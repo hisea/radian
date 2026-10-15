@@ -1147,6 +1147,7 @@ fn run(
                 budget_for: Some(budget_for),
                 price_for: Some(Arc::clone(&route_price)),
                 protected_branches: config.git.protected_branches.clone(),
+                allowed_filters: Some(config.git.allowed_filters()),
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),

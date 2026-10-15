@@ -306,6 +306,9 @@ pub struct SessionSetup {
     pub price_for: Option<RoutePrice>,
     /// Branch names the `git_commit` tool refuses besides `main`/`master` (ADR 0030 R10).
     pub protected_branches: Vec<String>,
+    /// Filter drivers `git add` may run (`[git] allowed_filters`, ADR 0030). `None`
+    /// means the default (`["lfs"]`); an empty list allows none.
+    pub allowed_filters: Option<Vec<String>>,
     pub servers: Vec<McpServerConfig>,
     /// The role prompt's name (ADR 0036): `default`, `task` or `lead`. `None` is
     /// `default`. `--system` replaces this layer only.
@@ -878,6 +881,7 @@ pub async fn open_session(
         budget_for,
         price_for,
         protected_branches,
+        allowed_filters,
     } = setup;
 
     // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
@@ -1018,6 +1022,9 @@ pub async fn open_session(
     let git_commit = crate::git_commit::RepoPin::resolve(&workspace).map(|pin| {
         crate::git_commit::GitCommitTools::new(workspace.clone(), Arc::clone(&journal), pin)
             .with_protected_branches(protected_branches)
+            .with_allowed_filters(
+                allowed_filters.unwrap_or_else(crate::git_commit::default_allowed_filters),
+            )
     });
     let mut tools = HostTools::new(coding, memory_tools, mcp.clone(), git_commit);
     let ask_registered = ask.is_some();

@@ -11,7 +11,7 @@
 //! is its audit index. The child is written and fsynced **first**, so the parent never records
 //! a child that does not exist (ADR 0022 §4).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use agent_core::{JournalError, JournalRecord, Message, ReplayError, TranscriptJournal, recover};
 use serde_json::Value;
@@ -181,6 +181,12 @@ fn open_parent(path: &std::path::Path, session_id: &str) -> Result<Session, Fork
 
 /// Writes the child first (the caller has the parent journal ready), then appends the
 /// parent's `SessionForked`. Any child failure returns before the parent is touched.
+///
+/// The child is built at a temp path in the same directory (ADR 0022 §4, review fix): the
+/// session index lists only `*.jsonl`, so the `.jsonl.tmp` name is never seen as a session. On
+/// success the complete, fsynced file is renamed into place and the directory is fsynced. On
+/// any failure the temp file is removed and the child path never exists — a half-written child
+/// can no longer look resumable while the parent has no `SessionForked`.
 async fn write_child_and_record(
     request: &ForkRequest,
     point: &ForkPoint,
@@ -194,23 +200,58 @@ async fn write_child_and_record(
             seq: point.seq,
         },
     );
-    let child = SessionJournal::create(&request.child_path, &request.child_id, created).map_err(
-        |source| ForkError::Child {
-            child_id: request.child_id.clone(),
-            source,
-        },
-    )?;
+    let temp_path = child_temp_path(&request.child_path);
+    // A temp file left by an earlier crash must not block this attempt.
+    let _ = std::fs::remove_file(&temp_path);
+    let child = match SessionJournal::create(&temp_path, &request.child_id, created) {
+        Ok(child) => child,
+        Err(source) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(ForkError::Child {
+                child_id: request.child_id.clone(),
+                source,
+            });
+        }
+    };
+    let mut appended = 0usize;
     for (index, message) in point.history.iter().cloned().enumerate() {
-        child
+        #[cfg(feature = "testing")]
+        if take_child_failure(appended) {
+            drop(child);
+            return Err(child_failure(
+                request,
+                &temp_path,
+                JournalError(format!("test seam: failing after {appended} messages")),
+            ));
+        }
+        if let Err(error) = child
             .append(JournalRecord::Message { index, message })
             .await
-            .map_err(|error| ForkError::ChildJournal {
-                child_id: request.child_id.clone(),
-                error,
-            })?;
+        {
+            drop(child);
+            return Err(child_failure(request, &temp_path, error));
+        }
+        appended += 1;
     }
-    // Close the child (every append already fsynced) before the parent records it.
+    // A failure between the last append and the rename is possible too.
+    #[cfg(feature = "testing")]
+    if take_child_failure(appended) {
+        drop(child);
+        return Err(child_failure(
+            request,
+            &temp_path,
+            JournalError(format!("test seam: failing after {appended} messages")),
+        ));
+    }
+    // Close the child (every append already fsynced), then publish it atomically.
     drop(child);
+    if let Err(source) = publish_child(&temp_path, &request.child_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(ForkError::Child {
+            child_id: request.child_id.clone(),
+            source,
+        });
+    }
     parent_journal
         .append_runtime_event(RuntimeEvent::SessionForked {
             child_session_id: request.child_id.clone(),
@@ -225,6 +266,65 @@ async fn write_child_and_record(
         child_id: request.child_id.clone(),
         seq: point.seq,
         messages: point.history.len(),
+    })
+}
+
+/// The child's temp path: `.<file name>.tmp` next to it, e.g. `.abc.jsonl.tmp`. The session
+/// index lists only `*.jsonl`, so the temp file is never mistaken for a session (ADR 0022 §4).
+fn child_temp_path(child_path: &Path) -> PathBuf {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(child_path.file_name().unwrap_or_default());
+    name.push(".tmp");
+    child_path.with_file_name(name)
+}
+
+/// Removes the temp file and builds the child-journal failure.
+fn child_failure(request: &ForkRequest, temp_path: &Path, error: JournalError) -> ForkError {
+    let _ = std::fs::remove_file(temp_path);
+    ForkError::ChildJournal {
+        child_id: request.child_id.clone(),
+        error,
+    }
+}
+
+/// Renames the complete temp file over the child path and fsyncs the directory, so the rename
+/// survives a crash (ADR 0022 §4).
+fn publish_child(temp_path: &Path, child_path: &Path) -> Result<(), WriteError> {
+    std::fs::rename(temp_path, child_path).map_err(|source| WriteError::Io {
+        path: child_path.to_path_buf(),
+        source,
+    })?;
+    if let Some(dir) = child_path.parent()
+        && let Ok(dir_file) = std::fs::File::open(dir)
+    {
+        let _ = dir_file.sync_all();
+    }
+    Ok(())
+}
+
+/// Test seam (feature `testing`): fail the child write after `k` messages. Thread-local and
+/// crate-private, so one test's armed seam cannot leak into another's (each `#[tokio::test]`
+/// runs on its own thread). `k` counts messages already appended, so `0` fails before any
+/// append and `1` after the first.
+#[cfg(all(test, feature = "testing"))]
+pub(crate) fn fail_child_after(messages: usize) {
+    FAIL_CHILD_AFTER.with(|slot| slot.set(Some(messages)));
+}
+
+#[cfg(feature = "testing")]
+thread_local! {
+    static FAIL_CHILD_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(feature = "testing")]
+fn take_child_failure(index: usize) -> bool {
+    FAIL_CHILD_AFTER.with(|slot| {
+        if slot.get() == Some(index) {
+            slot.set(None);
+            true
+        } else {
+            false
+        }
     })
 }
 
@@ -251,5 +351,160 @@ fn boundary_detail(events: &[SessionEvent], seq: u64, event: &SessionEvent) -> S
             "{} is not a turn boundary; fork after a TurnFinished (or at seq 0)",
             event.event
         )
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use super::*;
+    use crate::reader::Session;
+    use crate::runtime::TurnOutcome;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("radian-fork-seam-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A parent with one complete turn (two messages) and the boundary seq.
+    async fn parent_with_one_turn(dir: &Path, parent_id: &str) -> (PathBuf, u64) {
+        let path = dir.join("parent.jsonl");
+        let journal = SessionJournal::create(
+            &path,
+            parent_id,
+            SessionCreatedData::new("/work/example", serde_json::json!({})),
+        )
+        .unwrap();
+        journal
+            .append_runtime_event(RuntimeEvent::TurnStarted {
+                turn_id: "t-1".into(),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::Message {
+                index: 0,
+                message: Message::user("hi"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::Message {
+                index: 1,
+                message: Message::assistant("hello"),
+            })
+            .await
+            .unwrap();
+        let seq = journal.next_seq();
+        journal
+            .append_runtime_event(RuntimeEvent::TurnFinished {
+                turn_id: "t-1".into(),
+                outcome: TurnOutcome::Completed,
+                reason: None,
+                stop_reason: None,
+            })
+            .await
+            .unwrap();
+        drop(journal);
+        (path, seq)
+    }
+
+    fn fork_request(
+        dir: &Path,
+        parent_path: PathBuf,
+        seq: u64,
+        child_id: &str,
+    ) -> (ForkRequest, PathBuf) {
+        let child_path = dir.join("child.jsonl");
+        (
+            ForkRequest {
+                parent_path,
+                parent_id: "parent".into(),
+                seq: Some(seq),
+                child_path: child_path.clone(),
+                child_id: child_id.to_owned(),
+                workspace: "/work/example".into(),
+                config_snapshot: serde_json::json!({}),
+            },
+            child_path,
+        )
+    }
+
+    /// ADR 0022 §4 (review fix): a failure after k messages leaves no child file, no temp file
+    /// and no parent `SessionForked`. On the old code the child was written directly, so the
+    /// file existed half-written.
+    #[tokio::test]
+    async fn a_failed_child_leaves_nothing_behind() {
+        for k in 0..3 {
+            let dir = temp_dir(&format!("fail-{k}"));
+            let (parent_path, seq) = parent_with_one_turn(&dir, "parent").await;
+            let (request, child_path) = fork_request(&dir, parent_path.clone(), seq, "child");
+            fail_child_after(k);
+            let error = fork(request).await.unwrap_err();
+            assert!(matches!(error, ForkError::ChildJournal { .. }), "{error:?}");
+            assert!(!child_path.exists(), "a half child must not exist (k={k})");
+            let leftovers: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".tmp"))
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "no temp file left (k={k}): {leftovers:?}"
+            );
+            let parent = Session::open(&parent_path).unwrap();
+            assert!(
+                !parent
+                    .events()
+                    .iter()
+                    .any(|event| event.event == "SessionForked"),
+                "the parent must not record a fork that failed (k={k})"
+            );
+        }
+    }
+
+    /// The success path: the child is complete at the final path and the parent records it.
+    #[tokio::test]
+    async fn a_successful_child_is_complete_and_recorded() {
+        let dir = temp_dir("ok");
+        let (parent_path, seq) = parent_with_one_turn(&dir, "parent").await;
+        let (request, child_path) = fork_request(&dir, parent_path.clone(), seq, "child");
+        let outcome = fork(request).await.unwrap();
+        assert_eq!(outcome.messages, 2);
+        let child = Session::open(&child_path).unwrap();
+        assert_eq!(child.events().len(), 3, "SessionCreated + two messages");
+        let parent = Session::open(&parent_path).unwrap();
+        assert!(
+            parent
+                .events()
+                .iter()
+                .any(|event| event.event == "SessionForked"),
+            "the parent records the fork"
+        );
+    }
+
+    /// The session index lists only `*.jsonl`; a hand-made temp file is not a session.
+    #[test]
+    fn a_temp_file_is_not_listed_as_a_session() {
+        let dir = temp_dir("listing");
+        // A real session file.
+        let real = dir.join("child.jsonl");
+        let journal = SessionJournal::create(
+            &real,
+            "child",
+            SessionCreatedData::new("/work/example", serde_json::json!({})),
+        )
+        .unwrap();
+        drop(journal);
+        // A temp file with the same bytes: the index must ignore it.
+        std::fs::write(dir.join(".child.jsonl.tmp"), std::fs::read(&real).unwrap()).unwrap();
+        let mut index = crate::Index::open(dir.join("index.sqlite")).unwrap();
+        index.rebuild_dir(&dir).unwrap();
+        let rows = index.list(None).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].session_id, "child");
     }
 }

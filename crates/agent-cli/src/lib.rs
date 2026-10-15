@@ -1547,6 +1547,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             budget_for: Some(setup.budget_for),
             price_for: setup.price_for,
             protected_branches: Vec::new(),
+            allowed_filters: None,
             servers: setup.servers,
             // ADR 0036: a CLI session uses the `default` role.
             role: None,

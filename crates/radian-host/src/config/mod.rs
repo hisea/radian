@@ -223,6 +223,18 @@ pub struct GitConfig {
     /// `protected_branches = ["release"]`: branches `git_commit` refuses besides
     /// `main`/`master`.
     pub protected_branches: Vec<String>,
+    /// `allowed_filters = ["lfs"]` (ADR 0030): the `filter.<name>` drivers `git add`
+    /// may run. `None` means the default (`["lfs"]`); an empty list allows none.
+    pub allowed_filters: Option<Vec<String>>,
+}
+
+impl GitConfig {
+    /// The effective `allowed_filters`: the configured list, or the default (`["lfs"]`).
+    pub fn allowed_filters(&self) -> Vec<String> {
+        self.allowed_filters
+            .clone()
+            .unwrap_or_else(crate::git_commit::default_allowed_filters)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -833,6 +845,16 @@ fn parse_git(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
                     config.git.protected_branches.push(branch.clone());
                 }
             }
+        }
+        // ADR 0030: the filter drivers `git_commit` may run. `[]` allows none.
+        if let ("allowed_filters", Value::Array(filters)) = (key.as_str(), value) {
+            let mut names = Vec::with_capacity(filters.len());
+            for filter in filters {
+                if let Value::String(filter) = filter {
+                    names.push(filter.clone());
+                }
+            }
+            config.git.allowed_filters = Some(names);
         }
     }
     Ok(())
@@ -2001,6 +2023,31 @@ theme = "light"
             error.to_string().contains("openai-compatible|anthropic"),
             "{error}"
         );
+    }
+
+    /// ADR 0030: `[git] allowed_filters` is carried; the default (`["lfs"]`) applies
+    /// when it is absent, and `[]` allows none.
+    #[test]
+    fn the_git_allowed_filters_are_carried_with_an_lfs_default() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[git]\n",
+            "protected_branches = [\"release\"]\n",
+            "allowed_filters = [\"lfs\", \"custom\"]\n",
+        ))
+        .unwrap();
+        assert_eq!(config.git.protected_branches, vec!["release".to_string()]);
+        assert_eq!(
+            config.git.allowed_filters(),
+            vec!["lfs".to_string(), "custom".to_string()]
+        );
+        // Absent: the default.
+        let config =
+            parse_str("schema_version = 1\n[git]\nprotected_branches = [\"release\"]\n").unwrap();
+        assert_eq!(config.git.allowed_filters(), vec!["lfs".to_string()]);
+        // An empty list allows none.
+        let config = parse_str("schema_version = 1\n[git]\nallowed_filters = []\n").unwrap();
+        assert!(config.git.allowed_filters().is_empty());
     }
 
     /// ADR 0014 Q2: `[providers.<id>] reasoning_replay` overrides the catalog — a
