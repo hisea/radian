@@ -687,6 +687,69 @@ async fn pty_launches_with_no_arguments_from_the_config_and_auth_json() {
 /// ADR 0025 slice 3 acceptance: `/skill:<name> [args]` puts the skill's body in one user
 /// message, `/skills` lists the discovered skills, `/skill:nope` is a notice and not a message,
 /// and `//skill:x` is an ordinary message. A `disable-model-invocation: true` skill is listed for
+/// ADR 0036 C2: the host reads `AGENTS.md` at session start, the startup line names it, and
+/// the model's system prompt carries its content and the untrusted note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_context_file_reaches_the_model_and_the_startup_line() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("context-session");
+    let home = TempDir::new("context-home");
+    // The workspace is a **sibling** of the session directory (ADR 0020: the sandbox hides the
+    // session directory, so a workspace inside it could not be used).
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // A repository root (the walk stops here) with one context file.
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    std::fs::write(
+        ws.join("AGENTS.md"),
+        "CONTEXT-FILE-MARKER: commits go through git_commit.\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "context",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The information block is folded; expand it to see the context line.
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("context: AGENTS.md", 10),
+        "the startup line must name the context file:\n{}",
+        pty.screen()
+    );
+    pty.send(b"hello\r");
+    assert!(pty.wait_for_screen("OK", 20), "{}", pty.screen());
+    let body = server.requests()[0].json();
+    let system = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    assert!(system.contains("CONTEXT-FILE-MARKER"), "{system}");
+    assert!(system.contains("may be untrusted"), "{system}");
+    assert!(system.contains("<project_instructions path="), "{system}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// the user but never reaches the prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]

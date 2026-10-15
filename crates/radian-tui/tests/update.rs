@@ -253,7 +253,7 @@ fn the_slash_completion_walks_the_command_tree() {
     }
     let rows = app.completion().expect("a list").to_vec();
     assert!(
-        rows.iter().any(|row| row.starts_with("/memory")),
+        rows.iter().any(|row| row.insert.starts_with("/memory")),
         "{rows:?}"
     );
 
@@ -263,13 +263,19 @@ fn the_slash_completion_walks_the_command_tree() {
     assert_eq!(app.input, "/memory ");
     // The next level's list appears without another key.
     let rows = app.completion().expect("the subcommand list").to_vec();
-    assert!(rows.iter().any(|row| row.starts_with("list")), "{rows:?}");
+    assert!(
+        rows.iter().any(|row| row.insert.starts_with("list")),
+        "{rows:?}"
+    );
 
     // A partial second level is fuzzy-matched, and Tab completes it.
     app.on_key(key(KeyCode::Char('f')));
     app.on_key(key(KeyCode::Char('o')));
     let rows = app.completion().expect("the fuzzy list").to_vec();
-    assert!(rows.iter().any(|row| row.starts_with("forget")), "{rows:?}");
+    assert!(
+        rows.iter().any(|row| row.insert.starts_with("forget")),
+        "{rows:?}"
+    );
     let result = app.on_key(key(KeyCode::Tab));
     assert_eq!(app.input, "/memory forget ");
     assert!(
@@ -327,7 +333,10 @@ fn the_id_level_asks_the_host_and_shows_the_answer() {
     });
     assert!(result.dirty);
     let rows = app.completion().expect("the id list").to_vec();
-    assert!(rows.iter().any(|row| row.starts_with("m-1")), "{rows:?}");
+    assert!(
+        rows.iter().any(|row| row.insert.starts_with("m-1")),
+        "{rows:?}"
+    );
     let result = app.on_key(key(KeyCode::Tab));
     assert!(result.effects.is_empty(), "{:?}", result.effects);
     assert_eq!(app.input, "/memory forget m-1 ");
@@ -363,7 +372,7 @@ fn the_slash_menu_moves_its_highlight_and_enter_accepts_it() {
     let rows = app.completion().expect("a list").to_vec();
     assert!(rows.len() >= 2, "need at least two rows: {rows:?}");
     assert_eq!(app.completion_cursor, 0, "the first row is highlighted");
-    let second = rows[1].split_whitespace().next().unwrap().to_owned();
+    let second = rows[1].insert.clone();
 
     app.on_key(key(KeyCode::Down));
     assert_eq!(app.completion_cursor, 1);
@@ -380,15 +389,7 @@ fn the_slash_menu_moves_its_highlight_and_enter_accepts_it() {
     for c in "/memory ".chars() {
         app.on_key(key(KeyCode::Char(c)));
     }
-    let last = app
-        .completion()
-        .unwrap()
-        .last()
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_owned();
+    let last = app.completion().unwrap().last().unwrap().insert.clone();
     app.on_key(key(KeyCode::Up));
     let result = app.on_key(key(KeyCode::Tab));
     assert!(result.effects.is_empty(), "{:?}", result.effects);
@@ -414,7 +415,7 @@ fn typing_filters_the_slash_menu_and_resets_the_highlight() {
     assert_eq!(app.completion_cursor, 0);
     let rows = app.completion().expect("the filtered list").to_vec();
     assert!(
-        rows.iter().any(|row| row.starts_with("forget")),
+        rows.iter().any(|row| row.insert.starts_with("forget")),
         "the list follows the new text: {rows:?}"
     );
 }

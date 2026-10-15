@@ -1131,3 +1131,16 @@ Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`。
 | S-M1 | TUI 摘要行改回搜索 `sandbox_facts` 文本（macOS 上写 `none`） | `pty::pty_the_startup_summary_names_the_real_sandbox_backend` | ✅ |
 
 1/1 抓住。
+
+## select-list：共享列表原语与 /model 平铺（ADR 0035）
+
+Base `3c1c579` · 一次性 worktree `/tmp/radian-sl-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SL1 | `window()` 恒返回 0（窗口不跟随） | `select_list::the_window_follows_the_selection_and_shows_a_scrollbar` | ✅ |
+| SL2 | `scrollbar_thumb()` 恒返回 0（滑块位置错） | 同上 | ✅ |
+| SL3 | 接受候选时插入 `description`（provider）而不是 `provider/model` | `the_flat_model_list_filters_by_provider_and_accepts_the_pair` | ✅ |
+| SL4 | `select_list::matches` 只匹配 label（丢掉 description） | `select_list::the_filter_matches_the_label_and_the_description` | ✅ |
+
+4/4 抓住。

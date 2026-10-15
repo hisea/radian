@@ -236,8 +236,8 @@ impl Layer {
 pub enum Overlay {
     /// The in-transcript search box (Phase 5).
     Find(FindState),
-    /// The `@` completion candidate list.
-    Completion(Vec<String>),
+    /// The completion candidate list (label + description), drawn by `select_list`.
+    Completion(Vec<crate::command::Candidate>),
     /// The session picker (ADR 0023 U4): `--pick` at startup, `/sessions` in a session.
     Picker(Picker),
 }
@@ -1923,7 +1923,7 @@ impl App {
     }
 
     /// The `@` completion candidates, if the list is up.
-    pub fn completion(&self) -> Option<&[String]> {
+    pub fn completion(&self) -> Option<&[crate::command::Candidate]> {
         self.layers.iter().rev().find_map(|layer| match layer {
             Layer::Overlay(Overlay::Completion(candidates)) => Some(candidates.as_slice()),
             _ => None,
@@ -1935,13 +1935,26 @@ impl App {
         self.mention_completion = None;
     }
 
-    pub fn completion_set(&mut self, candidates: Vec<String>) {
+    pub fn completion_set(&mut self, candidates: Vec<crate::command::Candidate>) {
         self.completion_clear();
         if !candidates.is_empty() {
             // A fresh menu highlights its first (best-ranked) row.
             self.completion_cursor = 0;
             self.push_overlay(Overlay::Completion(candidates));
         }
+    }
+
+    /// The word the slash menu is completing: the text from the level's range start to the
+    /// cursor. The menu filters on it, so typing a provider name finds that provider's models
+    /// (ADR 0035).
+    pub fn completion_filter(&self) -> String {
+        let Some(slash) = &self.slash_completion else {
+            return String::new();
+        };
+        let chars: Vec<char> = self.input.text().chars().collect();
+        let end = self.input.cursor().min(chars.len());
+        let start = slash.range.start.min(end);
+        chars[start..end].iter().collect()
     }
 
     /// Whether a completion menu is on screen (the slash list or the `@` list).
@@ -1960,7 +1973,9 @@ impl App {
         if let Some(slash) = &self.slash_completion {
             return slash.candidates.len();
         }
-        self.completion().map(<[String]>::len).unwrap_or(0)
+        self.completion()
+            .map(<[crate::command::Candidate]>::len)
+            .unwrap_or(0)
     }
 
     /// Moves the menu highlight, wrapping.
@@ -3411,17 +3426,7 @@ impl App {
             self.completion_clear();
             return;
         }
-        let width = candidates
-            .iter()
-            .map(|candidate| candidate.insert.chars().count())
-            .max()
-            .unwrap_or(0);
-        self.completion_set(
-            candidates
-                .iter()
-                .map(|candidate| format!("{:<width$}  {}", candidate.insert, candidate.description))
-                .collect(),
-        );
+        self.completion_set(candidates.clone());
         self.slash_completion = Some(SlashCompletion { range, candidates });
     }
 
@@ -4284,7 +4289,16 @@ impl App {
         // The menu is up: keep the raw candidates so the highlighted row can be accepted.
         // `completion_set` clears the previous menu (including this field), so it is set after.
         let raw = completion.candidates.clone();
-        self.completion_set(completion.candidates);
+        self.completion_set(
+            completion
+                .candidates
+                .iter()
+                .map(|candidate| crate::command::Candidate {
+                    insert: candidate.clone(),
+                    description: String::new(),
+                })
+                .collect(),
+        );
         self.mention_completion = Some((completion.range, raw));
     }
 
