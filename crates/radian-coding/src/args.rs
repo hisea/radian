@@ -72,9 +72,9 @@ fn clean(schema: &Value, raw: &Value) -> Value {
 }
 
 /// Every problem with `raw` against the schema's `properties`, `required` and
-/// `additionalProperties`, in argument order. `minimum`/`maximum` and the `type`: `integer`
-/// checks with a semantic meaning (a limit exceeded) stay in the tool, which reports those as
-/// their own error codes.
+/// `additionalProperties`. `minimum`/`maximum` and the `type`: `integer` checks with a
+/// semantic meaning (a limit exceeded) stay in the tool, which reports those as their own
+/// error codes.
 fn validate(schema: &Value, raw: &Value) -> Vec<String> {
     let Some(object) = raw.as_object() else {
         return vec![format!(
