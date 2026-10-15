@@ -224,7 +224,10 @@ async fn write_child_and_record(
                 JournalError(format!("test seam: failing after {appended} messages")),
             ));
         }
-        if let Err(error) = child.append(JournalRecord::Message { index, message }).await {
+        if let Err(error) = child
+            .append(JournalRecord::Message { index, message })
+            .await
+        {
             drop(child);
             return Err(child_failure(request, &temp_path, error));
         }
@@ -299,29 +302,30 @@ fn publish_child(temp_path: &Path, child_path: &Path) -> Result<(), WriteError> 
     Ok(())
 }
 
-/// Test seam (feature `testing`): fail the child write after `k` messages. Crate-private: only
-/// the fork tests arm it. `k` counts messages already appended, so `0` fails before any append
-/// and `1` after the first.
-#[cfg(feature = "testing")]
+/// Test seam (feature `testing`): fail the child write after `k` messages. Thread-local and
+/// crate-private, so one test's armed seam cannot leak into another's (each `#[tokio::test]`
+/// runs on its own thread). `k` counts messages already appended, so `0` fails before any
+/// append and `1` after the first.
+#[cfg(all(test, feature = "testing"))]
 pub(crate) fn fail_child_after(messages: usize) {
-    *FAIL_CHILD_AFTER
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(messages);
+    FAIL_CHILD_AFTER.with(|slot| slot.set(Some(messages)));
 }
 
 #[cfg(feature = "testing")]
-static FAIL_CHILD_AFTER: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+thread_local! {
+    static FAIL_CHILD_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
 
 #[cfg(feature = "testing")]
 fn take_child_failure(index: usize) -> bool {
-    let mut slot = FAIL_CHILD_AFTER
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if *slot == Some(index) {
-        *slot = None;
-        return true;
-    }
-    false
+    FAIL_CHILD_AFTER.with(|slot| {
+        if slot.get() == Some(index) {
+            slot.set(None);
+            true
+        } else {
+            false
+        }
+    })
 }
 
 /// Why the event at `seq` is not a turn boundary, tracking the parent's state up to and
@@ -356,19 +360,9 @@ mod tests {
     use crate::reader::Session;
     use crate::runtime::TurnOutcome;
 
-    /// The fault seam is process-global; these tests run in one binary, so they take this lock
-    /// to keep one test's armed seam out of another's.
-    static SEAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn seam_guard() -> std::sync::MutexGuard<'static, ()> {
-        SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "radian-fork-seam-{label}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("radian-fork-seam-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -443,17 +437,13 @@ mod tests {
     /// file existed half-written.
     #[tokio::test]
     async fn a_failed_child_leaves_nothing_behind() {
-        let _guard = seam_guard();
         for k in 0..3 {
             let dir = temp_dir(&format!("fail-{k}"));
             let (parent_path, seq) = parent_with_one_turn(&dir, "parent").await;
             let (request, child_path) = fork_request(&dir, parent_path.clone(), seq, "child");
             fail_child_after(k);
             let error = fork(request).await.unwrap_err();
-            assert!(
-                matches!(error, ForkError::ChildJournal { .. }),
-                "{error:?}"
-            );
+            assert!(matches!(error, ForkError::ChildJournal { .. }), "{error:?}");
             assert!(!child_path.exists(), "a half child must not exist (k={k})");
             let leftovers: Vec<String> = std::fs::read_dir(&dir)
                 .unwrap()
@@ -461,10 +451,16 @@ mod tests {
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
                 .filter(|name| name.ends_with(".tmp"))
                 .collect();
-            assert!(leftovers.is_empty(), "no temp file left (k={k}): {leftovers:?}");
+            assert!(
+                leftovers.is_empty(),
+                "no temp file left (k={k}): {leftovers:?}"
+            );
             let parent = Session::open(&parent_path).unwrap();
             assert!(
-                !parent.events().iter().any(|event| event.event == "SessionForked"),
+                !parent
+                    .events()
+                    .iter()
+                    .any(|event| event.event == "SessionForked"),
                 "the parent must not record a fork that failed (k={k})"
             );
         }
@@ -473,7 +469,6 @@ mod tests {
     /// The success path: the child is complete at the final path and the parent records it.
     #[tokio::test]
     async fn a_successful_child_is_complete_and_recorded() {
-        let _guard = seam_guard();
         let dir = temp_dir("ok");
         let (parent_path, seq) = parent_with_one_turn(&dir, "parent").await;
         let (request, child_path) = fork_request(&dir, parent_path.clone(), seq, "child");
@@ -483,7 +478,10 @@ mod tests {
         assert_eq!(child.events().len(), 3, "SessionCreated + two messages");
         let parent = Session::open(&parent_path).unwrap();
         assert!(
-            parent.events().iter().any(|event| event.event == "SessionForked"),
+            parent
+                .events()
+                .iter()
+                .any(|event| event.event == "SessionForked"),
             "the parent records the fork"
         );
     }
@@ -502,11 +500,7 @@ mod tests {
         .unwrap();
         drop(journal);
         // A temp file with the same bytes: the index must ignore it.
-        std::fs::write(
-            dir.join(".child.jsonl.tmp"),
-            std::fs::read(&real).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(dir.join(".child.jsonl.tmp"), std::fs::read(&real).unwrap()).unwrap();
         let mut index = crate::Index::open(dir.join("index.sqlite")).unwrap();
         index.rebuild_dir(&dir).unwrap();
         let rows = index.list(None).unwrap();

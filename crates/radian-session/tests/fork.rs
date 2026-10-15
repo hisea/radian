@@ -366,10 +366,7 @@ async fn a_child_failure_leaves_the_parent_untouched() {
     );
     // ADR 0022 §4 (review fix): the failed child is not left behind at all — no half-written
     // session, and no temp file.
-    assert!(
-        !child_path.exists(),
-        "a half-written child must not exist"
-    );
+    assert!(!child_path.exists(), "a half-written child must not exist");
     let leftovers: Vec<String> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|entry| entry.ok())

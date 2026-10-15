@@ -281,12 +281,7 @@ pub fn write_at(path: &Path, store: &Store) -> std::io::Result<()> {
 /// directory is canonicalized first, so a symlink writes the target's key. A corrupt or
 /// unreadable record is an error (ADR 0031 T2): it is never silently replaced with an empty
 /// store, which would destroy every other directory's decision.
-pub fn set_at(
-    path: &Path,
-    dir: &Path,
-    decision: Decision,
-    audit: Audit<'_>,
-) -> Result<(), String> {
+pub fn set_at(path: &Path, dir: &Path, decision: Decision, audit: Audit<'_>) -> Result<(), String> {
     let canonical = canonical(dir);
     let key = canonical.to_string_lossy().into_owned();
     let mut store = read_at(path)?;
@@ -617,7 +612,10 @@ mod tests {
             bytes,
             "the corrupt file was overwritten"
         );
-        assert!(audit.lock().unwrap().is_empty(), "no audit on a failed write");
+        assert!(
+            audit.lock().unwrap().is_empty(),
+            "no audit on a failed write"
+        );
 
         let error = forget_at(&scratch.path(), &dir, &callback).unwrap_err();
         assert!(error.contains("not valid JSON"), "{error}");

@@ -352,7 +352,16 @@ fn a_git_dir_created_in_a_subdirectory_workspace_is_refused() {
         &["config", "core.fsmonitor", script.to_str().unwrap()]
     ));
 
-    let error = commit(&ws, &pin, "m", &[], None, &[], &radian_host::git_commit::default_allowed_filters()).unwrap_err();
+    let error = commit(
+        &ws,
+        &pin,
+        "m",
+        &[],
+        None,
+        &[],
+        &radian_host::git_commit::default_allowed_filters(),
+    )
+    .unwrap_err();
     assert_eq!(error.code, "repository_changed", "{error:?}");
     assert!(
         !marker.exists(),
@@ -483,7 +492,10 @@ fn a_driver_named_in_allowed_filters_is_allowed() {
 
     let allowed = vec!["custom".to_owned()];
     let committed = commit_with_filters(&dir, "m", &[], &allowed).expect("allowed by name");
-    assert!(committed.files >= 2, "a.txt and .gitattributes: {committed:?}");
+    assert!(
+        committed.files >= 2,
+        "a.txt and .gitattributes: {committed:?}"
+    );
     assert!(
         marker.exists(),
         "an allowed driver runs: the user opted in by name"

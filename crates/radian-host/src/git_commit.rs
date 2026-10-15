@@ -523,8 +523,7 @@ fn check_filters(
     let raw = git_raw(workspace, pin, &borrowed)?;
     let text = String::from_utf8_lossy(&raw);
     let mut fields = text.split('\0');
-    while let (Some(path), Some(_attr), Some(value)) =
-        (fields.next(), fields.next(), fields.next())
+    while let (Some(path), Some(_attr), Some(value)) = (fields.next(), fields.next(), fields.next())
     {
         if matches!(value, "set" | "unset" | "unspecified") {
             continue;
