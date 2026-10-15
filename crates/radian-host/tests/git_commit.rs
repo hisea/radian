@@ -79,7 +79,26 @@ fn commit_in(
     protected: &[String],
 ) -> Result<Committed, agent_core::ToolFailure> {
     let pin = RepoPin::resolve(dir).expect("a git repository");
-    commit(dir, &pin, message, paths, allowed, protected)
+    commit(
+        dir,
+        &pin,
+        message,
+        paths,
+        allowed,
+        protected,
+        &radian_host::git_commit::default_allowed_filters(),
+    )
+}
+
+/// [`commit_in`] with a custom filter allowlist (ADR 0030).
+fn commit_with_filters(
+    dir: &Path,
+    message: &str,
+    paths: &[String],
+    allowed_filters: &[String],
+) -> Result<Committed, agent_core::ToolFailure> {
+    let pin = RepoPin::resolve(dir).expect("a git repository");
+    commit(dir, &pin, message, paths, None, &[], allowed_filters)
 }
 
 fn write_executable(path: &Path, body: &str) {
@@ -333,7 +352,7 @@ fn a_git_dir_created_in_a_subdirectory_workspace_is_refused() {
         &["config", "core.fsmonitor", script.to_str().unwrap()]
     ));
 
-    let error = commit(&ws, &pin, "m", &[], None, &[]).unwrap_err();
+    let error = commit(&ws, &pin, "m", &[], None, &[], &radian_host::git_commit::default_allowed_filters()).unwrap_err();
     assert_eq!(error.code, "repository_changed", "{error:?}");
     assert!(
         !marker.exists(),
@@ -402,4 +421,122 @@ fn the_post_index_change_hook_does_not_run() {
         !marker.exists(),
         "core.hooksPath must not run on git add: a model-writable .husky/ would execute in the host"
     );
+}
+
+/// ADR 0030: a `filter=<driver>` attribute runs `filter.<driver>.clean` when the path
+/// is staged, and the model can write `.gitattributes`. A driver outside `[git] allowed_filters`
+/// refuses the commit before anything is staged, so the script never runs.
+#[test]
+fn a_filter_driver_not_in_allowed_filters_is_refused() {
+    let dir = repo("filter-refused");
+    let outside = temp("filter-outside");
+    let marker = outside.join("FILTER-RAN");
+    let script = dir.join("evil-clean.sh");
+    write_executable(
+        &script,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    );
+    assert!(git(
+        &dir,
+        &["config", "filter.evil.clean", script.to_str().unwrap()]
+    ));
+    std::fs::write(dir.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    change(&dir);
+
+    // With no explicit paths (`git add -A`) the status list is what gets checked.
+    let error = commit_in(&dir, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(error.message.contains("a.txt"), "{error:?}");
+    assert!(error.message.contains("evil"), "{error:?}");
+    assert!(
+        !marker.exists(),
+        "the disallowed filter must not run in the host"
+    );
+    // Nothing was staged.
+    assert!(
+        git(&dir, &["diff", "--cached", "--quiet"]),
+        "the refusal stages nothing"
+    );
+
+    // The explicit-path branch checks the resolved paths the same way.
+    let error = commit_in(&dir, "m", &["a.txt".to_string()], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(!marker.exists());
+}
+
+/// The opt-in: a driver the user named in `allowed_filters` runs (its command is not inspected).
+#[test]
+fn a_driver_named_in_allowed_filters_is_allowed() {
+    let dir = repo("filter-allowed");
+    let marker = dir.join("FILTER-RAN");
+    let script = dir.join("custom-clean.sh");
+    write_executable(
+        &script,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    );
+    assert!(git(
+        &dir,
+        &["config", "filter.custom.clean", script.to_str().unwrap()]
+    ));
+    std::fs::write(dir.join(".gitattributes"), "*.txt filter=custom\n").unwrap();
+    change(&dir);
+
+    let allowed = vec!["custom".to_owned()];
+    let committed = commit_with_filters(&dir, "m", &[], &allowed).expect("allowed by name");
+    assert!(committed.files >= 2, "a.txt and .gitattributes: {committed:?}");
+    assert!(
+        marker.exists(),
+        "an allowed driver runs: the user opted in by name"
+    );
+}
+
+/// `lfs` is the default allowed driver, but only when its commands are a `git-lfs` command.
+#[test]
+fn lfs_is_allowed_only_with_a_git_lfs_command() {
+    let dir = repo("filter-lfs");
+    assert!(git(
+        &dir,
+        &["config", "filter.lfs.clean", "git-lfs clean -- %f"]
+    ));
+    assert!(git(
+        &dir,
+        &["config", "filter.lfs.process", "git-lfs filter-process"]
+    ));
+    std::fs::write(dir.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+    std::fs::write(dir.join("b.bin"), "binary\n").unwrap();
+
+    // The check passes and `git add` is attempted. Whether `git-lfs` is installed decides the
+    // outcome; the filter check itself must not refuse.
+    match commit_in(&dir, "m", &[], None, &[]) {
+        Ok(committed) => assert!(committed.files >= 1),
+        Err(error) => {
+            assert_ne!(
+                error.code, "filter_not_allowed",
+                "a git-lfs command must be allowed: {error:?}"
+            );
+            assert_eq!(
+                error.code, "git_failed",
+                "staging must have been attempted: {error:?}"
+            );
+        }
+    }
+
+    // A non-git-lfs `clean` for the `lfs` driver is refused.
+    let other = repo("filter-lfs-other");
+    let marker = other.join("LFS-FILTER-RAN");
+    let script = other.join("lfs-clean.sh");
+    write_executable(
+        &script,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    );
+    assert!(git(
+        &other,
+        &["config", "filter.lfs.clean", script.to_str().unwrap()]
+    ));
+    std::fs::write(other.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+    std::fs::write(other.join("b.bin"), "binary\n").unwrap();
+    let error = commit_in(&other, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(error.message.contains("filter.lfs.clean"), "{error:?}");
+    assert!(!marker.exists(), "the non-git-lfs clean must not run");
 }
