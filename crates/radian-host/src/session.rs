@@ -1262,8 +1262,8 @@ fn memory_notice(memory: &Option<MemoryService>, config: &InjectionConfig) -> St
                 config.max_tokens
             ),
             Ok(ProjectState::Unlinked { .. }) => format!(
-                "[memory] no project linked; global memory only (run `agent memory project new` \
-                 or `agent memory relink <ProjectId>`); injection on, up to {} tokens",
+                "[memory] no project linked; global memory only (run `radian memory project new` \
+                 or `radian memory relink <ProjectId>`); injection on, up to {} tokens",
                 config.max_tokens
             ),
             Err(error) => format!("[memory] unavailable: {error}"),

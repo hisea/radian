@@ -138,6 +138,37 @@ async fn a_tui_startup_refusal_is_a_usage_error() {
 }
 
 #[tokio::test]
+async fn the_missing_credential_hint_names_radian_login() {
+    // ADR 0032 direction: the hint is a user command, so it says `radian login …` (it
+    // said `agent login …`). A non-local endpoint with no stored credential refuses startup
+    // before any network call - no tty needed.
+    let env = Env::fresh("credential-hint");
+    let (code, out, err) = run(spawn_in(
+        &[
+            "--model",
+            "m",
+            "--provider",
+            "openai-compatible",
+            "--base-url",
+            "https://example.invalid",
+        ],
+        &env,
+    ))
+    .await;
+
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("radian login openai-compatible"),
+        "the hint names the radian command: {err}"
+    );
+    assert!(
+        !err.contains("agent login"),
+        "no `agent login` hint remains: {err}"
+    );
+}
+
+#[tokio::test]
 async fn a_missing_workspace_is_refused_with_the_radian_prefix() {
     // A startup refusal names the program `radian:` (ADR 0032's prefix change) and exits 2.
     let env = Env::fresh("missing-workspace");

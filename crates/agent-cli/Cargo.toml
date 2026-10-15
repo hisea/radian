@@ -35,7 +35,7 @@ tokio = { workspace = true, features = [
 ] }
 
 [target.'cfg(unix)'.dependencies]
-# `agent login` turns the terminal's echo off for the key prompt and restores it on every
+# `radian login` turns the terminal's echo off for the key prompt and restores it on every
 # path, Ctrl-C included (signals are blocked across the echo-off window and delivered after
 # the restore). The pty tests already used it as a dev-dependency.
 libc = "0.2"

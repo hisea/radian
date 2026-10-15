@@ -1,4 +1,4 @@
-//! `agent login` / `agent logout` (ADR 0026 D3): the CLI side of the credential wizard.
+//! `radian login` / `radian logout` (ADR 0026 D3): the CLI side of the credential wizard.
 //!
 //! The steps mirror the TUI's `/login`: a built-in provider asks for its key; a custom one
 //! (D10) asks for the name, the protocol, the base URL and then the key — all of it into
@@ -213,7 +213,7 @@ fn aborted(message: String) -> i32 {
     USAGE_ERROR
 }
 
-/// `agent login [provider]` (ADR 0026 D3). Without a terminal it refuses and points at
+/// `radian login [provider]` (ADR 0026 D3). Without a terminal it refuses and points at
 /// `auth.json`; the key is never echoed.
 pub async fn run_login(provider: Option<String>) -> i32 {
     if !is_tty() {
@@ -393,7 +393,7 @@ fn ask_custom_steps() -> Result<(String, String, String), i32> {
     Ok((name, kind, base_url))
 }
 
-/// `agent logout <provider>`: confirm, then remove **only** that entry (D3).
+/// `radian logout <provider>`: confirm, then remove **only** that entry (D3).
 pub async fn run_logout(provider: String) -> i32 {
     if !is_tty() {
         return aborted(

@@ -94,7 +94,7 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
-/// Spawns `agent --resume <id> -p x` against a header server and returns the time to the
+/// Spawns `radian exec --resume <id> -p x` against a header server and returns the time to the
 /// request headers. `None` if the listener never heard from it.
 async fn resume_to_first_request(dir: &Path, session_id: &str) -> Option<Duration> {
     let start = Instant::now();
@@ -165,13 +165,13 @@ async fn perf_long_agent_resume() {
             );
             if times.len() != 5 {
                 println!(
-                    "agent --resume {context}: only {}/5 runs reached the request",
+                    "radian exec --resume {context}: only {}/5 runs reached the request",
                     times.len()
                 );
             }
             let (median, p95) = median_p95(times);
             println!(
-                "agent --resume {context} to first request: median {:.1} ms  p95 {:.1} ms",
+                "radian exec --resume {context} to first request: median {:.1} ms  p95 {:.1} ms",
                 ms(median),
                 ms(p95)
             );

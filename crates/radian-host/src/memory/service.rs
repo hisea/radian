@@ -81,7 +81,7 @@ impl fmt::Display for MemoryServiceError {
                 }
                 write!(
                     f,
-                    ". Run `agent memory relink <ProjectId>` or `agent memory project new`, \
+                    ". Run `radian memory relink <ProjectId>` or `radian memory project new`, \
                      or pass --global"
                 )
             }
@@ -168,7 +168,7 @@ impl MemoryService {
         }
     }
 
-    /// Registers this identity key as a new project. Only the explicit `agent memory project
+    /// Registers this identity key as a new project. Only the explicit `radian memory project
     /// new` command calls it.
     pub fn create_project(&self) -> Result<ProjectId, MemoryServiceError> {
         Ok(self.registry.register(&self.identity_key)?)

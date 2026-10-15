@@ -234,7 +234,7 @@ fn perf_agent_startup_and_resume() {
         }
         let (m, p) = median_p95(times);
         println!(
-            "agent --resume {n:>5} msgs to prompt: median {:.1} ms  p95 {:.1} ms",
+            "radian exec --resume {n:>5} msgs to prompt: median {:.1} ms  p95 {:.1} ms",
             ms(m),
             ms(p)
         );

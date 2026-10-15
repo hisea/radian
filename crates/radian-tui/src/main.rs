@@ -130,7 +130,7 @@ struct Cli {
     #[arg(help_heading = "Permissions", long, value_name = "POLICY")]
     approval: Option<String>,
 
-    /// Approve every tool call without asking, like `agent --yes`. Not "allow everything":
+    /// Approve every tool call without asking, like `radian exec --yes`. Not "allow everything":
     /// `deny` rules still deny and the sandbox still applies; only the question is removed.
     #[arg(help_heading = "Permissions", long)]
     yes: bool,
@@ -275,7 +275,7 @@ enum RadianCommand {
     /// Manage durable memory (ADR 0021 D7): the same grammar as `radian exec memory` and the
     /// TUI's `/memory`.
     Memory {
-        /// The workspace project memory is resolved against, like `agent --workspace`.
+        /// The workspace project memory is resolved against, like `radian exec --workspace`.
         #[arg(long, value_name = "DIR")]
         workspace: Option<PathBuf>,
         #[command(subcommand)]
@@ -798,7 +798,7 @@ fn run(
                 match radian_host::resolve_note(&key_id).map_err(|e| e.to_string())? {
                     Some(note) => note,
                     None => format!(
-                        "no credential for `{key_id}`: run `agent login {key_id}`, or \
+                        "no credential for `{key_id}`: run `radian login {key_id}`, or \
                          `/login {key_id}` in the TUI; refusing to continue because {} is not a \
                          local address",
                         radian_host::redact_base_url(&probe_base_url)

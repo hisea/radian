@@ -918,9 +918,12 @@ async fn a_remote_base_url_without_a_key_fails_fast() {
     .await;
 
     assert_eq!(code, 2);
-    // ADR 0026 D2/D3: the message names the fix — `agent login <provider>` (which writes
+    // ADR 0026 D2/D3: the message names the fix — `radian login <provider>` (which writes
     // `credentials/auth.json`) — and names the redacted endpoint.
-    assert!(stderr.contains("agent login openai-compatible"), "{stderr}");
+    assert!(
+        stderr.contains("radian login openai-compatible"),
+        "{stderr}"
+    );
     assert!(stderr.contains("/login"), "{stderr}");
     assert!(stderr.contains("https://api.example.com/v1"), "{stderr}");
     // The message must not suggest a placeholder key value or embed a JSON template with a
@@ -3229,7 +3232,7 @@ fn spawn_radian_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> 
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env("RADIAN_SESSION_DIR", session_dir)
-        // Isolate the catalog cache, the `~/.radian` root and the network, like `spawn_agent`.
+        // Isolate the catalog cache, the `~/.radian` root and the network, like `spawn_radian`.
         .env("HOME", fresh_session_dir())
         .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
         .env("RADIAN_HOME", &home)
@@ -5202,9 +5205,9 @@ async fn workspace_shell_cannot_read_a_moved_sessions_directory() {
     );
 }
 
-// ---------- `agent memory` (ADR 0021 D7/D8) ----------
+// ---------- `radian memory` (ADR 0021 D7/D8) ----------
 
-/// An isolated `agent memory` environment: a workspace, a `RADIAN_HOME`, and a sessions
+/// An isolated `radian memory` environment: a workspace, a `RADIAN_HOME`, and a sessions
 /// directory that must stay free of `.jsonl` files.
 struct MemoryEnv {
     dir: ScratchDir,
@@ -5989,7 +5992,7 @@ async fn a_failing_config_in_the_temp_radian_home_is_read_and_named() {
     assert!(!stderr.contains("no API key"), "{stderr}");
 }
 
-/// The harness must never read the user's real `~/.radian/config/config.toml`. `spawn_agent`
+/// The harness must never read the user's real `~/.radian/config/config.toml`. `spawn_radian`
 /// pins the whole root (`RADIAN_HOME`) and drops `RADIAN_CONFIG`, so a `HOME` whose
 /// `.radian/config/config.toml` would refuse startup is **not** consulted: the run reports
 /// `[config] none` and reaches the model. Without the pin it would refuse with the version
@@ -6061,7 +6064,7 @@ fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
         None,
     );
 
-    // One memory record, so `agent memory list` has a line to write.
+    // One memory record, so `radian memory list` has a line to write.
     let home = scratch("sigpipe-home");
     let add = std::process::Command::new(common::radian_bin())
         .args(["memory", "add", "--global", "a memory record"])
@@ -6072,10 +6075,10 @@ fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .expect("run agent memory add");
+        .expect("run radian memory add");
     assert!(
         add.status.success(),
-        "agent memory add failed: {}",
+        "radian memory add failed: {}",
         String::from_utf8_lossy(&add.stderr)
     );
 
@@ -6189,7 +6192,7 @@ async fn write_turn_session(sessions: &Path, id: &str, workspace: &str) -> u64 {
     seq
 }
 
-/// `agent --fork` creates a child with the parent's history, records the lineage in both
+/// `radian exec --fork` creates a child with the parent's history, records the lineage in both
 /// files, and refuses a parent another process holds.
 #[tokio::test]
 async fn fork_creates_a_child_and_refuses_a_locked_parent() {
@@ -6733,7 +6736,7 @@ fn spawn_radian_raw(args: &[&str], envs: &[(String, String)]) -> Child {
 
 // ---------- radian login / radian logout (ADR 0026 D3) ----------
 
-/// `agent login` refuses without a terminal: a key pasted into a pipe would be visible, so
+/// `radian login` refuses without a terminal: a key pasted into a pipe would be visible, so
 /// the message points at `auth.json` instead (D3). Exit code 2 (usage-shaped).
 #[tokio::test]
 async fn login_without_a_terminal_refuses_and_points_at_auth_json() {
@@ -6746,7 +6749,7 @@ async fn login_without_a_terminal_refuses_and_points_at_auth_json() {
         .stderr(std::process::Stdio::piped())
         .output()
         .await
-        .expect("spawn agent login");
+        .expect("spawn radian login");
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("login needs a terminal"), "{stderr}");
@@ -6868,7 +6871,7 @@ fn assert_stty_has_echo(stty: &str) {
     assert!(!tokens.contains(&"-echo"), "echo is still off: {stty}");
 }
 
-/// The full `agent login custom` flow on a real pty: the key is **never** in the pty stream
+/// The full `radian login custom` flow on a real pty: the key is **never** in the pty stream
 /// (echo off), the verification runs against a local server, `auth.json` gains the entry
 /// (with the endpoint in `env`, D10), and after the app exits the terminal's echo is **on**
 /// again — the restore held on the normal exit path.
