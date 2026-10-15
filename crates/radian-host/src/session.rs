@@ -381,8 +381,9 @@ pub struct SessionFacts {
     pub profile_line: String,
     /// The `[sandbox]` line.
     pub sandbox_facts: String,
-    /// The startup summary's word for the sandbox (ADR 0027): the real backend for
-    /// `workspace`, `no exec` for `safe`, `no sandbox` for `full`. The TUI prints it as-is.
+    /// The startup summary's word for the sandbox (ADR 0027): the real backend in plain
+    /// words for `workspace` (`macOS sandbox` / `Linux sandbox`), `no exec` for `safe`,
+    /// `no sandbox` for `full`. The TUI prints it as-is.
     pub sandbox_word: String,
     /// The `[memory]` line.
     pub memory_notice: String,
