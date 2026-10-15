@@ -119,3 +119,23 @@ Base: `2d7cb90` · 一次性检出 `/tmp/radian-us-mut`（detached，跑完删�
 修法是 `is_skipped_dir` 命中的目录只收集它**自己根下**的 `.git`（复用 `add_git_entry`，不往下钻），
 子树仍然不搜（`a_repository_inside_a_skipped_directory_is_not_collected` 与
 `the_walk_never_enters_a_cache_tagged_directory` 继续钉住）。
+
+## ADR 0038 切片①：`git_access` 与 `.git` 只留执行入口只读（macOS，2026-10-15）
+
+工作区 `<home>/Code/radian/.radian-worktrees/git-writable`，分支 `oc/git-writable`。每个变异
+只改 `crates/radian-sandbox/src/seatbelt.rs`，跑完从副本还原并逐字节比较确认一致（脚本与日志在
+`.radian/progress/logs/mutations.txt`）。跑 `cargo test -p radian-sandbox --no-fail-fast --test
+git_writable`（macOS-only 行为测试，每条命令带 `FullAccess` 对照）；列出的最后一个额外跑
+`--test escape_macos`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| GW-1 | 去掉 `hooks/` 的 deny（`(subpath <git>/hooks)` 那一段） | `git_writable::writable_except_exec_allows_git_and_denies_the_exec_entries` 的 `repo_hook_new_file`/`repo_hook_overwrite`/`submodule_hook`/`worktree_shared_hook` | ✅ 1 test FAILED |
+| GW-2 | 去掉 `config` 的 deny | 同上，`repo_config`/`submodule_config`/`worktree_shared_config` | ✅ |
+| GW-3 | 去掉 `config.worktree` 的 deny | 同上，`repo_config_worktree_new`/`worktree_per_gitdir_config_worktree` | ✅ |
+| GW-4 | 忽略 `git_access`：`WritableExceptExec` 也走整块 `ReadOnly` deny（宿主忘了接线的形态） | 同上，`git_add`/`git_commit`/`git_checkout_branch`/`git_stash`/`git_branch_delete` 这些 must_succeed 用例 | ✅ |
+| GW-5 | `ReadOnly` 臂改成不产生任何 deny（整块 `.git` 变可写） | `git_writable::readonly_keeps_the_whole_git_read_only`；另跑 `escape_macos` 的 `git_readonly` 组 | ✅ 两个测试二进制各 FAILED |
+
+5/5 抓住。GW-4 是"策略参数被忽略"的形态：`.git` 退回整块只读，原生 `git commit` 失败，must_succeed
+用例抓住。GW-5 同时被新行为测试与共享逃逸矩阵的 `git_readonly` 组抓住——后者证明任务 agent 的整块
+只读规则没有被放松。

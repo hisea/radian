@@ -34,7 +34,8 @@ macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在�
 
 - `SandboxMode::{Safe, WorkspaceWrite, FullAccess}` 是产品概念；SBPL / bwrap 的参数只是实现。
 - `SandboxPolicy`：canonical workspace、`network`、`read_only`（git 元数据自动发现：`.git` 目录、
-  worktree 指针文件及其共享 common dir）、`deny_read`（默认 `~/.ssh`、`~/.aws`、`~/.gnupg`、
+  worktree 指针文件及其共享 common dir）、`git_access`（ADR 0038：这些 git 元数据是整块只读，
+  还是只留执行入口只读；见下）、`deny_read`（默认 `~/.ssh`、`~/.aws`、`~/.gnupg`、
   `~/.netrc`、浏览器配置等）、`allow_env` 白名单。
 
 ### git 元数据的自动发现：跳过哪些目录（2026-10-15）
@@ -71,10 +72,12 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
 - **ADR 0020（2026-10-13）**：宿主在 enforced 档位把**实际的会话目录**（`--session-dir`
   可能已改位）与 `~/.radian/memory` 加进 `deny_read`，并在建沙箱前把它们创建为 0700（Linux 的
   bwrap 只能遮住**已存在**的路径）；`~/.radian/config` 与 `~/.radian/cache` 保持可读。
-- **macOS**：`(deny default)` + 选择性 allow；只写工作区；更深的 `deny` 覆盖 git 元数据与敏感读；
+- **macOS**：`(deny default)` + 选择性 allow；只写工作区；更深的 `deny` 覆盖敏感读，并按
+  `git_access` 覆盖 git 元数据（`ReadOnly` 整块拒写；`WritableExceptExec` 只拒执行入口，见下）；
   默认不加 `(allow network*)`；`/dev/null` 放行；`TMPDIR` 指向工作区内 `.radian-sandbox/tmp`。
 - **Linux**：`--unshare-all`（网络关闭）或部分隔离（开启）；宿主根 `--ro-bind / /` + 工作区
-  `--bind`；git 元数据 `--ro-bind` 覆盖；敏感目录 `--tmpfs`（目录）或 `/dev/null`（文件）；
+  `--bind`；git 元数据 `--ro-bind` 覆盖（ADR 0038 切片①**未改 Linux**：无论 `git_access` 取何值
+  都整块只读）；敏感目录 `--tmpfs`（目录）或 `/dev/null`（文件）；
   `--clearenv` + 白名单；`HOME`/`TMPDIR` 在工作区内 `.radian-sandbox/{home,tmp}`。
 
 ## 逃逸清单（两平台各 39 例，全部带"关掉沙箱后成功"的对照）
@@ -91,7 +94,7 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
 | environment | 白名单外的变量对子进程不可见；白名单内的可见 | ✅ | ✅ |
 | inheritance | 两层 `sh -c` 仍受约束；工作区内嵌套装写成功 | ✅ | ✅ |
 | normal_use | 工作区内写回读；工作区外只读 | ✅ | ✅ |
-| git_readonly | 写 `.git/hooks`、`.git/config`、`.git/info`、`git config core.hooksPath`、`git add`、worktree 指针、共享 gitdir、经符号链接写共享 `.git` 全部被拒；`git status`/`git log` 可用 | 8 拒 + 2 可 | 8 拒 + 2 可 |
+| git_readonly | `ReadOnly`（默认，任务 agent 与未点名放宽的宿主）：写 `.git/hooks`、`.git/config`、`.git/info`、`git config core.hooksPath`、`git add`、worktree 指针、共享 gitdir、经符号链接写共享 `.git` 全部被拒；`git status`/`git log` 可用 | 8 拒 + 2 可 | 8 拒 + 2 可 |
 | sensitive_read | 假 `~/.ssh/id_ed25519` 打开失败（只断言 exit，不读内容）；普通文件可读 | ✅ | ✅ |
 | radian_home | ADR 0020/0026/0025/0031：`~/.radian/sessions/<file>`、`~/.radian/memory/<file>`、`~/.radian/credentials/auth.json` 与 `~/.radian/trust/trust.json` 读失败；`config/<file>`、`cache/<file>` 与 `skills/<dir>/SKILL.md` 可读；`--session-dir` 指向的目录也读失败 | 5 拒 + 3 可 | 4 拒 + 2 可（`skills_readable`/`trust_unreadable` 待 VM 恢复后补跑） |
 | deny_inside_workspace | ADR 0020：会话目录在工作区**里面**（如 `--session-dir ./sessions`）允许构建；该子目录读失败，工作区其余部分可读可写 | 1 拒 + 2 可 | 1 拒 + 2 可 |
@@ -114,6 +117,48 @@ Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就�
 （根是只读的），因此只 mask 已存在的 deny 路径；SBPL 可以给未来才会创建的路径写规则。默认 deny
 列表里不存在的项在 Linux 上暂不 mask。
 
+## ADR 0038 切片①：`workspace` 档位下 `.git` 可写、只留执行入口只读（macOS）
+
+**背景**：通用（general）与项目主管（lead）会话在 `workspace` 档位下要能直接用原生 git 提交
+（commit、branch、checkout、stash、rebase、merge），否则"在 main 上和一个通用 agent 协作"这条最
+常见的用法走不通（ADR 0038 背景）。**理由不变**：仍要堵住模型在 `.git` 里埋可执行的东西（hook、
+`core.hooksPath`、filter、fsmonitor），等用户在沙箱外跑 git 时被执行（ADR 0012）。
+
+**选择放在一个显式策略参数上**：`SandboxPolicy::git_access`。
+
+- `GitAccess::ReadOnly`（**默认**）：发现到的 git 元数据整块只读——就是今天的行为。任务 agent 保持
+  它（ADR 0030/0038 决定 5），逃逸矩阵的 `git_readonly` 组也钉住它。
+- `GitAccess::WritableExceptExec`：`.git` 可写，只把**能执行代码的入口**留成只读。`agent-cli` 与
+  `radian-tui` 在 `WorkspaceWrite` 档位为通用会话传这个值（各自 `profile.rs` 一条单测钉住接线）。
+
+默认取更窄的 `ReadOnly`：调用方必须点名 `WritableExceptExec` 才会放宽，忘了接线的宿主退回安全一侧。
+
+**macOS 规则**（SBPL 最后匹配优先；对每个发现到的 git 目录——`.git` 目录、worktree 的 per-worktree
+gitdir 与共享 common dir，三者经同一函数处理——在整块可写之下追加）：
+
+- `(deny file-write* (literal <git>/config))`
+- `(deny file-write* (literal <git>/config.worktree))`
+- `(deny file-write* (subpath <git>/hooks))`（`subpath` 让整个目录及其下、以及尚不存在的 `hooks/` 都拒）
+- `(deny file-write* (regex "^<esc>/modules/[^/]+/config$"))`
+- `(deny file-write* (regex "^<esc>/modules/[^/]+/hooks(/.*)?$"))`
+
+子模块用 `<name>` 的 regex 而不是发现时枚举名字，是为了覆盖会话中**新加**的子模块。worktree 的
+`.git` 是个**指针文件**、不是目录，没有自己的执行入口，因此不额外加规则（它的 per-worktree gitdir
+与共享 common dir 是分开发现、分开处理的条目）。`<git>/info/` **有意不拒**（ADR 0038 的只读清单只
+列了 `config`、`config.worktree`、`hooks/` 与子模块同类），对象库、refs、index、`logs/` 都照常可写。
+
+**行为测试**：`crates/radian-sandbox/tests/git_writable.rs`（macOS-only；每条命令都带 `FullAccess`
+对照，scratch 里同时含仓库、子模块与链式 worktree）。它断言写 `config`、`config.worktree`、`hooks/`
+（新建与覆盖）、子模块与 worktree 的同类入口全被拒；`info/`、`objects/` 可写；`git add`、`git commit`、
+`git checkout -b`、`git stash`、`git branch -D` 在沙箱里成功。同文件的 `readonly_keeps_the_whole_git_read_only`
+在同一个 workspace 上对照 `ReadOnly`：整块只读、原生 git 写失败、`git status` 仍可用。规则"形状"另由
+`seatbelt::tests::writable_except_exec_carves_out_only_the_exec_entries` 与
+`a_worktree_pointer_file_gets_no_exec_carve_out` 钉住。
+
+**未验证 / Linux**：ADR 0038 切片①**只在 macOS 上实施**。Linux（bwrap）无论 `git_access` 取何值都
+保持今天的整块 `--ro-bind` 只读（`bwrap.rs` 里带注释）；任何"Linux 也只留执行入口只读"的说法都要等
+VM 恢复、`sandbox-escape` 矩阵在 VM 上重跑之后才算数。当前状态：**Linux pending，未改、未验证**。
+
 ## 敏感目录禁读的兼容性轮次（macOS，`workspace` + 默认 deny 列表）
 
 `crates/radian-sandbox/tests/compat_macos.rs` 逐条跑并断言：
@@ -124,11 +169,13 @@ Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就�
 | `ssh -V` | ✅ | 只打印版本，不读 `~/.ssh` |
 | `cargo --version` | ✅ | |
 | **`cargo build`（无依赖项目，`--offline`）** | ✅ | spike 未验证项：可在沙箱内 build；`target/` 在工作区内，`~/.cargo`/`~/.rustup` 可读，`TMPDIR` 指向工作区 |
-| `git add` / `git commit` | ❌ | **设计使然**：`.git` 有意只读（ADR 0012）。需要提交时应在沙箱外或 `full` 下做；不为此放宽规则 |
+| `git commit` / `git add` | ✅ | **ADR 0038 决定 4**：`workspace` 档位下通用会话的 `.git` 可写（只留执行入口只读），原生 git 在沙箱里可直接提交 |
+| `git config set core.hooksPath`（写 `.git/config`） | ❌ | **设计使然**：执行入口只读。模型仍不能改 `.git/config` 或装 hook（ADR 0038/0012） |
 
-**没有为兼容性放宽任何规则**：唯一新增的放行是 `/dev/null`（git 需要）与 `TMPDIR` 指向工作区内
-（两平台一致），都属于"工作区可写"的既有语义。不接受的做法——比如为了 `git commit` 而让 `.git`
-可写——没有采用。
+**本轮的兼容性断言仍不放宽规则**：`git commit` 能跑，是 ADR 0038 决定 4 有意放开 `.git` 的**非执行**
+部分，不是为兼容性让步；执行入口（`config`、`hooks/` 等）依旧拒写，兼容性轮次用
+`git config set core.hooksPath` 这条把口子钉住。除此之外唯一新增的放行仍是 `/dev/null`（git 需要）
+与 `TMPDIR` 指向工作区内（两平台一致），都属于"工作区可写"的既有语义。
 
 ## 启动开销
 
@@ -270,7 +317,7 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 2. **"真实 `cargo build` 能跑"的覆盖范围比测试本身更宽，但要说准。** 仓库里的兼容性测试验的是一个**零依赖**的 hello-world（`--offline`）。评审者另外在本机（macOS）沙箱里做了一次**带依赖的真实构建**：一个依赖 `serde_json` 的项目（共 11 个包，依赖从本机 cargo 缓存读取、`--offline`、网络关闭、`Cargo.lock` 在沙箱外预先生成），`cargo build` **成功**，用时约 8 秒。该探针依赖本机缓存状态，因此没有提交成测试。**未验证**：需要联网拉依赖的构建（这次探针是显式关网跑的；ADR 0016 之后 `workspace-write` 默认**开网**，`safe` 关网，ADR 0030 的 task agent 显式关网，关网时这类构建按设计会失败）、带 build script 写工作区外路径的 crate、其他构建系统。
 3. **Linux 结果本轮评审未能独立重跑。**（**后续已补**：2026-10-12 评审者在 VM 上独立重跑，26/26，零差异；见文末“Linux 独立复核”节。） 驱动可以按文档交叉编译（得到静态链接的 aarch64 ELF），但评审时 VM 已不可达（`ssh: … No route to host`）。所以 Linux 的 26/26 目前**以本文作者提交的证据为准**（`tests/data/escape-linux.{txt,json}`），评审者核对了证据文件格式与"每条失败都带关沙箱对照"的列，但没有在 VM 上再跑一次。上一轮 Linux spike 的 26 条中的同类用例评审者是独立复现过的（见 `docs/spikes/linux-sandbox.md`）。
 4. **本切片在 owner 的 Mac 上装了 rustup target `aarch64-unknown-linux-musl`**（用于交叉编译 VM 上跑的驱动）。这是一次开发环境改动，不影响仓库，但值得知道。
-5. **`git add`/`git commit` 在 `workspace-write` 下失败是设计结果**（`.git` 只读覆盖，ADR 0012），不是兼容性缺陷。含义：在该档位下 agent 不能自己提交；提交是宿主或用户在沙箱外做的事——这与计划 Phase 6c "apply/merge/push 保持独立审批步骤" 一致。
+5. **`git add`/`git commit` 在 `workspace-write` 下失败是设计结果**（`.git` 只读覆盖，ADR 0012），不是兼容性缺陷。含义：在该档位下 agent 不能自己提交；提交是宿主或用户在沙箱外做的事——这与计划 Phase 6c "apply/merge/push 保持独立审批步骤" 一致。（**ADR 0038 决定 4 之后已改，2026-10-15**：通用/lead 会话在该档位下 `.git` 可写、可直接提交，执行入口仍只读；任务 agent 仍整块只读。见前文"ADR 0038 切片①"。）
 
 ## Linux 复验（ADR 0016 之后，2026-10-13）
 
