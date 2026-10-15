@@ -1144,3 +1144,11 @@ Base `3c1c579` · 一次性 worktree `/tmp/radian-sl-mut`（detached，跑完删
 | SL4 | `select_list::matches` 只匹配 label（丢掉 description） | `select_list::the_filter_matches_the_label_and_the_description` | ✅ |
 
 4/4 抓住。
+## startup-speed（摘要行说 "macOS sandbox" / "Linux sandbox"，2026-10-15）
+
+工作区 `<home>/Code/radian-dogfood-ss`，分支 `dogfood/startup-speed`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SP-T1 | `radian_tui` 摘要行不再用 `SessionFacts::sandbox_word`，改回显示后端名（或搜索 `sandbox_facts`） | `pty::pty_the_startup_summary_names_the_real_sandbox_backend`（同一条用例现在同时断言摘要里的 `macOS sandbox` 与展开后 `profile:` 行里的 `macos-seatbelt`） | ✅ |
+

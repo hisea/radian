@@ -1063,7 +1063,7 @@ fn the_block_layout_snapshot() {
             meta: Default::default(),
         },
     });
-    app.push_notice("profile: workspace · sandbox seatbelt");
+    app.push_notice("profile: workspace · sandbox macos-seatbelt");
     let history =
         agent_core::compaction::compacted_history("the earlier work, summarized", &[], &[])
             .expect("a valid history");
@@ -1104,7 +1104,7 @@ fn the_block_layout_snapshot() {
         " <-d 4.0K src",             // its result (the aligned table)
         "   f 512 B b.md",
         "", // the gap
-        "* profile: workspace · sandbox seatbelt",
+        "* profile: workspace · sandbox macos-seatbelt",
         "", // the gap above the rule line
         "── context compacted ──",
         "", // the gap below it
