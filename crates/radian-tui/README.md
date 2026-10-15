@@ -555,6 +555,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   terminal width? does a long argument (a large patch, say) make the box unusable? do the
   `y`/`a`/`n` keys feel right, and is it obvious which one you are about to press? pty
   automation asserts the text and the keys, not the readability or the feel (ADR 0009).
+- **the `ask_user` panel** (ADR 0024): does the tab row read at your width, is the
+  current tab obvious, and do the bottom-border hints (which change per tab) make the keys
+  findable without `/help`? On the `Other` row, do Up/Down still move between the options while
+  the typed text stays? Does `alt-h` collapse to one line and back without losing answers?
+  pty automation asserts the text, not the feel (ADR 0009).
 - **the shell approval box with a long command**: a real command line is often longer than a
   file path. Does the `command:` line stay readable at your width, or does the wrapped preview
   become a wall of text? The pty test only asserts that the whole command is present.
@@ -1051,25 +1056,40 @@ so a facade without it refuses with a notice rather than resolving a request.
 says `ask_user: off (no interactive user)`. The tool is fixed `allow` in every tier (ADR 0024
 Q6): it writes nothing and runs nothing, and the answer is data, not a permission.
 
-A question request is one `Modal::Question` with a form (ADR 0024 Q7):
+A question request is one `Modal::Question`, drawn with the shared panel primitive (ADR 0035
+revision 1, ADR 0024 R2): a titled rounded box, a **tab row** (each question's
+`header`, capped at 16 display cells, a `✓` on an answered one, then `Submit`), the current
+question's options (a `❯` cursor, `○`/`◉` single, `☐`/`☑` multi, ` (Recommended)`, a `↳`
+description), the `Other` row with inline editing, and the key hints in the bottom border
+(they change with the tab). `alt-h` collapses the panel to one line.
 
 ```
-┌ question 1/3 from <session> ────────────────────────────────┐
+╭─ Ask · <session> ───────────────────────────────────────────╮
+│  Load  Scope  Submit                                        │
+├─────────────────────────────────────────────────────────────┤
 │ How should the UI extension be loaded?                      │
-│ > (•) Built-in Rust components                              │
-│   ( ) External process plugins                              │
-│ Tab next · Space select · Enter next/submit · Esc decline   │
-└─────────────────────────────────────────────────────────────┘
+├─────────────────────────────────────────────────────────────┤
+│ ❯ ○ Built-in Rust components                                │
+│   ○ External process plugins                                │
+│      ↳ a separate program, JSON-RPC over stdio              │
+│   ○ Other (type your own)                                   │
+╰─ ⏎ select · n note · ↑/↓ move · ⇥/←/→ question · esc cancel…╯
 ```
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift-Tab` (`form_next`/`form_prev`) | the next/previous question, wrapping |
-| `Up` / `Down` (`form_up`/`form_down`) | the option cursor; the list scrolls to keep it visible |
-| `Space` (`form_select`) | choose the highlighted option (toggle it for a `multi` question) |
-| `Enter` (`form_submit`) | the next question, then the overview; in the overview, submit |
+| `Tab`/`→` / `Shift-Tab`/`←` (`form_next`/`form_prev`) | the next/previous tab (a question or `Submit`), wrapping |
+| `Up` / `Down` (`form_up`/`form_down`) | the option cursor; on the `Other` row it still moves between options and keeps the typed text (a `text` question and a note are multi-line, so there it moves the composer's cursor) |
+| `Space` (`form_select`) | choose the highlighted option without advancing (toggle it for a `multi` question) |
+| `Enter` (`form_submit`) | save a note; a `single` selects **and advances**; a `multi` toggles; on `Submit`, submit |
+| `n` | a note for the current question (type, `Enter` saves, `Esc` cancels) |
 | `Esc` (`form_decline`) | ask once; a second `Esc` declines (`user_declined`) |
-| typing | the focused free-text field (a `text` question, or the `Other` row), with the composer's editing keys |
+| `alt-h` | collapse the panel to one line (`Ask · 2/3 answered · alt-h to show`) |
+| typing | the focused free-text field (a `text` question, the `Other` row, or a note), with the composer's editing keys |
+
+The transcript also shows the `ask_user` call and result as a boxed block (ADR 0024
+R1): the same questions, the chosen options marked `◉`/`☑`, a `↳` description, and the
+declined/cancelled status; `glyphs = ascii` falls back to `+ - |`, `(*)`/`[x]` and `->`.
 
 A `required` question with no answer blocks the submit with a notice. The drafts live in the
 form, so moving between questions keeps them. These are the **only** rebindable modal keys; the
