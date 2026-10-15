@@ -448,12 +448,24 @@ mod tests {
         );
     }
 
-    /// A `node_modules` directory is skipped by name, at any depth.
+    /// A `node_modules` directory is skipped by name, at any depth, with **no** `CACHEDIR.TAG`
+    /// involved. Two things must hold at once:
+    ///
+    /// - the walk never enters it (the `visit` callback records every directory it enters), so
+    ///   a `.git` deeper inside it is not collected; and
+    /// - its own root `.git` **is** still collected, so naming a directory `node_modules` cannot
+    ///   hide a repository root from the read-only list (the same bypass `CACHEDIR.TAG` would
+    ///   otherwise open).
     #[test]
-    fn the_walk_never_enters_node_modules() {
+    fn the_walk_never_enters_node_modules_but_collects_its_own_root_git() {
         let dir = TempDir::new("node-modules");
         let modules = dir.path().join("app").join("node_modules");
-        std::fs::create_dir_all(modules.join("pkg").join(".git")).unwrap();
+        let dotted = modules.join("pkg");
+        let deeper = dotted.join("nested");
+        // The root's own repository (collected) and repositories deeper inside (not collected).
+        std::fs::create_dir_all(modules.join(".git")).unwrap();
+        std::fs::create_dir_all(dotted.join(".git")).unwrap();
+        std::fs::create_dir_all(deeper.join(".git")).unwrap();
 
         let mut visited = Vec::new();
         let mut out = Vec::new();
@@ -465,7 +477,11 @@ mod tests {
             !visited.iter().any(|p| p.starts_with(&modules)),
             "node_modules must not be entered: {visited:?}"
         );
-        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(
+            out,
+            vec![std::fs::canonicalize(modules.join(".git")).unwrap()],
+            "only the node_modules root's own .git is collected, nothing deeper"
+        );
     }
 
     /// The workspace root itself is always walked: the user named it, so even if it carries the

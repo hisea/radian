@@ -109,7 +109,7 @@ Base: `2d7cb90` · 一次性检出 `/tmp/radian-us-mut`（detached，跑完删�
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | SP-1 | 去掉 `CACHEDIR.TAG` 跳过（`is_skipped_dir` 不查标记） | `policy::tests::the_walk_never_enters_a_cache_tagged_directory`、`backend::a_repository_inside_a_skipped_directory_is_not_collected` | ✅ |
-| SP-2 | 去掉 `node_modules` 跳过（`SKIP_DIR_NAMES` 置空） | `policy::tests::the_walk_never_enters_node_modules`、`backend::a_repository_inside_a_skipped_directory_is_not_collected` | ✅ |
+| SP-2 | 去掉 `node_modules` 跳过（`SKIP_DIR_NAMES` 置空） | `policy::tests::the_walk_never_enters_node_modules_but_collects_its_own_root_git`、`backend::a_repository_inside_a_skipped_directory_is_not_collected` | ✅ |
 | SP-3 | 把跳过检查放到遍历入口（连用户点名的工作区根也跳过） | `policy::tests::the_workspace_root_is_walked_even_when_it_is_cache_tagged` | ✅ |
 | SP-4 | 恢复跟随符号链接（`file_type()` 换回 `metadata()`） | `backend::a_symlinked_directory_is_not_traversed` | ✅ |
 | SP-5 | 跳过目录根自己的 `.git` 不再收集（即只 `continue`，这就是被评审指出的绕过） | `backend::a_skipped_directory_that_is_itself_a_repository_still_has_its_dot_git_collected` | ✅ |
