@@ -60,7 +60,7 @@ fn newest_mtime(dir: &Path) -> Option<std::time::SystemTime> {
 }
 
 /// The newest source mtime among the crates the `radian` binary is built from: every
-/// `crates/*/src` and `third_party/*/src` tree, plus the crates' manifests.
+/// `crates/*/src` and `third_party/*/src` tree, plus each crate's `build.rs`.
 ///
 /// Not just `radian-tui`: `radian` links the `agent-cli` library and every other path
 /// dependency, and `cargo test -p agent-cli` rebuilds only the library - so a change in any of
@@ -77,11 +77,12 @@ fn newest_source_mtime() -> Option<std::time::SystemTime> {
             if !dir.is_dir() {
                 continue;
             }
-            for candidate in [
-                dir.join("src"),
-                dir.join("build.rs"),
-                dir.join("Cargo.toml"),
-            ] {
+            // Manifests are deliberately not checked: a comment-only `Cargo.toml` edit does
+            // not make the artifact stale and cargo does not rebuild for it, so including
+            // them would refuse a perfectly current binary. A manifest change that alters the
+            // build (a feature or a dependency) is the gap - rebuild before trusting the
+            // tests when you make one.
+            for candidate in [dir.join("src"), dir.join("build.rs")] {
                 let found = if candidate.is_dir() {
                     newest_mtime(&candidate)
                 } else {
