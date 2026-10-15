@@ -23,6 +23,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use agent_core::{BudgetReport, ModelUsage};
 
+use crate::ModelPrice;
+
 /// The turn state the status bar shows (ADR 0023 U5).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TurnState {
@@ -97,6 +99,15 @@ struct Facts {
     usage_cache_read: Option<u64>,
     /// The provider-reported cache **write** tokens, for the same reason.
     usage_cache_write: Option<u64>,
+    /// The session's accumulated fee in micro-dollars (ADR 0027). Each model call
+    /// is priced at the rate the route had **when it arrived** (`cost::add_cost`), so a
+    /// `/model` switch does not re-price earlier calls. `None` until a call had something to
+    /// bill: the item hides rather than showing `$0.00`.
+    cost_micros: Option<u64>,
+    /// The unit prices of the model in force (ADR 0027), set at startup and on each
+    /// applied route change. `None` means the catalog has no price for it: calls arriving then
+    /// contribute no fee.
+    price: Option<ModelPrice>,
     budget: Option<BudgetReport>,
     /// The effective input budget `B` (ADR 0018), for the status bar's `T / B`.
     context_window: Option<u64>,
@@ -177,33 +188,56 @@ impl SessionProjection {
         })
     }
 
-    /// Adds one provider-reported usage to the session totals. A field the provider did not
-    /// report is left alone; it is never treated as zero.
+    /// Adds one provider-reported usage to the session totals, pricing it at the route's
+    /// **current** rate (ADR 0027). A field the provider did not report is left
+    /// alone; it is never treated as zero.
+    ///
+    /// The fee is added here rather than derived at draw time from the totals: the totals mix
+    /// models once `/model` switches, and one price cannot price a mixed total. A call that
+    /// arrives with no known price contributes nothing to the fee (and nothing is invented).
     pub fn add_usage(&self, usage: &ModelUsage) -> bool {
-        self.write(|facts| {
-            if let Some(input) = usage.input {
-                facts.usage_input = Some(facts.usage_input.unwrap_or(0).saturating_add(input));
-            }
-            if let Some(output) = usage.output {
-                facts.usage_output = Some(facts.usage_output.unwrap_or(0).saturating_add(output));
-            }
-            if let Some(cache_read) = usage.cache_read {
-                facts.usage_cache_read = Some(
-                    facts
-                        .usage_cache_read
-                        .unwrap_or(0)
-                        .saturating_add(cache_read),
-                );
-            }
-            if let Some(cache_write) = usage.cache_write {
-                facts.usage_cache_write = Some(
-                    facts
-                        .usage_cache_write
-                        .unwrap_or(0)
-                        .saturating_add(cache_write),
-                );
-            }
-        })
+        self.write(|facts| Self::add_usage_locked(facts, facts.price, usage))
+    }
+
+    /// Like [`Self::add_usage`], but at an explicit price: the resume path folds a journal's
+    /// usage records, each of which belongs to the route that was in force **then**, not to the
+    /// route the process starts with (F3, ADR 0027). The live path uses
+    /// `add_usage`, which passes the price currently in force.
+    pub fn add_usage_at(&self, price: Option<ModelPrice>, usage: &ModelUsage) -> bool {
+        self.write(|facts| Self::add_usage_locked(facts, price, usage))
+    }
+
+    fn add_usage_locked(facts: &mut Facts, price: Option<ModelPrice>, usage: &ModelUsage) {
+        if let Some(input) = usage.input {
+            facts.usage_input = Some(facts.usage_input.unwrap_or(0).saturating_add(input));
+        }
+        if let Some(output) = usage.output {
+            facts.usage_output = Some(facts.usage_output.unwrap_or(0).saturating_add(output));
+        }
+        if let Some(cache_read) = usage.cache_read {
+            facts.usage_cache_read = Some(
+                facts
+                    .usage_cache_read
+                    .unwrap_or(0)
+                    .saturating_add(cache_read),
+            );
+        }
+        if let Some(cache_write) = usage.cache_write {
+            facts.usage_cache_write = Some(
+                facts
+                    .usage_cache_write
+                    .unwrap_or(0)
+                    .saturating_add(cache_write),
+            );
+        }
+        facts.cost_micros = crate::cost::add_cost(facts.cost_micros, price, usage);
+    }
+
+    /// Sets the unit prices of the route now in force (ADR 0027, ADR 0026 D5): the
+    /// price each **later** call is billed at. An earlier call keeps the price it arrived
+    /// under, which is why the fee is accumulated per call instead of recomputed here.
+    pub fn set_price(&self, price: Option<ModelPrice>) -> bool {
+        self.write(|facts| facts.price = price)
     }
 
     /// The most recent tool call.
@@ -303,6 +337,12 @@ impl ProjectionRead<'_> {
 
     pub fn usage_cache_write(&self) -> Option<u64> {
         self.facts.usage_cache_write
+    }
+
+    /// The session's accumulated fee in micro-dollars (ADR 0027). `None` when no
+    /// call has had anything to bill: the `cost` item hides rather than showing `$0.00`.
+    pub fn cost_micros(&self) -> Option<u64> {
+        self.facts.cost_micros
     }
 
     pub fn budget(&self) -> Option<&BudgetReport> {

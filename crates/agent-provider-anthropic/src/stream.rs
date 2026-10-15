@@ -88,6 +88,9 @@ impl UsageAccum {
             total: None,
             cache_read: self.cache_read,
             cache_write: self.cache_write,
+            // Anthropic's `input_tokens` is the **uncached** part, a sibling of
+            // `cache_read_input_tokens`/`cache_creation_input_tokens` (ADR 0007).
+            input_includes_cache: Some(false),
             details: self.details.as_ref().map(|d| {
                 OpaqueJson::parse(d.to_string()).expect("a usage sub-object is valid JSON")
             }),
@@ -820,6 +823,12 @@ mod tests {
         assert_eq!(usage.cache_read, Some(3));
         assert_eq!(usage.cache_write, Some(7));
         assert_eq!(usage.total, None);
+        // Anthropic's `input_tokens` is the uncached part (ADR 0007): `input` is
+        // billed in full, the cache fields at their own rates, and the prompt the provider saw
+        // is all three added up.
+        assert_eq!(usage.input_includes_cache, Some(false));
+        assert_eq!(usage.uncached_input(), Some(472));
+        assert_eq!(usage.prompt_total(), Some(482));
     }
 
     #[test]

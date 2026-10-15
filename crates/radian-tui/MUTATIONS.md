@@ -1131,3 +1131,48 @@ Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`。
 | S-M1 | TUI 摘要行改回搜索 `sandbox_facts` 文本（macOS 上写 `none`） | `pty::pty_the_startup_summary_names_the_real_sandbox_backend` | ✅ |
 
 1/1 抓住。
+
+## select-list：共享列表原语与 /model 平铺（ADR 0035）
+
+Base `3c1c579` · 一次性 worktree `/tmp/radian-sl-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SL1 | `window()` 恒返回 0（窗口不跟随） | `select_list::the_window_follows_the_selection_and_shows_a_scrollbar` | ✅ |
+| SL2 | `scrollbar_thumb()` 恒返回 0（滑块位置错） | 同上 | ✅ |
+| SL3 | 接受候选时插入 `description`（provider）而不是 `provider/model` | `the_flat_model_list_filters_by_provider_and_accepts_the_pair` | ✅ |
+| SL4 | `select_list::matches` 只匹配 label（丢掉 description） | `select_list::the_filter_matches_the_label_and_the_description` | ✅ |
+
+4/4 抓住。
+## startup-speed（摘要行说 "macOS sandbox" / "Linux sandbox"，2026-10-15）
+
+工作区 `<home>/Code/radian-dogfood-ss`，分支 `dogfood/startup-speed`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SP-T1 | `radian_tui` 摘要行不再用 `SessionFacts::sandbox_word`，改回显示后端名（或搜索 `sandbox_facts`） | `pty::pty_the_startup_summary_names_the_real_sandbox_backend`（同一条用例现在同时断言摘要里的 `macOS sandbox` 与展开后 `profile:` 行里的 `macos-seatbelt`） | ✅ |
+
+## ime-latency（输入法一次提交的整串汉字，2026-10-15）
+
+Base `e2a0392` · 一次性 worktree `/tmp/radian-ime-mut*`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| IM-M1 | `read_input` 恢复 `tty_readiness(timeout)` 的非零等待 | `pty_a_committed_ime_string_reaches_the_input_in_one_frame`（整串 687 ms > 150 ms 界限） | ✅ |
+| IM-M2 | 去掉 `MAY_HAVE_BUFFERED` 收窄（Idle 分支无条件走 crossterm 的 `poll(0)`） | `pty_a_closed_master_ends_the_app_cleanly` | ❌ 未抓住（0/5） |
+| IM-M3 | `tty_readiness` 不检查 `POLLHUP`（该测试本来的目标变异） | `pty_a_closed_master_ends_the_app_cleanly`（卡死，exit 124） | ✅ |
+
+IM-M2 与既有记录一致（见上文 `RESIZE-B`：closed-master 测试抓不到收窄的缺失——收窄省的是 CPU，
+不是保证退出；退出由第一次 `tty_readiness` 的 Gone 与主循环兜底覆盖，两者都用同一个
+`tty_readiness`）。IM-M3 证明这次改动没有削弱该测试对 POLLHUP 的检查。
+
+## effect-settle（超过 MAX_EFFECT_ROUNDS 时 carry，2026-10-15）
+
+Base `9cb727d` · 一次性 worktree `/tmp/radian-es-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ES-M1 | `run_effect_rounds` 恢复 `return Err`（超过上限就退出） | `effect_rounds_carry_the_rest_in_order` | ✅ |
+| ES-M2 | 超过上限后 `effects.clear()`（丢掉剩余 effect） | 同上（顺序/完整性断言） | ✅ |
+
+2/2 抓住。

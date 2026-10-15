@@ -1190,16 +1190,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     // ADR 0023 U4: the middle of the frame is drawn by the top modal (the approval box
     // replaces the input box), then the find overlay, then the ordinary input box.
-    let completion = completion_rows(app, area.width as usize);
     // `[tui.widgets]` (ADR 0027 C3): one line above and/or below the input box.
     let above_widgets = crate::footer::widget_line(app, &app.widgets.above_input);
     let below_widgets = crate::footer::widget_line(app, &app.widgets.below_input);
     let widget_rows = u16::from(above_widgets.is_some()) + u16::from(below_widgets.is_some());
+    // ADR 0035: the completion menu's visible rows are omp's
+    // `max(3, min(10, viewport - used - 2))`, where `used` is the input box, the widgets and
+    // the status bar.
+    let used_rows = input_height(app, area.width as usize) as usize
+        + widget_rows as usize
+        + status_height(app, area.width as usize) as usize;
+    let completion_visible = completion_visible_rows(app, area.height as usize, used_rows);
+    let completion = completion_rows(app, area.width as usize, completion_visible);
     let middle = match app.top_modal() {
         Some(Modal::Approval(prompt)) => approval_height(
             &prompt.request,
             area.width as usize,
-            approval_cap(area.height as usize, completion.len()),
+            approval_cap(area.height as usize, completion_visible),
         ),
         Some(Modal::Question(form)) => question_height(form, area.width as usize),
         Some(Modal::Login(_)) => LOGIN_HEIGHT,
@@ -1298,21 +1305,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     if !completion.is_empty() {
-        // The highlighted row: the menu's cursor, styled with the theme's
-        // `selection` (reversed in `mono`), so it is clear which candidate Enter/Tab accepts.
-        let lines: Vec<Line> = completion
-            .into_iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let style = if index == app.completion_cursor {
-                    theme.selection
-                } else {
-                    theme.completion
-                };
-                Line::from(Span::styled(row, style))
-            })
-            .collect();
-        frame.render_widget(Paragraph::new(lines), chunks[1]);
+        frame.render_widget(Paragraph::new(completion), chunks[1]);
     }
 
     match app.top_modal() {
@@ -1791,45 +1784,44 @@ fn clip_columns(text: &str, width: usize) -> String {
     out
 }
 
-/// The most candidate lines shown before a `+N more` line.
+/// The most rows the completion menu shows (omp's `#autocompleteMaxVisible`).
 pub const COMPLETION_MAX_LINES: usize = 10;
 
-/// The `@` completion list's lines: the candidates (at most [`COMPLETION_MAX_LINES`]), then a
-/// `+N more` line when there are more. Each row is cut to `width` display columns, so a narrow
-/// terminal clips instead of wrapping. Empty when no list is up, or while an approval prompt
-/// is shown: the list never covers the prompt.
-pub fn completion_rows(app: &App, width: usize) -> Vec<String> {
+/// The completion menu's visible rows: omp's `max(3, min(10, viewport - used - 2))`. Zero when
+/// no menu is up.
+pub fn completion_visible_rows(app: &App, viewport: usize, used: usize) -> usize {
+    if app.has_modal() || app.completion().is_none() {
+        return 0;
+    }
+    viewport
+        .saturating_sub(used + 2)
+        .clamp(3, COMPLETION_MAX_LINES)
+}
+
+/// The completion menu's rows (ADR 0035): the shared list view, so the window
+/// follows the highlight and the overflow shows a scrollbar instead of a `+N more` line.
+pub fn completion_rows(app: &App, width: usize, visible: usize) -> Vec<Line<'static>> {
     if app.has_modal() {
         return Vec::new();
     }
     let Some(candidates) = app.completion() else {
         return Vec::new();
     };
-    let mut rows: Vec<String> = candidates
+    let items: Vec<crate::select_list::Item> = candidates
         .iter()
-        .take(COMPLETION_MAX_LINES)
-        .map(|candidate| truncate_columns(candidate, width))
+        .map(|candidate| {
+            crate::select_list::Item::new(candidate.insert.clone())
+                .description(candidate.description.clone())
+        })
         .collect();
-    if candidates.len() > COMPLETION_MAX_LINES {
-        rows.push(truncate_columns(
-            &format!("+{} more", candidates.len() - COMPLETION_MAX_LINES),
-            width,
-        ));
-    }
-    rows
-}
-
-/// Cuts `text` to at most `width` display columns, never splitting a wide character.
-fn truncate_columns(text: &str, width: usize) -> String {
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in text.chars() {
-        let cell = ch.width().unwrap_or(0);
-        if used + cell > width {
-            break;
-        }
-        out.push(ch);
-        used += cell;
-    }
-    out
+    crate::select_list::view(
+        &app.theme,
+        &items,
+        &app.completion_filter(),
+        app.completion_cursor,
+        visible,
+        width,
+        false,
+    )
+    .lines
 }

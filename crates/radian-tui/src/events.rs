@@ -159,6 +159,11 @@ impl ProjectionSink {
             AgentEvent::ModelResponseReceived {
                 usage: Some(usage), ..
             } => self.projection.add_usage(usage),
+            // ADR 0018: the summarizer's call is billed too, so its usage joins the
+            // same totals (and the same per-call pricing) as a conversation response. It is a
+            // separate event because it is not this turn's generation: the timer above must
+            // not treat the summary as the turn's response.
+            AgentEvent::CompactionUsage { usage, .. } => self.projection.add_usage(usage),
             AgentEvent::ToolStarted {
                 index,
                 call_id,
@@ -357,6 +362,57 @@ mod tests {
             )),
             "and the fact itself still reaches the channel"
         );
+    }
+
+    /// F2 (ADR 0018): the summarizer's call joins the session totals — both the
+    /// token counters and the fee — even though it is not a conversation response. Its own
+    /// event is what carries the fact, so the turn timer never mistakes a summary for this
+    /// turn's generation.
+    #[test]
+    fn a_compaction_usage_joins_the_session_totals() {
+        let (sink, projection, _rx) = sink();
+        projection.set_price(Some(radian_host::ModelPrice {
+            input: 3_000_000, // $3 / Mtok
+            output: 15_000_000,
+            cache_read: None,
+            cache_write: None,
+        }));
+        sink.emit(AgentEvent::CompactionUsage {
+            revision: 1,
+            model: "current".into(),
+            usage: agent_core::ModelUsage {
+                input: Some(50_000),
+                output: Some(1_000),
+                input_includes_cache: Some(false),
+                ..agent_core::ModelUsage::default()
+            },
+        });
+        {
+            let read = projection.read();
+            assert_eq!(
+                read.usage_input(),
+                Some(50_000),
+                "the summary's input counts"
+            );
+            assert_eq!(read.usage_output(), Some(1_000));
+            // 50000 x $3 + 1000 x $15 per Mtok = $0.15 + $0.015.
+            assert_eq!(read.cost_micros(), Some(165_000));
+        }
+        // ... and a later conversation response adds to the same totals.
+        sink.emit(AgentEvent::ModelResponseReceived {
+            stop_reason: agent_core::StopReason::EndTurn,
+            tool_calls: 0,
+            usage: Some(agent_core::ModelUsage {
+                input: Some(10_000),
+                input_includes_cache: Some(false),
+                ..agent_core::ModelUsage::default()
+            }),
+        });
+        {
+            let read = projection.read();
+            assert_eq!(read.usage_input(), Some(60_000));
+            assert_eq!(read.cost_micros(), Some(195_000), "$0.165 + $0.03");
+        }
     }
 
     /// Deltas are not facts; a commit is, and it ends the stream.

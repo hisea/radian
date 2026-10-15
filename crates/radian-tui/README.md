@@ -132,6 +132,10 @@ was not your choice, every config-file and approval-policy warning), and one `Ti
 information line's `label: value` split follows a notice's: the label uses `notice_label`, the
 value `notice_body` (ADR 0028 / ADR 0029). `Ctrl-P` (`toggle_startup`) folds and
 unfolds the information. `tui.banner = false` hides the wordmark, `tui.tips = false` the Tip.
+The collapsed summary names the sandbox in plain words: `workspace · macOS
+sandbox · context …` on macOS, `workspace · Linux sandbox · context …` on Linux, `no exec` for
+`safe` and `no sandbox` for `full`; the exact backend name (`macos-seatbelt`, `linux-bwrap`)
+stays in the expanded `profile:` line.
 The transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
 bare arrow keys belong to the composer.
 
@@ -244,8 +248,8 @@ find_next = ["ctrl-g", "shift-enter"]
 | `session` | `{id}` | the session id |
 | `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{auto}` is `~` (`auto` under ascii) while auto-compaction is on |
 | `context_bar` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{bar} {percent}%`, `width` 10, `fill` `━`, `empty` `─` |
-| `tokens` | `{in}`, `{out}`, `{cache}` | `^{in} v{out} R{cache}`; compact K/M, `-` when a provider never reported one |
-| `cost` | `{usd}` | `$` from the model's catalog price (per million tokens) and the session totals; hidden when the catalog has no price (never a fabricated number) |
+| `tokens` | `{in}`, `{out}`, `{cache}`, `{cache_write}` | `^{in} v{out} R{cache}`; compact K/M, `-` when a provider never reported one. `{cache_write}` (ADR 0027) is a cache **write**, billed at its own rate but deliberately **not** in the default format, so the row does not grow |
+| `cost` | `{usd}` | the session's accumulated fee: each call priced at the route's price **when it arrived** (`radian_host::cost`), so a `/model` switch does not re-price history. The cached tokens are billed once at the cache rate (`uncached_input()`). Hidden until some call had something to bill and when the catalog has no price — never a fabricated number, never `$0.00` |
 | `speed` | `{speed}` | `42.1 tok/s`, the last finished generation's reported output over its measured time |
 | `elapsed` | `{elapsed}` | `16.2s`, live while a generation runs, the last one when idle, empty after a resume |
 | `pending` | `{count}` | shown only when a request waits |

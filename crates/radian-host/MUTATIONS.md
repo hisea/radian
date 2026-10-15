@@ -551,7 +551,7 @@ Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`，还原后 `git statu
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
-| S-M2 | `sandbox_word` 的 workspace 分支写死 `seatbelt`（Linux 上是错的） | `describe::tests::the_summary_word_is_the_backend_it_is_given` | ✅ |
+| S-M2 | `sandbox_word` 的 workspace 分支写死 `seatbelt`（Linux 上是错的） | `describe::tests::the_summary_word_is_the_backend_it_is_given`（2026-10-15 改名/改写为 `the_summary_word_names_the_backend_in_plain_words`） | ✅ |
 | S-M3 | 说明句改回 `**on**` | `describe::tests::the_workspace_facts_have_no_markdown` | ✅ |
 
 2/2 抓住。
@@ -585,3 +585,41 @@ HD6 不是单个测试能确定性抓住的（丢唤醒是竞态，窗口在「s
 `Condvar::wait`」之间）；用 `sample` 抓到现场：测试线程停在 `Reporter::shutdown` 的 `join`
 （herdr.rs:354），sender 线程停在 `Condvar::wait`（herdr.rs:374）。修复是 `stop_and_wake` 持
 slot 锁设置 `stop` 并 `notify_all`，`shutdown` 与 `Drop` 都走它。
+## context-files（ADR 0036 切片 ①，2026-10-14）
+
+Base `1d4f6e9` · 一次性 worktree `/tmp/radian-cf-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| CF-M1 | 不在仓库根停，一直走到文件系统根（读到仓库外的文件） | `context::tests::discovery_stops_at_the_repository_root` / `a_workspace_outside_a_repository_reads_only_itself` | ✅ |
+| CF-M2 | 段里去掉不可信说明 | `context::tests::the_global_file_is_first_and_a_path_is_read_once` | ✅ |
+| CF-M3 | 单文件上限不生效（`limit = remaining`，65 KiB 不截断） | `context::tests::the_file_and_total_limits_truncate` | ✅ |
+| CF-M4 | 全局文件完全不加载 | 同上 | ✅ |
+| CF-M4b | 全局文件放到工作区之后（顺序错） | 同上 | ✅ |
+
+5/5 抓住。
+
+## startup-speed（沙箱词改写为 "macOS sandbox" / "Linux sandbox"，2026-10-15）
+
+工作区 `<home>/Code/radian-dogfood-ss`，分支 `dogfood/startup-speed`；每个变异改完从副本
+还原并 `cmp` 确认。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SP-S1 | `sandbox_word` 的 workspace 分支改回直接返回后端名（`macos-seatbelt`） | `describe::tests::the_summary_word_names_the_backend_in_plain_words`；`radian-tui::tests::pty::pty_the_startup_summary_names_the_real_sandbox_backend` | ✅ |
+| SP-S2 | `linux-bwrap` 的分支错写成 `"macOS sandbox"`（把平台的词写死成另一个平台） | `describe::tests::the_summary_word_names_the_backend_in_plain_words` | ✅ |
+
+2/2 抓住。SP-S2 在 macOS 上运行时 pty 用例抓不住（这台机器只会走 `macos-seatbelt` 分支），
+所以词组按平台分别断言在 `describe` 的单测里（同一测试也覆盖未知后端按真名显示）。
+
+## context-escape（上下文文件闭合标签/属性转义，ADR 0036 C2 补充，2026-10-15）
+
+Base `65ea1ed` · 一次性 worktree `/tmp/radian-ce-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| CE-M1 | 内容不转义（`close_tag` 直接返回原文） | `context::tests::a_content_closing_tag_is_escaped` | ✅ |
+| CE-M2 | `path` 属性不转义 | `context::tests::a_path_with_quotes_cannot_end_the_attribute` | ✅ |
+| CE-M3 | 转义大小写敏感（只查小写） | `context::tests::a_content_closing_tag_is_escaped`（大写变体未转义） | ✅ |
+
+3/3 抓住。

@@ -12,10 +12,13 @@ pub mod atomic_write;
 pub mod auth;
 mod catalog;
 pub mod config;
+pub mod context;
 pub mod contrib;
+pub mod cost;
 mod describe;
 mod diagnostics;
 mod errors;
+mod escape;
 pub mod git_commit;
 mod headers;
 pub mod herdr;
@@ -78,6 +81,7 @@ pub use config::{
     parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path,
 };
+pub use context::{ContextFiles, LoadedFile, load as load_context_files};
 pub use contrib::{
     Contribution, ContributionStore, ContributorRunner, GitContributor, Segment, SegmentRole,
     StatusContributor, Tick, spawn as spawn_contributor, spawn_gated as spawn_contributor_gated,

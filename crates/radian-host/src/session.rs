@@ -27,8 +27,9 @@ use radian_runtime::{
 use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
 
+use crate::cost::RoutePrice;
 use crate::describe::{Wording, describe, sandbox_word};
-use crate::home::skills_dir;
+use crate::home::{radian_home, skills_dir, user_home};
 use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
 use crate::model::SwitchableModel;
 use crate::pending::{
@@ -298,6 +299,11 @@ pub struct SessionSetup {
     pub config_queue: Arc<ConfigQueue>,
     /// Computes `B` for a switched model from the local catalog (ADR 0026 D7).
     pub budget_for: Option<BudgetFor>,
+    /// Resolves a route's catalog prices from the warm local cache (ADR 0027). Used
+    /// for the **resume** fold (F3): the journal's usage records are priced at the route each
+    /// call ran under, which the host can only resolve offline. `None` means no price is
+    /// resolved, so a resumed session's tokens are restored but its fee stays hidden.
+    pub price_for: Option<RoutePrice>,
     /// Branch names the `git_commit` tool refuses besides `main`/`master` (ADR 0030 R10).
     pub protected_branches: Vec<String>,
     pub servers: Vec<McpServerConfig>,
@@ -381,8 +387,9 @@ pub struct SessionFacts {
     pub profile_line: String,
     /// The `[sandbox]` line.
     pub sandbox_facts: String,
-    /// The startup summary's word for the sandbox (ADR 0027): the real backend for
-    /// `workspace`, `no exec` for `safe`, `no sandbox` for `full`. The TUI prints it as-is.
+    /// The startup summary's word for the sandbox (ADR 0027): the real backend in plain
+    /// words for `workspace` (`macOS sandbox` / `Linux sandbox`), `no exec` for `safe`,
+    /// `no sandbox` for `full`. The TUI prints it as-is.
     pub sandbox_word: String,
     /// The `[memory]` line.
     pub memory_notice: String,
@@ -394,6 +401,11 @@ pub struct SessionFacts {
     pub mcp_open: Option<(usize, usize)>,
     /// Whether `ask_user` is advertised (ADR 0024 Q5), for the host's startup line.
     pub ask_user: bool,
+    /// The startup line for the loaded context files (ADR 0036 C2): `AGENTS.md (12.3 KB), …`
+    /// or `none`.
+    pub context_line: String,
+    /// The context files that were loaded, in prompt order.
+    pub context_files: Vec<crate::context::LoadedFile>,
 }
 
 impl SessionFacts {
@@ -860,6 +872,7 @@ pub async fn open_session(
         config_slot,
         config_queue,
         budget_for,
+        price_for,
         protected_branches,
     } = setup;
 
@@ -867,6 +880,26 @@ pub async fn open_session(
     // tools and the hooks, because both route through it.
     let queue: Arc<SessionQueue> = Arc::new(PendingQueue::new());
     let origin = session_id.as_str().to_string();
+
+    // ADR 0036 C2: read the project context files once, here. They are workspace input, so
+    // they never enter the journal; only the loaded paths and sizes go into the snapshot. The
+    // section is appended after the host's base prompt (layer 1) and before the skills/memory
+    // hooks (layer 3).
+    let context = crate::context::load(&workspace, radian_home().as_deref());
+    for warning in &context.warnings {
+        memory_warning(warning);
+    }
+    let system_prompt = match (&system_prompt, context.section.is_empty()) {
+        (_, true) => system_prompt,
+        (Some(base), false) => Some(format!("{base}\n\n{}", context.section)),
+        (None, false) => Some(context.section.clone()),
+    };
+    let mut config_snapshot = config_snapshot;
+    if !context.is_empty()
+        && let Some(object) = config_snapshot.as_object_mut()
+    {
+        object.insert("context".to_string(), context.snapshot());
+    }
 
     // The startup description, before the sandbox moves into the tools. The summary word
     // comes from the real backend name, not from searching the description text (which does
@@ -1067,6 +1100,17 @@ pub async fn open_session(
             .map(|budget| budget.input_budget_tokens),
     );
     projection.set_tier(Some(tier.as_str().to_string()));
+    // F3 (ADR 0027): a resumed session folds its journal's usage records back into
+    // the projection. The projection's only other writer is the live event sink, so without
+    // this `--resume` showed `-` for the tokens and hid `cost` until the next response — the
+    // session's earlier spending was simply gone. Both records count (a conversation request
+    // and a summarizer's call, ADR 0018), and each is priced at the route that was
+    // in force when it ran, not at whatever model this process starts with.
+    if let Some(price_for) = price_for.as_ref()
+        && let Some(parsed) = parsed.as_ref()
+    {
+        crate::cost::restore_usage(parsed, &projection, price_for);
+    }
 
     // The driver runs until the host asks it to stop; dropping its `run()` future releases the
     // borrow so `shutdown()` can be called. Its end is reported by the injected callback, and
@@ -1108,6 +1152,8 @@ pub async fn open_session(
         // The **actual** registration, not the host's request: the startup line must not claim
         // a tool the model cannot see.
         ask_user: ask_registered,
+        context_line: context.line(&workspace, user_home().as_deref()),
+        context_files: context.files.clone(),
     };
     Ok(LocalSession {
         id: session_id,

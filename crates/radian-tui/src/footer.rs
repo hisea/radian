@@ -633,7 +633,7 @@ fn item_placeholders(id: &str) -> &'static [&'static str] {
         "session" => &["id"],
         "context" => &["bar", "percent", "used", "budget", "auto"],
         "context_bar" => &["bar", "percent", "used", "budget", "auto"],
-        "tokens" => &["in", "out", "cache"],
+        "tokens" => &["in", "out", "cache", "cache_write"],
         "speed" => &["speed"],
         "elapsed" => &["elapsed"],
         "cost" => &["usd"],
@@ -1248,21 +1248,25 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                         .usage_cache_read()
                         .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                 ),
+                // F8 (ADR 0027): the cache-**write** total. It is billed at its own
+                // (often higher) rate, so it is available to a format that wants to show it —
+                // but it is deliberately **not** in the default format, which stays as narrow
+                // as it was (see the "cache_write shows only when asked for" test).
+                (
+                    "cache_write",
+                    session
+                        .usage_cache_write()
+                        .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
+                ),
             ],
             default_format: "^{in} v{out} R{cache}",
             numeric: None,
         }),
-        // ADR 0027: the cost from the model's catalog price and the session's
-        // token totals. No price (or no reported tokens) means the item hides; never `$0.00`
-        // for a model whose price we do not know (v5 §5).
+        // ADR 0027: the fee the session has accumulated, each call priced at the
+        // rate in force when it arrived (`radian_host::cost`). Nothing billed yet means the
+        // item hides; never `$0.00` for a model whose price we do not know (v5 §5).
         "cost" => {
-            let micros = crate::timing::cost_micros(
-                app.model_price,
-                session.usage_input(),
-                session.usage_output(),
-                session.usage_cache_read(),
-                session.usage_cache_write(),
-            )?;
+            let micros = session.cost_micros()?;
             Some(ItemData {
                 values: vec![("usd", crate::timing::format_cost(micros))],
                 default_format: "{usd}",

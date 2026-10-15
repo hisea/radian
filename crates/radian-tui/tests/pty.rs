@@ -687,6 +687,69 @@ async fn pty_launches_with_no_arguments_from_the_config_and_auth_json() {
 /// ADR 0025 slice 3 acceptance: `/skill:<name> [args]` puts the skill's body in one user
 /// message, `/skills` lists the discovered skills, `/skill:nope` is a notice and not a message,
 /// and `//skill:x` is an ordinary message. A `disable-model-invocation: true` skill is listed for
+/// ADR 0036 C2: the host reads `AGENTS.md` at session start, the startup line names it, and
+/// the model's system prompt carries its content and the untrusted note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_context_file_reaches_the_model_and_the_startup_line() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("context-session");
+    let home = TempDir::new("context-home");
+    // The workspace is a **sibling** of the session directory (ADR 0020: the sandbox hides the
+    // session directory, so a workspace inside it could not be used).
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // A repository root (the walk stops here) with one context file.
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    std::fs::write(
+        ws.join("AGENTS.md"),
+        "CONTEXT-FILE-MARKER: commits go through git_commit.\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "context",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The information block is folded; expand it to see the context line.
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("context: AGENTS.md", 10),
+        "the startup line must name the context file:\n{}",
+        pty.screen()
+    );
+    pty.send(b"hello\r");
+    assert!(pty.wait_for_screen("OK", 20), "{}", pty.screen());
+    let body = server.requests()[0].json();
+    let system = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    assert!(system.contains("CONTEXT-FILE-MARKER"), "{system}");
+    assert!(system.contains("may be untrusted"), "{system}");
+    assert!(system.contains("<project_instructions path="), "{system}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// the user but never reaches the prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -1768,7 +1831,11 @@ async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
         pty.wait_for_exit(15).is_some(),
         "the app did not exit after the probe failed"
     );
-    assert_eq!(pty.app_exit_code(), Some(1), "a refusal is a failure exit");
+    assert_eq!(
+        pty.app_exit_code(),
+        Some(2),
+        "a startup refusal is a usage/setup error (ADR 0032 A3)"
+    );
     let raw_text = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(
         raw_text.contains("sandbox backend is unavailable")
@@ -2021,6 +2088,50 @@ async fn pty_multiline_paste_reaches_the_input_box() {
     pty.quit();
 }
 
+/// An IME commits a whole word in one burst; every character must reach the input in one
+/// frame, not one poll period apart (11 CJK characters appeared ~50 ms
+/// apart, because `read_input` waited the full `INPUT_POLL` before draining crossterm's
+/// buffer).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_committed_ime_string_reaches_the_input_in_one_frame() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let dir = TempDir::new("ime");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10));
+    // A mixed CJK/ASCII run written as one burst (what an IME commit produces).
+    let text = "你好世界abc测试中文输入法";
+    let start = std::time::Instant::now();
+    pty.send(text.as_bytes());
+    assert!(
+        pty.wait_for_screen(text, 2),
+        "the whole string must reach the input:\n{}",
+        pty.screen()
+    );
+    let elapsed = start.elapsed();
+    // The pre-fix behavior was one 50 ms poll period per buffered character (~550 ms here).
+    // 150 ms is well above the one-frame latency (a frame renders in a few ms, and the state
+    // wait polls every 20 ms) and far below the pre-fix time, so it fails on the regression,
+    // not on a loaded machine.
+    assert!(
+        elapsed < std::time::Duration::from_millis(150),
+        "the string took {elapsed:?}; the pre-fix behavior was ~50 ms per character"
+    );
+    pty.quit();
+}
+
 /// The second request must not carry the first response's reasoning (ADR 0014 R4), verified
 /// on the real UI path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2205,7 +2316,7 @@ async fn pty_an_authorization_header_is_refused_without_echoing_its_value() {
         "the header value leaked into the error: {raw}"
     );
     assert!(server.requests().is_empty(), "no request may be sent");
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
 }
 
 /// A `--header` with no `=` is a usage error whose message does not echo the argument: the
@@ -2377,9 +2488,11 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// ADR 0027: the startup summary's sandbox word is the **real** backend, never `none`. The
+/// ADR 0027: the startup summary's sandbox word is the **real** sandbox, never `none`. The
 /// bug was searching the `workspace` tier's description text, which does not name the backend,
-/// so macOS showed `workspace · none`.
+/// so macOS showed `workspace · none`. the summary says the plain words
+/// ("macOS sandbox" / "Linux sandbox") and the expanded `profile:` line keeps the exact
+/// backend name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
@@ -2417,13 +2530,25 @@ async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
         "the workspace tier has a sandbox; it must not read as none: {summary:?}"
     );
     let expected = if cfg!(target_os = "macos") {
+        "macOS sandbox"
+    } else {
+        "Linux sandbox"
+    };
+    assert!(
+        summary.contains(expected),
+        "the summary must name the sandbox in plain words ({expected}): {summary:?}"
+    );
+    // The exact backend name stays in the expanded `profile:` line.
+    pty.expand_startup();
+    let expanded = pty.screen();
+    let backend = if cfg!(target_os = "macos") {
         "macos-seatbelt"
     } else {
         "linux-bwrap"
     };
     assert!(
-        summary.contains(expected),
-        "the summary must name the real backend ({expected}): {summary:?}"
+        expanded.contains(backend),
+        "the expanded profile line keeps the real backend name ({backend}): {expanded}"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -2782,7 +2907,7 @@ fn pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
         pty.wait_for_exit(15).is_some(),
         "the app did not exit on a bad workspace"
     );
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw.contains(missing.to_str().unwrap()), "{raw}");
     assert!(raw.contains("workspace"), "{raw}");
@@ -2830,7 +2955,7 @@ fn pty_a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
         pty.wait_for_exit(15).is_some(),
         "the app did not exit on a nested workspace"
     );
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw.contains("workspace is inside"), "{raw}");
     assert!(
@@ -2878,7 +3003,7 @@ fn pty_a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
         100,
     );
     assert!(pty.wait_for_exit(15).is_some(), "the refusal did not exit");
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(
         raw.contains("sandbox backend is unavailable") || raw.contains("failed its probe"),
@@ -2946,7 +3071,7 @@ fn pty_a_bad_mcp_config_creates_no_session() {
         100,
     );
     assert!(pty.wait_for_exit(15).is_some(), "the refusal did not exit");
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw.contains(bad.to_str().unwrap()), "{raw}");
     assert!(
@@ -3345,7 +3470,7 @@ fn pty_session_id_already_exists_points_at_resume() {
         second.wait_for_exit(15).is_some(),
         "the second run did not exit"
     );
-    assert_eq!(second.app_exit_code(), Some(1));
+    assert_eq!(second.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&second.raw()).to_string();
     assert!(raw.contains("already exists"), "{raw}");
     assert!(raw.contains("--resume dup"), "{raw}");
@@ -3388,7 +3513,7 @@ fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
             pty.wait_for_exit(15).is_some(),
             "{label}: the refusal did not exit"
         );
-        assert_eq!(pty.app_exit_code(), Some(1), "{label}");
+        assert_eq!(pty.app_exit_code(), Some(2), "{label}");
         let raw = String::from_utf8_lossy(&pty.raw()).to_string();
         assert!(raw.contains("anthropic"), "{label}: {raw}");
         assert!(
@@ -6696,7 +6821,11 @@ fn pty_a_session_started_from_the_filesystem_root_is_refused() {
         assert!(Instant::now() < deadline, "the app did not exit");
         std::thread::sleep(Duration::from_millis(20));
     };
-    assert_eq!(status.code(), Some(1), "a startup refusal");
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "a startup refusal is a usage/setup error (ADR 0032 A3)"
+    );
     let text = String::from_utf8_lossy(&drained);
     assert!(text.contains("filesystem root"), "{text}");
     assert!(text.contains("--workspace"), "{text}");
@@ -8347,6 +8476,123 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// F3 (ADR 0027): `--resume` shows what the session already spent. Before this the
+/// tokens were `-` and `cost` was hidden until the next response, because the projection starts
+/// empty and only the live sink wrote to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("cost-resume");
+    let home = TempDir::new("cost-resume-home");
+    // A catalog cache with a price for the model the session ran on. `resolve_offline` reads
+    // it, so the resumed fee is resolved without any network (ADR 0026 D7).
+    let cache = home.path().join("cache/catalog");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(
+        cache.join("models.json"),
+        serde_json::json!({
+            "opencode-go": {
+                "id": "opencode-go",
+                "models": {
+                    "deepseek-v4.1-flash": {
+                        "id": "deepseek-v4.1-flash",
+                        "limit": {"context": 1000000, "input": 922000, "output": 128000},
+                        "cost": {"input": 0.15, "output": 0.6, "cache_read": 0.003}
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // The journal of a session that already ran: 1M input on the priced model = $0.15.
+    let path = dir.path().join("resumed.jsonl");
+    {
+        let journal = radian_session::SessionJournal::create(
+            &path,
+            "resumed",
+            radian_session::SessionCreatedData::new(
+                "/tmp",
+                serde_json::json!({"model": {"provider": "opencode-go", "model": "deepseek-v4.1-flash"}}),
+            ),
+        )
+        .unwrap();
+        use agent_core::TranscriptJournal;
+        journal
+            .append(agent_core::JournalRecord::Message {
+                index: 0,
+                message: agent_core::Message::user("earlier turn"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(agent_core::JournalRecord::Message {
+                index: 1,
+                message: agent_core::Message::assistant("earlier answer"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(agent_core::JournalRecord::ModelUsage {
+                usage: agent_core::ModelUsage {
+                    input: Some(1_000_000),
+                    output: Some(100_000),
+                    input_includes_cache: Some(true),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        drop(journal);
+    }
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "deepseek-v4.1-flash",
+            "--provider",
+            "opencode-go",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "resumed",
+        ],
+        &[
+            ("RADIAN_HOME", home.path().to_str().unwrap()),
+            // The harness writes the `opencode-go` credential into `auth.json` from this env
+            // name (ADR 0026 D2: a key comes only from `auth.json`).
+            ("OPENCODE_GO_API_KEY", "test-key-not-a-secret"),
+        ],
+        // The numbers row, so `tokens` and `cost` are both on screen.
+        "schema_version = 1\n[tui.footer]\nrows = [{ left = [] }, { left = [\"tokens\", \"cost\"] }]\n",
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The earlier turn's tokens are there (1M in, 100K out). The default `tokens` format is
+    // `^{in} v{out} R{cache}` (ADR 0027's ASCII-default icons), and `format_tokens`
+    // keeps one decimal under 10 (so 1 000 000 is `1.0M`) and rounds above it (`100K`).
+    assert!(
+        pty.wait_for_screen("^1.0M", 10),
+        "the resumed token total is missing:\n{}",
+        pty.screen()
+    );
+    assert!(pty.screen().contains("v100K"), "{}", pty.screen());
+    // ... and its fee: 1M x $0.15 + 100K x $0.60 per Mtok = $0.21, three decimals
+    // (ADR 0027).
+    assert!(
+        pty.wait_for_screen("$0.210", 10),
+        "the resumed fee is missing:\n{}",
+        pty.screen()
+    );
+    let _ = server;
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// The shipped default on a narrow terminal follows the drop order: the `right` group
 /// (reasoning) goes before the `left` group's end, and the model (highest priority) stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -8704,12 +8950,10 @@ async fn pty_bang_is_single_and_escapable() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // A running `!` has no block yet (the block appears when it finishes), and the composer
+    // echo is gone as soon as Enter is handled, so there is nothing to wait for here: the two
+    // sends are processed in order, so the second sees the first already running.
     pty.send(b"!sleep 30\r");
-    assert!(
-        pty.wait_for_screen("sleep 30", 10),
-        "the command block is not on screen:\n{}",
-        pty.screen()
-    );
     // A second command while the first runs is refused, not queued or run.
     pty.send(b"!echo SECOND\r");
     assert!(
@@ -8744,12 +8988,9 @@ async fn pty_ctrl_c_stops_a_running_bang() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // No block to wait for (it appears when the command finishes); the sends are ordered, so
+    // the `!` is running by the time the turn below starts.
     pty.send(b"!sleep 30\r");
-    assert!(
-        pty.wait_for_screen("sleep 30", 10),
-        "the command block is not on screen:\n{}",
-        pty.screen()
-    );
 
     // Start a turn so Ctrl-C is a cancel; the mock hangs, so it is still running.
     pty.send(b"hello\r");
