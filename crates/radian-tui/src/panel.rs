@@ -254,7 +254,7 @@ fn collapse(title: &str) -> String {
 
 /// `ch` repeated `n` times.
 fn repeat(ch: char, n: usize) -> String {
-    std::iter::repeat(ch).take(n).collect()
+    ch.to_string().repeat(n)
 }
 
 fn width_of(text: &str) -> usize {
@@ -298,7 +298,6 @@ fn truncate(line: Line<'static>, max: usize) -> Line<'static> {
         } else {
             let remaining = max - width;
             let text = truncate_str(&span.content, remaining);
-            width += width_of(&text);
             spans.push(Span::styled(text, span.style));
             break;
         }
