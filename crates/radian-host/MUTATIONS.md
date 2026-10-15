@@ -732,3 +732,15 @@ it afterwards (`md5` compared); `cargo test -p radian-host --lib --no-fail-fast 
 6/6 caught. `show` already read Global through the default Project→Global view before this change,
 so its test (`show_finds_a_global_record_in_an_unlinked_workspace`) is a regression guard, not a
 red-on-old-code test; the new not-found wording is what M4 reds on the old code for `show`.
+(Follow-up `memory-scope-wording` below moves that wording into `MemoryError::NotFound`, so the
+store message M4 mutated is the `no memory record <id>` wording itself now.)
+
+## memory-scope-wording: one not-found message for an unknown id (ADR 0021 D1 follow-up)
+
+Base `083c6c8` · in-place in this worktree, the mutation applied from a copy and restored from it
+afterwards (`md5` compared, `git status --short` empty), `cargo test -p radian-host --lib
+--no-fail-fast memory::`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| W1 | `MemoryError::NotFound`'s wording goes back to `no record <id>` | ✅ caught | `memory::commands::tests::an_unknown_id_is_a_clear_error`, `memory::tools::tests::an_unknown_memory_get_uses_the_stores_not_found_wording` |

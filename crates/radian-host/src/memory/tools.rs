@@ -180,8 +180,8 @@ fn tool_failure(error: MemoryServiceError) -> ToolFailure {
                  `radian memory project new` or `radian memory relink <ProjectId>`"
             ),
         ),
-        MemoryServiceError::Storage(MemoryError::NotFound { id }) => {
-            ToolFailure::new("not_found", format!("no memory record {id}"))
+        MemoryServiceError::Storage(storage @ MemoryError::NotFound { .. }) => {
+            ToolFailure::new("not_found", storage.to_string())
         }
         MemoryServiceError::Storage(MemoryError::KeyConflict { key, id, revision }) => {
             ToolFailure::new(
@@ -697,6 +697,22 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "unknown_tool");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unknown id is the store's own wording (`no memory record <id>`), so the tool and
+    /// the CLI cannot drift (ADR 0021 D1).
+    #[tokio::test]
+    async fn an_unknown_memory_get_uses_the_stores_not_found_wording() {
+        let (dir, service) = service("get-missing");
+        service.create_project().unwrap();
+        let session = session(service).await;
+        let missing = "mem-00000000000000000000000000000000";
+        let error = run(&session, "memory_get", json!({"id": missing}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "not_found");
+        assert_eq!(error.message, format!("no memory record {missing}"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

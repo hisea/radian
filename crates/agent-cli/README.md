@@ -126,6 +126,12 @@ key. Writes default to Project; `--global` writes a Global record.
 - **Confirmations** (`forget`, `purge`, `split`, `merge`): a terminal asks `y/N`; `--yes`
   skips it; **without a terminal and without `--yes` the command refuses, exits 2 and does
   nothing**.
+- **A command that takes an `<id>` finds the scope itself** (`show`, `edit`, `archive`,
+  `restore`, `confirm`, `forget`): an id is unique across scopes, so the command looks the id
+  up in Project (when this workspace is linked) and then Global and acts on the scope that
+  holds it — a Global record still works from an unlinked workspace. An explicit
+  `--global`/`--project` **only restricts** the search to that scope; an id that no visible
+  scope holds is `no memory record <id>`.
 - Every user command writes `source: user`; the store applies the revision and same-key rules
   (`KeyConflict`, `RevisionConflict`).
 - **Exit codes**: 0 on success; 1 for a conflict, a missing record or an unlinked workspace;

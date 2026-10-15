@@ -15,7 +15,8 @@ use std::fmt;
 use clap::Parser;
 
 use radian_memory::{
-    ImportReport, Kind, MemoryId, MemoryRecord, MoveReport, ProjectId, Scope, SearchQuery,
+    ImportReport, Kind, MemoryError, MemoryId, MemoryRecord, MoveReport, ProjectId, Scope,
+    SearchQuery,
 };
 
 use super::service::{MemoryService, MemoryServiceError, ProjectState, ScopeSelection, WriteScope};
@@ -284,9 +285,13 @@ fn write_scope(global: bool) -> WriteScope {
 
 /// The not-found error for an id command whose auto-detected scope is asked for the record:
 /// ids are unique across scopes, so "not found" means no scope this workspace can see holds
-/// it (ADR 0021 D1).
+/// it (ADR 0021 D1). The wording is the store's own (`MemoryError::NotFound`), so one message
+/// covers every place an id is unknown.
 fn unknown_id(id: &str) -> CommandError {
-    CommandError::failure(format!("no memory record {id}"))
+    MemoryServiceError::Storage(MemoryError::NotFound {
+        id: MemoryId(id.to_owned()),
+    })
+    .into()
 }
 
 /// The read scope for a single-record read (`show`). An explicit `--global`/`--project`
