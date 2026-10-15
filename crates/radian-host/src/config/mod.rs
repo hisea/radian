@@ -195,6 +195,10 @@ pub struct ModelConfig {
     pub model: Option<String>,
     pub headers: Vec<(String, String)>,
     pub context_window: Option<u64>,
+    /// `[model] retries` (ADR 0017): how many times a transient model failure is
+    /// retried inside one model call. `None` means the host's default
+    /// ([`agent_core::DEFAULT_MODEL_RETRIES`]); `0` disables retrying.
+    pub retries: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -676,6 +680,14 @@ fn parse_model(
                     "model.context_window",
                     "a positive integer",
                 ));
+            }
+            // ADR 0017: `[model] retries = 3`; `0` disables retrying. A negative or
+            // non-integer value is refused rather than guessed (fail-closed).
+            ("retries", Value::Integer(n)) if *n >= 0 => {
+                config.model.retries = Some(*n as u32);
+            }
+            ("retries", _) => {
+                return Err(wrong_type(path, "model.retries", "a non-negative integer"));
             }
             // Known by the ADR, not wired here (the host's `--include-usage` controls it).
             ("include_usage", _) => config.skipped.push("model.include_usage".into()),
@@ -1691,6 +1703,18 @@ theme = "light"
         assert_eq!(config.permissions.profile.as_deref(), Some("full"));
         assert_eq!(config.compaction.auto, Some(false));
         assert_eq!(config.tui.theme.as_deref(), Some("light"));
+    }
+
+    /// `[model] retries` (ADR 0017) is carried; a negative or non-integer value is
+    /// refused (fail-closed), and `0` means "no retrying".
+    #[test]
+    fn model_retries_must_be_a_non_negative_integer() {
+        let config = parse_str("schema_version = 1\n[model]\nretries = 3\n").unwrap();
+        assert_eq!(config.model.retries, Some(3));
+        let config = parse_str("schema_version = 1\n[model]\nretries = 0\n").unwrap();
+        assert_eq!(config.model.retries, Some(0));
+        assert!(parse_str("schema_version = 1\n[model]\nretries = -1\n").is_err());
+        assert!(parse_str("schema_version = 1\n[model]\nretries = \"3\"\n").is_err());
     }
 
     /// `tui.input_style` is carried as a string; the TUI parses it, and an unknown value is a

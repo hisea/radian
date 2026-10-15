@@ -327,6 +327,9 @@ pub struct SessionSetup {
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
     pub auto_compact: bool,
+    /// `[model] retries` (ADR 0017), the host already resolved against the default:
+    /// how many times a transient model failure is retried inside one model call; `0` disables.
+    pub retries: u32,
     /// The sandbox `shell` runs under; `None` for the safe tier.
     pub sandbox: Option<Sandbox>,
     /// The tier, for the startup description.
@@ -914,6 +917,7 @@ pub async fn open_session(
         system_prompt,
         context_budget,
         auto_compact,
+        retries,
         sandbox,
         tier,
         profile,
@@ -1117,6 +1121,7 @@ pub async fn open_session(
         system_prompt,
         context_budget,
         auto_compact,
+        retries,
         ..AgentConfig::default()
     };
     let facts_hooks = Arc::new(crate::prompt::SessionFactsHooks::new(

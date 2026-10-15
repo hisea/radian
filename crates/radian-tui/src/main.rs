@@ -1169,6 +1169,10 @@ fn run(
                     .budget
                     .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
+                retries: config
+                    .model
+                    .retries
+                    .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
                 sandbox,
                 tier: tier.preset(),
                 profile,

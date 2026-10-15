@@ -755,6 +755,9 @@ struct Setup {
     window: radian_host::Window,
     /// Whether the core compacts a request over `B` before sending it (ADR 0018).
     auto_compact: bool,
+    /// `[model] retries` (ADR 0017): how many times a transient model failure is
+    /// retried inside one model call; `0` disables.
+    retries: u32,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
     session_id: String,
     /// The validated, canonical workspace (dogfooding D1). Resolved in `setup`, before any
@@ -1135,6 +1138,10 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         window,
         // `--no-auto-compact` wins; otherwise the config may turn it off.
         auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
+        retries: config
+            .model
+            .retries
+            .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
         session_id,
         workspace,
         secrets,
@@ -1554,6 +1561,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
             auto_compact: setup.auto_compact,
+            retries: setup.retries,
             sandbox,
             tier: profile_arg.preset(),
             profile: permission_profile,
