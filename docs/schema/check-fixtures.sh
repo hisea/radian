@@ -60,6 +60,7 @@ EXPECT = {
         repair={"call-2": "outcome_unknown_after_crash"},
     ),
     "unknown-enum-values.jsonl": dict(outcome="accept", events=6, skips=[], repair={}),
+    "ask-user.jsonl": dict(outcome="accept", events=8, skips=[], repair={}),
     "memory-injected.jsonl": dict(
         outcome="accept",
         events=6,
