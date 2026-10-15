@@ -568,3 +568,15 @@ Base `1d4f6e9` · 一次性 worktree `/tmp/radian-cf-mut`，还原后 `git statu
 | CF-M4b | 全局文件放到工作区之后（顺序错） | 同上 | ✅ |
 
 5/5 抓住。
+
+## context-escape（上下文文件闭合标签/属性转义，ADR 0036 C2 补充，2026-10-15）
+
+Base `65ea1ed` · 一次性 worktree `/tmp/radian-ce-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| CE-M1 | 内容不转义（`close_tag` 直接返回原文） | `context::tests::a_content_closing_tag_is_escaped` | ✅ |
+| CE-M2 | `path` 属性不转义 | `context::tests::a_path_with_quotes_cannot_end_the_attribute` | ✅ |
+| CE-M3 | 转义大小写敏感（只查小写） | `context::tests::a_content_closing_tag_is_escaped`（大写变体未转义） | ✅ |
+
+3/3 抓住。
