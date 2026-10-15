@@ -585,6 +585,15 @@ HD6 不是单个测试能确定性抓住的（丢唤醒是竞态，窗口在「s
 `Condvar::wait`」之间）；用 `sample` 抓到现场：测试线程停在 `Reporter::shutdown` 的 `join`
 （herdr.rs:354），sender 线程停在 `Condvar::wait`（herdr.rs:374）。修复是 `stop_and_wake` 持
 slot 锁设置 `stop` 并 `notify_all`，`shutdown` 与 `Drop` 都走它。
+## brand-config（[tui] brand，ADR 0027，2026-10-15）
+
+Base `4772113` · 一次性 worktree `/tmp/radian-bc-mut`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| B-M3 | 去掉 `tui.brand` 的 4 显示宽度检查 | `startup_pref_tests::tui_brand_is_carried_and_over_wide_is_refused` | ✅ |
+
+1/1 抓住。
 ## context-files（ADR 0036 切片 ①，2026-10-14）
 
 Base `1d4f6e9` · 一次性 worktree `/tmp/radian-cf-mut`，还原后 `git status --short` 为空。

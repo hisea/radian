@@ -208,6 +208,69 @@ fn the_status_line_shows_model_and_turn_state() {
     assert!(text.contains("running"), "{text}");
 }
 
+/// ADR 0027: the input rule shows the spinner and the running state while a turn
+/// runs (`── ◜  Working `), and is a plain rule when idle. The spinner and the text are
+/// separated by **two** spaces.
+#[test]
+fn the_input_rule_shows_the_spinner_status_while_running() {
+    let mut app = App::new("m", "s");
+    app.spinner_kind = radian_tui::spinner::Kind::Arc;
+    // The frame is a function of the injected clock (ADR 0027).
+    app.set_now(app.spinner_origin);
+    app.projection.set_turn(radian_tui::TurnState::Running);
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(
+        text.contains("◜  Working"),
+        "the spinner and two spaces on the input rule: {text}"
+    );
+
+    // Idle: no spinner, no text.
+    app.projection.set_turn(radian_tui::TurnState::Idle);
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(!text.contains("Working"), "an idle rule is plain: {text}");
+    assert!(!text.contains('◜'), "{text}");
+}
+
+/// ADR 0018 + ADR 0027: a running compaction shows `Compacting` on the input rule
+/// (the `CompactionStarted`/`CompactionFinished` events exist, so this is not invented).
+#[test]
+fn the_input_rule_shows_compacting() {
+    let mut app = App::new("m", "s");
+    app.spinner_kind = radian_tui::spinner::Kind::Arc;
+    app.set_now(app.spinner_origin);
+    app.projection.set_turn(radian_tui::TurnState::Running);
+    app.compacting = true;
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(text.contains("◜  Compacting"), "{text}");
+
+    // The flag clears when the compaction ends.
+    app.compacting = false;
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(!text.contains("Compacting"), "{text}");
+}
+
+/// ADR 0027: the `box` style puts the same status on the border's top edge.
+#[test]
+fn the_box_style_shows_the_spinner_on_the_border() {
+    let mut app = App::new("m", "s");
+    app.spinner_kind = radian_tui::spinner::Kind::Arc;
+    app.set_now(app.spinner_origin);
+    app.input_style = radian_tui::render::InputStyle::Box;
+    app.projection.set_turn(radian_tui::TurnState::Running);
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(
+        text.contains("◜  Working"),
+        "the box border carries the status: {text}"
+    );
+    // The rounded corner is still there (the title starts with a space).
+    assert!(text.contains('╭'), "{text}");
+}
+
 #[test]
 fn live_deltas_are_replaced_by_the_committed_message_not_duplicated() {
     let mut app = App::new("m", "s");

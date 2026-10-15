@@ -26,6 +26,7 @@ pub mod render;
 pub mod select;
 pub mod select_list;
 pub mod signals;
+pub mod spinner;
 pub mod startup;
 pub mod terminal;
 pub mod theme;

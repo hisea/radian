@@ -1564,11 +1564,7 @@ fn run(
     mark("before-startup");
     app.set_startup(radian_tui::startup::StartupScreen {
         banner,
-        banner_narrow: format!(
-            "{} radian {}",
-            radian_tui::footer::brand_mark(app.footer_glyphs()),
-            env!("CARGO_PKG_VERSION")
-        ),
+        banner_narrow: format!("{} radian {}", app.brand_mark(), env!("CARGO_PKG_VERSION")),
         summary,
         lines: startup_lines,
         safety,
@@ -2110,6 +2106,25 @@ fn terminal_gone(error: &std::io::Error) -> bool {
 /// Whether the tty is already hung up, as `poll(2)` sees it right now. A draw failure carries
 /// crossterm's own "failed to write the buffered data" (no errno), so the tty's own state is
 /// the reliable test.
+/// Advances the spinner's clock and returns the new frame when a spinner is visible and the
+/// frame changed since `last` (ADR 0027). The idle tick calls this, so an idle app
+/// still makes no frame and a visible spinner redraws on its interval.
+fn spinner_tick(
+    app: &mut App,
+    last: &mut Option<radian_tui::spinner::Frame>,
+) -> Option<radian_tui::spinner::Frame> {
+    if !app.spinner_visible() {
+        return None;
+    }
+    app.set_now(std::time::Instant::now());
+    let frame = app.spinner_frame();
+    if *last == Some(frame) {
+        return None;
+    }
+    *last = Some(frame);
+    Some(frame)
+}
+
 fn terminal_is_gone() -> bool {
     #[cfg(unix)]
     {
@@ -3100,6 +3115,9 @@ fn ui_loop(
         return Ok(None);
     }
     radian_tui::terminal::set_cursor_visible(app.input_editable());
+    // The last spinner frame drawn (ADR 0027): the idle tick redraws only when the
+    // frame changes, so the pulse (500 ms) does not draw on every 250 ms wake.
+    let mut last_spinner: Option<radian_tui::spinner::Frame> = None;
     // An effect batch the draw-fairness cap did not finish: declared outside the loop so the
     // rest survives to the next turn (never dropped, order kept).
     let mut effects: Vec<Effect> = Vec::new();
@@ -3160,6 +3178,12 @@ fn ui_loop(
                             app.quit = true;
                             break;
                         }
+                        if spinner_tick(app, &mut last_spinner).is_some()
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
                         continue;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
@@ -3171,6 +3195,12 @@ fn ui_loop(
                     Ok(event) => Some(event),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         if terminal_is_gone() {
+                            app.quit = true;
+                            break;
+                        }
+                        if spinner_tick(app, &mut last_spinner).is_some()
+                            && !draw_frame(terminal, app)?
+                        {
                             app.quit = true;
                             break;
                         }
@@ -3249,6 +3279,7 @@ fn ui_loop(
                 app.quit = true;
                 break;
             }
+            last_spinner = Some(app.spinner_frame());
             // The cursor is visible only while the input box is editable.
             radian_tui::terminal::set_cursor_visible(app.input_editable());
         }
