@@ -5792,6 +5792,12 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
         "no question form: {}",
         pty.screen()
     );
+    // Wait for the **panel** (its hint), not the transcript block (`[loader]` appears there too).
+    assert!(
+        pty.wait_for_screen("⏎ select", 40),
+        "the panel must be up: {}",
+        pty.screen()
+    );
     assert!(
         pty.wait_for_screen("loader", 40),
         "the tab row must show the question header: {}",
