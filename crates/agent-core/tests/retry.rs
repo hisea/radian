@@ -190,6 +190,8 @@ async fn cancelling_during_the_backoff_ends_the_turn_without_another_request() {
         }
     };
 
+    // The paused clock: if the cancellation interrupts the wait, no virtual time passes.
+    let started = tokio::time::Instant::now();
     let outcome = run.run(&events).await.unwrap();
 
     assert_eq!(
@@ -200,6 +202,11 @@ async fn cancelling_during_the_backoff_ends_the_turn_without_another_request() {
         model.requests().len(),
         1,
         "no request after the cancellation"
+    );
+    assert_eq!(
+        tokio::time::Instant::now() - started,
+        Duration::ZERO,
+        "the cancellation must end the wait at once, not after the backoff"
     );
 }
 
