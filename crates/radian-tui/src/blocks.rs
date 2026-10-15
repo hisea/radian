@@ -1267,12 +1267,12 @@ fn frame_plan(card: Card, has_output: bool, has_meta: bool) -> FramePlan {
 /// not a section, and neither is an empty result (ADR 0028 rule 1's "no output, no
 /// section").
 fn plan_has_output(plan: &[tools::BodyLine], text: &str) -> bool {
-    plan.iter().any(|line| match line {
-        tools::BodyLine::Text { source, .. } => {
-            !text.get(source.clone()).unwrap_or("").trim().is_empty()
-        }
-        tools::BodyLine::Hint(_) => false,
-    })
+    // One whole-text blankness test (trimming scans only the ends) and one plan scan: this
+    // runs for every tool entry on a resize, so it must not walk the body line by line.
+    !text.trim().is_empty()
+        && plan
+            .iter()
+            .any(|line| matches!(line, tools::BodyLine::Text { .. }))
 }
 
 /// How many rows a frame adds to a card's content.
