@@ -16,7 +16,7 @@ use std::path::Path;
 use radian_permissions::{
     Action, ApprovalPolicy, Preset, Profile, ResourceMatcher, Rule, ToolMatcher,
 };
-use radian_sandbox::{Sandbox, SandboxError, SandboxMode, SandboxPolicy};
+use radian_sandbox::{GitAccess, Sandbox, SandboxError, SandboxMode, SandboxPolicy};
 
 use crate::SetupError;
 
@@ -147,6 +147,12 @@ pub(crate) fn build_sandbox(
             )));
         }
     };
+    // ADR 0038 decision 4: a general (and, later, lead) session in the `workspace` tier may
+    // write `.git` except the entries git can execute, so `git commit` and friends work in the
+    // sandbox. `full` has no backend to enforce it and `safe` builds no sandbox.
+    if profile == ProfileArg::WorkspaceWrite {
+        policy = policy.git_access(GitAccess::WritableExceptExec);
+    }
     // ADR 0020 decision 3: the actual sessions directory and the memory directory are not
     // readable in the enforced tiers. `full` gets the list too, but its transparent backend ignores it.
     for path in deny_read {
@@ -184,4 +190,35 @@ fn unavailable(profile: ProfileArg, mode: SandboxMode) -> String {
 /// removing the real backend from the machine.
 fn probe_failure_injected() -> bool {
     std::env::var("RADIAN_SANDBOX_PROBE_FAIL").is_ok_and(|value| value == "1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR 0038 decision 4: the `workspace` tier a general (and later lead) session runs in
+    /// must let it write `.git` except the exec entries. If a host forgets to ask for it, the
+    /// policy falls back to the read-only default and native `git commit` stops working.
+    #[test]
+    fn the_workspace_tier_asks_for_writable_except_exec() {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "radian-cli-profile-git-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = build_sandbox(ProfileArg::WorkspaceWrite, &dir, &[], &[]);
+        let _ = std::fs::remove_dir_all(&dir);
+        match result {
+            Ok(Some(sandbox)) => assert_eq!(
+                sandbox.policy().git_access,
+                GitAccess::WritableExceptExec,
+                "the workspace tier must request WritableExceptExec"
+            ),
+            // No working backend on this machine: there is no policy to inspect.
+            Err(_) => {}
+            Ok(None) => panic!("the workspace tier must build a sandbox"),
+        }
+    }
 }
