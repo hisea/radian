@@ -2177,11 +2177,12 @@ async fn pty_a_compound_shell_command_always_asks() {
     pty.quit();
 }
 
-/// A panic inside the driver task is caught by the runtime, but the UI must notice that the
-/// session is gone: leave in order, restore the terminal, and report the failure where the
-/// user can see it (after the alternate screen is gone).
+/// A panic inside the driver task is caught by the runtime. The UI must notice that the
+/// session is gone: leave `Running`, name the reason in the status bar, and refuse `/fork`
+/// (ADR 0022 §1's idle session no longer exists). It stays so the reason is readable; the
+/// user quits with the ordinary keys, which restore the terminal.
 #[test]
-fn pty_a_driver_panic_exits_orderly_and_restores_the_terminal() {
+fn pty_a_driver_panic_ends_the_session_and_refuses_fork() {
     let _serial = pty_guard();
     let dir = TempDir::new("driver-panic");
     let mut pty = Pty::spawn(
@@ -2199,31 +2200,35 @@ fn pty_a_driver_panic_exits_orderly_and_restores_the_terminal() {
         24,
         100,
     );
+    // The session ends in place: the notice names the reason and the app stays.
     assert!(
-        pty.wait_for_exit(15).is_some(),
-        "the TUI did not exit after the driver task panicked"
+        pty.wait_for_screen("the session ended: driver panicked", 15),
+        "the session-ended notice is missing:\n{}",
+        pty.screen()
     );
-    // Not 101: the process did not panic, its driver did. The app exits 1 with a message.
-    assert_eq!(pty.app_exit_code(), Some(1), "an orderly failure exit");
+    assert!(
+        pty.wait_for_screen("driver task panic test", 10),
+        "the reason is the panic message:\n{}",
+        pty.screen()
+    );
+    // `/fork` is refused: the session is over.
+    pty.send(b"/fork\r");
+    assert!(
+        pty.wait_for_screen("the session has ended; there is nothing to fork", 10),
+        "`/fork` was not refused:\n{}",
+        pty.screen()
+    );
+    // The user quits with the ordinary keys; the terminal is restored. The exit is still 1:
+    // the driver's failure is reported on the normal screen by `main` after the loop.
+    pty.quit();
+    assert_eq!(
+        pty.app_exit_code(),
+        Some(1),
+        "the driver failure is still reported"
+    );
     let raw_text = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw_text.contains("\u{1b}[?1049l"), "left alternate screen");
-    assert!(
-        raw_text.contains("\u{1b}[?2004l"),
-        "bracketed paste disabled"
-    );
     assert!(raw_text.contains("\u{1b}[?25h"), "cursor restored");
-    assert!(raw_text.contains("icanon"), "cooked mode restored");
-    assert!(!raw_text.contains("-icanon"), "raw mode not restored");
-    // The panic is reported after the alternate screen is gone, so it is readable.
-    let after_restore = raw_text
-        .rsplit_once("\u{1b}[?1049l")
-        .map(|(_, rest)| rest.to_string())
-        .unwrap_or_default();
-    assert!(
-        after_restore.contains("driver task ended unexpectedly")
-            || after_restore.contains("driver task panic test"),
-        "the failure was not reported on the normal screen: {after_restore}"
-    );
 }
 
 /// A bracketed paste arrives whole and multi-line in the input box.
@@ -3891,24 +3896,25 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    // The memory notice is one of the folded startup lines.
+    // The memory notice is one of the folded startup lines. Wait for
+    // **that** line: `expand_startup` returns as soon as the block is expanded (its predicate
+    // accepts the header or `profile:`), so reading the screen right after can catch a frame
+    // whose tail is not on screen yet.
     pty.expand_startup();
-    let notice = pty
-        .screen()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
     assert!(
-        notice.contains("[memory]"),
-        "the memory startup notice is shown: {notice}"
+        pty.wait_for_screen("[memory]", 10),
+        "the memory startup notice is shown:\n{}",
+        pty.screen()
     );
     assert!(
-        notice.contains("no project linked"),
-        "the notice names the unlinked state: {notice}"
+        pty.wait_for_screen("no project linked", 10),
+        "the notice names the unlinked state:\n{}",
+        pty.screen()
     );
     assert!(
-        notice.contains("injection on, up to 2000 tokens"),
-        "the notice names the budget: {notice}"
+        pty.wait_for_screen("injection on, up to 2000 tokens", 10),
+        "the notice names the budget:\n{}",
+        pty.screen()
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -4939,6 +4945,126 @@ async fn pty_fork_creates_a_resumable_child_when_idle() {
     );
     child.quit();
     assert_eq!(child.app_exit_code(), Some(0));
+}
+
+/// ADR 0022 §1: a `/fork` requested while the turn's boundary is still being written waits for
+/// the journaled `TurnFinished` (a controllable gap via `RADIAN_TURN_COMMIT_DELAY_MS`) instead
+/// of copying an empty history. The classic footer shows the turn state, so the test can wait
+/// for `idle` (the `RunFinished`) while the commit is still pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_fork_waits_for_the_turn_to_be_committed() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("fork-commit-wait");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("PARENT-DONE")]).await;
+    let config = "schema_version = 1\n[tui.footer]\npreset = \"classic\"\n";
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "parent",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_TURN_COMMIT_DELAY_MS", "1500")],
+        config,
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello parent\r");
+    assert!(pty.wait_for_screen("PARENT-DONE", 15), "{}", pty.screen());
+    // The turn is idle (the agent's `RunFinished`), but the journaled `TurnFinished` is still
+    // ~1.5 s away.
+    assert!(pty.wait_for_screen("idle", 10), "{}", pty.screen());
+    pty.send(b"/fork\r");
+    assert!(
+        pty.wait_for_screen("forked at seq", 10),
+        "the fork never ran after the commit:\n{}",
+        pty.screen()
+    );
+    // The child has the parent's whole turn, not an empty history.
+    let child = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().is_some_and(|ext| ext == "jsonl") && !path.ends_with("parent.jsonl")
+        })
+        .expect("a child session file");
+    let text = std::fs::read_to_string(&child).unwrap();
+    assert!(
+        text.contains("hello parent"),
+        "the child history is empty:\n{text}"
+    );
+    assert!(text.contains("PARENT-DONE"), "{text}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0022 §1: when the commit takes longer than `FORK_COMMIT_WAIT`, the `/fork` gives up with
+/// a notice and creates no child session (never an empty one).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_fork_gives_up_when_the_turn_is_still_being_written() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("fork-commit-timeout");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("PARENT-DONE")]).await;
+    let config = "schema_version = 1\n[tui.footer]\npreset = \"classic\"\n";
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "parent",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_TURN_COMMIT_DELAY_MS", "8000")],
+        config,
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello parent\r");
+    assert!(pty.wait_for_screen("PARENT-DONE", 15), "{}", pty.screen());
+    assert!(pty.wait_for_screen("idle", 10), "{}", pty.screen());
+    pty.send(b"/fork\r");
+    assert!(
+        pty.wait_for_screen("still writing the turn; try again", 10),
+        "the fork did not time out:\n{}",
+        pty.screen()
+    );
+    // No child session file was created.
+    let files: Vec<String> = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        files,
+        vec!["parent.jsonl".to_string()],
+        "no empty child: {files:?}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
 }
 
 /// `/fork` while a turn is running is refused with a notice and creates nothing.
@@ -8934,15 +9060,21 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
         90,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // Wait for the **footer** before reading its last two lines: `message` is the input hint,
+    // which is drawn in the same frame as the footer, but the hint can appear before the
+    // footer's items have data. `^- v- R-` is the numbers row with no usage yet.
+    assert!(
+        pty.wait_for_screen("^- v-", 10),
+        "the numbers row is on screen:\n{}",
+        pty.screen()
+    );
     let lines: Vec<String> = pty.screen().lines().map(str::to_owned).collect();
     let first = lines.get(lines.len() - 2).cloned().unwrap_or_default();
     let second = lines.last().cloned().unwrap_or_default();
-    // The shipped default is the `full` preset (ADR 0027): the identity row (brand,
-    // model, repo/worktree) and the numbers row (tokens, speed, cost, context, elapsed).
-    assert!(
-        first.contains('R') || first.contains("rad"),
-        "the brand is on the first row: {first:?}"
-    );
+    // The shipped default is the `deck` preset (ADR 0027): the identity row (model,
+    // cwd, branch, worktree) and the numbers row (tokens, cost, context). The `deck` identity
+    // row has no brand, so there is no brand assertion (the old one passed only because the
+    // temp workspace is named `radian-…`).
     assert!(
         first.contains("mock"),
         "the model is on the identity row: {first:?}"

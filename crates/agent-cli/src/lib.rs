@@ -1660,7 +1660,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             runtime_events,
             driver_stopped: {
                 let ended = Arc::clone(&driver_ended);
-                Arc::new(move || ended.notify_one())
+                Arc::new(move |_| ended.notify_one())
             },
             before_driver: None,
             memory_warning: Arc::new(|message: &str| eprintln!("[memory] {message}")),

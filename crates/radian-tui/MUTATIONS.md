@@ -1218,6 +1218,16 @@ Base `e157bfb` · 一次性 worktree `.radian-worktrees/sf2-mut`（detached，�
 SF2（高亮计数改线程局部）与 SF3（build.rs 用运行时 `CARGO_MANIFEST_DIR`）没有常规变异测试：
 SF2 是把测试自身的干扰源去掉，SF3 是编译期路径问题；两者的证据分别是「高亮测试单独跑 5/5」
 与「把 worktree 改名后 build script 仍找得到 `third_party/syntaxes`」。
+## fork-commit（/fork 等落盘, 2026-10-15）
+
+Base `52265c1` · 一次性 worktree `/tmp/radian-fc-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| FC-M1 | `/fork` 不看 `turn_committed`（间隙下立即 fork, 空历史） | `pty_a_fork_waits_for_the_turn_to_be_committed` | ✅ |
+| FC-M2 | `ForkDeadline` 超时也执行 fork（生成空子会话） | `pty_a_fork_gives_up_when_the_turn_is_still_being_written` | ✅ |
+
+2/2 抓住。
 ## spinner（运行指示一处定义 + 输入框上沿状态线，ADR 0027/9/10，2026-10-15）
 
 Base `c0ae44c` · 一次性 worktree `/tmp/radian-sp-mut2`，还原后 `git status --short` 为空。
