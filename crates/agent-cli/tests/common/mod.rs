@@ -1,5 +1,9 @@
 //! Shared helpers for the integration tests that drive the `radian` binary (ADR 0032).
 //!
+//! Every test file includes this module and uses a subset of it, so unused helpers are
+//! expected (a test binary compiles the whole module).
+#![allow(dead_code)]
+//!
 //! The tests used to drive the `agent` binary, which is gone: `radian exec` is the headless
 //! command now. `radian` is built by the workspace build, and `cargo test -p agent-cli` alone
 //! does **not** rebuild `radian-tui` - so [`radian_bin`] refuses a stale binary the same way
