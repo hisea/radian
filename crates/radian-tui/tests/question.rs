@@ -576,3 +576,32 @@ fn other_keeps_its_text_while_moving_with_arrows() {
     let answer = answer_of(effect(&mut app, key(KeyCode::Enter))).expect("a submit");
     assert_eq!(answer.answers[0].other.as_deref(), Some("custom"));
 }
+
+/// R3: `⏎` on a `single` question selects the highlighted option **and advances**; `Space`
+/// selects without advancing.
+#[test]
+fn a_single_question_selects_and_advances() {
+    let questions = || {
+        vec![
+            question(
+                "one",
+                QuestionKind::Single,
+                vec![option("a", "A"), option("b", "B")],
+                false,
+            ),
+            question("two", QuestionKind::Text, Vec::new(), false),
+        ]
+    };
+    let mut app = App::new("m", "s");
+    show(&mut app, questions());
+    app.on_key(key(KeyCode::Down)); // B
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(form(&app).answers[0].selected, vec!["b"]);
+    assert_eq!(form(&app).current, Some(1), "Enter advances");
+
+    let mut spaced = App::new("m", "s");
+    show(&mut spaced, questions());
+    spaced.on_key(key(KeyCode::Char(' '))); // select A, stay
+    assert_eq!(form(&spaced).answers[0].selected, vec!["a"]);
+    assert_eq!(form(&spaced).current, Some(0), "Space does not advance");
+}
