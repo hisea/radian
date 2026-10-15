@@ -31,7 +31,7 @@ use std::ffi::{OsStr, OsString};
 use std::process::Command;
 
 pub use error::{ProbeReport, SandboxError};
-pub use policy::{DEFAULT_ALLOW_ENV, DEFAULT_DENY_READ, SandboxMode, SandboxPolicy};
+pub use policy::{DEFAULT_ALLOW_ENV, DEFAULT_DENY_READ, GitAccess, SandboxMode, SandboxPolicy};
 
 /// A concrete sandbox mechanism. `command` returns a launcher `Command` that runs `program`
 /// with `args` under the policy; the caller may add cwd/stdio but must not widen the
