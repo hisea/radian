@@ -1326,7 +1326,7 @@ fn run(
         {
             route_price(&route_provider, &route_model)
         }
-        _ => window.price,
+        _ => window.price.clone(),
     };
     app.set_model_price(startup_price);
     app.set_bash_available(bash_sandbox.is_some());
@@ -4011,12 +4011,14 @@ mod tests {
                 output: 600_000,
                 cache_read: None,
                 cache_write: None,
+                tiers: Vec::new(),
             }),
             ("anthropic", "expensive") => Some(radian_host::ModelPrice {
                 input: 3_000_000,
                 output: 15_000_000,
                 cache_read: Some(300_000),
                 cache_write: Some(3_750_000),
+                tiers: Vec::new(),
             }),
             // A model the warm cache does not know.
             _ => None,
@@ -4039,6 +4041,7 @@ mod tests {
                 output: 600_000,
                 cache_read: None,
                 cache_write: None,
+                tiers: Vec::new(),
             })),
             "the switched route's price"
         );

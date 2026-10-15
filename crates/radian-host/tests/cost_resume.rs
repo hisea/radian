@@ -46,6 +46,7 @@ fn cheap() -> radian_host::ModelPrice {
         output: 600_000, // $0.60
         cache_read: None,
         cache_write: None,
+        tiers: Vec::new(),
     }
 }
 
@@ -55,6 +56,7 @@ fn expensive() -> radian_host::ModelPrice {
         output: 15_000_000,
         cache_read: None,
         cache_write: None,
+        tiers: Vec::new(),
     }
 }
 
@@ -288,4 +290,61 @@ fn the_snapshot_route_prices_the_calls_before_the_first_switch() {
     assert_eq!(read.usage_input(), Some(2_000_000));
     // Only the call after the switch is priced: $0.15, not $0.15 + a guess.
     assert_eq!(read.cost_micros(), Some(150_000));
+}
+
+/// Research F5: a resumed session folds each historical call at the price in force **then**,
+/// and a tiered price picks its tier by that call's own prompt length, not the session total.
+#[tokio::test]
+async fn a_resumed_tiered_price_folds_each_call_by_its_own_length() {
+    let scratch = Scratch::new("tiered-resume");
+    let path = scratch.file("s.jsonl");
+    let journal = SessionJournal::create(
+        &path,
+        "tiered-resume",
+        SessionCreatedData::new(
+            "/work/example",
+            json!({"model": {"provider": "t", "model": "tiered"}}),
+        ),
+    )
+    .unwrap();
+    // Two calls on the same tiered route: one below the 100K threshold, one above.
+    for input in [50_000u64, 150_000] {
+        journal
+            .append(JournalRecord::ModelUsage {
+                usage: agent_core::ModelUsage {
+                    input: Some(input),
+                    input_includes_cache: Some(false),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+    }
+    drop(journal);
+
+    let tiered = radian_host::ModelPrice {
+        input: 100_000,
+        output: 0,
+        cache_read: None,
+        cache_write: None,
+        tiers: vec![radian_host::PriceTier {
+            size: 100_000,
+            input: 500_000,
+            output: 0,
+            cache_read: None,
+            cache_write: None,
+        }],
+    };
+    let prices: cost::RoutePrice = Arc::new(move |provider: &str, model: &str| {
+        (provider == "t" && model == "tiered").then(|| tiered.clone())
+    });
+    let parsed = Session::open(&path).unwrap();
+    let projection = SessionProjection::new();
+    assert_eq!(cost::restore_usage(&parsed, &projection, &prices), 2);
+    // 50K at the base rate = 5_000 micro-dollars; 150K at the tier = 75_000; total 80_000.
+    assert_eq!(
+        projection.read().cost_micros(),
+        Some(80_000),
+        "each call keeps its own tier"
+    );
 }

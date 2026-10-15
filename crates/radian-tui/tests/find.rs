@@ -328,7 +328,6 @@ fn the_matching_substring_is_reversed_in_the_rendered_line() {
 /// not depend on the fold defaults.
 #[allow(dead_code)]
 const EXPANDED: DisplayModes = DisplayModes {
-    glyphs: radian_tui::footer::Glyphs::Unicode,
     reasoning: ReasoningMode::Expanded,
     tools: radian_tui::tools::ToolDisplay {
         fold: radian_tui::tools::ToolFold::Expanded,
@@ -336,6 +335,7 @@ const EXPANDED: DisplayModes = DisplayModes {
     },
     mermaid: true,
     highlight: true,
+    glyphs: radian_tui::footer::Glyphs::Unicode,
 };
 
 /// A folded tool body must not vanish from the search (ADR 0028 R4 / this slice): the match
@@ -454,8 +454,9 @@ fn a_hit_in_a_folded_tool_body_expands_only_that_entry() {
     render(&mut app);
     assert_eq!(
         app.total_lines,
-        folded_total + 3,
-        "the hit entry's four body lines replace its one-line hint"
+        folded_total + 4,
+        "the hit entry's four body lines replace its one-line hint, and its Output divider \
+         comes back (a real section, ADR 0028)"
     );
     // The match line is on screen, centered: the jump mapped it through the display geometry.
     let display_line: usize = app.entries[..match_line.entry]

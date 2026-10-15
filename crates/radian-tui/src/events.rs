@@ -379,6 +379,7 @@ mod tests {
             output: 15_000_000,
             cache_read: None,
             cache_write: None,
+            tiers: Vec::new(),
         }));
         sink.emit(AgentEvent::CompactionUsage {
             revision: 1,
