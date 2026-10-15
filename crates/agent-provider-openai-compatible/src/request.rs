@@ -5,15 +5,9 @@ use serde_json::{Map, Value, json};
 
 use crate::config::OpenAiCompatibleConfig;
 
-/// Keys the adapter owns. Settings may not override them.
-const RESERVED: [&str; 6] = [
-    "model",
-    "messages",
-    "tools",
-    "stream",
-    "stream_options",
-    "reasoning_effort",
-];
+/// Keys the adapter owns. Settings may not override them. `reasoning_effort` is **not** here:
+/// since ADR 0018 it is a request-level setting that wins over `config.reasoning_effort`.
+const RESERVED: [&str; 5] = ["model", "messages", "tools", "stream", "stream_options"];
 
 pub(crate) fn build_body(
     request: &ModelRequest,
@@ -21,7 +15,12 @@ pub(crate) fn build_body(
     include_usage: bool,
 ) -> Result<Value, ModelError> {
     let mut body = Map::new();
-    for source in [&config.extra_body, &settings_object(&request.settings)?] {
+    let settings = settings_object(&request.settings)?;
+    // ADR 0018, decision 1: a request-level `reasoning_effort` (the summary call's
+    // own, lower reasoning setting) wins over the adapter config. The config still wins over
+    // `extra_body` (its own dial), so the guard is on the **request settings**.
+    let request_effort = settings.contains_key("reasoning_effort");
+    for source in [&config.extra_body, &settings] {
         for (key, value) in source {
             if RESERVED.contains(&key.as_str()) {
                 return Err(ModelError::Protocol(format!(
@@ -34,8 +33,11 @@ pub(crate) fn build_body(
     body.insert("model".into(), json!(config.model));
     body.insert("stream".into(), json!(true));
     // ADR 0026 D11: the thinking level's wire value, when the route's map gives one. Absent
-    // otherwise, so a level-less model keeps the pre-D11 request byte for byte.
-    if let Some(effort) = &config.reasoning_effort {
+    // otherwise, so a level-less model keeps the pre-D11 request byte for byte. A request-level
+    // value (ADR 0018) wins over it.
+    if !request_effort
+        && let Some(effort) = &config.reasoning_effort
+    {
         body.insert("reasoning_effort".into(), json!(effort));
     }
     // Only ask for streamed usage when we handle it; some compatible servers reject the key.
@@ -668,6 +670,7 @@ mod tests {
 
     /// ADR 0026 D11: `reasoning_effort` rides along only when the route's map gave a wire
     /// value; without one the request is unchanged (byte-for-byte with pre-D11).
+    /// ADR 0018, decision 1: a request-level `reasoning_effort` wins over the config.
     #[test]
     fn reasoning_effort_is_sent_only_when_set() {
         let mut cfg = config();
@@ -678,9 +681,16 @@ mod tests {
         let plain = build_body(&request(vec![Message::user("hi")]), &config(), false).unwrap();
         assert!(plain.get("reasoning_effort").is_none(), "{plain}");
 
-        // The adapter owns the key: a request setting cannot override it.
+        // The request setting wins over the config (the summary call's lower level).
         let mut override_request = request(vec![Message::user("hi")]);
         override_request.settings = json!({"reasoning_effort": "low"});
-        assert!(build_body(&override_request, &cfg, false).is_err());
+        let overridden = build_body(&override_request, &cfg, false).unwrap();
+        assert_eq!(overridden["reasoning_effort"], "low");
+
+        // The config is not invented when nothing set it.
+        let mut no_effort = request(vec![Message::user("hi")]);
+        no_effort.settings = json!({"temperature": 0.2});
+        let none = build_body(&no_effort, &config(), false).unwrap();
+        assert!(none.get("reasoning_effort").is_none(), "{none}");
     }
 }
