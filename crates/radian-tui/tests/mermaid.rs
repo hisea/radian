@@ -26,7 +26,6 @@ const FLOW: &str = "flowchart LR; A[Start] -- go --> B[End]";
 /// The modes the tests lay out with: both folds expanded, diagrams on.
 fn modes(reasoning: ReasoningMode, mermaid: bool) -> DisplayModes {
     DisplayModes {
-        glyphs: radian_tui::footer::Glyphs::Unicode,
         reasoning,
         tools: ToolDisplay {
             fold: ToolFold::Expanded,
@@ -34,6 +33,7 @@ fn modes(reasoning: ReasoningMode, mermaid: bool) -> DisplayModes {
         },
         mermaid,
         highlight: true,
+        glyphs: radian_tui::footer::Glyphs::Unicode,
     }
 }
 

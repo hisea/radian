@@ -565,6 +565,7 @@ fn a_compaction_usage_reaches_the_footer_totals() {
         output: 15_000_000,
         cache_read: None,
         cache_write: None,
+        tiers: Vec::new(),
     }));
     let (tx, _rx) = channel();
     let sink = radian_tui::events::ProjectionSink::new(tx, std::sync::Arc::clone(&app.projection));
@@ -615,6 +616,7 @@ fn the_cost_item_uses_the_model_price() {
         output: 15_000_000,
         cache_read: Some(300_000),
         cache_write: None,
+        tiers: Vec::new(),
     }));
     app.apply_footer(&rows(vec![item("cost")]));
 
@@ -654,6 +656,7 @@ fn a_cache_hit_is_billed_once_at_the_cache_rate() {
         output: 600_000,
         cache_read: Some(3_000),
         cache_write: None,
+        tiers: Vec::new(),
     }));
     app.apply_footer(&rows(vec![item("cost")]));
     app.projection.add_usage(&agent_core::ModelUsage {
@@ -679,6 +682,7 @@ fn a_model_switch_prices_only_the_calls_after_it() {
         output: 600_000,
         cache_read: None,
         cache_write: None,
+        tiers: Vec::new(),
     }));
     let cheap = agent_core::ModelUsage {
         input: Some(1_000_000),
@@ -691,6 +695,7 @@ fn a_model_switch_prices_only_the_calls_after_it() {
         output: 15_000_000,
         cache_read: None,
         cache_write: None,
+        tiers: Vec::new(),
     }));
     app.projection.add_usage(&cheap);
 
@@ -709,6 +714,7 @@ fn an_all_zero_response_hides_the_cost() {
         output: 15_000_000,
         cache_read: Some(300_000),
         cache_write: None,
+        tiers: Vec::new(),
     }));
     app.apply_footer(&rows(vec![item("cost")]));
     app.projection.add_usage(&agent_core::ModelUsage {
@@ -1203,6 +1209,7 @@ fn the_deck_numbers_row_matches_the_sample() {
         output: 0,
         cache_read: None,
         cache_write: None,
+        tiers: Vec::new(),
     }));
     app.projection.add_usage(&agent_core::ModelUsage {
         input: Some(15_000_000),

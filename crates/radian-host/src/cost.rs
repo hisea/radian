@@ -33,10 +33,15 @@ pub type RoutePrice = Arc<dyn Fn(&str, &str) -> Option<ModelPrice> + Send + Sync
 /// visible (ADR 0027: a model with no price, an all-zero usage report, or a
 /// response that only moved cached tokens whose rate the catalog does not list).
 ///
+/// A model with context tiers (research F5, models.dev `cost.tiers`) is billed at the tier the
+/// **call's own** prompt length exceeds ([`ModelUsage::prompt_total`], cache included); the
+/// tier's rates replace the base rates for the whole call. A `prompt_total()` of `None` (no
+/// input counter was reported) uses the base rates.
+///
 /// Each term is `tokens * rate / 1_000_000` truncated (so at most one micro-dollar is lost per
 /// term, never gained) and the terms are added with saturation: a wildly wrong price cannot
 /// wrap the total around.
-pub fn cost_micros(price: ModelPrice, usage: &ModelUsage) -> Option<u64> {
+pub fn cost_micros(price: &ModelPrice, usage: &ModelUsage) -> Option<u64> {
     let mut total: u64 = 0;
     let mut billed = false;
     let mut add = |tokens: Option<u64>, rate: Option<u64>| {
@@ -47,16 +52,21 @@ pub fn cost_micros(price: ModelPrice, usage: &ModelUsage) -> Option<u64> {
             billed |= tokens > 0;
         }
     };
-    add(usage.uncached_input(), Some(price.input));
-    add(usage.output, Some(price.output));
-    add(usage.cache_read, price.cache_read);
-    add(usage.cache_write, price.cache_write);
+    // Research F5: the tier is chosen by **this call's** prompt length (`prompt_total()`,
+    // cache reads and writes included), not by the session total or the context projection.
+    // The tier's rates replace the base rates for the whole call (the tier carries a full rate
+    // set). `prompt_total() == None` (no input counter was reported) uses the base rates.
+    let rates = price.rates_for(usage.prompt_total());
+    add(usage.uncached_input(), Some(rates.input));
+    add(usage.output, Some(rates.output));
+    add(usage.cache_read, rates.cache_read);
+    add(usage.cache_write, rates.cache_write);
     billed.then_some(total)
 }
 
 /// Adds one call's fee to a session total. The running total stays `None` until the first
 /// call that had something to bill, which is what keeps `$0.00` off the footer.
-pub fn add_cost(total: Option<u64>, price: Option<ModelPrice>, usage: &ModelUsage) -> Option<u64> {
+pub fn add_cost(total: Option<u64>, price: Option<&ModelPrice>, usage: &ModelUsage) -> Option<u64> {
     let fee = price.and_then(|price| cost_micros(price, usage));
     match (total, fee) {
         (Some(total), Some(fee)) => Some(total.saturating_add(fee)),
@@ -104,7 +114,7 @@ pub fn restore_usage(
             }
             EventData::ModelUsageRecorded { usage }
             | EventData::CompactionUsageRecorded { usage, .. } => {
-                projection.add_usage_at(price, usage);
+                projection.add_usage_at(price.as_ref(), usage);
                 folded += 1;
             }
             _ => {}
@@ -134,6 +144,7 @@ fn session_snapshot(session: &Session) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PriceTier;
     use agent_core::ModelUsage;
 
     /// The catalog prices from the research's §3.2 example (`opencode-go` /
@@ -144,6 +155,7 @@ mod tests {
             output: 600_000,         // $0.60 / Mtok
             cache_read: Some(3_000), // $0.003 / Mtok
             cache_write: None,
+            tiers: Vec::new(),
         }
     }
 
@@ -154,6 +166,7 @@ mod tests {
             output: 15_000_000,
             cache_read: Some(300_000),
             cache_write: Some(3_750_000),
+            tiers: Vec::new(),
         }
     }
 
@@ -170,7 +183,7 @@ mod tests {
             ..ModelUsage::default()
         };
         // (200000-190000) x $0.15 + 2000 x $0.60 + 190000 x $0.003, per Mtok.
-        assert_eq!(cost_micros(deepseek(), &usage), Some(3_270));
+        assert_eq!(cost_micros(&deepseek(), &usage), Some(3_270));
     }
 
     /// The same shape on the Anthropic wire: `input` is already the uncached part, so it is
@@ -186,7 +199,7 @@ mod tests {
             ..ModelUsage::default()
         };
         // 10000 x $3 + 2000 x $15 + 190000 x $0.30, per Mtok = $0.117.
-        assert_eq!(cost_micros(sonnet(), &usage), Some(117_000));
+        assert_eq!(cost_micros(&sonnet(), &usage), Some(117_000));
     }
 
     /// A cache **write** is billed at its own (higher) rate, and it is inside `input` for the
@@ -202,7 +215,7 @@ mod tests {
             ..ModelUsage::default()
         };
         // uncached 0 x $3 + 2000 x $15 + 1000 x $0.30 + 10000 x $3.75 = $0.0678.
-        assert_eq!(cost_micros(sonnet(), &usage), Some(67_800));
+        assert_eq!(cost_micros(&sonnet(), &usage), Some(67_800));
     }
 
     /// F7 (ADR 0027: never `$0.00`): an all-zero usage report, or no usage at all,
@@ -217,17 +230,17 @@ mod tests {
             input_includes_cache: Some(true),
             ..ModelUsage::default()
         };
-        assert_eq!(cost_micros(deepseek(), &zeros), None);
-        assert_eq!(cost_micros(sonnet(), &zeros), None);
+        assert_eq!(cost_micros(&deepseek(), &zeros), None);
+        assert_eq!(cost_micros(&sonnet(), &zeros), None);
         // No reported counters at all is the same case.
-        assert_eq!(cost_micros(deepseek(), &ModelUsage::default()), None);
+        assert_eq!(cost_micros(&deepseek(), &ModelUsage::default()), None);
         // A zero cache reading is not a billed counter either; the input alone still is.
         let input_only = ModelUsage {
             input: Some(1_000_000),
             cache_read: Some(0),
             ..ModelUsage::default()
         };
-        assert_eq!(cost_micros(sonnet(), &input_only), Some(3_000_000));
+        assert_eq!(cost_micros(&sonnet(), &input_only), Some(3_000_000));
     }
 
     /// A counter the catalog has no rate for cannot be priced. If it is the only counter the
@@ -245,11 +258,94 @@ mod tests {
             output: 600_000,
             cache_read: None,
             cache_write: None,
+            tiers: Vec::new(),
         };
-        assert_eq!(cost_micros(no_cache_price, &cache_only), None);
+        assert_eq!(cost_micros(&no_cache_price, &cache_only), None);
     }
 
-    /// The running total: `None` until a call has something to bill, and each call is priced
+    /// Research F5: a model with context tiers bills the **whole** call at the tier whose
+    /// threshold the call's prompt exceeds; at or below the threshold the base rates apply.
+    #[test]
+    fn a_context_tier_prices_the_whole_call_above_its_threshold() {
+        let price = ModelPrice {
+            input: 100_000,           // $0.10 / Mtok
+            output: 500_000,          // $0.50 / Mtok
+            cache_read: Some(10_000), // $0.01
+            cache_write: Some(125_000),
+            tiers: vec![PriceTier {
+                size: 100_000,
+                input: 500_000, // 5x
+                output: 2_500_000,
+                cache_read: Some(50_000),
+                cache_write: Some(625_000),
+            }],
+        };
+        let call = |prompt: u64| ModelUsage {
+            input: Some(prompt),
+            input_includes_cache: Some(false),
+            output: Some(1_000),
+            ..ModelUsage::default()
+        };
+        // Below the threshold: the base rates.
+        assert_eq!(cost_micros(&price, &call(99_999)), Some(9_999 + 500));
+        // Exactly at the threshold: still the base rates (the tier is "over" the size).
+        assert_eq!(cost_micros(&price, &call(100_000)), Some(10_000 + 500));
+        // One over: the whole call at the tier rates.
+        assert_eq!(cost_micros(&price, &call(100_001)), Some(50_000 + 2_500));
+        // No input counter: the base rates (documented).
+        let no_input = ModelUsage {
+            output: Some(1_000),
+            ..ModelUsage::default()
+        };
+        assert_eq!(cost_micros(&price, &no_input), Some(500));
+    }
+
+    /// Several tiers: the highest one the prompt exceeds wins, and a model with no tiers is
+    /// unchanged.
+    #[test]
+    fn the_highest_exceeded_tier_wins() {
+        let price = ModelPrice {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: None,
+            cache_write: None,
+            tiers: vec![
+                PriceTier {
+                    size: 32_000,
+                    input: 2_000_000,
+                    output: 2_000_000,
+                    cache_read: None,
+                    cache_write: None,
+                },
+                PriceTier {
+                    size: 128_000,
+                    input: 4_000_000,
+                    output: 4_000_000,
+                    cache_read: None,
+                    cache_write: None,
+                },
+            ],
+        };
+        let call = |prompt: u64| ModelUsage {
+            input: Some(prompt),
+            input_includes_cache: Some(false),
+            ..ModelUsage::default()
+        };
+        assert_eq!(cost_micros(&price, &call(32_000)), Some(32_000));
+        assert_eq!(cost_micros(&price, &call(32_001)), Some(64_002));
+        assert_eq!(cost_micros(&price, &call(128_001)), Some(512_004));
+        // No tiers at all: the base rate, as before F5.
+        let plain = ModelPrice {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: None,
+            cache_write: None,
+            tiers: Vec::new(),
+        };
+        assert_eq!(cost_micros(&plain, &call(1_000_000)), Some(1_000_000));
+    }
+
+    /// The running total: `None` until a call has something to bill, and each call is priced    /// The running total: `None` until a call has something to bill, and each call is priced
     /// at the price it was passed, so a `/model` switch mid-session does not re-price history.
     #[test]
     fn the_running_total_prices_each_call_at_its_own_price() {
@@ -261,14 +357,17 @@ mod tests {
         let expensive = cheap.clone();
 
         // Nothing billed yet: no fee, not zero.
-        assert_eq!(add_cost(None, Some(sonnet()), &ModelUsage::default()), None);
+        assert_eq!(
+            add_cost(None, Some(&sonnet()), &ModelUsage::default()),
+            None
+        );
         // No price at all: the call contributes nothing.
         assert_eq!(add_cost(None, None, &cheap), None);
 
-        let mut total = add_cost(None, Some(deepseek()), &cheap);
+        let mut total = add_cost(None, Some(&deepseek()), &cheap);
         assert_eq!(total, Some(150_000), "$0.15");
         // The switch: the second call is priced with the new model, the first keeps its own.
-        total = add_cost(total, Some(sonnet()), &expensive);
+        total = add_cost(total, Some(&sonnet()), &expensive);
         assert_eq!(total, Some(3_150_000), "$0.15 + $3.00");
         // A later unpriced call does not erase what was already counted.
         total = add_cost(total, None, &cheap);
@@ -279,9 +378,10 @@ mod tests {
             output: u64::MAX,
             cache_read: None,
             cache_write: None,
+            tiers: Vec::new(),
         };
         assert_eq!(
-            add_cost(Some(u64::MAX), Some(absurd), &cheap),
+            add_cost(Some(u64::MAX), Some(&absurd), &cheap),
             Some(u64::MAX)
         );
     }

@@ -16,7 +16,6 @@
 //! The syntax set is loaded once ([`syntax_set`]) and cached for the process.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use syntect::parsing::{ParseState, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
@@ -157,14 +156,17 @@ pub const MAX_HIGHLIGHT_LINES: usize = 512;
 /// The same cap by size, for a few very long lines: 128 KiB.
 pub const MAX_HIGHLIGHT_BYTES: usize = 128 * 1024;
 
-/// How many blocks [`highlight_lines`] has run for, for the tests that prove the measure phase
-/// never highlights and that a resize does not re-highlight. One atomic add per block, not per
-/// line.
-static HIGHLIGHT_CALLS: AtomicU64 = AtomicU64::new(0);
+// How many blocks [`highlight_lines`] has run for, for the tests that prove the measure phase
+// never highlights and that a resize does not re-highlight. One add per block, not per line.
+// **Thread-local**: the counter is test-only, and parallel tests in one binary used to bump a
+// process-global counter, which made `the_measure_pass_never_highlights` flake under load.
+thread_local! {
+    static HIGHLIGHT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-/// The number of blocks highlighted so far this process.
+/// The number of blocks highlighted so far **on this thread**.
 pub fn highlight_calls() -> u64 {
-    HIGHLIGHT_CALLS.load(Ordering::Relaxed)
+    HIGHLIGHT_CALLS.with(std::cell::Cell::get)
 }
 
 /// Highlights `lines` as one block: multi-line state (a comment or string spanning lines) is
@@ -178,7 +180,7 @@ pub fn highlight_lines(lines: &[&str], lang: &str) -> Option<Vec<HighlightedLine
         return None;
     }
     let syntax = syntax_for(lang)?;
-    HIGHLIGHT_CALLS.fetch_add(1, Ordering::Relaxed);
+    HIGHLIGHT_CALLS.with(|calls| calls.set(calls.get() + 1));
     let set = syntax_set();
     let mut state = ParseState::new(syntax);
     let mut stack = ScopeStack::new();
