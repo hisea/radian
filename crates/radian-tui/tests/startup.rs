@@ -16,7 +16,7 @@ fn screen() -> StartupScreen {
     StartupScreen {
         banner: banner_rows("0.1.0", "mock-model", "~/Code/radian"),
         banner_narrow: "R radian 0.1.0".to_string(),
-        summary: "workspace · seatbelt · context 1000 · memory off · ask_user on".to_string(),
+        summary: "workspace · macOS sandbox · context 1000 · memory off · ask_user on".to_string(),
         lines: vec![
             "profile: workspace".to_string(),
             "context: window 2000".to_string(),
@@ -47,7 +47,7 @@ fn the_information_block_collapses_and_ctrl_p_toggles_it() {
     assert!(
         collapsed
             .iter()
-            .any(|text| text.starts_with("+ workspace · seatbelt")),
+            .any(|text| text.starts_with("+ workspace · macOS sandbox")),
         "{collapsed:?}"
     );
     assert!(
@@ -76,7 +76,7 @@ fn the_information_block_collapses_and_ctrl_p_toggles_it() {
     let back = entry_texts(&app);
     assert!(
         back.iter()
-            .any(|text| text.starts_with("+ workspace · seatbelt")),
+            .any(|text| text.starts_with("+ workspace · macOS sandbox")),
         "{back:?}"
     );
 }

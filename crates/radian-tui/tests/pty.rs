@@ -1831,7 +1831,11 @@ async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
         pty.wait_for_exit(15).is_some(),
         "the app did not exit after the probe failed"
     );
-    assert_eq!(pty.app_exit_code(), Some(1), "a refusal is a failure exit");
+    assert_eq!(
+        pty.app_exit_code(),
+        Some(2),
+        "a startup refusal is a usage/setup error (ADR 0032 A3)"
+    );
     let raw_text = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(
         raw_text.contains("sandbox backend is unavailable")
@@ -2084,6 +2088,50 @@ async fn pty_multiline_paste_reaches_the_input_box() {
     pty.quit();
 }
 
+/// An IME commits a whole word in one burst; every character must reach the input in one
+/// frame, not one poll period apart (11 CJK characters appeared ~50 ms
+/// apart, because `read_input` waited the full `INPUT_POLL` before draining crossterm's
+/// buffer).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_committed_ime_string_reaches_the_input_in_one_frame() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let dir = TempDir::new("ime");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10));
+    // A mixed CJK/ASCII run written as one burst (what an IME commit produces).
+    let text = "你好世界abc测试中文输入法";
+    let start = std::time::Instant::now();
+    pty.send(text.as_bytes());
+    assert!(
+        pty.wait_for_screen(text, 2),
+        "the whole string must reach the input:\n{}",
+        pty.screen()
+    );
+    let elapsed = start.elapsed();
+    // The pre-fix behavior was one 50 ms poll period per buffered character (~550 ms here).
+    // 150 ms is well above the one-frame latency (a frame renders in a few ms, and the state
+    // wait polls every 20 ms) and far below the pre-fix time, so it fails on the regression,
+    // not on a loaded machine.
+    assert!(
+        elapsed < std::time::Duration::from_millis(150),
+        "the string took {elapsed:?}; the pre-fix behavior was ~50 ms per character"
+    );
+    pty.quit();
+}
+
 /// The second request must not carry the first response's reasoning (ADR 0014 R4), verified
 /// on the real UI path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2268,7 +2316,7 @@ async fn pty_an_authorization_header_is_refused_without_echoing_its_value() {
         "the header value leaked into the error: {raw}"
     );
     assert!(server.requests().is_empty(), "no request may be sent");
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
 }
 
 /// A `--header` with no `=` is a usage error whose message does not echo the argument: the
@@ -2440,9 +2488,11 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// ADR 0027: the startup summary's sandbox word is the **real** backend, never `none`. The
+/// ADR 0027: the startup summary's sandbox word is the **real** sandbox, never `none`. The
 /// bug was searching the `workspace` tier's description text, which does not name the backend,
-/// so macOS showed `workspace · none`.
+/// so macOS showed `workspace · none`. the summary says the plain words
+/// ("macOS sandbox" / "Linux sandbox") and the expanded `profile:` line keeps the exact
+/// backend name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
@@ -2480,13 +2530,25 @@ async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
         "the workspace tier has a sandbox; it must not read as none: {summary:?}"
     );
     let expected = if cfg!(target_os = "macos") {
+        "macOS sandbox"
+    } else {
+        "Linux sandbox"
+    };
+    assert!(
+        summary.contains(expected),
+        "the summary must name the sandbox in plain words ({expected}): {summary:?}"
+    );
+    // The exact backend name stays in the expanded `profile:` line.
+    pty.expand_startup();
+    let expanded = pty.screen();
+    let backend = if cfg!(target_os = "macos") {
         "macos-seatbelt"
     } else {
         "linux-bwrap"
     };
     assert!(
-        summary.contains(expected),
-        "the summary must name the real backend ({expected}): {summary:?}"
+        expanded.contains(backend),
+        "the expanded profile line keeps the real backend name ({backend}): {expanded}"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -2845,7 +2907,7 @@ fn pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
         pty.wait_for_exit(15).is_some(),
         "the app did not exit on a bad workspace"
     );
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw.contains(missing.to_str().unwrap()), "{raw}");
     assert!(raw.contains("workspace"), "{raw}");
@@ -2893,7 +2955,7 @@ fn pty_a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
         pty.wait_for_exit(15).is_some(),
         "the app did not exit on a nested workspace"
     );
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw.contains("workspace is inside"), "{raw}");
     assert!(
@@ -2941,7 +3003,7 @@ fn pty_a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
         100,
     );
     assert!(pty.wait_for_exit(15).is_some(), "the refusal did not exit");
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(
         raw.contains("sandbox backend is unavailable") || raw.contains("failed its probe"),
@@ -3009,7 +3071,7 @@ fn pty_a_bad_mcp_config_creates_no_session() {
         100,
     );
     assert!(pty.wait_for_exit(15).is_some(), "the refusal did not exit");
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw.contains(bad.to_str().unwrap()), "{raw}");
     assert!(
@@ -3408,7 +3470,7 @@ fn pty_session_id_already_exists_points_at_resume() {
         second.wait_for_exit(15).is_some(),
         "the second run did not exit"
     );
-    assert_eq!(second.app_exit_code(), Some(1));
+    assert_eq!(second.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&second.raw()).to_string();
     assert!(raw.contains("already exists"), "{raw}");
     assert!(raw.contains("--resume dup"), "{raw}");
@@ -3451,7 +3513,7 @@ fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
             pty.wait_for_exit(15).is_some(),
             "{label}: the refusal did not exit"
         );
-        assert_eq!(pty.app_exit_code(), Some(1), "{label}");
+        assert_eq!(pty.app_exit_code(), Some(2), "{label}");
         let raw = String::from_utf8_lossy(&pty.raw()).to_string();
         assert!(raw.contains("anthropic"), "{label}: {raw}");
         assert!(
@@ -5890,49 +5952,230 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
             "--workspace",
             ws.to_str().unwrap(),
         ],
-        40,
+        60,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     // ADR 0024 Q5: this host has an interactive user, so the startup line says so.
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("ask_user: on", 10),
+        pty.wait_for_screen("ask_user: on", 40),
         "the startup line must say ask_user is on: {}",
         pty.screen()
     );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("How should it load?", 20),
+        pty.wait_for_screen("How should it load?", 40),
         "no question form: {}",
         pty.screen()
     );
+    // Wait for the **panel** (its hint), not the transcript block (`[loader]` appears there too).
     assert!(
-        pty.wait_for_screen("question 1/3", 20),
-        "the title must name the position: {}",
+        pty.wait_for_screen("⏎ select", 40),
+        "the panel must be up: {}",
         pty.screen()
     );
-    // Question 1 (single): select the highlighted option.
+    assert!(
+        pty.wait_for_screen("loader", 40),
+        "the tab row must show the question header: {}",
+        pty.screen()
+    );
+    // Question 1 (single): Space selects without advancing, `n` adds a note, Tab advances.
+    pty.send(b" ");
+    pty.send(b"n");
+    pty.send(b"note-one");
+    pty.send(b"\r"); // save the note
+    pty.send(b"\t");
+    // Question 2 (multi): Space toggles, Tab advances.
     pty.send(b" ");
     pty.send(b"\t");
-    // Question 2 (multi): select the highlighted option.
-    pty.send(b" ");
-    pty.send(b"\t");
-    // Question 3 (text): type.
+    // Question 3 (text): type, Enter -> the Submit tab.
     pty.send(b"radian");
-    // Enter -> the overview, Enter -> submit.
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("overview", 20),
-        "the overview must be shown: {}",
+        pty.wait_for_screen("✓ loader", 40),
+        "the Submit tab lists the answers: {}",
         pty.screen()
     );
+    // Enter -> submit.
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("ASK-DONE", 30),
+        pty.wait_for_screen("ASK-DONE", 40),
         "the turn must continue after the answers: {}",
         pty.screen()
     );
+    pty.quit();
+    // The journal carries the answers and the note (ADR 0024 Q3/R4).
+    let journal = std::fs::read_to_string(sessions.join("ask.jsonl")).expect("the journal");
+    assert!(
+        journal.contains("\"selected\":[\"builtin\"]") && journal.contains("\"note\":\"note-one\""),
+        "the answer and the note must be journaled:\n{journal}"
+    );
+}
+
+/// ADR 0024 R2/R3 end to end: `alt-h` collapses the panel to one line and shows it
+/// again without losing the answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ask_user_alt_h_hides_and_shows() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-hide");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(ask_reply("HIDE-DONE")).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask-hide",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        60,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
+    pty.send(b"go\r");
+    // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
+    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    // Answer the first question, then collapse.
+    pty.send(b" ");
+    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    pty.send(b"\x1bh"); // alt-h
+    assert!(
+        pty.wait_for_screen("alt-h to show", 40),
+        "the panel must collapse: {}",
+        pty.screen()
+    );
+    pty.send(b"\x1bh"); // alt-h again
+    assert!(
+        pty.wait_for_screen("How should it load?", 40),
+        "the panel must come back with the answers: {}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0024 R3 + feedback: `esc` twice declines, and the turn continues.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ask_user_esc_declines() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-decline");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(ask_reply("DECLINE-DONE")).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask-decline",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        60,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
+    pty.send(b"go\r");
+    // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
+    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    pty.send(&[0x1b]); // the first Esc asks again
+    assert!(
+        pty.wait_for_screen("press Esc again", 40),
+        "the first Esc must confirm: {}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]); // the second Esc declines
+    assert!(
+        pty.wait_for_screen("DECLINE-DONE", 40),
+        "the turn must continue after the decline: {}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0024 R2/R3 + feedback: the `Other` row keeps its text while Up/Down
+/// move between the options, and the answer carries it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ask_user_other_keeps_its_text() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-other");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let questions = json!({"questions": [
+        {"id": "pick", "header": "Pick", "prompt": "Pick one", "kind": "single",
+         "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+         "allow_other": true, "required": true}
+    ]});
+    let server = MockServer::start(vec![
+        tool_reply("call_ask", "ask_user", &questions.to_string()),
+        text_reply("OTHER-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask-other",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        60,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
+    pty.send(b"go\r");
+    // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
+    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    // Move to `Other` (A, B, Other) and type.
+    pty.send(b"\x1b[B"); // Down
+    pty.send(b"\x1b[B"); // Down
+    pty.send(b"custom");
+    assert!(
+        pty.wait_for_screen("Other: custom", 40),
+        "the typed text must be in the Other row: {}",
+        pty.screen()
+    );
+    // Up to B, Down back to Other: the text is still there.
+    pty.send(b"\x1b[A"); // Up
+    pty.send(b"\x1b[B"); // Down
+    assert!(
+        pty.wait_for_screen("Other: custom", 40),
+        "the text must survive the arrows: {}",
+        pty.screen()
+    );
+    // Enter confirms and advances to Submit; Enter submits.
+    pty.send(b"\r");
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("OTHER-DONE", 40),
+        "the turn must continue with the Other answer: {}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
 }
 
 /// ADR 0024 Q4: Ctrl-C while a question is up cancels the turn, the form goes with the waiter
@@ -5992,8 +6235,8 @@ async fn pty_ctrl_c_during_a_question_cancels_without_an_answer() {
     // The form's own title, not the prompt: the transcript shows the tool call's arguments,
     // which contain the prompt text.
     assert!(
-        pty.wait_until_gone("question 1/3", 20),
-        "the form must go with the cancelled wait: {}",
+        pty.wait_until_gone("⏎ select", 20),
+        "the panel must go with the cancelled wait: {}",
         pty.screen()
     );
     // One request only: the tool never returned an answer, so the model was never asked again.
@@ -6544,16 +6787,16 @@ async fn pty_ask_user_is_registered_without_a_workspace() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("ask_user: on", 10),
+        pty.wait_for_screen("ask_user: on", 40),
         "the startup line must say ask_user is on: {}",
         pty.screen()
     );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("NO-WS-DONE", 20),
+        pty.wait_for_screen("NO-WS-DONE", 40),
         "the turn must run: {}",
         pty.screen()
     );
@@ -6759,7 +7002,11 @@ fn pty_a_session_started_from_the_filesystem_root_is_refused() {
         assert!(Instant::now() < deadline, "the app did not exit");
         std::thread::sleep(Duration::from_millis(20));
     };
-    assert_eq!(status.code(), Some(1), "a startup refusal");
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "a startup refusal is a usage/setup error (ADR 0032 A3)"
+    );
     let text = String::from_utf8_lossy(&drained);
     assert!(text.contains("filesystem root"), "{text}");
     assert!(text.contains("--workspace"), "{text}");
@@ -7747,6 +7994,318 @@ fn pty_quit_closes_button_motion_reporting() {
     );
 }
 
+// ---------- herdr reporting (ADR 0034) ----------
+
+/// A fake herdr socket: accepts connections, records each request line, and replies so the
+/// sender finishes. Reporting never touches the real herdr in these tests.
+struct HerdrSocket {
+    path: PathBuf,
+    lines: Arc<Mutex<Vec<serde_json::Value>>>,
+    _dir: TempDir,
+}
+
+impl HerdrSocket {
+    fn start(label: &str) -> Self {
+        use std::io::BufRead as _;
+        use std::os::unix::net::UnixListener;
+        let dir = TempDir::new(label);
+        // The AF_UNIX path limit: a short `/tmp` name, not the (long) temp dir.
+        let path = PathBuf::from(format!(
+            "/tmp/radian-herdr-pty-{}-{label}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind the fake herdr socket");
+        let lines: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&lines);
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { break };
+                let mut line = String::new();
+                let mut reader = std::io::BufReader::new(conn.try_clone().unwrap());
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                if let Ok(value) = serde_json::from_str(line.trim()) {
+                    log.lock().unwrap().push(value);
+                }
+                let _ = conn.write_all(b"{\"id\":\"x\",\"result\":{}}\n");
+            }
+        });
+        Self {
+            path,
+            lines,
+            _dir: dir,
+        }
+    }
+
+    fn env(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("HERDR_ENV", "1".to_owned()),
+            ("HERDR_PANE_ID", "w1:p1".to_owned()),
+            (
+                "HERDR_SOCKET_PATH",
+                self.path.to_string_lossy().into_owned(),
+            ),
+        ]
+    }
+
+    fn snapshot(&self) -> Vec<serde_json::Value> {
+        self.lines.lock().unwrap().clone()
+    }
+
+    /// Waits for a `pane.report_agent` with `state`.
+    fn wait_for_state(&self, state: &str, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if self.snapshot().iter().any(|value| {
+                value["method"] == "pane.report_agent" && value["params"]["state"] == state
+            }) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn wait_for_release(&self, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if self
+                .snapshot()
+                .iter()
+                .any(|value| value["method"] == "pane.release_agent")
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+fn herdr_env(envs: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
+    envs.to_vec()
+}
+
+/// One mock turn: the fake socket must see idle (startup), working (TurnStarted), idle
+/// (RunFinished) and a release on exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_the_turn_states_and_releases() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("HERDR-REPLY-OK")]).await;
+    let dir = TempDir::new("herdr-turn");
+    let sock = HerdrSocket::start("turn");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "herdr-turn",
+        ],
+        &env_refs,
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", 10),
+        "screen:\n{}",
+        pty.screen()
+    );
+    assert!(sock.wait_for_state("idle", 5), "the startup idle report");
+    pty.send(b"hello\r");
+    assert!(
+        sock.wait_for_state("working", 10),
+        "working on TurnStarted: {:?}",
+        sock.snapshot()
+    );
+    assert!(
+        pty.wait_for_screen("HERDR-REPLY-OK", 15),
+        "screen:\n{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("idle", 10),
+        "idle on RunFinished: {:?}",
+        sock.snapshot()
+    );
+    pty.quit();
+    assert!(
+        sock.wait_for_release(5),
+        "a normal exit releases: {:?}",
+        sock.snapshot()
+    );
+    // The first report carries the session identity and the resume command.
+    let first = sock
+        .snapshot()
+        .into_iter()
+        .find(|value| value["method"] == "pane.report_agent")
+        .expect("a report");
+    assert_eq!(first["params"]["source"], "radian");
+    assert_eq!(first["params"]["agent"], "radian");
+    assert_eq!(first["params"]["agent_session_id"], "herdr-turn");
+    assert!(first["params"]["agent_session_path"].is_string());
+    assert_eq!(first["params"]["resume_argv"][0], "radian");
+    assert_eq!(first["params"]["resume_argv"][1], "--resume");
+    assert_eq!(first["params"]["resume_argv"][2], "herdr-turn");
+}
+
+/// An approval is `blocked` with the tool name only; the command text is never sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_blocked_without_the_command_text() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("herdr-approval");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = dir.path().join("sessions");
+    let command = "echo HERDR-SECRET-COMMAND";
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "shell", &json!({"command": command}).to_string()),
+        text_reply("HERDR-DONE"),
+    ])
+    .await;
+    let sock = HerdrSocket::start("approval");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "herdr-approval",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &env_refs,
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "the approval box:\n{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("blocked", 10),
+        "blocked while the approval waits: {:?}",
+        sock.snapshot()
+    );
+    let blocked = sock
+        .snapshot()
+        .into_iter()
+        .find(|value| value["params"]["state"] == "blocked")
+        .expect("a blocked report");
+    assert_eq!(blocked["params"]["message"], "approval: shell");
+    let all = serde_json::to_string(&sock.snapshot()).unwrap();
+    assert!(
+        !all.contains("HERDR-SECRET-COMMAND"),
+        "the command text must never be sent: {all}"
+    );
+    pty.quit();
+}
+
+/// Without `HERDR_ENV=1` nothing is sent at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_is_silent_without_the_env() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("HERDR-SILENT-OK")]).await;
+    let dir = TempDir::new("herdr-off");
+    let sock = HerdrSocket::start("off");
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "herdr-off",
+        ],
+        &[
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_SOCKET_PATH", sock.path.to_str().unwrap()),
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("HERDR-SILENT-OK", 15),
+        "{}",
+        pty.screen()
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        sock.snapshot().is_empty(),
+        "no HERDR_ENV means no reports: {:?}",
+        sock.snapshot()
+    );
+    pty.quit();
+}
+
+/// `RADIAN_HERDR=0` turns it off for one run even inside a herdr pane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_is_silent_when_disabled() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("HERDR-DISABLED-OK")]).await;
+    let dir = TempDir::new("herdr-disabled");
+    let sock = HerdrSocket::start("disabled");
+    let envs = herdr_env(&sock.env());
+    let mut env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    env_refs.push(("RADIAN_HERDR", "0"));
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "herdr-disabled",
+        ],
+        &env_refs,
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("HERDR-DISABLED-OK", 15),
+        "{}",
+        pty.screen()
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        sock.snapshot().is_empty(),
+        "RADIAN_HERDR=0 means no reports: {:?}",
+        sock.snapshot()
+    );
+    pty.quit();
+}
+
 // ---------- Ctrl-C: clear first, then press twice to quit ----------
 
 /// Idle and empty, Ctrl-C asks twice: the first press only shows the hint and never exits;
@@ -8094,6 +8653,123 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
         !second.contains("mock"),
         "the model is not on the numbers row: {second:?}"
     );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// F3 (ADR 0027): `--resume` shows what the session already spent. Before this the
+/// tokens were `-` and `cost` was hidden until the next response, because the projection starts
+/// empty and only the live sink wrote to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("cost-resume");
+    let home = TempDir::new("cost-resume-home");
+    // A catalog cache with a price for the model the session ran on. `resolve_offline` reads
+    // it, so the resumed fee is resolved without any network (ADR 0026 D7).
+    let cache = home.path().join("cache/catalog");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(
+        cache.join("models.json"),
+        serde_json::json!({
+            "opencode-go": {
+                "id": "opencode-go",
+                "models": {
+                    "deepseek-v4.1-flash": {
+                        "id": "deepseek-v4.1-flash",
+                        "limit": {"context": 1000000, "input": 922000, "output": 128000},
+                        "cost": {"input": 0.15, "output": 0.6, "cache_read": 0.003}
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // The journal of a session that already ran: 1M input on the priced model = $0.15.
+    let path = dir.path().join("resumed.jsonl");
+    {
+        let journal = radian_session::SessionJournal::create(
+            &path,
+            "resumed",
+            radian_session::SessionCreatedData::new(
+                "/tmp",
+                serde_json::json!({"model": {"provider": "opencode-go", "model": "deepseek-v4.1-flash"}}),
+            ),
+        )
+        .unwrap();
+        use agent_core::TranscriptJournal;
+        journal
+            .append(agent_core::JournalRecord::Message {
+                index: 0,
+                message: agent_core::Message::user("earlier turn"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(agent_core::JournalRecord::Message {
+                index: 1,
+                message: agent_core::Message::assistant("earlier answer"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(agent_core::JournalRecord::ModelUsage {
+                usage: agent_core::ModelUsage {
+                    input: Some(1_000_000),
+                    output: Some(100_000),
+                    input_includes_cache: Some(true),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        drop(journal);
+    }
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "deepseek-v4.1-flash",
+            "--provider",
+            "opencode-go",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "resumed",
+        ],
+        &[
+            ("RADIAN_HOME", home.path().to_str().unwrap()),
+            // The harness writes the `opencode-go` credential into `auth.json` from this env
+            // name (ADR 0026 D2: a key comes only from `auth.json`).
+            ("OPENCODE_GO_API_KEY", "test-key-not-a-secret"),
+        ],
+        // The numbers row, so `tokens` and `cost` are both on screen.
+        "schema_version = 1\n[tui.footer]\nrows = [{ left = [] }, { left = [\"tokens\", \"cost\"] }]\n",
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The earlier turn's tokens are there (1M in, 100K out). The default `tokens` format is
+    // `^{in} v{out} R{cache}` (ADR 0027's ASCII-default icons), and `format_tokens`
+    // keeps one decimal under 10 (so 1 000 000 is `1.0M`) and rounds above it (`100K`).
+    assert!(
+        pty.wait_for_screen("^1.0M", 10),
+        "the resumed token total is missing:\n{}",
+        pty.screen()
+    );
+    assert!(pty.screen().contains("v100K"), "{}", pty.screen());
+    // ... and its fee: 1M x $0.15 + 100K x $0.60 per Mtok = $0.21, three decimals
+    // (ADR 0027).
+    assert!(
+        pty.wait_for_screen("$0.210", 10),
+        "the resumed fee is missing:\n{}",
+        pty.screen()
+    );
+    let _ = server;
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
@@ -8455,12 +9131,10 @@ async fn pty_bang_is_single_and_escapable() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // A running `!` has no block yet (the block appears when it finishes), and the composer
+    // echo is gone as soon as Enter is handled, so there is nothing to wait for here: the two
+    // sends are processed in order, so the second sees the first already running.
     pty.send(b"!sleep 30\r");
-    assert!(
-        pty.wait_for_screen("sleep 30", 10),
-        "the command block is not on screen:\n{}",
-        pty.screen()
-    );
     // A second command while the first runs is refused, not queued or run.
     pty.send(b"!echo SECOND\r");
     assert!(
@@ -8495,12 +9169,9 @@ async fn pty_ctrl_c_stops_a_running_bang() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // No block to wait for (it appears when the command finishes); the sends are ordered, so
+    // the `!` is running by the time the turn below starts.
     pty.send(b"!sleep 30\r");
-    assert!(
-        pty.wait_for_screen("sleep 30", 10),
-        "the command block is not on screen:\n{}",
-        pty.screen()
-    );
 
     // Start a turn so Ctrl-C is a cancel; the mock hangs, so it is still running.
     pty.send(b"hello\r");

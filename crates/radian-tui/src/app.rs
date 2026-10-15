@@ -244,8 +244,8 @@ impl Layer {
 pub enum Overlay {
     /// The in-transcript search box (Phase 5).
     Find(FindState),
-    /// The `@` completion candidate list.
-    Completion(Vec<String>),
+    /// The completion candidate list (label + description), drawn by `select_list`.
+    Completion(Vec<crate::command::Candidate>),
     /// The session picker (ADR 0023 U4): `--pick` at startup, `/sessions` in a session.
     Picker(Picker),
 }
@@ -1113,7 +1113,10 @@ pub struct App {
     pub git_branch: Option<String>,
     /// The machine's hostname (ADR 0027 `host`), read once at startup.
     pub hostname: Option<String>,
-    /// The model's catalog unit prices (ADR 0027 `cost`), set once at startup.
+    /// The model's catalog unit prices (ADR 0027). Kept for the host's startup
+    /// wiring and its own tests; the footer's `cost` reads the **projection's** accumulated
+    /// fee, because the fee is per call at the price in force then (a `/model` switch does not
+    /// re-price earlier calls). [`App::set_model_price`] records it in both places.
     pub model_price: Option<radian_host::ModelPrice>,
     /// Whether automatic compaction is on (`context`'s `{auto}` marker), set once at startup.
     pub auto_compact: bool,
@@ -1376,7 +1379,7 @@ impl App {
             tools: self.tool_display,
             mermaid: self.mermaid_enabled,
             highlight: self.highlight_enabled,
-            glyphs: self.footer.glyphs(),
+            glyphs: self.footer_glyphs(),
         }
     }
 
@@ -1494,6 +1497,25 @@ impl App {
 
     /// Replaces the read handle with the host's projection, so the renderer reads the same
     /// facts the facade owns.
+    /// The inputs to the herdr state function (ADR 0034 H2): the turn state, the pending
+    /// queue's length, and whether the startup trust prompt is waiting.
+    pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool) {
+        let trust = matches!(self.top_modal(), Some(Modal::Trust(_)));
+        (self.projection.read().turn(), self.pending, trust)
+    }
+
+    /// What is blocking, for herdr's category-only message (ADR 0034 H2). The approval's tool
+    /// name only - never the command, path or question body.
+    pub fn herdr_blocked(&self) -> Option<radian_host::herdr::Blocked> {
+        match self.top_modal() {
+            Some(Modal::Approval(prompt)) => Some(radian_host::herdr::Blocked::Approval(
+                prompt.request.tool.clone(),
+            )),
+            Some(Modal::Question(_)) => Some(radian_host::herdr::Blocked::Question),
+            _ => None,
+        }
+    }
+
     pub fn set_projection(&mut self, projection: Arc<SessionProjection>) {
         self.projection = projection;
     }
@@ -1929,7 +1951,7 @@ impl App {
     }
 
     /// The `@` completion candidates, if the list is up.
-    pub fn completion(&self) -> Option<&[String]> {
+    pub fn completion(&self) -> Option<&[crate::command::Candidate]> {
         self.layers.iter().rev().find_map(|layer| match layer {
             Layer::Overlay(Overlay::Completion(candidates)) => Some(candidates.as_slice()),
             _ => None,
@@ -1941,13 +1963,26 @@ impl App {
         self.mention_completion = None;
     }
 
-    pub fn completion_set(&mut self, candidates: Vec<String>) {
+    pub fn completion_set(&mut self, candidates: Vec<crate::command::Candidate>) {
         self.completion_clear();
         if !candidates.is_empty() {
             // A fresh menu highlights its first (best-ranked) row.
             self.completion_cursor = 0;
             self.push_overlay(Overlay::Completion(candidates));
         }
+    }
+
+    /// The word the slash menu is completing: the text from the level's range start to the
+    /// cursor. The menu filters on it, so typing a provider name finds that provider's models
+    /// (ADR 0035).
+    pub fn completion_filter(&self) -> String {
+        let Some(slash) = &self.slash_completion else {
+            return String::new();
+        };
+        let chars: Vec<char> = self.input.text().chars().collect();
+        let end = self.input.cursor().min(chars.len());
+        let start = slash.range.start.min(end);
+        chars[start..end].iter().collect()
     }
 
     /// Whether a completion menu is on screen (the slash list or the `@` list).
@@ -1966,7 +2001,9 @@ impl App {
         if let Some(slash) = &self.slash_completion {
             return slash.candidates.len();
         }
-        self.completion().map(<[String]>::len).unwrap_or(0)
+        self.completion()
+            .map(<[crate::command::Candidate]>::len)
+            .unwrap_or(0)
     }
 
     /// Moves the menu highlight, wrapping.
@@ -2706,6 +2743,11 @@ impl App {
         // actions come from the `form` layer, and everything else that can edit text goes to
         // the focused field. A key the form does not want is swallowed, never passed down.
         if matches!(self.top_modal(), Some(Modal::Question(_))) {
+            // `alt-h` collapses the panel (ADR 0024 R3): it is the form's own key,
+            // not a rebindable `form` action.
+            if key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::ALT) {
+                return Some(Input::Form(FormKey::Hide));
+            }
             if let Some(action) = self.keymap.form_action_for(key) {
                 return Some(Input::Form(FormKey::Action(action)));
             }
@@ -3417,17 +3459,7 @@ impl App {
             self.completion_clear();
             return;
         }
-        let width = candidates
-            .iter()
-            .map(|candidate| candidate.insert.chars().count())
-            .max()
-            .unwrap_or(0);
-        self.completion_set(
-            candidates
-                .iter()
-                .map(|candidate| format!("{:<width$}  {}", candidate.insert, candidate.description))
-                .collect(),
-        );
+        self.completion_set(candidates.clone());
         self.slash_completion = Some(SlashCompletion { range, candidates });
     }
 
@@ -4222,9 +4254,12 @@ impl App {
         self.hostname = hostname;
     }
 
-    /// The model's catalog unit prices (ADR 0027).
+    /// The model's catalog unit prices (ADR 0027). Written through to the
+    /// projection, which is what prices each arriving call: the footer reads the accumulated
+    /// fee from there, because a call keeps the price it arrived under even after a switch.
     pub fn set_model_price(&mut self, price: Option<radian_host::ModelPrice>) {
         self.model_price = price;
+        self.projection.set_price(price);
     }
 
     /// Whether automatic compaction is on (ADR 0027).
@@ -4299,7 +4334,16 @@ impl App {
         // The menu is up: keep the raw candidates so the highlighted row can be accepted.
         // `completion_set` clears the previous menu (including this field), so it is set after.
         let raw = completion.candidates.clone();
-        self.completion_set(completion.candidates);
+        self.completion_set(
+            completion
+                .candidates
+                .iter()
+                .map(|candidate| crate::command::Candidate {
+                    insert: candidate.clone(),
+                    description: String::new(),
+                })
+                .collect(),
+        );
         self.mention_completion = Some((completion.range, raw));
     }
 

@@ -498,6 +498,103 @@ async fn an_invalid_summary_is_retried_once() {
 }
 
 /// Two invalid summaries fail the turn; nothing commits.
+///
+/// The retry is a **second real call**, so both attempts report their usage (ADR 0018
+/// revision 3): the journal gets two records and the host gets two events, one per attempt.
+#[tokio::test]
+async fn each_summarization_attempt_reports_its_usage_once() {
+    let model = ScriptedModel::new([
+        summary_reply("   ", 10),
+        summary_reply("a real summary", 20),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 3_000, true);
+    let mut session = agent
+        .open_session_with_journal(big_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+
+    // The journal: one record per attempt, in order, with each attempt's own numbers.
+    let recorded: Vec<u64> = journal
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            JournalRecord::CompactionUsage { usage, .. } => usage.input,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded, vec![10, 20], "one record per attempt");
+
+    // The events: the same, one per attempt. Attaching the usage to `CompactionFinished`
+    // instead would lose the first attempt (that event fires once).
+    let reported: Vec<u64> = recorder
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::CompactionUsage {
+                usage, revision, ..
+            } => {
+                assert_eq!(*revision, 1, "both attempts belong to revision 1");
+                usage.input
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reported, vec![10, 20], "one event per attempt");
+}
+
+/// A summarization call whose response reported **no** usage emits no event and writes no
+/// journal record: a provider that reports nothing must not have a zero invented for it
+/// (ADR 0007 J1), and the host must not see a usage fact it cannot believe.
+#[tokio::test]
+async fn a_summarization_call_without_usage_reports_nothing() {
+    let no_usage = Reply::Respond(ModelResponse {
+        reasoning: Vec::new(),
+        content: vec![ContentPart::text("a real summary")],
+        tool_calls: vec![],
+        provider_payload: None,
+        stop_reason: StopReason::EndTurn,
+        usage: None,
+    });
+    let model = ScriptedModel::new([no_usage, text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 3_000, true);
+    let mut session = agent
+        .open_session_with_journal(big_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1);
+    assert!(
+        !journal
+            .records()
+            .iter()
+            .any(|record| matches!(record, JournalRecord::CompactionUsage { .. })),
+        "no usage means no record"
+    );
+    assert!(
+        !recorder
+            .events()
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CompactionUsage { .. })),
+        "no usage means no event"
+    );
+}
+
+/// Two invalid summaries fail the turn; nothing commits.
 #[tokio::test]
 async fn two_invalid_summaries_fail_the_turn() {
     let model = ScriptedModel::new([summary_reply("", 10), summary_reply("", 10), text("done")]);

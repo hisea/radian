@@ -238,6 +238,13 @@ impl<'a> Assembler<'a> {
 /// name (`prompt_tokens_details`, `completion_tokens_details`), so reasoning tokens are not
 /// lost; a bare `details` key is treated as the prompt details. `cache_read`/`cache_write`
 /// still come from the prompt details' `cached_tokens`/`cache_write`.
+///
+/// `input_includes_cache` is `Some(true)`: this is the OpenAI shape, where `prompt_tokens`
+/// contains `prompt_tokens_details.cached_tokens` (`total_tokens = prompt_tokens +
+/// completion_tokens`). The adapter **keeps both numbers as reported** (ADR 0007 J1) and
+/// marks the relationship, so a consumer can bill the cached part once
+/// (ADR 0007). The alias `input_tokens` is the Anthropic spelling, but this
+/// adapter is the OpenAI-compatible one: its own wire contract is what it marks.
 fn usage_from_json(usage: &Value) -> ModelUsage {
     let number = |keys: &[&str]| {
         keys.iter()
@@ -279,6 +286,8 @@ fn usage_from_json(usage: &Value) -> ModelUsage {
             .or_else(|| details_number("cached_tokens")),
         cache_write: number(&["cache_creation_input_tokens"])
             .or_else(|| details_number("cache_write")),
+        // OpenAI's `prompt_tokens` already contains the cached part (ADR 0007).
+        input_includes_cache: Some(true),
         details: details.map(|d| {
             // The object already parsed as JSON, so a re-serialization cannot fail.
             OpaqueJson::parse(d.to_string()).expect("a usage sub-object is valid JSON")
@@ -619,6 +628,11 @@ mod tests {
         assert_eq!(usage.total, Some(15));
         assert_eq!(usage.cache_read, Some(3));
         assert_eq!(usage.cache_write, None);
+        // OpenAI's `prompt_tokens` contains the cached part (ADR 0007): the adapter
+        // marks it so the fee counts those 3 tokens once, at the cache rate.
+        assert_eq!(usage.input_includes_cache, Some(true));
+        assert_eq!(usage.uncached_input(), Some(8));
+        assert_eq!(usage.prompt_total(), Some(11));
         // Every `*_details` sub-object is kept, keyed by its wire name; key order may be
         // normalized by the stream parse, content and nesting must match exactly.
         let details: Value =
@@ -627,6 +641,33 @@ mod tests {
             details,
             json!({"prompt_tokens_details": {"cached_tokens": 3, "audio_tokens": 0}})
         );
+    }
+
+    /// The real dogfooded shape (§3.2 of the research): a 200 000-token prompt with 190 000
+    /// of it cached. `input` stays the provider's own 200 000 (ADR 0007 J1) and the mark makes
+    /// the conversions right: the whole prompt is 200 000, the full-rate part is 10 000.
+    #[test]
+    fn a_cached_prefix_is_marked_so_the_full_rate_part_is_the_remainder() {
+        let response = assemble(
+            &[
+                json!({"choices": [], "usage": {
+                    "prompt_tokens": 200_000,
+                    "completion_tokens": 2_000,
+                    "total_tokens": 202_000,
+                    "prompt_tokens_details": {"cached_tokens": 190_000}
+                }})
+                .to_string(),
+                chunk(json!({}), Some("stop")),
+            ],
+            false,
+        )
+        .unwrap();
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.input, Some(200_000), "the provider's own number");
+        assert_eq!(usage.cache_read, Some(190_000));
+        assert_eq!(usage.input_includes_cache, Some(true));
+        assert_eq!(usage.prompt_total(), Some(200_000));
+        assert_eq!(usage.uncached_input(), Some(10_000));
     }
 
     #[test]

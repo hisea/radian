@@ -56,7 +56,7 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 
 > **在 `ContractHarness` 里显式声明，然后要么按「缺席」断言，要么按「不适用」跳过——绝不允许静默跳过，也绝不允许为了让契约通过而伪造 provider 行为。**
 
-只有**显式声明**能改变检查；默认声明是「全都支持/全都报告」。目前有三个出口，前两个是接 Anthropic adapter 时暴露出来的真实缺口，第三个是 ADR 0018 的「可识别超长错误」加的：
+只有**显式声明**能改变检查；默认声明是「全都支持/全都报告」。目前有四个出口，前两个是接 Anthropic adapter 时暴露出来的真实缺口，第三个是 ADR 0018 的「可识别超长错误」加的，第四个是 ADR 0007 的「`input` 含不含缓存命中」加的：
 
 ### 出口 1：finish reason（跳过被声明的项）
 
@@ -70,8 +70,6 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 
 **实例**：Anthropic 官方 usage 的完整字段集合是 `input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`、`cache_creation`、`output_tokens_details`、`server_tool_use`、`service_tier`、`inference_geo`（`https://platform.claude.com/docs/en/api/messages`，访问 2026-10-12），**没有** `total_tokens`。所以 Anthropic harness 声明 `UsageField::Total`，adapter 的 `ModelUsage.total` 必须永远为 `None`。
 
-两个出口都有「声明了就生效、没声明就必须满足」的测试，以及「声明了却仍然填值」的变异被抓住（见 `crates/agent-provider-contract/src/lib.rs` 的 `tests` 与 `crates/agent-provider-anthropic/MUTATIONS-ANTHROPIC.md`）。OpenAI adapter 两个出口都**不声明**，它的 12 个契约测试保持全绿。
-
 ### 出口 3：可识别的超长错误（ADR 0018，**反例对所有 provider 都跑**）
 
 `fn context_overflow(&self) -> Option<Wire> { None }`。provider 真实可识别的「输入超出上下文窗口」错误（状态码 + 正文）；`None` 是「这家 provider 没有可识别的超长错误」，不是静默跳过。`check_context_overflow` 分两部分：
@@ -81,9 +79,17 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 
 契约 crate 自己的 `tests` 用一个假 provider 钉住三件事：声明即分类、无声明只跳过正例（反例照跑）、把普通 400 误判成超长会在**没有声明**的 harness 上失败——这条专门防「默认 `None` 就把反例也省了」的变异。两家的 `context_overflow` 都返回真实的 400 形态（OpenAI 的 `context_length_exceeded`；Anthropic 的 `prompt is too long`），对应测试 `contract_11_context_overflow`。
 
+### 出口 4：`input` 是否已含缓存命中（**声明即断言**，ADR 0007）
+
+`fn input_includes_cache(&self) -> bool { false }`——provider 报的输入计数**是否已含**缓存命中：OpenAI 形状（`prompt_tokens` 含 `prompt_tokens_details.cached_tokens`）为 `true`，Anthropic 形状（`input_tokens` 是不含缓存的那部分，与 `cache_read_input_tokens` 并列）为 `false`。`check_input_cache_semantics` 对每一条 adapter 报出来的 usage 断言 `ModelUsage.input_includes_cache == Some(声明值)`。
+
+这条**没有「未设」**：adapter 留下的 `None` 直接失败。不说就是重复计费的来源——同样的两个数，预算侧当成「整次请求有多大」，费用侧当成「未命中缓存的那部分」，缓存命中就被按全价再算一遍（ADR 0007 的 F6 根因）。默认声明是 `false`：第三家若也没有缓存概念，`false` 正是它的真实形状（它数出来的输入全是未命中的），不需要新出口；若它像 OpenAI 一样把命中包在输入里，必须**显式**声明 `true`——默认值故意取 `false`，免得新 harness 意外继承 OpenAI 的形状。`expected_usage` 把声明值放进期望里，所以 `check_usage_shapes` 也顺带钉住它。
+
+**实例**：OpenAI 兼容 harness 声明 `true`（`total_tokens = prompt_tokens + completion_tokens`，`cached_tokens` 是 `prompt_tokens_details` 的明细）；Anthropic harness 声明 `false`。两家各自的 `contract_7c_input_cache_semantics`。
+
 ## Anthropic adapter 已接入
 
-`crates/agent-provider-anthropic`（API key 认证，无 OAuth）的 13 个契约测试全部委托给同一套检查，现已全绿（含 `contract_11_context_overflow`）。线格式依据（官方 URL + 访问日期）、`stop_reason` 取值集合与 usage 字段全集见 `docs/providers/anthropic-wire-notes.md`。
+`crates/agent-provider-anthropic`（API key 认证，无 OAuth）的 14 个契约测试全部委托给同一套检查，现已全绿（含 `contract_11_context_overflow` 与 `contract_7c_input_cache_semantics`）。线格式依据（官方 URL + 访问日期）、`stop_reason` 取值集合与 usage 字段全集见 `docs/providers/anthropic-wire-notes.md`。
 
 ## 接第三家时预计会暴露的地方（2026-10-12 评估，非结论）
 

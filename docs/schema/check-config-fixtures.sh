@@ -35,6 +35,7 @@ EXPECT = {
     "skills-extra-paths.toml": dict(outcome="accept"),
     "skills-builtin.toml": dict(outcome="accept"),
     "sandbox-unix-sockets.toml": dict(outcome="accept"),
+    "integrations-herdr.toml": dict(outcome="accept"),
     "api-key-removed.toml": dict(outcome="reject"),
     "plaintext-secret.toml": dict(outcome="reject"),
     "heuristic-secret.toml": dict(outcome="reject"),

@@ -87,6 +87,21 @@ pub enum AgentEvent {
         tokens_after: u64,
         below_target: bool,
     },
+    /// One **summarization** model call reported its usage (ADR 0018: the real call
+    /// is billed whether the compaction commits or not, and a retry counts too).
+    ///
+    /// Deliberately not [`AgentEvent::ModelResponseReceived`]: that event is a conversation
+    /// response, which a host timestamps and times as this turn's generation. The summarizer's
+    /// call is neither — it runs between turns and its response never reaches the transcript —
+    /// but it does cost money, so its usage must reach a host that shows a session total.
+    /// Emitted once per attempt, **after** the journal record of the same call, so a host that
+    /// sees the event has the durable record too.
+    CompactionUsage {
+        revision: u64,
+        /// The summarizer the call used (ADR 0018's `CompactionModel`).
+        model: String,
+        usage: ModelUsage,
+    },
     /// The compaction failed; the turn ends `failed` without sending the oversized request.
     /// `reason` is the `Display` of the `CompactionError`.
     CompactionFailed {

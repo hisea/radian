@@ -11,6 +11,7 @@ use radian_tui::render;
 use radian_tui::tools::DisplayModes;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Color;
 
 /// One streaming chunk the way the loop does it: the projection accumulates the delta, then the
@@ -251,12 +252,19 @@ fn a_user_file_attachment_is_folded_to_one_line() {
     );
 }
 
+fn candidate(label: &str) -> radian_tui::command::Candidate {
+    radian_tui::command::Candidate {
+        insert: label.into(),
+        description: String::new(),
+    }
+}
+
 /// The `@` completion list is drawn above the input box and is clipped to the terminal width.
 #[test]
 fn the_completion_list_sits_above_the_input_and_truncates() {
     let mut app = App::new("m", "s");
     app.input = "@no".into();
-    app.completion_set(vec!["notes.txt".into(), "notes.md".into()]);
+    app.completion_set(vec![candidate("notes.txt"), candidate("notes.md")]);
     let text = screen(&render(&mut app, 40, 12));
     assert!(text.contains("notes.txt"), "{text}");
     assert!(text.contains("notes.md"), "{text}");
@@ -272,32 +280,53 @@ fn the_completion_list_sits_above_the_input_and_truncates() {
 fn the_completion_list_truncates_on_a_narrow_terminal() {
     let mut app = App::new("m", "s");
     app.input = "@".into();
-    app.completion_set(vec!["a-very-long-candidate-name.txt".into()]);
+    app.completion_set(vec![candidate("a-very-long-candidate-name.txt")]);
     let text = screen(&render(&mut app, 12, 10));
     assert!(
         !text.contains("a-very-long-candidate-name.txt"),
         "the row must be clipped, not wrapped:\n{text}"
     );
-    assert!(text.contains("a-very-long"), "{text}");
+    // The `❯ ` cursor takes two of the twelve columns.
+    assert!(text.contains("a-very-lon"), "{text}");
+    assert!(!text.contains("candidate"), "{text}");
 }
 
-/// `completion_rows` itself truncates, so the rule is testable without a terminal that
-/// clips: a row longer than the width is cut to exactly the width.
+/// The list cuts a row to the width (the cursor is 2 columns), so the rule is testable
+/// without a terminal that clips.
 #[test]
 fn completion_rows_truncates_to_the_width() {
     let mut app = App::new("m", "s");
-    app.completion_set(vec!["a-very-long-name.txt".into()]);
-    assert_eq!(render::completion_rows(&app, 6), vec!["a-very".to_string()]);
+    app.completion_set(vec![candidate("a-very-long-name.txt")]);
+    let rows = render::completion_rows(&app, 6, 10);
+    let text: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(text.starts_with("❯ a-ve"), "{text:?}");
+    assert_eq!(unicode_width::UnicodeWidthStr::width(text.as_str()), 6);
 }
 
+/// ADR 0035: the menu scrolls instead of a `+N more` line, and the window follows
+/// the highlight.
 #[test]
-fn the_completion_list_shows_ten_then_more() {
+fn the_completion_list_scrolls_instead_of_showing_more() {
     let mut app = App::new("m", "s");
-    app.completion_set((0..15).map(|i| format!("file{i:02}.txt")).collect());
+    app.completion_set(
+        (0..15)
+            .map(|i| candidate(&format!("file{i:02}.txt")))
+            .collect(),
+    );
     let text = screen(&render(&mut app, 40, 20));
-    assert!(text.contains("file09.txt"), "{text}");
+    assert!(text.contains("file00.txt"), "{text}");
     assert!(!text.contains("file10.txt"), "{text}");
-    assert!(text.contains("+5 more"), "{text}");
+    assert!(!text.contains("more"), "no +N more line: {text}");
+    // Move the highlight past the window: the list scrolls to keep it visible.
+    for _ in 0..11 {
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let text = screen(&render(&mut app, 40, 20));
+    assert!(
+        text.contains("file11.txt"),
+        "the window follows the highlight: {text}"
+    );
+    assert!(!text.contains("file00.txt"), "{text}");
 }
 
 // ---------- the question form (ADR 0024 Q7) ----------
@@ -307,11 +336,22 @@ fn option(id: &str, label: &str) -> radian_coding::QuestionOption {
         id: id.into(),
         label: label.into(),
         description: None,
+        recommended: false,
     }
 }
 
 fn form(questions: Vec<radian_coding::Question>) -> radian_tui::question::QuestionForm {
     radian_tui::question::QuestionForm::new(7, "session".into(), questions)
+}
+
+fn panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> String {
+    text_of(&render::question_panel(
+        form,
+        width,
+        usize::MAX,
+        &radian_tui::theme::Theme::dark(),
+        radian_tui::footer::Glyphs::Unicode,
+    ))
 }
 
 fn text_of(lines: &[ratatui::text::Line<'static>]) -> String {
@@ -335,30 +375,25 @@ fn a_long_option_list_scrolls_to_keep_the_cursor_visible() {
         .collect();
     let mut form = form(vec![radian_coding::Question {
         id: "q".into(),
+        header: None,
         prompt: "Pick one".into(),
         kind: radian_coding::QuestionKind::Single,
         options,
         allow_other: false,
         required: true,
     }]);
-    // Move the cursor to the last option, with only five visible rows.
+    // The panel lays the whole list out; the frame clips it to the modal height.
     form.answers[0].cursor = 11;
-    let shown = text_of(&render::question_lines(&form, 40, 5));
-    assert!(shown.contains("> ( ) Option 11"), "{shown}");
-    assert!(
-        shown.contains("above"),
-        "the clipped rows are counted: {shown}"
-    );
-    assert!(
-        !shown.contains("Option 0"),
-        "the top scrolled away: {shown}"
-    );
+    let shown = panel_text(&form, 40);
+    assert!(shown.contains("❯ ○ Option 11"), "{shown}");
+    assert!(shown.contains("Option 0"), "{shown}");
 }
 
 /// A narrow box clips its rows instead of wrapping them (ADR 0024 Q7).
 #[test]
 fn a_narrow_question_box_clips_instead_of_wrapping() {
     let form = form(vec![radian_coding::Question {
+        header: None,
         id: "q".into(),
         prompt: "a prompt that is far too long for the box".into(),
         kind: radian_coding::QuestionKind::Single,
@@ -366,7 +401,7 @@ fn a_narrow_question_box_clips_instead_of_wrapping() {
         allow_other: false,
         required: false,
     }]);
-    let shown = text_of(&render::question_lines(&form, 20, 10));
+    let shown = panel_text(&form, 20);
     for line in shown.lines() {
         assert!(
             line.chars().count() <= 20,
@@ -381,6 +416,7 @@ fn a_narrow_question_box_clips_instead_of_wrapping() {
 fn the_overview_lists_each_question_and_its_answer() {
     let mut form = form(vec![
         radian_coding::Question {
+            header: None,
             id: "one".into(),
             prompt: "Pick one".into(),
             kind: radian_coding::QuestionKind::Single,
@@ -389,6 +425,7 @@ fn the_overview_lists_each_question_and_its_answer() {
             required: false,
         },
         radian_coding::Question {
+            header: None,
             id: "two".into(),
             prompt: "Say something".into(),
             kind: radian_coding::QuestionKind::Text,
@@ -399,18 +436,17 @@ fn the_overview_lists_each_question_and_its_answer() {
     ]);
     form.current = None;
     form.answers[0].selected = vec!["a".into()];
-    let shown = text_of(&render::question_lines(&form, 60, 10));
-    assert!(shown.contains("1. Pick one → A"), "{shown}");
-    assert!(
-        shown.contains("2. Say something → (not answered)"),
-        "{shown}"
-    );
+    let shown = panel_text(&form, 60);
+    // The `Submit` tab lists each question by its header and answer.
+    assert!(shown.contains("✓ one — A"), "{shown}");
+    assert!(shown.contains("· two — (not answered)"), "{shown}");
 }
 
 /// The decline confirmation is shown, so the first `Esc` never looks like it did nothing.
 #[test]
 fn the_decline_confirmation_is_shown() {
     let mut form = form(vec![radian_coding::Question {
+        header: None,
         id: "one".into(),
         prompt: "Pick one".into(),
         kind: radian_coding::QuestionKind::Text,
@@ -419,7 +455,7 @@ fn the_decline_confirmation_is_shown() {
         required: false,
     }]);
     form.confirm_decline = true;
-    let shown = text_of(&render::question_lines(&form, 60, 10));
+    let shown = panel_text(&form, 60);
     assert!(shown.contains("press Esc again to decline"), "{shown}");
 }
 
@@ -1044,7 +1080,7 @@ fn the_block_layout_snapshot() {
             meta: Default::default(),
         },
     });
-    app.push_notice("profile: workspace · sandbox seatbelt");
+    app.push_notice("profile: workspace · sandbox macos-seatbelt");
     let history =
         agent_core::compaction::compacted_history("the earlier work, summarized", &[], &[])
             .expect("a valid history");
@@ -1106,7 +1142,7 @@ fn the_block_layout_snapshot() {
         row("f 512 B b.md"),
         bottom.clone(),
         "".to_string(), // the gap
-        "* profile: workspace · sandbox seatbelt".to_string(),
+        "* profile: workspace · sandbox macos-seatbelt".to_string(),
         "".to_string(), // the gap above the rule line
         "── context compacted ──".to_string(),
         "".to_string(), // the gap below it
@@ -1216,7 +1252,8 @@ fn the_list_and_memory_cards_have_their_own_heads() {
             "ask_user",
             serde_json::json!({"questions": [{"id": "q1"}, {"id": "q2"}]}),
             serde_json::json!({"request_id": "r", "answers": []}),
-            "ask_user: 2 questions",
+            // ADR 0024 R1: the call is a boxed block, not the plain head.
+            "Ask 2 questions",
         ),
         (
             "memory_get",
@@ -1917,6 +1954,7 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
             origin: "session".into(),
             request: PendingRequest::Question(radian_coding::QuestionRequest {
                 questions: vec![radian_coding::Question {
+                    header: None,
                     id: "q".into(),
                     prompt: "Pick one".into(),
                     kind: QuestionKind::Single,
@@ -1930,12 +1968,11 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
     ));
     let text = screen(&render(&mut app, 60, 18));
     assert!(
-        text.contains("Tab next"),
-        "the keys must be on screen:\n{text}"
+        text.contains("⏎ select"),
+        "the keys are in the bottom border:\n{text}"
     );
-    assert!(text.contains("Esc decline"), "{text}");
-    // The box is on screen with its scrolled list.
-    assert!(text.contains("question 1/1"), "{text}");
+    assert!(text.contains("esc canc"), "{text}");
+    assert!(text.contains("Ask · session"), "{text}");
 }
 
 /// `wrap_line_count` (the counting-only path, used to measure every entry on the first frame

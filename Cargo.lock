@@ -2270,6 +2270,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2368,6 +2369,7 @@ dependencies = [
 name = "radian-tui"
 version = "0.1.0"
 dependencies = [
+ "agent-cli",
  "agent-core",
  "agent-extensions",
  "agent-provider-anthropic",
