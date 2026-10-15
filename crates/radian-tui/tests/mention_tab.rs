@@ -192,7 +192,8 @@ fn typing_dismisses_the_list() {
     assert!(app.completion().is_none());
 }
 
-/// A key with an action of its own dismisses the stale list too (not just typing).
+/// A key with an action of its own dismisses the stale list too (not just typing). Up and
+/// Down now belong to the menu (see the tests below), so this uses another bound key.
 #[test]
 fn a_bound_key_dismisses_the_list_too() {
     let dir = TempDir::new("bound-key");
@@ -202,10 +203,81 @@ fn a_bound_key_dismisses_the_list_too() {
     tab_complete(&mut app, dir.path());
     tab_complete(&mut app, dir.path());
     assert!(app.completion().is_some());
-    app.on_key(key(KeyCode::Up));
+    app.on_key(key(KeyCode::Home));
     assert!(
         app.completion().is_none(),
         "the list was computed for a word the key may have changed"
+    );
+}
+
+/// The menu opens on its first (best-ranked) row, and Up/Down move the highlight and wrap.
+#[test]
+fn the_menu_opens_on_the_first_row_and_up_down_wrap() {
+    let dir = TempDir::new("menu-wrap");
+    dir.write("notes.txt", "x");
+    dir.write("notes.md", "x");
+    let mut app = app_with(dir.path(), "@no");
+    tab_complete(&mut app, dir.path());
+    tab_complete(&mut app, dir.path());
+    assert_eq!(app.completion_cursor, 0, "the first row is highlighted");
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(app.completion_cursor, 1);
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(app.completion_cursor, 0, "down wraps to the first row");
+    app.on_key(key(KeyCode::Up));
+    assert_eq!(app.completion_cursor, 1, "up wraps to the last row");
+}
+
+/// Enter accepts the highlighted row: it inserts the candidate and never sends the line.
+#[test]
+fn enter_accepts_the_highlighted_candidate_without_sending() {
+    let dir = TempDir::new("menu-enter");
+    dir.write("notes.txt", "x");
+    dir.write("notes.md", "x");
+    let mut app = app_with(dir.path(), "@no");
+    tab_complete(&mut app, dir.path());
+    tab_complete(&mut app, dir.path());
+    // The second row (`notes.txt`) is highlighted.
+    app.on_key(key(KeyCode::Down));
+    let result = app.on_key(key(KeyCode::Enter));
+    assert!(result.effects.is_empty(), "Enter must not send: {result:?}");
+    assert_eq!(app.input, "@notes.txt ");
+    assert!(app.completion().is_none());
+}
+
+/// Tab accepts the highlighted row too (it is not a "recompute" once the menu is up).
+#[test]
+fn tab_accepts_the_highlighted_candidate() {
+    let dir = TempDir::new("menu-tab");
+    dir.write("notes.txt", "x");
+    dir.write("notes.md", "x");
+    let mut app = app_with(dir.path(), "@no");
+    tab_complete(&mut app, dir.path());
+    tab_complete(&mut app, dir.path());
+    app.on_key(key(KeyCode::Down));
+    let result = app.on_key(tab());
+    assert!(result.effects.is_empty(), "{result:?}");
+    assert_eq!(app.input, "@notes.txt ");
+    assert!(app.completion().is_none());
+}
+
+/// Esc closes the menu and keeps the input untouched.
+#[test]
+fn escape_closes_the_menu_and_keeps_the_input() {
+    let dir = TempDir::new("menu-esc");
+    dir.write("notes.txt", "x");
+    dir.write("notes.md", "x");
+    let mut app = app_with(dir.path(), "@no");
+    tab_complete(&mut app, dir.path());
+    tab_complete(&mut app, dir.path());
+    assert!(app.completion().is_some());
+    let result = app.on_key(key(KeyCode::Esc));
+    assert!(result.effects.is_empty(), "{result:?}");
+    assert!(app.completion().is_none());
+    // The second Tab-complete filled the common prefix (`notes.`); Esc keeps it.
+    assert_eq!(
+        app.input, "@notes.",
+        "Esc closes the menu, it does not clear the line"
     );
 }
 

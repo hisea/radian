@@ -462,6 +462,7 @@ fn run(
                 cli.model.clone().unwrap_or_default(),
             ),
             &config.providers,
+            config.tui.theme.clone(),
             cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             // The picker phase has no session and no sandbox yet.
             None,
@@ -555,8 +556,16 @@ fn run(
         }
         None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), None, false),
     };
-    // Kept for the footer's `reasoning` item: `thinking` is moved into the route below.
-    let thinking_for_footer = thinking.clone();
+    // The footer's `reasoning` item shows the level that actually takes effect (ADR 0026
+    // D11): the requested level clamped against this route's map, so a model that does not
+    // support `medium` shows `high` rather than the config value. `thinking` is moved into the
+    // route below.
+    let thinking_for_footer = radian_tui::command::effective_thinking_level(
+        &provider_ref,
+        &model_name,
+        &thinking,
+        cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+    );
     if legacy_thinking {
         eprintln!(
             "radian: [thinking] the legacy `--thinking {}` spelling is deprecated; use one of {}",
@@ -1347,6 +1356,7 @@ fn run(
         },
         (provider_name.clone(), model_name.clone()),
         &config.providers,
+        config.tui.theme.clone(),
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         bash_sandbox,
     );
@@ -1915,6 +1925,11 @@ struct LoopContext<'a> {
     /// The config's `[providers.<name>]` declarations (ADR 0026 D10), for `/model`'s provider
     /// completion.
     config_providers: std::collections::BTreeMap<String, radian_host::ProviderDecl>,
+    /// The applied thinking level (ADR 0026 D11), kept in step with the app, for `/thinking`'s
+    /// current-value marker.
+    current_thinking: String,
+    /// The configured theme name, for `/theme`'s current-value marker.
+    current_theme: Option<String>,
     /// The request's `--max-tokens`: a level whose budget cannot fit is not offered and is
     /// clamped past (review B1).
     thinking_max_tokens: u32,
@@ -2003,6 +2018,11 @@ impl LoopContext<'_> {
                 return true;
             }
         };
+        // The completion menu's current-value markers read these; keep them in step with the
+        // app (the footer's `reasoning` item is the same value).
+        if let Some(level) = app.thinking_level.clone() {
+            self.current_thinking = level;
+        }
         effects.extend(result.effects);
         result.dirty
     }
@@ -2089,6 +2109,9 @@ impl LoopContext<'_> {
                     self.host.theme_write_path.as_deref(),
                     self.host.config_read_only,
                 );
+                if outcome.theme.is_some() {
+                    self.current_theme = Some(name);
+                }
                 self.send(AppInput::ThemeReady {
                     theme: outcome.theme.map(Box::new),
                     notices: outcome.notices,
@@ -2146,28 +2169,55 @@ impl LoopContext<'_> {
                         memory_record_candidates(self.memory, command)
                     }
                     radian_tui::command::Fetch::Themes { .. } => {
+                        // The current theme is marked, so the menu says what a pick changes.
+                        let current = self.current_theme.clone();
                         radian_tui::command::theme_candidates(radian_host::themes_dir().as_deref())
+                            .into_iter()
+                            .map(|mut candidate| {
+                                if Some(&candidate.insert) == current.as_ref() {
+                                    candidate.description =
+                                        format!("● current · {}", candidate.description);
+                                }
+                                candidate
+                            })
+                            .collect()
                     }
                     radian_tui::command::Fetch::ModelRoute { provider, .. } => {
+                        // Mark the route in effect (the slot, or the startup route before it).
+                        let (current_provider, current_model) = self
+                            .session
+                            .model_route()
+                            .unwrap_or_else(|| self.startup_route.clone());
                         model_route_candidates(provider.as_deref(), &self.config_providers)
+                            .into_iter()
+                            .map(|mut candidate| {
+                                let is_current = candidate.insert
+                                    == format!("{current_provider}/{current_model}")
+                                    || candidate.insert == format!("{current_provider}/");
+                                if is_current {
+                                    candidate.description =
+                                        format!("● current · {}", candidate.description);
+                                }
+                                candidate
+                            })
+                            .collect()
                     }
                     radian_tui::command::Fetch::ThinkingLevels { .. } => {
-                        // D11: only the levels the current model supports.
+                        // D11: only the levels the current model supports. Each row names the
+                        // wire value it sends (`enabled:4096` for Anthropic, `high` for
+                        // openai-compatible), and the applied level is marked.
                         let (route_provider, route_model) = self
                             .session
                             .model_route()
                             .unwrap_or_else(|| self.startup_route.clone());
-                        radian_host::supported_thinking_levels_ref_with(
-                            &provider_ref_for(&route_provider, &self.config_providers),
+                        let provider_ref =
+                            provider_ref_for(&route_provider, &self.config_providers);
+                        radian_tui::command::thinking_candidates(
+                            &provider_ref,
                             &route_model,
-                            Some(self.thinking_max_tokens),
+                            self.thinking_max_tokens,
+                            &self.current_thinking,
                         )
-                        .into_iter()
-                        .map(|level| radian_tui::command::Candidate {
-                            insert: level.to_owned(),
-                            description: "thinking level".to_owned(),
-                        })
-                        .collect()
                     }
                     // `/skill:`'s candidates: the discovered skill names, including the ones
                     // with `disable-model-invocation: true` — that flag hides a skill from the
@@ -2557,6 +2607,8 @@ fn ui_loop(
     phase: Phase<'_>,
     startup_route: (String, String),
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
+    // The configured theme name (`tui.theme`), for `/theme`'s current-value marker.
+    current_theme: Option<String>,
     thinking_max_tokens: u32,
     bash_sandbox: Option<radian_sandbox::Sandbox>,
 ) -> Result<Option<i32>, String> {
@@ -2572,6 +2624,8 @@ fn ui_loop(
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
             config_providers: config_providers.clone(),
+            current_thinking: app.thinking_level.clone().unwrap_or_default(),
+            current_theme,
             thinking_max_tokens,
             workspace,
             runtime,
