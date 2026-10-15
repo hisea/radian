@@ -70,10 +70,11 @@ pub fn hostname() -> Option<String> {
 
 pub use catalog::{
     CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, ModelPrice,
-    OUTPUT_RESERVATION_CAP, ProviderInfo, ProviderModels, Window, WindowCheck, WindowQuery,
-    WindowSource, cache_path, fetch_provider_models, host_of, input_budget, output_ceiling_warning,
-    output_reservation, provider_for_host, provider_models_cache, provider_models_stale,
-    read_provider_models, resolve, resolve_offline, write_provider_models,
+    OUTPUT_RESERVATION_CAP, PriceRates, PriceTier, ProviderInfo, ProviderModels, Window,
+    WindowCheck, WindowQuery, WindowSource, cache_path, fetch_provider_models, host_of,
+    input_budget, output_ceiling_warning, output_reservation, provider_for_host,
+    provider_models_cache, provider_models_stale, read_provider_models, resolve, resolve_offline,
+    write_provider_models,
 };
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::theme_write::{ThemeWriteError, write_theme};
@@ -108,8 +109,9 @@ pub use job_notify::{
 pub use mcp::load_mcp_config;
 pub use mermaid::{MermaidCheckSession, MermaidCheckTools, check};
 pub use model::{
-    DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
-    SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
+    COMPACTION_THINKING_CURRENT, DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs,
+    Provider, RouteContext, SwitchableModel, Thinking, build_model, check_provider_flags,
+    compaction_settings_for, compaction_settings_for_route, redact_base_url,
     resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref, route_replays_reasoning,
 };
 pub use opencode_go::{

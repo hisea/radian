@@ -21,7 +21,6 @@ fn ctrl(c: char) -> KeyEvent {
 
 fn modes(reasoning: ReasoningMode) -> DisplayModes {
     DisplayModes {
-        glyphs: radian_tui::footer::Glyphs::Unicode,
         reasoning,
         tools: ToolDisplay {
             fold: ToolFold::Expanded,
@@ -29,6 +28,7 @@ fn modes(reasoning: ReasoningMode) -> DisplayModes {
         },
         mermaid: true,
         highlight: true,
+        glyphs: radian_tui::footer::Glyphs::Unicode,
     }
 }
 
@@ -698,4 +698,33 @@ fn the_sample_markdown_snapshot() {
     assert!(text.contains("| quoted"), "{text}");
     assert!(text.contains("+--"), "the ascii table: {text}");
     assert!(!text.contains('▏'), "{text}");
+}
+
+/// Every glyph tier renders a task item's checkbox prefix exactly (ADR 0035):
+/// `☐`/`☑` for unicode and nerd, `[ ]`/`[x]` for ascii. `nerd` is its own table in
+/// `MdGlyphs::for_glyphs`, so it must be exercised directly — the unicode snapshot does not
+/// cover it.
+#[test]
+fn every_glyph_tier_renders_its_own_task_checkbox_prefix() {
+    for (tier, unchecked, checked) in [
+        ("unicode", "☐ todo", "☑ done"),
+        ("nerd", "☐ todo", "☑ done"),
+        ("ascii", "[ ] todo", "[x] done"),
+    ] {
+        let mut app = App::new("m", "s");
+        app.apply_footer(&radian_host::config::TuiFooterConfig {
+            glyphs: Some(tier.to_string()),
+            ..Default::default()
+        });
+        assistant(&mut app, "- [ ] todo\n- [x] done\n");
+        let text = screen(&render(&mut app, 80, 20));
+        assert!(
+            text.contains(unchecked),
+            "tier {tier}: missing {unchecked:?}:\n{text}"
+        );
+        assert!(
+            text.contains(checked),
+            "tier {tier}: missing {checked:?}:\n{text}"
+        );
+    }
 }

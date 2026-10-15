@@ -1009,6 +1009,22 @@ mutation applied by a patch that asserts its anchor is present, then `cargo test
 
 4/4 caught; no misses. B3's rule was later superseded by ADR 0028 (the merged card,
 `blocks3`), which reuses the same pairing and the same status glyphs.
+
+## Slice: the merged tool card (ADR 0028, `blocks3`)
+
+Base: `1a3b798` · one-shot worktree `/tmp/b3-mut` (created from HEAD, deleted after) · each
+mutation applied by a patch that asserts its anchor is present, then `cargo test -p radian-tui
+--test card`; files restored after each; `git status --short` empty at the end.
+
+| # | Rule mutated | Mutation | Caught by |
+|---|---|---|---|
+| C1 | 1: a call and its result are one card | the pairing marks both entries `Solo` (two cards) | `card.rs::the_ascii_glyph_set_draws_ascii_borders_and_brackets` FAILED |
+| C2 | 6: the meta writes only existing data | `duration_ms.or(Some(0))` invents a duration | `card.rs::other_tools_are_their_head_and_their_output_section` FAILED |
+| C3 | 2: the frame characters are not text | the body row's text gets a leading `│ ` | `card.rs::a_failed_call_labels_its_section_error` FAILED |
+| C4 | 4: a folded hint is not a section | `plan_has_output` returns true for any non-empty plan | `card.rs::a_call_with_no_output_draws_no_output_section` FAILED |
+
+4/4 caught; no misses. C3's assertion is the copy: `a_copy_of_a_card_has_no_border_characters`
+pins the clipboard directly.
 ## footer-s3：opencode-go 用量、deck、逐字段配置（ADR 0027 C3/C4、修订 3，2026-10-16）
 
 Base `6cd0879` · 一次性 worktree `/tmp/radian-mut-f3`（`git worktree add --detach`，独立
@@ -1203,6 +1219,18 @@ Base `2ecb02b` · 一次性 worktree `/tmp/radian-mut-mdb` · 每条跑完 `git 
 | MD-E | `<br>` 不换行 | `html_br_hr_and_blockquote_render` | ✅ |
 
 5/5 抓住。
+## small-fixes-2：footer 状态与 Esc 取消
+
+Base `e157bfb` · 一次性 worktree `.radian-worktrees/sf2-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SF4 | 去掉 `ToolFinished` 清 note 的分支 | `tests/render.rs::the_note_clears_when_the_tools_finish` | ✅ |
+| SF5 | `Action::Escape` 在回合运行时直接返回（不取消） | `pty_escape_cancels_a_running_turn` | ✅ |
+
+SF2（高亮计数改线程局部）与 SF3（build.rs 用运行时 `CARGO_MANIFEST_DIR`）没有常规变异测试：
+SF2 是把测试自身的干扰源去掉，SF3 是编译期路径问题；两者的证据分别是「高亮测试单独跑 5/5」
+与「把 worktree 改名后 build script 仍找得到 `third_party/syntaxes`」。
 ## spinner（运行指示一处定义 + 输入框上沿状态线，ADR 0027/9/10，2026-10-15）
 
 Base `c0ae44c` · 一次性 worktree `/tmp/radian-sp-mut2`，还原后 `git status --short` 为空。

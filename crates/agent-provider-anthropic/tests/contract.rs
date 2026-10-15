@@ -16,7 +16,7 @@ use agent_provider_anthropic::testing::{
     MockServer, Reply, block_stop, error, input_json_delta, message_delta, message_start,
     message_stop, text_delta, text_start, tool_start,
 };
-use agent_provider_anthropic::{Anthropic, AnthropicConfig, ApiKey, CacheMode};
+use agent_provider_anthropic::{Anthropic, AnthropicConfig, ApiKey, CacheMode, ThinkingConfig};
 use agent_provider_contract::{FnCall, Reason, UsageField, Wire};
 use serde_json::{Map, Value, json};
 
@@ -456,4 +456,43 @@ async fn contract_12b_an_empty_text_part_is_dropped_and_the_attachment_remains()
         .expect("the user content is a block array on this wire");
     assert_eq!(blocks.len(), 1, "the empty part is dropped: {blocks:?}");
     assert_eq!(blocks[0], json!({"type": "text", "text": "alpha\nbeta"}));
+}
+
+/// ADR 0018, decision 1: the request's `settings` win over the adapter config, so
+/// the summary call can run at its own (lower) reasoning level. The adapter passes through the
+/// object it is given verbatim and invents nothing.
+#[tokio::test]
+async fn contract_13_the_request_thinking_wins_over_the_config() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        message_start(None),
+        text_start(0),
+        text_delta(0, "ok"),
+        block_stop(0),
+        message_delta("end_turn", None),
+        message_stop(),
+    ])])
+    .await;
+    let base = server.base_url.clone();
+    let model = Anthropic::new(
+        AnthropicConfig::new(base, "contract-model")
+            .with_api_key(ApiKey::new(SECRET))
+            .with_thinking(ThinkingConfig::Adaptive),
+    )
+    .expect("a local mock config is valid");
+    let request = ModelRequest {
+        system_prompt: None,
+        messages: vec![Message::user("hi")],
+        tools: Vec::new(),
+        settings: json!({"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+    };
+    model
+        .complete(request, agent_provider_contract::context(&NoopSink))
+        .await
+        .unwrap();
+    let body = server.requests()[0].json();
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 2048}),
+        "the request setting must win over the configured `adaptive`"
+    );
 }

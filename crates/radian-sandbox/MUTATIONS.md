@@ -119,3 +119,34 @@ Base: `2d7cb90` · 一次性检出 `/tmp/radian-us-mut`（detached，跑完删�
 修法是 `is_skipped_dir` 命中的目录只收集它**自己根下**的 `.git`（复用 `add_git_entry`，不往下钻），
 子树仍然不搜（`a_repository_inside_a_skipped_directory_is_not_collected` 与
 `the_walk_never_enters_a_cache_tagged_directory` 继续钉住）。
+
+## ADR 0038 切片①：`git_access` 与 `.git` 只留执行入口只读（macOS，2026-10-15）
+
+工作区 `<home>/Code/radian/.radian-worktrees/git-writable`，分支 `oc/git-writable`。每个变异
+只改 `crates/radian-sandbox/src/seatbelt.rs`，跑完从副本还原并逐字节比较确认一致（脚本与日志在
+`.radian/progress/logs/mutations-round2.txt`）。跑 `cargo test -p radian-sandbox --no-fail-fast
+--test git_writable`（macOS-only 行为测试，每条命令带 `FullAccess` 对照）；GW-5 额外跑
+`--test escape_macos`。GW-6..8 是评审回合（发现下述真实漏洞后）补的。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| GW-1 | 去掉 `hooks/` 的 deny（`(subpath <git>/hooks)` 那一段） | `git_writable::writable_except_exec_allows_git_and_denies_the_exec_entries` 的 `repo_hook_new_file`/`repo_hook_overwrite`/`submodule_hook`/`worktree_shared_hook` | ✅ 1 test FAILED |
+| GW-2 | 去掉 `config` 的 deny | 同上，`repo_config`/`submodule_config`/`worktree_shared_config` | ✅ |
+| GW-3 | 去掉 `config.worktree` 的 deny | 同上，`repo_config_worktree_new`（per-worktree 那条仍被 `worktrees/*/config.worktree` 的 regex 护住） | ✅ |
+| GW-4 | 忽略 `git_access`：`WritableExceptExec` 也走整块 `ReadOnly` deny（宿主忘了接线的形态） | 同上，`git_add`/`git_commit`/`git_checkout_branch`/`git_stash`/`git_branch_delete` 这些 must_succeed 用例 | ✅ |
+| GW-5 | `ReadOnly` 臂改成不产生任何 deny（整块 `.git` 变可写） | `git_writable::readonly_keeps_the_whole_git_read_only`；另跑 `escape_macos` 的 `git_readonly` 组 | ✅ 两个测试二进制各 FAILED |
+| GW-6 | 非目录条目回退成"不加任何规则"（即评审发现的漏洞：worktree 的 `.git` 指针文件变可写） | `git_writable::writable_except_exec_protects_worktree_links_and_nested_submodules` 的 `worktree_pointer_file` | ✅ |
+| GW-7 | 去掉 `worktrees/<name>/{gitdir,commondir,config.worktree}` 的 deny | 同上，`worktree_gitdir`/`worktree_commondir`（per-worktree 的 `config.worktree` 仍被 `git_exec_denies` 对该 gitdir 的 literal 护住） | ✅ |
+| GW-8 | 子模块 regex 退回一层（`(/modules/[^/]+)+` → `/modules/[^/]+`） | 同上，`nested_submodule_config`/`nested_submodule_hook`（那个两级 gitdir 没有工作树、不被发现，只有这条多级 regex 护得住） | ✅ |
+
+8/8 抓住。GW-4 是"策略参数被忽略"的形态：`.git` 退回整块只读，原生 `git commit` 失败，must_succeed
+用例抓住。GW-5 同时被新行为测试与共享逃逸矩阵的 `git_readonly` 组抓住——后者证明任务 agent 的整块
+只读规则没有被放松。
+
+**GW-6 是一个真实的安全漏洞（评审回合发现，已修）**：最初 `git_exec_denies` 对**非目录**（worktree 的
+`.git` 指针文件）直接 `return`，于是那类是**整块可写**的——模型可以把它改指向自己握有 hook 的 gitdir，
+用户在沙箱外下次跑 git 就执行。修法：非目录条目保留**整块** `deny file-write*`，和 `ReadOnly` 一样。
+GW-6 证明新测试抓住这个回归。**GW-8 的测试要小心**：若嵌套子模块的工作树还在工作区里，发现会把它
+的 gitdir 加进只读清单，`literal .../config` 就替 regex 挡住写——测试会**空过**。所以测试里的两级子模块
+故意**没有工作树**（`nest/.git/modules/a/modules/b` 在，`nest/a`、`nest/a/b` 已删），只有多级 regex
+护得住；否则 GW-8 抓不住（本次第一版测试就是这样空过的）。

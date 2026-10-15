@@ -755,6 +755,11 @@ struct Setup {
     window: radian_host::Window,
     /// Whether the core compacts a request over `B` before sending it (ADR 0018).
     auto_compact: bool,
+    /// The request-level settings the summary call carries (ADR 0018, decision 1),
+    /// converted from `[compaction] thinking` to the route's wire value.
+    compaction_settings: serde_json::Value,
+    /// Recomputes the summary call's settings for a switched route (ADR 0018).
+    compaction_settings_for: radian_runtime::CompactionSettingsFor,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
     session_id: String,
     /// The validated, canonical workspace (dogfooding D1). Resolved in `setup`, before any
@@ -991,6 +996,38 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         route.adapter(),
         Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
+    // ADR 0018, decision 1: the summary call's reasoning level, converted to this
+    // route's wire value with the same map `/thinking` uses. `low` by default; `"current"`
+    // keeps the conversation's level (carries no setting). A clamped level is said once.
+    let compaction_settings = {
+        let level = config.compaction.thinking.as_deref().unwrap_or("low");
+        let (settings, notice) = radian_host::compaction_settings_for(
+            &provider_ref,
+            &model_name,
+            level,
+            cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        );
+        if let Some(notice) = notice {
+            eprintln!("[compaction] {notice}");
+        }
+        settings
+    };
+    // ADR 0018: the same level, converted per route, so a `/model` switch never
+    // leaves the summary carrying the previous route's wire form.
+    let compaction_settings_for = {
+        let providers = config.providers.clone();
+        let level = config
+            .compaction
+            .thinking
+            .clone()
+            .unwrap_or_else(|| "low".to_owned());
+        let max_tokens = cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        std::sync::Arc::new(move |provider: &str, model: &str| {
+            radian_host::compaction_settings_for_route(
+                &providers, provider, model, &level, max_tokens,
+            )
+        }) as radian_runtime::CompactionSettingsFor
+    };
     // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
@@ -1135,6 +1172,8 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         window,
         // `--no-auto-compact` wins; otherwise the config may turn it off.
         auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
+        compaction_settings,
+        compaction_settings_for,
         session_id,
         workspace,
         secrets,
@@ -1554,6 +1593,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
             auto_compact: setup.auto_compact,
+            compaction_settings: setup.compaction_settings,
+            compaction_settings_for: Some(setup.compaction_settings_for),
             sandbox,
             tier: profile_arg.preset(),
             profile: permission_profile,

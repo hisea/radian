@@ -41,6 +41,15 @@ pub struct AgentConfig {
     /// Defaults to `true`; a host turns it off with `--no-auto-compact`. With no
     /// `context_budget` there is no `B`, so nothing triggers either way.
     pub auto_compact: bool,
+    /// The request-level settings only the **compaction** calls carry (ADR 0018,
+    /// decision 1). A host converts its `[compaction] thinking` level into the provider's wire
+    /// value — `{"reasoning_effort":"low"}` for an OpenAI-compatible route, `{"thinking":
+    /// {"type":"enabled","budget_tokens":2048}}` for Anthropic — and puts it here; the core
+    /// knows no level names. The value is copied verbatim into the summary request and the
+    /// shorten-retry request's `settings` and is **never** added to a conversation request, so
+    /// the summarizer can run at a lower reasoning level than the conversation. `Null` (the
+    /// default) sends no setting, which is the behavior before this field existed.
+    pub compaction_settings: Value,
 }
 
 impl Default for AgentConfig {
@@ -51,6 +60,7 @@ impl Default for AgentConfig {
             model_settings: Value::Null,
             context_budget: None,
             auto_compact: true,
+            compaction_settings: Value::Null,
         }
     }
 }
