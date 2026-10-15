@@ -364,9 +364,19 @@ async fn a_child_failure_leaves_the_parent_untouched() {
         before,
         "the parent changed"
     );
-    // The half-written child is a readable (incomplete) session, not a reader crash.
-    let opened = Session::open(&child_path).unwrap();
-    assert!(opened.history().unwrap().len() < 4);
+    // ADR 0022 §4 (review fix): the failed child is not left behind at all — no half-written
+    // session, and no temp file.
+    assert!(
+        !child_path.exists(),
+        "a half-written child must not exist"
+    );
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "no temp file left: {leftovers:?}");
 }
 
 #[tokio::test]
