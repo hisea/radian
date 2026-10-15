@@ -233,6 +233,26 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
     assert!(!text.contains('◜'), "{text}");
 }
 
+/// ADR 0018 + ADR 0027: a running compaction shows `Compacting` on the input rule
+/// (the `CompactionStarted`/`CompactionFinished` events exist, so this is not invented).
+#[test]
+fn the_input_rule_shows_compacting() {
+    let mut app = App::new("m", "s");
+    app.spinner_kind = radian_tui::spinner::Kind::Arc;
+    app.set_now(app.spinner_origin);
+    app.projection.set_turn(radian_tui::TurnState::Running);
+    app.compacting = true;
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(text.contains("◜  Compacting"), "{text}");
+
+    // The flag clears when the compaction ends.
+    app.compacting = false;
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(!text.contains("Compacting"), "{text}");
+}
+
 /// ADR 0027: the `box` style puts the same status on the border's top edge.
 #[test]
 fn the_box_style_shows_the_spinner_on_the_border() {

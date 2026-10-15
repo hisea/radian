@@ -1156,6 +1156,10 @@ pub struct App {
     pub projection: Arc<SessionProjection>,
     pub quit: bool,
     pub note: Option<String>,
+    /// A compaction is running (ADR 0018): the input rule's status line shows `Compacting`
+    /// (ADR 0027). Set on `CompactionStarted`, cleared when it finishes, fails or
+    /// is skipped.
+    pub compacting: bool,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
     /// The startup screen: the leading block of entries (wordmark,
@@ -1300,6 +1304,7 @@ impl App {
             projection: Arc::new(SessionProjection::new()),
             quit: false,
             note: None,
+            compacting: false,
             pending: 0,
             startup_screen: None,
             startup_len: 0,
@@ -3937,6 +3942,7 @@ impl App {
             // ADR 0018: compaction is visible to the user as it happens.
             AgentEvent::CompactionStarted { tokens_before, .. } => {
                 self.note = Some("compacting context".to_string());
+                self.compacting = true;
                 self.entries.push(Entry::new(
                     EntryKind::Notice,
                     format!("context over the budget ({tokens_before} tokens); compacting…"),
@@ -3949,6 +3955,7 @@ impl App {
                 ..
             } => {
                 self.note = None;
+                self.compacting = false;
                 self.entries.push(Entry::new(
                     EntryKind::Notice,
                     format!("context compacted ({tokens_before} → {tokens_after} tokens)"),
@@ -3959,10 +3966,15 @@ impl App {
             }
             AgentEvent::CompactionFailed { reason } => {
                 self.note = None;
+                self.compacting = false;
                 self.entries.push(Entry::new(
                     EntryKind::Notice,
                     format!("compaction failed: {reason}"),
                 ));
+            }
+            // A skip means nothing was summarized (ADR 0018): the flag must not stick.
+            AgentEvent::CompactionSkipped { .. } => {
+                self.compacting = false;
             }
             AgentEvent::RunFinished { status: _ } => {
                 // The turn is over. A pending approval is not cleared here: the permission
@@ -3971,6 +3983,7 @@ impl App {
                 // from the queue alone is what makes "the waiter gave up" and "the turn ended"
                 // the same event.
                 self.note = None;
+                self.compacting = false;
                 // ADR 0033: a `!` submitted behind the turn starts now.
                 if let Some((command, exclude_from_context)) = self.queued_bash.take() {
                     effects.extend(self.begin_bash(command, exclude_from_context).effects);
@@ -4272,6 +4285,10 @@ impl App {
         if matches!(self.top_modal(), Some(Modal::Question(_))) {
             return Some("Waiting for your answer");
         }
+        // A running compaction is the most specific state (ADR 0018).
+        if self.compacting {
+            return Some("Compacting");
+        }
         if self.turn() == TurnState::Running {
             return Some("Working");
         }
@@ -4416,6 +4433,52 @@ mod tests {
         assert!(!app.spinner_frame().dim);
         app.set_now(base + std::time::Duration::from_millis(500));
         assert!(app.spinner_frame().dim);
+    }
+
+    /// ADR 0018 + ADR 0027: the compaction events drive the `Compacting` status.
+    #[test]
+    fn the_compacting_status_follows_the_compaction_events() {
+        let mut app = App::new("m", "s");
+        app.projection.set_turn(TurnState::Running);
+        assert_eq!(app.spinner_status(), Some("Working"));
+
+        app.apply_event(&AgentEvent::CompactionStarted {
+            revision: 1,
+            tokens_before: 100,
+            keep_target: 50,
+            trigger: agent_core::CompactionTrigger::Budget,
+        });
+        assert_eq!(app.spinner_status(), Some("Compacting"));
+
+        app.apply_event(&AgentEvent::CompactionFinished {
+            revision: 1,
+            tokens_before: 100,
+            tokens_after: 40,
+            below_target: false,
+        });
+        assert_eq!(app.spinner_status(), Some("Working"));
+
+        // A failed or skipped compaction clears it too.
+        app.apply_event(&AgentEvent::CompactionStarted {
+            revision: 2,
+            tokens_before: 100,
+            keep_target: 50,
+            trigger: agent_core::CompactionTrigger::Manual,
+        });
+        app.apply_event(&AgentEvent::CompactionFailed {
+            reason: "boom".to_string(),
+        });
+        assert_eq!(app.spinner_status(), Some("Working"));
+        app.apply_event(&AgentEvent::CompactionStarted {
+            revision: 3,
+            tokens_before: 100,
+            keep_target: 50,
+            trigger: agent_core::CompactionTrigger::Manual,
+        });
+        app.apply_event(&AgentEvent::CompactionSkipped {
+            reason: "already fits".to_string(),
+        });
+        assert_eq!(app.spinner_status(), Some("Working"));
     }
 
     fn a_run(exit_code: Option<i32>, stdout: &str) -> radian_coding::UserBash {
