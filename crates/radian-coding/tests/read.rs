@@ -8,8 +8,38 @@ use common::{TempDir, call, structured, text, tools};
 use radian_coding::CodingTools;
 use serde_json::json;
 
+/// Strips the `N: ` line-number prefix `read` adds, so a test can compare the body with the
+/// file. A line with no numeric prefix is the continuation hint and is dropped.
+fn unbuffer(content: &str) -> String {
+    let mut out = String::new();
+    for segment in content.split_inclusive('\n') {
+        let (line, newline) = match segment.strip_suffix('\n') {
+            Some(line) => (line, true),
+            None => (segment, false),
+        };
+        let Some(body) = strip_number(line) else {
+            continue; // the hint line: not file content
+        };
+        out.push_str(body);
+        if newline {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// `Some(body)` for a `N: body` line, `None` when the line has no numeric prefix.
+fn strip_number(line: &str) -> Option<&str> {
+    let (digits, rest) = line.split_once(": ")?;
+    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
 /// Reads the whole file by following `next_offset`, returning exactly the bytes each call
-/// returned (`bytes_read` bytes of the content, before the human-readable continuation hint).
+/// returned (the `N: ` prefixes stripped, before the human-readable continuation hint).
 async fn read_whole(tools: &CodingTools, path: &str, max_bytes: u64) -> Vec<u8> {
     let mut out = Vec::new();
     let mut offset = 1i64;
@@ -22,9 +52,7 @@ async fn read_whole(tools: &CodingTools, path: &str, max_bytes: u64) -> Vec<u8> 
         .await
         .unwrap();
         let info = structured(&output);
-        let content = text(&output);
-        let bytes_read = info["bytes_read"].as_u64().unwrap() as usize;
-        out.extend_from_slice(&content.as_bytes()[..bytes_read]);
+        out.extend_from_slice(unbuffer(&text(&output)).as_bytes());
         match info.get("next_offset").and_then(|value| value.as_i64()) {
             Some(next) => offset = next,
             None => break,
@@ -32,6 +60,42 @@ async fn read_whole(tools: &CodingTools, path: &str, max_bytes: u64) -> Vec<u8> 
         assert!(out.len() < 1_000_000, "the read loop did not terminate");
     }
     out
+}
+
+/// Every returned line carries its **file** line number as `N: `, so a read starting at
+/// `offset` numbers the first line `offset` (not `1`). The continuation hint is not a file
+/// line and carries no prefix, and `bytes_read` counts the file bytes, not the prefixes.
+#[tokio::test]
+async fn read_prefixes_each_line_with_its_file_line_number() {
+    let dir = TempDir::new("read-numbers");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    std::fs::write(root.join("f.txt"), "alpha\nbeta\ngamma\ndelta\n").unwrap();
+
+    // From the start: lines 1..3, and the budget cut names line 4.
+    let output = call(&tools, "read", json!({"path": "f.txt", "max_bytes": 12}))
+        .await
+        .unwrap();
+    assert_eq!(
+        text(&output),
+        "1: alpha\n2: beta\n[truncated: continue with offset=3]"
+    );
+    // bytes_read is the file bytes ("alpha\nbeta\n" = 11), not the 14 output bytes.
+    assert_eq!(structured(&output)["bytes_read"], 11);
+
+    // A middle read numbers by the file line, and the hint keeps no number.
+    let middle = call(
+        &tools,
+        "read",
+        json!({"path": "f.txt", "offset": 3, "limit": 1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        text(&middle),
+        "3: gamma\n[truncated: continue with offset=4]"
+    );
 }
 
 #[tokio::test]
@@ -45,7 +109,7 @@ async fn read_starts_at_a_middle_line() {
     let output = call(&tools, "read", json!({"path": "f.txt", "offset": 2}))
         .await
         .unwrap();
-    assert_eq!(text(&output), "two\nthree\nfour\n");
+    assert_eq!(text(&output), "2: two\n3: three\n4: four\n");
     let info = structured(&output);
     assert_eq!(info["start_line"], 2);
     assert_eq!(info["end_line"], 4);
@@ -68,7 +132,10 @@ async fn read_limit_stops_after_n_lines() {
     )
     .await
     .unwrap();
-    assert_eq!(text(&output), "b\nc\n[truncated: continue with offset=4]");
+    assert_eq!(
+        text(&output),
+        "2: b\n3: c\n[truncated: continue with offset=4]"
+    );
     let info = structured(&output);
     assert_eq!(info["start_line"], 2);
     assert_eq!(info["end_line"], 3);
@@ -91,7 +158,7 @@ async fn a_budget_cut_mid_line_resumes_at_that_line() {
         .await
         .unwrap();
     let info = structured(&output);
-    assert_eq!(text(&output), "aaa\n[truncated: continue with offset=2]");
+    assert_eq!(text(&output), "1: aaa\n[truncated: continue with offset=2]");
     assert_eq!(info["bytes_read"], 4);
     assert_eq!(info["start_line"], 1);
     assert_eq!(info["end_line"], 1);
@@ -149,7 +216,7 @@ async fn an_overlong_first_line_is_returned_as_a_marked_prefix() {
     .unwrap();
     let info = structured(&output);
     let content = text(&output);
-    assert!(content.starts_with("0123"), "{content}");
+    assert!(content.starts_with("2: 0123"), "{content}");
     assert!(
         content.contains("[line 2 truncated at max_bytes; continue with offset=3]"),
         "{content}"
@@ -164,7 +231,7 @@ async fn an_overlong_first_line_is_returned_as_a_marked_prefix() {
     let rest = call(&tools, "read", json!({"path": "f.txt", "offset": 3}))
         .await
         .unwrap();
-    assert_eq!(text(&rest), "b\n");
+    assert_eq!(text(&rest), "3: b\n");
     assert_eq!(structured(&rest)["line_truncated"], false);
 }
 
@@ -231,7 +298,7 @@ async fn a_multibyte_character_on_the_budget_edge_is_not_split() {
         .unwrap();
     let info = structured(&output);
     let content = text(&output);
-    assert!(content.starts_with('é'), "{content}");
+    assert!(content.starts_with("1: é"), "{content}");
     assert!(
         content.contains("[line 1 truncated at max_bytes; continue with offset=2]"),
         "{content}"
@@ -269,7 +336,7 @@ async fn a_budget_ending_exactly_on_a_character_keeps_it() {
     let output = call(&tools, "read", json!({"path": "f.txt", "max_bytes": 3}))
         .await
         .unwrap();
-    assert_eq!(text(&output), "é\n[truncated: continue with offset=2]");
+    assert_eq!(text(&output), "1: é\n[truncated: continue with offset=2]");
     assert_eq!(structured(&output)["end_line"], 1);
 }
 

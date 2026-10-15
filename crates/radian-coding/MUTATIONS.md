@@ -240,3 +240,13 @@ Base `236f4c3`（实现 `385d21d` + 接线 `18aeff7` + 测试 `236f4c3`）· 就
 这里记的是 per-file 那条。G13 用 `if false` 而不是删掉整个 `sniff` 块：删块会让 `sniff`/`filled`
 变成未使用（只是警告），而 `if false` 让分支在编译期仍然存在、行为上关闭探测，语义更接近"关掉这个
 判断"。
+
+## tool-details：read 行号前缀（2026-10-15，backlog P5）
+
+Base `ea8d251` · 就地变异（改源码），每个变异前把文件复制到工作树外的 scratchpad，跑完从副本
+还原并逐字节比较，结束时 `git status --short` 只剩本片自己的改动。每个变异用
+`cargo test -p radian-coding --test read --no-fail-fast -- <test>`（会重新编译）。
+
+| # | 变异（行为） | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| L1 | `number_lines` 的行号从 `start_line + index` 变成 `start_line + index + 1`（编号整体加一，中段 offset 不再对应用户给的行） | `read::read_prefixes_each_line_with_its_file_line_number`（中段读期望 `3: gamma`，变异给出 `4: gamma`） | ✅ |

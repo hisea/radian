@@ -21,14 +21,18 @@ struct ReadArgs {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "read".into(),
-        description: "Read a UTF-8 text file from the workspace. For a large file, read it in \
-                      sections with offset (the 1-based first line) and limit (how many lines): \
-                      do NOT raise max_bytes to reach a later part, that rereads the prefix \
-                      every time. max_bytes (default 65536, hard cap 1048576) bounds the bytes \
-                      returned. A byte budget that runs out mid-line drops the incomplete line \
-                      and the result names the line range and the next_offset to pass; the only \
-                      exception is a first line longer than the whole budget, which is returned \
-                      as a prefix with line_truncated. Binary (non-UTF-8) content is refused."
+        description: "Read a UTF-8 text file from the workspace. Every returned line is \
+                      prefixed with its file line number as `N: `. That prefix is NOT part of \
+                      the file: remove it before using the text anywhere else, in particular \
+                      before passing it as the `old` text of `patch`. For a large file, read it \
+                      in sections with offset (the 1-based first line) and limit (how many \
+                      lines): do NOT raise max_bytes to reach a later part, that rereads the \
+                      prefix every time. max_bytes (default 65536, hard cap 1048576) bounds the \
+                      file bytes read. A byte budget that runs out mid-line drops the incomplete \
+                      line and the result names the line range and the next_offset to pass; the \
+                      only exception is a first line longer than the whole budget, which is \
+                      returned as a prefix with line_truncated. Binary (non-UTF-8) content is \
+                      refused."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -250,7 +254,15 @@ fn read_stream<R: BufRead>(
         }
     };
     let truncated = next_offset.is_some();
-    let mut content = text;
+    // Number the file lines for the model: `N: ` before each. The prefix is not file content.
+    // The body is numbered *before* the continuation hint is appended, so the hint carries no
+    // prefix. An empty body with `next_offset` set is the truncated-first-line case where the
+    // budget could not hold even one character; the number still names that line.
+    let mut content = if text.is_empty() && line_truncated {
+        format!("{start_line}: ")
+    } else {
+        number_lines(&text, start_line)
+    };
     if let Some(next) = next_offset {
         // The adapters never send `structured` to the model, so the continuation hint must be
         // in the body. A truncated first line is named as such (its prefix is a partial line,
@@ -275,6 +287,19 @@ fn read_stream<R: BufRead>(
         line_truncated,
         next_offset,
     })
+}
+
+/// Prefixes each line of `text` with its file line number as `N: `. `split_inclusive` keeps
+/// the exact bytes, including each line's trailing newline and the absence of one on the last
+/// line, so the only change is the prefix.
+fn number_lines(text: &str, start_line: i64) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 8 + 8);
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        out.push_str(&(start_line + index as i64).to_string());
+        out.push_str(": ");
+        out.push_str(line);
+    }
+    out
 }
 
 /// What [`read_line_capped`] did.
@@ -460,7 +485,7 @@ mod tests {
         let outcome = read_stream(&mut reader, "long.txt", bytes.len() as u64, 4, 1, None)
             .expect("a budget cut is not an error");
         assert!(
-            outcome.content.starts_with("ab"),
+            outcome.content.starts_with("1: ab"),
             "only complete characters survive: {}",
             outcome.content
         );
@@ -491,7 +516,7 @@ mod tests {
         let outcome = read_stream(&mut reader, "late-bad.bin", bytes.len() as u64, 8, 1, None)
             .expect("the invalid byte was never read");
         assert!(
-            outcome.content.starts_with("aaaaaaaa"),
+            outcome.content.starts_with("1: aaaaaaaa"),
             "content: {}",
             outcome.content
         );
