@@ -129,12 +129,28 @@ impl Protocol {
 /// (ADR 0026 D10). The TUI wizard and `radian login` share it so they cannot drift.
 pub const CUSTOM_LOGIN: &str = "custom";
 
-/// The `/login` provider-choice candidates: the built-in descriptors, then [`CUSTOM_LOGIN`].
+/// The `/login` choice for the ChatGPT-subscription device-code flow (ADR 0026
+/// decision 3). The browser flow's id is [`crate::oauth_chatgpt::PROVIDER_ID`] (`"chatgpt"`)
+/// — both store into the same `auth.json` entry, so there is no separate constant for it.
+pub const CHATGPT_DEVICE_LOGIN: &str = "chatgpt-device";
+
+/// The `/login` provider-choice candidates: the built-in descriptors, the two ChatGPT OAuth
+/// choices (ADR 0026), then [`CUSTOM_LOGIN`]. The TUI wizard's own `choices()`
+/// mirrors this list (same ids, same order) so the picker and `radian login`'s numbered list
+/// never drift.
 pub fn login_choices() -> Vec<(String, String)> {
     let mut choices: Vec<(String, String)> = descriptors()
         .iter()
         .map(|d| (d.id.to_owned(), d.display_name.to_owned()))
         .collect();
+    choices.push((
+        crate::oauth_chatgpt::PROVIDER_ID.to_owned(),
+        "Sign in with ChatGPT (opens your browser)".to_owned(),
+    ));
+    choices.push((
+        CHATGPT_DEVICE_LOGIN.to_owned(),
+        "ChatGPT (device code; no browser needed on this machine)".to_owned(),
+    ));
     choices.push((
         CUSTOM_LOGIN.to_owned(),
         "a custom endpoint: name, protocol, base URL and key (ADR 0026 D10)".to_owned(),

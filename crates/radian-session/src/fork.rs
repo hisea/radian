@@ -210,6 +210,11 @@ async fn write_child_and_record(
             });
         }
     };
+    // Only the `testing` fault-injection seam reads this count; a production build never
+    // increments it, so it must not exist there either (otherwise it is dead: clippy's
+    // `explicit_counter_loop`/`unused_assignments`, caught chasing an unrelated `-D warnings`
+    // failure while on ADR 0026 slice ①).
+    #[cfg(feature = "testing")]
     let mut appended = 0usize;
     for (index, message) in point.history.iter().cloned().enumerate() {
         #[cfg(feature = "testing")]
@@ -228,7 +233,10 @@ async fn write_child_and_record(
             drop(child);
             return Err(child_failure(request, &temp_path, error));
         }
-        appended += 1;
+        #[cfg(feature = "testing")]
+        {
+            appended += 1;
+        }
     }
     // A failure between the last append and the rename is possible too.
     #[cfg(feature = "testing")]

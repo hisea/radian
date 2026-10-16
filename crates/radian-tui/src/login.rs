@@ -44,6 +44,20 @@ pub enum LoginStep {
     Verifying,
     /// The verification failed; `y` saves anyway, `n`/`Esc` cancels.
     VerifyFailed { reason: String },
+    /// Sign in with ChatGPT (ADR 0026): the loop has bound the loopback listener
+    /// and is waiting for the browser redirect. `url` is `None` for the brief moment before
+    /// the loop's effect reports it back (`Input::LoginOAuthUrlReady`) — shown once known so
+    /// a remote/headless session (or a browser the host failed to open) has something to
+    /// copy. `Esc` cancels the wizard; the background exchange, already running, finishes
+    /// unobserved either way (the same "a late answer is dropped" rule `Verifying` follows).
+    OAuthBrowserWaiting { url: Option<String> },
+    /// Sign in with ChatGPT, device-code flow: the code to enter at `verification_url`, shown
+    /// once the loop's effect starts polling (`Input::LoginOAuthDeviceReady`). Empty strings
+    /// until then.
+    OAuthDeviceWaiting {
+        user_code: String,
+        verification_url: String,
+    },
 }
 
 /// The two protocol choices, in display order.
@@ -105,12 +119,24 @@ impl LoginWizard {
         wizard
     }
 
-    /// The provider picker's candidates: the built-in descriptors, then `custom`.
+    /// The provider picker's candidates: the built-in descriptors, the two ChatGPT OAuth
+    /// choices (ADR 0026), then `custom`. Kept byte-identical to
+    /// `radian_host::login_choices()` (same ids, same order, same text) — a pre-existing
+    /// duplication (`radian login`'s numbered list builds the same list independently) this
+    /// change does not introduce.
     pub fn choices() -> Vec<(String, String)> {
         let mut choices: Vec<(String, String)> = radian_host::descriptors()
             .iter()
             .map(|d| (d.id.to_owned(), d.display_name.to_owned()))
             .collect();
+        choices.push((
+            radian_host::CHATGPT_PROVIDER_ID.to_owned(),
+            "Sign in with ChatGPT (opens your browser)".to_owned(),
+        ));
+        choices.push((
+            radian_host::CHATGPT_DEVICE_LOGIN.to_owned(),
+            "ChatGPT (device code; no browser needed on this machine)".to_owned(),
+        ));
         choices.push((
             CUSTOM.to_owned(),
             "a custom endpoint: name, protocol, base URL and key (ADR 0026 D10)".to_owned(),
@@ -176,6 +202,15 @@ impl LoginWizard {
                     };
                     if insert == CUSTOM {
                         self.step = LoginStep::CustomName;
+                    } else if insert == radian_host::CHATGPT_PROVIDER_ID {
+                        self.step = LoginStep::OAuthBrowserWaiting { url: None };
+                        return LoginOutcome::BeginOAuthBrowser;
+                    } else if insert == radian_host::CHATGPT_DEVICE_LOGIN {
+                        self.step = LoginStep::OAuthDeviceWaiting {
+                            user_code: String::new(),
+                            verification_url: String::new(),
+                        };
+                        return LoginOutcome::BeginOAuthDevice;
                     } else {
                         // The choice is a descriptor id, so this always resolves.
                         self.built_in = radian_host::descriptor(insert).map(|d| d.id);
@@ -265,6 +300,8 @@ impl LoginWizard {
                 _ => {}
             },
             LoginStep::Verifying => {} // only Esc (handled above)
+            LoginStep::OAuthBrowserWaiting { .. } => {} // only Esc (handled above)
+            LoginStep::OAuthDeviceWaiting { .. } => {} // only Esc (handled above)
             LoginStep::VerifyFailed { .. } => match key {
                 LoginKey::Char('y') | LoginKey::Char('Y') => {
                     return LoginOutcome::Save {
@@ -316,6 +353,28 @@ impl LoginWizard {
     pub fn masked(value: &str) -> String {
         "*".repeat(value.chars().count())
     }
+
+    /// The loop's effect bound the browser-flow listener and has the authorization URL
+    /// (`Input::LoginOAuthUrlReady`). A no-op for a wizard that moved on (cancelled, or never
+    /// in this step — the same "late answer" rule `verified` follows).
+    pub fn oauth_browser_url_ready(&mut self, url: &str) {
+        if let LoginStep::OAuthBrowserWaiting { url: slot } = &mut self.step {
+            *slot = Some(url.to_owned());
+        }
+    }
+
+    /// The loop's effect started the device-code poll and has the code to show
+    /// (`Input::LoginOAuthDeviceReady`). A no-op for a wizard that moved on.
+    pub fn oauth_device_ready(&mut self, user_code: &str, verification_url: &str) {
+        if let LoginStep::OAuthDeviceWaiting {
+            user_code: code_slot,
+            verification_url: url_slot,
+        } = &mut self.step
+        {
+            *code_slot = user_code.to_owned();
+            *url_slot = verification_url.to_owned();
+        }
+    }
 }
 
 /// What one key produced.
@@ -338,6 +397,12 @@ pub enum LoginOutcome {
     },
     /// Close without saving.
     Cancel,
+    /// Start the ChatGPT browser OAuth flow (`Effect::LoginOAuthBrowser`): bind the loopback
+    /// listener, open/print the authorize URL, wait for the redirect, exchange, save.
+    BeginOAuthBrowser,
+    /// Start the ChatGPT device-code flow (`Effect::LoginOAuthDevice`): ask for a user code,
+    /// show it, poll, exchange, save.
+    BeginOAuthDevice,
 }
 
 #[cfg(test)]
@@ -351,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn the_choice_list_is_the_builtins_plus_custom() {
+    fn the_choice_list_is_the_builtins_then_chatgpt_oauth_then_custom() {
         let choices = LoginWizard::choices();
         assert_eq!(
             choices
@@ -363,9 +428,75 @@ mod tests {
                 "anthropic",
                 "openai",
                 "openai-compatible",
-                CUSTOM
+                radian_host::CHATGPT_PROVIDER_ID,
+                radian_host::CHATGPT_DEVICE_LOGIN,
+                CUSTOM,
             ]
         );
+        // Mirrors `radian_host::login_choices()` exactly (ids and order), so the TUI picker
+        // and `radian login`'s numbered list cannot drift.
+        assert_eq!(
+            choices.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+            radian_host::login_choices()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn choosing_sign_in_with_chatgpt_begins_the_browser_flow() {
+        let mut wizard = LoginWizard::new(LoginStep::ChooseProvider {
+            cursor: LoginWizard::choices()
+                .iter()
+                .position(|(id, _)| id == radian_host::CHATGPT_PROVIDER_ID)
+                .unwrap(),
+        });
+        assert_eq!(
+            wizard.on_key(LoginKey::Enter),
+            LoginOutcome::BeginOAuthBrowser
+        );
+        assert!(matches!(
+            wizard.step,
+            LoginStep::OAuthBrowserWaiting { url: None }
+        ));
+        // The loop reports the URL once the listener is bound.
+        wizard.oauth_browser_url_ready("https://auth.openai.com/oauth/authorize?...");
+        assert!(matches!(
+            &wizard.step,
+            LoginStep::OAuthBrowserWaiting { url: Some(u) }
+                if u == "https://auth.openai.com/oauth/authorize?..."
+        ));
+    }
+
+    #[test]
+    fn choosing_the_device_code_begins_that_flow_and_shows_the_code_once_reported() {
+        let mut wizard = LoginWizard::new(LoginStep::ChooseProvider {
+            cursor: LoginWizard::choices()
+                .iter()
+                .position(|(id, _)| id == radian_host::CHATGPT_DEVICE_LOGIN)
+                .unwrap(),
+        });
+        assert_eq!(
+            wizard.on_key(LoginKey::Enter),
+            LoginOutcome::BeginOAuthDevice
+        );
+        assert!(matches!(wizard.step, LoginStep::OAuthDeviceWaiting { .. }));
+        wizard.oauth_device_ready("ABCD-1234", "https://auth.openai.com/codex/device");
+        match &wizard.step {
+            LoginStep::OAuthDeviceWaiting {
+                user_code,
+                verification_url,
+            } => {
+                assert_eq!(user_code, "ABCD-1234");
+                assert_eq!(verification_url, "https://auth.openai.com/codex/device");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A late report for a wizard that moved on (e.g. cancelled) is dropped.
+        let mut moved_on = LoginWizard::new(LoginStep::CustomName);
+        moved_on.oauth_device_ready("SHOULD-NOT-APPEAR", "https://example.com");
+        assert!(matches!(moved_on.step, LoginStep::CustomName));
     }
 
     #[test]
@@ -497,6 +628,11 @@ mod tests {
             LoginStep::CustomBaseUrl,
             LoginStep::KeyInput,
             LoginStep::Verifying,
+            LoginStep::OAuthBrowserWaiting { url: None },
+            LoginStep::OAuthDeviceWaiting {
+                user_code: String::new(),
+                verification_url: String::new(),
+            },
         ] {
             let mut wizard = LoginWizard::new(step.clone());
             assert_eq!(

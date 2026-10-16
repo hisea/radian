@@ -1349,6 +1349,25 @@ Base `a3eb856`（分支 `oc/orch-s8`）· 就地改 `src/control.rs`，每次从
 4/4 抓住。CTL-2 的「抓住」表现为 panic/abort（tokio 禁止在运行时线程上 `blocking_send`），
 这正是变异要证明的：扇出绝不能在生产事件的线程上等待客户端。
 
+## ADR 0026 slice ①: ChatGPT OAuth login and refresh (2026-10-16)
+
+Base `7705bb5` (branch `oc/oauth-login`) · mutated in place in `crates/radian-host/src/{auth,oauth_chatgpt}.rs`,
+each restored from a `cp` of the pre-mutation file in `.radian/scratch/mutations/` and confirmed
+byte-identical with `cmp` (no `git checkout --`/`restore`, per this worktree's rules); every
+mutation run with `--no-fail-fast`.
+
+| # | Requirement mutated | Mutation | Result | Caught by |
+|---|---|---|---|---|
+| M1 | an oauth token must never reach a log/journal/export | `AuthStore::resolved_keys()`'s oauth loop deleted (only `api_key` entries redacted) | ✅ FAILED | `auth::tests::oauth_tokens_are_redacted_from_journal_and_export_shaped_text`, `auth::tests::resolved_keys_also_carries_oauth_access_and_refresh_tokens` |
+| M2 | refresh before expiry | `ensure_fresh_in` returns the stored (stale) access token unconditionally, before the margin check | ✅ FAILED | `refresh_runs_only_within_the_margin_and_writes_back` (`left: "stale"` vs. the refreshed token) |
+| M3 | the callback's `state` must be checked | `parse_callback` drops the `state != expected_state` branch | ✅ FAILED (both) | `oauth_chatgpt::tests::a_state_mismatch_is_refused_without_reading_the_code` (unit); `a_state_mismatch_is_refused_and_never_reaches_the_token_endpoint` (integration, against the fake server) |
+| M4 | the written `auth.json` must be `0600` | `AuthStore::write`'s mode hardcoded to `0o644` | ✅ FAILED | `exchange_stores_an_oauth_entry_at_0600` (caught even earlier than the mode assertion: the reopen's own `WidePermissions` check refuses the file) |
+| M5 | `originator` must be `radian`, never Codex's own value (ADR 0026) | `ORIGINATOR` constant changed to `"codex_cli_rs"` | ✅ FAILED | `oauth_chatgpt::tests::authorize_url_carries_the_fixed_constants_and_originator_radian` |
+
+5/5 caught, including the 4 the task brief names explicitly (M1–M4) plus the ADR's own listed
+mutation for the Codex-impersonation risk (M5). M4's shared write path (`AuthStore::write`) is
+also covered by the pre-existing `A26-1`/`F2` entries above for `api_key` writes; M4 here
+confirms the **same** path protects the `oauth` entry specifically, through the oauth-only test.
 ## ADR 0042: 渲染侧移出 host（`mermaid_check`、`mermaid_layout`、`diagrams` skill 删除，2026-10-16）
 
 本 ADR 的 code 改动没有新的 host 变异可跑：`radian-host/src/mermaid.rs`、`mermaid_layout.rs`

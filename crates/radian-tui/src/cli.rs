@@ -2151,6 +2151,23 @@ fn refresh_secrets(secrets: &radian_tui::terminal::SharedSecrets) {
     }
 }
 
+/// A finished ChatGPT OAuth flow (browser or device): write the entry, refresh the
+/// redaction list on success (the same rule `refresh_secrets` documents for an API key), and
+/// turn the error into the one-line `AppInput::LoginSaved` already expects.
+fn store_oauth_outcome(
+    outcome: Result<radian_host::OAuthTokenResponse, radian_host::OAuthError>,
+    secrets: &radian_tui::terminal::SharedSecrets,
+) -> Result<(), String> {
+    let token = outcome.map_err(|error| error.to_string())?;
+    let result = radian_host::AuthStore::open()
+        .and_then(|mut store| radian_host::oauth_store_token(&mut store, &token))
+        .map_err(|error| error.to_string());
+    if result.is_ok() {
+        refresh_secrets(secrets);
+    }
+    result
+}
+
 /// One argument of the resume command, quoted when it would not survive a shell.
 fn shell_arg(value: &str) -> String {
     if value
@@ -3568,6 +3585,89 @@ impl LoopContext<'_> {
                     refresh_secrets(&self.host.secrets);
                 }
                 self.send(AppInput::LoginSaved { name, result });
+                Ok(())
+            }
+            // Sign in with ChatGPT, browser flow (ADR 0026): bind the listener,
+            // report the URL right away (`LoginOAuthUrlReady`) so a remote/headless session —
+            // or a browser the `open`/`xdg-open` guess failed to launch — has something to
+            // copy, then wait for the redirect and exchange. The whole thing is one spawned
+            // task so a slow or abandoned browser step cannot block the UI loop; it ends on
+            // the same `LoginSaved` event the API-key path does.
+            Effect::LoginOAuthBrowser => {
+                let tx = self.tx.clone();
+                let secrets = Arc::clone(&self.host.secrets);
+                self.runtime.spawn(async move {
+                    let endpoints = radian_host::OAuthEndpoints::default();
+                    let (login, listener) = match radian_host::BrowserLogin::start(&endpoints).await
+                    {
+                        Ok(pair) => pair,
+                        Err(error) => {
+                            let _ = tx.send(UiEvent::Command(AppInput::LoginSaved {
+                                name: radian_host::CHATGPT_PROVIDER_ID.to_owned(),
+                                result: Err(error.to_string()),
+                            }));
+                            return;
+                        }
+                    };
+                    let _ = tx.send(UiEvent::Command(AppInput::LoginOAuthUrlReady {
+                        url: login.authorize_url.clone(),
+                    }));
+                    radian_host::oauth_chatgpt::try_open_browser(&login.authorize_url);
+                    let outcome = login
+                        .finish(
+                            &endpoints,
+                            listener,
+                            radian_host::oauth_chatgpt::CALLBACK_TIMEOUT,
+                        )
+                        .await;
+                    let result = store_oauth_outcome(outcome, &secrets);
+                    let _ = tx.send(UiEvent::Command(AppInput::LoginSaved {
+                        name: radian_host::CHATGPT_PROVIDER_ID.to_owned(),
+                        result,
+                    }));
+                });
+                Ok(())
+            }
+            // Sign in with ChatGPT, device-code flow: ask for a code, report it
+            // (`LoginOAuthDeviceReady`), then poll in the same spawned task.
+            Effect::LoginOAuthDevice => {
+                let tx = self.tx.clone();
+                let secrets = Arc::clone(&self.host.secrets);
+                self.runtime.spawn(async move {
+                    let endpoints = radian_host::OAuthEndpoints::default();
+                    let start = match radian_host::oauth_device_start(&endpoints).await {
+                        Ok(start) => start,
+                        Err(error) => {
+                            let _ = tx.send(UiEvent::Command(AppInput::LoginSaved {
+                                name: radian_host::CHATGPT_PROVIDER_ID.to_owned(),
+                                result: Err(error.to_string()),
+                            }));
+                            return;
+                        }
+                    };
+                    let _ = tx.send(UiEvent::Command(AppInput::LoginOAuthDeviceReady {
+                        user_code: start.user_code.clone(),
+                        verification_url: radian_host::oauth_chatgpt::DEVICE_VERIFICATION_URL
+                            .to_owned(),
+                    }));
+                    // 5 minutes at the server's own interval (floored at
+                    // `DEVICE_POLL_MIN_INTERVAL`), matching the browser flow's timeout.
+                    let max_polls = (radian_host::oauth_chatgpt::CALLBACK_TIMEOUT.as_secs()
+                        / start.interval.as_secs().max(1))
+                    .max(1) as u32;
+                    let outcome = radian_host::oauth_poll_device_until_done(
+                        &endpoints,
+                        &start,
+                        start.interval,
+                        max_polls,
+                    )
+                    .await;
+                    let result = store_oauth_outcome(outcome, &secrets);
+                    let _ = tx.send(UiEvent::Command(AppInput::LoginSaved {
+                        name: radian_host::CHATGPT_PROVIDER_ID.to_owned(),
+                        result,
+                    }));
+                });
                 Ok(())
             }
             // `/logout` after the `y`: remove the entry, everything else byte-for-byte (D3).

@@ -34,6 +34,7 @@ mod mcp;
 pub mod memory;
 mod model;
 pub mod named;
+pub mod oauth_chatgpt;
 pub mod observer;
 pub mod opencode_go;
 pub mod orchestration;
@@ -61,8 +62,8 @@ pub use agents::{
 };
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
-    AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, RADIAN_BASE_URL, ResolvedKey, auth_path,
-    list as list_auth, remove as remove_auth, resolve_key, resolve_note, resolved_keys,
+    AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, OAuthEntry, RADIAN_BASE_URL, ResolvedKey,
+    auth_path, list as list_auth, remove as remove_auth, resolve_key, resolve_note, resolved_keys,
     upsert_api_key as upsert_auth_api_key,
 };
 /// The machine's hostname (ADR 0027 `host`), read once at startup. `HOSTNAME` is
@@ -143,6 +144,13 @@ pub use named::{
     NamedBuilder, NamedContext, NamedError, NamedRecord, NamedRegistry, NamedSeams, SendOutcome,
     known_definitions as known_agent_definitions,
 };
+pub use oauth_chatgpt::{
+    BrowserLogin, CallbackListener, DevicePoll, DeviceStart, Endpoints as OAuthEndpoints,
+    OAuthError, PROVIDER_ID as CHATGPT_PROVIDER_ID, RefreshError as OAuthRefreshError,
+    TokenResponse as OAuthTokenResponse, device_start as oauth_device_start,
+    ensure_fresh as oauth_ensure_fresh, ensure_fresh_in as oauth_ensure_fresh_in,
+    poll_device_until_done as oauth_poll_device_until_done, store_token as oauth_store_token,
+};
 pub use observer::{JournalObserver, SessionObserver};
 pub use opencode_go::{
     DEFAULT_PERIOD as OPENCODE_GO_DEFAULT_PERIOD, MAX_PERIOD as OPENCODE_GO_MAX_PERIOD,
@@ -163,14 +171,14 @@ pub use projection::{
 };
 pub use prompt::{Mode, RoleHooks};
 pub use provider::{
-    CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod,
-    NamedProvider, NamedSource, Protocol, ProviderDecl, ProviderDescriptor, ProviderRef,
-    RADIAN_KIND, ReasoningReplayOverride, Route, THINKING_LEVELS, ThinkingMap, clamp_thinking,
-    clamp_thinking_with, descriptor, descriptors, level_fits, login_choices, name_error,
-    parse_thinking_level, resolve_provider, resolve_route, resolve_route_for,
-    supported_thinking_levels, supported_thinking_levels_ref, supported_thinking_levels_ref_with,
-    supported_thinking_levels_with, supported_wire, thinking_map_for, thinking_map_for_ref,
-    thinking_rank, valid_name, wire_budget,
+    CHATGPT_DEVICE_LOGIN, CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel,
+    GENERIC_ID, LoginMethod, NamedProvider, NamedSource, Protocol, ProviderDecl,
+    ProviderDescriptor, ProviderRef, RADIAN_KIND, ReasoningReplayOverride, Route, THINKING_LEVELS,
+    ThinkingMap, clamp_thinking, clamp_thinking_with, descriptor, descriptors, level_fits,
+    login_choices, name_error, parse_thinking_level, resolve_provider, resolve_route,
+    resolve_route_for, supported_thinking_levels, supported_thinking_levels_ref,
+    supported_thinking_levels_ref_with, supported_thinking_levels_with, supported_wire,
+    thinking_map_for, thinking_map_for_ref, thinking_rank, valid_name, wire_budget,
 };
 pub use radian_runtime::ModelRoute;
 pub use session::session_hooks;

@@ -120,6 +120,27 @@ pub struct AuthEntry {
     pub usable: bool,
 }
 
+/// An `oauth` entry's three reserved fields (ADR 0026 D1): `{"type":"oauth","access",
+/// "refresh","expires"}`. The ChatGPT workspace id is **not** one of them (ADR 0026
+/// decision 3): it is decoded from `access` each time a caller needs it, never stored.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthEntry {
+    pub access: String,
+    pub refresh: String,
+    /// Unix epoch milliseconds (pi's `auth.json` convention for this field).
+    pub expires_at_millis: u64,
+}
+
+impl fmt::Debug for OAuthEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthEntry")
+            .field("access", &"<redacted>")
+            .field("refresh", &"<redacted>")
+            .field("expires_at_millis", &self.expires_at_millis)
+            .finish()
+    }
+}
+
 /// The parsed `auth.json`, kept as raw JSON so unknown entries survive a write.
 pub struct AuthStore {
     path: PathBuf,
@@ -272,6 +293,39 @@ impl AuthStore {
         self.write()
     }
 
+    /// The `oauth` entry for `provider_id`, or `None` when there is no entry, it is some other
+    /// type, or it is missing one of the three reserved fields.
+    pub fn oauth_entry(&self, provider_id: &str) -> Option<OAuthEntry> {
+        let entry = self.entries.get(provider_id)?.as_object()?;
+        if entry.get("type").and_then(Value::as_str) != Some("oauth") {
+            return None;
+        }
+        Some(OAuthEntry {
+            access: entry.get("access")?.as_str()?.to_owned(),
+            refresh: entry.get("refresh")?.as_str()?.to_owned(),
+            expires_at_millis: entry.get("expires")?.as_u64()?,
+        })
+    }
+
+    /// Adds or replaces the `oauth` entry for `provider_id`, merging into any existing object
+    /// so an unknown field (one a future Radian, or pi, added) survives — the same rule
+    /// [`Self::upsert_api_key`] follows. Other entries are untouched.
+    pub fn upsert_oauth(&mut self, provider_id: &str, entry: &OAuthEntry) -> Result<(), AuthError> {
+        let mut object = self
+            .entries
+            .get(provider_id)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        object.insert("type".into(), json!("oauth"));
+        object.insert("access".into(), json!(entry.access));
+        object.insert("refresh".into(), json!(entry.refresh));
+        object.insert("expires".into(), json!(entry.expires_at_millis));
+        self.entries
+            .insert(provider_id.to_owned(), Value::Object(object));
+        self.write()
+    }
+
     /// Removes the entry for `provider_id` (the `/logout` operation), leaving every other
     /// entry byte-for-byte. Writing an empty object is fine; the file is not deleted.
     pub fn remove(&mut self, provider_id: &str) -> Result<(), AuthError> {
@@ -280,8 +334,10 @@ impl AuthStore {
     }
 
     /// Every entry: id, type, and whether it is usable in this build.
-    /// Every usable key in this store, sorted and deduplicated (ADR 0013 T4). The free
-    /// [`resolved_keys`] is this for the process store.
+    /// Every usable key **and every `oauth` entry's access/refresh token** in this store,
+    /// sorted and deduplicated (ADR 0013 T4; ADR 0026: an OAuth token
+    /// must be redacted exactly like an API key — never printed, journaled, or exported). The
+    /// free [`resolved_keys`] is this for the process store.
     pub fn resolved_keys(&self) -> Vec<String> {
         let mut keys = Vec::new();
         for entry in self.list() {
@@ -289,6 +345,14 @@ impl AuthStore {
                 && !key.key.is_empty()
             {
                 keys.push(key.key);
+            }
+            if let Some(oauth) = self.oauth_entry(&entry.provider_id) {
+                if !oauth.access.is_empty() {
+                    keys.push(oauth.access);
+                }
+                if !oauth.refresh.is_empty() {
+                    keys.push(oauth.refresh);
+                }
             }
         }
         keys.sort();
@@ -933,6 +997,97 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(scratch.path()).unwrap()).unwrap();
         assert!(after.get("a").is_none());
         assert_eq!(after["b"]["key"], "kb");
+    }
+
+    #[test]
+    fn oauth_entry_round_trips_and_preserves_unknown_fields() {
+        let scratch = Scratch::new("oauth-roundtrip");
+        write_auth(
+            &scratch,
+            r#"{"chatgpt": {"type": "oauth", "access": "old-a", "refresh": "old-r", "expires": 1, "future": "keep-me"}}"#,
+        );
+        let mut store = scratch.open().unwrap();
+        assert_eq!(
+            store.oauth_entry("chatgpt").unwrap(),
+            OAuthEntry {
+                access: "old-a".into(),
+                refresh: "old-r".into(),
+                expires_at_millis: 1,
+            }
+        );
+        store
+            .upsert_oauth(
+                "chatgpt",
+                &OAuthEntry {
+                    access: "new-a".into(),
+                    refresh: "new-r".into(),
+                    expires_at_millis: 999,
+                },
+            )
+            .unwrap();
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(scratch.path()).unwrap()).unwrap();
+        assert_eq!(after["chatgpt"]["access"], "new-a");
+        assert_eq!(after["chatgpt"]["refresh"], "new-r");
+        assert_eq!(after["chatgpt"]["expires"], 999);
+        assert_eq!(after["chatgpt"]["future"], "keep-me");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(scratch.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{mode:04o}");
+        }
+    }
+
+    /// ADR 0026: an OAuth access/refresh token is redacted exactly like
+    /// an API key.
+    #[test]
+    fn resolved_keys_also_carries_oauth_access_and_refresh_tokens() {
+        let scratch = Scratch::new("oauth-redact");
+        write_auth(
+            &scratch,
+            r#"{
+                "anthropic": {"type": "api_key", "key": "sk-a"},
+                "chatgpt": {"type": "oauth", "access": "at-secret", "refresh": "rt-secret", "expires": 1}
+            }"#,
+        );
+        let store = scratch.open().unwrap();
+        let keys = store.resolved_keys();
+        assert!(keys.contains(&"sk-a".to_owned()));
+        assert!(keys.contains(&"at-secret".to_owned()));
+        assert!(keys.contains(&"rt-secret".to_owned()));
+    }
+
+    /// ADR 0026's acceptance item "tokens never in a log/journal/export": this is
+    /// the host-side half of that guarantee — `resolved_keys()` feeds the exact redactor
+    /// `radian-session`'s journal/export/panic-log paths use, so a scan of redacted text
+    /// proves the chain end to end rather than only that the list contains the token.
+    #[test]
+    fn oauth_tokens_are_redacted_from_journal_and_export_shaped_text() {
+        let scratch = Scratch::new("oauth-redact-e2e");
+        write_auth(
+            &scratch,
+            r#"{"chatgpt": {"type": "oauth", "access": "at-super-secret-123", "refresh": "rt-super-secret-456", "expires": 1}}"#,
+        );
+        let store = scratch.open().unwrap();
+        let secrets = store.resolved_keys();
+        let journal_line =
+            r#"{"event":"ModelRequest","headers":{"authorization":"Bearer at-super-secret-123"}}"#
+                .to_owned();
+        let export_text = "the model saw refresh token rt-super-secret-456 in a tool result";
+        let panic_text = "thread panicked: at-super-secret-123 could not be parsed";
+        for text in [journal_line.as_str(), export_text, panic_text] {
+            let redacted = radian_session::redact_text(text, &secrets);
+            assert!(
+                !redacted.contains("at-super-secret-123")
+                    && !redacted.contains("rt-super-secret-456"),
+                "{redacted}"
+            );
+        }
     }
 
     #[test]
