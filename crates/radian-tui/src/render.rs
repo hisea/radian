@@ -654,7 +654,7 @@ pub fn transcript_lines_with(
         // The container owns the blank line between blocks (ADR 0028 rule 1).
         out.extend(std::iter::repeat_n(
             Line::from(""),
-            blocks::block_gap(entries.get(index.wrapping_sub(1)), entry),
+            blocks::gap_at(entries, index),
         ));
         out.extend(entry_lines(entry, modes, width, theme, spinner));
     }
@@ -713,7 +713,7 @@ pub fn visible_lines_with(
     // (this is the 50k-entry frame path).
     let mut total: usize = counts.iter().sum::<usize>();
     for index in 1..entries.len() {
-        total += blocks::block_gap(entries.get(index - 1), &entries[index]);
+        total += blocks::gap_at(entries, index);
     }
     let mut out = Vec::with_capacity(height);
     let mut line = 0usize;
@@ -721,7 +721,7 @@ pub fn visible_lines_with(
         if out.len() >= height {
             break;
         }
-        let gap = blocks::block_gap(entries.get(index.wrapping_sub(1)), &entries[index]);
+        let gap = blocks::gap_at(entries, index);
         let count = counts[index];
         let entry = &mut entries[index];
         let next = line + gap + count;

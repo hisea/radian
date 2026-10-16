@@ -739,11 +739,10 @@ fn a_copy_of_a_diff_block_has_no_marker_or_line_number() {
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                blocks::block_gap(entries.get(i.wrapping_sub(1)), entry)
-                    + render::display_lines(entry, modes, width).len()
+                blocks::gap_at(entries, i) + render::display_lines(entry, modes, width).len()
             })
             .sum::<usize>()
-            + blocks::block_gap(entries.get(index.wrapping_sub(1)), &entries[index])
+            + blocks::gap_at(entries, index)
     };
     let first = start_line(call_index);
     let body_lines = render::display_lines(&entries[result_index], modes, width).len();
