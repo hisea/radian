@@ -156,6 +156,7 @@ async fn open(
             task_agent: options.task_agent,
             parent: None,
             allowed_branch: None,
+            git_commit_requires_branch: false,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
@@ -186,6 +187,7 @@ async fn open(
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
             task_builder: None,
+            named_builder: None,
         },
     )
     .await

@@ -72,7 +72,10 @@ fn recorder() -> Seen {
 fn host(base_url: &str, workspace: &Path, task_seen: Seen) -> TaskHost {
     let base_url = base_url.to_owned();
     let model: radian_host::TaskModelFactory = Arc::new(
-        move |session_id: &str, slot: Arc<ConfigSlot>, _agent: Option<&radian_host::SpawnAgent>| {
+        move |session_id: &str,
+              slot: Arc<ConfigSlot>,
+              _route: Option<radian_host::ModelRoute>,
+              _thinking: Option<String>| {
             let initial = build_model(radian_host::ModelArgs {
                 provider: Provider::OpenAiCompatible,
                 base_url: base_url.clone(),
@@ -377,26 +380,25 @@ async fn the_builder_hands_the_agent_definition_to_the_model_factory() {
     )
     .unwrap();
 
-    // A recorder for the `name / provider / thinking` the factory was handed.
-    type SeenAgent = Arc<Mutex<Option<(String, String, Option<String>)>>>;
+    // A recorder for the `provider / thinking` the factory was handed.
+    type SeenAgent = Arc<Mutex<Option<(String, Option<String>)>>>;
     let seen: SeenAgent = Arc::new(Mutex::new(None));
     let mut host = host(&server.base_url, &fixture.scratch, recorder());
     let inner = Arc::clone(&host.model);
     let seen_factory = Arc::clone(&seen);
     host.model = Arc::new(
-        move |session_id: &str, slot: Arc<ConfigSlot>, agent: Option<&radian_host::SpawnAgent>| {
-            if let Some(agent) = agent {
-                *seen_factory.lock().unwrap() = Some((
-                    agent.name.clone(),
-                    agent
-                        .model
-                        .as_ref()
-                        .map(|route| route.provider.clone())
-                        .unwrap_or_default(),
-                    agent.thinking.clone(),
-                ));
-            }
-            inner(session_id, slot, agent)
+        move |session_id: &str,
+              slot: Arc<ConfigSlot>,
+              route: Option<radian_host::ModelRoute>,
+              thinking: Option<String>| {
+            *seen_factory.lock().unwrap() = Some((
+                route
+                    .as_ref()
+                    .map(|route| route.provider.clone())
+                    .unwrap_or_default(),
+                thinking.clone(),
+            ));
+            inner(session_id, slot, route, thinking)
         },
     );
 
@@ -411,10 +413,9 @@ async fn the_builder_hands_the_agent_definition_to_the_model_factory() {
         .lock()
         .unwrap()
         .clone()
-        .expect("the factory saw an agent");
-    assert_eq!(seen.0, "route-agent");
-    assert_eq!(seen.1, "opencode-go");
-    assert_eq!(seen.2.as_deref(), Some("low"));
+        .expect("the factory saw a definition");
+    assert_eq!(seen.0, "opencode-go");
+    assert_eq!(seen.1.as_deref(), Some("low"));
 
     registry.remove("t1", true).await.expect("remove");
     let _ = std::fs::remove_file(def_path);

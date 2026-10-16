@@ -19,10 +19,10 @@ use clap::Parser;
 use radian_host::memory::MemoryService;
 use radian_host::{
     DEFAULT_MAX_TOKENS, ModelArgs, Provider, SessionFacade, Thinking, build_model,
-    check_provider_flags, load_mcp_config, parse_headers, validate_session_id,
+    check_provider_flags, is_local_base_url, load_mcp_config, parse_headers, validate_session_id,
 };
 use radian_permissions::{AuditSink, PermissionResolved, runtime_event};
-use radian_session::{Index, SessionJournal};
+use radian_session::SessionJournal;
 use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input as AppInput, MemoryResult, PickerData};
 use radian_tui::clip::{ClipboardMode, osc52};
 use radian_tui::events::{InputEvent, ProjectionSink, UiEvent};
@@ -639,10 +639,13 @@ fn run(
     mark("run-start");
     if cli.list {
         return match list_sessions(&cli) {
-            Ok(()) | Err(ListError::BrokenPipe) => Ok(None),
+            Ok(()) | Err(radian_host::ListError::BrokenPipe) => Ok(None),
             // `--list` failing is a real error of this run, not a startup refusal (ADR 0032
             // A3's table: print-and-exit modes return 1 for a real error).
-            Err(ListError::Failed(message)) => Err(RunError::Failed(message)),
+            Err(radian_host::ListError::Failed(message)) => Err(RunError::Failed(message)),
+            Err(radian_host::ListError::Write(error)) => {
+                Err(RunError::Failed(format!("cannot write to stdout: {error}")))
+            }
         };
     }
     // ADR 0013 decision 4: diagnostics live in the user cache directory, and cleanup runs at
@@ -1062,38 +1065,21 @@ fn run(
         route.adapter(),
         Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
-    // ADR 0018, decision 1: the summary call's reasoning level, converted to this
-    // route's wire value with the same map `/thinking` uses. `low` by default; `"current"`
-    // keeps the conversation's level (carries no setting). A clamped level is said once.
-    let compaction_settings = {
-        let level = config.compaction.thinking.as_deref().unwrap_or("low");
-        let (settings, notice) = radian_host::compaction_settings_for(
-            &provider_ref,
-            &model_name,
-            level,
-            cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        );
-        if let Some(notice) = notice {
-            eprintln!("radian: [compaction] {notice}");
-        }
-        settings
-    };
-    // ADR 0018: the same level, converted per route, so a `/model` switch never
-    // leaves the summary carrying the previous route's wire form.
-    let compaction_settings_for = {
-        let providers = config.providers.clone();
-        let level = config
-            .compaction
-            .thinking
-            .clone()
-            .unwrap_or_else(|| "low".to_owned());
-        let max_tokens = cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-        std::sync::Arc::new(move |provider: &str, model: &str| {
-            radian_host::compaction_settings_for_route(
-                &providers, provider, model, &level, max_tokens,
-            )
-        }) as radian_runtime::CompactionSettingsFor
-    };
+    // ADR 0032 slice 5: the settings the TUI and `radian exec` read from the config the same way
+    // — the retries, the compaction settings (ADR 0018: `[compaction]
+    // thinking` converted to this route's wire value, `low` by default; a clamped level is said
+    // once), the skills, the memory injection and the shell auto-background. The same value
+    // builds the task builder below.
+    let (settings, compaction_notice) = radian_host::SessionSettings::from_config(
+        &config,
+        &provider_ref,
+        &model_name,
+        cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        cli.no_auto_compact,
+    );
+    if let Some(notice) = compaction_notice {
+        eprintln!("radian: [compaction] {notice}");
+    }
     // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
@@ -1393,7 +1379,7 @@ fn run(
     // builder, so a `spawn_task` opens a real task session (a fresh model on the lead's route,
     // a workspace-write tier, MCP off, the lead's retries/compaction/budget/skills). The
     // registry still owns the worktree, the network-off sandbox, no memory and the `task` role.
-    let task_builder = {
+    let task_host = {
         let provider = route.adapter();
         let base_url = route.base_url.clone();
         let model_id = model_name.clone();
@@ -1408,19 +1394,20 @@ fn run(
         let task_model: radian_host::TaskModelFactory = std::sync::Arc::new(
             move |session_id: &str,
                   slot: std::sync::Arc<radian_runtime::ConfigSlot>,
-                  agent: Option<&radian_host::SpawnAgent>| {
+                  agent_model: Option<radian_host::ModelRoute>,
+                  agent_thinking: Option<String>| {
                 // ADR 0030 O11: an agent definition's `model` and `thinking` are the task's
                 // route and level. The route's credential is resolved here the same way a
                 // `/model` switch resolves it — never copied into the snapshot.
-                if let Some(route) = agent.and_then(|agent| agent.model.clone()) {
+                if let Some(route) = agent_model {
                     let ctx = radian_host::RouteContext {
                         providers: providers.clone(),
                         session_id: session_id.to_owned(),
                         user_headers: route_user_headers.clone(),
                         include_usage: None,
                         max_tokens,
-                        thinking: agent
-                            .and_then(|agent| agent.thinking.clone())
+                        thinking: agent_thinking
+                            .clone()
                             .unwrap_or_else(|| route_thinking.clone()),
                         thinking_budget,
                     };
@@ -1457,12 +1444,7 @@ fn run(
                 ))
             },
         );
-        let task_skills = radian_host::config::resolve_extra_paths(
-            &config.skills.extra_paths,
-            config.source.as_deref().and_then(std::path::Path::parent),
-            radian_host::user_home().as_deref(),
-        );
-        radian_host::task_builder(radian_host::TaskHost {
+        radian_host::TaskHost {
             session_dir: dir.clone(),
             model: task_model,
             route: (provider_name.clone(), model_name.clone()),
@@ -1470,19 +1452,16 @@ fn run(
             sandbox: sandbox.clone(),
             sandbox_deny_read: sandbox_deny_read.clone(),
             allow_unix_sockets: allow_unix_sockets.clone(),
-            retries: config
-                .model
-                .retries
-                .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
+            retries: settings.retries,
             context_budget: window
                 .budget
                 // ADR 0015: a zero budget is unset, never a real zero-token budget (the CLI
                 // builds its session budget the same way).
                 .filter(|tokens| *tokens > 0)
                 .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
-            auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
-            compaction_settings: compaction_settings.clone(),
-            compaction_settings_for: Some(compaction_settings_for.clone()),
+            auto_compact: settings.auto_compact,
+            compaction_settings: settings.compaction_settings.clone(),
+            compaction_settings_for: settings.compaction_settings_for.clone(),
             turn_options: TurnOptions {
                 max_model_calls: Some(cli.max_model_calls),
                 ..TurnOptions::default()
@@ -1491,32 +1470,31 @@ fn run(
             wording: radian_host::TUI_WORDING,
             protected_branches: config.git.protected_branches.clone(),
             allowed_filters: Some(config.git.allowed_filters()),
-            shell_auto_background: config.shell.auto_background_after(),
-            skills_extra_paths: task_skills,
-            skills_builtin: config.skills.builtin.unwrap_or(true),
-            skills_disabled: config.skills.disabled.clone(),
-            memory_injection: config.memory.injection(),
+            shell_auto_background: settings.shell_auto_background,
+            skills_extra_paths: settings.skills_extra_paths.clone(),
+            skills_builtin: settings.skills_builtin,
+            skills_disabled: settings.skills_disabled.clone(),
+            memory_injection: settings.memory_injection,
             capabilities: radian_host::SessionCapability::ALL.to_vec(),
             audit: Arc::clone(&audit),
             // A task's own stream must not reach the lead's live view (ADR 0030 O10); the
             // status-bar count and the notice lines come from the registry and the projection.
             task_events: Arc::new(|_: &radian_session::RuntimeEvent| {}),
-        })
+        }
     };
+    // ADR 0030 O12: the named-agent builder shares the same host. A `/send` or `send_agent`
+    // creates one long session per name from its definition.
+    let task_builder = radian_host::task_builder(task_host.clone());
+    let named_builder = radian_host::named_builder(task_host);
 
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
-    // first thing that creates durable state.
+    // first thing that creates durable state. ADR 0032 slice 5: `LeadSetup::setup` fills what
+    // every host-opened session shares; what the TUI decides itself is written here.
     let mut session = runtime
         .block_on(radian_host::open_session(
-            radian_host::SessionSetup {
-                config_slot: std::sync::Arc::clone(&config_slot),
-                config_queue: radian_runtime::ConfigQueue::new(),
-                budget_for: Some(budget_for),
-                price_for: Some(Arc::clone(&route_price)),
-                protected_branches: config.git.protected_branches.clone(),
-                allowed_filters: Some(config.git.allowed_filters()),
-                shell_auto_background: config.shell.auto_background_after(),
+            radian_host::LeadSetup {
+                settings,
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),
@@ -1524,44 +1502,23 @@ fn run(
                 // (or `$HOME/tmp`), not only an explicit `--workspace`.
                 coding_root: Some(workspace_path.clone()),
                 model,
+                config_slot: std::sync::Arc::clone(&config_slot),
+                budget_for: Some(budget_for),
+                price_for: Some(Arc::clone(&route_price)),
+                protected_branches: config.git.protected_branches.clone(),
+                allowed_filters: Some(config.git.allowed_filters()),
                 servers,
-                // ADR 0036: an interactive session uses the `default` role.
-                role: None,
                 system_prompt: cli.system.clone(),
                 context_budget: window
                     .budget
                     // ADR 0015: a zero budget is unset, never a real zero-token budget.
                     .filter(|tokens| *tokens > 0)
                     .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
-                auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
-                compaction_settings,
-                compaction_settings_for: Some(compaction_settings_for),
-                retries: config
-                    .model
-                    .retries
-                    .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
                 sandbox,
                 tier: tier.preset(),
                 profile,
                 access_builder: Some(access_builder),
-                // The interactive session is the human's named `main` agent, not a task agent
-                // (ADR 0030 O13), so `/mode` is allowed.
-                task_agent: false,
-                parent: None,
-                allowed_branch: None,
                 memory_root,
-                skills_extra_paths: radian_host::config::resolve_extra_paths(
-                    &config.skills.extra_paths,
-                    config.source.as_deref().and_then(std::path::Path::parent),
-                    radian_host::user_home().as_deref(),
-                ),
-                skills_builtin: config.skills.builtin.unwrap_or(true),
-                skills_disabled: config.skills.disabled.clone(),
-                // The human's `main` session is not an agent definition (ADR 0030 O11): no
-                // built-in tool allow-list and no skills allow-list.
-                tools_allow: None,
-                skills_allow: None,
-                memory_injection: config.memory.injection(),
                 trust: trust_setup,
                 resume: resume.is_some(),
                 config_snapshot: serde_json::json!({
@@ -1575,7 +1532,8 @@ fn run(
                 turn_timeout: None,
                 wording: radian_host::TUI_WORDING,
                 capabilities: radian_host::SessionCapability::ALL.to_vec(),
-            },
+            }
+            .setup(),
             radian_host::HostBindings {
                 approvals,
                 shared_queue: None,
@@ -1591,6 +1549,8 @@ fn run(
                 // ADR 0030 slice 6b2: the lead's task tools are mounted and can open real task
                 // sessions; the mode gate still refuses them outside `/mode lead`.
                 task_builder: Some(task_builder),
+                // ADR 0030 O12: named agents are available to `/send` and `send_agent`.
+                named_builder: Some(named_builder),
             },
         ))
         .map_err(|error| error.to_string())?;
@@ -2065,6 +2025,7 @@ fn run(
     };
     mark("startup-set");
     let lead_tasks = session.lead_tasks().cloned();
+    let lead_named = session.named_agents().cloned();
     let session = Arc::new(session);
     let facade: Arc<dyn radian_host::SessionFacade> =
         Arc::clone(&session) as Arc<dyn radian_host::SessionFacade>;
@@ -2081,6 +2042,7 @@ fn run(
             host: &session_host,
             memory: &memory_service,
             lead_tasks,
+            lead_named,
         },
         (provider_name.clone(), model_name.clone()),
         Arc::clone(&route_price),
@@ -2137,24 +2099,7 @@ fn run(
     }))
 }
 
-/// Whether `base_url` points at this machine (loopback), where a server needs no credential.
-fn is_local_base_url(base_url: &str) -> bool {
-    let Some((_, rest)) = base_url.split_once("://") else {
-        return false;
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority.strip_prefix('[').map_or_else(
-        || {
-            authority
-                .rsplit_once(':')
-                .filter(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
-                .map_or(authority, |(host, _)| host)
-        },
-        |bracketed| bracketed.split(']').next().unwrap_or_default(),
-    );
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
-}
-
+/// Writes every decision to the session journal as a `PermissionResolved` (ADR 0006 §5.9).
 /// The program name for the resume command: `argv[0]`'s file name, so the line is copyable
 /// whatever the binary is called (a `cargo run`, an absolute path, a symlink).
 fn program_name() -> String {
@@ -2834,6 +2779,9 @@ struct LoopContext<'a> {
     host: &'a SessionHost,
     /// The lead's task registry (ADR 0030 slice 6b2), when this session mounted the lead tools.
     lead_tasks: Option<Arc<radian_host::TaskRegistry>>,
+    /// The lead's named-agent registry (ADR 0030 O12), when this session has one; `/send` reads
+    /// it.
+    lead_named: Option<Arc<radian_host::NamedRegistry>>,
     tx: &'a Sender<UiEvent>,
     /// The pending queue (ADR 0023 U7): the loop reads the head and the count when it is told
     /// something changed, and the facade answers it.
@@ -3374,6 +3322,64 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
+            // ADR 0030 O12: `/send` lists the known definitions, or sends to a named agent
+            // (source `User`). The reply arrives later as `AgentReplied`, when the turn ends.
+            Effect::Send(request) => {
+                let Some(named) = self.lead_named.clone() else {
+                    self.send(AppInput::SessionDone(vec![
+                        "this session has no named agents".to_owned(),
+                    ]));
+                    return Ok(());
+                };
+                match request {
+                    radian_tui::command::SendRequest::List => {
+                        let names = radian_host::known_agent_definitions();
+                        self.send(AppInput::SessionDone(vec![format!(
+                            "known definitions: {}",
+                            names.join(", ")
+                        )]));
+                    }
+                    radian_tui::command::SendRequest::Send { name, text } => {
+                        match self.runtime.block_on(named.send(
+                            &name,
+                            text,
+                            radian_tui::command::send_source(),
+                        )) {
+                            Ok(outcome) => {
+                                self.send(AppInput::AgentSent {
+                                    name: name.clone(),
+                                    created: outcome.created,
+                                });
+                                // Wait for this send's turn to end, then show the first lines of
+                                // the reply. The task is dropped when the loop exits.
+                                let record = named.get(&name);
+                                let tx = self.tx.clone();
+                                let turn = outcome.turn;
+                                self.runtime.spawn(async move {
+                                    let summary = match record {
+                                        Some(record) => record
+                                            .await_turn_end(turn)
+                                            .await
+                                            .map(|reply| bound_reply(&reply))
+                                            .unwrap_or_default(),
+                                        None => String::new(),
+                                    };
+                                    let _ = tx.send(UiEvent::Command(AppInput::AgentReplied {
+                                        name,
+                                        summary,
+                                    }));
+                                });
+                            }
+                            Err(error) => {
+                                self.send(AppInput::SessionDone(vec![format!(
+                                    "cannot send to `{name}`: {error}"
+                                )]));
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
             // ADR 0031 T3: apply the startup trust choice through the facade (it writes
             // `trust.json` and journals `ProjectTrustChanged`), then show the new state.
             Effect::SetTrust { choice } => {
@@ -3628,7 +3634,27 @@ enum Phase<'a> {
         /// The lead's task registry (ADR 0030 slice 6b2), when this session mounted the lead
         /// tools; `/tasks` and the status-bar count read it.
         lead_tasks: Option<Arc<radian_host::TaskRegistry>>,
+        /// The lead's named-agent registry (ADR 0030 O12), when this session has one; `/send`
+        /// reads it.
+        lead_named: Option<Arc<radian_host::NamedRegistry>>,
     },
+}
+
+/// Bounds a named agent's reply for the `/send` notice (ADR 0030 O12): the first 5 lines and at
+/// most 500 characters, with a marker when cut. The full observation view is a later slice.
+fn bound_reply(text: &str) -> String {
+    let mut out = text.lines().take(5).collect::<Vec<_>>().join("\n");
+    let more_lines = text.lines().count() > 5;
+    let truncated = out.chars().count() > 500;
+    if truncated {
+        out = out.chars().take(500).collect();
+    }
+    if more_lines {
+        out.push_str("\n… [more lines]");
+    } else if truncated {
+        out.push_str("\n… [truncated]");
+    }
+    out
 }
 
 /// Handles one event in the pre-session `--pick` phase. Returns whether the frame is dirty.
@@ -3738,6 +3764,7 @@ fn ui_loop(
             host,
             memory,
             lead_tasks,
+            lead_named,
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
             route_price: Arc::clone(&route_price),
@@ -3751,6 +3778,7 @@ fn ui_loop(
             memory,
             host,
             lead_tasks,
+            lead_named,
             tx,
             queue: session.pending(),
             signal: None,
@@ -4298,36 +4326,26 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Where session files live: `--session-dir`, then `RADIAN_SESSION_DIR`, then the platform's
-/// *data* directory (never a cache or temp path; ADR 0013 decision 4). This is the same
-/// convention `agent-cli` uses, so a session written by one is resumable by the other.
+/// Where session files live: `--session-dir`, then `RADIAN_SESSION_DIR`, then the user's data
+/// directory (ADR 0020: `~/.radian/sessions`). The rule lives in `radian-host` so a session
+/// written by one host is resumable by the other (ADR 0032 slice 5).
 fn session_dir(cli: &Cli) -> Result<PathBuf, String> {
-    if let Some(dir) = &cli.session_dir {
-        return Ok(dir.clone());
-    }
-    if let Ok(dir) = std::env::var("RADIAN_SESSION_DIR")
-        && !dir.is_empty()
-    {
-        return Ok(PathBuf::from(dir));
-    }
-    // ADR 0020: the default is `~/.radian/sessions` (or `$RADIAN_HOME/sessions`).
-    radian_host::sessions_dir().ok_or_else(|| {
-        "no RADIAN_HOME or HOME to place sessions under; pass --session-dir".to_string()
-    })
+    radian_host::session_dir(cli.session_dir.as_deref())
 }
 
 /// The workspace a session belongs to: `--workspace` when given, else the current directory,
-/// canonicalized and validated by the shared `radian-host` rule. `--list` filters by the same
-/// value, so a session is only listed in the workspace it was created in, and a bad
-/// `--workspace` fails as a workspace error (dogfooding D1).
+/// through the TUI's coding root (`$HOME` becomes `$HOME/tmp`, the filesystem root is refused)
+/// and then the shared `radian-host` rule. `--list` filters by the same value, so a session is
+/// only listed in the workspace it was created in, and a bad `--workspace` fails as a workspace
+/// error (dogfooding D1).
 fn session_workspace(cli: &Cli) -> Result<String, String> {
-    Ok(resolve_workspace(cli)?.to_string_lossy().into_owned())
+    radian_host::session_workspace(Some(&coding_root(cli)?.path))
 }
 
 /// The coding root: `--workspace` as given, else the current directory, with the TUI's two
 /// exceptions — `$HOME` becomes `$HOME/tmp` and the filesystem root
-/// is refused. The CLI (`agent`) does **not** do this: it is the unattended entry point and gets
-/// no write access by default.
+/// is refused. The CLI (`radian exec`) does **not** do this: it is the unattended entry point and
+/// gets no write access by default.
 fn coding_root(cli: &Cli) -> Result<radian_tui::workspace::CodingRoot, String> {
     let cwd = std::env::current_dir()
         .map_err(|error| format!("cannot read the current directory: {error}"))?;
@@ -4337,13 +4355,14 @@ fn coding_root(cli: &Cli) -> Result<radian_tui::workspace::CodingRoot, String> {
     radian_tui::workspace::resolve_coding_root(cli.workspace.as_deref(), &cwd, home.as_deref())
 }
 
-/// The canonical, validated workspace path (the shared `radian-host` rule).
-fn resolve_workspace(cli: &Cli) -> Result<PathBuf, String> {
-    let root = coding_root(cli)?;
-    radian_host::resolve_workspace(Some(&root.path))
+/// `--list`: this workspace's sessions, newest activity first (the shared table, ADR 0032
+/// slice 5).
+fn list_sessions(cli: &Cli) -> Result<(), radian_host::ListError> {
+    let dir = session_dir(cli)?;
+    let workspace = session_workspace(cli)?;
+    radian_host::list_sessions(&dir, &workspace)
 }
 
-/// `--list`: this workspace's sessions, newest activity first. Same columns as `agent-cli`.
 /// The Phase 4 startup picker: opens the workspace index, lists the sessions, and (when there
 /// are any) runs the full-screen picker. `Ok(None)` means there are no sessions yet, so the
 /// caller starts a new one with a notice instead of flashing an empty list.
@@ -4362,68 +4381,6 @@ fn prepare_picker(
     Ok(Some(radian_tui::picker::Picker::new(
         rows, index, workspace,
     )))
-}
-
-/// Why the TUI's `--list` stopped. A closed stdout (`radian --list | head`) is a normal
-/// stop, not a failure (dogfooding D21), so it is kept apart from a real error.
-enum ListError {
-    /// A real failure: exit 1 with this message.
-    Failed(String),
-    /// stdout's reader went away: exit 0, no message.
-    BrokenPipe,
-}
-
-impl From<String> for ListError {
-    fn from(message: String) -> Self {
-        Self::Failed(message)
-    }
-}
-
-impl From<radian_host::StdoutError> for ListError {
-    fn from(error: radian_host::StdoutError) -> Self {
-        match error {
-            radian_host::StdoutError::BrokenPipe => Self::BrokenPipe,
-            radian_host::StdoutError::Failed(error) => {
-                Self::Failed(format!("cannot write to stdout: {error}"))
-            }
-        }
-    }
-}
-
-fn list_sessions(cli: &Cli) -> Result<(), ListError> {
-    let dir = session_dir(cli)?;
-    let workspace = session_workspace(cli)?;
-    if !dir.exists() {
-        return Ok(()); // no sessions yet
-    }
-    radian_session::warn_if_wide(&dir);
-    let mut index = Index::open(dir.join("index.db"))
-        .map_err(|e| format!("cannot open the session index in {}: {e}", dir.display()))?;
-    index
-        .rebuild_dir(&dir)
-        .map_err(|e| format!("cannot rebuild the session index: {e}"))?;
-    let sessions = index
-        .list(Some(&workspace))
-        .map_err(|e| format!("cannot list sessions: {e}"))?;
-    for session in sessions {
-        let messages = index
-            .indexed_events(&session.session_id)
-            .map(|events| {
-                events
-                    .iter()
-                    .filter(|event| event.event == "MessageAppended")
-                    .count()
-            })
-            .unwrap_or(0);
-        radian_host::write_line(&format!(
-            "{}\t{}\t{}\t{}",
-            session.session_id,
-            session.created_ts.as_deref().unwrap_or("-"),
-            session.last_ts.as_deref().unwrap_or("-"),
-            messages
-        ))?;
-    }
-    Ok(())
 }
 
 /// Writes every decision to the session journal as a `PermissionResolved` (ADR 0006 §5.9).

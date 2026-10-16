@@ -152,6 +152,7 @@ fn task_builder(session_dir: PathBuf, base_url: String) -> TaskBuilder {
                     skills_disabled: Vec::new(),
                     tools_allow: None,
                     skills_allow: None,
+                    git_commit_requires_branch: false,
                     memory_injection: radian_host::memory::InjectionConfig::default(),
                     trust: radian_host::trust::Setup::untrusted(&workspace, false),
                     resume: false,
@@ -176,6 +177,7 @@ fn task_builder(session_dir: PathBuf, base_url: String) -> TaskBuilder {
                     memory_warning: Arc::new(|_message: &str| {}),
                     memory_notice_line: Arc::new(|_line: &str| {}),
                     task_builder: None,
+                    named_builder: None,
                 },
             })
         },
@@ -263,6 +265,7 @@ impl Fixture {
                 skills_disabled: Vec::new(),
                 tools_allow: None,
                 skills_allow: None,
+                git_commit_requires_branch: false,
                 memory_injection: radian_host::memory::InjectionConfig::default(),
                 trust: radian_host::trust::Setup::untrusted(&lead, false),
                 resume: false,
@@ -287,6 +290,7 @@ impl Fixture {
                 memory_warning: Arc::new(|_message: &str| {}),
                 memory_notice_line: Arc::new(|_line: &str| {}),
                 task_builder: Some(task_builder(session_dir.clone(), base_url.to_owned())),
+                named_builder: None,
             },
         )
         .await
@@ -689,6 +693,7 @@ async fn a_session_without_a_registry_refuses_the_task_verbs() {
                 skills_disabled: Vec::new(),
                 tools_allow: None,
                 skills_allow: None,
+                git_commit_requires_branch: false,
                 memory_injection: radian_host::memory::InjectionConfig::default(),
                 trust: radian_host::trust::Setup::untrusted(&scratch, false),
                 resume: false,
@@ -713,6 +718,7 @@ async fn a_session_without_a_registry_refuses_the_task_verbs() {
                 memory_warning: Arc::new(|_message: &str| {}),
                 memory_notice_line: Arc::new(|_line: &str| {}),
                 task_builder: None,
+                named_builder: None,
             },
         )
         .await
