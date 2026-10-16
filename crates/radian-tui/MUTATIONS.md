@@ -1655,3 +1655,16 @@ Base：本片 HEAD（`oc/thin-think`）· 就地变异，每个变异先把文�
 `▾ thinking · …` 头行是合成行（没有源字符）但**画了文字**，旧判据把它当空白边缘行删掉，整个头行消失。
 只有这一种形状受影响，由 `thinking::the_expanded_thinking_has_a_header_and_a_rail` 与
 `blocks::reasoning_modes_change_the_line_count` 钉住。
+
+## thin ② × slice ③：thinking 正文的代码块用 slice ③ 的 open frame（2026-10-16）
+
+切片 ③ 把围栏代码块改成 open frame（ADR 0035）后，thinking 正文的代码块跟随同一形状，
+由新增测试 `thinking::a_thinking_code_block_draws_the_open_frame_and_counts_the_drawn_lines` 钉住。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| TH6 | thinking 正文的代码块画 open frame | `blocks.rs::reasoning_body_lines` 去掉 `code_frame_top(...)` 的 push | `thinking::a_thinking_code_block_draws_the_open_frame_and_counts_the_drawn_lines`（屏幕没有 `╭─ rust `） | ✅ |
+| TH7 | 计数的行数等于画出的行数 | `blocks.rs::line_count` 的 Reasoning 分支改成 `code_line_count(&text[start..end], closed) - 1` | 同上（`left: 5, right: 6`） | ✅ |
+
+2/2 抓住。测试正文**不带**结尾换行，所以 `line_count` 走镜像分支而不是 `has_blank_edge` 的 layout
+兜底（第一版带了结尾换行，TH7 没抓住：兜底直接返回 layout 的长度，绕过镜像）。

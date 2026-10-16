@@ -8,9 +8,10 @@
 
 use agent_core::{AgentEvent, ContentPart, Message};
 use radian_tui::app::{App, Entry, EntryKind};
-use radian_tui::blocks::ReasoningMode;
+use radian_tui::blocks::{self, ReasoningMode};
 use radian_tui::projection::{SessionProjection, StreamKind};
 use radian_tui::render;
+use radian_tui::tools::{DisplayModes, ToolDisplay, ToolFold};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Modifier;
@@ -23,6 +24,20 @@ fn classic_footer(app: &mut App) {
         preset: Some("classic".to_string()),
         ..Default::default()
     });
+}
+
+/// The display modes the other reasoning tests render but assert only counts with.
+fn thinking_modes(reasoning: ReasoningMode) -> DisplayModes {
+    DisplayModes {
+        reasoning,
+        tools: ToolDisplay {
+            fold: ToolFold::Expanded,
+            preview_lines: 5,
+        },
+        mermaid: true,
+        highlight: true,
+        glyphs: radian_tui::footer::Glyphs::Unicode,
+    }
 }
 
 fn render(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
@@ -325,6 +340,44 @@ fn the_thinking_markers_follow_the_ascii_glyph_tier() {
     resumed(&mut folded, "a thought");
     let text = screen(&render(&mut folded, 80, 10));
     assert!(text.contains("> thinking · 1 lines"), "{text}");
+}
+
+/// A fenced code block in the thinking body draws the same open frame as a reply (ADR 0035
+/// revision 6 decision 7): the `╭─ <lang>` top line, the `│ ` rail on the code rows and the
+/// `╰──` bottom line — and the counted lines equal the drawn ones at two widths.
+#[test]
+fn a_thinking_code_block_draws_the_open_frame_and_counts_the_drawn_lines() {
+    let source = "before the block\n\n```rust\nlet x = 1;\n```";
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.reasoning_mode = ReasoningMode::Expanded;
+    resumed(&mut app, source);
+    let terminal = render(&mut app, 60, 16);
+    let text = screen(&terminal);
+    assert!(
+        text.contains("╭─ rust "),
+        "the open frame's titled top line: {text}"
+    );
+    assert!(text.contains("╰──"), "the open frame's bottom line: {text}");
+    let code = row_of(&terminal, "let x = 1;").expect("the code row");
+    assert!(
+        row(&terminal, code as u16).starts_with("│ let x = 1;"),
+        "the code row keeps the frame's rail in columns 1-2: {text}"
+    );
+
+    // The counted lines equal the drawn ones: the mirror and the layout must agree, or the
+    // transcript's total height (and the scroll position) drifts.
+    let entry = &app.session.entries[0];
+    assert_eq!(entry.kind, EntryKind::Reasoning);
+    let parsed = blocks::parse_blocks(&entry.text);
+    for width in [60usize, 24] {
+        let modes = thinking_modes(ReasoningMode::Expanded);
+        assert_eq!(
+            blocks::line_count(entry, modes, width),
+            blocks::layout(entry, &parsed, modes, width).len(),
+            "width {width}"
+        );
+    }
 }
 
 /// The `~ ` marker of the old thinking channel is gone (ADR 0028).
