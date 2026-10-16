@@ -993,7 +993,10 @@ mod tests {
     #[test]
     fn a_zero_window_is_unset() {
         let zero = WindowQuery::production(Some(0), None, "http://127.0.0.1:1/v1", "m", None, true);
-        assert_eq!(zero.explicit, None, "a zero window is not an explicit window");
+        assert_eq!(
+            zero.explicit, None,
+            "a zero window is not an explicit window"
+        );
         let one = WindowQuery::production(Some(1), None, "http://127.0.0.1:1/v1", "m", None, true);
         assert_eq!(one.explicit, Some(1));
         // The resolver's own rule (ADR 0018: "0 or missing is unknown") already covers C/I.
