@@ -77,3 +77,22 @@ fn main_does_not_establish_a_session() {
         "main.rs must call the shared open_session"
     );
 }
+
+/// ADR 0016: `[sandbox] allow_unix_sockets` can only be enforced by the sandbox, so
+/// the sockets the TUI resolved must reach `build_sandbox`. A call site that forwards an empty
+/// list silently ignores the user's config, and the compiler cannot tell the two apart.
+#[test]
+fn main_forwards_the_allowed_unix_sockets_to_the_sandbox() {
+    let code = main_rs();
+    let call = code
+        .split_once("radian_tui::profile::build_sandbox(")
+        .expect("main.rs builds the sandbox")
+        .1
+        .split_once(")?;")
+        .expect("the build_sandbox call ends with `)?;`")
+        .0;
+    assert!(
+        call.contains("&allow_unix_sockets"),
+        "the sandbox must get the resolved `[sandbox] allow_unix_sockets` (ADR 0016):\n{call}"
+    );
+}

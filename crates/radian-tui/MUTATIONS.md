@@ -1399,3 +1399,15 @@ Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 每个变异在就�
 2/2 抓住。`pty::pty_mode_lead_switches_the_role_prompt_from_the_next_turn`（真 TUI、mock 模型）
 覆盖上一层的接线：`/mode lead` 的 layer 1 在下一次请求里变成 lead 角色提示词，`<role>` 之外的字节
 不变；它连跑 5 次全绿。
+## sandbox-unix-sockets：TUI 把 `allow_unix_sockets` 交给沙箱（ADR 0016，2026-10-15）
+
+Base `acbc455`（`origin/main`）· 就地变异：改前 `cp` 到 scratchpad，改后从副本写回并 `cmp` 逐字节相同。
+`cargo test -p radian-tui --test structure --no-fail-fast main_forwards_the_allowed_unix_sockets_to_the_sandbox`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| US-M1 | `build_sandbox` 调用的第四个实参改成 `&Vec::new()`（配置里的 socket 列表到不了沙箱） | `structure::main_forwards_the_allowed_unix_sockets_to_the_sandbox` | ✅ |
+
+1/1 抓住。这条是**接线**变异：白名单本身的行为由 `radian-sandbox` 的逃逸矩阵覆盖（`unix_socket` 组的
+`whitelisted_allowed` 对照），而「TUI 把解析后的列表交给 `build_sandbox`」只有源码结构能钉住
+（`run` 在 `main.rs` 里、测试够不到），所以按 `structure.rs` 的既有做法做结构断言。
