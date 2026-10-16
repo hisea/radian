@@ -6,7 +6,7 @@
 //! state** (signals, the driver's end) is one event each. Nothing is polled: every source sends
 //! here.
 //!
-//! This module is a library module rather than part of `main.rs` so the sink's rule — one
+//! This module is a library module rather than part of `cli.rs` so the sink's rule — one
 //! `Dirty` per wake-up, never one per delta — has a unit test.
 
 use std::sync::Arc;
