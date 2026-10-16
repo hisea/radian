@@ -492,6 +492,10 @@ pub struct HostBindings {
     /// `/mode` gate (ADR 0038 decision 1); `None` mounts none. A task session never mounts them
     /// (depth limit 2), whatever its builder returns.
     pub task_builder: Option<crate::task::TaskBuilder>,
+    /// Builds the host-specific parts of a **named** session (ADR 0030 O12, slice 7 part b).
+    /// `Some` builds the lead's named-agent registry, so the session can create and command
+    /// named agents (`send_agent`); `None` has no named agents. A task session never gets one.
+    pub named_builder: Option<crate::named::NamedBuilder>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).
@@ -558,6 +562,8 @@ pub struct LocalSession {
     task_agent: bool,
     /// The lead's task registry (ADR 0030 slice 6), or `None` for a session with no lead tools.
     lead: Option<Arc<crate::task::TaskRegistry>>,
+    /// The lead's named-agent registry (ADR 0030 O12), or `None` for a session with none.
+    named: Option<Arc<crate::named::NamedRegistry>>,
     /// Whether layer 1 is fixed for the session (`--system` or an explicit role): `set_mode`
     /// refuses then.
     role_fixed: bool,
@@ -625,6 +631,11 @@ impl LocalSession {
     /// interface to it; this is for the host (the TUI's task count, `/tasks`).
     pub fn lead_tasks(&self) -> Option<&Arc<crate::task::TaskRegistry>> {
         self.lead.as_ref()
+    }
+
+    /// The lead's named-agent registry (ADR 0030 O12), or `None`. For the host's `/send`.
+    pub fn named_agents(&self) -> Option<&Arc<crate::named::NamedRegistry>> {
+        self.named.as_ref()
     }
 
     pub fn projection(&self) -> &Arc<SessionProjection> {
@@ -772,6 +783,10 @@ impl LocalSession {
     /// Asks the driver to stop gracefully (idempotent) and aborts this session's pending
     /// requests.
     pub fn stop(&self) {
+        // ADR 0030 O12: a lead's named agents close with it; their worktrees stay on disk.
+        if let Some(named) = &self.named {
+            named.close_all();
+        }
         self.close_pending();
         if let Some(stop) = self.driver.stop.lock().unwrap().take() {
             let _ = stop.send(());
@@ -1107,6 +1122,7 @@ pub async fn open_session(
         memory_warning,
         memory_notice_line,
         task_builder,
+        named_builder,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -1312,6 +1328,21 @@ pub async fn open_session(
         None
     };
 
+    // The lead's named-agent registry (ADR 0030 O12, slice 7b): built the same way, over the
+    // lead's workspace, journal and queue. A task agent never builds one.
+    let named_registry = if task_agent {
+        None
+    } else {
+        named_builder.map(|builder| {
+            Arc::new(crate::named::NamedRegistry::new(
+                workspace.clone(),
+                Arc::clone(&journal),
+                Arc::clone(&queue),
+                builder,
+            ))
+        })
+    };
+
     // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line
     // prompt answers them directly. A task agent routes to its own task approver (ADR 0030
     // slice 5), which is the one case a non-human turn may reach the approver.
@@ -1398,7 +1429,10 @@ pub async fn open_session(
     // stay in the model's list in every mode (`/mode` never adds or removes one, revision 5 item
     // 5); the gate turns a call into a "switch with /mode lead" refusal in `general`.
     if let Some(registry) = &lead_registry {
-        tools = tools.with_lead(crate::lead_tools::LeadTools::new(Arc::clone(registry)));
+        tools = tools.with_lead(
+            crate::lead_tools::LeadTools::new(Arc::clone(registry))
+                .with_named(named_registry.clone()),
+        );
         hooks.set_tool_gate(Some(lead_mode_gate(Arc::clone(&config_slot))));
     }
     // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> lists
@@ -1646,6 +1680,7 @@ pub async fn open_session(
         access_builder,
         task_agent,
         lead: lead_registry,
+        named: named_registry,
         role_fixed,
         facts_hooks,
         projection,

@@ -194,6 +194,7 @@ async fn open_with_records(
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
             task_builder: None,
+            named_builder: None,
         },
     )
     .await
@@ -328,6 +329,7 @@ async fn a_local_session_accepts_a_declared_command() {
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
             task_builder: None,
+            named_builder: None,
         },
     )
     .await

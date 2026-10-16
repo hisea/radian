@@ -1362,7 +1362,7 @@ fn run(
     // builder, so a `spawn_task` opens a real task session (a fresh model on the lead's route,
     // a workspace-write tier, MCP off, the lead's retries/compaction/budget/skills). The
     // registry still owns the worktree, the network-off sandbox, no memory and the `task` role.
-    let task_builder = {
+    let task_host = {
         let provider = route.adapter();
         let base_url = route.base_url.clone();
         let model_id = model_name.clone();
@@ -1377,19 +1377,20 @@ fn run(
         let task_model: radian_host::TaskModelFactory = std::sync::Arc::new(
             move |session_id: &str,
                   slot: std::sync::Arc<radian_runtime::ConfigSlot>,
-                  agent: Option<&radian_host::SpawnAgent>| {
+                  agent_model: Option<radian_host::ModelRoute>,
+                  agent_thinking: Option<String>| {
                 // ADR 0030 O11: an agent definition's `model` and `thinking` are the task's
                 // route and level. The route's credential is resolved here the same way a
                 // `/model` switch resolves it — never copied into the snapshot.
-                if let Some(route) = agent.and_then(|agent| agent.model.clone()) {
+                if let Some(route) = agent_model {
                     let ctx = radian_host::RouteContext {
                         providers: providers.clone(),
                         session_id: session_id.to_owned(),
                         user_headers: route_user_headers.clone(),
                         include_usage: None,
                         max_tokens,
-                        thinking: agent
-                            .and_then(|agent| agent.thinking.clone())
+                        thinking: agent_thinking
+                            .clone()
                             .unwrap_or_else(|| route_thinking.clone()),
                         thinking_budget,
                     };
@@ -1431,7 +1432,7 @@ fn run(
             config.source.as_deref().and_then(std::path::Path::parent),
             radian_host::user_home().as_deref(),
         );
-        radian_host::task_builder(radian_host::TaskHost {
+        radian_host::TaskHost {
             session_dir: dir.clone(),
             model: task_model,
             route: (provider_name.clone(), model_name.clone()),
@@ -1467,8 +1468,12 @@ fn run(
             // A task's own stream must not reach the lead's live view (ADR 0030 O10); the
             // status-bar count and the notice lines come from the registry and the projection.
             task_events: Arc::new(|_: &radian_session::RuntimeEvent| {}),
-        })
+        }
     };
+    // ADR 0030 O12: the named-agent builder shares the same host. A `/send` or `send_agent`
+    // creates one long session per name from its definition.
+    let task_builder = radian_host::task_builder(task_host.clone());
+    let named_builder = radian_host::named_builder(task_host);
 
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
@@ -1555,6 +1560,8 @@ fn run(
                 // ADR 0030 slice 6b2: the lead's task tools are mounted and can open real task
                 // sessions; the mode gate still refuses them outside `/mode lead`.
                 task_builder: Some(task_builder),
+                // ADR 0030 O12: named agents are available to `/send` and `send_agent`.
+                named_builder: Some(named_builder),
             },
         ))
         .map_err(|error| error.to_string())?;

@@ -139,6 +139,7 @@ fn builder(session_dir: PathBuf) -> TaskBuilder {
                     memory_warning: Arc::new(|_message: &str| {}),
                     memory_notice_line: Arc::new(|_line: &str| {}),
                     task_builder: None,
+                    named_builder: None,
                 },
             })
         },

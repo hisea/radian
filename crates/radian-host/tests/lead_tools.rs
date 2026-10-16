@@ -181,6 +181,7 @@ fn builder(session_dir: PathBuf, base_url: String, mount_lead_in_tasks: bool) ->
                     memory_warning: Arc::new(|_message: &str| {}),
                     memory_notice_line: Arc::new(|_line: &str| {}),
                     task_builder,
+                    named_builder: None,
                 },
             })
         },
@@ -1139,6 +1140,7 @@ async fn open_lead_inner(
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
             task_builder,
+            named_builder: None,
         },
     )
     .await

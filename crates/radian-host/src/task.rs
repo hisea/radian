@@ -292,9 +292,9 @@ impl SpawnRequest {
 /// The task agents' worktree root (ADR 0039 decision 4): `<radian-home>/worktrees/<repo-key>`,
 /// plus the radian home the symlink check starts from.
 #[derive(Debug, Clone)]
-struct WorktreeRoot {
-    home: PathBuf,
-    root: PathBuf,
+pub(crate) struct WorktreeRoot {
+    pub(crate) home: PathBuf,
+    pub(crate) root: PathBuf,
 }
 
 /// The registry a lead holds: it keys live task agents by id and owns their worktrees
@@ -1016,8 +1016,9 @@ fn enforce_task_setup(
 
 /// The built-in tool names a task can mount: the universe an agent definition's `tools`
 /// allow-list narrows (ADR 0030 O11). MCP tools are dynamic (they depend on a server) and are
-/// governed by the definition's `mcp` list, so they are not in it.
-fn builtin_tool_names() -> Vec<&'static str> {
+/// governed by the definition's `mcp` list, so they are not in it. A named agent's allow-list
+/// narrows the same universe.
+pub(crate) fn builtin_tool_names() -> Vec<&'static str> {
     vec![
         "read",
         "patch",
@@ -1067,7 +1068,7 @@ pub fn task_sandbox(lead: &Sandbox, workspace: &Path) -> Result<Sandbox, TaskErr
 
 /// The task worktree root for `workspace` (ADR 0039 decision 4), or `None` when the workspace
 /// is not a git repository or this process has no usable `~/.radian`.
-fn task_worktree_root(workspace: &Path) -> Option<WorktreeRoot> {
+pub(crate) fn task_worktree_root(workspace: &Path) -> Option<WorktreeRoot> {
     let home = radian_home()?;
     let common = git_common_dir(workspace)?;
     let root = worktrees_dir_for(&home).join(repo_key(&common));

@@ -31,8 +31,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_core::{
-    Message, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure, ToolOutput,
-    ToolProvider, ToolSession, ToolSpec,
+    InputSource, Message, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure,
+    ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
 use radian_permissions::ApprovalPolicy;
 use radian_session::TurnOutcome;
@@ -83,10 +83,13 @@ fn wait_timeout(secs: Option<f64>) -> Result<(Duration, f64), ToolFailure> {
 
 /// The lead tool names, in the order the provider advertises them. The host adds these to the
 /// session profile as `allow` rules (ADR 0030 slice 6); the mode gate decides whether they run.
-pub const LEAD_TOOL_NAMES: [&str; 10] = [
+/// `send_agent`/`wait_agent` are the named-agent pair of slice 7 part b (ADR 0030 O4/O12).
+pub const LEAD_TOOL_NAMES: [&str; 12] = [
     "spawn_task",
+    "send_agent",
     "wait_task",
     "wait_any",
+    "wait_agent",
     "answer_task",
     "deny_task_approval",
     "escalate_approval",
@@ -190,6 +193,25 @@ pub fn specs() -> Vec<ToolSpec> {
             concurrency: ToolConcurrency::Exclusive,
         },
         ToolSpec {
+            name: "send_agent".into(),
+            description: "Send a task to a named agent (a long session the human commands), \
+                          creating it from its definition on first use and reusing it after. \
+                          Returns at once with the name and whether it was created or reused; \
+                          read the reply with `wait_agent`. The input is `Subagent`, so it \
+                          cannot borrow your permissions."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The agent definition name (`~/.radian/agents/<name>.md`)." },
+                    "brief": { "type": "string", "description": "The task to send; appended to the named agent's queue." }
+                },
+                "required": ["name", "brief"],
+                "additionalProperties": false
+            }),
+            concurrency: ToolConcurrency::Shared,
+        },
+        ToolSpec {
             name: "wait_task".into(),
             description: "Block until task `id` raises a question or a still-ask approval, or \
                           finishes its turn (including its end-of-task commit), or the timeout \
@@ -207,6 +229,15 @@ pub fn specs() -> Vec<ToolSpec> {
                           `still_running`. A timeout never cancels a task."
                     .into(),
             input_schema: wait_any_schema(),
+            concurrency: ToolConcurrency::Shared,
+        },
+        ToolSpec {
+            name: "wait_agent".into(),
+            description: "Block until named agent `name` finishes its turn, then return the \
+                          last committed assistant text (bounded). A timeout returns \
+                          `still_running` and never cancels the agent."
+                .into(),
+            input_schema: wait_agent_schema(),
             concurrency: ToolConcurrency::Shared,
         },
         ToolSpec {
@@ -373,14 +404,43 @@ fn wait_any_schema() -> Value {
     })
 }
 
+/// The `wait_agent` schema.
+fn wait_agent_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string", "description": "The named agent to wait for." },
+            "timeout_secs": {
+                "type": "number",
+                "minimum": 0,
+                "description": "How long to wait, in seconds (fractions allowed). Defaults to \
+                                600 (10 minutes); clamped to 24 hours."
+            }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    })
+}
+
 /// The lead's tool provider: one per lead session, sharing the session's [`TaskRegistry`].
 pub struct LeadTools {
     registry: Arc<TaskRegistry>,
+    /// The named-agent registry (ADR 0030 O12), or `None` for a lead with no named agents.
+    named: Option<Arc<crate::named::NamedRegistry>>,
 }
 
 impl LeadTools {
     pub fn new(registry: Arc<TaskRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            named: None,
+        }
+    }
+
+    /// Adds the named-agent registry (ADR 0030 O12), enabling `send_agent`/`wait_agent`.
+    pub fn with_named(mut self, named: Option<Arc<crate::named::NamedRegistry>>) -> Self {
+        self.named = named;
+        self
     }
 }
 
@@ -390,6 +450,7 @@ impl ToolProvider for LeadTools {
     async fn open_session(&self) -> Result<Self::Session, ToolError> {
         Ok(LeadSession {
             registry: Arc::clone(&self.registry),
+            named: self.named.clone(),
             specs: specs(),
         })
     }
@@ -399,6 +460,8 @@ impl ToolProvider for LeadTools {
 /// registry owns the tasks, their worktrees and the pending queue.
 pub struct LeadSession {
     registry: Arc<TaskRegistry>,
+    /// The named-agent registry (ADR 0030 O12), or `None` for a lead with no named agents.
+    named: Option<Arc<crate::named::NamedRegistry>>,
     specs: Vec<ToolSpec>,
 }
 
@@ -430,8 +493,10 @@ pub async fn run(
 ) -> Result<ToolOutput, ToolFailure> {
     match call.name.as_str() {
         "spawn_task" => lead.spawn(call).await,
+        "send_agent" => lead.send_agent(call).await,
         "wait_task" => lead.wait_task(call, &cx).await,
         "wait_any" => lead.wait_any(call, &cx).await,
+        "wait_agent" => lead.wait_agent(call, &cx).await,
         "answer_task" => lead.answer_task(call),
         "deny_task_approval" => lead.deny_task_approval(call),
         "escalate_approval" => lead.escalate_approval(call),
@@ -473,6 +538,20 @@ struct WaitArgs {
 #[serde(deny_unknown_fields)]
 struct WaitAnyArgs {
     ids: Vec<String>,
+    timeout_secs: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendAgentArgs {
+    name: String,
+    brief: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaitAgentArgs {
+    name: String,
     timeout_secs: Option<f64>,
 }
 
@@ -683,6 +762,81 @@ impl LeadSession {
                 }
                 _ = pending.changed() => {}
                 _ = wait_any_turn(&mut turns) => {}
+            }
+        }
+    }
+
+    /// `send_agent { name, brief }` (ADR 0030 O4/O12): append a task to a named agent without a
+    /// new session, creating it from its definition on first use. The input is `Subagent`, so the
+    /// named agent's turn is lowered and it cannot borrow the lead's `User` authority.
+    async fn send_agent(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
+        let args: SendAgentArgs = parse(call)?;
+        if args.brief.trim().is_empty() {
+            return Err(invalid("`brief` must not be empty"));
+        }
+        let named = self
+            .named
+            .as_ref()
+            .ok_or_else(|| fail("no_named_agents", "this lead has no named-agent registry"))?;
+        let outcome = named
+            .send(&args.name, args.brief, InputSource::Subagent)
+            .await
+            .map_err(|error| fail("send_failed", error.to_string()))?;
+        let state = match (outcome.created, outcome.queued) {
+            (true, _) => "created",
+            (false, true) => "reused, queued behind its current turn",
+            (false, false) => "reused",
+        };
+        Ok(ToolOutput {
+            content: vec![agent_core::ContentPart::text(format!(
+                "sent to named agent `{}` ({state}); read the reply with `wait_agent`",
+                outcome.name
+            ))],
+            structured: Some(json!({
+                "agent": outcome.name,
+                "session_id": outcome.session_id,
+                "created": outcome.created,
+                "queued": outcome.queued,
+                "worktree": outcome.worktree.as_ref().map(|p| p.display().to_string()),
+            })),
+        })
+    }
+
+    /// `wait_agent { name, timeout_secs? }` (ADR 0030 O4/O12): block until the named agent's turn
+    /// ends, then return its last committed assistant text (bounded). A timeout returns
+    /// `still_running` and never cancels the agent.
+    async fn wait_agent(
+        &self,
+        call: &ToolCall,
+        cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolFailure> {
+        let args: WaitAgentArgs = parse(call)?;
+        let named = self
+            .named
+            .as_ref()
+            .ok_or_else(|| fail("no_named_agents", "this lead has no named-agent registry"))?;
+        let record = named
+            .get(&args.name)
+            .ok_or_else(|| fail("no_such_agent", format!("no named agent `{}`", args.name)))?;
+        let (timeout, timeout_secs) = wait_timeout(args.timeout_secs)?;
+        let deadline = Instant::now() + timeout;
+        // The turn generation at the start of this wait: a turn that ends from here on (or a turn
+        // that starts and ends) advances it, so this returns the reply to the send just made.
+        let start = record.turn_generation();
+        let mut turns = record.subscribe_turns();
+        loop {
+            if record.turn_generation() != start && !record.running() {
+                return Ok(agent_finished(&record));
+            }
+            tokio::select! {
+                biased;
+                _ = cx.cancellation.cancelled() => {
+                    return Err(fail("cancelled", "the wait was cancelled"));
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Ok(still_running(&args.name, timeout_secs));
+                }
+                _ = turns.changed() => {}
             }
         }
     }
@@ -1074,6 +1228,39 @@ fn any_still_running(timeout_secs: f64) -> ToolOutput {
         structured: Some(json!({
             "event": "still_running",
             "timeout_secs": timeout_secs,
+        })),
+    }
+}
+
+/// A `wait_agent` result: the named agent's turn ended. Carries the last committed assistant
+/// text (bounded) and the outcome. Reads the committed journal, so an uncommitted replacement is
+/// never shown (ADR 0023 U6).
+fn agent_finished(record: &crate::named::NamedRecord) -> ToolOutput {
+    let outcome = record.last_outcome().unwrap_or(TurnOutcome::Unknown);
+    let (summary, summary_truncated) = match record.reply() {
+        Some(text) => {
+            let (mut cut, truncated) = truncate_chars(&text, TASK_SUMMARY_LIMIT_CHARS);
+            if truncated {
+                cut.push_str("\n… [truncated]");
+            }
+            (Some(cut), truncated)
+        }
+        None => (None, false),
+    };
+    ToolOutput {
+        content: vec![agent_core::ContentPart::text(format!(
+            "named agent `{}` finished ({outcome:?})",
+            record.name
+        ))],
+        structured: Some(json!({
+            "agent": record.name,
+            "event": "finished",
+            "outcome": outcome,
+            "isolation": record.isolation.as_str(),
+            "worktree": record.worktree.as_ref().map(|p| p.display().to_string()),
+            "branch": record.branch,
+            "summary": summary,
+            "summary_truncated": summary_truncated,
         })),
     }
 }
