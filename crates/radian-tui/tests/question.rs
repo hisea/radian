@@ -460,9 +460,10 @@ fn the_panel_shows_the_tabs_the_options_and_the_hints() {
     assert!(text.contains("↳ the second"), "{text}");
     assert!(text.contains("Other (type your own)"), "{text}");
     assert!(
-        text.contains("⏎ select"),
-        "the single-question hint: {text}"
+        text.contains("space select"),
+        "the only select key: {text}"
     );
+    assert!(text.contains("⏎ next"), "the confirm key: {text}");
     assert!(text.contains("alt-h"), "{text}");
 
     // A multi question changes the hints.
@@ -476,7 +477,7 @@ fn the_panel_shows_the_tabs_the_options_and_the_hints() {
     q.header = Some("Tiers".to_string());
     show(&mut multi, vec![q]);
     let text = render(&mut multi, 80, 16);
-    assert!(text.contains("space toggle"), "{text}");
+    assert!(text.contains("space select"), "{text}");
     assert!(text.contains("○ Safe"), "{text}");
 }
 
@@ -579,33 +580,148 @@ fn other_keeps_its_text_while_moving_with_arrows() {
     assert_eq!(answer.answers[0].other.as_deref(), Some("custom"));
 }
 
-/// R3: `⏎` on a `single` question selects the highlighted option **and advances**; `Space`
-/// selects without advancing.
+/// `Enter` only confirms and advances, it never selects; `Space` selects
+/// without advancing. A question with nothing chosen still moves on.
 #[test]
-fn a_single_question_selects_and_advances() {
+fn enter_advances_without_selecting_and_space_selects_without_advancing() {
     let questions = || {
         vec![
             question(
                 "one",
                 QuestionKind::Single,
                 vec![option("a", "A"), option("b", "B")],
-                false,
+                true,
             ),
-            question("two", QuestionKind::Text, Vec::new(), false),
+            question("two", QuestionKind::Text, Vec::new(), true),
+        ]
+    };
+    // `Enter` on the single question advances to the next question and changes nothing.
+    let mut app = App::new("m", "s");
+    show(&mut app, questions());
+    app.on_key(key(KeyCode::Down)); // B
+    assert_eq!(effect(&mut app, key(KeyCode::Enter)), None);
+    assert_eq!(
+        form(&app).answers[0].selected,
+        Vec::<String>::new(),
+        "Enter must not select"
+    );
+    assert_eq!(form(&app).current, Some(1), "Enter advances");
+
+    // `Space` selects the highlighted option and stays on the question.
+    let mut spaced = App::new("m", "s");
+    show(&mut spaced, questions());
+    spaced.on_key(key(KeyCode::Down)); // B
+    spaced.on_key(key(KeyCode::Char(' '))); // select B, stay
+    assert_eq!(form(&spaced).answers[0].selected, vec!["b"]);
+    assert_eq!(form(&spaced).current, Some(0), "Space does not advance");
+}
+
+/// on a `multi` question `Space` toggles and `Enter` only advances (it does
+/// **not** toggle).
+#[test]
+fn a_multi_question_toggles_with_space_and_enter_only_advances() {
+    let questions = || {
+        vec![
+            question(
+                "tiers",
+                QuestionKind::Multi,
+                vec![option("safe", "Safe"), option("workspace", "Workspace")],
+                true,
+            ),
+            question("two", QuestionKind::Text, Vec::new(), true),
         ]
     };
     let mut app = App::new("m", "s");
     show(&mut app, questions());
-    app.on_key(key(KeyCode::Down)); // B
-    app.on_key(key(KeyCode::Enter));
-    assert_eq!(form(&app).answers[0].selected, vec!["b"]);
+    app.on_key(key(KeyCode::Char(' '))); // toggle `safe` on
+    assert_eq!(form(&app).answers[0].selected, vec!["safe"]);
+    assert_eq!(form(&app).current, Some(0), "Space does not advance");
+    assert_eq!(effect(&mut app, key(KeyCode::Enter)), None);
+    assert_eq!(
+        form(&app).answers[0].selected,
+        vec!["safe"],
+        "Enter must not toggle"
+    );
     assert_eq!(form(&app).current, Some(1), "Enter advances");
+}
 
-    let mut spaced = App::new("m", "s");
-    show(&mut spaced, questions());
-    spaced.on_key(key(KeyCode::Char(' '))); // select A, stay
-    assert_eq!(form(&spaced).answers[0].selected, vec!["a"]);
-    assert_eq!(form(&spaced).current, Some(0), "Space does not advance");
+/// `Space` on the `Other` row selects it and starts typing at once — the
+/// cursor is visible on that row, the next keys land in its text, a following `Space` is a
+/// space (the field takes the space), and switching to another option and back keeps the text.
+#[test]
+fn space_on_other_starts_typing_and_the_cursor_is_visible() {
+    let mut q = question(
+        "pick",
+        QuestionKind::Single,
+        vec![option("a", "A"), option("b", "B")],
+        true,
+    );
+    q.allow_other = true;
+    let mut app = App::new("m", "s");
+    show(&mut app, vec![q]);
+    // Move onto the `Other` row (A, B, Other); before `Space` it is not chosen.
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(form(&app).answers[0].cursor, 2, "the Other row");
+    assert!(!form(&app).answers[0].other, "not chosen yet");
+    // `Space` chooses it and shows the inline cursor on that row.
+    app.on_key(key(KeyCode::Char(' ')));
+    assert!(form(&app).answers[0].other, "Space chooses Other");
+    let text = render(&mut app, 80, 24);
+    assert!(
+        text.contains("Other: ▏"),
+        "the text cursor is visible on the Other row: {text}"
+    );
+    // Typing lands in the Other text, and a `Space` is a space now (the field takes it).
+    for c in "hi".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    app.on_key(key(KeyCode::Char(' ')));
+    assert_eq!(form(&app).answers[0].text.text(), "hi ");
+
+    // `Space` on another option switches the single answer and keeps the typed text; `Space`
+    // back on `Other` chooses it again with the text intact and the cursor at its end.
+    app.on_key(key(KeyCode::Up)); // to option B
+    app.on_key(key(KeyCode::Char(' '))); // choose option B
+    assert_eq!(form(&app).answers[0].selected, vec!["b"]);
+    assert!(!form(&app).answers[0].other, "Other is un-chosen");
+    assert_eq!(form(&app).answers[0].text.text(), "hi ", "the text is kept");
+    app.on_key(key(KeyCode::Down)); // back to Other
+    app.on_key(key(KeyCode::Char(' '))); // choose Other again
+    assert!(form(&app).answers[0].other);
+    assert_eq!(form(&app).answers[0].text.text(), "hi ");
+    assert_eq!(
+        form(&app).answers[0].text.cursor(),
+        form(&app).answers[0].text.len(),
+        "the cursor is at the end of the text"
+    );
+}
+
+/// `Enter` with nothing chosen still advances; the question counts as
+/// unanswered and the overview marks it.
+#[test]
+fn an_unanswered_question_is_marked_in_the_overview() {
+    let mut app = App::new("m", "s");
+    show(
+        &mut app,
+        vec![
+            question("one", QuestionKind::Single, vec![option("a", "A")], false),
+            question("two", QuestionKind::Single, vec![option("b", "B")], false),
+        ],
+    );
+    // `Enter` on the first question with nothing chosen advances to the second.
+    assert_eq!(effect(&mut app, key(KeyCode::Enter)), None);
+    assert_eq!(form(&app).current, Some(1));
+    assert!(form(&app).answers[0].selected.is_empty());
+    // `Enter` again reaches the overview; both are unanswered and marked `· (not answered)`.
+    assert_eq!(effect(&mut app, key(KeyCode::Enter)), None);
+    assert_eq!(form(&app).current, None);
+    let text = render(&mut app, 80, 24);
+    assert!(
+        text.contains("· one — (not answered)"),
+        "the unanswered question is marked: {text}"
+    );
+    assert!(text.contains("· two — (not answered)"), "{text}");
 }
 
 /// A tall question panel shrinks the transcript; when it closes the transcript must be back at

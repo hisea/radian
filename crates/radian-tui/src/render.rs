@@ -2337,18 +2337,17 @@ fn option_line(
     ])
 }
 
-/// The `Other` row: `Other (type your own)`, with the typed text when chosen.
+/// The `Other` row: `Other (type your own)` before it is chosen, `Other: <text>` once it is. A
+/// focused, chosen row draws a visible inline cursor (`Space` on `Other`
+/// starts typing at once), at the composer's cursor so `←`/`→` move it.
 fn other_line(
     question: &radian_coding::Question,
     answer: &crate::question::FormAnswer,
     theme: &Theme,
     glyphs: crate::footer::Glyphs,
 ) -> Line<'static> {
-    let cursor = if answer.cursor == question.options.len() {
-        "❯ "
-    } else {
-        "  "
-    };
+    let focused = answer.cursor == question.options.len();
+    let cursor = if focused { "❯ " } else { "  " };
     // ADR 0024 implementation note: `Other` uses the **same** checkbox pair as the
     // options (it used to always draw a circle, even in a multi question), from `AskGlyphs`.
     let g = blocks::AskGlyphs::for_glyphs(glyphs);
@@ -2357,17 +2356,29 @@ fn other_line(
     } else {
         g.single_off
     };
-    let text = if answer.other && !answer.text.is_empty() {
-        format!("Other: {}", answer.text.text())
-    } else {
-        "Other (type your own)".to_string()
-    };
     // The marker and the cursor are never bold, like `option_line`.
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(cursor, theme.notice_label.remove_modifier(Modifier::BOLD)),
         Span::styled(mark, theme.notice_body),
-        Span::styled(format!(" {text}"), theme.notice_body),
-    ])
+    ];
+    if answer.other && focused {
+        let text = answer.text.text();
+        let at = answer.text.cursor();
+        let before: String = text.chars().take(at).collect();
+        let after: String = text.chars().skip(at).collect();
+        spans.push(Span::styled(" Other: ".to_string(), theme.notice_body));
+        spans.push(Span::styled(before, theme.notice_body));
+        spans.push(Span::styled("▏", theme.hint));
+        spans.push(Span::styled(after, theme.notice_body));
+    } else {
+        let text = if answer.other && !answer.text.is_empty() {
+            format!("Other: {}", answer.text.text())
+        } else {
+            "Other (type your own)".to_string()
+        };
+        spans.push(Span::styled(format!(" {text}"), theme.notice_body));
+    }
+    Line::from(spans)
 }
 
 /// A free-text field (`text`, `Other`, a note): `> ` and the text.

@@ -1317,15 +1317,15 @@ description), the `Other` row with inline editing, and the key hints in the bott
 │   ○ External process plugins                                │
 │      ↳ a separate program, JSON-RPC over stdio              │
 │   ○ Other (type your own)                                   │
-╰─ ⏎ select · n note · ↑/↓ move · ⇥/←/→ question · esc cancel…╯
+╰─ space select · ⏎ next · ↑/↓ move · ⇥/←/→ question · esc can…╯
 ```
 
 | Key | Action |
 |---|---|
 | `Tab`/`→` / `Shift-Tab`/`←` (`form_next`/`form_prev`) | the next/previous tab (a question or `Submit`), wrapping |
 | `Up` / `Down` (`form_up`/`form_down`) | the option cursor; on the `Other` row it still moves between options and keeps the typed text (a `text` question and a note are multi-line, so there it moves the composer's cursor) |
-| `Space` (`form_select`) | choose the highlighted option without advancing (toggle it for a `multi` question) |
-| `Enter` (`form_submit`) | save a note; a `single` selects **and advances**; a `multi` toggles; on `Submit`, submit |
+| `Space` (`form_select`) | the **only** select key: choose the highlighted option without advancing (toggle it for a `multi` question). On the `Other` row it chooses `Other` and starts typing at once (a visible cursor on that row); a `Space` inside the field is a space |
+| `Enter` (`form_submit`) | **only** confirm and advance to the next question (never select; the last question goes to `Submit`, `Submit` submits). Saves a note. Inside the `Other` field it confirms the typed answer and advances |
 | `n` | a note for the current question (type, `Enter` saves, `Esc` cancels) |
 | `Esc` (`form_decline`) | ask once; a second `Esc` declines (`user_declined`) |
 | `alt-h` | collapse the panel to one line (`Ask · 2/3 answered · alt-h to show`) |
