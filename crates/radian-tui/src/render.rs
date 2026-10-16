@@ -166,6 +166,11 @@ pub fn wrap_line_count(text: &str, width: usize) -> usize {
             }
             let ch_width = if ch == '\t' {
                 4
+            } else if ch.is_ascii() {
+                // `UnicodeWidthChar::width` is a table lookup; ASCII is by far the common case
+                // (the first frame counts ~40 MiB of tool output). Printable ASCII is 1, the
+                // other ASCII (control) is 0, exactly as `width` reports.
+                usize::from((0x20..0x7f).contains(&(ch as u8)))
             } else {
                 ch.width().unwrap_or(0)
             };
@@ -2516,7 +2521,13 @@ fn render_frame_row(
                 spans.push(Span::styled(command.to_owned(), patch_band(body, band)));
             } else {
                 spans.extend(body_spans(
-                    entry, row, body, theme, band, first_text, spinner,
+                    entry,
+                    row,
+                    patch_band(body, band),
+                    theme,
+                    band,
+                    first_text,
+                    spinner,
                 ));
             }
             let used = 2 + UnicodeWidthStr::width(row.text.as_str()) + if meta { 2 } else { 0 };

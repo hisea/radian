@@ -530,3 +530,96 @@ async fn a_resume_aborts_a_pending_segment_and_the_driver_matches_the_disk_fold(
     let _ = session.join().await;
     drop(scratch);
 }
+
+/// resume-perf B/resume-perf2: the host's initial transcript is the one the driver recovered
+/// from the **single** parse, so it must equal opening and folding the file. This is the
+/// promise step 2 makes, checked where a second fold could drift: a committed compaction
+/// replacement (ADR 0018/0019) plus a pending one at end of file (which the resume aborts).
+/// The comparison is the assertion; no wall clock.
+#[tokio::test]
+async fn a_resumed_history_matches_the_disk_fold_through_compaction_and_replacement() {
+    use agent_core::{JournalRecord, Message};
+
+    let records = vec![
+        JournalRecord::Message {
+            index: 0,
+            message: Message::user("old zero"),
+        },
+        JournalRecord::Message {
+            index: 1,
+            message: Message::assistant("old one"),
+        },
+        // A committed compaction: the summary at 0, two kept messages after it.
+        JournalRecord::ContextCompacted {
+            revision: 1,
+            source_revision: 0,
+            source_len: 2,
+            summary: "summary of the above".to_owned(),
+            first_kept: 1,
+            tokens_before: 1_000,
+            tokens_after: 100,
+            below_target: false,
+            model: "mock".to_owned(),
+        },
+        JournalRecord::TranscriptReplaced {
+            revision: 1,
+            len: 3,
+        },
+        JournalRecord::Message {
+            index: 0,
+            message: Message::user("summary of the above"),
+        },
+        JournalRecord::Message {
+            index: 1,
+            message: Message::user("kept zero"),
+        },
+        JournalRecord::Message {
+            index: 2,
+            message: Message::assistant("kept one"),
+        },
+        JournalRecord::TranscriptReplacementCommitted {
+            revision: 1,
+            len: 3,
+        },
+        // A second replacement left pending at end of file: the resume aborts it, so its
+        // messages are dropped and the history stays the committed one.
+        JournalRecord::TranscriptReplaced {
+            revision: 2,
+            len: 2,
+        },
+        JournalRecord::Message {
+            index: 0,
+            message: Message::user("pending zero"),
+        },
+        JournalRecord::Message {
+            index: 1,
+            message: Message::user("pending one"),
+        },
+    ];
+    let (scratch, session) = open_with_records(
+        "resume-history",
+        vec![SessionCapability::Observe],
+        Some(records),
+    )
+    .await;
+    let path = scratch.0.join("resume-history.jsonl");
+    let disk = radian_session::Session::open(&path)
+        .unwrap()
+        .history()
+        .unwrap();
+    assert_eq!(
+        session.history, disk,
+        "the host's initial view must be exactly the disk fold"
+    );
+    assert!(
+        !session.history.iter().any(|m| m.text() == "pending zero"),
+        "the pending replacement's messages are dropped"
+    );
+    assert!(
+        session.history.iter().any(|m| m.text() == "kept zero"),
+        "the committed replacement's messages stand"
+    );
+    session.stop();
+    let _ = session.join().await;
+    drop(scratch);
+}

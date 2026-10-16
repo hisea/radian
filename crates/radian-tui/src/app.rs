@@ -172,8 +172,13 @@ pub struct Entry {
     /// The entry's laid-out Markdown paragraph lines (ADR 0028 R2), keyed by `(width,
     /// text_len)` and indexed by the paragraph block's start. The layout does not depend on
     /// the reasoning/tool folds, so a global fold toggle reuses it instead of re-parsing
-    /// every Assistant entry (the R7 toggle gate).
-    pub(crate) md_cache: Option<MdCache>,
+    /// every Assistant entry (the R7 toggle gate). Filled lazily by the layout/text paths
+    /// (interior mutability), because the measure pass counts Markdown without laying it out.
+    pub(crate) md_cache: std::cell::RefCell<Option<MdCache>>,
+    /// The Markdown paragraph **line counts**, keyed the same way (resume-perf2). The measure
+    /// pass fills this from [`crate::blocks::line_count`], so the first frame (and a fold
+    /// toggle) never materializes Markdown lines for an entry it only needs to measure.
+    pub(crate) md_count_cache: Option<MdCountCache>,
 }
 
 impl Entry {
@@ -193,7 +198,8 @@ impl Entry {
             block_cache: None,
             layout_cache: None,
             diagram_cache: None,
-            md_cache: None,
+            md_cache: std::cell::RefCell::new(None),
+            md_count_cache: None,
         }
     }
 }
@@ -250,14 +256,25 @@ pub enum Overlay {
     Picker(Picker),
 }
 
-/// The Markdown layout cache: `(width, text_len, paragraphs)`, where each paragraph is
-/// `(block start, lines)`. A type alias keeps the `Option` readable in `Entry`.
+/// The Markdown **line** cache: `(width, text_len, glyphs, paragraphs)`, where each paragraph
+/// is `(block start, lines)`. A type alias keeps the `Option` readable in `Entry`. It is filled
+/// **lazily** by the paths that actually lay a paragraph out (the window, the selection and
+/// the search), never by the measure pass (resume-perf2: measuring counts a paragraph without
+/// building its lines). The glyph tier is part of the key (ADR 0035): the bullet,
+/// the quote bar, the task checkboxes and the table borders change the layout.
 pub(crate) type MdCache = (
     usize,
     usize,
     crate::footer::Glyphs,
     Vec<(usize, Vec<crate::blocks::BodyLine>)>,
 );
+
+/// The Markdown **count** cache: `(width, text_len, glyphs, paragraphs)`, where each paragraph
+/// is `(block start, line count)`. The measure pass fills it (a count is cheap — no line is
+/// built), so re-measuring the same entry after a fold toggle does not re-parse its Markdown
+/// (the R7 toggle gate). The glyph tier is in the key too: a task list's checkbox changes the
+/// marker width, so the count depends on it (ADR 0035).
+pub(crate) type MdCountCache = (usize, usize, crate::footer::Glyphs, Vec<(usize, usize)>);
 
 /// One approval as the UI shows it: the queue's id (ADR 0023 U7), the session that asked and
 /// the request itself. The queue id is what the answer names, not the permission layer's own
@@ -4546,37 +4563,49 @@ impl App {
                 // The result pairs with its call **by id** (the same key the live and the
                 // resume paths carry), so a batch of calls pairs correctly whatever order
                 // their results arrive in.
-                let paired = self
-                    .entries
-                    .iter_mut()
-                    .rev()
-                    .find(|entry| {
-                        entry.kind == EntryKind::ToolCall
-                            && entry
-                                .tool
-                                .as_ref()
-                                .is_some_and(|card| card.call_id == result.call_id)
-                    })
-                    .and_then(|entry| {
+                //
+                // The pairing is a **single** scan from the back: the call is the most recent
+                // matching card, and the index it found is reused for the insertion below.
+                // (A second front `position` for the index walked the whole transcript per
+                // result — the same O(n^2) family as the `retain` resume-perf A fixed.)
+                let [_, ok_glyph, failed_glyph] = self.footer.glyphs().tool_status();
+                let mut paired: Option<(String, serde_json::Value)> = None;
+                let mut call_index: Option<usize> = None;
+                let len = self.entries.len();
+                for (rev, entry) in self.entries.iter_mut().rev().enumerate() {
+                    #[cfg(test)]
+                    TOOL_PAIR_SCANS.with(|count| count.set(count.get() + 1));
+                    if entry.kind == EntryKind::ToolCall
+                        && entry
+                            .tool
+                            .as_ref()
+                            .is_some_and(|card| card.call_id == result.call_id)
+                    {
                         entry.result = Some(result.is_error);
-                        let card = entry.tool.as_mut()?;
-                        card.structured = result.structured.clone();
-                        // The header can only be final now (the `shell` exit code comes from
-                        // the result), so the entry's text - what renders and copies - is
-                        // regenerated from the same function the layout uses.
-                        let [_, ok, failed] = self.footer.glyphs().tool_status();
-                        let glyph = if result.is_error { failed } else { ok };
-                        let head = crate::tools::call_text(card, glyph, &result.text());
-                        // ADR 0024: the call entry draws the whole ask block (its
-                        // result entry is blank), so it keeps the result's own text for the
-                        // declined/cancelled status line inside the box.
-                        entry.text = if card.name == "ask_user" {
-                            result.text()
-                        } else {
-                            head
-                        };
-                        Some((card.name.clone(), card.arguments.clone()))
-                    });
+                        if let Some(card) = entry.tool.as_mut() {
+                            card.structured = result.structured.clone();
+                            // The header can only be final now (the `shell` exit code comes
+                            // from the result), so the entry's text - what renders and copies -
+                            // is regenerated from the same function the layout uses.
+                            let glyph = if result.is_error {
+                                failed_glyph
+                            } else {
+                                ok_glyph
+                            };
+                            // ADR 0024: the call entry draws the whole ask block
+                            // (its result entry is blank), so it keeps the result's own text
+                            // for the declined/cancelled status line inside the box.
+                            entry.text = if card.name == "ask_user" {
+                                result.text()
+                            } else {
+                                crate::tools::call_text(card, glyph, &result.text())
+                            };
+                            paired = Some((card.name.clone(), card.arguments.clone()));
+                        }
+                        call_index = Some(len - 1 - rev);
+                        break;
+                    }
+                }
                 let (name, arguments) = paired.unwrap_or_default();
                 let mut card = crate::tools::ToolCard::new(result.call_id.clone(), name, arguments);
                 card.structured = result.structured.clone();
@@ -4594,13 +4623,7 @@ impl App {
                 // entries are the UI's own order; the journal keeps the message order, so a
                 // resume replay runs this same code and lands on the same order. A result
                 // whose call is gone (a torn transcript) is appended.
-                match self.entries.iter().position(|entry| {
-                    entry.kind == EntryKind::ToolCall
-                        && entry
-                            .tool
-                            .as_ref()
-                            .is_some_and(|call| call.call_id == result.call_id)
-                }) {
+                match call_index {
                     Some(index) => {
                         // The call heads the merged card and this result closes it (ADR 0028
                         // revision 2): the drawing merges them, the data stays two entries.
@@ -4636,6 +4659,14 @@ pub fn text_of(parts: &[ContentPart]) -> String {
 #[cfg(test)]
 thread_local! {
     pub(crate) static LIVE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+// Test-only: how many entries the tool-result pairing has walked. A unit test asserts it stays
+// linear in the transcript when every result pairs with the most recent call, which is the
+// property the O(n^2) fix rests on (no wall clock). Thread-local for the same reason as above.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TOOL_PAIR_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The `@`-mention slice needs exactly one `App` method. Kept in its own block at the end of
@@ -5177,5 +5208,122 @@ mod tests {
             "the non-live entry after it survives"
         );
         assert_eq!(app.live_count, 0);
+    }
+
+    fn pair_scans() -> u64 {
+        TOOL_PAIR_SCANS.with(std::cell::Cell::get)
+    }
+
+    /// A resume replays assistant tool calls and their results in order, so every result pairs
+    /// with the most recent call. The pairing must not walk the transcript from the front: that
+    /// was a second O(n^2) over the whole resume (resume-perf2). The number of entries walked
+    /// is the property; no wall clock.
+    #[test]
+    fn tool_result_pairing_does_not_walk_the_transcript() {
+        use agent_core::{ContentPart, ToolCall, ToolResult};
+
+        let mut app = App::new("m", "s");
+        let pairs = 400u64;
+        let before = pair_scans();
+        for i in 0..pairs {
+            app.push_message(&agent_core::Message::Assistant {
+                content: Vec::new(),
+                reasoning: Vec::new(),
+                tool_calls: vec![ToolCall {
+                    id: format!("call-{i}"),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "file.txt"}),
+                }],
+                provider_payload: None,
+                interrupted: false,
+                meta: Default::default(),
+            });
+            app.push_message(&agent_core::Message::Tool {
+                result: ToolResult::success(format!("call-{i}"), vec![ContentPart::text("ok")]),
+                meta: Default::default(),
+            });
+        }
+        let scanned = pair_scans() - before;
+        assert!(
+            scanned <= pairs * 4,
+            "pairing {pairs} results walked {scanned} entries; it must not scan the transcript"
+        );
+        // The results still pair: one Assistant entry, one call and one result per pair.
+        assert_eq!(app.entries.len() as u64, pairs * 3);
+    }
+
+    /// The pairing search is a scan from the back, so it finds the most recent matching call.
+    /// A batch of calls (one assistant message, several results) pairs each result with its own
+    /// call, not the first one in the batch.
+    #[test]
+    fn a_batch_of_tool_results_pairs_each_with_its_own_call() {
+        use agent_core::{ContentPart, ToolCall, ToolResult};
+
+        let mut app = App::new("m", "s");
+        app.push_message(&agent_core::Message::Assistant {
+            content: Vec::new(),
+            reasoning: Vec::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "a".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "a"}),
+                },
+                ToolCall {
+                    id: "b".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "b"}),
+                },
+            ],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        });
+        // The results arrive in the reverse order (allowed): each must pair with its own call.
+        for id in ["b", "a"] {
+            app.push_message(&agent_core::Message::Tool {
+                result: ToolResult::success(id.to_owned(), vec![ContentPart::text("ok")]),
+                meta: Default::default(),
+            });
+        }
+        let order: Vec<&str> = app
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::ToolCall)
+            .filter_map(|entry| entry.tool.as_ref().map(|card| card.call_id.as_str()))
+            .collect();
+        assert_eq!(order, vec!["a", "b"], "the calls keep their order");
+        // Each result sits right after **its own** call (rule 4): call a, result a, call b,
+        // result b - not every call then every result.
+        let layout: Vec<(EntryKind, String)> = app
+            .entries
+            .iter()
+            .map(|entry| {
+                let id = entry
+                    .tool
+                    .as_ref()
+                    .map(|card| card.call_id.clone())
+                    .unwrap_or_default();
+                (entry.kind, id)
+            })
+            .collect();
+        assert_eq!(
+            layout,
+            vec![
+                (EntryKind::Assistant, String::new()),
+                (EntryKind::ToolCall, "a".to_owned()),
+                (EntryKind::ToolResult, "a".to_owned()),
+                (EntryKind::ToolCall, "b".to_owned()),
+                (EntryKind::ToolResult, "b".to_owned()),
+            ]
+        );
+        // Both calls paired with their own result.
+        let calls: Vec<Option<bool>> = app
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::ToolCall)
+            .map(|entry| entry.result)
+            .collect();
+        assert_eq!(calls, vec![Some(false), Some(false)]);
     }
 }
