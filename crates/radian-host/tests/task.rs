@@ -437,6 +437,48 @@ async fn shared_isolation_is_the_lead_workspace_and_safe() {
     fixture.registry.remove("t1", true).await.expect("remove");
 }
 
+/// A `shared` task writes no end-of-task commit: even with the lead's workspace dirty, its
+/// turn end must not commit the user's changes (ADR 0030 O3: no worktree, no end commit).
+#[tokio::test]
+async fn a_shared_task_writes_no_end_commit() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": "done"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+    let fixture = Fixture::new("shared-end", &server.base_url);
+    // The user's own uncommitted change in the lead workspace.
+    std::fs::write(fixture.lead.join("user-work.txt"), "the user's change\n").unwrap();
+
+    let mut request = SpawnRequest::new("t1");
+    request.isolation = Isolation::Shared;
+    request.brief = Some("look around".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while server.requests().len() < 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn did not finish"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        git_out(&fixture.lead, &["log", "-1", "--pretty=%s"]),
+        "init",
+        "a shared task must not commit the user's workspace"
+    );
+    assert_ne!(
+        git_out(&fixture.lead, &["status", "--porcelain"]),
+        "",
+        "the user's change stays uncommitted"
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    let _ = record;
+}
+
 /// The end-of-task commit commits the worktree's changes with the fixed message; a second call
 /// with no changes makes no commit.
 #[tokio::test]
