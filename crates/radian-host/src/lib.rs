@@ -85,8 +85,8 @@ pub use catalog::{
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{
-    CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ModelConfig, PermissionsConfig,
-    RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
+    CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ControlConfig, ModelConfig,
+    PermissionsConfig, RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
     parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path,
 };
@@ -106,8 +106,8 @@ pub use home::{
     RADIAN_HOME_ENV, access_dir_for, cache_dir_for, catalog_cache, catalog_cache_for, config_dir,
     config_dir_for, credentials_dir, credentials_dir_for, diagnostics_dir_for, ensure_private_dir,
     legacy_sessions_dirs_for, legacy_sessions_hint, legacy_sessions_hint_for, memory_dir,
-    memory_dir_for, radian_home, radian_home_for, sessions_dir, sessions_dir_for, skills_dir,
-    skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
+    memory_dir_for, radian_home, radian_home_for, run_dir_for, sessions_dir, sessions_dir_for,
+    skills_dir, skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
     worktrees_dir_for,
 };
 pub use job_notify::{

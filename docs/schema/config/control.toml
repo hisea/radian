@@ -1,0 +1,6 @@
+# ADR 0030 O6 (slice 8): the process control port. On by default; `enabled = false` turns
+# the `$RADIAN_HOME/run/<pid>.sock` socket off for this process.
+schema_version = 1
+
+[control]
+enabled = false
