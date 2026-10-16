@@ -206,16 +206,17 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         // folded one-liner overrides this with the fold marker in `render_row`. Two cells under
         // every tier, so the body column never moves.
         EntryKind::Reasoning => REASONING_MARKER,
-        // ADR 0028: a tool block's marker column carries `• ` on its
-        // head row and `│ ` on its body rows (drawn by [`render_row`], not by the generic
-        // lead — both are two cells, like every other marker).
+        // ADR 0035's 2026-10-16 "折叠标记统一" note: a tool block's marker column carries the
+        // head's fold marker (`• `/`◼ `/`◻ `, ascii `* + -`) on its head row and `│ ` on its
+        // body rows (drawn by [`render_row`], not by the generic lead — both are two cells,
+        // like every other marker). This is only the width's default spelling.
         EntryKind::ToolCall => "• ",
         EntryKind::ToolResult => "│ ",
         EntryKind::Notice => "* ",
         // The compaction line has no marker of its own: it is a rule-like `── … ──` line.
         EntryKind::Compaction => "",
-        // The startup block has no marker of its own: its lines carry `▶`/`▼` (or none for
-        // the wordmark). The warning marker is its own; `Tip:` is styled separately.
+        // The startup block has no marker of its own (the `Tip:` label is content). The warning
+        // marker is its own.
         EntryKind::Banner => "  ",
         EntryKind::Startup => "  ",
         EntryKind::Warning => "! ",
@@ -230,18 +231,16 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
 /// The default (unicode) spelling, also what [`marker_prefix`] returns for the width.
 const USER_MARKER: &str = "❯ ";
 
-/// The expanded thinking channel's header marker (ADR 0035, with the
-/// owner's 2026-10-16 glyph note: `▼`/`▶` replace the design's `▾`/`▸`, which miss Fira Code
-/// and Source Code Pro). `ascii` maps to `v` (ADR 0035). Two cells
-/// under every tier.
-const REASONING_MARKER: &str = "▼ ";
+/// The expanded thinking channel's header marker (ADR 0035, superseded by
+/// the 2026-10-16 "折叠标记统一" note: the thinking header and an expandable tool head share the
+/// pair `◼` folded / `◻` expanded, ascii `+`/`-`). This is the **expanded** spelling, `◻ `
+/// (ascii `- `); two cells under every tier, so the body column never moves.
+const REASONING_MARKER: &str = "◻ ";
 
-/// The thinking channel's header marker in the terminal's glyph set.
+/// The thinking channel's header marker in the terminal's glyph set: `◻ ` normally, `- ` under
+/// `ascii` ([`crate::footer::Glyphs::open_marker`]).
 fn reasoning_marker(glyphs: crate::footer::Glyphs) -> &'static str {
-    match glyphs {
-        crate::footer::Glyphs::Ascii => "v ",
-        _ => REASONING_MARKER,
-    }
+    glyphs.open_marker()
 }
 
 /// The user row's marker in the terminal's glyph set (ADR 0035): `❯ `
@@ -258,7 +257,8 @@ fn marker(kind: EntryKind, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'s
         EntryKind::User => theme.user,
         EntryKind::Assistant => Style::default(),
         EntryKind::Reasoning => theme.reasoning,
-        // The tool block's own markers (`• `/`│ `) are `frame` (ADR 0035).
+        // The tool block's own markers (`│ ` and the head's fold marker) are `frame` (ADR 0035
+        // revision 6 decision 2).
         EntryKind::ToolCall | EntryKind::ToolResult => theme.frame,
         EntryKind::Notice => theme.notice,
         EntryKind::Banner => theme.hint,
@@ -383,8 +383,10 @@ fn entry_lines(
     width: usize,
     theme: &Theme,
     spinner: crate::spinner::Frame,
+    body_follows: bool,
 ) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
+    let head_marker = blocks::head_marker(entry, modes, body_follows);
     let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
     let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
     let style = body_style(entry, theme);
@@ -405,6 +407,7 @@ fn entry_lines(
             Some(i) == first_text,
             modes.glyphs,
             spinner,
+            head_marker,
         );
         if Some(i) == last && entry.interrupted {
             line.spans
@@ -453,10 +456,14 @@ fn render_row(
     first_text: bool,
     glyphs: crate::footer::Glyphs,
     spinner: crate::spinner::Frame,
+    head_marker: blocks::HeadMarker,
 ) -> Line<'static> {
     match row.frame {
-        // The tool block's head (ADR 0028): `• ` and the head's pieces.
-        blocks::Frame::Head => return render_head_row(row, style, theme, glyphs, spinner),
+        // The tool block's head (ADR 0028): the fold marker and the
+        // head's pieces.
+        blocks::Frame::Head => {
+            return render_head_row(row, style, theme, glyphs, spinner, head_marker);
+        }
         // A `│ `-prefixed body row.
         blocks::Frame::Body => {
             return render_body_row(entry, row, style, theme, first_text, glyphs);
@@ -465,8 +472,8 @@ fn render_row(
     }
     // The collapsed reasoning placeholder is one synthetic line: its marker is the marker
     // column's own glyph (ADR 0028 rule 5), so the body column does not move
-    // between folded and expanded. The marker is the tier's fold glyph (ADR 0035
-    // decision 2 with the owner's glyph note: `▶` for unicode/nerd, `>` under ascii).
+    // between folded and expanded. The marker is the tier's folded glyph (ADR 0035's 2026-10-16
+    // "折叠标记统一" note: `◼ ` for unicode/nerd, `+ ` under ascii).
     let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
     // An expanded thinking row (ADR 0028): the header carries the expand
     // marker, every other **prose** row the `│ ` rail in the marker column, so the body stays at
@@ -483,7 +490,7 @@ fn render_row(
     } else if row.code {
         String::new()
     } else if placeholder {
-        format!("{} ", glyphs.fold_marker())
+        glyphs.fold_marker().to_string()
     } else if first_text {
         prefix.to_string()
     } else {
@@ -536,9 +543,10 @@ fn role_style(role: crate::tools::LineRole, style: Style, theme: &Theme) -> Styl
     }
 }
 
-/// A tool block's head row (ADR 0028): the `• ` marker (the `frame`
-/// role, in the marker column, never copied) and the row's pieces — the tool name
-/// (`tool_name`), the title (the entry's own text), the meta (weak) and the status glyph.
+/// A tool block's head row (ADR 0028): the fold marker (the `frame` role,
+/// in the marker column, never copied) and the row's pieces — the tool name (`tool_name`), the
+/// title (the entry's own text), the meta (weak) and the status glyph. The marker itself is the
+/// head's [`blocks::HeadMarker`] (ADR 0035's 2026-10-16 "折叠标记统一" note, option A).
 ///
 /// A **running** call's status is the live spinner frame in place of the placeholder the
 /// layout carries (ADR 0027/13), drawn with the pulse's own colour.
@@ -549,8 +557,9 @@ fn render_head_row(
     theme: &Theme,
     glyphs: crate::footer::Glyphs,
     spinner: crate::spinner::Frame,
+    marker: blocks::HeadMarker,
 ) -> Line<'static> {
-    let mut spans = vec![Span::styled(tool_marker(glyphs).to_string(), theme.frame)];
+    let mut spans = vec![Span::styled(marker.glyph(glyphs).to_string(), theme.frame)];
     match &row.md {
         Some(pieces) => {
             for piece in pieces {
@@ -585,15 +594,6 @@ fn render_body_row(
     let body = role_style(row.role, style, theme);
     spans.extend(body_spans(entry, row, body, theme, first_text));
     Line::from(spans)
-}
-
-/// The tool block's head marker (ADR 0035): `• `, `- ` under `ascii`.
-/// Two cells, like every marker.
-pub(crate) fn tool_marker(glyphs: crate::footer::Glyphs) -> &'static str {
-    match glyphs {
-        crate::footer::Glyphs::Ascii => "- ",
-        _ => "• ",
-    }
 }
 
 /// The tool block's body marker (ADR 0028): `│ `, `| ` under `ascii`.
@@ -656,9 +656,36 @@ pub fn transcript_lines_with(
             Line::from(""),
             blocks::gap_at(entries, index),
         ));
-        out.extend(entry_lines(entry, modes, width, theme, spinner));
+        // Whether a body is drawn under this tool head (the head's fold marker, ADR 0035's
+        // 2026-10-16 note): the reference path measures the paired result without its cache.
+        let result_lines = entries
+            .get(index + 1)
+            .filter(|next| next.kind == EntryKind::ToolResult)
+            .map_or(0, |next| blocks::line_count(next, modes, width));
+        let body_follows = tool_body_follows(entries, index, result_lines);
+        out.extend(entry_lines(
+            entry,
+            modes,
+            width,
+            theme,
+            spinner,
+            body_follows,
+        ));
     }
     out
+}
+
+/// Whether the tool call at `index` has a body drawn under its head (ADR 0035's 2026-10-16
+/// "折叠标记统一" note, option A): the call is a merged block's head, its paired result is the
+/// next entry, and that result lays out at least `result_lines` > 0. The head lives on the call
+/// entry and the body on the result's, so only the pair can decide the head's fold marker.
+fn tool_body_follows(entries: &[Entry], index: usize, result_lines: usize) -> bool {
+    entries[index].kind == EntryKind::ToolCall
+        && entries[index].card == blocks::Card::Head
+        && entries
+            .get(index + 1)
+            .is_some_and(|next| next.kind == EntryKind::ToolResult)
+        && result_lines > 0
 }
 
 /// The transcript's total line count and the `height` lines starting at line `start`, laying
@@ -723,6 +750,10 @@ pub fn visible_lines_with(
         }
         let gap = blocks::gap_at(entries, index);
         let count = counts[index];
+        // Whether the paired result draws a body (the head's fold marker, ADR 0035's 2026-10-16
+        // note): the result's cached count is already in `counts`.
+        let body_follows =
+            tool_body_follows(entries, index, counts.get(index + 1).copied().unwrap_or(0));
         let entry = &mut entries[index];
         let next = line + gap + count;
         if next > start {
@@ -743,6 +774,7 @@ pub fn visible_lines_with(
             let blocks = blocks::blocks_for(entry, modes.reasoning);
             let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
             let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
+            let head_marker = blocks::head_marker(entry, modes, body_follows);
             let style = body_style(entry, theme);
             let first_text = (!body.is_empty()).then_some(0);
             let last = body.len().checked_sub(1);
@@ -762,6 +794,7 @@ pub fn visible_lines_with(
                             Some(i) == first_text,
                             modes.glyphs,
                             spinner,
+                            head_marker,
                         );
                         if Some(i) == last && entry.interrupted {
                             line.spans

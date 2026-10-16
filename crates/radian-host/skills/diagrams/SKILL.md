@@ -5,10 +5,12 @@ description: How to draw diagrams Radian can actually render: the supported Merm
 
 # Diagrams in Radian
 
-Radian renders a fenced ```` ```mermaid ```` block with a **bounded** Mermaid renderer
-(`codex-mermaid`). It is a deliberate subset, not full Mermaid. Verify every diagram with the
-`mermaid_check` tool before you answer; do **not** read the vendored renderer source, compile
-its example, or measure widths by hand — that is exactly what this skill exists to avoid.
+Radian renders a fenced ```` ```mermaid ```` block with a **bounded** renderer: a `flowchart`/
+`graph` is drawn by Radian's own **layered layout**, and every other family — plus the few
+flowcharts that layout cannot draw — by the vendored `codex-mermaid`. Either way it is a
+deliberate subset, not full Mermaid. Verify every diagram with the `mermaid_check` tool before
+you answer; do **not** read the renderer source, compile its example, or measure widths by hand
+— that is exactly what this skill exists to avoid.
 
 ## Workflow
 
@@ -53,18 +55,29 @@ ligatures with non-additive widths. `<br>` is **not** a line break; put each mem
 
 ## How to make it look good in a terminal
 
-- Nodes are laid out **in declaration/first-reference order** in the requested direction, and
-  **every edge owns its own lane** on the right. A node with many outgoing edges becomes one box
-  with a wide fan of crossing lines (`╪`) — the renderer never joins routes.
-- **Avoid the star shape**: one central node with 8+ edges is exactly the case that reads badly.
-  Split it into several small diagrams (one per concern), or describe the layers in prose and
-  diagram one layer at a time.
+- A `flowchart` is laid out in **layers** — the longest path from the sources — and every layer
+  is centred in the canvas. A node is a **one-row-high box**, and two nodes of adjacent layers
+  are joined by a **straight line with an arrowhead** through the middle of both (the boxes' sides
+  in `LR`/`RL`).
+- A layer with several nodes gets one **bus row**: each edge leaves its box's middle and the
+  edges merge or split on one line, so a fan-out or a merge reads as a single fork instead of a
+  band of crossings.
+- An edge that **skips a layer**, and one that points **back** (a loop), wraps in a channel
+  **outside the canvas** rather than crossing a box. An edge's label (`A -->|yes| B`) is drawn
+  beside its line, and the canvas widens if the label needs the room.
+- **Avoid the star**: one central node with 8+ edges makes one layer of eight boxes and a very
+  wide bus row. Split it into several small diagrams (one per concern), or describe the layers in
+  prose and diagram one layer at a time.
 - One diagram, one topic: **5–8 nodes**. Prefer `flowchart TD` for structure, and
   `sequenceDiagram` for **flows and interactions** (it reads far better than a chain of arrows).
-- `LR`/`RL` layouts reserve a text gutter per endpoint and get wide fast; use `TD`/`TB` unless you
-  know the graph is small.
+- `LR`/`RL` are one box per layer and get wide fast; use `TD`/`TB` unless you know the graph is
+  small.
 - CJK and other wide characters count as **2 cells**; a 40-cell label fits about 20 CJK characters.
 - Keep labels short and concrete; move detail into the prose around the diagram.
+- A few flowcharts still fall back to the vendored renderer's own shape (one column, a lane per
+  edge): a **self-loop** (`A --> A`), an edge marked at its source (`A <--> B`), a **labelled**
+  edge that skips a layer, and any diagram whose layers do not fit the width. Nothing is lost,
+  but those read worse — prefer the shapes above when the look matters.
 
 ## A good example
 
