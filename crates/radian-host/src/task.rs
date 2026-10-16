@@ -41,20 +41,24 @@
 //! the builder returns, so the two hosts and the tests cannot accidentally leave one out. The
 //! [`TaskSeams`] the registry can carry exist only for tests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use agent_core::Message;
+use chrono::{DateTime, Utc};
+use radian_coding::HeavySlots;
 use radian_permissions::{ApprovalPolicy, Preset, Profile};
 use radian_sandbox::{GitAccess, Sandbox, SandboxPolicy};
 use radian_session::{ForkParent, RuntimeEvent, SessionJournal, TurnOutcome};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 use crate::git_commit::{Committed, RepoPin, default_allowed_filters};
 use crate::home::{ensure_private_dir, radian_home, worktrees_dir_for};
+use crate::observer::{JournalObserver, SessionObserver};
 use crate::session::{
     ApprovalRouting, HostBindings, LocalSession, SessionError, SessionQueue, SessionSetup,
     open_session,
@@ -81,6 +85,37 @@ impl Isolation {
         match self {
             Self::Worktree => "worktree",
             Self::Shared => "shared",
+        }
+    }
+}
+
+/// The orchestration limits ADR 0030 O8 gives a [`TaskRegistry`]. They are **constructor
+/// parameters with the ADR defaults**; reading them from `[orchestration]` is slice 9, not here.
+#[derive(Debug, Clone)]
+pub struct OrchestrationLimits {
+    /// At most this many tasks run at once in one registry (O8: default 4). `spawn_task` past
+    /// the cap queues the task, FIFO.
+    pub max_tasks: usize,
+    /// The heavy-command slots (O8/R4: default 2), process-level: installed with
+    /// [`HeavySlots::set_process`] so the lead and every task share one pool.
+    pub heavy_slots: usize,
+    /// The commands that count as heavy (O8/R4: `cargo build`/`cargo test`/`cargo clippy`).
+    pub heavy_patterns: Vec<String>,
+    /// A task with no committed event or successful write for this long is `stalled` (O8/R5:
+    /// default 600 s). The runtime never intervenes.
+    pub stall_after_secs: f64,
+}
+
+impl Default for OrchestrationLimits {
+    fn default() -> Self {
+        Self {
+            max_tasks: 4,
+            heavy_slots: radian_coding::DEFAULT_HEAVY_SLOTS,
+            heavy_patterns: radian_coding::DEFAULT_HEAVY_PATTERNS
+                .iter()
+                .map(|pattern| (*pattern).to_owned())
+                .collect(),
+            stall_after_secs: 600.0,
         }
     }
 }
@@ -187,6 +222,9 @@ pub struct TaskRecord {
     /// The sandbox policy the task's tools run under (ADR 0030 O3): a `workspace` policy with
     /// the network off and `.git` read-only, or `None` for a host with no sandbox.
     pub sandbox_policy: Option<SandboxPolicy>,
+    /// When the task started, the reference for the stall check before it has an event or a
+    /// write (ADR 0030 R5).
+    pub started_at: DateTime<Utc>,
     /// The awaitable end-of-task commit (ADR 0039 decision 7). Private so only the registry
     /// builds a record.
     finisher: Arc<TaskFinisher>,
@@ -219,6 +257,7 @@ impl TaskRecord {
 }
 
 /// What to spawn. The registry fills the rest from its own configuration.
+#[derive(Clone)]
 pub struct SpawnRequest {
     /// The task id: `[A-Za-z0-9._-]`, 1-128 chars (it names a worktree directory and a branch).
     pub id: String,
@@ -256,6 +295,91 @@ impl SpawnRequest {
     }
 }
 
+/// What a start produced: a running task, or a queued one with its 1-based queue position.
+#[derive(Clone)]
+pub struct Spawned {
+    pub id: String,
+    /// The started record, or `None` while the task is queued.
+    pub record: Option<Arc<TaskRecord>>,
+    /// The 1-based queue position, `Some` only while queued.
+    pub position: Option<usize>,
+}
+
+/// A task accepted but not yet started: over `max_tasks`, it waits FIFO (ADR 0030 O4/O8).
+pub struct QueuedTask {
+    id: String,
+    request: SpawnRequest,
+    state: Mutex<QueuedState>,
+}
+
+enum QueuedState {
+    /// Waiting for a slot.
+    Waiting,
+    /// Its start failed; the message is why, and a waiting lead gets it.
+    Failed(String),
+    /// Removed while queued: it never started and wrote no `TaskSpawned`.
+    Removed,
+}
+
+impl QueuedTask {
+    fn new(request: SpawnRequest) -> Self {
+        Self {
+            id: request.id.clone(),
+            request,
+            state: Mutex::new(QueuedState::Waiting),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.request.label.as_deref()
+    }
+
+    pub fn isolation(&self) -> Isolation {
+        self.request.isolation
+    }
+
+    /// The start failure, if one happened.
+    pub fn failed(&self) -> Option<String> {
+        match &*self.state.lock().unwrap_or_else(|e| e.into_inner()) {
+            QueuedState::Failed(message) => Some(message.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether it was removed before starting.
+    pub fn is_removed(&self) -> bool {
+        matches!(
+            &*self.state.lock().unwrap_or_else(|e| e.into_inner()),
+            QueuedState::Removed
+        )
+    }
+
+    fn set(&self, state: QueuedState) {
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = state;
+    }
+}
+
+/// One task as the lead sees it: started (a record) or queued (a ticket).
+pub enum TaskHandle {
+    Started(Arc<TaskRecord>),
+    Queued(Arc<QueuedTask>),
+}
+
+/// One `stalled` notification (ADR 0030 O8/R5): a task ran for `idle_secs` with no committed
+/// event and no successful write. Raised once per episode; a new event or write ends the
+/// episode and a later quiet stretch can raise a new one. The runtime never intervenes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StallNotice {
+    pub task_id: String,
+    /// Seconds since the last committed event or successful write (the task's start when it
+    /// has had neither).
+    pub idle_secs: u64,
+}
+
 /// The task agents' worktree root (ADR 0039 decision 4): `<radian-home>/worktrees/<repo-key>`,
 /// plus the radian home the symlink check starts from.
 #[derive(Debug, Clone)]
@@ -283,10 +407,46 @@ pub struct TaskRegistry {
     /// Test seams (ADR 0039 decisions 5 and 7); both are `None` in production.
     seams: TaskSeams,
     tasks: Mutex<BTreeMap<String, Arc<TaskRecord>>>,
+    /// The orchestration limits (ADR 0030 O8): `max_tasks` and `stall_after_secs`.
+    limits: OrchestrationLimits,
+    /// The process-level heavy gate (ADR 0030 O8). The registry installs it with
+    /// [`HeavySlots::set_process`] at construction, so the lead's and every task's shell share
+    /// one pool; `heavy_slots()` hands it to the session builder.
+    heavy: Arc<HeavySlots>,
+    /// Tasks over `max_tasks`, in FIFO order (ADR 0030 O4/O8).
+    queue: Mutex<VecDeque<String>>,
+    /// The queued tasks by id, so a status lookup and `remove` can find one.
+    queued_tasks: Mutex<BTreeMap<String, Arc<QueuedTask>>>,
+    /// Bumped on every observable change (a task starts, a queued task is dropped, a turn
+    /// boundary, a stall). A `wait_task`/`wait_any` wakes on it instead of polling.
+    wake: watch::Sender<u64>,
+    /// The FIFO pump's wake: raised when a slot frees or a task is queued.
+    pump: Arc<Notify>,
+    /// Whether the pump task has been started (once, lazily, on the first queued task).
+    pump_started: AtomicBool,
+    /// Serialises start decisions so a queued start and a fresh `spawn_task` cannot both pass
+    /// the `max_tasks` check (an async mutex: it is held across `open_session`).
+    scheduler: tokio::sync::Mutex<()>,
+    /// Bumped when a stall notice is pushed, so a host watch (b2's TUI) wakes.
+    stall_version: watch::Sender<u64>,
+    /// The stall notices not yet taken, in order.
+    stalls: Mutex<VecDeque<StallNotice>>,
+    /// Per-task stall-episode state (ADR 0030 R5): `true` while a notice is outstanding.
+    stall_episode: Mutex<BTreeMap<String, bool>>,
+    /// The per-task read-only observers the stall check reads (ADR 0030 item 10:
+    /// the timestamps come from the observer). Opened lazily.
+    observers: Mutex<BTreeMap<String, JournalObserver>>,
+    /// The wall clock, injectable so a test never sleeps 600 s.
+    clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
+    /// Whether `clock` was injected (`with_clock`). A manual clock means a test drives
+    /// [`TaskRegistry::check_stalls`]; the ticker is then off, so it cannot consume a notice the
+    /// test wanted to observe.
+    manual_clock: bool,
 }
 
 impl TaskRegistry {
-    /// Builds the registry over the lead's workspace and session.
+    /// Builds the registry over the lead's workspace and session, with the ADR 0030 O8 defaults
+    /// ([`OrchestrationLimits::default`]).
     pub fn new(
         workspace: impl Into<PathBuf>,
         lead_session_id: impl Into<String>,
@@ -299,6 +459,13 @@ impl TaskRegistry {
         let workspace = std::fs::canonicalize(&workspace).unwrap_or(workspace);
         let worktree_root = task_worktree_root(&workspace);
         let pending = TaskPendingQueue::new(Some(Arc::clone(&lead_queue)));
+        let limits = OrchestrationLimits::default();
+        // Install the process gate from these limits (ADR 0030 O8). First configuration wins:
+        // the process reads its orchestration config once (ADR 0030 slice 9).
+        HeavySlots::set_process(limits.heavy_slots, limits.heavy_patterns.clone());
+        let heavy = HeavySlots::process();
+        let (wake, _) = watch::channel(0u64);
+        let (stall_version, _) = watch::channel(0u64);
         Self {
             workspace,
             worktree_root,
@@ -308,6 +475,20 @@ impl TaskRegistry {
             builder,
             seams: TaskSeams::default(),
             tasks: Mutex::new(BTreeMap::new()),
+            limits,
+            heavy,
+            queue: Mutex::new(VecDeque::new()),
+            queued_tasks: Mutex::new(BTreeMap::new()),
+            wake,
+            pump: Arc::new(Notify::new()),
+            pump_started: AtomicBool::new(false),
+            scheduler: tokio::sync::Mutex::new(()),
+            stall_version,
+            stalls: Mutex::new(VecDeque::new()),
+            stall_episode: Mutex::new(BTreeMap::new()),
+            observers: Mutex::new(BTreeMap::new()),
+            clock: Box::new(Utc::now),
+            manual_clock: false,
         }
     }
 
@@ -315,6 +496,50 @@ impl TaskRegistry {
     pub fn with_seams(mut self, seams: TaskSeams) -> Self {
         self.seams = seams;
         self
+    }
+
+    /// Sets the orchestration limits (ADR 0030 O8). The heavy gate is rebuilt and installed
+    /// with [`HeavySlots::set_process`].
+    pub fn with_limits(mut self, limits: OrchestrationLimits) -> Self {
+        HeavySlots::set_process(limits.heavy_slots, limits.heavy_patterns.clone());
+        self.heavy = HeavySlots::process();
+        self.limits = limits;
+        self
+    }
+
+    /// Installs a test clock (ADR 0030 R5 uses time; a test never sleeps 600 s). With an
+    /// injected clock the stall ticker is **off**: the test drives
+    /// [`TaskRegistry::check_stalls`], so the ticker cannot consume a notice first.
+    pub fn with_clock(mut self, clock: impl Fn() -> DateTime<Utc> + Send + Sync + 'static) -> Self {
+        self.clock = Box::new(clock);
+        self.manual_clock = true;
+        self
+    }
+
+    /// The configured `max_tasks` (ADR 0030 O8).
+    pub fn max_tasks(&self) -> usize {
+        self.limits.max_tasks
+    }
+
+    /// The configured `stall_after_secs` (ADR 0030 O8/R5).
+    pub fn stall_after_secs(&self) -> f64 {
+        self.limits.stall_after_secs
+    }
+
+    /// The process-level heavy gate this registry's sessions share (ADR 0030 O8).
+    pub fn heavy_slots(&self) -> &Arc<HeavySlots> {
+        &self.heavy
+    }
+
+    /// A receiver that changes on every task state change (a start, a turn boundary, a removal,
+    /// a stall). The lead's `wait_*` waits on it instead of polling.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.wake.subscribe()
+    }
+
+    fn bump_wake(&self) {
+        self.wake
+            .send_modify(|version| *version = version.wrapping_add(1));
     }
 
     /// The lead's workspace (the repository task worktrees branch from).
@@ -408,6 +633,315 @@ impl TaskRegistry {
     ) -> Result<(), TaskPendingError> {
         self.pending
             .escalate_approval(task_id, request_id, summary, recommendation)
+    }
+
+    /// One task by id — started or queued — or `None` when there is no such task.
+    pub fn lookup(&self, id: &str) -> Option<TaskHandle> {
+        if let Some(record) = self.get(id) {
+            return Some(TaskHandle::Started(record));
+        }
+        self.queued_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+            .map(TaskHandle::Queued)
+    }
+
+    /// Every queued task's id and 1-based queue position, in FIFO order.
+    pub fn queued(&self) -> Vec<(String, usize)> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (id.clone(), index + 1))
+            .collect()
+    }
+
+    /// The 1-based queue position of `id`, or `None` when it is not queued.
+    pub fn queued_position(&self, id: &str) -> Option<usize> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .position(|queued| queued == id)
+            .map(|index| index + 1)
+    }
+
+    /// How many tasks occupy a `max_tasks` slot: started and not yet finished a turn (or
+    /// removed). A task that has had a turn end frees its slot (ADR 0030 O4: a queued task
+    /// starts when a running one finishes), as does `remove`.
+    pub fn live_count(&self) -> usize {
+        self.tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|record| record.last_outcome().is_none())
+            .count()
+    }
+
+    /// Starts a task, or queues it FIFO when `max_tasks` are already running (ADR 0030 O4/O8).
+    /// `spawn_task` calls this; the tests and the FIFO pump call [`TaskRegistry::spawn`] directly.
+    pub fn submit(
+        self: &Arc<Self>,
+        request: SpawnRequest,
+    ) -> futures_util::future::BoxFuture<'_, Result<Spawned, TaskError>> {
+        Box::pin(async move {
+            let id = request.id.clone();
+            validate_session_id(&id).map_err(|_| {
+                TaskError::new(format!(
+                    "invalid task id {id:?}: [A-Za-z0-9._-], 1-128 chars"
+                ))
+            })?;
+            self.ensure_pump();
+            // The scheduler lock is held across the start so a fresh spawn and the pump cannot
+            // both pass the cap check.
+            let _guard = self.scheduler.lock().await;
+            if self.get(&id).is_some()
+                || self
+                    .queued_tasks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&id)
+            {
+                return Err(TaskError::new(format!("task `{id}` already exists")));
+            }
+            if self.live_count() < self.limits.max_tasks {
+                let record = self.spawn(request).await?;
+                self.bump_wake();
+                return Ok(Spawned {
+                    id,
+                    record: Some(record),
+                    position: None,
+                });
+            }
+            let queued = Arc::new(QueuedTask::new(request));
+            {
+                self.queued_tasks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id.clone(), Arc::clone(&queued));
+                self.queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push_back(id.clone());
+            }
+            let position = self.queued_position(&id);
+            self.bump_wake();
+            Ok(Spawned {
+                id,
+                record: None,
+                position,
+            })
+        })
+    }
+
+    /// Starts the FIFO pump and the stall ticker once (ADR 0030 O4/O8). Both hold a `Weak`, so
+    /// they never keep the registry alive.
+    fn ensure_pump(self: &Arc<Self>) {
+        if self.pump_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // No runtime: nothing async can be dispatched. A synchronous caller that needs the
+            // queue must have a runtime; tests and both hosts do.
+            self.pump_started.store(false, Ordering::SeqCst);
+            return;
+        };
+        let weak = Arc::downgrade(self);
+        let pump = Arc::clone(&self.pump);
+        handle.spawn(async move {
+            loop {
+                pump.notified().await;
+                let Some(registry) = weak.upgrade() else {
+                    break;
+                };
+                registry.dispatch().await;
+            }
+        });
+        // The stall ticker (ADR 0030 O8/R5): checks live tasks every `min(stall / 4, 30 s)` so a
+        // notice lands close to the threshold. A zero threshold disables it; so does an injected
+        // clock (a test drives `check_stalls` itself).
+        if self.limits.stall_after_secs > 0.0 && !self.manual_clock {
+            let interval = Duration::from_secs_f64((self.limits.stall_after_secs / 4.0).min(30.0));
+            let weak = Arc::downgrade(self);
+            handle.spawn(async move {
+                loop {
+                    tokio::time::sleep(interval).await;
+                    let Some(registry) = weak.upgrade() else {
+                        break;
+                    };
+                    registry.check_stalls();
+                }
+            });
+        }
+    }
+
+    /// A slot may have freed (a turn ended, a task was removed): wake the pump.
+    fn notify_slot(&self) {
+        self.pump.notify_one();
+    }
+
+    /// Starts queued tasks while `max_tasks` slots are free, FIFO (ADR 0030 O4/O8). Holds the
+    /// scheduler lock so a concurrent `spawn_task` cannot race the cap.
+    async fn dispatch(self: &Arc<Self>) {
+        let _guard = self.scheduler.lock().await;
+        loop {
+            if self.live_count() >= self.limits.max_tasks {
+                break;
+            }
+            let id = self
+                .queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop_front();
+            let Some(id) = id else {
+                break;
+            };
+            let queued = self
+                .queued_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&id)
+                .cloned();
+            let Some(queued) = queued else {
+                continue; // removed between the pop and here
+            };
+            let request = queued.request.clone();
+            // The queued ticket is no longer in `tasks`, so `spawn`'s duplicate check is clear.
+            match self.spawn(request).await {
+                Ok(_record) => {
+                    // Started: drop the ticket; `get(id)` now finds the record.
+                    self.queued_tasks
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id);
+                }
+                Err(error) => {
+                    // Keep the ticket with the failure so a waiting lead gets it; it is out of
+                    // the FIFO order already (popped above), so it blocks nothing.
+                    queued.set(QueuedState::Failed(error.to_string()));
+                }
+            }
+            self.bump_wake();
+            self.notify_slot();
+        }
+    }
+
+    /// The stall notices raised but not yet taken, in order (ADR 0030 O8/R5).
+    pub fn subscribe_stalls(&self) -> watch::Receiver<u64> {
+        self.stall_version.subscribe()
+    }
+
+    /// Takes the next stall notice (ADR 0030 O8/R5). Mirrors the pending watch: the host
+    /// subscribes to [`TaskRegistry::subscribe_stalls`] and takes notices here.
+    pub fn next_stall(&self) -> Option<StallNotice> {
+        self.stalls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+    }
+
+    /// Checks every live (not-yet-finished) task against `stall_after_secs` and raises one notice
+    /// per episode (ADR 0030 O8/R5). Called by the ticker in production and directly by a test
+    /// with a clock seam; returns how many notices it raised this check.
+    ///
+    /// A task is stalled when its **last activity** — the more recent of its last committed
+    /// event and its last successful `write`/`patch` (ADR 0030 R5's two observer timestamps) —
+    /// is older than the threshold; the task's start is the reference before either exists. A
+    /// new event or write clears the episode, and a later quiet stretch raises a new one. The
+    /// runtime never cancels the task. A task that has finished its turn is cleared and skipped:
+    /// it is done, not stuck.
+    pub fn check_stalls(&self) -> usize {
+        let now = (self.clock)();
+        let records: Vec<Arc<TaskRecord>> = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        let mut fired = 0;
+        for record in records {
+            if record.last_outcome().is_some() {
+                // A finished task is not making progress toward nothing; clear any episode so a
+                // later turn can raise a new one. (A task's turn state is "has it finished",
+                // which the runtime records; `running()` is not wired to `TurnStarted`.)
+                self.clear_stall(&record.id);
+                continue;
+            }
+            let activity = self.last_activity(&record);
+            let idle = now.signed_duration_since(activity);
+            let stalled = idle.num_milliseconds() as f64 >= self.limits.stall_after_secs * 1000.0;
+            if stalled {
+                if !self.stall_active(&record.id) {
+                    self.mark_stall(&record.id);
+                    let notice = StallNotice {
+                        task_id: record.id.clone(),
+                        idle_secs: idle.num_seconds().max(0) as u64,
+                    };
+                    self.stalls
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push_back(notice);
+                    self.stall_version
+                        .send_modify(|version| *version = version.wrapping_add(1));
+                    fired += 1;
+                }
+            } else {
+                self.clear_stall(&record.id);
+            }
+        }
+        fired
+    }
+
+    /// The task's last activity: the later of its last committed event, its last successful
+    /// write, and its start. Reads the committed facts through the observer (ADR 0030 revision
+    /// 5 item 10).
+    fn last_activity(&self, record: &Arc<TaskRecord>) -> DateTime<Utc> {
+        let mut latest = record.started_at;
+        let mut observers = self.observers.lock().unwrap_or_else(|e| e.into_inner());
+        if !observers.contains_key(&record.id)
+            && let Ok(observer) = JournalObserver::open(record.session.journal_path())
+        {
+            observers.insert(record.id.clone(), observer);
+        }
+        if let Some(observer) = observers.get_mut(&record.id) {
+            let _ = observer.poll();
+            for ts in [observer.last_event_ts(), observer.last_write_ts()]
+                .into_iter()
+                .flatten()
+            {
+                if let Ok(parsed) = DateTime::parse_from_rfc3339(ts) {
+                    latest = latest.max(parsed.with_timezone(&Utc));
+                }
+            }
+        }
+        latest
+    }
+
+    fn stall_active(&self, id: &str) -> bool {
+        self.stall_episode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn mark_stall(&self, id: &str) {
+        self.stall_episode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_owned(), true);
+    }
+
+    fn clear_stall(&self, id: &str) {
+        self.stall_episode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
     }
 
     /// Spawns a task agent (ADR 0030 O2/O3) as one transaction (ADR 0039 decision 5).
@@ -617,11 +1151,14 @@ impl TaskRegistry {
             running: AtomicBool::new(false),
             last_outcome: Mutex::new(None),
             turns: watch::channel(0u64).0,
+            // ADR 0030 O8: a turn end frees a `max_tasks` slot, so wake the FIFO pump.
+            notify: Arc::clone(&self.pump),
         });
         let inner = Arc::clone(&bindings.runtime_events);
         bindings.runtime_events = Arc::new(TaskRuntimeEvents {
             inner,
             finisher: Arc::clone(&finisher),
+            wake: self.wake.clone(),
         });
 
         // The sandbox policy the task's tools will run under (kept for the record): read it
@@ -664,6 +1201,7 @@ impl TaskRegistry {
             start_seq,
             start_commit,
             sandbox_policy,
+            started_at: Utc::now(),
             finisher,
         });
         self.tasks
@@ -690,6 +1228,24 @@ impl TaskRegistry {
     /// worktree is clean). `force` removes it regardless. The record is kept when the removal
     /// is refused.
     pub async fn remove(&self, id: &str, force: bool) -> Result<(), TaskError> {
+        // A queued task has no session and no worktree: dropping it from the queue is all
+        // (ADR 0030 O4). It wrote no `TaskSpawned`, so nothing needs pairing.
+        if let Some(queued) = self
+            .queued_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id)
+        {
+            self.queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|queued| queued != id);
+            queued.set(QueuedState::Removed);
+            self.clear_stall(id);
+            self.bump_wake();
+            self.notify_slot();
+            return Ok(());
+        }
         let record = self
             .get(id)
             .ok_or_else(|| TaskError::new(format!("no task `{id}`")))?;
@@ -715,6 +1271,14 @@ impl TaskRegistry {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(id);
+        self.observers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+        self.clear_stall(id);
+        // Removing frees a `max_tasks` slot (ADR 0030 O4): wake the FIFO pump.
+        self.bump_wake();
+        self.notify_slot();
         Ok(())
     }
 }
@@ -1334,6 +1898,8 @@ struct TaskFinisher {
     last_outcome: Mutex<Option<TurnOutcome>>,
     /// Bumped on every turn start and turn boundary, so a waiter wakes without polling.
     turns: watch::Sender<u64>,
+    /// The FIFO pump wake (ADR 0030 O4/O8): a turn end frees a `max_tasks` slot.
+    notify: Arc<Notify>,
 }
 
 impl TaskFinisher {
@@ -1369,12 +1935,14 @@ impl TaskFinisher {
         }
     }
 
-    /// A turn boundary: record the outcome, run the end-of-task commit, then wake the waiters.
+    /// A turn boundary: record the outcome, run the end-of-task commit, then wake the waiters
+    /// and the FIFO pump (a `max_tasks` slot is free now, ADR 0030 O4/O8).
     fn on_turn_ended(self: &Arc<Self>, outcome: TurnOutcome) {
         self.running.store(false, Ordering::SeqCst);
         *self.last_outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
         self.schedule_commit(outcome);
         self.signal_turn();
+        self.notify.notify_one();
     }
 
     /// On a turn boundary of a worktree task, run the end-of-task commit off the runtime thread.
@@ -1486,12 +2054,16 @@ impl TaskFinisher {
 struct TaskRuntimeEvents {
     inner: Arc<dyn radian_runtime::RuntimeEvents>,
     finisher: Arc<TaskFinisher>,
+    /// Bumped on every event so a lead's `wait_*` wakes on any task activity (ADR 0030 O4).
+    wake: watch::Sender<u64>,
 }
 
 impl radian_runtime::RuntimeEvents for TaskRuntimeEvents {
     fn on_runtime_event(&self, event: &RuntimeEvent) {
         self.inner.on_runtime_event(event);
         self.finisher.on_turn_event(event);
+        self.wake
+            .send_modify(|version| *version = version.wrapping_add(1));
     }
 }
 

@@ -373,3 +373,17 @@ only this slice's own changes at the end). Each mutation run with
 (`tests/safe_fs.rs`) catch it too; the named test is the read-roots one. RR0 is recorded because
 the brief's first rule is "tests fail on the current branch": with `from_env` disabled the
 read-root tests fail on the boundary refusal, not on a missing API.
+
+## orch-s6b（2026-10-16，ADR 0030 O8 / 修订 1 R4）：heavy 门的 host 接线
+
+Base 是 `oc/orch-s6b`。变异就地施加，源文件先复制到 `.radian/scratch/mut/`，改完跑一条命名的测试，
+再从副本还原并用 `diff -q` 确认字节一致（禁用 `git checkout --`）。每条
+`cargo test -p radian-coding --test heavy <test> --no-fail-fast -- --exact`。
+
+| # | 变异的需求 | 变异 | 结果 | 抓住它的测试（rc=101） |
+|---|---|---|---|---|
+| SC-1 | 排队等槽可以被取消，且取消后不运行命令 | `HeavySlots::acquire` 的 `select!` 里把 `cancel.cancelled()` 分支换成永不就绪的 future（等于忽略取消） | ✅ 7.0s | `cancelling_a_queued_heavy_command_runs_nothing`（取消后仍占住 5s 超时，且标记文件被创建） |
+| SC-2 | 非重活命令不占槽、不排队 | `HeavySlots::acquire` 去掉非重活的提前返回（`if !self.is_heavy(command)` 改成 `if false`） | ✅ 6.9s | `a_heavy_command_waits_for_the_slot_and_a_light_one_does_not`（light 命令在槽被占时也等待，5s 超时） |
+
+2/2 抓住。`heavy.rs` 里 `is_heavy` 的前缀匹配（默认模式、边界、`bash -c` 不可见）由同文件的单元测试
+`the_default_patterns_match_their_commands_and_only_theirs` 钉住。

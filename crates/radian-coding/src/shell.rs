@@ -41,6 +41,7 @@ use serde_json::json;
 
 use crate::args;
 use crate::fail;
+use crate::heavy::{HeavyPermit, HeavySlots};
 use crate::jobs::Jobs;
 use crate::provider::Limits;
 use crate::workspace::WorkspaceRoot;
@@ -233,6 +234,7 @@ pub(crate) async fn run(
     sandbox: &Sandbox,
     limits: &Limits,
     jobs: &Jobs,
+    heavy: &HeavySlots,
     arguments: &serde_json::Value,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
@@ -252,8 +254,15 @@ pub(crate) async fn run(
         None => root.root().to_path_buf(),
     };
 
+    // ADR 0030 O8: a command matching a heavy pattern takes a process-level slot before it runs.
+    // The wait respects the turn's cancellation and takes no slot when cancelled.
+    let permit = match heavy.acquire(&args.command, &cx.cancellation).await {
+        Ok(permit) => permit,
+        Err(_) => return Ok(cancelled_waiting_for_slot(&args.command)),
+    };
+
     if args.background.unwrap_or(false) {
-        return start_background(root, sandbox, jobs, &cwd, &args);
+        return start_background(root, sandbox, jobs, &cwd, &args, permit);
     }
 
     let (timeout, clamped) = clamp_timeout(args.timeout_secs, limits);
@@ -268,6 +277,7 @@ pub(crate) async fn run(
         &cx.cancellation,
     )
     .await?;
+    let queued = permit.as_ref().map(HeavyPermit::waited);
     Ok(report(
         &args.command,
         root.root(),
@@ -277,31 +287,54 @@ pub(crate) async fn run(
         clamped,
         output_cap,
         output_clamped,
+        queued,
         &outcome,
     ))
+}
+
+/// The result when a heavy command's wait for a slot was cancelled before it ran (ADR 0030
+/// O8): the command did not run, and the result says so. It mirrors the cancelled shape of a
+/// running command so a host renders both the same way.
+fn cancelled_waiting_for_slot(command: &str) -> ToolOutput {
+    ToolOutput {
+        content: vec![ContentPart::text(format!(
+            "$ {command}\n[cancelled while waiting for a heavy slot; the command did not run]\n"
+        ))],
+        structured: Some(json!({
+            "command": command,
+            "cancelled": true,
+            "heavy_queued": true,
+        })),
+    }
 }
 
 /// Starts `command` as a background job (ADR 0037) and returns the one-line acknowledgement:
 /// the job id, the `job_output` hint and the three tools. No default timeout; an explicit
 /// `timeout_secs` kills the job like `job_kill` and settles it as timed out.
+///
+/// A heavy command arrives with `heavy` already held (ADR 0030 O8): the job keeps the slot for
+/// its whole life and drops it on settle, so background heavy jobs queue behind foreground ones
+/// and each other. `job_kill` never consults the gate, so a held slot cannot block a kill.
 fn start_background(
     root: &WorkspaceRoot,
     sandbox: &Sandbox,
     jobs: &Jobs,
     cwd: &Path,
     args: &ShellArgs,
+    heavy: Option<HeavyPermit>,
 ) -> Result<ToolOutput, ToolFailure> {
     let timeout = args
         .timeout_secs
         .map(|secs| Duration::from_secs(secs.max(1)));
-    let info = jobs.start(sandbox, cwd, &args.command, timeout)?;
+    let queued = heavy.as_ref().map(HeavyPermit::waited);
+    let info = jobs.start(sandbox, cwd, &args.command, timeout, heavy)?;
     let cwd_relative = cwd
         .strip_prefix(root.root())
         .ok()
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| ".".into());
-    let text = format!(
+    let mut text = format!(
         "started background job {id}\n\
          its output is {output}\n\
          read it with `job_output` (pass `wait: true` to wait for the end); `job_list` lists \
@@ -312,6 +345,12 @@ fn start_background(
         id = info.id,
         output = info.output,
     );
+    if let Some(queued) = queued {
+        text.push_str(&format!(
+            "[queued for a heavy slot: waited {} ms before starting]\n",
+            queued.as_millis()
+        ));
+    }
     Ok(ToolOutput {
         content: vec![ContentPart::text(text)],
         structured: Some(json!({
@@ -322,6 +361,7 @@ fn start_background(
             "cwd": cwd_relative,
             "sandbox_mode": sandbox.mode().as_str(),
             "timeout_secs": timeout.map(|t| t.as_secs()),
+            "heavy_queued_ms": queued.map(|queued| queued.as_millis() as u64),
         })),
     })
 }
@@ -733,6 +773,7 @@ fn report(
     clamped: bool,
     output_cap: usize,
     output_clamped: bool,
+    queued: Option<Duration>,
     outcome: &Outcome,
 ) -> ToolOutput {
     let stdout = outcome.stdout.render();
@@ -742,6 +783,13 @@ fn report(
 
     let mut text = String::new();
     text.push_str(&format!("$ {command}\n"));
+    // ADR 0030 O8: say the command queued for a heavy slot, and for how long.
+    if let Some(queued) = queued {
+        text.push_str(&format!(
+            "[queued for a heavy slot: waited {} ms before running]\n",
+            queued.as_millis()
+        ));
+    }
     if outcome.timed_out {
         text.push_str(&format!(
             "[timed out after {timeout:?}; the process group was killed. For a command that \
@@ -821,6 +869,7 @@ fn report(
             "stderr_total_bytes": outcome.stderr.total,
             "stdout_truncated_bytes": outcome.stdout.discarded(),
             "stderr_truncated_bytes": outcome.stderr.discarded(),
+            "heavy_queued_ms": queued.map(|queued| queued.as_millis() as u64),
             "duration_ms": outcome.duration.as_millis() as u64,
         })),
     }

@@ -1089,3 +1089,20 @@ inbox」与「lead 的回合来源被任务事件降低」在 part a 里**不可
 **平台说明（如实记录）**：reviewer 给的例子是 `1e15`，但 macOS 上 `Instant` 用 `i64` 秒存，`1e15` 秒加得下、不 panic
 （集成测试在变异下仍通过）。真正 panic 的是 `1e19`（`i64` 秒溢出、但仍是合法 `Duration`），所以测试用
 `1e19`；夹取去掉后集成测试确实 panic。单元测试与平台无关，两种值下都抓住夹取被去掉。
+
+## orch-s6b（2026-10-16，ADR 0030 切片 6 b1）：max_tasks 队列、heavy 门、stall
+
+Base：本文件所在分支 `oc/orch-s6b`（在 origin/main + 切片 6a 之上）。变异就地施加：源文件先复制到
+`.radian/scratch/mut/`，改完跑一条命名的测试，再从副本还原并用 `diff -q` 确认字节一致（本仓库禁用
+`git checkout --`）。每条 `cargo test ... <test> --no-fail-fast -- --exact`。驱动脚本
+`.radian/scratch/mutate.py`（不提交）。
+
+| # | 变异的需求 | 变异 | 结果 | 抓住它的测试（rc=101） |
+|---|---|---|---|---|
+| S6B-1 | `max_tasks` 是硬上限（超过就排队） | `TaskRegistry::submit` 的上限判断改成 `if true`，永远 `spawn` | ✅ 8.8s | `spawn_past_max_tasks_queues_fifo_and_starts_when_a_slot_frees`（builder seam 断言 live 超过 max_tasks） |
+| S6B-2 | 队列 FIFO | `dispatch` 把 `pop_front` 换成 `pop_back` | ✅ 35.2s | `spawn_past_max_tasks_queues_fifo_and_starts_when_a_slot_frees`（先起 t4；t3 永不开始，`wait_until` 超时） |
+| S6B-5 | stall 每个 episode 只发一次 | `check_stalls` 忽略 `stall_active`，每次检查都推通知 | ✅ 6.9s | `the_stall_fires_once_clears_on_activity_and_fires_again`（第二次 `check_stalls()` 返回 1 而非 0） |
+| S6B-6 | stall 从不干预（不取消任务） | `check_stalls` 发通知后加 `session.command(Cancel)` | ✅ 1.7s | `the_stall_fires_once_clears_on_activity_and_fires_again`（第二次检查后 `last_outcome()` 变成 `Some`） |
+
+4/4 抓住。heavy 门的两条变异（忽略取消、非重活也占槽）记录在
+`crates/radian-coding/MUTATIONS.md`：SC-1、SC-2，均被 `tests/heavy.rs` 抓住。

@@ -43,6 +43,7 @@ use serde_json::json;
 
 use crate::args;
 use crate::fail;
+use crate::heavy::HeavyPermit;
 use crate::provider::Limits;
 use crate::shell::{lock_bool, sandboxed_command, signal_group, wait_for_exit_without_reaping};
 
@@ -153,6 +154,10 @@ struct JobCell {
     reaped: Arc<Mutex<bool>>,
     /// Flipped to `true` when the job settles; `job_output`'s `wait` awaits it.
     settled: tokio::sync::watch::Sender<bool>,
+    /// The heavy slot this job holds for its whole life (ADR 0030 O8), dropped on settle. A
+    /// held slot never blocks `job_kill`: the kill signals the process group and does not read
+    /// the gate.
+    heavy: Option<HeavyPermit>,
 }
 
 /// A job as `job_list` shows it.
@@ -251,6 +256,7 @@ impl Jobs {
         cwd: &Path,
         command: &str,
         timeout: Option<Duration>,
+        heavy: Option<HeavyPermit>,
     ) -> Result<StartInfo, ToolFailure> {
         let mut state = self.lock_state();
         let running = state
@@ -312,6 +318,7 @@ impl Jobs {
             reaped: Arc::new(Mutex::new(false)),
             waiters: 0,
             settled,
+            heavy,
         }));
 
         let (done_tx, done_rx) = mpsc::channel();
@@ -722,6 +729,9 @@ fn supervise(
         // notified: the model set the timeout but did not ask to kill the job, so it may be
         // waiting on it.
         let notify = !matches!(cell.termination, Some(Termination::Killed)) && cell.waiters == 0;
+        // ADR 0030 O8: the job's heavy slot is released the moment it settles, whether it
+        // exited on its own or was killed, so the next queued heavy command can start.
+        cell.heavy = None;
         let _ = cell.settled.send(true);
         (state, duration_ms, notify)
     };
