@@ -752,6 +752,15 @@ struct ContextCompactedData<'a> {
     tokens_after: u64,
     below_target: bool,
     model: &'a str,
+    /// ADR 0018, decision 3: written only for the deterministic fallback; absent for
+    /// a model summary (a forward reader defaults it to `false`).
+    #[serde(skip_serializing_if = "is_false")]
+    deterministic: bool,
+}
+
+/// `skip_serializing_if` for the deterministic flag: omit it when `false`.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// How one core record changes the replacement-segment gate (ADR 0018 §A).
@@ -843,6 +852,7 @@ fn render_record(record: &JournalRecord) -> Option<((&'static str, bool), Render
             tokens_after,
             below_target,
             model,
+            deterministic,
         } => (
             EVT_CONTEXT_COMPACTED,
             Render::ContextCompacted(ContextCompactedData {
@@ -855,6 +865,7 @@ fn render_record(record: &JournalRecord) -> Option<((&'static str, bool), Render
                 tokens_after: *tokens_after,
                 below_target: *below_target,
                 model,
+                deterministic: *deterministic,
             }),
         ),
         _ => return None,

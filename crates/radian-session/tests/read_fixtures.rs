@@ -357,6 +357,28 @@ fn the_compaction_fixtures_agree_with_the_reference_checker() {
     assert_eq!(candidate.last_committed_revision(), 0);
     assert_eq!(candidate.history().unwrap(), vec![Message::user("old")]);
     assert!(candidate.uncommitted_replacements().is_empty());
+
+    // ADR 0018, decision 3: the deterministic flag round-trips, and the record has
+    // no matching `CompactionUsageRecorded` (the deterministic path makes no model call).
+    let deterministic = Session::open(fixture("compaction-deterministic.jsonl")).unwrap();
+    assert_eq!(deterministic.last_committed_revision(), 1);
+    assert!(
+        deterministic.events().iter().any(|event| matches!(
+            &event.data,
+            EventData::ContextCompacted {
+                deterministic: true,
+                ..
+            }
+        )),
+        "the deterministic flag reads back"
+    );
+    assert!(
+        !deterministic
+            .events()
+            .iter()
+            .any(|event| matches!(&event.data, EventData::CompactionUsageRecorded { .. })),
+        "no CompactionUsage for a deterministic compaction"
+    );
 }
 
 /// ADR 0007's `input_includes_cache`: the fixture carries a marked `true` (OpenAI

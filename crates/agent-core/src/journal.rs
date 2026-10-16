@@ -69,6 +69,9 @@ pub enum JournalRecord {
         tokens_after: u64,
         below_target: bool,
         model: String,
+        /// ADR 0018, decision 3: `true` for the deterministic fallback (no model
+        /// call, so no `CompactionUsage`). `false` for a model summary.
+        deterministic: bool,
     },
 }
 

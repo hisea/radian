@@ -81,11 +81,19 @@ pub enum AgentEvent {
     /// The compaction committed and the request is being rebuilt. `below_target` says the
     /// compacted view fit the budget but missed the 75% target, so the rest of this turn will
     /// not compact again.
+    ///
+    /// ADR 0018, decision 3: `deterministic` is `true` when the summary path failed
+    /// and this is the deterministic fallback (no model call, so no `CompactionUsage`), and
+    /// `dropped` is then the number of messages the fallback dropped from the planned kept
+    /// suffix. A model summary sends `deterministic: false, dropped: 0`. The host wording names
+    /// the count — "compacted without a summary (N dropped)".
     CompactionFinished {
         revision: u64,
         tokens_before: u64,
         tokens_after: u64,
         below_target: bool,
+        deterministic: bool,
+        dropped: u64,
     },
     /// One **summarization** model call reported its usage (ADR 0018: the real call
     /// is billed whether the compaction commits or not, and a retry counts too).

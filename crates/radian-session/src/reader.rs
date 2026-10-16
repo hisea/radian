@@ -111,6 +111,9 @@ pub enum EventData {
         tokens_after: u64,
         below_target: bool,
         model: String,
+        /// ADR 0018, decision 3: `true` for the deterministic fallback; absent in a
+        /// model summary's record (and in an old record) and read back as `false`.
+        deterministic: bool,
     },
     // Runtime events (ADR 0006 §5.5–§5.7). They are typed so a round trip is exact, and
     // they are deliberately **not** mapped to `JournalRecord`: they are not transcript
@@ -632,6 +635,7 @@ impl LineScanner {
                         tokens_after: d.tokens_after,
                         below_target: d.below_target,
                         model: d.model.clone(),
+                        deterministic: d.deterministic,
                     },
                     path,
                     self.lineno,
@@ -646,6 +650,7 @@ impl LineScanner {
                     tokens_after: d.tokens_after,
                     below_target: d.below_target,
                     model: d.model,
+                    deterministic: d.deterministic,
                 }
             }
             "PermissionResolved" => {
@@ -1008,6 +1013,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
             tokens_after,
             below_target,
             model,
+            deterministic,
         } => Some(JournalRecord::ContextCompacted {
             revision: *revision,
             source_revision: *source_revision,
@@ -1018,6 +1024,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
             tokens_after: *tokens_after,
             below_target: *below_target,
             model: model.clone(),
+            deterministic: *deterministic,
         }),
         // Runtime events are not transcript records: `replay`/`repair`/`recover`
         // must never see them (ADR 0006 §12).
@@ -1129,6 +1136,9 @@ struct ContextCompactedData {
     tokens_after: u64,
     below_target: bool,
     model: String,
+    /// ADR 0018, decision 3: optional on disk; absent is `false`.
+    #[serde(default)]
+    deterministic: bool,
 }
 
 #[derive(Deserialize)]

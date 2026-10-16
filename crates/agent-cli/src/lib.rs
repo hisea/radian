@@ -2274,14 +2274,22 @@ impl EventSink for Ui {
                 tokens_before,
                 tokens_after,
                 below_target,
+                deterministic,
+                dropped,
                 ..
             } => {
-                let note = if below_target {
-                    " (below target; no further compaction this turn)"
+                // ADR 0018, decision 3: a deterministic fallback says so and names
+                // the messages it dropped; a model summary keeps the token line.
+                if deterministic {
+                    eprintln!("[compaction] compacted without a summary ({dropped} dropped)");
                 } else {
-                    ""
-                };
-                eprintln!("[compaction] {tokens_before} tokens → {tokens_after} tokens{note}");
+                    let note = if below_target {
+                        " (below target; no further compaction this turn)"
+                    } else {
+                        ""
+                    };
+                    eprintln!("[compaction] {tokens_before} tokens → {tokens_after} tokens{note}");
+                }
             }
             AgentEvent::CompactionFailed { reason } => {
                 eprintln!("[compaction] failed: {reason}");

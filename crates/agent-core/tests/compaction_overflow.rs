@@ -199,22 +199,21 @@ async fn a_non_overflow_model_error_does_not_compact() {
     assert!(starts(&recorder.events()).is_empty());
 }
 
-/// 4. Window known and the estimate low: the reference is `min(T_before, B)`, so a target of
-///    `B/2` is required even though `T_before` is larger.
+/// 4. Window known and the estimate low: the reference is `min(T_before, B)`. The model summary
+///    cannot reach `B/2`, so the deterministic fallback drops units until it does — proving the
+///    target is half of `B`, not half of the larger `T_before` (ADR 0018, decision 3).
 #[tokio::test]
 async fn a_known_window_uses_min_of_projection_and_budget() {
-    // `T_before` (~110000 tokens) is well over `B = 30000`; the kept suffix (~15000, plus the
-    // verbatim copy of the huge prefix) is too large for `B/2 = 15000`, but small enough that
-    // `T_before/2` would have passed.
+    // `T_before` (~110000 tokens) is well over `B = 30000`; the deterministic fallback must
+    // reach `B/2 = 15000`, which `T_before/2` would not require.
     let model = ScriptedModel::new([
         overflow("prompt is too long"),
         summary_reply("a short summary", 50),
+        text("done"),
     ]);
     let journal = Arc::new(RecordingJournal::new());
     // `auto_compact = false`: the proactive path is off, so the request is sent and overflows.
     let agent = overflow_agent(model.clone(), Some(30_000), false);
-    // 30000-byte messages are 7500 tokens each, so the plan keeps `[asst, b, asst, c, go]`
-    // (~15000) and summarizes the huge prefix; `T_after > B/2` makes the fallback fail.
     let history = vec![
         Message::user("x".repeat(380_000)),
         Message::assistant("ok"),
@@ -228,36 +227,47 @@ async fn a_known_window_uses_min_of_projection_and_budget() {
         .unwrap();
     let recorder = Recorder::default();
 
-    let error = session
+    let outcome = session
         .run_turn("go", TurnOptions::default(), &recorder)
         .await
-        .unwrap_err();
-    match error {
-        RunError::Compaction(CompactionError::Insufficient { target, .. }) => {
-            assert_eq!(target, 15_000, "half of min(T_before, B)");
-        }
-        other => panic!("expected InsufficientCompaction, got {other:?}"),
-    }
-    assert_eq!(session.transcript_revision(), 0, "nothing committed");
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the fallback committed");
+    // The committed view reaches half of `B`, which half of `T_before` would not demand.
+    let (before, after) = journal
+        .records()
+        .iter()
+        .find_map(|record| match record {
+            JournalRecord::ContextCompacted {
+                tokens_before,
+                tokens_after,
+                deterministic: true,
+                ..
+            } => Some((*tokens_before, *tokens_after)),
+            _ => None,
+        })
+        .expect("a deterministic candidate");
+    assert!(
+        after * 2 <= 30_000,
+        "{before} -> {after}: half of B = 30000 is required"
+    );
 }
 
-/// 5. The fallback cannot reach half (the last unit alone is over the target): no commit.
+/// 5. Even the newest unit plus the deterministic summary does not reach the target: `NothingFits`,
+///    with nothing committed (ADR 0018, decision 3).
 #[tokio::test]
-async fn a_fallback_that_cannot_reach_half_commits_nothing() {
+async fn a_fallback_that_cannot_reach_the_target_is_nothing_fits() {
     let model = ScriptedModel::new([
         overflow("prompt is too long"),
         summary_reply("a short summary", 50),
     ]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = overflow_agent(model.clone(), None, true);
-    // ~30000 tokens total, of which the plan can only summarize ~10000: the kept suffix
-    // (~20000) is over half of `T_before`, so the fallback cannot reach its target.
+    // A tiny window: `B = 2000`, half is 1000, and the verbatim copies of the two big user
+    // messages alone cost ~4000 projected tokens, so no drop level fits.
+    let agent = overflow_agent(model.clone(), Some(2_000), false);
     let history = vec![
-        Message::user("x".repeat(38_000)),
-        Message::assistant("ok"),
-        Message::user("b".repeat(38_000)),
-        Message::assistant("ok"),
-        Message::user("c".repeat(38_000)),
+        Message::user("x".repeat(40_000)),
+        Message::user("y".repeat(40_000)),
     ];
     let mut session = agent
         .open_session_with_journal(history, journal.clone())
@@ -270,10 +280,7 @@ async fn a_fallback_that_cannot_reach_half_commits_nothing() {
         .await
         .unwrap_err();
     assert!(
-        matches!(
-            error,
-            RunError::Compaction(CompactionError::Insufficient { .. })
-        ),
+        matches!(error, RunError::Compaction(CompactionError::NothingFits)),
         "{error:?}"
     );
     assert_eq!(session.transcript_revision(), 0);
@@ -621,19 +628,18 @@ async fn compact_now_scales_the_summary_ceiling_with_the_window() {
     assert!(prompt.contains("8192 tokens"), "{prompt}");
 }
 
-/// ADR 0018: the verbatim user messages are part of `T_after`, so the fallback's
-/// half-gain threshold is higher than it was. This history is chosen to sit **inside** that
-/// band: without the verbatim `T_after` would be ~9000 and half of `T_before` (21000) would
-/// pass, while with it `T_after` is ~11000, so the fallback fails explicitly instead of sending
-/// a request that is still over the window.
+/// ADR 0018 + revision 8 decision 3: the verbatim user messages are part of `T_after`,
+/// so the deterministic fallback's target counts them. Here the two verbatim copies alone
+/// (~1024 tokens) exceed half of `B = 2000`, so even the newest unit cannot fit and the turn
+/// fails explicitly instead of sending a request that is still over the window.
 #[tokio::test]
-async fn the_verbatim_raises_the_fallback_threshold() {
+async fn the_verbatim_counts_toward_the_fallback_target() {
     let model = ScriptedModel::new([
         overflow("prompt is too long"),
         summary_reply("a short summary", 50),
     ]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = overflow_agent(model.clone(), None, true);
+    let agent = overflow_agent(model.clone(), Some(2_000), false);
     let history = vec![
         Message::user("x".repeat(48_000)),
         Message::user("y".repeat(36_000)),
@@ -649,10 +655,7 @@ async fn the_verbatim_raises_the_fallback_threshold() {
         .await
         .unwrap_err();
     assert!(
-        matches!(
-            error,
-            RunError::Compaction(CompactionError::Insufficient { .. })
-        ),
+        matches!(error, RunError::Compaction(CompactionError::NothingFits)),
         "{error:?}"
     );
     assert_eq!(session.transcript_revision(), 0, "nothing committed");

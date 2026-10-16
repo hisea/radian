@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use agent_core::testing::RecordingJournal;
 use agent_core::{
-    Agent, AgentConfig, AgentEvent, CompactionError, ContentPart, ContextBudget, JournalRecord,
-    Message, ModelResponse, ModelUsage, NoTools, RunError, RunStatus, StopReason, TurnOptions,
-    compaction,
+    Agent, AgentConfig, AgentEvent, CancellationToken, CompactionError, CompactionFailure,
+    ContentPart, ContextBudget, JournalRecord, Message, ModelResponse, ModelUsage, NoTools,
+    RunStatus, StopReason, TurnOptions, compaction,
 };
 use common::{Recorder, Reply, ScriptedModel, text};
 
@@ -26,6 +26,35 @@ fn summary_reply(summary: &str, input: u64) -> Reply {
             ..Default::default()
         }),
     })
+}
+
+/// A summary answer that is empty and reports no usage, so a failed attempt leaves no
+/// `CompactionUsage` record (ADR 0018, decision 3's acceptance).
+fn empty_reply() -> Reply {
+    Reply::Respond(ModelResponse {
+        reasoning: Vec::new(),
+        content: vec![ContentPart::text("   ")],
+        tool_calls: vec![],
+        provider_payload: None,
+        stop_reason: StopReason::EndTurn,
+        usage: None,
+    })
+}
+
+/// The `(deterministic, first_kept)` of every `ContextCompacted` candidate in the journal.
+fn compacted_records(journal: &RecordingJournal) -> Vec<(bool, usize)> {
+    journal
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            JournalRecord::ContextCompacted {
+                deterministic,
+                first_kept,
+                ..
+            } => Some((*deterministic, *first_kept)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A budget whose ruler is one token per byte, so a 8000-byte message is 8000 projected
@@ -161,53 +190,75 @@ async fn a_request_over_the_budget_is_compacted_and_committed() {
     )));
 }
 
-// ---------- 5. summary request failure / cancellation ----------
+// ---------- 5. summary request failure falls back deterministically ----------
 
-/// A summarizer failure fails the turn and leaves the session usable; the oversized request is
-/// never sent, and the transcript is unchanged.
+/// ADR 0018, decision 3: a summarizer transport failure no longer fails the turn on
+/// an automatic path — the deterministic fallback commits with no further model call, and the
+/// failed attempt (which reported no usage) leaves no `CompactionUsage` record.
 #[tokio::test]
-async fn a_summary_failure_fails_the_turn_without_touching_the_transcript() {
+async fn a_summary_transport_failure_falls_back_deterministically() {
     let model = ScriptedModel::new([
         Reply::Fail("summarizer down".into()),
-        summary_reply("summary two", 10),
         text("done"),
+        text("more"),
     ]);
     let journal = Arc::new(RecordingJournal::new());
     let agent = compaction_agent(model.clone(), 3_000, true);
-    let before = big_history();
     let mut session = agent
-        .open_session_with_journal(before.clone(), journal.clone())
+        .open_session_with_journal(big_history(), journal.clone())
         .await
         .unwrap();
     let recorder = Recorder::default();
 
-    let error = session
-        .run_turn("go", TurnOptions::default(), &recorder)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(error, agent_core::RunError::Compaction(_)),
-        "{error:?}"
-    );
-    // Only the turn's own input was committed; the oversized history is untouched.
-    let mut expected = before.clone();
-    expected.push(Message::user("go"));
-    assert_eq!(session.transcript(), expected);
-    assert_eq!(session.transcript_revision(), 0);
-    assert_eq!(model.requests().len(), 1, "only the summary was attempted");
-    assert!(
-        !journal
-            .records()
-            .iter()
-            .any(|r| matches!(r, JournalRecord::TranscriptReplaced { .. })),
-        "nothing was replaced"
-    );
-    // The session can run another turn (it is not poisoned or recovery-required).
     let outcome = session
-        .run_turn("again", TurnOptions::default(), &recorder)
+        .run_turn("go", TurnOptions::default(), &recorder)
         .await
         .unwrap();
     assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the fallback committed");
+    assert!(compaction::is_compaction_summary(&session.transcript()[0]));
+    assert!(
+        session.transcript()[0].text().contains("without a summary"),
+        "{}",
+        session.transcript()[0].text()
+    );
+    assert_eq!(
+        compaction_usage_count(&journal),
+        0,
+        "no summary call was billed"
+    );
+    assert_eq!(
+        compacted_records(&journal)
+            .iter()
+            .map(|r| r.0)
+            .collect::<Vec<_>>(),
+        vec![true],
+        "the one candidate is deterministic"
+    );
+    assert!(
+        recorder.events().iter().any(|event| matches!(
+            event,
+            AgentEvent::CompactionFinished {
+                deterministic: true,
+                ..
+            }
+        )),
+        "the host sees the deterministic flag"
+    );
+    // The first user message survives verbatim.
+    let verbatim = compaction::compaction_user_messages(&session.transcript()[0]);
+    assert!(!verbatim.is_empty(), "the user's words are kept");
+    // Two requests only: the failed summary attempt, then the compacted conversation.
+    assert_eq!(model.requests().len(), 2, "no model call for the fallback");
+    assert!(compaction::is_compaction_summary(
+        &model.requests()[1].messages[0]
+    ));
+
+    // The session stays usable afterwards.
+    let outcome = session
+        .run_turn("again", TurnOptions::default(), &recorder)
+        .await;
+    assert!(outcome.is_ok(), "{outcome:?}");
 }
 
 // ---------- 10. auto_compact off ----------
@@ -379,11 +430,12 @@ async fn a_cancelled_summary_does_not_commit() {
     );
 }
 
-// ---------- 6a. insufficient gain ----------
+// ---------- 6a. insufficient gain falls back deterministically ----------
 
-/// A compaction that does not get under `B` fails the turn and commits nothing.
+/// ADR 0018, decision 3: a model summary that does not reach `B` is not the end of
+/// the turn — the deterministic fallback drops the oldest units until the request fits `B`.
 #[tokio::test]
-async fn insufficient_gain_fails_without_committing() {
+async fn an_insufficient_model_summary_falls_back_deterministically() {
     let model = ScriptedModel::new([summary_reply(&"s".repeat(4_000), 10), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
     let agent = compaction_agent(model.clone(), 8_000, true);
@@ -398,6 +450,89 @@ async fn insufficient_gain_fails_without_committing() {
         .unwrap();
     let recorder = Recorder::default();
 
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the fallback committed");
+    assert_eq!(
+        compacted_records(&journal)
+            .iter()
+            .map(|r| r.0)
+            .collect::<Vec<_>>(),
+        vec![true],
+        "only the deterministic candidate committed"
+    );
+    // The model summary was a real call (billed) but did not commit.
+    assert_eq!(compaction_usage_count(&journal), 1);
+    // The committed view fits `B` and is smaller than the oversized request.
+    let requests = model.requests();
+    let request = requests.last().expect("the compacted request");
+    let after = agent_core::budget::request_size_with(request, false)
+        .tokens(agent.config().context_budget.unwrap().bytes_per_token);
+    assert!(after <= 8_000, "T_after {after} must fit B");
+}
+
+/// A manual `/compact` gets **no** deterministic fallback: it reports the failed summarizer to
+/// its caller and commits nothing (ADR 0018, decision 3).
+#[tokio::test]
+async fn a_manual_compact_reports_a_summary_failure_instead_of_falling_back() {
+    let model = ScriptedModel::new([Reply::Fail("summarizer down".into())]);
+    let agent = compaction_agent(model.clone(), 3_000, true);
+    let mut session = agent
+        .open_session_with_journal(
+            vec![
+                Message::user("x".repeat(200_000)),
+                Message::assistant("ok"),
+                Message::user("last"),
+            ],
+            Arc::new(RecordingJournal::new()),
+        )
+        .await
+        .unwrap();
+    let error = session
+        .compact_now(
+            None,
+            &CancellationToken::new(),
+            &Recorder::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CompactionFailure::Compaction(CompactionError::Summary(_))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(session.transcript_revision(), 0, "nothing committed");
+    assert_eq!(model.requests().len(), 1, "no deterministic model call");
+}
+
+// ---------- 6c. nothing fits ----------
+
+/// Even the newest atomic unit plus the deterministic summary does not fit the budget: today's
+/// `NothingFits` failure, with nothing committed (ADR 0018, decision 3).
+#[tokio::test]
+async fn nothing_fits_still_fails() {
+    let model = ScriptedModel::new([summary_reply("a short summary", 50)]);
+    let journal = Arc::new(RecordingJournal::new());
+    // One byte per token: the two big user messages are ~20000 tokens each, and their verbatim
+    // copies alone push `T_after` over a 2000-token budget, so no drop level helps.
+    let agent = compaction_agent(model.clone(), 2_000, true);
+    let history = vec![
+        Message::user("x".repeat(40_000)),
+        Message::user("y".repeat(40_000)),
+    ];
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
     let error = session
         .run_turn("go", TurnOptions::default(), &recorder)
         .await
@@ -405,17 +540,17 @@ async fn insufficient_gain_fails_without_committing() {
     assert!(
         matches!(
             error,
-            agent_core::RunError::Compaction(agent_core::CompactionError::Insufficient { .. })
+            agent_core::RunError::Compaction(agent_core::CompactionError::NothingFits)
         ),
         "{error:?}"
     );
-    assert_eq!(session.transcript_revision(), 0);
+    assert_eq!(session.transcript_revision(), 0, "nothing committed");
     assert!(
         !journal
             .records()
             .iter()
             .any(|r| matches!(r, JournalRecord::ContextCompacted { .. })),
-        "a failed gain check writes no candidate"
+        "no candidate is written"
     );
 }
 
@@ -594,10 +729,12 @@ async fn a_summarization_call_without_usage_reports_nothing() {
     );
 }
 
-/// Two invalid summaries fail the turn; nothing commits.
+/// Two empty summaries (no usage) fall back to the deterministic compaction: the turn
+/// continues, the candidate is deterministic, and no `CompactionUsage` is written (ADR 0018
+/// revision 8, decision 3's acceptance).
 #[tokio::test]
-async fn two_invalid_summaries_fail_the_turn() {
-    let model = ScriptedModel::new([summary_reply("", 10), summary_reply("", 10), text("done")]);
+async fn two_invalid_summaries_fall_back_deterministically() {
+    let model = ScriptedModel::new([empty_reply(), empty_reply(), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
     let agent = compaction_agent(model.clone(), 3_000, true);
     let mut session = agent
@@ -606,19 +743,32 @@ async fn two_invalid_summaries_fail_the_turn() {
         .unwrap();
     let recorder = Recorder::default();
 
-    let error = session
+    let outcome = session
         .run_turn("go", TurnOptions::default(), &recorder)
         .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            agent_core::RunError::Compaction(agent_core::CompactionError::InvalidSummary(_))
-        ),
-        "{error:?}"
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the fallback committed");
+    assert_eq!(
+        model.requests().len(),
+        3,
+        "two summary attempts, then the compacted conversation"
     );
-    assert_eq!(session.transcript_revision(), 0);
-    assert_eq!(model.requests().len(), 2, "exactly two attempts");
+    assert_eq!(compaction_usage_count(&journal), 0);
+    assert_eq!(
+        compacted_records(&journal)
+            .iter()
+            .map(|r| r.0)
+            .collect::<Vec<_>>(),
+        vec![true]
+    );
+    // The summary message carries the deterministic fixed line and the first user words.
+    let summary = session.transcript()[0].text();
+    assert!(summary.contains("without a summary"), "{summary}");
+    assert!(
+        summary.contains(&"x".repeat(100)),
+        "verbatim survives: {summary}"
+    );
 }
 
 // ---------- 7. replacement abort ----------
@@ -778,6 +928,7 @@ fn a_candidate_without_a_commit_recovers_the_old_history() {
         tokens_after: 5,
         below_target: false,
         model: "current".into(),
+        deterministic: false,
     });
     records.push(JournalRecord::TranscriptReplaced {
         revision: 1,
@@ -857,6 +1008,7 @@ fn a_compaction_record_inside_a_pending_segment_is_corruption() {
         tokens_after: 5,
         below_target: false,
         model: "current".into(),
+        deterministic: false,
     };
     let open = JournalRecord::TranscriptReplaced {
         revision: 1,
@@ -1055,15 +1207,15 @@ async fn an_empty_summary_resends_the_original_request() {
     assert_eq!(compaction_usage_count(&journal), 2);
 }
 
-/// Both summaries are over the limit: the turn fails with the unchanged error text and
-/// nothing commits.
+/// Both model summaries are over the limit: the deterministic fallback commits instead of
+/// failing the turn, and both real attempts are still billed (ADR 0018, decision 3).
 #[tokio::test]
-async fn two_overlong_summaries_fail_the_turn() {
+async fn two_overlong_summaries_fall_back_deterministically() {
     let overlong = "L".repeat(9_000);
     let model = ScriptedModel::new([
         summary_reply(&overlong, 50),
         summary_reply(&overlong, 10),
-        text("never"),
+        text("done"),
     ]);
     let journal = Arc::new(RecordingJournal::new());
     let agent = compaction_agent(model.clone(), 3_000, true);
@@ -1073,25 +1225,33 @@ async fn two_overlong_summaries_fail_the_turn() {
         .unwrap();
     let recorder = Recorder::default();
 
-    let error = session
+    let outcome = session
         .run_turn("go", TurnOptions::default(), &recorder)
         .await
-        .unwrap_err();
-    match error {
-        RunError::Compaction(CompactionError::InvalidSummary(message)) => {
-            assert!(message.contains("over the limit of 2048"), "{message}");
-        }
-        other => panic!("expected an invalid-summary failure, got {other:?}"),
-    }
-    assert_eq!(session.transcript_revision(), 0, "nothing committed");
-    assert_eq!(model.requests().len(), 2, "exactly two attempts");
-    assert_eq!(compaction_usage_count(&journal), 2);
-    assert!(
-        !journal
-            .records()
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the fallback committed");
+    assert_eq!(
+        model.requests().len(),
+        3,
+        "two attempts, then the conversation"
+    );
+    assert_eq!(
+        compaction_usage_count(&journal),
+        2,
+        "both attempts were billed"
+    );
+    assert_eq!(
+        compacted_records(&journal)
             .iter()
-            .any(|record| matches!(record, JournalRecord::ContextCompacted { .. })),
-        "no candidate is written"
+            .map(|r| r.0)
+            .collect::<Vec<_>>(),
+        vec![true]
+    );
+    assert!(
+        session.transcript()[0].text().contains("without a summary"),
+        "{}",
+        session.transcript()[0].text()
     );
 }
 
@@ -1294,4 +1454,103 @@ async fn the_plan_reserves_the_verbatim_space() {
         kept.iter().all(|length| *length < 1_000),
         "the 7200-byte unit must be summarized, not kept: {kept:?}"
     );
+}
+
+// ---------- ADR 0018, decision 3: deterministic details ----------
+
+/// The deterministic fallback truncates kept tool results to `TOOL_RESULT_LIMIT_CHARS` (the
+/// marker is inside the limit), leaves the newest unit in place, and names the counts it
+/// dropped/cut. The oldest tool result is not in the new view.
+#[tokio::test]
+async fn the_deterministic_fallback_truncates_tools_and_drops_the_oldest_first() {
+    use agent_core::{MessageMeta, TOOL_RESULT_LIMIT_CHARS, ToolCall, ToolResult};
+
+    let call = |id: &str| Message::Assistant {
+        content: Vec::new(),
+        reasoning: Vec::new(),
+        tool_calls: vec![ToolCall {
+            id: id.into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({}),
+        }],
+        provider_payload: None,
+        interrupted: false,
+        meta: MessageMeta::default(),
+    };
+    let result = |id: &str, text: String| Message::Tool {
+        result: ToolResult::success(id, vec![ContentPart::text(text)]),
+        meta: MessageMeta::default(),
+    };
+
+    let history = vec![
+        Message::user("task"),
+        call("c1"),
+        result("c1", "a".repeat(3_500)),
+        Message::user("m"),
+        call("c2"),
+        result("c2", "b".repeat(3_500)),
+        Message::user("n"),
+        call("c3"),
+        result("c3", "c".repeat(3_500)),
+    ];
+    let model = ScriptedModel::new([empty_reply(), empty_reply(), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 3_500, true);
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1);
+
+    let history = session.transcript();
+    // The newest unit (the turn's own input) is still there.
+    assert!(
+        history.iter().any(|m| *m == Message::user("go")),
+        "the newest unit is kept"
+    );
+    // The oldest kept tool results (`c1`, `c2`) are not; the newest (`c3`) is cut to the limit,
+    // marker included — so the drop went from the oldest to the newest.
+    for gone in ["c1", "c2"] {
+        assert!(
+            !history
+                .iter()
+                .any(|m| matches!(m, Message::Tool { result, .. } if result.call_id == gone)),
+            "{gone} must be gone"
+        );
+    }
+    let kept = history
+        .iter()
+        .find_map(|m| match m {
+            Message::Tool { result, .. } if result.call_id == "c3" => Some(result.text()),
+            _ => None,
+        })
+        .expect("the newest tool result is kept");
+    assert!(
+        kept.chars().count() <= TOOL_RESULT_LIMIT_CHARS,
+        "kept {} characters",
+        kept.chars().count()
+    );
+    assert!(kept.contains("[truncated"), "{kept:?}");
+
+    // The summary names the counts and the first user words survive.
+    let summary = history[0].text();
+    assert!(summary.contains("without a summary"), "{summary}");
+    assert!(summary.contains("3 messages dropped"), "{summary}");
+    assert!(summary.contains("1 tool results truncated"), "{summary}");
+    assert!(
+        summary.contains("task"),
+        "the first user words survive: {summary}"
+    );
+
+    // The compacted view passed `validate_history` (it was sent) and is the last model request.
+    assert!(compaction::is_compaction_summary(
+        &model.requests().last().unwrap().messages[0]
+    ));
 }

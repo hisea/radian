@@ -537,6 +537,81 @@ fn truncate_chars(text: &str, limit: usize) -> (String, Option<usize>) {
     (text.chars().take(limit).collect(), Some(total - limit))
 }
 
+// ---------- ADR 0018, decision 3: the deterministic fallback ----------
+
+/// The truncation marker appended to a kept tool result (ADR 0018, decision 3). It is
+/// the same shape the summary input writes, so the same cut reads the same either way.
+fn tool_result_truncation_marker(dropped: usize) -> String {
+    format!(" … [truncated {dropped} characters]")
+}
+
+/// Cuts one tool result's text to at most [`TOOL_RESULT_LIMIT_CHARS`] characters, truncation
+/// marker included, using [`truncate_chars`] — the same cut the summary input uses. `None` when
+/// the result already fits.
+///
+/// The marker reserves its own room inside the limit, so the kept result never grows past
+/// [`TOOL_RESULT_LIMIT_CHARS`] (the marker is useless without the count it names).
+pub fn truncate_tool_result_text(text: &str) -> Option<String> {
+    let total = text.chars().count();
+    if total <= TOOL_RESULT_LIMIT_CHARS {
+        return None;
+    }
+    // Reserve the longest marker this text could need, so no rounding of the count can push the
+    // result back over the limit.
+    let reserve = tool_result_truncation_marker(total).chars().count();
+    let limit = TOOL_RESULT_LIMIT_CHARS.saturating_sub(reserve);
+    let (kept, cut) = truncate_chars(text, limit);
+    let cut = cut.expect("the text is over the limit");
+    Some(format!("{kept}{}", tool_result_truncation_marker(cut)))
+}
+
+/// Truncates every tool result in `kept` that is over [`TOOL_RESULT_LIMIT_CHARS`] (ADR 0018
+/// revision 8, decision 3), in place, and reports how many were cut. A cut result keeps only
+/// its textual content: `structured` and non-text parts cannot be cut by character and are
+/// dropped rather than sent whole.
+pub fn truncate_kept_tool_results(kept: &mut [Message]) -> usize {
+    let mut cut = 0;
+    for message in kept.iter_mut() {
+        let Message::Tool { result, .. } = message else {
+            continue;
+        };
+        let Some(text) = truncate_tool_result_text(&result.text()) else {
+            continue;
+        };
+        result.content = vec![ContentPart::text(text)];
+        result.structured = None;
+        cut += 1;
+    }
+    cut
+}
+
+/// The fixed line a deterministic summary carries (ADR 0018, decision 3): what the
+/// fallback dropped and how many kept tool results it cut. It is not a model summary, and a
+/// reader can tell the two apart by it.
+pub fn deterministic_summary_line(dropped: usize, truncated: usize) -> String {
+    format!(
+        "[context compacted without a summary: {dropped} messages dropped, \
+         {truncated} tool results truncated]"
+    )
+}
+
+/// The deterministic fallback's summary text (ADR 0018, decision 3): the previous
+/// model summary **verbatim** (when there is one) followed by [`deterministic_summary_line`].
+/// The previous summary is kept because the fallback must not throw away what an earlier model
+/// summary established. The verbatim user messages are rendered by [`compacted_history`], not
+/// here.
+pub fn deterministic_summary(
+    previous_summary: Option<&str>,
+    dropped: usize,
+    truncated: usize,
+) -> String {
+    let line = deterministic_summary_line(dropped, truncated);
+    match previous_summary.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(previous) => format!("{previous}\n\n{line}"),
+        None => line,
+    }
+}
+
 /// Whether `message` is a compaction summary: a user message whose `origin.kind` is
 /// `"compaction_summary"` (ADR 0018). A host, exporter or reader uses this instead of parsing
 /// the text.
