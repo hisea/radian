@@ -10,6 +10,8 @@
 
 mod color;
 mod file;
+pub mod importer;
+mod toml_file;
 
 pub use color::{
     ColorValue, Rgb, approximate_256, parse_color_value, truecolor_env, truecolor_for,
@@ -46,7 +48,10 @@ pub fn switch(
         };
     }
     let builtin = matches!(name, "dark" | "light" | "mono");
-    let is_file = themes_dir.is_some_and(|dir| dir.join(format!("{name}.json")).is_file());
+    let is_file = themes_dir.is_some_and(|dir| {
+        // ADR 0029: `<name>.toml` first, then the old `<name>.json`.
+        dir.join(format!("{name}.toml")).is_file() || dir.join(format!("{name}.json")).is_file()
+    });
     if !builtin && !is_file {
         return Switch {
             theme: None,
@@ -90,7 +95,8 @@ use std::collections::BTreeMap;
 use ratatui::style::{Color, Modifier, Style};
 
 /// The named built-in themes, plus `File` for a theme loaded from
-/// `~/.radian/themes/<name>.json` (ADR 0029 decision 1).
+/// `~/.radian/themes/<name>.toml` (ADR 0029; a `<name>.json` is the
+/// one-version transition, decision 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeName {
     #[default]
