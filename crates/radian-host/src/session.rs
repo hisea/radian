@@ -436,6 +436,13 @@ pub enum ApprovalRouting {
     Queued,
     /// Directly, by this approver (the CLI's line prompt: no queue, no modal).
     Direct(Arc<dyn Approver>),
+    /// A task agent (ADR 0030 slice 5): its approval asks go to the task-side pending queue, and
+    /// its `ask_user` questions likewise, never to the human's queue. Only an escalation the
+    /// lead performs reaches the human queue (ADR 0030 R9 / revision 6).
+    Task {
+        approver: Arc<dyn Approver>,
+        prompter: Arc<dyn radian_coding::Prompter>,
+    },
 }
 
 /// What the host injects. Everything here is host-specific; nothing is a session fact.
@@ -1154,8 +1161,14 @@ pub async fn open_session(
     // there are coding tools. It is its own provider, so a host without `--workspace` still
     // advertises it. `None` is what the model sees as "no such tool".
     let ask = ask_user.then(|| {
-        let prompter: Arc<dyn radian_coding::Prompter> =
-            Arc::new(QueuedPrompter::new(Arc::clone(&queue), origin.clone()));
+        // A task agent's questions go to the task-side pending queue (ADR 0030 slice 5), not to
+        // the human's; every other session asks through its own pending queue.
+        let task_prompter = match &approvals {
+            ApprovalRouting::Task { prompter, .. } => Some(Arc::clone(prompter)),
+            _ => None,
+        };
+        let prompter: Arc<dyn radian_coding::Prompter> = task_prompter
+            .unwrap_or_else(|| Arc::new(QueuedPrompter::new(Arc::clone(&queue), origin.clone())));
         radian_coding::AskTools::new(prompter)
     });
     let injection_config = memory_injection;
@@ -1233,18 +1246,22 @@ pub async fn open_session(
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
     // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line
-    // prompt answers them directly.
+    // prompt answers them directly. A task agent routes to its own task approver (ADR 0030
+    // slice 5), which is the one case a non-human turn may reach the approver.
+    let task_routing = matches!(&approvals, ApprovalRouting::Task { .. });
     let approver: Arc<dyn Approver> = match approvals {
         ApprovalRouting::Queued => {
             Arc::new(QueuedApprover::new(Arc::clone(&queue), origin.clone()))
         }
         ApprovalRouting::Direct(approver) => approver,
+        ApprovalRouting::Task { approver, .. } => approver,
     };
     let hooks = Arc::new(PermissionHooks::new(
         profile,
         Some(approver),
         audit(Arc::clone(&journal)),
     ));
+    hooks.set_task_approver(task_routing);
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),
     // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).

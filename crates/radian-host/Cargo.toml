@@ -51,4 +51,4 @@ toml_edit = "0.22"
 radian-session = { path = "../radian-session", features = ["testing"] }
 # The catalog tests use the adapter's local mock HTTP server, never the real network.
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
