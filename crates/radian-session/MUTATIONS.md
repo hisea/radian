@@ -243,3 +243,22 @@ after); the mutation was restored with `git checkout --`, `git status --short` e
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | RF1-FB | write the child directly to the final path and keep it on failure (no temp/rename) | caught (rc=101) | `fork::tests::a_failed_child_leaves_nothing_behind` (the half child existed) |
+
+## ADR 0030 slice 1：`ForkParent.relation`、`TaskSpawned`/`TaskFinished`、`PermissionResolved.policy`
+
+Base: `a4a00bf` · 在本任务工作树内逐条施加，改前把 `writer.rs`/`runtime.rs` 复制到
+`/tmp/orch-s1-mut-backup/`，改后 `cp` 还原（本任务禁 `git checkout --`）；每条跑完后
+`git status --short` 为空，`diff -q` 与副本一致。测试用 `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S1-M1 | writer：`ForkParent.relation` 加 `#[serde(skip_serializing)]`（relation 从线上消失） | `fork::a_task_child_records_relation_task`、`fork::the_parent_gains_only_the_forked_record_and_the_seqs_match` | ✅ failed |
+| S1-M2 | writer：去掉 `#[serde(default = "default_relation")]`（没有 relation 的旧 parent 变报错而不是默认） | `read_fixtures::the_fork_fixtures_agree_with_the_reference_checker`（`missing field relation`） | ✅ failed |
+| S1-M3 | runtime：`PermissionResolved` 移进 `critical() == true` 臂 | `permission_event::permission_resolved_round_trips_and_is_not_replayed` | ✅ failed |
+| S1-M3b | runtime：`TaskSpawned`/`TaskFinished` 移进 `true` 臂 | `runtime_events::the_task_events_round_trip_and_are_not_critical` | ✅ failed |
+| S1-M4 | runtime：`runtime_data` 的 `policy` 恒为 `None`（有 policy 也不写） | `permission_event::permission_resolved_round_trips_and_is_not_replayed` | ✅ failed |
+| S1-M4b | runtime：去掉 `PermissionResolvedData.policy` 的 `skip_serializing_if`（写成 `"policy":null`） | `permission_event::permission_resolved_round_trips_and_is_not_replayed` | ✅ failed |
+
+6/6 抓住。S1-M1/M2 是 brief 要求的「relation 掉线」「旧 parent 被拒」两条；S1-M3 是
+「policy（即 PermissionResolved 事件）被标 critical」；S1-M4/M4b 是「有 policy 时省略」与
+「None 时也序列化」两面。S1-M3b 是额外加的：两个新事件同样不能标 critical。

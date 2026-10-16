@@ -1349,6 +1349,27 @@ catching tests are the render snapshots, not the footer ones.
 
 另记一个无效变异：「只给第 200 字节之后的第一个合成格子假偏移」——那一处的上一个字符是 ASCII，`+1` 正好是合法边界，不会 panic，不能说明覆盖缺口；MS-M2 用确定落在多字节中间的单格变异代替。
 
+## resume-perf2：`push_message` 的 O(n²) 与 Markdown 只数不建（2026-10-16）
+
+Base `oc/resume-perf2` · 就地变异：改前 `cp` 到 `.radian/mut/`，改后跑测试，再从副本写回，
+逐个 `diff` 确认与副本逐字节相同（`git status --short` 只剩本片的五个改动文件）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| RP2-M1 | 工具结果配对从前端扫（`iter_mut().enumerate()`，索引取 `rev`），即修复前的第二次 O(n²) | `app::tests::tool_result_pairing_does_not_walk_the_transcript`（400 个结果走了 240 200 条） | ✅ |
+| RP2-M2 | 计数路径改成 `md_lines(..).len()`（量测即排版） | `blocks::tests::the_measure_pass_never_lays_out_markdown` | ✅ |
+| RP2-M3 | 去掉 `md_lines_cached` 的懒填充（行缓存永不写入） | `blocks::tests::a_repeat_frame_reuses_the_markdown_line_cache` | ✅ |
+| RP2-M4 | `wrap_line_count` 的 ASCII 快路径给错宽度（+1） | `virtual::every_window_matches_the_full_wrap`（总数与实际排版不符） | ✅ |
+| RP2-M5 | `md_line_count` 去掉「补回被 pulldown 吃掉的结尾换行」 | `blocks::tests::md_line_count_matches_the_layout` | ✅ |
+
+5/5 抓住。两处过程记录：
+
+- RP2-M2 第一次变异放在 `md_line_count_cached` 的兜底分支，**没抓住**：量测时
+  `fill_md_count_cache` 先填好计数缓存，`md_line_count_cached` 总是命中，兜底分支在生产路径里
+  几乎不可达。改成变异真正的计数入口 `fill_md_count_cache` 后抓住——即变异要落在会被执行的路径上。
+- RP2-M1 的变异保留了配对的正确性（前端扫也找到同一个 call id），只放大扫描量；测试断言的是
+  「走过的条目数」，不是结果，所以抓住了「修复后的算法没被还原」这层回归。
+
 ## band-padding：带的半格留白与 thinking 贴住下一块（ADR 0035，2026-10-15）
 
 Base `a36a099` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`，每条只跑列出的测试，
@@ -1385,6 +1406,20 @@ Base `d8b7688`（worktree `.radian-worktrees/access-cmd`）· 每个变异在就
 3/3 抓住。AC-M3 的两半都在同一个 pty 用例里：写 `~/.radian/access/access.json` 时必须生效并带
 `(project)` 标记；把同样内容写进工作区文件、用干净 HOME 启动时**必须不生效**。
 
+## build-script：合并 dump 预先提交、build script 只校验与拷贝（2026-10-15）
+
+Base `39c67ad`（worktree `.radian-worktrees/build-script`）。本片没有改产品行为（新 dump 与 main 的
+build script 产出**逐字节相同**，md5 `34b85cf9241b1ceb6672355035c27c40`），新增的是构建脚本的两道
+校验与一条冻结测试。前两条是**构建期**的负向验证（手工跑，不是 `cargo test`），第三条是新测试的变异
+检查；每条跑完从 `/tmp/bs/` 的副本还原并用 `md5` 确认逐字节相同。
+
+| # | 变异 / 负向场景 | 抓住它的东西 | 结果 |
+|---|---|---|---|
+| BS-M1 | `assets/syntaxes.packdump.digest` 改成别的值（dump 与语法不同步） | `build.rs` 的 digest 校验：构建失败并打印 `RADIAN_REGENERATE_SYNTAXES=1 cargo build -p radian-tui` | ✅（`cargo build -p radian-tui` 报错退出） |
+| BS-M2 | dump 截断到 2000 B（坏文件 / syntect 格式变了的等价物） | `build.rs` 的 `from_uncompressed_dump_file` 校验：构建失败并打印同一命令 | ✅ |
+| BS-M3 | `third_party/syntaxes/TOML.sublime-syntax` 的注释 scope 改成 `constant.numeric.toml`，重新生成 dump | `highlight::the_vendored_grammars_highlight_a_fixed_snippet_identically`（Comment → Number） | ✅（1 FAILED） |
+
+BS-M1/M2 覆盖「旧的 dump 不会被静默用掉」，BS-M3 覆盖「重新生成真的改变了行为时看得见」。
 ## mode-cmd：`/mode` 的查询与切换（ADR 0038 切片 ③，2026-10-15）
 
 Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 每个变异在就地改完后跑
@@ -1399,3 +1434,15 @@ Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 每个变异在就�
 2/2 抓住。`pty::pty_mode_lead_switches_the_role_prompt_from_the_next_turn`（真 TUI、mock 模型）
 覆盖上一层的接线：`/mode lead` 的 layer 1 在下一次请求里变成 lead 角色提示词，`<role>` 之外的字节
 不变；它连跑 5 次全绿。
+## sandbox-unix-sockets：TUI 把 `allow_unix_sockets` 交给沙箱（ADR 0016，2026-10-15）
+
+Base `acbc455`（`origin/main`）· 就地变异：改前 `cp` 到 scratchpad，改后从副本写回并 `cmp` 逐字节相同。
+`cargo test -p radian-tui --test structure --no-fail-fast main_forwards_the_allowed_unix_sockets_to_the_sandbox`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| US-M1 | `build_sandbox` 调用的第四个实参改成 `&Vec::new()`（配置里的 socket 列表到不了沙箱） | `structure::main_forwards_the_allowed_unix_sockets_to_the_sandbox` | ✅ |
+
+1/1 抓住。这条是**接线**变异：白名单本身的行为由 `radian-sandbox` 的逃逸矩阵覆盖（`unix_socket` 组的
+`whitelisted_allowed` 对照），而「TUI 把解析后的列表交给 `build_sandbox`」只有源码结构能钉住
+（`run` 在 `main.rs` 里、测试够不到），所以按 `structure.rs` 的既有做法做结构断言。

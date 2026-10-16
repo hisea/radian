@@ -19,6 +19,7 @@ KNOWN_EVENTS = {
     "MemoryInjected", "ModelUsageRecorded", "CompactionUsageRecorded", "SessionForked",
     "ProjectTrustChanged", "UserBash", "GitCommitted",
     "BackgroundJobStarted", "BackgroundJobSettled",
+    "TaskSpawned", "TaskFinished",
 }
 # ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
@@ -183,6 +184,33 @@ EXPECT = {
         skips=[],
         repair={},
         parent=("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 4),
+    ),
+    "task-parent.jsonl": dict(
+        outcome="accept",
+        events=7,
+        skips=[],
+        repair={},
+        task_spawned=(
+            3,
+            "14222222-2222-4222-8222-222222222222",
+            "/work/example/.radian-worktrees/task-1",
+            "slice 1",
+        ),
+        task_finished=(6, "14222222-2222-4222-8222-222222222222", "completed"),
+    ),
+    "task-child.jsonl": dict(
+        outcome="accept",
+        events=2,
+        skips=[],
+        repair={},
+        parent=("14111111-1111-4111-8111-111111111111", 3, "task"),
+    ),
+    "policy-approval.jsonl": dict(
+        outcome="accept",
+        events=4,
+        skips=[],
+        repair={},
+        policy_resolved=(3, "policy", "safe-commands"),
     ),
     "usage-cache-semantics.jsonl": dict(
         outcome="accept",
@@ -415,6 +443,12 @@ def check_fixture(name, exp):
                     raise Corruption(f"{name}: line {i}: SessionCreated.parent 不是对象")
                 if not isinstance(parent.get("session_id"), str) or not parent["session_id"]:
                     raise Corruption(f"{name}: line {i}: parent.session_id 必须是非空字符串")
+                # ADR 0030 O2: `relation` is optional; an old `parent` without one reads as
+                # "fork". When present it must be a non-empty string.
+                if "relation" in parent and (
+                    not isinstance(parent["relation"], str) or not parent["relation"]
+                ):
+                    raise Corruption(f"{name}: line {i}: parent.relation 必须是非空字符串")
                 # `seq` is ADR 0022's addition; the older reserved shape has no `seq`, which
                 # a forward reader still ignores. If it is present, it must be an integer.
                 if "seq" in parent and (
@@ -429,6 +463,40 @@ def check_fixture(name, exp):
                 )
             if not isinstance(data.get("parent_seq"), int) or isinstance(data["parent_seq"], bool):
                 raise Corruption(f"{name}: line {i}: SessionForked.parent_seq 不是整数")
+        if ev["event"] == "PermissionResolved":
+            # ADR 0006 §5.9：`policy` 只在 approver=policy 时出现（critical 的取值由 Rust
+            # 侧的作者/读取方测试钉住，这里不重复：旧的 unknown-enum-values fixture 由另一
+            # 个切片负责，本片不改它）。
+            data = ev["data"]
+            if "policy" in data:
+                if not isinstance(data["policy"], str) or not data["policy"]:
+                    raise Corruption(
+                        f"{name}: line {i}: PermissionResolved.policy 必须是非空字符串"
+                    )
+                if data.get("approver") != "policy":
+                    raise Corruption(
+                        f"{name}: line {i}: 只有 approver=policy 的事件才能带 policy"
+                    )
+        if ev["event"] in ("TaskSpawned", "TaskFinished"):
+            # ADR 0030 O5：lead journal 的两条审计事件，都是 critical:false。
+            if ev["critical"]:
+                raise Corruption(f"{name}: line {i}: {ev['event']} 必须是 critical:false")
+            data = ev["data"]
+            if not isinstance(data.get("agent_session_id"), str) or not data["agent_session_id"]:
+                raise Corruption(
+                    f"{name}: line {i}: {ev['event']}.agent_session_id 必须是非空字符串"
+                )
+            if ev["event"] == "TaskSpawned":
+                for field in ("worktree", "label"):
+                    if field in data and (
+                        not isinstance(data[field], str) or not data[field]
+                    ):
+                        raise Corruption(
+                            f"{name}: line {i}: TaskSpawned.{field} 必须是非空字符串"
+                        )
+            else:
+                if not isinstance(data.get("outcome"), str) or not data["outcome"]:
+                    raise Corruption(f"{name}: line {i}: TaskFinished.outcome 必须是非空字符串")
         if ev["event"] == "MessageAppended":
             msg = ev["data"].get("message")
             if not isinstance(msg, dict) or len(msg) != 1:
@@ -525,9 +593,12 @@ def check_fixture(name, exp):
                 raise Corruption(f"{name}: SessionCreated 缺预留字段 {field}")
     if "parent" in exp:
         created = next(e["data"] for e in events if e["event"] == "SessionCreated")
-        sid, seq = exp["parent"]
-        if created.get("parent") != {"session_id": sid, "seq": seq}:
-            raise Corruption(f"{name}: SessionCreated.parent {created.get('parent')!r} != 期望")
+        expected = exp["parent"]
+        want = {"session_id": expected[0], "seq": expected[1]}
+        if len(expected) == 3:
+            want["relation"] = expected[2]
+        if created.get("parent") != want:
+            raise Corruption(f"{name}: SessionCreated.parent {created.get('parent')!r} != 期望 {want}")
     if "forked" in exp:
         forked = next(e["data"] for e in events if e["event"] == "SessionForked")
         sid, seq = exp["forked"]
@@ -695,6 +766,47 @@ def check_fixture(name, exp):
         for e in events:
             if e["event"] == "GitCommitted" and e["critical"]:
                 raise Corruption(f"{name}: GitCommitted 必须是 critical:false")
+    if "task_spawned" in exp:
+        spawned = [
+            (
+                e["seq"],
+                e["data"].get("agent_session_id"),
+                e["data"].get("worktree"),
+                e["data"].get("label"),
+            )
+            for e in events
+            if e["event"] == "TaskSpawned"
+        ]
+        if spawned != [tuple(exp["task_spawned"])]:
+            raise Corruption(f"{name}: task_spawned {spawned} != 期望 {[tuple(exp['task_spawned'])]}")
+    if "task_finished" in exp:
+        finished = [
+            (
+                e["seq"],
+                e["data"].get("agent_session_id"),
+                e["data"].get("outcome"),
+            )
+            for e in events
+            if e["event"] == "TaskFinished"
+        ]
+        if finished != [tuple(exp["task_finished"])]:
+            raise Corruption(
+                f"{name}: task_finished {finished} != 期望 {[tuple(exp['task_finished'])]}"
+            )
+    if "policy_resolved" in exp:
+        resolved = [
+            (e["seq"], e["data"].get("approver"), e["data"].get("policy"))
+            for e in events
+            if e["event"] == "PermissionResolved"
+        ]
+        if resolved != [tuple(exp["policy_resolved"])]:
+            raise Corruption(
+                f"{name}: policy_resolved {resolved} != 期望 {[tuple(exp['policy_resolved'])]}"
+            )
+        # ADR 0006 §4：审批审计是 non-critical。
+        for e in events:
+            if e["event"] == "PermissionResolved" and e["critical"]:
+                raise Corruption(f"{name}: PermissionResolved 必须是 critical:false")
     if "background_jobs" in exp:
         starts = [
             (

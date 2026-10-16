@@ -30,6 +30,7 @@ mod mcp;
 pub mod memory;
 pub mod mermaid;
 mod model;
+pub mod observer;
 pub mod opencode_go;
 mod output;
 pub mod pending;
@@ -115,6 +116,7 @@ pub use model::{
     compaction_settings_for, compaction_settings_for_route, redact_base_url,
     resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref, route_replays_reasoning,
 };
+pub use observer::{JournalObserver, SessionObserver};
 pub use opencode_go::{
     DEFAULT_PERIOD as OPENCODE_GO_DEFAULT_PERIOD, MAX_PERIOD as OPENCODE_GO_MAX_PERIOD,
     MIN_PERIOD as OPENCODE_GO_MIN_PERIOD, OpencodeGoUsage, USAGE_URL as OPENCODE_GO_USAGE_URL,

@@ -48,9 +48,11 @@ unicode-width = "0.2.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
 
 [build-dependencies]
-# The build script (`build.rs`) loads syntect's packed default set, parses the vendored
-# TypeScript/TSX/TOML grammars and dumps the combined set to `$OUT_DIR/syntaxes.packdump`;
-# the runtime dep above only deserializes it.
+# The build script (`build.rs`) checks the committed `assets/syntaxes.packdump` against the
+# vendored grammars and copies it to `$OUT_DIR/syntaxes.packdump`; the runtime dep above only
+# deserializes it. syntect is needed here only by the regeneration path
+# (`RADIAN_REGENERATE_SYNTAXES=1 cargo build -p radian-tui`), which parses the YAML and dumps the
+# merged set — see the header of `build.rs`.
 syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy", "default-syntaxes", "yaml-load", "dump-create"] }
 
 [target.'cfg(unix)'.dependencies]

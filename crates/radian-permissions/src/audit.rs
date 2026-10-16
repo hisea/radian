@@ -31,6 +31,11 @@ pub struct PermissionResolved {
     pub approver: Approver,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The named external policy command that decided (ADR 0030 O2 revision 2, ADR 0006 §5.9):
+    /// set only when `approver = "policy"` and the decision came from `orchestration.toml`'s
+    /// policy command. Built-in rules and `auto` leave it `None`. Slice 5 is the first producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
 }
 
 /// Where decisions go. The host wires this to the session journal so a durable
