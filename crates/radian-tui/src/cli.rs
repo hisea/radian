@@ -3486,8 +3486,11 @@ impl LoopContext<'_> {
             Effect::ModelSwitch { provider, model } => {
                 // D6: the target needs a credential. `resolve_key` reads `auth.json` (file I/O,
                 // fine in the loop): without one the switch dies here with the `/login` hint.
+                // `resolve_key` only resolves an `api_key` entry; `chatgpt`'s login is an `oauth`
+                // entry (ADR 0026), so `has_login` - the presence check both shapes
+                // share, as at startup and in `RouteContext::args_for` - also counts here.
                 let checked = match radian_host::auth::resolve_key(&provider) {
-                    Ok(Some(_)) => {
+                    Ok(found) if found.is_some() || radian_host::has_login(&provider) => {
                         // D7: `B'` from the warm catalog, `T` from the projection's last report.
                         let budget = self.session.budget_for_route(&provider, &model);
                         let tokens = self
@@ -3502,7 +3505,7 @@ impl LoopContext<'_> {
                             budget,
                         }
                     }
-                    Ok(None) => {
+                    Ok(_) => {
                         self.send(AppInput::CommandRefused(radian_host::CommandRefused {
                             command: format!("/model {provider}/{model}"),
                             reason: format!(

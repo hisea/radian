@@ -7378,6 +7378,50 @@ async fn pty_model_lists_chatgpt_once_it_is_logged_in() {
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
+/// ADR 0026: switching to a `chatgpt` model with `/model` is accepted once there is
+/// a `chatgpt` login. The login is an `oauth` entry, which `resolve_key` (api keys only) does
+/// not see; the switch's credential check must also accept `has_login` (owner report
+/// 2026-10-16: "no credential for `chatgpt`: run /login chatgpt" right after logging in).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_model_switches_to_chatgpt_with_an_oauth_login() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("model-chatgpt-switch");
+    let sessions = dir.path().join("sessions");
+    let radian_home = dir.path().join("radian-home");
+    write_chatgpt_oauth_entry(&radian_home);
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "model-chatgpt-switch",
+        ],
+        &[("RADIAN_HOME", radian_home.to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/model chatgpt/gpt-5.4\r");
+    assert!(
+        pty.wait_for_screen("next turn: chatgpt/gpt-5.4", 10),
+        "the switch to chatgpt was refused or never confirmed:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("no credential"),
+        "an oauth login must count as a credential:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
 /// D8: a resume uses the last switched model from the journal, with no flags.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
