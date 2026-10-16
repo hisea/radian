@@ -337,6 +337,74 @@ fn a_diff_row_copies_its_own_text_without_the_gutter() {
     );
 }
 
+/// `write` (ADR 0028): a whole-file write has no hunk, so the entry text
+/// is the file's content with **no** sign and every row is a numbered addition. The number and
+/// the synthesized `+` are drawn but carry no source, so a copy of the body is the content
+/// alone — no gutter, no sign.
+#[test]
+fn a_write_body_numbers_the_content_and_copies_it_without_the_gutter() {
+    let mut app = App::new("m", "s");
+    card(
+        &mut app,
+        "write",
+        serde_json::json!({"path": "src/a.rs", "content": "let a = 1;\nlet b = 2;"}),
+        "wrote 20 bytes to src/a.rs",
+        serde_json::json!({"path": "src/a.rs", "bytes_written": 20}),
+    );
+    app.tool_display.fold = ToolFold::Expanded;
+    app.set_transcript_width(80);
+    let modes = app.display_modes();
+    let width = 80usize;
+    let entries = &app.session.entries;
+    let result_index = entries
+        .iter()
+        .position(|entry| entry.kind == EntryKind::ToolResult)
+        .expect("the result entry");
+    let entry = &entries[result_index];
+    let body = radian_tui::blocks::layout(entry, &[], modes, width);
+    let row = body
+        .iter()
+        .position(|line| line.text.ends_with("+ let a = 1;"))
+        .expect("the first added row is drawn");
+    assert_eq!(body[row].text, "   1 + let a = 1;");
+    // The four-cell number, its space, the sign and the gap after it are synthesized: seven
+    // cells with no source. Only the code maps the entry's own bytes.
+    assert!(
+        body[row].chars[..7].iter().all(Option::is_none),
+        "the number and the sign carry no source: {:?}",
+        body[row].chars
+    );
+    let start = entry.text.find("let a = 1;").expect("the code's text");
+    let mapped: Vec<usize> = body[row].chars.iter().flatten().copied().collect();
+    assert_eq!(
+        mapped,
+        (start..start + "let a = 1;".len()).collect::<Vec<_>>(),
+        "the drawn cells map the code's own bytes: {:?}",
+        body[row].chars
+    );
+    // A selection over the whole entry copies the content, never the numbering or the sign.
+    let base = entries[..result_index]
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            radian_tui::blocks::block_gap(entries.get(index.wrapping_sub(1)), entry)
+                + render::display_lines(entry, modes, width).len()
+        })
+        .sum::<usize>()
+        + radian_tui::blocks::block_gap(
+            entries.get(result_index.wrapping_sub(1)),
+            &entries[result_index],
+        );
+    let anchor = locate(entries, modes, width, base, 0).expect("the first row's start");
+    let head =
+        locate(entries, modes, width, base + body.len() - 1, 200).expect("the last row's end");
+    let copied = logical_text(entries, &Selection { anchor, head });
+    assert_eq!(
+        copied, "let a = 1;\nlet b = 2;",
+        "the copy is the content, with no gutter and no sign"
+    );
+}
+
 /// The line count a card reports equals the lines it draws, with numbered diff rows — at two
 /// widths, including one where a row has to be cut (ADR 0028 R1's virtualization: the count
 /// and the drawing derive from the same plan).

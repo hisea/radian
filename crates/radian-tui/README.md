@@ -25,7 +25,7 @@ App::update(input: Input) -> UpdateResult { dirty: bool, effects: Vec<Effect> }
   `Quit`, `AnswerApproval`/`AbandonApproval`, `ExpandMentions` (the `@` expansion reads
   files), `CompleteMention` (reads a directory), `RunMemoryCommand`, `Compact`, `Session`
   (`/export`, `/fork`), and `OpenPicker` (reads the session index for `/sessions`).
-- The event loop in `main.rs` runs the effects and feeds their results back as inputs. A key
+- The event loop in `cli.rs` runs the effects and feeds their results back as inputs. A key
   press is resolved by `App::key_input` (the keymap plus the current layer) and `App::on_key`
   is the thin wrapper around it.
 - **`update` never** does I/O, touches the runtime, reads a file or a directory, or calls the
@@ -67,7 +67,7 @@ projection handle, now reached through `app.session.projection`.
 
 ### The loop: one channel, three promises (ADR 0023 U2)
 
-`main.rs`'s loop blocks on **one** `std::sync::mpsc` channel of `UiEvent`:
+`cli.rs`'s loop blocks on **one** `std::sync::mpsc` channel of `UiEvent`:
 
 | Source | Event | Promise |
 |---|---|---|

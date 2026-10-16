@@ -2,7 +2,7 @@
 //!
 //! `update` is **pure**: it never does I/O, never touches the runtime, never reads a file or a
 //! directory, and never calls into a service. Everything that needs the outside world comes
-//! back as an [`Effect`], which the event loop in `main.rs` runs; the result returns as another
+//! back as an [`Effect`], which the event loop in `cli.rs` runs; the result returns as another
 //! [`Input`]. `tests/purity.rs` asserts the structure (no `std::fs`, no `MemoryService`, no
 //! `tokio`, no `mention::expand`/`complete` call in this file).
 //!
