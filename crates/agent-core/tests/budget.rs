@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 fn text_with_usage(s: &str, input: u64) -> Reply {
     Reply::Respond(ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![ContentPart::text(s)],
         tool_calls: vec![],
@@ -27,6 +28,7 @@ fn text_with_usage(s: &str, input: u64) -> Reply {
 /// it (ADR 0007). `prompt_total()` is all three added up.
 fn text_with_anthropic_usage(s: &str, input: u64, cache_read: u64, cache_write: u64) -> Reply {
     Reply::Respond(ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![ContentPart::text(s)],
         tool_calls: vec![],
@@ -44,6 +46,7 @@ fn text_with_anthropic_usage(s: &str, input: u64, cache_read: u64, cache_write: 
 
 fn calls_with_usage(list: Vec<ToolCall>, input: u64) -> Reply {
     Reply::Respond(ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![],
         tool_calls: list,
@@ -193,6 +196,7 @@ async fn the_reported_baseline_includes_the_cache_read_and_write() {
 async fn the_openai_shaped_baseline_is_the_input_itself() {
     let model = ScriptedModel::new([
         Reply::Respond(ModelResponse {
+            limits: None,
             reasoning: Vec::new(),
             content: vec![ContentPart::text("first")],
             tool_calls: vec![],
@@ -226,6 +230,7 @@ async fn the_openai_shaped_baseline_is_the_input_itself() {
 async fn an_unmarked_record_is_a_baseline_of_its_input_alone() {
     let model = ScriptedModel::new([
         Reply::Respond(ModelResponse {
+            limits: None,
             reasoning: Vec::new(),
             content: vec![ContentPart::text("first")],
             tool_calls: vec![],

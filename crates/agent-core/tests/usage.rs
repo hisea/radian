@@ -220,6 +220,7 @@ fn usage_value() -> ModelUsage {
 /// An assistant reply that carries usage.
 fn reply_with_usage() -> Reply {
     Reply::Respond(ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![ContentPart::text("used")],
         tool_calls: vec![],
