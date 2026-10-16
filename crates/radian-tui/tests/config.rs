@@ -222,8 +222,9 @@ fn the_dark_theme_keeps_the_original_colors() {
         }
     }
     let style = user_marker.expect("the user marker");
-    // The built-in dark palette is pi's: the user marker takes the main text level.
-    assert_eq!(style.fg, Some(Color::Rgb(222, 224, 225)));
+    // The built-in dark palette is pi's. ADR 0029: the user marker is
+    // the accent foreground now (the `user` role), not the main text level.
+    assert_eq!(style.fg, Some(Color::Rgb(167, 152, 215)));
 }
 
 /// `mono` renders with no color at all.
