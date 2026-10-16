@@ -9062,9 +9062,10 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     // Wait for the **footer** before reading its last two lines: `message` is the input hint,
     // which is drawn in the same frame as the footer, but the hint can appear before the
-    // footer's items have data. `^- v- R-` is the numbers row with no usage yet.
+    // footer's items have data. `↑- ↓- R-` is the numbers row with no usage yet (the unicode
+    // tier's token arrows, ADR 0027 item 2).
     assert!(
-        pty.wait_for_screen("^- v-", 10),
+        pty.wait_for_screen("↑- ↓-", 10),
         "the numbers row is on screen:\n{}",
         pty.screen()
     );
