@@ -1286,15 +1286,19 @@ fn run(
     app.set_projection(Arc::clone(&projection));
     // ADR 0030 slice 8: the process control port. Bound before the session so its fan-out can
     // wrap the host's own sinks; the startup line names the path. A bind failure is a warning,
-    // never a startup refusal.
-    let control = match radian_host::ControlServer::bind_if(
-        config.control.enabled,
-        radian_host::radian_home().as_deref(),
-    ) {
-        Ok(server) => server,
-        Err(error) => {
-            eprintln!("[control] disabled: {error}");
-            None
+    // never a startup refusal. The bind creates a tokio listener, and this setup runs outside
+    // the async `run` (sessions are opened with `runtime.block_on`), so enter the runtime first.
+    let control = {
+        let _guard = runtime.enter();
+        match radian_host::ControlServer::bind_if(
+            config.control.enabled,
+            radian_host::radian_home().as_deref(),
+        ) {
+            Ok(server) => server,
+            Err(error) => {
+                eprintln!("[control] disabled: {error}");
+                None
+            }
         }
     };
     if let Some(server) = &control {
