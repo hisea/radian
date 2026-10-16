@@ -1745,3 +1745,26 @@ Base：本片 HEAD（`oc/thin-think`）· 就地变异，每个变异先把文�
 
 2/2 抓住。测试正文**不带**结尾换行，所以 `line_count` 走镜像分支而不是 `has_blank_edge` 的 layout
 兜底（第一版带了结尾换行，TH7 没抓住：兜底直接返回 layout 的长度，绕过镜像）。
+
+## Slice ⑦: thin snapshots, the hand-test list and the mutation list (2026-10-16)
+
+Base `1d58517` (the slice's own tests/README) · mutations applied in place by
+`.radian/scratch/mutate.py`, which backs each file up under `.radian/scratch/mut/`, asserts the
+anchor is present, runs the named test with `--exact` and `timeout`, then restores with a plain
+`cp` and `cmp`s the file byte-for-byte. `git status --short` empty after every mutation; none
+restored to a different byte.
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| SL7-1 | the head row is a rail, not a card | `render.rs::render_head_row` returns the head `Line` with a `bg` | `thin::no_transcript_row_has_a_background_in_any_builtin_theme` | ✅ |
+| SL7-2 | the meta stays on the head line | `blocks.rs::head_rows` pushes the meta as its own `BodyLine` instead of the tail | `thin::the_shell_blocks_snapshot_at_80_120_dark_light` (the golden rows shift) | ✅ |
+| SL7-3 | a `+` row carries the **new** file's number | `tools.rs::diff_body`'s `DiffKind::Added` arm numbers from `old` | `thin::a_three_hunk_diff_numbers_each_row_by_its_own_file` | ✅ |
+| SL7-4 | `@@`/file headers are the weak `frame` role | `tools.rs::diff_role` returns `LineRole::Accent` | `diff::a_diff_row_colors_its_gutter_sign_and_code` (`@@` == the accent) | ✅ |
+| SL7-5 | the thinking body is Markdown (no `**`/backticks) | `blocks.rs::reasoning_body_lines`' Paragraph branch back to `prose_lines` | `thinking::the_thinking_body_is_single_colour_markdown` | ✅ |
+| SL7-6 | a table cell keeps its inline style | `blocks.rs::md_table` flattens the body cell's pieces to `MdStyle::Plain` | `markdown::table_header_and_body_cells_keep_their_roles` | ✅ |
+| SL7-7 | the ask record is an **open** frame | `blocks.rs::ask_top`/`ask_bottom` add a `╮`/`╯` corner | `thin::the_ask_record_snapshot_is_an_open_frame` | ✅ |
+| SL7-8 | a folded shell block draws no output | `tools.rs::body_plan` drops `|| fold == ToolFold::Collapsed` from the compact branch | `card::the_fold_modes_decide_the_body_and_the_collapsed_meta` | ✅ |
+
+8/8 caught, no misses and no equivalent mutants. Each mutation is a real behaviour change (the
+script asserts its anchor, so a `cargo fmt` shift or a no-op patch fails loudly rather than
+passing as "caught" — the U3/U4 trap); the restoring `cmp` is the guard that nothing leaked.
