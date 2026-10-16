@@ -674,7 +674,13 @@ fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
 ///
 /// * a tool call and **its own** result (matched by call id, rule 4) - the result hugs its
 ///   call, with no gap in between;
-/// * the startup block: one block built from several entries (see [`is_startup_block`]).
+/// * the startup block: one block built from several entries (see [`is_startup_block`]);
+/// * a skipped empty assistant entry ([`is_empty_assistant`]): it draws no line, so it has no
+///   blank line before it either.
+///
+/// `prev` must be the entry the blank line really follows: the last one that is **not**
+/// skipped. [`gap_at`] resolves it from the entries; call it, not this, for a transcript
+/// entry's own gap.
 ///
 /// A user row is an ordinary block now (ADR 0035: no padding rows used to be its
 /// separation), so it gets the container's one blank line on both sides like every other block.
@@ -684,8 +690,11 @@ fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
 /// sides, because a folded `> thinking (N lines)` against the reply read as one cramped block.
 /// The counting ([`line_count`]'s callers), the drawing
 /// ([`crate::render::visible_lines`]), the selection mapping and the find geometry all call
-/// this, so a gap cannot exist in one and not the other.
+/// [`gap_at`], so a gap cannot exist in one and not the other.
 pub fn block_gap(prev: Option<&Entry>, next: &Entry) -> usize {
+    if is_empty_assistant(next) {
+        return 0;
+    }
     let Some(prev) = prev else {
         return 0;
     };
@@ -698,6 +707,47 @@ pub fn block_gap(prev: Option<&Entry>, next: &Entry) -> usize {
         return 0;
     }
     1
+}
+
+/// Whether the entry is a **text-less assistant turn**: a committed (not live) assistant entry
+/// whose text is empty or whitespace only (a reply that was only tool calls or only reasoning).
+/// It lays out as zero lines, and the container gives it no blank line and does not count it as
+/// a `prev` for the entry after it ([`gap_at`]), so a reasoning block followed by a text-less
+/// reply followed by a tool call shows **one** blank row, not two (ADR 0028 rule 1,
+/// ADR 0035).
+///
+/// The entry itself stays in `entries` (`push_message` keeps it: the interrupted marker, usage
+/// and copy-last-reply read it); only its layout and its blank lines are skipped. A **live**
+/// empty entry is drawn as it always was, so a reply that is still starting does not shift, and
+/// an **interrupted** one is never skipped either: it has to keep the `[interrupted]` marker
+/// visible (ADR 0003), and the layout gives it one line to carry it ([`layout_with`]).
+pub fn is_empty_assistant(entry: &Entry) -> bool {
+    entry.kind == EntryKind::Assistant
+        && !entry.live
+        && !entry.interrupted
+        && entry.text.trim().is_empty()
+}
+
+/// The index of the last entry before `entries[index]` that is not skipped ([`is_empty_assistant`]).
+/// That entry is what a blank line before `entries[index]` follows and what a selection on that
+/// blank line anchors to. `None` when no entry precedes it.
+pub fn previous_shown(entries: &[Entry], index: usize) -> Option<usize> {
+    entries[..index.min(entries.len())]
+        .iter()
+        .rposition(|entry| !is_empty_assistant(entry))
+}
+
+/// The blank lines before `entries[index]` (ADR 0028 rule 1): [`block_gap`] against
+/// the last entry that is **not** skipped, so a skipped empty assistant entry contributes no
+/// line of its own and no gap of its own. Every gap consumer (the drawing
+/// [`crate::render::visible_lines`], the counting, the selection mapping and the find geometry)
+/// calls this, so they cannot disagree.
+pub fn gap_at(entries: &[Entry], index: usize) -> usize {
+    let Some(next) = entries.get(index) else {
+        return 0;
+    };
+    let prev = previous_shown(entries, index).map(|prev| &entries[prev]);
+    block_gap(prev, next)
 }
 
 /// Whether the `bar` input gets its half-cell padding rows under this glyph tier (ADR 0035
@@ -730,10 +780,8 @@ pub fn is_call_result_pair(prev: &Entry, next: &Entry) -> bool {
 /// The gap before each entry: `gaps[i]` is the blank lines before entry `i` (`gaps[0]` is 0).
 /// The container's total line count is the sum of the entries' counts plus these.
 pub fn gaps(entries: &[Entry]) -> Vec<usize> {
-    entries
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| block_gap(entries.get(index.wrapping_sub(1)), entry))
+    (0..entries.len())
+        .map(|index| gap_at(entries, index))
         .collect()
 }
 
@@ -1066,6 +1114,14 @@ pub fn layout_with(
     // and the search all see the same shape.
     let mut lines = layout_unstripped(entry, blocks, modes, width, spinner);
     strip_edge_blanks(&mut lines);
+    // The `[interrupted]` marker is drawn on the entry's **last** line (ADR 0003, `render.rs`'s
+    // `entry_lines` / `visible_lines`): an interrupted reply whose text is empty (cut off during
+    // reasoning only) would otherwise lose the whole body here and with it the marker. It keeps
+    // one empty line to carry it -- the one blank line the strip above is not allowed to take.
+    // It is not a skipped entry either ([`is_empty_assistant`] excludes interrupted ones).
+    if lines.is_empty() && entry.interrupted && entry.kind == EntryKind::Assistant {
+        lines.push(BodyLine::prose(Vec::new(), 0, String::new()));
+    }
     lines
 }
 
@@ -3865,6 +3921,84 @@ mod tests {
         assert_eq!(block_gap(Some(&banner), &startup), 0, "the startup block");
         assert_eq!(block_gap(Some(&startup), &assistant), 1, "after it");
         assert_eq!(gaps(&[assistant, notice]).len(), 2);
+    }
+
+    /// A committed text-less assistant reply (only tool calls, or only reasoning) is skipped by
+    /// the gap geometry: it has no blank line of its own, and the entry after it is measured
+    /// against the last entry that is not skipped (ADR 0028 rule 1). A **live** or an
+    /// **interrupted** empty entry is not skipped, and the pair rules (a call and its own result)
+    /// still hold across a skip.
+    #[test]
+    fn an_empty_committed_assistant_is_skipped_by_the_gaps() {
+        assert!(is_empty_assistant(&Entry::new(EntryKind::Assistant, "")));
+        assert!(
+            is_empty_assistant(&Entry::new(EntryKind::Assistant, "  \n ")),
+            "whitespace only counts as empty"
+        );
+        let mut live = Entry::new(EntryKind::Assistant, "");
+        live.live = true;
+        assert!(!is_empty_assistant(&live), "a live entry is never skipped");
+        // An interrupted empty reply is not skipped either: it keeps one line for the
+        // `[interrupted]` marker (ADR 0003).
+        let mut interrupted = Entry::new(EntryKind::Assistant, "");
+        interrupted.interrupted = true;
+        assert!(
+            !is_empty_assistant(&interrupted),
+            "an interrupted reply keeps its block"
+        );
+        assert_eq!(
+            line_count(&interrupted, EXPANDED, 20),
+            1,
+            "and it lays out one line for the marker"
+        );
+        assert!(!is_empty_assistant(&Entry::new(EntryKind::User, "")));
+        assert!(!is_empty_assistant(&Entry::new(EntryKind::Assistant, "x")));
+
+        // The skipped entry has no gap before it, and the tool call takes the reasoning block's
+        // one blank line instead of adding a second one.
+        let entries = vec![
+            Entry::new(EntryKind::User, "q"),
+            Entry::new(EntryKind::Reasoning, "a thought"),
+            Entry::new(EntryKind::Assistant, ""),
+            Entry::new(EntryKind::ToolCall, "-> shell"),
+        ];
+        assert_eq!(gap_at(&entries, 2), 0, "the skipped reply has no gap");
+        assert_eq!(
+            gap_at(&entries, 3),
+            1,
+            "the tool call is measured against the reasoning block"
+        );
+        assert_eq!(gaps(&entries), vec![0, 1, 0, 1]);
+        assert_eq!(previous_shown(&entries, 3), Some(1));
+
+        // Skipping the very first entry leaves the next one a first block (no gap).
+        let entries = vec![
+            Entry::new(EntryKind::Assistant, ""),
+            Entry::new(EntryKind::User, "q"),
+        ];
+        assert_eq!(gaps(&entries), vec![0, 0]);
+        assert_eq!(previous_shown(&entries, 1), None);
+
+        // A call/result pair still hugs across a skip: the result's gap is measured against
+        // the call, not against the skipped reply between them.
+        let card = |id: &str| {
+            Some(Box::new(tools::ToolCard::new(
+                id,
+                "shell",
+                serde_json::json!({}),
+            )))
+        };
+        let mut call = Entry::new(EntryKind::ToolCall, "-> shell");
+        call.tool = card("c1");
+        let mut result = Entry::new(EntryKind::ToolResult, "ok");
+        result.tool = card("c1");
+        let entries = vec![call, Entry::new(EntryKind::Assistant, ""), result];
+        assert_eq!(
+            gaps(&entries),
+            vec![0, 0, 0],
+            "the result still hugs its call"
+        );
+        assert_eq!(previous_shown(&entries, 2), Some(0));
     }
 
     #[test]

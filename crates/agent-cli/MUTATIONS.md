@@ -345,3 +345,14 @@ Base `bf6ccf8` · 一次性 worktree `/tmp/e2-mut`（从 HEAD 建，跑完删）
 2/2 抓住。**教训**：变异脚本必须在**新 worktree 里**先编 `radian`（陈旧检测会直接拒绝旧
 二进制，这是它该做的）；另外 MCP 相关测试需要先编 `mcp-fixture`，否则它们会以环境错误
 失败、把"被抓住"的假象混进来——所以最后是按目标测试逐个过滤确认的。
+
+## ADR 0030 片 6b2：`radian exec` 挂 lead tools（2026-10-16）
+
+Base `2f41f69` · 直接改源码、跑单个测试、从 `.radian/scratch/mut/` 副本 `cp` 还原，
+`git status --short` 跑完为空。测试前先 `cargo build -p radian-tui`（陈旧检测会拒绝旧二进制）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S6B2-1 | `lib.rs` 的 `task_builder: Some(task_builder)` 改回 `None`（headless lead 不挂 lead tools） | `a_headless_lead_mounts_the_task_tools`（tools 列表里没有 `spawn_task` 等） | ✅ |
+
+1/1 抓住。

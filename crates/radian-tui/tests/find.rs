@@ -48,7 +48,7 @@ fn entry_line(app: &App, entry: usize) -> usize {
         let Some(item) = app.session.entries.get(index) else {
             break;
         };
-        line += radian_tui::blocks::block_gap(app.session.entries.get(index.wrapping_sub(1)), item);
+        line += radian_tui::blocks::gap_at(&app.session.entries, index);
         if index < entry {
             line += render::display_lines(item, EXPANDED, WIDTH).len();
         }

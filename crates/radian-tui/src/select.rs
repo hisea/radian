@@ -95,9 +95,9 @@ pub fn locate_hit(
         // The container's gap line before this entry (ADR 0028 rule 1) belongs to
         // the **previous** entry's end: a selection dragged across it copies the newline
         // between the two entries, exactly as a trailing blank line of the previous text did.
-        let gap = crate::blocks::block_gap(entries.get(index.wrapping_sub(1)), entry);
+        let gap = crate::blocks::gap_at(entries, index);
         if remaining < gap {
-            let previous = index.checked_sub(1)?;
+            let previous = crate::blocks::previous_shown(entries, index)?;
             let text_len = display_text(&entries[previous]).len();
             return Some(Hit {
                 anchor: Anchor {
@@ -349,7 +349,7 @@ pub fn highlight_rows(
         }
         // The container's gap line before this entry: it is never highlighted (it carries no
         // text), but it occupies a row.
-        let gap = crate::blocks::block_gap(entries.get(index.wrapping_sub(1)), entry);
+        let gap = crate::blocks::gap_at(entries, index);
         if line + gap > scroll {
             for _ in scroll.saturating_sub(line)..gap {
                 if out.len() >= height {
