@@ -84,6 +84,13 @@ impl JournalTail {
     /// [`Session::open`](crate::Session::open) would. A writer in another process holding the
     /// file's lock does not matter: this never locks and never writes.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ReadError> {
+        Ok(Self::open_with_update(path)?.0)
+    }
+
+    /// Like [`JournalTail::open`], but also returns the [`TailUpdate`] of the **opening** read,
+    /// so a caller that folds the journal (an observer) folds the existing prefix without
+    /// parsing the file a second time.
+    pub fn open_with_update(path: impl AsRef<Path>) -> Result<(Self, TailUpdate), ReadError> {
         let path = path.as_ref().to_path_buf();
         let mut tail = Self {
             path,
@@ -92,8 +99,8 @@ impl JournalTail {
             identity: FileId::ZERO,
             broken: None,
         };
-        tail.poll()?;
-        Ok(tail)
+        let update = tail.poll()?;
+        Ok((tail, update))
     }
 
     /// Reads the complete lines appended since the last poll and folds them.
