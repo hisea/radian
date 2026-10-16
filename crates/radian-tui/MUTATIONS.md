@@ -1463,3 +1463,17 @@ Base `19dc0d7`（worktree `.radian-worktrees/pulse`，分支 `dogfood/pulse`）�
 24-bit 颜色按呼吸变化（一个周期里 7 个不同颜色、包含主题的强调色与暗色两端），而
 `pty_an_idle_screen_is_not_redrawn`（空闲零重绘）与 `pty_a_visible_spinner_redraws_on_its_interval`
 （`arc` 250 ms 不变）都仍然通过。
+
+## pulse：bar 竖条加高到半格、状态行点移到竖条列（ADR 0035，2026-10-15）
+
+同上一节的工作区。改完后跑 `cargo test -p radian-tui --test render`（`--test cursor` 一并跑），再从
+`.radian/scratch/render.rs.orig` 还原并用 `diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| R4-M1 | 留白行仍画 `▄`/`▀` 而不是 `▖`/`▘` | `render::the_bar_band_fills_the_terminal_width`（第一格 `▄` ≠ `▖`，两档宽度都查） | ✅ |
+| R4-M2 | 竖条仍是 `▎`（`BAR_RAIL` 回退） | `render::the_bar_input_style_draws_a_full_width_band_with_the_rail`、`the_bar_band_fills_the_terminal_width`、`the_bar_input_takes_the_status_row_the_pad_rows_and_its_text_rows`、`the_bar_status_row_never_moves_the_band_or_the_transcript`、`the_empty_input_shows_the_placeholder_after_the_prompt`（5 条 FAILED），以及 `pty::pty_the_slash_completion_walks_the_command_tree` 的 `▌ /memory` | ✅（5 条 FAILED） |
+| R4-M3 | 点回到正文列（状态行恢复两个前导空格与两个空格分隔） | `render::the_bar_status_row_never_moves_the_band_or_the_transcript`（第 0 格不是 `◜`）、`the_bar_rail_and_spinner_fall_back_to_ascii`、`the_input_rule_shows_the_spinner_status_while_running`、`the_input_rule_shows_compacting` | ✅（4 条 FAILED） |
+
+光标列不动的断言在 `cursor::the_bar_cursor_stays_at_the_text_column`（空输入 x=2、`ab` x=4）；
+`▖`/`▘` 这一格的前景是强调色、背景是终端默认（`the_bar_band_fills_the_terminal_width` 的第 0 格断言）。

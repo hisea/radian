@@ -255,9 +255,10 @@ fn the_status_line_shows_model_and_turn_state() {
     assert!(text.contains("running"), "{text}");
 }
 
-/// ADR 0027: the input rule shows the spinner and the running state while a turn
-/// runs (`── ◜  Working `), and is a plain rule when idle. The spinner and the text are
-/// separated by **two** spaces.
+/// ADR 0027 + ADR 0035: the default `bar` status row shows the spinner
+/// and the running state while a turn runs (`◜ Working`), and is blank when idle. The dot sits
+/// in the rail's column with **one** cell before the text (which starts at the text column);
+/// the `lines`/`box` rule line keeps revision 2's two spaces (the box test below).
 #[test]
 fn the_input_rule_shows_the_spinner_status_while_running() {
     let mut app = App::new("m", "s");
@@ -268,8 +269,8 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
     assert!(
-        text.contains("◜  Working"),
-        "the spinner and two spaces on the input rule: {text}"
+        text.contains("◜ Working"),
+        "the spinner on the bar's status row: {text}"
     );
 
     // Idle: no spinner, no text.
@@ -280,7 +281,7 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
     assert!(!text.contains('◜'), "{text}");
 }
 
-/// ADR 0018 + ADR 0027: a running compaction shows `Compacting` on the input rule
+/// ADR 0018 + ADR 0027: a running compaction shows `Compacting` on the status row
 /// (the `CompactionStarted`/`CompactionFinished` events exist, so this is not invented).
 #[test]
 fn the_input_rule_shows_compacting() {
@@ -291,7 +292,7 @@ fn the_input_rule_shows_compacting() {
     app.compacting = true;
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
-    assert!(text.contains("◜  Compacting"), "{text}");
+    assert!(text.contains("◜ Compacting"), "{text}");
 
     // The flag clears when the compaction ends.
     app.compacting = false;
@@ -617,7 +618,7 @@ fn the_empty_input_shows_the_placeholder_after_the_prompt() {
     let mut bar = App::new("m", "s");
     let text = screen(&render(&mut bar, 80, 8));
     assert!(
-        text.contains("▎ (type a message, Enter to send, Ctrl-J for a new line)"),
+        text.contains("▌ (type a message, Enter to send, Ctrl-J for a new line)"),
         "the bar's placeholder follows the rail:\n{text}"
     );
 }
@@ -720,8 +721,8 @@ fn the_bar_input_style_draws_a_full_width_band_with_the_rail() {
     let terminal = render(&mut app, 20, 8);
     let text = screen(&terminal);
     let band = app.theme.input_bar.bg.expect("the band's background");
-    let first = row_of(&terminal, "▎ first").expect("the first band row");
-    let second = row_of(&terminal, "▎ second").expect("the second band row");
+    let first = row_of(&terminal, "▌ first").expect("the first band row");
+    let second = row_of(&terminal, "▌ second").expect("the second band row");
     assert_eq!(second, first + 1, "one band row per input row:\n{text}");
     for y in [first as u16, second as u16] {
         let line = row(&terminal, y);
@@ -750,17 +751,18 @@ fn the_bar_input_style_draws_a_full_width_band_with_the_rail() {
     wide.input = "中文中文中文".into();
     let terminal = render(&mut wide, 12, 8);
     // Inner width 10: five 2-cell characters, then the sixth.
-    let first = row_of(&terminal, "▎ 中").expect("the first band row");
+    let first = row_of(&terminal, "▌ 中").expect("the first band row");
     let wrapped = row(&terminal, (first + 1) as u16);
     assert!(
-        wrapped.starts_with("▎ ") && wrapped.contains('文'),
+        wrapped.starts_with("▌ ") && wrapped.contains('文'),
         "the band grew a row for the wrapped tail: {wrapped:?}"
     );
     assert_band_across(&terminal, (first + 1) as u16, wide.theme.input_bar.bg, 12);
 }
 
 /// The band reaches the terminal's last column at both widths the brief pins (80 and 120), and
-/// its half-cell pads (ADR 0035) do too: `▄` above, `▀` below, in the band's color.
+/// its half-cell pads (ADR 0035/4) do too: the rail's own quadrant (`▖` above, `▘`
+/// below, in the accent) then `▄`/`▀` in the band's color across the rest.
 #[test]
 fn the_bar_band_fills_the_terminal_width() {
     use radian_tui::render::InputStyle;
@@ -769,18 +771,39 @@ fn the_bar_band_fills_the_terminal_width() {
         app.input_style = InputStyle::Bar;
         app.input = "wide".into();
         let terminal = render(&mut app, width, 8);
-        let y = row_of(&terminal, "▎ wide").expect("the band") as u16;
+        let y = row_of(&terminal, "▌ wide").expect("the band") as u16;
         let band = app.theme.input_bar.bg;
         assert_band_across(&terminal, y, band, width);
-        assert_eq!(row(&terminal, y - 1), "▄".repeat(width as usize), "{width}");
-        assert_eq!(row(&terminal, y + 1), "▀".repeat(width as usize), "{width}");
-        for (y, glyph) in [(y - 1, "▄"), (y + 1, "▀")] {
-            for col in [0u16, width - 1] {
+        // ADR 0035: the rail continues into the pad rows as the half-cell-wide
+        // quadrants, so it is as tall as the band; the rest of the row is the band's half cell.
+        assert_eq!(
+            row(&terminal, y - 1),
+            format!("▖{}", "▄".repeat(width as usize - 1)),
+            "{width}"
+        );
+        assert_eq!(
+            row(&terminal, y + 1),
+            format!("▘{}", "▀".repeat(width as usize - 1)),
+            "{width}"
+        );
+        for (y, rail, glyph) in [(y - 1, "▖", "▄"), (y + 1, "▘", "▀")] {
+            let rail_style = cell_style(&terminal, 0, y);
+            assert_eq!(rail_style.fg, app.theme.notice_label.fg, "the {rail} rail");
+            assert_eq!(
+                rail_style.bg,
+                Some(Color::Reset),
+                "the {rail} rail's cell keeps the terminal background"
+            );
+            for col in [1u16, width - 1] {
                 let style = cell_style(&terminal, col, y);
                 assert_eq!(style.fg, band, "the {glyph} pad's color at {col}");
                 assert_eq!(style.bg, Some(Color::Reset), "the {glyph} pad's background");
             }
         }
+        // The text rows' rail is the same accent in the same column, and the cell after it is
+        // the band's own (the one cell of padding before the text at `BAR_LEAD`).
+        assert_eq!(cell_style(&terminal, 0, y).fg, app.theme.notice_label.fg);
+        assert_eq!(cell_style(&terminal, 1, y).fg, app.theme.input_bar.fg);
     }
 }
 
@@ -799,11 +822,12 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
 
     // Wide enough that the whole status row fits: it is asserted on, not clipped.
     let idle = render(&mut app, 80, 10);
-    let band_row = row_of(&idle, "▎ hello").expect("the band");
+    let band_row = row_of(&idle, "▌ hello").expect("the band");
     let transcript_row = row_of(&idle, "a question").expect("the transcript");
-    // The band's half-cell pads are always there (ADR 0035): `▄` above, `▀` below.
-    assert!(row(&idle, (band_row - 1) as u16).starts_with('▄'));
-    assert!(row(&idle, (band_row + 1) as u16).starts_with('▀'));
+    // The band's half-cell pads are always there (ADR 0035/4): the rail's `▖`
+    // above, `▘` below, then `▄`/`▀` for the rest of the row.
+    assert!(row(&idle, (band_row - 1) as u16).starts_with("▖▄"));
+    assert!(row(&idle, (band_row + 1) as u16).starts_with("▘▀"));
     // The status row is one above the top pad, and blank (but there) while idle.
     assert_eq!(row(&idle, (band_row - 2) as u16).trim_end(), "");
     assert!(!screen(&idle).contains("Working"));
@@ -813,7 +837,7 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     app.set_now(app.spinner_origin + std::time::Duration::from_secs(12));
     let running = render(&mut app, 80, 10);
     assert_eq!(
-        row_of(&running, "▎ hello"),
+        row_of(&running, "▌ hello"),
         Some(band_row),
         "the band must not move when the turn starts"
     );
@@ -824,14 +848,28 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     );
     let status = row(&running, (band_row - 2) as u16);
     assert!(
-        status.contains("◜  Working · 12s · esc to interrupt"),
+        status.contains("◜ Working · 12s · esc to interrupt"),
         "the live status row: {status:?}"
+    );
+    // ADR 0035: the dot is in the rail's column (0) — the same vertical line as the
+    // rail — one cell before the text, which starts at the text column.
+    let cells: Vec<char> = status.chars().collect();
+    assert_eq!(cells[0], '◜', "the dot's column: {status:?}");
+    assert_eq!(
+        cells[1], ' ',
+        "one cell between the dot and the text: {status:?}"
+    );
+    assert_eq!(cells[2], 'W', "the text column: {status:?}");
+    assert_eq!(
+        cell_style(&running, 0, (band_row - 2) as u16).fg,
+        app.theme.notice_label.fg,
+        "the dot takes the accent"
     );
 
     // The turn ends: the row is blank again and nothing moved.
     app.projection.set_turn(radian_tui::TurnState::Idle);
     let after = render(&mut app, 80, 10);
-    assert_eq!(row_of(&after, "▎ hello"), Some(band_row));
+    assert_eq!(row_of(&after, "▌ hello"), Some(band_row));
     assert_eq!(row_of(&after, "a question"), Some(transcript_row));
     assert_eq!(row(&after, (band_row - 2) as u16).trim_end(), "");
 
@@ -863,25 +901,37 @@ fn the_bar_input_takes_the_status_row_the_pad_rows_and_its_text_rows() {
     // the band 5, the bottom pad 6.
     let terminal = render(&mut app, 20, 8);
     assert_eq!(
-        row_of(&terminal, "▎ hello"),
+        row_of(&terminal, "▌ hello"),
         Some(5),
         "the band sits between the two pad rows:\n{}",
         screen(&terminal)
     );
     assert_eq!(row(&terminal, 3).trim_end(), "", "the blank status row");
-    assert!(row(&terminal, 4).starts_with('▄'), "the top pad");
-    assert!(row(&terminal, 6).starts_with('▀'), "the bottom pad");
+    assert!(
+        row(&terminal, 4).starts_with('▖'),
+        "the top pad's rail cell"
+    );
+    assert!(
+        row(&terminal, 6).starts_with('▘'),
+        "the bottom pad's rail cell"
+    );
 
     app.input = "one\ntwo".into();
     let terminal = render(&mut app, 20, 8);
     assert_eq!(
-        row_of(&terminal, "▎ one"),
+        row_of(&terminal, "▌ one"),
         Some(4),
         "the status row moved up"
     );
-    assert_eq!(row_of(&terminal, "▎ two"), Some(5));
-    assert!(row(&terminal, 3).starts_with('▄'), "the top pad");
-    assert!(row(&terminal, 6).starts_with('▀'), "the bottom pad");
+    assert_eq!(row_of(&terminal, "▌ two"), Some(5));
+    assert!(
+        row(&terminal, 3).starts_with('▖'),
+        "the top pad's rail cell"
+    );
+    assert!(
+        row(&terminal, 6).starts_with('▘'),
+        "the bottom pad's rail cell"
+    );
 }
 
 /// `tui.footer.glyphs = "ascii"` reaches the rail and the status spinner too (ADR 0027
@@ -900,14 +950,14 @@ fn the_bar_rail_and_spinner_fall_back_to_ascii() {
     app.projection.set_turn(radian_tui::TurnState::Running);
     let text = screen(&render(&mut app, 40, 10));
     assert!(text.contains("| hi"), "the ascii rail:\n{text}");
-    assert!(!text.contains('▎'), "no unicode rail:\n{text}");
+    assert!(!text.contains('▌'), "no unicode rail:\n{text}");
     // ADR 0035: the `ascii` tier gets no half-cell band padding.
     assert!(
         !text.contains('▄') && !text.contains('▀'),
         "no band padding under ascii:\n{text}"
     );
     assert!(
-        text.contains("*  Working · esc to interrupt"),
+        text.contains("* Working · esc to interrupt"),
         "the ascii pulse glyph: \n{text}"
     );
 }
