@@ -5739,10 +5739,9 @@ fn dot_colours(raw: &[u8]) -> Vec<(u8, u8, u8)> {
             rgb.0.parse::<u8>(),
             rgb.1.parse::<u8>(),
             rgb.2.parse::<u8>(),
-        ) {
-            if !out.contains(&(r, g, b)) {
-                out.push((r, g, b));
-            }
+        ) && !out.contains(&(r, g, b))
+        {
+            out.push((r, g, b));
         }
     }
     out
