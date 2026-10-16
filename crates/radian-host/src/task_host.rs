@@ -40,6 +40,7 @@ use crate::projection::SessionProjection;
 use crate::session::{
     ApprovalRouting, HostBindings, SessionCapability, SessionError, SessionId, SessionSetup,
 };
+use crate::startup::{LeadSetup, SessionSettings};
 use crate::task::{TaskBuilder, TaskContext, TaskSession, task_sandbox};
 use crate::trust;
 
@@ -313,51 +314,45 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
         .map(|route| (route.provider, route.model))
         .unwrap_or_else(|| host.route.clone());
     Ok(TaskSession {
-        setup: SessionSetup {
+        // ADR 0032 slice 5: a task's setup is a lead setup with the task's own values; the
+        // registry overwrites the rest (the workspace, the `task` role, the allow-lists, the
+        // sandbox it rebuilds and the approval routing).
+        setup: LeadSetup {
+            settings: SessionSettings {
+                retries: host.retries,
+                auto_compact: host.auto_compact,
+                compaction_settings: host.compaction_settings.clone(),
+                compaction_settings_for: host.compaction_settings_for.clone(),
+                shell_auto_background: host.shell_auto_background,
+                skills_extra_paths: host.skills_extra_paths.clone(),
+                skills_builtin: host.skills_builtin,
+                skills_disabled: host.skills_disabled.clone(),
+                memory_injection: host.memory_injection,
+            },
             session_id: SessionId::new(ctx.session_id),
             session_dir: host.session_dir.clone(),
             workspace: workspace.clone(),
             coding_root: Some(workspace.clone()),
             model,
             config_slot: slot,
-            config_queue: ConfigQueue::new(),
             // A task does not switch models, and it never resumes, so no budget/price resolver.
             budget_for: None,
             price_for: None,
             protected_branches: host.protected_branches.clone(),
             allowed_filters: host.allowed_filters.clone(),
-            shell_auto_background: host.shell_auto_background,
             // ADR 0030 O8: a task mounts no MCP server by default. The builder hands the lead's
             // configured set; the registry keeps only the ones the definition names, so the
             // default stays none and an explicit `mcp` list opts in by name.
             servers: host.servers.clone(),
             // The registry sets the `task` role; `--system` (a fixed layer 1) does not apply.
-            role: None,
             system_prompt: None,
             context_budget: host.context_budget,
-            auto_compact: host.auto_compact,
-            compaction_settings: host.compaction_settings.clone(),
-            compaction_settings_for: host.compaction_settings_for.clone(),
-            retries: host.retries,
             sandbox,
             tier: Preset::WorkspaceWrite,
             profile,
             // A task has no `/access`; the registry pins the tier.
             access_builder: None,
-            // The registry sets these to the task values.
-            task_agent: false,
-            parent: None,
-            allowed_branch: None,
-            git_commit_requires_branch: false,
             memory_root: None,
-            skills_extra_paths: host.skills_extra_paths.clone(),
-            skills_builtin: host.skills_builtin,
-            skills_disabled: host.skills_disabled.clone(),
-            // The registry's `enforce_task_setup` fills both from the resolved definition; the
-            // builder's defaults are "no narrowing".
-            tools_allow: None,
-            skills_allow: None,
-            memory_injection: host.memory_injection,
             // A task's worktree is a fresh, untrusted directory (ADR 0031).
             trust: trust::Setup::untrusted(&workspace, false),
             resume: false,
@@ -366,7 +361,8 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
             turn_timeout: host.turn_timeout,
             wording: host.wording,
             capabilities: host.capabilities.clone(),
-        },
+        }
+        .setup(),
         bindings: HostBindings {
             // The registry replaces this with the task-side routing; `Queued` is the harmless
             // placeholder it overwrites.
