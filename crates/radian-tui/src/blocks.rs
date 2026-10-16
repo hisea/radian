@@ -1333,6 +1333,7 @@ struct AskGlyphs {
     bottom_left: char,
     bottom_right: char,
     horizontal: char,
+    vertical: char,
     tee_left: char,
     tee_right: char,
     single_on: &'static str,
@@ -1351,6 +1352,7 @@ impl AskGlyphs {
                 bottom_left: '+',
                 bottom_right: '+',
                 horizontal: '-',
+                vertical: '|',
                 tee_left: '+',
                 tee_right: '+',
                 single_on: "(*)",
@@ -1365,6 +1367,7 @@ impl AskGlyphs {
                 bottom_left: '╰',
                 bottom_right: '╯',
                 horizontal: '─',
+                vertical: '│',
                 tee_left: '├',
                 tee_right: '┤',
                 single_on: "◉",
@@ -1457,12 +1460,12 @@ fn ask_block(
             .get("prompt")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        for line in ask_wrap(prompt, width.saturating_sub(2)) {
-            out.push(ask_line(vec![
-                (" ".to_string(), MdStyle::Dim),
-                (line, MdStyle::Accent),
-            ]));
-        }
+        out.extend(ask_body(
+            &g,
+            width,
+            (" ".to_string(), MdStyle::Dim),
+            (prompt.to_owned(), MdStyle::Accent),
+        ));
         let reply = answers.and_then(|answers| {
             answers
                 .iter()
@@ -1502,28 +1505,34 @@ fn ask_block(
                 {
                     label.push_str(" (Recommended)");
                 }
-                out.push(ask_line(vec![
+                out.extend(ask_body(
+                    &g,
+                    width,
                     (format!("  {mark} "), MdStyle::Dim),
                     (label, MdStyle::Plain),
-                ]));
+                ));
                 if let Some(description) = option
                     .get("description")
                     .and_then(serde_json::Value::as_str)
                 {
-                    out.push(ask_line(vec![
+                    out.extend(ask_body(
+                        &g,
+                        width,
                         (format!("     {} ", g.desc), MdStyle::Dim),
                         (description.to_owned(), MdStyle::Muted),
-                    ]));
+                    ));
                 }
             }
         }
         if let Some(reply) = reply {
             for (key, style) in [("other", MdStyle::Muted), ("note", MdStyle::Muted)] {
                 if let Some(value) = reply.get(key).and_then(serde_json::Value::as_str) {
-                    out.push(ask_line(vec![
+                    out.extend(ask_body(
+                        &g,
+                        width,
                         (format!("  {key}: "), MdStyle::Dim),
                         (value.to_owned(), style),
-                    ]));
+                    ));
                 }
             }
         }
@@ -1531,15 +1540,14 @@ fn ask_block(
     // Declined/cancelled (an error result) is one status line; the text is the tool failure.
     if is_error {
         let status = text.lines().next().unwrap_or("(no answer)").to_owned();
-        out.push(ask_line(vec![
+        out.extend(ask_body(
+            &g,
+            width,
             (" ".to_string(), MdStyle::Dim),
             (status, MdStyle::Muted),
-        ]));
+        ));
     }
-    out.push(ask_line(vec![(
-        format!("{}{}{}", g.bottom_left, g.horizontal, g.bottom_right),
-        MdStyle::Dim,
-    )]));
+    out.push(ask_line(ask_bottom_border(&g, width)));
     out
 }
 
@@ -1590,6 +1598,56 @@ fn ask_wrap(text: &str, width: usize) -> Vec<String> {
                 .collect()
         })
         .collect()
+}
+
+/// One bordered content row of the ask block (ADR 0024 rule 3): the left border in
+/// the box's first column, `prefix` (the indent and the mark), the value wrapped to whatever
+/// the prefix leaves of the inner width (CJK by display width), padded with blanks, and the
+/// right border in the box's last column. A continuation row keeps the value's column, so the
+/// right border never moves. One line per wrapped row.
+fn ask_body(
+    g: &AskGlyphs,
+    width: usize,
+    prefix: (String, MdStyle),
+    value: (String, MdStyle),
+) -> Vec<BodyLine> {
+    let inner = width.saturating_sub(2);
+    let prefix_width = UnicodeWidthStr::width(prefix.0.as_str());
+    let avail = inner.saturating_sub(prefix_width).max(1);
+    ask_wrap(&value.0, avail)
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let lead = if index == 0 {
+                prefix.0.clone()
+            } else {
+                " ".repeat(prefix_width)
+            };
+            let used = prefix_width + UnicodeWidthStr::width(chunk.as_str());
+            let pad = inner.saturating_sub(used);
+            ask_line(vec![
+                (g.vertical.to_string(), MdStyle::Dim),
+                (lead, prefix.1),
+                (chunk, value.1),
+                (" ".repeat(pad), MdStyle::Dim),
+                (g.vertical.to_string(), MdStyle::Dim),
+            ])
+        })
+        .collect()
+}
+
+/// The block's bottom border (ADR 0024 rule 3): as wide as the top border, so the
+/// box is closed.
+fn ask_bottom_border(g: &AskGlyphs, width: usize) -> Vec<(String, MdStyle)> {
+    vec![(
+        format!(
+            "{}{}{}",
+            g.bottom_left,
+            g.horizontal.to_string().repeat(width.saturating_sub(2)),
+            g.bottom_right
+        ),
+        MdStyle::Dim,
+    )]
 }
 
 /// The call entry's content rows (ADR 0028 rule 1): the head status line, then the
@@ -3605,5 +3663,99 @@ mod tests {
             "{ascii:?}"
         );
         assert!(!ascii.iter().any(|t| t.contains('╭')), "{ascii:?}");
+    }
+
+    /// ADR 0024 rule 3: the ask block is a closed box. Every row - the top border,
+    /// every divider and every body row - has the box's width and ends in one of the right
+    /// border glyphs, at a narrow and a wide width, under unicode and ascii, with a prompt,
+    /// option labels and descriptions long enough (in CJK display cells) to wrap.
+    #[test]
+    fn the_ask_block_is_closed_at_every_width() {
+        use serde_json::json;
+        let unanswered = tools::ToolCard::new(
+            "c1",
+            "ask_user",
+            json!({"questions":[{
+                "id":"intent","kind":"text",
+                "prompt":"你的整条消息本来就包含了这段话，所以我只是把它原样转述一遍，好让这一段足够长从而必须折行"
+            }]}),
+        );
+        let mut answered = tools::ToolCard::new(
+            "c2",
+            "ask_user",
+            json!({"questions":[{
+                "id":"pick","kind":"single",
+                "options":[
+                    {"id":"a","label":"第一个选项","description":"这是第一个选项的说明文字，也足够长到需要折行"},
+                    {"id":"b","label":"Option B","recommended":true}
+                ]
+            }]}),
+        );
+        answered.structured = Some(json!({"answers":[
+            {"id":"pick","selected":["a"],"other":"我自己写的另一个答案","note":"一条够长的备注，也应该被折到内宽以内"}
+        ]}));
+        let mut multi = tools::ToolCard::new(
+            "c3",
+            "ask_user",
+            json!({"questions":[{"id":"tiers","kind":"multi","options":[
+                {"id":"safe","label":"safe"},{"id":"workspace","label":"workspace"}]}]}),
+        );
+        multi.structured =
+            Some(json!({"answers":[{"id":"tiers","selected":["safe","workspace"]}]}));
+        for width in [40usize, 100] {
+            for glyphs in [crate::footer::Glyphs::Unicode, crate::footer::Glyphs::Ascii] {
+                let g = AskGlyphs::for_glyphs(glyphs);
+                let rights = [g.top_right, g.tee_right, g.vertical, g.bottom_right];
+                for (card, label) in [
+                    (&unanswered, "unanswered"),
+                    (&answered, "answered"),
+                    (&multi, "multi"),
+                ] {
+                    let lines = ask_block(card, "user declined to answer", false, width, glyphs);
+                    for line in &lines {
+                        assert_eq!(
+                            UnicodeWidthStr::width(line.text.as_str()),
+                            width,
+                            "{label} at width {width} with {glyphs:?} is not the box width: {:?}",
+                            line.text
+                        );
+                        assert!(
+                            line.text
+                                .chars()
+                                .last()
+                                .is_some_and(|c| rights.contains(&c)),
+                            "{label} at width {width} with {glyphs:?} does not end in a right \
+                             border glyph: {:?}",
+                            line.text
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// ADR 0024 rule 3: the bottom border runs the full width, like the top.
+    #[test]
+    fn the_ask_bottom_border_is_as_wide_as_the_top() {
+        use serde_json::json;
+        let card = tools::ToolCard::new(
+            "c1",
+            "ask_user",
+            json!({"questions":[{"id":"q","kind":"text","prompt":"hi"}]}),
+        );
+        for width in [40usize, 100] {
+            for glyphs in [crate::footer::Glyphs::Unicode, crate::footer::Glyphs::Ascii] {
+                let lines = ask_block(&card, "", false, width, glyphs);
+                let top = UnicodeWidthStr::width(lines.first().unwrap().text.as_str());
+                let bottom = UnicodeWidthStr::width(lines.last().unwrap().text.as_str());
+                assert_eq!(top, width, "{glyphs:?}");
+                assert_eq!(
+                    top,
+                    bottom,
+                    "the bottom border must be as wide as the top ({glyphs:?}): {:?}",
+                    lines.last().unwrap().text
+                );
+            }
+        }
     }
 }

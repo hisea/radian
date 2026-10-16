@@ -1430,6 +1430,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let budget = (area.height as usize).saturating_sub(6);
             question_height(
                 form,
+                &app.session_id,
                 area.width as usize,
                 budget,
                 &app.theme,
@@ -1618,6 +1619,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let budget = (area.height as usize).saturating_sub(6);
             let lines = question_panel(
                 form,
+                &app.session_id,
                 input_area.width as usize,
                 budget,
                 &app.theme,
@@ -1935,12 +1937,13 @@ pub const QUESTION_KEYS: &str = "Tab next · Space select · Enter next/submit �
 /// The height the question form's box needs: its content plus the key line, bounded.
 fn question_height(
     form: &QuestionForm,
+    own_session: &str,
     width: usize,
     max_rows: usize,
     theme: &Theme,
     glyphs: crate::footer::Glyphs,
 ) -> u16 {
-    let rows = question_panel(form, width, max_rows, theme, glyphs).len();
+    let rows = question_panel(form, own_session, width, max_rows, theme, glyphs).len();
     (rows as u16).clamp(5, MAX_QUESTION_ROWS)
 }
 
@@ -1949,6 +1952,7 @@ fn question_height(
 /// key hints in the bottom border. Pure, so the layout is testable without a terminal.
 pub fn question_panel(
     form: &QuestionForm,
+    own_session: &str,
     width: usize,
     max_rows: usize,
     theme: &Theme,
@@ -1973,7 +1977,11 @@ pub fn question_panel(
         ])];
     }
     let inner = width.saturating_sub(4).max(1);
-    let title = if form.origin.is_empty() {
+    // ADR 0024 rule 4: `Ask` alone when the asker is this process's own session
+    // (the ordinary single-session TUI); the origin only distinguishes several sessions. A
+    // TUI process has one session today (ADR 0030 slice 0), so origin == own session is the
+    // clean test.
+    let title = if form.origin.is_empty() || form.origin == own_session {
         "Ask".to_string()
     } else {
         format!("Ask · {}", form.origin)

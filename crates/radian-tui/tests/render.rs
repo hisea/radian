@@ -457,6 +457,7 @@ fn form(questions: Vec<radian_coding::Question>) -> radian_tui::question::Questi
 fn panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> String {
     text_of(&render::question_panel(
         form,
+        "session",
         width,
         usize::MAX,
         &radian_tui::theme::Theme::dark(),
@@ -2582,9 +2583,48 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
     assert!(text.contains("Ask · session"), "{text}");
 }
 
-/// `wrap_line_count` (the counting-only path, used to measure every entry on the first frame
-/// and after a resize) must agree with `wrap` for the same corpus, or the transcript's total
-/// line count and the virtualized window disagree.
+/// ADR 0024 rule 4: the Ask panel title is `Ask` alone when the asker is this
+/// process's own session, and `Ask · <origin>` only when another session (an ADR 0030 task
+/// agent) is asking. A TUI process has one session today, so `origin == own session` is the
+/// clean test.
+#[test]
+fn the_ask_panel_title_omits_the_own_session() {
+    let questions = vec![radian_coding::Question {
+        id: "q".into(),
+        header: None,
+        prompt: "Pick one".into(),
+        kind: QuestionKind::Text,
+        options: vec![],
+        allow_other: false,
+        required: true,
+    }];
+    let theme = radian_tui::theme::Theme::dark();
+    let title = |origin: &str, own: &str| {
+        let form = radian_tui::question::QuestionForm::new(7, origin.into(), questions.clone());
+        text_of(&render::question_panel(
+            &form,
+            own,
+            60,
+            usize::MAX,
+            &theme,
+            radian_tui::footer::Glyphs::Unicode,
+        ))
+    };
+    let own = title("session-abc", "session-abc");
+    assert!(
+        own.contains("╭─ Ask "),
+        "own session shows a bare Ask: {own}"
+    );
+    assert!(
+        !own.contains("session-abc"),
+        "the own session id never reaches the title: {own}"
+    );
+    let other = title("other-session", "session-abc");
+    assert!(
+        other.contains("Ask · other-session"),
+        "another session keeps its origin: {other}"
+    );
+}
 #[test]
 fn the_line_count_matches_the_wrap() {
     let corpus = [
