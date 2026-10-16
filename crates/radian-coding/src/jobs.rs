@@ -206,9 +206,10 @@ struct JobsState {
 
 impl Jobs {
     /// A registry whose output files live in `dir` (ADR 0039 decision 1). The caller owns the
-    /// directory choice: the host passes the session's own jobs directory, so the registry
-    /// never computes a workspace path. The directory is created 0700 on the first
-    /// [`Jobs::start`], so opening a session never touches the disk.
+    /// directory choice: the host passes the session's own jobs directory
+    /// (`<sessions_dir>/<session-id>.jobs/`, created 0700 with `radian_session::ensure_private_dir`),
+    /// so the registry never computes a workspace path. If the directory is missing (a registry
+    /// built without a host), the first [`Jobs::start`] creates it 0700.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         let (events, _) = tokio::sync::broadcast::channel(SETTLED_CAPACITY);
         Self {
@@ -549,9 +550,8 @@ pub(crate) enum KillResult {
 // ---------- output files ----------
 
 /// Creates the jobs directory 0700 if it is missing. The host normally creates it with
-/// `radian_session::ensure_private_dir` (ADR 0020) before the sandbox is built; this mirrors
-/// that for a registry used without a host (tests, an embedded tool set) so the output is
-/// owner-only either way.
+/// `radian_session::ensure_private_dir` when the session opens; this mirrors that for a registry
+/// used without a host (tests, an embedded tool set) so the output is owner-only either way.
 fn ensure_jobs_dir(dir: &Path) -> std::io::Result<()> {
     if dir.exists() {
         return Ok(());
@@ -576,9 +576,9 @@ fn ensure_jobs_dir(dir: &Path) -> std::io::Result<()> {
 /// Opens a job's output file for appending, creating it **exclusively** and refusing to follow
 /// a symlink at the destination (ADR 0039 decision 1): `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600.
 ///
-/// `create_new` alone already refuses any existing path (including a symlink), so `O_NOFOLLOW`
-/// is defence in depth for the platforms where the two are not equivalent; on macOS and Linux
-/// the kernel reports `EEXIST` for both. The pair is what the ADR asks for.
+/// `create_new` already refuses an existing path, and a symlink is an existing path, so
+/// `O_NOFOLLOW` is defence in depth here: when the destination is a symlink the two are
+/// equivalent, which `job_output_security` pins. The pair is what the ADR asks for.
 fn open_job_output(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.append(true).create_new(true);

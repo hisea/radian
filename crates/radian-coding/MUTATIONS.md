@@ -299,10 +299,10 @@ Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 变异就地改完�
 | SJ3 | 同时去掉 O_EXCL 与 O_NOFOLLOW（ADR 的「去掉 O_EXCL/O_NOFOLLOW」） | `job_output_security::a_planted_symlink_at_the_next_output_file_is_not_followed`（`start` 顺着 symlink 打开，输出落在外部文件） | ✅ failed |
 | SJ4 | 宿主把 jobs 目录改回工作区内（`dir.join(".radian/jobs")`） | `radian-host::session::tests::the_jobs_directory_is_the_sessions_own_and_owner_only` | ✅ failed |
 
-**SJ2（等价变异，诚实记录）**：`O_CREAT|O_EXCL` 在 macOS 与 Linux 上都先把「已存在的路径
-（含 symlink）」判为 `EEXIST`，所以只留 `create_new` 时 `O_NOFOLLOW` 无可观察后果（本机实测：
-`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` 与 `O_WRONLY|O_CREAT|O_EXCL` 对 symlink 都返回 `EEXIST`；
-`O_NOFOLLOW` 只在 `O_CREAT|O_APPEND`（无 `O_EXCL`）时才把 symlink 变成 `ELOOP`）。ADR 0039 把
+**SJ2（等价变异，诚实记录）**：POSIX 规定 `O_CREAT|O_EXCL` 对已存在的路径（含 symlink）返回
+`EEXIST`；本机 macOS 实测：`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` 与 `O_WRONLY|O_CREAT|O_EXCL`
+对 symlink 都返回 `EEXIST`；`O_NOFOLLOW` 只在 `O_CREAT|O_APPEND`（无 `O_EXCL`）时才把 symlink 变成
+`ELOOP`。所以只留 `create_new` 时 `O_NOFOLLOW` 无可观察后果。ADR 0039 把
 `O_EXCL/O_NOFOLLOW` 当一个变异（SJ3 抓住）；单独去掉 `O_NOFOLLOW` 是纵深防御，没有确定性测试能
 区分它，与上面 M7（`write` 的 `O_NOFOLLOW`）同理。
 
