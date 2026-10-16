@@ -950,12 +950,13 @@ throwaway terminal, not your working one.
    `· N lines` (the body is not
    silently cut); the thinking block is separated from its neighbour by the container's one
    blank line (not hugged). *Fail*: record the fold state after each press and the config value.
-7. **Mermaid** (ADR 0028 R8; merge `5628737`). *Steps*: ask for a small ` ```mermaid `
-   flowchart; widen then narrow the terminal past the `TooWide` threshold, then widen again.
+7. **Mermaid** (ADR 0042; merge `aedc23f`). *Steps*: ask for a small ` ```mermaid `
+   flowchart, then a `subgraph` one and a 4-participant `sequenceDiagram`; widen then narrow
+   the terminal past the `TooWide` threshold, then widen again.
    *Expect*: wide → a Unicode diagram at the body width; narrow → the **source** plus one dim
-   `mermaid: <reason>` line (never half a diagram); widening re-renders it. *Look*: node/edge
-   colors from the theme (`mermaid_node`/`mermaid_edge`/`mermaid_text`), and `mono`.
-   *Fail*: record the reason line and the widths.
+   `mermaid: needs N columns, have W` line (never half a diagram); widening re-renders it.
+   *Look*: node/edge colors from the theme (`mermaid_node`/`mermaid_edge`/`mermaid_text`), and
+   `mono`. *Fail*: record the reason line and the widths.
 8. **Code blocks** (ADR 0028; merge `0f5a302`). *Steps*: get a long single-line code block,
    then a block with CJK characters.
    *Expect*: code **never wraps**; a line wider than the body ends in `…`; CJK code lines
@@ -1568,24 +1569,27 @@ transcript (the hook appends to the system prompt) and its only transcript trace
 ADR 0037's completion notice); an approval is a modal, not a transcript entry (the call and its
 result are the card). A pending question's result arrives as the `ask_user` card.
 
-## Mermaid blocks (ADR 0028 R8)
+## Mermaid blocks (ADR 0042)
 
 A fenced code block whose info string is `mermaid` (ASCII case-insensitive) and which is
 **closed** is drawn as a Unicode diagram, at the transcript body width, through
-`radian_host::mermaid::render_spans` — the one entry point (ADR 0028): a
-`flowchart`/`graph` by Radian's own layered layout, everything else (and every flowchart that
-layout cannot draw) by the vendored `codex-mermaid`. While the fence is open (streaming) the
-source shows; the diagram appears when the closing fence arrives. `tui.display.mermaid = false`
-(config) renders every code block as source.
+`grok_mermaid::render` — the one entry point (ADR 0042 decision 3), the vendored
+`third_party/grok-mermaid` (grok-build's `mermaid.rs`: flowchart with `subgraph`, sequence,
+state, class and ER diagrams). While the fence is open (streaming) the source shows; the diagram
+appears when the closing fence arrives. `tui.display.mermaid = false` (config) renders every code
+block as source.
 
-A diagram neither renderer can draw (unsupported syntax, their limits, or too narrow) keeps the
-**source** and puts one dim `mermaid: <reason>` line first — never a half diagram. Widening the
+A diagram the renderer cannot draw keeps the **source** and puts one dim
+`mermaid: <reason>` line first — never a half diagram. The reason is
+`needs N columns, have W` when the drawing is wider than the body (ADR 0042 decision 5: it is
+never compressed or turned), and `unsupported syntax` or `too large` otherwise. Widening the
 terminal re-renders: the diagram cache is keyed by `(width, text_len)`, so a `TooWide` failure
 can succeed on a wider screen.
 
-The three diagram roles take their colors from the theme (ADR 0029): `mermaid_node` (pi's
-`accent`), `mermaid_edge` (pi's `dim`) and `mermaid_text` (pi's `text`). `mono` uses modifiers
-only; `[tui.colors]` overrides each like any other role.
+The vendored renderer's five roles collapse onto the theme's three (ADR 0029, ADR 0042
+decision 4): box drawing is `mermaid_node` (pi's `accent`), a connector and its head is
+`mermaid_edge` (pi's `dim`), and every label — a node's, a connector's — is `mermaid_text`
+(pi's `text`). `mono` uses modifiers only; `[tui.colors]` overrides each like any other role.
 
 Selecting a diagram selects its block (the diagram has no source offsets of its own), so a copy
 yields the Mermaid **source** — the text that actually exists. Ctrl-F searches the diagram's

@@ -1348,3 +1348,16 @@ Base `a3eb856`（分支 `oc/orch-s8`）· 就地改 `src/control.rs`，每次从
 
 4/4 抓住。CTL-2 的「抓住」表现为 panic/abort（tokio 禁止在运行时线程上 `blocking_send`），
 这正是变异要证明的：扇出绝不能在生产事件的线程上等待客户端。
+
+## ADR 0042: 渲染侧移出 host（`mermaid_check`、`mermaid_layout`、`diagrams` skill 删除，2026-10-16）
+
+本 ADR 的 code 改动没有新的 host 变异可跑：`radian-host/src/mermaid.rs`、`mermaid_layout.rs`
+与它们的测试，以及内建 `diagrams` skill、`mermaid_check` 工具（挂载、dispatch、agent-cli 表、
+permission allow 名单）全部删除；`radian-tui` 改为直接依赖 vendored 的
+`third_party/grok-mermaid`。因此本文件里这些旧的节不再有对应代码或测试，保留为历史：
+
+- 「ADR 0025 / ADR 0028 R8：内建 skill + diagrams + mermaid_check」的 DG-M1/DG-M2；
+- 「ADR 0028: radian's own layered flowchart layout」的 L1-L9。
+
+新渲染器的四个变异记在 `crates/radian-tui/MUTATIONS.md` 的「ADR 0042」一节；上游文件的保真度
+（决定 2）由 `third_party/grok-mermaid/tests/pristine.rs` 自己查。
