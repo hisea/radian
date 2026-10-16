@@ -3379,12 +3379,25 @@ async fn a_zero_context_window_in_the_config_is_unset_and_the_guard_is_off() {
     assert_eq!(server.requests().len(), 1, "{stderr}");
 }
 
-/// The same rule for the flag (ADR 0015): `--context-window 0` means "not given", so the
-/// catalog decides and the guard is off; the CLI does not refuse the run for a zero it would
-/// otherwise read as a window.
+/// The same rule for the flag, and what "unset" means: `--context-window 0` is not an explicit
+/// window at all, so the catalog (here a written cache) decides — it is not read as an explicit
+/// zero. With the catalog's `C 20000, I 18000` the effective budget is
+/// `B = min(18000, 20000 - 5000) = 15000`, and the startup line names models.dev as the source.
+/// A host that read `0` as an explicit window would take the no-fetch branch instead and report
+/// `B 18000 from --context-window` for a window it never looked up.
 #[tokio::test]
-async fn a_zero_context_window_flag_is_unset_and_the_guard_is_off() {
-    let (_dir, ws) = budget_workspace("budget-zero-flag");
+async fn a_zero_context_window_flag_lets_the_catalog_decide() {
+    let (dir, ws) = budget_workspace("budget-zero-flag");
+    // The cache the run reads (`--offline-catalog`), in the shape models.dev serves.
+    let home = dir.join("radian");
+    let cache = home.join("cache/catalog/models.json");
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cache,
+        r#"{"acme": {"id": "acme", "models": {"m": {"id": "m",
+            "limit": {"context": 20000, "input": 18000, "output": 4096}}}}}"#,
+    )
+    .unwrap();
     let server = MockServer::start(vec![text_reply("done")]).await;
 
     let (code, stdout, stderr) = feed_and_wait(
@@ -3394,15 +3407,18 @@ async fn a_zero_context_window_flag_is_unset_and_the_guard_is_off() {
                 "m",
                 "--base-url",
                 &server.base_url,
-                "--workspace",
-                ws.to_str().unwrap(),
+                "--catalog-provider",
+                "acme",
+                "--offline-catalog",
                 "--context-window",
                 "0",
+                "--workspace",
+                ws.to_str().unwrap(),
                 "--yes",
                 "-p",
                 "go",
             ],
-            &[],
+            &[("RADIAN_HOME", home.to_str().unwrap())],
         ),
         "",
     )
@@ -3410,10 +3426,13 @@ async fn a_zero_context_window_flag_is_unset_and_the_guard_is_off() {
 
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("done"), "{stdout}");
-    assert!(stderr.contains("[budget] window unknown"), "{stderr}");
-    assert!(stderr.contains("no budget"), "{stderr}");
+    assert!(stderr.contains("from models.dev"), "{stderr}");
     assert!(
-        !stderr.contains("at least 1 token"),
+        stderr.contains("B 15000"),
+        "the catalog's window decides: {stderr}"
+    );
+    assert!(
+        !stderr.contains("--context-window must be"),
         "a zero window is unset, not a usage error: {stderr}"
     );
     assert_eq!(server.requests().len(), 1, "{stderr}");
