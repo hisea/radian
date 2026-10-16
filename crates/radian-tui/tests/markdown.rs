@@ -455,7 +455,7 @@ fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_entry() {
     // the display line with the channel folded.
     // The container's gap line before the assistant entry is part of both geometries
     // (ADR 0028 rule 1).
-    let gap = blocks::block_gap(Some(&app.session.entries[0]), &app.session.entries[1]);
+    let gap = blocks::gap_at(&app.session.entries, 1);
     assert_eq!(find.current_line(), Some(expanded + gap + m.line));
     assert!(!app.is_following(), "a jump closes follow");
     let hit_line = folded + gap + m.line;

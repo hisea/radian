@@ -91,6 +91,7 @@ fn builder(session_dir: PathBuf) -> TaskBuilder {
                     price_for: None,
                     protected_branches: Vec::new(),
                     allowed_filters: None,
+                    shell_auto_background: None,
                     servers: Vec::new(),
                     role: None,
                     system_prompt: None,

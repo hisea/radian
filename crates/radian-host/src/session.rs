@@ -354,6 +354,10 @@ pub struct SessionSetup {
     /// Filter drivers `git add` may run (`[git] allowed_filters`, ADR 0030). `None`
     /// means the default (`["lfs"]`); an empty list allows none.
     pub allowed_filters: Option<Vec<String>>,
+    /// The resolved `[shell] auto_background_secs` (ADR 0037): a **foreground**
+    /// `shell` call still running after this is adopted by the job registry in place. `None`
+    /// disables adoption (the config's `0`, or a host that does not set it).
+    pub shell_auto_background: Option<Duration>,
     pub servers: Vec<McpServerConfig>,
     /// The role prompt's name (ADR 0036): `default`, `task` or `lead`. `None` is
     /// `default`. `--system` replaces this layer only.
@@ -1136,6 +1140,7 @@ pub async fn open_session(
         price_for,
         protected_branches,
         allowed_filters,
+        shell_auto_background,
     } = setup;
 
     // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
@@ -1175,8 +1180,12 @@ pub async fn open_session(
     // `<sessions_dir>/<session-id>.jobs/`. It is a sibling of the session file, so the
     // sandbox's deny-read rule on the sessions directory covers it.
     let jobs_dir = session_dir.join(format!("{}.jobs", session_id.as_str()));
-    let (coding, jobs) =
-        build_coding_tools(coding_root.as_deref(), sandbox_slot.clone(), &jobs_dir)?;
+    let (coding, jobs) = build_coding_tools(
+        coding_root.as_deref(),
+        sandbox_slot.clone(),
+        &jobs_dir,
+        shell_auto_background,
+    )?;
     // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
     // there are coding tools. It is its own provider, so a host without `--workspace` still
     // advertises it. `None` is what the model sees as "no such tool".
@@ -1271,13 +1280,24 @@ pub async fn open_session(
     let lead_mounted = !task_agent && task_builder.is_some();
     let lead_registry = if lead_mounted {
         let builder = task_builder.expect("lead_mounted implies a task builder");
-        Some(Arc::new(crate::task::TaskRegistry::new(
-            workspace.clone(),
-            session_id.as_str(),
-            Arc::clone(&journal),
-            Arc::clone(&queue),
-            builder,
-        )))
+        // ADR 0030 O10: the registry tells the host's live view about every `TaskSpawned` and
+        // `TaskFinished` it writes, so the TUI shows a notice line and the CLI one stderr line.
+        // The sink is the host's own runtime-events handler (the same one the driver calls).
+        let runtime_events = Arc::clone(&runtime_events);
+        let notifier: crate::task::TaskNotifier =
+            Arc::new(move |event: &radian_session::RuntimeEvent| {
+                runtime_events.on_runtime_event(event);
+            });
+        Some(Arc::new(
+            crate::task::TaskRegistry::new(
+                workspace.clone(),
+                session_id.as_str(),
+                Arc::clone(&journal),
+                Arc::clone(&queue),
+                builder,
+            )
+            .with_notifier(notifier),
+        ))
     } else {
         None
     };
@@ -1718,6 +1738,7 @@ fn build_coding_tools(
     workspace: Option<&Path>,
     sandbox: SandboxSlot,
     jobs_dir: &Path,
+    shell_auto_background: Option<Duration>,
 ) -> Result<(Option<CodingTools>, Option<Arc<radian_coding::Jobs>>), SessionError> {
     match workspace {
         Some(dir) => {
@@ -1734,6 +1755,12 @@ fn build_coding_tools(
                     SessionError::Message(format!("--workspace {}: {error}", dir.display()))
                 })?
             };
+            // ADR 0037: the adoption threshold comes from `[shell]`; the host
+            // resolved the default already, so `None` here means off.
+            let tools = tools.with_limits(radian_coding::Limits {
+                auto_background_after: shell_auto_background,
+                ..radian_coding::Limits::default()
+            });
             // ADR 0039 decision 1: the jobs directory is the **session's own** directory, in
             // the sessions dir the sandbox already denies reading. It is created 0700 with the
             // same helper the sessions dir uses, before the registry can write anything, and
@@ -1841,7 +1868,7 @@ mod tests {
         let jobs_dir = root.join("sessions/sid.jobs");
 
         let slot = SandboxSlot::from_option(Some(full_access(&ws)));
-        let (_coding, jobs) = build_coding_tools(Some(&ws), slot, &jobs_dir).expect("tools");
+        let (_coding, jobs) = build_coding_tools(Some(&ws), slot, &jobs_dir, None).expect("tools");
         let jobs = jobs.expect("a registry");
 
         assert_eq!(

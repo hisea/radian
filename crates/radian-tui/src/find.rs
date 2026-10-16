@@ -138,7 +138,7 @@ pub fn compute(
     for (entry, item) in entries.iter().enumerate() {
         // The container's gap before this entry is part of the transcript's geometry
         // (ADR 0028 rule 1), so an absolute line is the same in both.
-        line += crate::blocks::block_gap(entries.get(entry.wrapping_sub(1)), item);
+        line += crate::blocks::gap_at(entries, entry);
         starts.push(line);
         // Folded content must not vanish from the search (ADR 0028 R6): matching runs over
         // the **fully expanded** form - thinking, tool bodies and compaction summaries alike.

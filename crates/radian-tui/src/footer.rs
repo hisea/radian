@@ -500,6 +500,7 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     with_format("cwd", "{repo}"),
                     with_format("git_branch", "{branch}{dirty}"),
                     item("worktree"),
+                    item("tasks"),
                 ],
                 vec![item("context_bar"), item("reasoning")],
             ),
@@ -769,6 +770,7 @@ fn item_placeholders(id: &str) -> &'static [&'static str] {
         "elapsed" => &["elapsed"],
         "cost" => &["usd"],
         "pending" => &["count"],
+        "tasks" => &["running", "total"],
         "mcp" => &["mcp"],
         "scroll" => &["position", "mode"],
         _ => &[],
@@ -799,6 +801,7 @@ fn item_priority(id: &str) -> i64 {
         "tier" => 75,
         "host" => 78,
         "git_branch" | "worktree" | "pending" => 70,
+        "tasks" => 72,
         "status" => 45,
         "session" => 65,
         "reasoning" => 60,
@@ -834,6 +837,7 @@ fn default_role(id: &str) -> Option<Role> {
         "mcp" => Role::Mcp,
         "context" | "context_bar" => Role::Budget,
         "pending" => Role::TurnRunning,
+        "tasks" => Role::TurnRunning,
         _ => return None,
     })
 }
@@ -1466,6 +1470,16 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             values: vec![("count", app.pending.to_string())],
             default_format: "{count} pending",
             numeric: Some(app.pending as u64),
+        }),
+        // ADR 0030 O10: the live task-agent count `running/total`. Absent with no tasks, so it
+        // never reads `0/0`.
+        "tasks" => app.session.task_counts().map(|(running, total)| ItemData {
+            values: vec![
+                ("running", running.to_string()),
+                ("total", total.to_string()),
+            ],
+            default_format: "tasks {running}/{total}",
+            numeric: Some(total as u64),
         }),
         "mcp" => Some(ItemData {
             values: vec![(

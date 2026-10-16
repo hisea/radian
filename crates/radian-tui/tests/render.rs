@@ -1350,26 +1350,23 @@ fn thinking_has_one_blank_line_on_both_sides() {
         "and that line is empty:\n{text}"
     );
 
-    // Expanded, and directly against a tool card: the same single line. The entries are pushed
-    // directly because `push_message` always puts an (empty) assistant entry between them — a
-    // block of its own, which is what makes a text-less call show two blank rows in a real
-    // transcript, not this rule. The unit test in `blocks.rs` pins the pair rule itself.
+    // Expanded, and directly against a tool card: the same single line. The real flow gives one
+    // line too: `push_message` still pushes the (empty) assistant entry between them, but the
+    // layout skips a committed text-less reply (ADR 0028 rule 1), so it does not
+    // add a second blank row.
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
     app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
-    app.session.entries.push(Entry::new(
-        EntryKind::Reasoning,
+    app.push_message(&assistant_with(
+        "",
         "first thought\nsecond thought",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "make test"}),
+        }],
     ));
-    let card = radian_tui::tools::ToolCard::new(
-        "c1",
-        "shell",
-        serde_json::json!({"command": "make test"}),
-    );
-    let mut call = Entry::new(EntryKind::ToolCall, "shell $ make test");
-    call.tool = Some(Box::new(card));
-    call.card = radian_tui::blocks::Card::Solo;
-    app.session.entries.push(call);
     let terminal = render(&mut app, 40, 12);
     let text = screen(&terminal);
     let first = row_of(&terminal, "first thought").expect("the expanded thinking body");
@@ -1390,6 +1387,176 @@ fn thinking_has_one_blank_line_on_both_sides() {
         row(&terminal, (body + 1) as u16).trim_end(),
         "",
         "and that line is empty:\n{text}"
+    );
+}
+
+/// Pushes the result of the call `c1` (`shell $ true`, exit 0) through the real path, so the
+/// call/result pair is formed the way the loop forms it.
+fn push_c1_result(app: &mut App) {
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("ok")],
+            structured: Some(serde_json::json!({"command": "true", "exit_code": 0})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+}
+
+/// A text-less assistant reply (only reasoning, or nothing at all) is still pushed as its own
+/// committed entry (`push_message` keeps it), but the layout skips it: a committed empty reply
+/// contributes no line and no blank row of its own, so the block below it is one blank row
+/// under the block above it (ADR 0028 rule 1, ADR 0035).
+#[test]
+fn a_text_less_assistant_reply_leaves_one_blank_row() {
+    // Reasoning and a tool call, no reply text, then the result.
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
+    app.push_message(&Message::user("q"));
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: assistant_with(
+            "",
+            "a thought",
+            false,
+            vec![ToolCall {
+                id: "c1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({"command": "true"}),
+            }],
+        ),
+    });
+    push_c1_result(&mut app);
+    let terminal = render(&mut app, 40, 12);
+    let text = screen(&terminal);
+    let thought = row_of(&terminal, "a thought").expect("the thinking body");
+    let head = row_of(&terminal, "• shell").expect("the tool head");
+    assert_eq!(
+        head,
+        thought + 2,
+        "one blank row between the thinking line and the tool head:\n{text}"
+    );
+    assert_eq!(
+        row(&terminal, (thought + 1) as u16).trim_end(),
+        "",
+        "and it is empty:\n{text}"
+    );
+
+    // No reasoning at all: the user row and the tool head are one blank row apart too.
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.push_message(&Message::user("q"));
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "true"}),
+        }],
+    ));
+    push_c1_result(&mut app);
+    let terminal = render(&mut app, 40, 12);
+    let text = screen(&terminal);
+    let user = row_of(&terminal, "❯ q").expect("the user row");
+    let head = row_of(&terminal, "• shell").expect("the tool head");
+    assert_eq!(
+        head,
+        user + 2,
+        "one blank row between the user row and the tool head:\n{text}"
+    );
+    assert_eq!(
+        row(&terminal, (user + 1) as u16).trim_end(),
+        "",
+        "and it is empty:\n{text}"
+    );
+}
+
+/// A **live** text-less assistant entry (a reply whose first delta has not produced text yet)
+/// keeps today's geometry: its block still reserves the container's blank line, so nothing
+/// shifts while the reply is starting. Only a committed empty reply is skipped.
+#[test]
+fn a_live_empty_assistant_keeps_its_blank_line() {
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
+    let projection = radian_tui::projection::SessionProjection::new();
+    app.push_message(&Message::user("q"));
+    stream(&mut app, &projection, StreamKind::Reasoning, "a thought");
+    stream(&mut app, &projection, StreamKind::Assistant, "");
+    let live = app
+        .session
+        .entries
+        .iter()
+        .position(|entry| entry.kind == EntryKind::Assistant && entry.live)
+        .expect("the live reply entry");
+    assert_eq!(
+        radian_tui::blocks::gap_at(&app.session.entries, live),
+        1,
+        "a live empty entry still reserves the container's blank line"
+    );
+    let terminal = render(&mut app, 40, 12);
+    let text = screen(&terminal);
+    let thought = row_of(&terminal, "a thought").expect("the thinking body");
+    assert_eq!(
+        row(&terminal, (thought + 1) as u16).trim_end(),
+        "",
+        "the live entry's blank row is still there:\n{text}"
+    );
+}
+
+/// The gap consumers (the selection mapping and the find geometry) see the skipped reply the
+/// same way the drawing does: the tool call's transcript line is one blank row below the
+/// reasoning block, and a press on the tool head maps to the call, not to the reply that is
+/// not drawn.
+#[test]
+fn a_skipped_reply_does_not_shift_the_selection_or_find_rows() {
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
+    app.push_message(&Message::user("q"));
+    app.push_message(&assistant_with(
+        "",
+        "a thought",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "true"}),
+        }],
+    ));
+    push_c1_result(&mut app);
+    let modes = EXPANDED;
+    let width = 40;
+    let reasoning = app
+        .session
+        .entries
+        .iter()
+        .position(|entry| entry.kind == EntryKind::Reasoning)
+        .expect("the reasoning entry");
+    let call = app
+        .session
+        .entries
+        .iter()
+        .position(|entry| entry.kind == EntryKind::ToolCall)
+        .expect("the tool call entry");
+    let reasoning_lines =
+        radian_tui::render::display_lines(&app.session.entries[reasoning], modes, width).len();
+    let (_, starts) = radian_tui::find::compute(&app.session.entries, modes, width, "");
+    assert_eq!(
+        starts[call] - starts[reasoning],
+        reasoning_lines + 1,
+        "the tool call starts one blank row (not two) below the reasoning block"
+    );
+    let hit = radian_tui::select::locate_hit(&app.session.entries, modes, width, starts[call], 2)
+        .expect("a hit on the tool head");
+    assert_eq!(
+        hit.anchor.entry, call,
+        "the head row maps to the tool call, not to the skipped reply"
     );
 }
 
@@ -2499,11 +2666,11 @@ fn collapsed_and_errors_differ_for_a_successful_card() {
         let _ = render(&mut app, 60, 30);
         counts.push(app.session.total_lines);
     }
-    // The empty assistant entry contributes nothing (its blank line is stripped, rule 1) and
-    // the container's gap before the block is one line. The block (ADR 0028
-    // decision 1) is the head row plus the body rows: 20 rows expanded, the last 5 under
-    // `errors`, none under `collapsed` (the head only).
-    assert_eq!(counts, vec![22, 7, 2], "expanded / errors / collapsed");
+    // The empty assistant entry is skipped entirely (no lines and no blank line of its own,
+    // rule 1), so the tool block is the transcript's first one: its head row plus its body
+    // rows - 20 rows expanded, the last 5 under `errors`, none under `collapsed` (the head
+    // only).
+    assert_eq!(counts, vec![21, 6, 1], "expanded / errors / collapsed");
     // A failure: the same count in all three, and the body really visible.
     for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
         let mut app = app_with(true);
@@ -3376,5 +3543,34 @@ fn the_ask_panel_and_the_transcript_block_use_the_same_markers() {
     assert!(
         !block_text.contains('☐') && !block_text.contains('☑'),
         "{block_text}"
+    );
+}
+
+/// ADR 0003: a reply cut off during reasoning only (empty text, `interrupted`) still has to
+/// tell the user that the turn was interrupted. The `[interrupted]` marker is drawn on the
+/// entry's **last** body line (`render.rs`'s `entry_lines` / `visible_lines`), so the entry
+/// keeps one line for it instead of being skipped as an empty reply.
+#[test]
+fn an_interrupted_reply_with_no_text_still_shows_the_marker() {
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
+    app.push_message(&Message::user("q"));
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: assistant_with("", "a thought", true, vec![]),
+    });
+    let terminal = render(&mut app, 40, 12);
+    let text = screen(&terminal);
+    assert!(
+        text.contains("[interrupted]"),
+        "the cut-off reply keeps its marker:\n{text}"
+    );
+    let thought = row_of(&terminal, "a thought").expect("the thinking body");
+    let marker = row_of(&terminal, "[interrupted]").expect("the marker row");
+    assert_eq!(
+        marker,
+        thought + 2,
+        "one blank row between the thinking block and the marker:\n{text}"
     );
 }

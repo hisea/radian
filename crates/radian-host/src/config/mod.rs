@@ -249,6 +249,28 @@ impl GitConfig {
     }
 }
 
+/// `[shell]` (ADR 0037): the shell tool's limits a host exposes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShellConfig {
+    /// `auto_background_secs`: a **foreground** `shell` call still running after this many
+    /// seconds is adopted by the job registry in place. `None` means the built-in default
+    /// ([`radian_coding::Limits::default`]'s value); `Some(0)` disables adoption.
+    pub auto_background_secs: Option<u64>,
+}
+
+impl ShellConfig {
+    /// The effective adoption threshold a host passes to the session: `None` for
+    /// `auto_background_secs = 0` (off), the configured seconds, or the built-in default
+    /// ([`radian_coding::Limits`]'s `auto_background_after`) when unset.
+    pub fn auto_background_after(&self) -> Option<std::time::Duration> {
+        match self.auto_background_secs {
+            Some(0) => None,
+            Some(secs) => Some(std::time::Duration::from_secs(secs)),
+            None => radian_coding::Limits::default().auto_background_after,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkillsConfig {
     pub extra_paths: Vec<String>,
@@ -540,6 +562,8 @@ pub struct Config {
     pub memory: MemoryConfig,
     /// `[git]` (ADR 0030 R10): the branches `git_commit` refuses besides `main`/`master`.
     pub git: GitConfig,
+    /// `[shell]` (ADR 0037): the shell tool's limits.
+    pub shell: ShellConfig,
     pub tui: TuiConfig,
     /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
     /// resolve them through `radian_host::provider::resolve_provider`.
@@ -647,6 +671,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "skills" => parse_skills(value, path, &mut config)?,
             "memory" => parse_memory(value, path, &mut config)?,
             "git" => parse_git(value, &mut config)?,
+            "shell" => parse_shell(value, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
             "providers" => parse_providers(value, path, &mut config)?,
             // Known by the ADR, not wired in this slice: the hosts take MCP servers from
@@ -982,6 +1007,27 @@ fn parse_git(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
                 }
             }
             config.git.allowed_filters = Some(names);
+        }
+    }
+    Ok(())
+}
+
+/// Parses `[shell]` (ADR 0037). A non-integer or negative `auto_background_secs`
+/// (or an unknown key) is skipped and named on the startup line, never a refusal (the
+/// preferences rule: a bad limit must not block startup).
+fn parse_shell(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Ok(());
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("auto_background_secs", Value::Integer(secs)) if *secs >= 0 => {
+                config.shell.auto_background_secs = Some(*secs as u64);
+            }
+            ("auto_background_secs", _) => {
+                config.skipped.push("shell.auto_background_secs".into());
+            }
+            (other, _) => config.skipped.push(format!("shell.{other}")),
         }
     }
     Ok(())
@@ -2193,6 +2239,39 @@ theme = "light"
         // An empty list allows none.
         let config = parse_str("schema_version = 1\n[git]\nallowed_filters = []\n").unwrap();
         assert!(config.git.allowed_filters().is_empty());
+    }
+
+    /// ADR 0037: `[shell] auto_background_secs` is carried; `0` means off, unset
+    /// means the built-in default, and a bad value is skipped (never a refusal).
+    #[test]
+    fn the_shell_auto_background_secs_is_carried_with_an_off_zero() {
+        let config = parse_str("schema_version = 1\n[shell]\nauto_background_secs = 30\n").unwrap();
+        assert_eq!(config.shell.auto_background_secs, Some(30));
+        assert_eq!(
+            config.shell.auto_background_after(),
+            Some(std::time::Duration::from_secs(30))
+        );
+
+        let config = parse_str("schema_version = 1\n[shell]\nauto_background_secs = 0\n").unwrap();
+        assert_eq!(config.shell.auto_background_secs, Some(0));
+        assert_eq!(config.shell.auto_background_after(), None);
+
+        let config = parse_str("schema_version = 1\n").unwrap();
+        assert_eq!(
+            config.shell.auto_background_after(),
+            radian_coding::Limits::default().auto_background_after
+        );
+
+        let config = parse_str("schema_version = 1\n[shell]\nauto_background_secs = -1\n").unwrap();
+        assert_eq!(config.shell.auto_background_secs, None);
+        assert!(
+            config
+                .skipped
+                .iter()
+                .any(|key| key == "shell.auto_background_secs"),
+            "{:?}",
+            config.skipped
+        );
     }
 
     /// ADR 0014 Q2: `[providers.<id>] reasoning_replay` overrides the catalog — a

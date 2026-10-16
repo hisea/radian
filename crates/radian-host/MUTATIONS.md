@@ -1121,3 +1121,17 @@ cargo test -p radian-host --test task --no-fail-fast -- <下面的测试名>
 `TaskBuilder`（切片 6b），登记表把名单实现为**权限层的 deny**（`Profile::with_denied_tools`：名单外每个内置
 工具一条 `deny`），它只能收窄、不能放宽，可测；「不挂载」的物理挂载要等 6b 的 builder 按名单挂，已列入
 「to decide」。
+## ADR 0030 片 6b2：宿主的真任务 builder（2026-10-16）
+
+Base `2f41f69` · 在 worktree 内直接改文件、跑单个测试、再从 `.radian/scratch/mut/` 的副本
+`cp` 还原并 `cmp` 对比；每个变异后 `git status --short` 只剩被测文件，本次跑完为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S6B2-1 | 把 lead 的 live sink 当成任务的 `task_events`（fixture 里 `host(...)` 收到 `lead_seen` 而非 `task_seen`） | ✅ failed | `the_production_builder_builds_an_accepted_session`（任务的 event 没进它自己的 sink：`the task's own sink sees its turn: []`；lead 的 sink 同时会看到任务的 `TurnFinished`） |
+| S6B2-2 | 任务会话挂一个 MCP server（`servers: vec![McpServerConfig::new("mut", "/bin/true")]`） | ✅ failed | `the_production_builder_builds_an_accepted_session`（`registry.spawn` 因 MCP 启动失败而报错）；`a_shared_task_has_no_worktree_and_no_network` 的 `mcp_configured == 0` 同理 |
+
+2/2 抓住。**说明（如实记录）**：S6B2-1 的变异落在测试 fixture 的接线处（builder 拿到的
+sink 就是宿主会传的 sink），因为生产 builder 的 `task_events` 由宿主提供，没有"把 lead 的
+sink 塞进 builder"的单行源码改法；测试断言（任务自己的 sink 收到它自己的 stream、lead 的
+sink 只收到 `TaskSpawned`/`TaskFinished`）在变异下失败。S6B2-2 的变异是源码变异。

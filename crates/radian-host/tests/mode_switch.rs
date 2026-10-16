@@ -140,6 +140,7 @@ async fn open(
             price_for: None,
             protected_branches: Vec::new(),
             allowed_filters: None,
+            shell_auto_background: None,
             servers: Vec::new(),
             role: options.role,
             system_prompt: options.system,
