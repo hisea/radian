@@ -1784,3 +1784,20 @@ restored to a different byte.
 8/8 caught, no misses and no equivalent mutants. Each mutation is a real behaviour change (the
 script asserts its anchor, so a `cargo fmt` shift or a no-op patch fails loudly rather than
 passing as "caught" — the U3/U4 trap); the restoring `cmp` is the guard that nothing leaked.
+
+## pulse-slow: the breath's period 1.4 s -> 2.0 s and 12 -> 16 samples
+
+Worktree `.radian-worktrees/pulse-slow`, branch `oc/pulse-slow`. In-place mutation: `cp` the file
+to `.radian/scratch/spinner.rs.fixed` first, then a `python3` patch replaces the const line (with
+an `assert` that the anchor occurs once and `assert old in s`, so a no-op patch fails loudly), the
+suite runs `cargo test -p radian-tui --lib --locked --no-fail-fast`, and finally the file is
+restored with a plain `cp` (no `-p`, so the mtime is "now" and cargo rebuilds) and `cmp` reports it
+byte-identical (`git status --short` empty).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| PS-M1 | `PULSE_PERIOD` 2_000 -> 1_400 (the period back to the old value, samples left at 16) | `spinner::tests::the_breath_walks_one_sine_period_in_sixteen_steps` (the pinned `2_000 ms`), `spinner::tests::a_pulse_that_cannot_interpolate_keeps_the_two_colour_switch` (one 87.5 ms step is outside the `100..130` ms assertion), `cli::tests::the_breath_redraws_once_per_step_and_only_when_a_spinner_is_visible` (the two-colour switch counts 6 frames over the now 2.8 s window, not the asserted 8) | ✅ (3 FAILED) |
+
+1/1 caught. The three different tests fail for three different reasons — the pinned constant, the
+step length, and the frame count over two periods — so the slower period is not pinned by a single
+assertion. After the plain-`cp` restore the whole lib suite is green again (272 passed).

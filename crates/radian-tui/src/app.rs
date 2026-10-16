@@ -5124,7 +5124,7 @@ mod tests {
         assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_ACCENT_STEP);
         app.set_now(base + std::time::Duration::from_millis(500));
         assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_DIM_STEP);
-        // An RGB theme breathes instead: the step advances every ~117 ms.
+        // An RGB theme breathes instead: the step advances every 125 ms.
         app.theme = crate::theme::Theme::dark();
         app.set_now(base);
         assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_DIM_STEP);

@@ -888,7 +888,7 @@ throwaway terminal, not your working one.
    `"braille"`, then `glyphs = "ascii"`. *Expect*: the input rule shows
    `── <spinner>  Working ` (two spaces) while the turn runs, a plain rule when idle; `pulse`
    is a `⏺` that only changes color — it **breathes** between the accent and the dim level
-   (1.4 s, 12 steps, a sine, so it slows at both ends) when the terminal has truecolor
+   (2.0 s, 16 steps, a sine, so it slows at both ends) when the terminal has truecolor
    (`COLORTERM=truecolor`/`24bit`); without it (and for `glyphs = "ascii"`) it is the two-color
    switch every 500 ms; `arc`/`quadrant`/`braille` turn every 250 ms;
    `ascii` is `*` (pulse) or `| / - \`. *Look*: **does the spinner render in your terminal
