@@ -3034,11 +3034,27 @@ impl App {
         // The question form is the one modal whose keys are rebindable (ADR 0024 Q7): its own
         // actions come from the `form` layer, and everything else that can edit text goes to
         // the focused field. A key the form does not want is swallowed, never passed down.
-        if matches!(self.top_modal(), Some(Modal::Question(_))) {
+        if let Some(Modal::Question(form)) = self.top_modal() {
             // `alt-h` collapses the panel (ADR 0024 R3): it is the form's own key,
             // not a rebindable `form` action.
             if key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::ALT) {
                 return Some(Input::Form(FormKey::Hide));
+            }
+            // ←/→ switch questions while no free-text field has focus (the hint row says so);
+            // with the `Other` row, a `text` question or a note focused they fall through to
+            // the composer's cursor actions below. feedback: ←/→ used to do nothing
+            // outside a field.
+            let field_focused = form.note_focused() || form.text_focused();
+            if !field_focused && key.modifiers.is_empty() {
+                match key.code {
+                    KeyCode::Left => {
+                        return Some(Input::Form(FormKey::Action(Action::FormPrev)));
+                    }
+                    KeyCode::Right => {
+                        return Some(Input::Form(FormKey::Action(Action::FormNext)));
+                    }
+                    _ => {}
+                }
             }
             if let Some(action) = self.keymap.form_action_for(key) {
                 return Some(Input::Form(FormKey::Action(action)));

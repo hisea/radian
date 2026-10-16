@@ -632,3 +632,132 @@ fn the_transcript_follows_after_the_panel_closes() {
         app.max_scroll
     );
 }
+
+// ---------- feedback: Other typing and question switching (ADR 0024) ----------
+
+/// The `Other` row is a free-text field: moving to it with Down and typing keeps the text and
+/// chooses `Other`. Also checked: a `text` question keeps its typed text.
+#[test]
+fn typing_in_the_other_row_and_a_text_question_keeps_the_text() {
+    let mut app = App::new("m", "s");
+    let mut with_other = question(
+        "one",
+        QuestionKind::Single,
+        vec![option("a", "A"), option("b", "B")],
+        true,
+    );
+    with_other.allow_other = true;
+    show(
+        &mut app,
+        vec![
+            with_other,
+            question("two", QuestionKind::Text, Vec::new(), true),
+        ],
+    );
+    // Move past the two options onto the `Other` row.
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(form(&app).answers[0].cursor, 2, "the Other row");
+    for c in "a b c".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    assert!(
+        form(&app).answers[0].other,
+        "typing in the Other row chooses it"
+    );
+    assert_eq!(form(&app).answers[0].text.text(), "a b c");
+
+    // The text question keeps its text, spaces included.
+    app.on_key(tab());
+    assert_eq!(form(&app).current, Some(1));
+    for c in "two words".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(form(&app).answers[1].text.text(), "two words");
+}
+
+/// The hint row says `⇥/←/→ question`: Left/Right switch questions while no text field has
+/// focus, and Shift-Tab still walks back.
+#[test]
+fn left_and_right_switch_questions_without_a_focused_field() {
+    let mut app = App::new("m", "s");
+    show(
+        &mut app,
+        vec![
+            question("one", QuestionKind::Single, vec![option("a", "A")], true),
+            question("two", QuestionKind::Single, vec![option("b", "B")], true),
+        ],
+    );
+    assert_eq!(form(&app).current, Some(0));
+    app.on_key(key(KeyCode::Right));
+    assert_eq!(form(&app).current, Some(1), "Right moves forward");
+    app.on_key(key(KeyCode::Left));
+    assert_eq!(form(&app).current, Some(0), "Left moves back");
+    app.on_key(key(KeyCode::Right));
+    assert_eq!(form(&app).current, Some(1));
+    app.on_key(key(KeyCode::BackTab));
+    assert_eq!(form(&app).current, Some(0), "Shift-Tab still walks back");
+}
+
+/// While the `Other` row or a `text` question has focus, Left/Right move the text cursor and do
+/// **not** change the question.
+#[test]
+fn left_and_right_move_the_text_cursor_while_a_field_has_focus() {
+    let mut text = question("one", QuestionKind::Text, Vec::new(), true);
+    text.prompt = "Type".into();
+    let mut app = App::new("m", "s");
+    let mut with_other = question("one", QuestionKind::Single, vec![option("a", "A")], true);
+    with_other.allow_other = true;
+    show(&mut app, vec![with_other, text]);
+    // The Other row (index 1, past one option): type, then Left moves the cursor back.
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(form(&app).answers[0].cursor, 1, "the Other row");
+    for c in "abc".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    app.on_key(key(KeyCode::Left));
+    assert_eq!(
+        form(&app).current,
+        Some(0),
+        "Left on the Other row keeps the question"
+    );
+    app.on_key(key(KeyCode::Char('Z')));
+    assert_eq!(
+        form(&app).answers[0].text.text(),
+        "abZc",
+        "Left moved the Other cursor, so the insert lands before c"
+    );
+
+    // The text question: Left/Right edit the text, never the tab.
+    app.on_key(tab());
+    assert_eq!(form(&app).current, Some(1));
+    for c in "xyz".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    app.on_key(key(KeyCode::Left));
+    app.on_key(key(KeyCode::Char('Q')));
+    assert_eq!(form(&app).answers[1].text.text(), "xyQz");
+    assert_eq!(form(&app).current, Some(1), "still the text question");
+}
+
+/// While a text field has focus the hint row shows the cursor keys, not the question arrows.
+#[test]
+fn the_hint_row_shows_the_cursor_keys_while_a_field_has_focus() {
+    let mut app = App::new("m", "s");
+    let mut with_other = question("one", QuestionKind::Single, vec![option("a", "A")], true);
+    with_other.allow_other = true;
+    show(&mut app, vec![with_other]);
+    // On an option: the question arrows.
+    assert!(
+        form(&app)
+            .hints()
+            .iter()
+            .any(|hint| hint.keys == "⇥/←/→" && hint.description == "question"),
+        "an option row advertises the question arrows"
+    );
+    app.on_key(key(KeyCode::Down)); // the Other row
+    assert!(
+        form(&app).hints().iter().any(|hint| hint.keys == "⇥/⇤"),
+        "the Other row advertises the cursor keys and Shift-Tab, not ←/→"
+    );
+}
