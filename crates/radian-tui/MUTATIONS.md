@@ -1745,3 +1745,29 @@ Base：本片 HEAD（`oc/thin-think`）· 就地变异，每个变异先把文�
 
 2/2 抓住。测试正文**不带**结尾换行，所以 `line_count` 走镜像分支而不是 `has_blank_edge` 的 layout
 兜底（第一版带了结尾换行，TH7 没抓住：兜底直接返回 layout 的长度，绕过镜像）。
+
+## 空回合：一条只有 reasoning/tool call 的回复不再留两行空白（ADR 0028 规则 1，ADR 0035，2026-10-16）
+
+Base：本片 HEAD（`dogfood/empty-turn`，父提交 `3d44139`）· 就地变异：先把 `crates/radian-tui/src/blocks.rs`
+用 `cp` 存到 `.radian/scratch/mut/blocks.rs.orig`，用 `python3` 做带 `assert` 的精确文本替换，跑命名的测试
+（`--no-fail-fast`），再用 `cp` 从副本写回并 `cmp` 逐字节确认相同（脚本内联，不提交；`git status --short`
+只剩本片改动）。
+
+**先核对的事实**：空（或纯空白）的已提交 assistant 条目在当前代码上**已经**排成 0 行（`strip_edge_blanks`
+删掉了那段无背景空白边缘行；探针在 `blocks.rs` 里临时加了一条 `eprintln!`，看完即删：`layout("") = 0`、
+`layout(" ") = 0`、`layout("  \n ") = 0`）。所以本片的实现只改**间隙**：`is_empty_assistant` + `gap_at`。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| EM-M1 | 已提交的空回复被间隙跳过（零行保持不变，间隙不再多一行） | `blocks.rs::is_empty_assistant` 恒返回 `false`（等于回到旧几何，零行仍在） | `blocks::tests::an_empty_committed_assistant_is_skipped_by_the_gaps`、`render::a_text_less_assistant_reply_leaves_one_blank_row`、`render::a_skipped_reply_does_not_shift_the_selection_or_find_rows`、`render::thinking_has_one_blank_line_on_both_sides`（改成真实流程后的下半段）、`render::collapsed_and_errors_differ_for_a_successful_card`、`selection::a_selection_over_a_tool_head_copies_its_text` | ✅ |
+| EM-M2 | **live** 的空回复**不**被跳过 | `blocks.rs::is_empty_assistant` 去掉 `!entry.live` 守卫（live 也被跳过） | `blocks::tests::an_empty_committed_assistant_is_skipped_by_the_gaps`、`render::a_live_empty_assistant_keeps_its_blank_line` | ✅ |
+
+2/2 抓住，无等价变异。EM-M1 下上述 6 条一起 FAILED（`--no-fail-fast` 全跑：
+`blocks.rs` 那条在 `assert_eq!(gap_at(&entries, 2), 0)`，`render.rs` 各条在「一行空白」的绝对行号上）。
+EM-M2 下 `a_live_empty_assistant_keeps_its_blank_line` 在 `gap_at(...) == 1` 上 FAILED。
+
+**旧代码上先跑过的核对**：本片新增/改写的断言在旧实现（EM-M1 的语义）上失败；只有
+`a_live_empty_assistant_keeps_its_blank_line` 按设计在旧代码上**通过**（它钉的就是「live 不变」的今天行为）。
+两条既有测试（`render::collapsed_and_errors_differ_for_a_successful_card` 的 `[22,7,2]`、
+`selection::a_selection_over_a_tool_head_copies_its_text` 的第 1 行 head）承载的是旧几何，本片随实现一起
+更新到 `[21,6,1]` / 第 0 行——它们各自也被 EM-M1 抓住，说明改动后仍有效。
