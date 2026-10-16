@@ -1755,7 +1755,8 @@ fn run(
             .model_route()
             .map(|(provider, _)| provider)
             .unwrap_or_else(|| provider_name.clone());
-        let (gate_tx, gate_rx) = tokio::sync::watch::channel(startup_provider == "chatgpt");
+        let (gate_tx, gate_rx) =
+            tokio::sync::watch::channel(chatgpt_usage_active(&startup_provider));
         radian_host::spawn_contributor_gated(
             runtime.handle(),
             Arc::new(radian_host::ChatGptUsage::new(session_id.clone(), period)),
@@ -2882,7 +2883,7 @@ impl LoopContext<'_> {
                 let _ = gate.send(route.provider == "opencode-go");
             }
             if let Some(gate) = &self.chatgpt_usage_gate {
-                let _ = gate.send(route.provider == "chatgpt");
+                let _ = gate.send(chatgpt_usage_active(&route.provider));
             }
         }
         let result = match event {
@@ -3849,6 +3850,28 @@ fn usage_period(configured: Option<u64>) -> Option<std::time::Duration> {
         Some(0) => None,
         Some(seconds) => Some(radian_host::clamp_opencode_go_period(seconds)),
         None => Some(radian_host::OPENCODE_GO_DEFAULT_PERIOD),
+    }
+}
+
+/// Whether the `chatgpt` usage gate (ADR 0026) should be active for
+/// `provider`: only while the current route's provider is exactly `chatgpt`, mirroring
+/// opencode-go's own (inline) `provider == "opencode-go"` gate. Pulled into its own function
+/// — unlike opencode-go's — so a mutation to it (polling while routed elsewhere) has a direct
+/// unit test rather than needing a full TUI run to catch.
+fn chatgpt_usage_active(provider: &str) -> bool {
+    provider == radian_host::CHATGPT_PROVIDER_ID
+}
+
+#[cfg(test)]
+mod chatgpt_usage_gate_tests {
+    use super::chatgpt_usage_active;
+
+    #[test]
+    fn the_gate_is_active_only_for_chatgpt() {
+        assert!(chatgpt_usage_active("chatgpt"));
+        assert!(!chatgpt_usage_active("opencode-go"));
+        assert!(!chatgpt_usage_active("anthropic"));
+        assert!(!chatgpt_usage_active("openai"));
     }
 }
 
