@@ -1085,19 +1085,20 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         std::sync::Arc::new(
             move |session_id: &str,
                   slot: std::sync::Arc<radian_runtime::ConfigSlot>,
-                  agent: Option<&radian_host::SpawnAgent>| {
+                  agent_model: Option<radian_host::ModelRoute>,
+                  agent_thinking: Option<String>| {
                 // ADR 0030 O11: an agent definition's `model` and `thinking` are the task's
                 // route and level. The route's credential is resolved here the same way a
                 // `/model` switch resolves it — never copied into the snapshot.
-                if let Some(route) = agent.and_then(|agent| agent.model.clone()) {
+                if let Some(route) = agent_model {
                     let ctx = radian_host::RouteContext {
                         providers: providers.clone(),
                         session_id: session_id.to_owned(),
                         user_headers: user_headers.clone(),
                         include_usage,
                         max_tokens,
-                        thinking: agent
-                            .and_then(|agent| agent.thinking.clone())
+                        thinking: agent_thinking
+                            .clone()
                             .unwrap_or_else(|| route_thinking.clone()),
                         thinking_budget,
                     };
@@ -1686,7 +1687,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // ADR 0030 slice 6b2: the production task builder, so a headless lead (`radian exec`) can
     // spawn real task sessions. A task mounts no MCP servers (ADR 0030 O8) and inherits the
     // lead's sandbox deny-read/Unix-socket lists, retries, compaction and budget settings.
-    let task_builder = radian_host::task_builder(radian_host::TaskHost {
+    let task_host = radian_host::TaskHost {
         session_dir: sessions_for_deny.clone(),
         model: setup.task_model.clone(),
         route: setup.route.clone(),
@@ -1717,7 +1718,9 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         // A task's own stream must not reach the lead's live view (ADR 0030 O10); the CLI prints
         // its own one-line notices for spawn/finish, not the task's stream.
         task_events: Arc::new(|_: &radian_session::RuntimeEvent| {}),
-    });
+    };
+    let task_builder = radian_host::task_builder(task_host.clone());
+    let named_builder = radian_host::named_builder(task_host);
 
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
     // with its own bindings. ADR 0032 slice 5: `LeadSetup::setup` fills what every host-opened
@@ -1779,6 +1782,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             memory_notice_line: Arc::new(|line: &str| eprintln!("[memory] {line}")),
             // ADR 0030 slice 6b2: a headless lead mounts the task tools and can spawn tasks.
             task_builder: Some(task_builder),
+            // ADR 0030 O12: named agents are available to `send_agent` (no `/send` in the CLI).
+            named_builder: Some(named_builder),
         },
     )
     .await

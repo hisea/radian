@@ -34,6 +34,7 @@ pub mod memory;
 pub mod mermaid;
 mod mermaid_layout;
 mod model;
+pub mod named;
 pub mod observer;
 pub mod opencode_go;
 pub mod orchestration;
@@ -55,9 +56,9 @@ pub mod trust;
 mod workspace;
 
 pub use agents::{
-    AgentDef, AgentError, AgentSource, SpawnAgent, SpawnDefaults, SpawnOverrides, builtin_def,
-    load as load_agent, parse_file as parse_agent_file, parse_model_route, parse_tier,
-    resolve as resolve_agent,
+    AgentDef, AgentError, AgentSource, NamedAgent, SpawnAgent, SpawnDefaults, SpawnOverrides,
+    builtin_def, load as load_agent, parse_file as parse_agent_file, parse_model_route, parse_tier,
+    resolve as resolve_agent, resolve_named as resolve_named_agent,
 };
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
@@ -136,6 +137,10 @@ pub use model::{
     compaction_settings_for, compaction_settings_for_route, redact_base_url,
     resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref, route_replays_reasoning,
 };
+pub use named::{
+    NamedBuilder, NamedContext, NamedError, NamedRecord, NamedRegistry, NamedSeams, SendOutcome,
+    known_definitions as known_agent_definitions,
+};
 pub use observer::{JournalObserver, SessionObserver};
 pub use opencode_go::{
     DEFAULT_PERIOD as OPENCODE_GO_DEFAULT_PERIOD, MAX_PERIOD as OPENCODE_GO_MAX_PERIOD,
@@ -192,7 +197,7 @@ pub use task::{
     TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
     task_sandbox,
 };
-pub use task_host::{TaskHost, TaskModelFactory, task_builder, task_lines};
+pub use task_host::{TaskHost, TaskModelFactory, named_builder, task_builder, task_lines};
 pub use task_pending::{
     DEFAULT_PENDING_TIMEOUT, DEFAULT_POLICY_TIMEOUT, PolicyCommand, TaskApprover,
     TaskPendingContent, TaskPendingError, TaskPendingKind, TaskPendingQueue, TaskPendingView,

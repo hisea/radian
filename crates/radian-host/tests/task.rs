@@ -228,6 +228,7 @@ fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> T
                     task_agent: false,
                     parent: None,
                     allowed_branch: None,
+                    git_commit_requires_branch: false,
                     memory_root: Some(session_dir.clone()),
                     skills_extra_paths: Vec::new(),
                     skills_builtin: true,
@@ -258,6 +259,7 @@ fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> T
                     memory_warning: Arc::new(|_message: &str| {}),
                     memory_notice_line: Arc::new(|_line: &str| {}),
                     task_builder: None,
+                    named_builder: None,
                 },
             })
         },
@@ -635,6 +637,66 @@ async fn a_shared_task_writes_no_end_commit() {
     let _ = record;
 }
 
+/// ADR 0030 O3 (review fix 2): a `shared` task has no branch of its own, so `git_commit` is not
+/// mounted — a call to it is an unknown tool, and the task can never commit onto the lead's
+/// checked-out branch. (A worktree task mounts it, limited to `radian/<id>`.)
+#[tokio::test]
+async fn a_shared_task_does_not_mount_git_commit() {
+    // The model's first call is `git_commit`, which a shared task must not have.
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                    "function": {"name": "git_commit", "arguments": "{\"message\":\"x\"}"}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ]),
+        a_text_reply("done"),
+    ])
+    .await;
+    let fixture = Fixture::new("shared-unmount", &server.base_url);
+    let mut request = SpawnRequest::new("t1");
+    request.isolation = Some(Isolation::Shared);
+    request.brief = Some("go".to_owned());
+    let _record = fixture.registry.spawn(request).await.expect("spawn");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while server.requests().len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn did not finish"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let tools: Vec<String> = server.requests()[0].json()["tools"]
+        .as_array()
+        .expect("a tools array")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        !tools.iter().any(|name| name == "git_commit"),
+        "a shared task must not mount git_commit: {tools:?}"
+    );
+    assert!(tools.iter().any(|name| name == "read"), "{tools:?}");
+
+    // Calling it is an unknown tool: it commits nothing (the lead stays clean).
+    let result = tool_result(&server, 1, "c1");
+    assert!(
+        result.contains("no tool named") && result.contains("git_commit"),
+        "{result}"
+    );
+    assert_eq!(
+        git_out(&fixture.lead, &["log", "-1", "--pretty=%s"]),
+        "init",
+        "the lead workspace has no new commit"
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+}
+
 /// The end-of-task commit commits the worktree's changes with the fixed message; a second call
 /// with no changes makes no commit.
 #[tokio::test]
@@ -833,6 +895,7 @@ async fn open_plain(
             task_agent,
             parent: None,
             allowed_branch: None,
+            git_commit_requires_branch: false,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
@@ -863,6 +926,7 @@ async fn open_plain(
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
             task_builder: None,
+            named_builder: None,
         },
     )
     .await

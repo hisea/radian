@@ -181,6 +181,7 @@ fn builder(
                     task_agent: false,
                     parent: None,
                     allowed_branch: None,
+                    git_commit_requires_branch: false,
                     memory_root: None,
                     skills_extra_paths: Vec::new(),
                     skills_builtin: true,
@@ -211,6 +212,7 @@ fn builder(
                     memory_warning: Arc::new(|_message: &str| {}),
                     memory_notice_line: Arc::new(|_line: &str| {}),
                     task_builder: None,
+                    named_builder: None,
                 },
             })
         },
@@ -661,4 +663,46 @@ async fn the_stalled_hook_point_is_emitted() {
             && data["idle_secs"].as_u64().unwrap_or(0) >= 30),
         "the stalled hook point: {seen:?}"
     );
+}
+
+/// ADR 0030 item 4: the agent definition is snapshotted at the `spawn_task` call, so a
+/// task that waits past `max_tasks` starts from that snapshot even if the file is gone by the
+/// time a slot frees. Without the submit-time snapshot the queued start would re-resolve and fail.
+#[tokio::test]
+async fn a_queued_task_starts_from_its_submit_time_snapshot() {
+    let fixture = Fixture::new("queue-snapshot", limits(1, 0.0));
+    if !fixture.sandbox_available() {
+        return;
+    }
+    let registry = Arc::clone(&fixture.registry);
+    // A definition the queued task names.
+    let home = isolated_home();
+    let dir = home.join("agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    let def = dir.join("qagent.md");
+    std::fs::write(&def, "---\nname: qagent\n---\nQA\n").unwrap();
+
+    // t1 occupies the only slot (no brief, so it runs no turn and stays live).
+    registry
+        .submit(SpawnRequest::new("t1"))
+        .await
+        .expect("t1 starts");
+    let mut request = SpawnRequest::new("t2");
+    request.agent = Some("qagent".into());
+    let queued = registry.submit(request).await.expect("t2 queues");
+    assert_eq!(queued.position, Some(1), "t2 waits");
+    assert!(registry.get("t2").is_none(), "a queued task has no record");
+
+    // The definition file is gone before the queued task starts.
+    std::fs::remove_file(&def).unwrap();
+
+    // Free the slot: the pump starts t2 from the submit-time snapshot.
+    registry.remove("t1", true).await.expect("remove t1");
+    let record = wait_until(|| registry.get("t2")).await;
+    assert_eq!(
+        record.agent, "qagent",
+        "the queued task started from its submit-time definition"
+    );
+    assert!(registry.queued().is_empty(), "the queue drained");
+    registry.remove("t2", true).await.ok();
 }

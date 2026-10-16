@@ -660,6 +660,81 @@ pub fn resolve(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Resolution: the snapshot a named agent's first `send` resolves (ADR 0030 O12)
+// ---------------------------------------------------------------------------
+
+/// The definition resolved for one **named agent** (ADR 0030 O12): one long session per name,
+/// created from the definition on first use and reused after. Unlike a task (ADR 0030 O3), a
+/// named agent is not narrowed to the `workspace` floor: it is commanded by the human, so a
+/// `full` profile is allowed, and `spawn: true` is **not** ignored (a named lead is the ADR's
+/// lead, O13). The snapshot is taken once, at creation, so later edits to the file never move a
+/// live session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedAgent {
+    pub name: String,
+    /// Layer 1 for the named session (ADR 0036).
+    pub body: String,
+    pub source: AgentSource,
+    pub description: Option<String>,
+    pub thinking: Option<String>,
+    /// The resolved route; `None` means the host's own default.
+    pub model: Option<ModelRoute>,
+    /// The tier the definition names (`safe`, `workspace`, `full`); `None` means the host's
+    /// default. A named agent may name any tier — it is the human's own session.
+    pub profile: Option<Preset>,
+    pub tools: Option<Vec<String>>,
+    pub mcp: Vec<String>,
+    pub skills: Option<Vec<String>>,
+    /// The isolation (ADR 0030 O3); `None` means the `worktree` default.
+    pub isolation: Option<Isolation>,
+    /// `true` for a lead definition (ADR 0030 O13): the named session mounts the lead tools.
+    pub spawn: bool,
+    /// The definition's unknown frontmatter keys (ignored).
+    pub unknown_fields: Vec<String>,
+}
+
+/// Resolves a named agent's definition from the **lead's** definition dirs (ADR 0030 O7 rev 2 item
+/// 4): the lead's trusted project dir `project` when the workspace is trusted, else the user-level
+/// dir. The name is the file stem; `load` falls back to the built-in `default`/`task`/`lead` of
+/// that name. A named agent never reads its own worktree's `.radian/agents` — its definition is
+/// snapshotted from the lead's workspace at first use (ADR 0031 T1).
+pub fn resolve_named(
+    name: &str,
+    radian_home: Option<&Path>,
+    project: Option<&Path>,
+) -> Result<NamedAgent, AgentError> {
+    let def = load(name, radian_home, project)?;
+    let def_path = def.path();
+    let model = match def.model.as_deref() {
+        Some(raw) => Some(parse_model_route(raw).map_err(|e| e.or_path(def_path))?),
+        None => None,
+    };
+    let profile = match def.profile.as_deref() {
+        Some(raw) => Some(parse_tier(raw).map_err(|e| e.or_path(def_path))?),
+        None => None,
+    };
+    let isolation = match def.isolation.as_deref() {
+        Some(raw) => Some(parse_isolation(raw).map_err(|e| e.or_path(def_path))?),
+        None => None,
+    };
+    Ok(NamedAgent {
+        name: def.name,
+        body: def.body,
+        source: def.source,
+        description: def.description,
+        thinking: def.thinking,
+        model,
+        profile,
+        tools: def.tools,
+        mcp: def.mcp,
+        skills: def.skills,
+        isolation,
+        spawn: def.spawn,
+        unknown_fields: def.unknown_fields,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1240,6 +1240,99 @@ sink 就是宿主会传的 sink），因为生产 builder 的 `task_events` 由�
 sink 塞进 builder"的单行源码改法；测试断言（任务自己的 sink 收到它自己的 stream、lead 的
 sink 只收到 `TaskSpawned`/`TaskFinished`）在变异下失败。S6B2-2 的变异是源码变异。
 
+## ADR 0030 切片 7 part b：named agent、`send_agent`、`/send`（2026-10-16）
+
+工作树 `.radian-worktrees/orch-s7b`（分支 `oc/orch-s7b`，基 `ce085d9` = 片 7a）。每条变异就地改，
+跑单个测试，再从 `/tmp` 的副本 `cp` 还原并 `cmp` 确认；跑完 `git status --short` 只剩源码改动。
+跑法（`timeout` 包裹，`--no-fail-fast`）：
+
+```sh
+cargo test -p radian-host --test named --no-fail-fast -- <下面的测试名>
+cargo test -p radian-tui --test send --no-fail-fast -- <下面的测试名>
+```
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S7B-1 | `NamedRegistry::get_or_create` 不查已有的同名会话（把两次 reuse 检查都去掉，总是 `create`） | ✅ failed | `first_send_creates_and_the_second_reuses`（第二次 `send` 走 `create`：`open_session` 对同名会话文件失败，第二次 send 报错） |
+| S7B-2 | `send_agent` 用 `InputSource::User` 入队（`InputSource::Subagent` → `User`） | ✅ failed | `send_agent_and_wait_agent_round_trip`（断言 named 会话的 `turn_source == Subagent`） |
+| S7B-3 | TUI `/send` 用 `InputSource::Subagent` 入队（`command::send_source()` 返回 `Subagent`） | ✅ failed | `a_submitted_send_line_is_the_loop_effect`（断言 `send_source() == User`） |
+| S7B-4 | named agent 打开 memory（`enforce_named_setup` 去掉 `setup.memory_root = None;`） | ✅ failed | `a_named_agent_has_no_memory_and_is_not_a_task`（builder 故意传 `memory_root = Some(...)`，去掉清除后 `session.memory()` 为 `Some`） |
+| S7B-5 | 队列在**起**任务时才解析定义（`dispatch` 忽略 `queued.resolved`，改用 `resolve_task(&request)` 重新解析） | ✅ failed | `a_queued_task_starts_from_its_submit_time_snapshot`（定义文件在排队后删除，重新解析失败：pump panic，t2 永不出现） |
+
+5/5 抓住。
+
+**说明（如实记录）**：
+- S7B-2 的变异在 `lead_tools.rs` 的 `send_agent`（源码），由 host 测试断言 named 会话的
+  `hooks().turn_source()` 抓住；`send_agent` 是 `send(..., Subagent)` 的薄包装，来源错误会让
+  这一断言变红。
+- S7B-3 的变异在 `command.rs` 的 `send_source()`（源码），由 TUI 单测断言它返回 `User` 抓住。
+  这是纯函数断言：TUI 的 `/send` 真入队路径在事件循环里，事件循环没有 `TestBackend` 级测试，
+  来源规则因此用一个可直接断言的接缝钉住（与 7a 的 `tools` 允许名单同法）。**未做端到端 pty
+  试跑**：`/send` 的真实入队来源没有 pty 覆盖，属本条已知缺口。
+- S7B-4 的测试 builder 必须传 `memory_root = Some(...)`，否则 enforcer 的那行不是承重的，变异不会
+  变红；这一点写进测试注释。
+
+## orch-s7b review fix 1（2026-10-16）
+
+基 `5dbb2ae`（slice 7b 已合入），新提交记录两处：`wait_agent` 漏掉已结束的 turn；`shared`
+agent 不该能提交到 lead 的分支（ADR 0030 O3）。每条变异就地改、跑单测、再从
+`.radian/scratch/orig/` 的副本 `cp` 还原并 `cmp` 确认；跑完 `git status --short` 只剩源码改动。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| RF1-1 | `lead_tools.rs` 的 `wait_agent` 忽略 `since`（`let start = record.turn_generation();`，不再取 `args.since`） | ✅ failed（5.7s，`still_running`） | `wait_agent_with_the_since_token_sees_a_turn_that_already_ended`（token 指向的 turn 已结束，忽略后等一个永不到来的 turn） |
+| RF1-2 | `named.rs` 的 `enforce_named_setup` 不设 `git_commit_requires_branch`（`shared` named agent 重新挂 `git_commit`） | ✅ failed | `a_shared_named_agent_does_not_mount_git_commit`（模型收到的 tool 列表里出现 `git_commit`） |
+| RF1-3 | `task.rs` 的 `enforce_task_setup` 不设 `git_commit_requires_branch`（`shared` task 重新挂 `git_commit`） | ✅ failed | `a_shared_task_does_not_mount_git_commit`（`safe` 工具列表里出现 `git_commit`） |
+| RF1-4 | `git_commit.rs` 的 `commit` 去掉「无自己的分支即拒绝」（`require_branch && allowed_branch.is_none()` 块） | ✅ failed | `a_session_with_no_branch_of_its_own_cannot_commit`（期望 `no_branch`，得到一次提交） |
+| RF1-5 | `named.rs` 的 `create` 去掉 `shared` 定义列出 `git_commit` 的警告 | ✅ failed | `a_shared_send_warns_about_a_git_commit_the_definition_listed`（`warnings` 为空） |
+
+5/5 抓住。
+
+**说明（如实记录）**：
+- RF1-1 的 token 是**入队时的 turn generation**（`SendOutcome.turn`）。`wait_agent` 带 `since` 时
+  等 `turn_generation() > since && !running`，所以「调用前 turn 已结束」立刻返回；不带 `since`
+  时从调用时刻等下一个 turn 结束（今天的行为，写进工具描述）。fix 1 时覆盖 busy 入队的
+  `wait_agent_after_a_busy_send_waits_for_the_sent_turn` **区分不出** `turn + 1` 与 `turn` 两种
+  token（turn 1 结束到 turn 2 开始之间驱动几乎不空转，`!running` 的窗口观测不到），所以当时 token
+  就用入队时的 generation、不声称 busy 的额外修正；**fix 2 改正了这一点**，见下节，那条测试也已
+  换成 `a_queued_send_waits_past_the_running_turn`。
+- RF1-2/RF1-3 是「不挂载」而非「权限拒绝」（ADR 0030 O11 的物理卸载；这也是为什么直接调用是
+  `unknown_tool`——`agent-core` 的 preflight 在权限 hook 之前就按已挂载的 spec 列表拒绝）。
+- RF1-4 的 `commit` 多了一个 `require_branch` 形参，`GitCommitTools` 默认 `false`：交互会话不受
+  影响；`open_session` 对「只有自己分支」的会话在没有分支时**根本不构造**这个工具，`commit` 里
+  的检查是「万一到达」的兜底。
+
+## orch-s7b review fix 2（2026-10-16）：busy 入队的 token 必须越过正在跑的 turn
+
+基 `8985c36`（fix 1 已接受）。fix 1 的 token 是入队时的 generation（`G`）；busy 入队时会在「正在
+跑的 turn 刚结束、排在后面的输入还没起自己的 turn」的窗口里命中 `turn_generation() > G && !running`，
+返回**上一个** turn 的文本，而不是这次 send 的回复。改为：idle 用 `G`（我们的 turn 是下一个结束的），
+busy 用 `G + 1`（正在跑的 turn 先结束一次）。变异就地改 `crates/radian-host/src/named.rs` 的
+`let turn = generation + u64::from(queued);`，跑完从 `.radian/scratch/orig2/named.rs` 的副本 `cp`
+还原并 `cmp` 确认逐字节一致；`git status --short` 结束时只剩源码与测试改动。跑法（`timeout` 包裹，
+`--no-fail-fast`）：
+
+```sh
+cargo test -p radian-host --test named --locked --no-fail-fast -- a_queued_send_waits_past_the_running_turn
+```
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| RF2-1 | busy 入队的 token 仍用入队时的 generation（`let turn = generation;`，去掉 `+ u64::from(queued)`） | ✅ failed（left 0, right 1） | `a_queued_send_waits_past_the_running_turn`（断言 busy 的 `SendOutcome.turn == G + 1`） |
+
+1/1 抓住。
+
+**为什么确定性抓住的是 token 本身，而不是「wait 返回谁」（如实记录）**：busy 的旧 token 只在
+「正在跑的 turn 结束」与「排队的 turn 开始」之间那个瞬间出错，而驱动在这两步之间**不 await**
+（`claim_control`/`claim_next_turn` 无竞争时立即返回，`append_runtime_event` 同步落盘；见
+`radian-runtime/src/driver.rs` 的 `run_loop`），单线程 `#[tokio::test]` 里等待方只能在驱动 yield
+（turn 2 的模型网络调用）时被轮询，此时 `turn_running` 已为 true，`!running()` 的窗口观测不到。
+所以纯行为断言（wait 返回排队的 turn 的回复、不是上一个 turn 的）在两种 token 下都绿；能确定性
+区分两者的可观察量就是 `SendOutcome.turn`（`send_agent` 结构化输出里的 `since`，也是工具描述里的
+契约）。`a_queued_send_waits_past_the_running_turn` 两者都写：先断言 `turn == G + 1`（变异在此失败），
+再在两个 turn 各由一个**人工审批闸门**扣住（无 sleep）的情况下断言 wait 在 turn 2 运行期间返回
+`still_running`、释放 turn 2 后返回 turn 2 的回复「two」（从不是 turn 1 的「one」）。
+
 ## ADR 0030 片 8：进程控制口（Unix socket、JSON lines，2026-10-16）
 
 Base `a3eb856`（分支 `oc/orch-s8`）· 就地改 `src/control.rs`，每次从 `/tmp/control.rs.bak`
@@ -1269,7 +1362,11 @@ Base `11a25d9` · worktree 内就地改 `src/orchestration.rs` / `src/task.rs`�
 | MUT9-3 | verify 从 **task 自己的 worktree** 读（`self.orchestration.verify` → `load_project(worktree, true)`） | ✅ failed | `a_tasks_own_dot_radian_and_a_later_edit_do_not_change_the_running_task`（命令是 `echo task` 而不是 `echo lead`） |
 | MUT9-4 | 快照在 spawn 时重读 lead 工作区（`self.orchestration.verify` → `load_project(&self.workspace, true)`） | ✅ failed | 同上（spawn 后写进 lead 的 `echo changed` 生效了） |
 | MUT9-5 | 策略命令不从快照填（`policy.or_else(|| …)` → `let policy = policy;`） | ✅ failed | `the_edge_policy_comes_from_a_trusted_project_config_only`（受信任时 `record.policy` 仍是 `None`） |
+| MUT9-6 | named 路径不再读 lead 快照的项目 agent 目录（`src/named.rs` 的 `self.orchestration.project_agents.as_deref()` → `None`，合并 origin/main 后补） | ✅ failed | `a_named_agent_reads_the_leads_project_definition_snapshot`（named agent 落到用户级 `writer` 的 worktree 隔离，`outcome.worktree` 变成 `Some`，断言 `None` 失败） |
 
 5/5 抓住。MUT9-1 同时钉住「未信任时 verify 与 policy 都不读」这一条门的两个面（同一个
 `if !trusted` 早退）。MUT9-3 与 MUT9-4 都用同一条快照测试，但变异点不同：一个从 task 的
-worktree 读，一个在 spawn 时重读 lead 的文件。
+worktree 读，一个在 spawn 时重读 lead 的文件。合并 origin/main（切片 7b 的 named agent）后
+补了 MUT9-6：named agent 的定义也读 lead 工作区的快照（ADR 0030 O7 rev 2 item 4），同一条
+测试就地变异 `src/named.rs` 验证，改完从 `.radian/scratch/named.rs.bak` 的副本 `cp` 还原并用
+`cmp` 断言逐字节相同。
