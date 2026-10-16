@@ -1019,7 +1019,11 @@ fn the_user_row_is_a_chevron_and_the_words_with_no_band() {
     // One blank line between the two rows (ADR 0035: the user row is an ordinary
     // block now, not its own pad).
     assert!(row(&terminal, 0).starts_with("❯ hello"), "{text:?}");
-    assert_eq!(row(&terminal, 1).trim_end(), "", "the container gap: {text:?}");
+    assert_eq!(
+        row(&terminal, 1).trim_end(),
+        "",
+        "the container gap: {text:?}"
+    );
     assert!(row(&terminal, 2).starts_with("❯ 中"), "{text:?}");
     // `❯` and the words are the `user` role's foreground; there is no background band.
     let chevron = cell_style(&terminal, 0, 0);
@@ -1066,7 +1070,10 @@ fn a_wrapped_user_message_starts_every_row_at_column_three() {
         second.starts_with("  cccc"),
         "the continuation row starts at column 3: {second:?}"
     );
-    assert!(!second.contains('❯'), "no marker on the continuation: {second:?}");
+    assert!(
+        !second.contains('❯'),
+        "no marker on the continuation: {second:?}"
+    );
 }
 
 /// A selection maps screen columns through the two-cell marker and copies only the words
@@ -1121,8 +1128,8 @@ fn the_compaction_line_starts_at_column_one_in_the_frame_role() {
     app.push_message(&history[0]);
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
-    let y = u16::try_from(row_of(&terminal, "── context compacted").expect("the line"))
-        .expect("a row");
+    let y =
+        u16::try_from(row_of(&terminal, "── context compacted").expect("the line")).expect("a row");
     let line = row(&terminal, y);
     assert!(
         line.starts_with("── context compacted ──"),
@@ -2591,7 +2598,10 @@ fn the_user_row_has_no_band_at_80_and_120() {
         app.push_message(&Message::user("hello band"));
         let terminal = render(&mut app, width, 8);
         let text = screen(&terminal);
-        assert!(!text.contains('▄') && !text.contains('▀'), "{width}: {text}");
+        assert!(
+            !text.contains('▄') && !text.contains('▀'),
+            "{width}: {text}"
+        );
         assert!(row(&terminal, 0).starts_with("❯ hello band"), "{width}");
         // Every cell of the row keeps the terminal background: no band, trailing cells included.
         for col in [0u16, 2, width - 1] {
