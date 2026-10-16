@@ -716,12 +716,14 @@ fn label_room(
 }
 
 /// One canvas cell: the wire directions that meet there, whether those wires are dashed, a
-/// marker's own direction, and the semantic role the cell is drawn with.
+/// marker's own direction, the semantic role the cell is drawn with, and — for a stadium box's
+/// corners — a glyph that replaces what the wire directions would give.
 #[derive(Clone, Copy, Default)]
 struct Cell {
     bits: u8,
     dashed: u8,
     arrow: u8,
+    glyph: Option<char>,
     text: bool,
     role: Option<Role>,
 }
@@ -765,6 +767,20 @@ impl Grid {
     fn free(&self, across: usize, along: usize) -> bool {
         let cell = self.cell(across, along);
         cell.bits == 0 && cell.arrow == 0 && !cell.text
+    }
+
+    /// A stadium node's four corners, rounded as the vendor draws them. The glyph comes from the
+    /// corner's own wire directions, so a turned layout (`LR`/`RL`) gets the right corners.
+    fn round_corners(&mut self, node: &Placed, flow: Flow) {
+        let (left, right) = (node.across, node.across_end());
+        let (top, bottom) = (node.along, node.along + node.along_size - 1);
+        for (across, along) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
+            let mut cell = self.cell(across, along);
+            if let Some(glyph) = round_glyph(screen_bits(cell.bits, flow)) {
+                cell.glyph = Some(glyph);
+                self.put(across, along, cell);
+            }
+        }
     }
 
     /// Adds wire directions at one cell. A box's border keeps its node role where a wire meets
@@ -890,6 +906,11 @@ fn draw(graph: &Graph, plan: &Plan) -> Option<Grid> {
             Shape::Decision => format!("◇ {}", node.label),
             Shape::Rectangle | Shape::Stadium => node.label.clone(),
         };
+        // A stadium keeps the vendor's rounded corners (ADR 0028); every
+        // other shape is square.
+        if node.shape == Shape::Stadium {
+            grid.round_corners(&placed, plan.flow);
+        }
         // A one-row-high box: the label sits on the middle line of the layer axis, and reads
         // along the axis that is the screen's horizontal one.
         let run_across = !plan.horizontal();
@@ -1148,14 +1169,14 @@ fn spans(grid: &Grid, plan: &Plan) -> Vec<Vec<Span>> {
     for across in 0..plan.across() {
         for along in 0..plan.along {
             let cell = grid.cell(across, along);
-            if cell.arrow == 0 && cell.bits == 0 {
+            if cell.arrow == 0 && cell.bits == 0 && cell.glyph.is_none() {
                 continue;
             }
             let (x, y) = point(across, along);
-            let glyph = if cell.arrow != 0 {
-                arrow_glyph(cell.arrow, plan.flow)
-            } else {
-                wire_glyph(&cell, plan.flow)
+            let glyph = match cell.glyph {
+                Some(glyph) => glyph,
+                None if cell.arrow != 0 => arrow_glyph(cell.arrow, plan.flow),
+                None => wire_glyph(&cell, plan.flow),
             };
             screen[y][x] = Screen::Ink(glyph, cell.role.unwrap_or(Role::Edge));
         }
@@ -1244,6 +1265,18 @@ fn screen_bits(bits: u8, flow: Flow) -> u8 {
         screen |= along_neg;
     }
     screen
+}
+
+/// The rounded corner for one screen pair of directions: `┌`'s (right+down) is `╭`, `┐`'s
+/// (left+down) is `╮`, `└`'s (up+right) is `╰` and `┘`'s (up+left) is `╯`.
+fn round_glyph(bits: u8) -> Option<char> {
+    match bits {
+        10 => Some('╭'),
+        6 => Some('╮'),
+        9 => Some('╰'),
+        5 => Some('╯'),
+        _ => None,
+    }
 }
 
 fn wire_glyph(cell: &Cell, flow: Flow) -> char {

@@ -1096,7 +1096,7 @@ Worktree `.radian-worktrees/build-script`, branch `dogfood/mermaid-layout`. Each
 applied in place by `.radian/scratch/mutate.py` (it asserts the anchor occurs the expected number
 of times, so a `cargo fmt` shift or a no-op patch fails loudly instead of passing as "caught"),
 the suite runs with `--no-fail-fast`, and the file is restored with a plain `cp` and `cmp`ed byte
-for byte (drivers: `.radian/scratch/mutate-layout{,2,3,4}.sh`). `git status --short` held only the
+for byte (drivers: `.radian/scratch/mutate-layout{,2,3,4,5}.sh`). `git status --short` held only the
 source and test files at the end.
 
 | # | Requirement mutated | Mutation | Caught by | Result |
@@ -1110,8 +1110,9 @@ source and test files at the end.
 | L6b | the same, horizontal layout | the LR label's `Role::Edge` → `Role::Text` | `the_diagram_roles_come_from_the_theme` (radian-tui) | ✅ 1 failed |
 | L7 | two edges of one gap that would **cross** are refused | `draw`: `bus_rows_are_clear(graph, plan)?;` removed | `a_diagram_the_layout_refuses_is_the_vendored_render_byte_for_byte` (the crossing sample is drawn instead of falling back) | ✅ 1 failed |
 | L8 | a wide character's second cell carries nothing (ADR 0028 R9) | `spans`: `Screen::Covered => continue` → an `Edge` space | `a_cjk_label_is_sized_by_display_width` (the label row is wider than its box) | ✅ 1 failed |
+| L9 | a stadium's corners are rounded (decision 3) *and* turned with the layout | `round_corners`: `round_glyph(screen_bits(cell.bits, flow))` → `round_glyph(cell.bits)` | `a_stadium_keeps_its_corners_rounded` (the `LR` golden gets `╭`/`╰` in the wrong corners) | ✅ 1 failed |
 
-8 mutations, 8 caught.
+9 mutations, 9 caught.
 
 **An equivalent mutant, honestly recorded (the ADR's "回边穿过框")**: "a back edge crosses a box"
 is defended **twice** — the route's freedom pre-check (`channel_edge`'s `grid.free` loop) and the
