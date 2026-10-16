@@ -193,10 +193,22 @@ EXPECT = {
         task_spawned=(
             3,
             "14222222-2222-4222-8222-222222222222",
-            "/work/example/.radian-worktrees/task-1",
+            "/work/radian-home/worktrees/example-0f3a1c9b7d2e/task-1",
             "slice 1",
         ),
         task_finished=(6, "14222222-2222-4222-8222-222222222222", "completed"),
+    ),
+    "task-finished-error.jsonl": dict(
+        outcome="accept",
+        events=5,
+        skips=[],
+        repair={},
+        task_finished_error=(
+            4,
+            "15222222-2222-4222-8222-222222222222",
+            "completed",
+            "the end-of-task commit failed: this session may only commit to `radian/task-1`, not `other`",
+        ),
     ),
     "task-child.jsonl": dict(
         outcome="accept",
@@ -497,6 +509,13 @@ def check_fixture(name, exp):
             else:
                 if not isinstance(data.get("outcome"), str) or not data["outcome"]:
                     raise Corruption(f"{name}: line {i}: TaskFinished.outcome 必须是非空字符串")
+                # ADR 0039 决定 5/7：`error` 是可选的；出现时必须是非空字符串。
+                if "error" in data and (
+                    not isinstance(data["error"], str) or not data["error"]
+                ):
+                    raise Corruption(
+                        f"{name}: line {i}: TaskFinished.error 必须是非空字符串"
+                    )
         if ev["event"] == "MessageAppended":
             msg = ev["data"].get("message")
             if not isinstance(msg, dict) or len(msg) != 1:
@@ -792,6 +811,22 @@ def check_fixture(name, exp):
         if finished != [tuple(exp["task_finished"])]:
             raise Corruption(
                 f"{name}: task_finished {finished} != 期望 {[tuple(exp['task_finished'])]}"
+            )
+    if "task_finished_error" in exp:
+        # ADR 0039 决定 7：提交失败写在 TaskFinished 的可选 `error` 里。
+        finished = [
+            (
+                e["seq"],
+                e["data"].get("agent_session_id"),
+                e["data"].get("outcome"),
+                e["data"].get("error"),
+            )
+            for e in events
+            if e["event"] == "TaskFinished"
+        ]
+        if finished != [tuple(exp["task_finished_error"])]:
+            raise Corruption(
+                f"{name}: task_finished_error {finished} != 期望 {[tuple(exp['task_finished_error'])]}"
             )
     if "policy_resolved" in exp:
         resolved = [

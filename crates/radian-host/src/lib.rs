@@ -161,8 +161,8 @@ pub use skills::{
     prompt_section,
 };
 pub use task::{
-    Isolation, SpawnRequest, TaskBuilder, TaskContext, TaskError, TaskRecord, TaskRegistry,
-    TaskSession, end_of_task_commit, task_sandbox,
+    Isolation, SpawnHook, SpawnRequest, SpawnStage, TaskBuilder, TaskContext, TaskError,
+    TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit, task_sandbox,
 };
 pub use tools::{HostSession, HostTools, merge_tool_specs};
 pub use workspace::resolve_workspace;

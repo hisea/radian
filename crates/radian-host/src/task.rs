@@ -26,13 +26,16 @@
 //!   committed by the host with the fixed message `radian: end of task <id> (<outcome>)`
 //!   (ADR 0030 item 1 B). With no changes, no commit is made.
 //!
-//! The lead's journal gets a non-critical `TaskSpawned` before the task session is opened, so
-//! the lead's own file answers "which task agents did I start" (ADR 0030 O5). `TaskFinished`
-//! is written by a later slice when the lead collects the result.
+//! Spawning is one transaction (ADR 0039 decision 5). A [`SpawnGuard`] owns the worktree from
+//! the moment it exists and — after `open_session` — the session's driver; it is disarmed only
+//! once the record is in the registry. A failure after the lead's `TaskSpawned` was written
+//! pairs it with a `TaskFinished { outcome: failed, error }` (ADR 0030 O5, ADR 0039 decision 5);
+//! a failure before that leaves the journal untouched.
 //!
 //! The host-specific parts (which model, which profile, the wording, the audit sink) are the
 //! caller's: it passes a [`TaskBuilder`] and the registry enforces the invariants above on what
-//! the builder returns, so the two hosts and the tests cannot accidentally leave one out.
+//! the builder returns, so the two hosts and the tests cannot accidentally leave one out. The
+//! [`TaskSeams`] the registry can carry exist only for tests.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -116,6 +119,31 @@ pub struct TaskSession {
 pub type TaskBuilder =
     Arc<dyn Fn(&TaskContext<'_>) -> Result<TaskSession, SessionError> + Send + Sync>;
 
+/// Where a spawn can be interrupted, for tests (ADR 0039 decision 5). Production installs no
+/// hook, so no variant ever fires outside a test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnStage {
+    /// Before the lead's `TaskSpawned` is appended: models a write that fails, so nothing is
+    /// recorded and nothing needs pairing.
+    TaskSpawned,
+    /// Before the [`TaskBuilder`] builds the session.
+    Builder,
+    /// Before the task invariants are enforced on the built setup.
+    Enforce,
+    /// Before the brief is sent as a `Subagent` input.
+    Brief,
+}
+
+/// A test seam run at each [`SpawnStage`]; `Err` aborts the spawn there with that message.
+pub type SpawnHook = Arc<dyn Fn(SpawnStage) -> Result<(), String> + Send + Sync>;
+
+/// The test seams a registry can carry (ADR 0039 decision 5). Both are `None` in production;
+/// the two hosts never install one.
+#[derive(Clone, Default)]
+pub struct TaskSeams {
+    pub spawn: Option<SpawnHook>,
+}
+
 /// One live task agent: its session and the facts the lead needs about it (ADR 0030 O2/O3).
 pub struct TaskRecord {
     pub id: String,
@@ -174,12 +202,14 @@ pub struct TaskRegistry {
     worktree_root: Option<WorktreeRoot>,
     /// The lead's session id, recorded as every task's `parent.session_id`.
     lead_session_id: String,
-    /// The lead's journal: `TaskSpawned` lands here (ADR 0030 O5).
+    /// The lead's journal: `TaskSpawned`/`TaskFinished` land here (ADR 0030 O5).
     lead_journal: Arc<SessionJournal>,
     /// The lead's pending queue: every task's approvals and questions route here, tagged with
     /// the task's session id (ADR 0030 O2).
     lead_queue: Arc<SessionQueue>,
     builder: TaskBuilder,
+    /// Test seams (ADR 0039 decisions 5 and 7); both are `None` in production.
+    seams: TaskSeams,
     tasks: Mutex<BTreeMap<String, Arc<TaskRecord>>>,
 }
 
@@ -203,8 +233,15 @@ impl TaskRegistry {
             lead_journal,
             lead_queue,
             builder,
+            seams: TaskSeams::default(),
             tasks: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Installs the test seams (ADR 0039 decisions 5 and 7).
+    pub fn with_seams(mut self, seams: TaskSeams) -> Self {
+        self.seams = seams;
+        self
     }
 
     /// The lead's workspace (the repository task worktrees branch from).
@@ -237,11 +274,12 @@ impl TaskRegistry {
             .collect()
     }
 
-    /// Spawns a task agent (ADR 0030 O2/O3).
+    /// Spawns a task agent (ADR 0030 O2/O3) as one transaction (ADR 0039 decision 5).
     ///
     /// Steps, in order: create the worktree, append the lead's `TaskSpawned`, build and open
     /// the task session with the enforced invariants, and (if a brief was given) send it as a
-    /// `Subagent` input. On a failure after the worktree exists, the worktree is removed again.
+    /// `Subagent` input. A failure at any step after the worktree exists removes it again; a
+    /// failure after `TaskSpawned` was written also appends the paired `TaskFinished`.
     pub async fn spawn(&self, request: SpawnRequest) -> Result<Arc<TaskRecord>, TaskError> {
         let SpawnRequest {
             id,
@@ -258,6 +296,44 @@ impl TaskRegistry {
             return Err(TaskError::new(format!("task `{id}` already exists")));
         }
 
+        // The guard owns everything the spawn has built so far; it is disarmed only once the
+        // record is in the registry, so no failure below can leave a worktree or a driver.
+        let mut guard = SpawnGuard::new(self.workspace.clone());
+        match self
+            .spawn_inner(&mut guard, &id, isolation, label, brief)
+            .await
+        {
+            Ok(record) => {
+                guard.disarm();
+                Ok(record)
+            }
+            Err(error) => {
+                // ADR 0039 decision 5: the `TaskSpawned` this spawn wrote needs a pair.
+                if guard.spawned {
+                    let _ = self
+                        .lead_journal
+                        .append_runtime_event(RuntimeEvent::TaskFinished {
+                            agent_session_id: id.clone(),
+                            outcome: TurnOutcome::Failed,
+                            error: Some(error.to_string()),
+                        })
+                        .await;
+                }
+                guard.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// The fallible body of [`TaskRegistry::spawn`]; the caller owns the guard.
+    async fn spawn_inner(
+        &self,
+        guard: &mut SpawnGuard,
+        id: &str,
+        isolation: Isolation,
+        label: Option<String>,
+        brief: Option<String>,
+    ) -> Result<Arc<TaskRecord>, TaskError> {
         // 1. The workspace: a fresh worktree on `radian/<id>`, or the lead's own (shared).
         let (workspace, worktree, branch) = match isolation {
             Isolation::Worktree => {
@@ -268,25 +344,29 @@ impl TaskRegistry {
                         self.workspace.display()
                     ))
                 })?;
-                let worktree = root.root.join(&id);
+                let worktree = root.root.join(id);
                 let lead = self.workspace.clone();
                 let home = root.home.clone();
-                let branch = format!("radian/{id}");
                 let wt = worktree.clone();
-                let br = branch.clone();
-                tokio::task::spawn_blocking(move || create_worktree(&lead, &home, &wt, &br))
-                    .await
-                    .map_err(|error| TaskError::new(format!("worktree task failed: {error}")))??;
-                (worktree.clone(), Some(worktree), Some(branch))
+                let br = format!("radian/{id}");
+                let br_for_git = br.clone();
+                tokio::task::spawn_blocking(move || {
+                    create_worktree(&lead, &home, &wt, &br_for_git)
+                })
+                .await
+                .map_err(|error| TaskError::new(format!("worktree task failed: {error}")))??;
+                guard.worktree = Some(worktree.clone());
+                (worktree.clone(), Some(worktree), Some(br))
             }
             Isolation::Shared => (self.workspace.clone(), None, None),
         };
 
         // 2. The lead's `TaskSpawned`, before the task session exists. `parent.seq` is its seq.
+        self.seam(SpawnStage::TaskSpawned)?;
         let start_seq = self.lead_journal.next_seq();
         self.lead_journal
             .append_runtime_event(RuntimeEvent::TaskSpawned {
-                agent_session_id: id.clone(),
+                agent_session_id: id.to_owned(),
                 worktree: worktree
                     .as_ref()
                     .map(|path| path.to_string_lossy().into_owned()),
@@ -294,12 +374,14 @@ impl TaskRegistry {
             })
             .await
             .map_err(|error| TaskError::new(format!("cannot write TaskSpawned: {error}")))?;
+        guard.spawned = true;
         let parent = ForkParent::task(self.lead_session_id.clone(), start_seq);
 
         // 3. Build and open the session, enforcing the task invariants on what the builder gave.
+        self.seam(SpawnStage::Builder)?;
         let parts = (self.builder)(&TaskContext {
-            id: &id,
-            session_id: &id,
+            id,
+            session_id: id,
             isolation,
             workspace: &workspace,
             branch: branch.as_deref(),
@@ -315,6 +397,7 @@ impl TaskRegistry {
             .allowed_filters
             .clone()
             .unwrap_or_else(default_allowed_filters);
+        self.seam(SpawnStage::Enforce)?;
         enforce_task_setup(
             &mut setup,
             &workspace,
@@ -328,7 +411,7 @@ impl TaskRegistry {
         bindings.shared_queue = Some(Arc::clone(&self.lead_queue));
         bindings.approvals = ApprovalRouting::Queued;
         let finisher = Arc::new(TaskFinisher {
-            id: id.clone(),
+            id: id.to_owned(),
             worktree: worktree.clone(),
             branch: branch.clone(),
             protected,
@@ -350,23 +433,17 @@ impl TaskRegistry {
             .sandbox
             .as_ref()
             .map(|sandbox| sandbox.policy().clone());
-        let session = match open_session(setup, bindings).await {
-            Ok(session) => Arc::new(session),
-            Err(error) => {
-                // The worktree was created before the session; do not leave it orphaned.
-                if let Some(worktree) = &worktree {
-                    let lead = self.workspace.clone();
-                    let wt = worktree.clone();
-                    let _ = tokio::task::spawn_blocking(move || remove_worktree(&lead, &wt, true))
-                        .await;
-                }
-                return Err(TaskError::new(error.to_string()));
-            }
-        };
+        let session = Arc::new(
+            open_session(setup, bindings)
+                .await
+                .map_err(|error| TaskError::new(error.to_string()))?,
+        );
+        guard.session = Some(Arc::clone(&session));
         let _ = finisher.journal.set(Arc::clone(session.journal()));
 
         // 4. The brief, as a `Subagent` input (ADR 0030 O2).
         if let Some(brief) = brief {
+            self.seam(SpawnStage::Brief)?;
             session
                 .inbox()
                 .followup(Message::user(brief), agent_core::InputSource::Subagent)
@@ -375,7 +452,7 @@ impl TaskRegistry {
         }
 
         let record = Arc::new(TaskRecord {
-            id: id.clone(),
+            id: id.to_owned(),
             session,
             isolation,
             worktree,
@@ -387,8 +464,16 @@ impl TaskRegistry {
         self.tasks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id, Arc::clone(&record));
+            .insert(id.to_owned(), Arc::clone(&record));
         Ok(record)
+    }
+
+    /// Runs the spawn test seam, if this registry has one (ADR 0039 decision 5).
+    fn seam(&self, stage: SpawnStage) -> Result<(), TaskError> {
+        match &self.seams.spawn {
+            Some(hook) => hook(stage).map_err(TaskError::new),
+            None => Ok(()),
+        }
     }
 
     /// Closes a task and removes its worktree (ADR 0030 O3: `remove_task`).
@@ -422,6 +507,69 @@ impl TaskRegistry {
             .unwrap_or_else(|e| e.into_inner())
             .remove(id);
         Ok(())
+    }
+}
+
+/// Owns a half-built task during [`TaskRegistry::spawn`] (ADR 0039 decision 5): its worktree
+/// from the moment it exists, and — once `open_session` returned — the session's driver. The
+/// registry disarms it only after the record is in the registry; any earlier failure rolls it
+/// back, and a dropped spawn (cancellation) is rolled back by `Drop`.
+struct SpawnGuard {
+    lead: PathBuf,
+    worktree: Option<PathBuf>,
+    session: Option<Arc<LocalSession>>,
+    /// Whether the lead's `TaskSpawned` was written; a later failure pairs a `TaskFinished`.
+    spawned: bool,
+    armed: bool,
+}
+
+impl SpawnGuard {
+    fn new(lead: PathBuf) -> Self {
+        Self {
+            lead,
+            worktree: None,
+            session: None,
+            spawned: false,
+            armed: true,
+        }
+    }
+
+    /// The spawn reached the registry: nothing is ours to clean up any more.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Stops and joins the task's driver, then removes its worktree.
+    async fn rollback(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if let Some(session) = self.session.take() {
+            session.stop();
+            let _ = session.join().await;
+        }
+        if let Some(worktree) = self.worktree.take() {
+            let lead = self.lead.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || remove_worktree(&lead, &worktree, true)).await;
+        }
+    }
+}
+
+impl Drop for SpawnGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // A dropped `spawn` future: the driver is aborted at once and the worktree is removed
+        // with native git (no runtime to await on here).
+        if let Some(session) = self.session.take() {
+            session.abort();
+        }
+        if let Some(worktree) = self.worktree.take() {
+            let _ = remove_worktree(&self.lead, &worktree, true);
+        }
     }
 }
 

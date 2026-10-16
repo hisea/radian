@@ -440,9 +440,11 @@ fn event_data_value(
         EventData::TaskFinished {
             agent_session_id,
             outcome,
+            error,
         } => json!({
             "agent_session_id": agent_session_id,
             "outcome": outcome,
+            "error": error,
         }),
         EventData::BackgroundJobStarted {
             job_id,

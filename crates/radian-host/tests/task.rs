@@ -9,14 +9,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_core::{NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use radian_host::{
     HostBindings, Isolation, LocalSession, SessionError, SessionFacade, SessionId,
-    SessionProjection, SessionQueue, SessionSetup, SpawnRequest, TaskBuilder, TaskContext,
-    TaskRegistry, TaskSession, build_model, end_of_task_commit, open_session,
+    SessionProjection, SessionQueue, SessionSetup, SpawnRequest, SpawnStage, TaskBuilder,
+    TaskContext, TaskRegistry, TaskSeams, TaskSession, build_model, end_of_task_commit,
+    open_session,
 };
 use radian_permissions::{ApprovalPolicy, NoopAudit, Preset, Profile};
 use radian_sandbox::{Sandbox, SandboxPolicy};
@@ -65,6 +66,31 @@ fn mode(path: &Path) -> Option<u32> {
     {
         let _ = path;
         None
+    }
+}
+
+/// Records the task sessions whose driver ended (their `driver_stopped` binding fired), so a
+/// test can assert a failed spawn left no driver running.
+#[derive(Default)]
+struct DriverStops {
+    stopped: Mutex<Vec<String>>,
+}
+
+impl DriverStops {
+    fn record(&self, session_id: &str) {
+        self.stopped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(session_id.to_owned());
+    }
+
+    fn count(&self, session_id: &str) -> usize {
+        self.stopped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|id| *id == session_id)
+            .count()
     }
 }
 
@@ -131,12 +157,14 @@ fn model(
 
 /// The host-specific builder a test gives the registry: a mock model and, for a worktree task,
 /// a `workspace` sandbox built with the network **on** (the registry must turn it off).
-fn builder(session_dir: PathBuf, base_url: String) -> TaskBuilder {
+fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> TaskBuilder {
     Arc::new(
         move |ctx: &TaskContext<'_>| -> Result<TaskSession, SessionError> {
             let workspace = ctx.workspace.to_path_buf();
             let fail = |error: String| SessionError::Message(error);
             let slot = radian_runtime::ConfigSlot::new(Value::Null);
+            let stopped = Arc::clone(&stops);
+            let session_id = ctx.session_id.to_owned();
             let (sandbox, tier, profile) = match ctx.isolation {
                 Isolation::Shared => (
                     None,
@@ -208,7 +236,7 @@ fn builder(session_dir: PathBuf, base_url: String) -> TaskBuilder {
                     events: Arc::new(NoopSink),
                     projection: Arc::new(SessionProjection::new()),
                     runtime_events: Arc::new(|_event: &radian_session::RuntimeEvent| {}),
-                    driver_stopped: Arc::new(|_| {}),
+                    driver_stopped: Arc::new(move |_| stopped.record(&session_id)),
                     before_driver: None,
                     memory_warning: Arc::new(|_message: &str| {}),
                     memory_notice_line: Arc::new(|_line: &str| {}),
@@ -225,11 +253,16 @@ struct Fixture {
     lead: PathBuf,
     session_dir: PathBuf,
     queue: Arc<SessionQueue>,
+    stops: Arc<DriverStops>,
     registry: TaskRegistry,
 }
 
 impl Fixture {
     fn new(label: &str, base_url: &str) -> Self {
+        Self::with_seams(label, base_url, TaskSeams::default())
+    }
+
+    fn with_seams(label: &str, base_url: &str, seams: TaskSeams) -> Self {
         let home = isolated_home();
         let scratch = scratch(label);
         let lead = scratch.join("lead");
@@ -260,19 +293,22 @@ impl Fixture {
             .expect("the lead journal"),
         );
         let queue: Arc<SessionQueue> = Arc::new(SessionQueue::new());
+        let stops = Arc::new(DriverStops::default());
         let registry = TaskRegistry::new(
             lead.clone(),
             "lead",
             lead_journal,
             Arc::clone(&queue),
-            builder(session_dir.clone(), base_url.to_owned()),
-        );
+            builder(session_dir.clone(), base_url.to_owned(), Arc::clone(&stops)),
+        )
+        .with_seams(seams);
         Self {
             scratch,
             home,
             lead,
             session_dir,
             queue,
+            stops,
             registry,
         }
     }
@@ -1136,4 +1172,98 @@ async fn a_symlink_under_the_new_root_is_refused() {
         !list.contains("t1"),
         "git must not know a worktree:\n{list}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0039 decision 5: spawning is one transaction.
+// ---------------------------------------------------------------------------------------------
+
+/// A failure at any of the four spawn points leaves no worktree, no driver and a consistent
+/// registry, and pairs every `TaskSpawned` with a `TaskFinished` (ADR 0039 decision 5).
+#[tokio::test]
+async fn a_failed_spawn_leaves_nothing_behind_and_pairs_a_task_finished() {
+    for stage in [
+        SpawnStage::TaskSpawned,
+        SpawnStage::Builder,
+        SpawnStage::Enforce,
+        SpawnStage::Brief,
+    ] {
+        a_failed_spawn_at(stage).await;
+    }
+}
+
+async fn a_failed_spawn_at(stage: SpawnStage) {
+    let seams = TaskSeams {
+        spawn: Some(Arc::new(move |at: SpawnStage| {
+            if at == stage {
+                Err(format!("test seam: aborting at {at:?}"))
+            } else {
+                Ok(())
+            }
+        })),
+    };
+    let fixture = Fixture::with_seams("fail", "http://127.0.0.1:1/v1", seams);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return; // no sandbox backend here
+    }
+    let root = fixture.worktree_root();
+    let mut request = SpawnRequest::new("t1");
+    if stage == SpawnStage::Brief {
+        // The `Brief` seam only exists when there is a brief to send.
+        request.brief = Some("go".to_owned());
+    }
+    let error = match fixture.registry.spawn(request).await {
+        Ok(_) => panic!("{stage:?}: the seam must abort the spawn"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("test seam"),
+        "{stage:?}: {error}"
+    );
+    // No worktree, in the filesystem or in git.
+    assert!(!root.join("t1").exists(), "{stage:?}: a worktree is left");
+    let list = git_out(&fixture.lead, &["worktree", "list", "--porcelain"]);
+    assert!(
+        !list.contains("t1"),
+        "{stage:?}: git knows a worktree:\n{list}"
+    );
+    // A consistent registry: no entry, no id.
+    assert!(fixture.registry.get("t1").is_none(), "{stage:?}");
+    assert!(fixture.registry.ids().is_empty(), "{stage:?}");
+
+    // No running driver: the session (opened for the `Brief` stage) was stopped and joined.
+    // `driver_stopped` fires before the join resolves, so a count of one is exact.
+    let expected_stops = usize::from(stage == SpawnStage::Brief);
+    assert_eq!(
+        fixture.stops.count("t1"),
+        expected_stops,
+        "{stage:?}: a driver is still running"
+    );
+
+    // The journal pairs every `TaskSpawned` with a `TaskFinished`.
+    let lines = fixture.lead_journal_lines();
+    let spawned = lines.iter().filter(|v| v["event"] == "TaskSpawned").count();
+    let finished: Vec<&Value> = lines
+        .iter()
+        .filter(|v| v["event"] == "TaskFinished")
+        .collect();
+    assert_eq!(
+        finished.len(),
+        spawned,
+        "{stage:?}: {spawned} TaskSpawned but {} TaskFinished",
+        finished.len()
+    );
+    if stage == SpawnStage::TaskSpawned {
+        assert_eq!(spawned, 0, "nothing was recorded before the seam");
+    } else {
+        assert_eq!(spawned, 1, "{stage:?}");
+        assert_eq!(finished[0]["data"]["outcome"], "failed", "{stage:?}");
+        assert!(
+            finished[0]["data"]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("test seam")),
+            "{stage:?}: the failure reason must be recorded: {}",
+            finished[0]
+        );
+    }
 }
