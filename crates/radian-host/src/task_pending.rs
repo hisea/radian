@@ -363,6 +363,15 @@ impl TaskPendingQueue {
                 request_id: request_id.to_owned(),
             });
         };
+        // Check the runtime first: a failure after the entry is taken would leave the task
+        // blocked with the event out of the queue.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return Err(TaskPendingError {
+                kind: "approval",
+                task_id: task_id.to_owned(),
+                request_id: request_id.to_owned(),
+            });
+        };
         // Take the entry out with its waiting end, so only the human's answer resolves it. The
         // entry leaves the task queue here; an escalated request is no longer the lead's.
         let reply = {
@@ -407,13 +416,6 @@ impl TaskPendingQueue {
             });
         };
         // Forward the human's answer to the task, off the lead's thread.
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return Err(TaskPendingError {
-                kind: "approval",
-                task_id: task_id.to_owned(),
-                request_id: request_id.to_owned(),
-            });
-        };
         handle.spawn(async move {
             let outcome = match answer.wait().await {
                 Ok(PendingResponse::Approval(outcome)) => outcome,

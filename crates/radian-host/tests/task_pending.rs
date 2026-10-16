@@ -38,16 +38,27 @@ fn policy_script(name: &str, script: &str) -> PolicyCommand {
     PolicyCommand::new(name, "/bin/sh").with_args(vec!["-c".into(), script.into()])
 }
 
-/// Polls a queue until the next event appears, waiting on its `watch` instead of sleeping.
+/// Polls a queue until the next event appears, waiting on its `watch` instead of sleeping. A
+/// bounded overall wait (20 s) turns "no event was raised" into a failure instead of a hang.
 async fn wait_next(
     queue: &Arc<TaskPendingQueue>,
     rx: &mut tokio::sync::watch::Receiver<u64>,
 ) -> radian_host::TaskPendingView {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         if let Some(view) = queue.next() {
             return view;
         }
-        rx.changed().await.expect("the queue is alive");
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            panic!("no task raised a pending event in time");
+        }
+        let wait = (deadline - now).min(Duration::from_millis(20));
+        match tokio::time::timeout(wait, rx.changed()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => panic!("the queue was dropped"),
+            Err(_) => {}
+        }
     }
 }
 
@@ -269,20 +280,30 @@ async fn escalate_reaches_the_human_queue_with_the_summary() {
         }
         other => panic!("expected an approval, got {other:?}"),
     }
-    // The task is still blocked: the lead has not decided.
+    // Let a wrong "the lead approved" path run before we assert the task is still blocked.
+    tokio::task::yield_now().await;
     assert!(
         !handle.is_finished(),
         "the lead cannot approve, only the human can"
     );
 
-    // The human answers; now the task resolves.
+    // The human answers **deny**: the task resolves to what the human chose, which no lead
+    // operation can produce. A mutation that approves on the lead's behalf resolves `allow`
+    // here and fails.
     human
         .answer(
             head.request_id,
-            radian_host::PendingResponse::Approval(ApprovalOutcome::AllowOnce),
+            radian_host::PendingResponse::Approval(ApprovalOutcome::Deny {
+                reason: Some("the human said no".into()),
+            }),
         )
         .unwrap();
-    assert_eq!(handle.await.unwrap().unwrap(), ApprovalOutcome::AllowOnce);
+    match handle.await.unwrap().unwrap() {
+        ApprovalOutcome::Deny { reason } => {
+            assert_eq!(reason.as_deref(), Some("the human said no"));
+        }
+        other => panic!("the human's deny must reach the task, got {other:?}"),
+    }
 }
 
 /// A task question becomes a pending event and `answer` completes it.

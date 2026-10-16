@@ -18,9 +18,11 @@
 //!   own branch (ADR 0030 O3);
 //! - `SessionCreated.parent.relation = "task"` naming the lead and its `TaskSpawned` seq
 //!   (ADR 0030 O2);
-//! - a `HostBindings` whose approvals and questions route to the **lead's** pending queue,
-//!   tagged with the task's session id as the origin (ADR 0030 O2), so the human sees one
-//!   arrival order and the task never appears as its own queue;
+//! - a `HostBindings` whose approvals and questions route to the **task-side** pending queue
+//!   ([`crate::task_pending`], ADR 0030 slice 5, revision 6): the task's still-ask approvals and
+//!   its `ask_user` become pending task events the lead resolves (answer / deny / escalate),
+//!   never items in the human's queue. Only an escalation the lead performs reaches the human
+//!   queue, tagged with the task as the origin (ADR 0030 R9);
 //! - an end-of-task commit: when the task's turn ends, the worktree's uncommitted changes are
 //!   committed by the host with the fixed message `radian: end of task <id> (<outcome>)`
 //!   (ADR 0030 item 1 B). With no changes, no commit is made.

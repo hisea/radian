@@ -914,3 +914,30 @@ allowed_branch=None)` 在 `main` 上，此时只有 `refuse_main` 在起作用�
 （`a_shared_task_writes_no_end_commit`）先等任务 journal 里出现 `TurnFinished`，再给错误的 finisher
 一个有界的窗口（2 s）去提交，然后断言 lead 工作区未变——纯 `requests()` 计数会在 finisher 运行前
 就通过（假绿）。
+
+## orch-s5：task 三层审批与 task 侧待决队列（ADR 0030 切片 5，2026-10-16）
+
+工作树 `.radian-worktrees/orch-s5`。每个变异就地施加，改前把源文件复制到
+`.radian/scratch/mut-backup/`，改后用 `cp` 还原并以 `cmp` 证明一致（本任务禁 `git checkout --`）；
+结束后 `git status --short` 只剩本片的改动。每个变异：
+`timeout 240 cargo test -p radian-host --test task_pending <测试> --locked --no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T-S5-A | `TaskApprover` 把 edge policy 的 `ask` 直接当 allow（策略说「问」= 自动批） | `a_policy_ask_lands_in_the_pending_queue_not_auto`（20 s 内有界等待等不到待决事件 → panic） | ✅ GRABBED (rc=101) |
+| T-S5-B | `escalate_approval` 立即回 `AllowOnce`（lead 代人批准） | `escalate_reaches_the_human_queue_with_the_summary`（`yield` 后 task 已结束；且人类否决的答案没到达 task） | ✅ GRABBED (rc=101) |
+| T-S5-C | R9 超时在事件**创建**时起算（把 `start_timeout` 从 `next` 移到 `approval` 的 push） | `the_timeout_starts_at_take_and_resolves_as_deny`（take 之前 advance 120 s，task 已被拒绝） | ✅ GRABBED (rc=101) |
+| T-S5-D | task 的事件写进 lead 的 inbox（`spawn` 里给 lead journal 追加一条 `InboxEnqueued{source: Subagent}`） | `a_task_ask_blocks_on_the_pending_queue_and_never_touches_the_lead_inbox`（lead journal 出现 `InboxEnqueued`/`subagent`） | ✅ GRABBED (rc=101) |
+| T-S5-E | `PermissionHooks.task_approver` 永不置位（task 的非人类 `ask` 在 hook 里先被拒，approver 收不到） | `a_task_ask_blocks_on_the_pending_queue_and_never_touches_the_lead_inbox`（等不到待决事件） | ✅ GRABBED (rc=101) |
+
+5/5 抓住。硬禁止清单那条变异改的是 `radian-permissions`，记在
+`crates/radian-permissions/MUTATIONS.md`（PM-O2）。
+
+**T-S5-E 与修订 2 的冲突（如实记录）**：task 的 `on-ask` 与 edge policy 能到达 `TaskApprover`，
+前提是 `PermissionHooks` 上新增的 `task_approver` 标志（`set_task_approver`，默认 `false`）。
+hook 原本在咨询 approver **之前**就拒绝非人类 `ask`（`hooks.rs` 的
+`"this turn is not from the user, so no approval can be obtained"`），而 task 的 turn 来源是
+`Subagent`/未设，所以没有这个标志，三层里的第二、三层永远跑不到。ADR 0030 说
+`radian-permissions` 不改、`PermissionHooks` 判定顺序照旧，与切片 5 要求的 `Approver` 冲突；
+冲突写在 `.radian/progress/orch-s5.md`。该标志只对 task 路由生效，task 仍不能借用人类
+session grant，其他非人类来源照旧在 hook 里被拒。
