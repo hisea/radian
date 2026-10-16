@@ -777,11 +777,14 @@ throwaway terminal, not your working one.
    `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and
    kitty-protocol terminals), and `Ctrl-J` always does; a terminal that cannot report it sends
    instead - record which of the three did what. *Fail*: a newline that also sends.
-3c. **Spinner** (`tui.spinner`; ADR 0027/9/10). *Steps*: start a turn (send a
+3c. **Spinner** (`tui.spinner`; ADR 0027/9/10/13). *Steps*: start a turn (send a
    message) with `tui.spinner = "pulse"` (the default), then `"arc"`, then `"quadrant"`, then
    `"braille"`, then `glyphs = "ascii"`. *Expect*: the input rule shows
    `── <spinner>  Working ` (two spaces) while the turn runs, a plain rule when idle; `pulse`
-   is a `⏺` that only changes color (500 ms); `arc`/`quadrant`/`braille` turn every 250 ms;
+   is a `⏺` that only changes color — it **breathes** between the accent and the dim level
+   (1.4 s, 12 steps, a sine, so it slows at both ends) when the terminal has truecolor
+   (`COLORTERM=truecolor`/`24bit`); without it (and for `glyphs = "ascii"`) it is the two-color
+   switch every 500 ms; `arc`/`quadrant`/`braille` turn every 250 ms;
    `ascii` is `*` (pulse) or `| / - \`. *Look*: **does the spinner render in your terminal
    font?** `pulse` (`⏺`) and `arc` are the documented exceptions (no checked font has `⏺`; a
    box means the fallback font lacks it); `quadrant` is the covered alternative. *Fail*:

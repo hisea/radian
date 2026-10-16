@@ -5651,6 +5651,103 @@ async fn pty_a_visible_spinner_redraws_on_its_interval() {
     );
 }
 
+/// ADR 0027: with truecolor the default pulse **breathes** — the `⏺` takes the 12
+/// colours of one sine period — and the loop wakes at the step (~117 ms), not at revision 10's
+/// 500 ms switch. The wire carries each colour as `38;2;R;G;B` in front of the glyph, so the
+/// colours themselves are checkable, not just the frame count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_pulse_breathes_through_rgb_colours() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(
+        &[],
+        &[("OPENAI_API_KEY", "sk-test"), ("COLORTERM", "truecolor")],
+        &config,
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    let _ = settled_frame_count(&mut pty);
+    // A turn that never finishes keeps the spinner visible.
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("Working", 10),
+        "the input rule must show the running state: {}",
+        pty.screen()
+    );
+    let start = frame_count(&pty);
+    std::thread::sleep(std::time::Duration::from_millis(2200));
+    let after = frame_count(&pty);
+    let breathed = dot_colours(&pty.raw());
+    pty.quit();
+    assert!(
+        after >= start + 10,
+        "the breath must redraw about every 117 ms (a two-colour switch would be 4): {start} -> {after}"
+    );
+    // The breath's 12 samples hold 7 distinct colours (the sine's levels 0, 1, 3, 6, 9, 11, 12);
+    // a two-colour switch would show 2 and a rotating frame 1.
+    assert!(
+        breathed.len() >= 6,
+        "the dot must take the breath's colours: {breathed:?}"
+    );
+    let theme = radian_tui::theme::Theme::dark();
+    let rgb = |style: ratatui::style::Style| match style.fg {
+        Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
+        other => panic!("an RGB theme role: {other:?}"),
+    };
+    assert!(
+        breathed.contains(&rgb(theme.notice_label)),
+        "the accent must be reached: {breathed:?}"
+    );
+    assert!(
+        breathed.contains(&rgb(theme.truncation)),
+        "and the dim end: {breathed:?}"
+    );
+}
+
+/// The distinct 24-bit colours written immediately in front of the pulse glyph (`⏺`), in the
+/// order they first appear: the breath as it reached the terminal.
+fn dot_colours(raw: &[u8]) -> Vec<(u8, u8, u8)> {
+    let text = String::from_utf8_lossy(raw);
+    let mut out: Vec<(u8, u8, u8)> = Vec::new();
+    let mut at = 0;
+    while let Some(found) = text[at..].find("38;2;") {
+        let params = at + found + "38;2;".len();
+        at = params;
+        let Some((rgb, tail)) = text[params..].split_once('m') else {
+            break;
+        };
+        if !tail.starts_with('⏺') {
+            continue;
+        }
+        let mut parts = rgb.split(';');
+        let rgb = match (parts.next(), parts.next(), parts.next()) {
+            (Some(r), Some(g), Some(b)) => (r, g, b),
+            _ => continue,
+        };
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            rgb.0.parse::<u8>(),
+            rgb.1.parse::<u8>(),
+            rgb.2.parse::<u8>(),
+        ) {
+            if !out.contains(&(r, g, b)) {
+                out.push((r, g, b));
+            }
+        }
+    }
+    out
+}
+
 /// ADR 0023 U2: a signal is an event, not a poll. The loop is blocked on its channel while the
 /// app is idle; SIGTERM must take the ordinary exit path at once — far inside the signal task's
 /// 3 s watchdog, which is what would fire if the loop still had to poll for the flag.

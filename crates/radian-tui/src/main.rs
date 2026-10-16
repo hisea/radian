@@ -2331,22 +2331,44 @@ fn terminal_gone(error: &std::io::Error) -> bool {
 }
 
 /// Advances the spinner's clock and returns the new frame when a spinner is visible and the
-/// frame changed since `last` (ADR 0027). The idle tick calls this, so an idle app
-/// still makes no frame and a visible spinner redraws on its interval.
+/// frame changed since `last` (ADR 0027/13). The idle tick calls this, so an idle
+/// app still makes no frame and a visible spinner redraws on its interval — the breath's step
+/// (about 117 ms) while it interpolates, the two-colour switch or the rotating frames otherwise.
 fn spinner_tick(
     app: &mut App,
     last: &mut Option<radian_tui::spinner::Frame>,
 ) -> Option<radian_tui::spinner::Frame> {
+    spinner_frame_at(app, last, std::time::Instant::now())
+}
+
+/// [`spinner_tick`] with the wake's instant as an argument: the loop passes the clock, a test
+/// walks it.
+fn spinner_frame_at(
+    app: &mut App,
+    last: &mut Option<radian_tui::spinner::Frame>,
+    now: std::time::Instant,
+) -> Option<radian_tui::spinner::Frame> {
     if !app.spinner_visible() {
         return None;
     }
-    app.set_now(std::time::Instant::now());
+    app.set_now(now);
     let frame = app.spinner_frame();
     if *last == Some(frame) {
         return None;
     }
     *last = Some(frame);
     Some(frame)
+}
+
+/// How long the loop may wait for an event: the hang-up check's own tick, and — only while a
+/// spinner is visible — that spinner's frame interval, so the breath is sampled at the step it
+/// turns at and nothing else wakes the loop early (ADR 0023 U2).
+fn wait_for_an_event(app: &App) -> Duration {
+    if app.spinner_visible() {
+        TTY_CHECK_TICK.min(app.spinner_interval())
+    } else {
+        TTY_CHECK_TICK
+    }
 }
 
 /// Whether the tty is already hung up, as `poll(2)` sees it right now. A draw failure carries
@@ -3540,8 +3562,10 @@ fn ui_loop(
                 }
             } else {
                 // A bounded wait, not a blocking one: guard 2's hang-up check runs every tick even
-                // while the app is idle. A timeout with the tty alive loops without drawing.
-                match rx.recv_timeout(TTY_CHECK_TICK) {
+                // while the app is idle. A timeout with the tty alive loops without drawing. The
+                // spinner shortens it to its own frame interval while one is visible (ADR 0027
+                // revision 13), which is what makes the breath turn at its step.
+                match rx.recv_timeout(wait_for_an_event(app)) {
                     Ok(event) => Some(event),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         if terminal_is_gone() {
@@ -4165,6 +4189,63 @@ mod tests {
             (0..20).rev().collect::<Vec<_>>(),
             "every effect ran, in order"
         );
+    }
+
+    /// ADR 0027 + ADR 0023 U2: the breath redraws **once per step**, and only while a
+    /// spinner is visible. The test walks the injected clock in 50 ms wakes — no wall clock — and
+    /// counts the frames the loop's own tick hands out over two breath periods: 24 for an RGB
+    /// theme (12 steps each), 6 for a theme that can only switch (one every 500 ms), none idle.
+    #[test]
+    fn the_breath_redraws_once_per_step_and_only_when_a_spinner_is_visible() {
+        /// The frames `spinner_tick` hands the loop while the clock walks two periods in 50 ms
+        /// wakes — the same function the loop calls, with the wake's instant as the argument.
+        fn frames(app: &mut App) -> usize {
+            let base = app.spinner_origin;
+            let mut last = None;
+            let mut count = 0;
+            let mut t = Duration::ZERO;
+            while t < radian_tui::spinner::PULSE_PERIOD * 2 {
+                if spinner_frame_at(app, &mut last, base + t).is_some() {
+                    count += 1;
+                }
+                t += Duration::from_millis(50);
+            }
+            count
+        }
+
+        let mut app = App::new("m", "s");
+        app.projection.set_turn(radian_tui::TurnState::Running);
+        assert!(app.spinner_visible(), "a running turn shows a spinner");
+        app.theme = radian_tui::theme::Theme::dark();
+        assert_eq!(
+            frames(&mut app),
+            usize::from(radian_tui::spinner::PULSE_STEPS) * 2,
+            "one frame per step, 12 steps in every 1.4 s period"
+        );
+        assert_eq!(
+            wait_for_an_event(&app),
+            radian_tui::spinner::pulse_step(),
+            "the loop wakes at the breath's step while it is visible"
+        );
+        // The 250 ms hang-up tick is still the floor: a slower frame never shortens it further.
+        app.theme = radian_tui::theme::Theme::mono();
+        assert_eq!(
+            frames(&mut app),
+            6,
+            "a theme that cannot interpolate switches every 500 ms (two colours over 2.8 s)"
+        );
+        assert_eq!(wait_for_an_event(&app), TTY_CHECK_TICK);
+        assert_eq!(
+            frames(&mut app),
+            6,
+            "the walk is a pure function of the clock: the same count again, no wall clock"
+        );
+
+        // Idle: the same walk hands out nothing, so an idle screen is never redrawn.
+        let mut idle = App::new("m", "s");
+        idle.theme = radian_tui::theme::Theme::dark();
+        assert_eq!(frames(&mut idle), 0, "no spinner visible, no frame");
+        assert_eq!(wait_for_an_event(&idle), TTY_CHECK_TICK);
     }
 
     /// ADR 0023 U5: a fact-only update (usage, budget, tier, MCP) wakes the UI with a `Dirty`
