@@ -1429,7 +1429,7 @@ fn run(
                 before_driver,
                 memory_warning,
                 memory_notice_line,
-                // The orchestration host wiring (a real task builder) is a later slice; this
+                // The orchestration host wiring (a real task builder) is slice 6b; this
                 // session mounts no lead tools yet.
                 task_builder: None,
             },

@@ -1674,7 +1674,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             before_driver: None,
             memory_warning: Arc::new(|message: &str| eprintln!("[memory] {message}")),
             memory_notice_line: Arc::new(|line: &str| eprintln!("[memory] {line}")),
-            // The orchestration host wiring (a real task builder) is a later slice.
+            // The orchestration host wiring (a real task builder) is slice 6b.
             task_builder: None,
         },
     )

@@ -365,6 +365,12 @@ impl TaskRegistry {
         self.pending.next_for(id)
     }
 
+    /// [`TaskRegistry::pending_next`] restricted to a set of tasks (ADR 0030 slice 6's
+    /// `wait_any { ids }`): the first event raised by any of them, in arrival order.
+    pub fn pending_next_in(&self, ids: &[String]) -> Option<TaskPendingView> {
+        self.pending.next_in(ids)
+    }
+
     /// Sets the R9 timeout applied to each taken event (ADR 0030).
     pub fn set_pending_timeout(&self, timeout: std::time::Duration) {
         self.pending.set_timeout(timeout);

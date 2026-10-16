@@ -1065,3 +1065,14 @@ inbox」与「lead 的回合来源被任务事件降低」在 part a 里**不可
 `a_lead_turn_stays_user_and_a_task_turn_is_subagent` 的两条断言钉住（lead 日志里没有任何
 `"subagent"` 输入；`hooks().turn_source() == Some(User)`）。能把任务事件塞进 lead 的 inbox 的近似
 变异在运行时/切片 4-5 的代码里，由那些切片的 inbox-来源测试抓住。
+
+### orch-s6a review fix 1（2026-10-16）：`timeout_secs` 与 `wait_any { ids }`
+
+`wait_task`/`wait_any` 按 ADR 0030 O4 / 修订 1 R3 的签名改成 `timeout_secs`（秒，接受小数，负数/非有限拒绝）
+与 `wait_any { ids }`（必填、非空；每个 id 必须存在才等待）。新增一条变异：
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S6A-10 | `wait_any` 去掉 ids 过滤（`self.registry.pending_next_in(&args.ids)` 换回 `self.registry.pending_next()`，取队首任意任务） | ✅ failed | `wait_any_ignores_a_task_not_in_ids`（不属于 ids 的 t2 的提问被 t1 的等待取走，等待不再超时） |
+
+1/1 抓住。跑法：把 `wait_any` 里那一行换成 `pending_next()`，`cargo test -p radian-host --test lead_tools wait_any_ignores_a_task_not_in_ids`。

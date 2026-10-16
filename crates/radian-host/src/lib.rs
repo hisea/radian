@@ -113,7 +113,7 @@ pub use job_notify::{
     JobNotifier, MAX_CONSECUTIVE_WAKES, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message,
 };
 pub use lead_tools::{
-    DEFAULT_WAIT_TIMEOUT_MS, LEAD_TOOL_NAMES, LeadSession, LeadTools, TASK_DETAIL_LIMIT_CHARS,
+    DEFAULT_WAIT_TIMEOUT_SECS, LEAD_TOOL_NAMES, LeadSession, LeadTools, TASK_DETAIL_LIMIT_CHARS,
     TASK_SUMMARY_LIMIT_CHARS, run as run_lead_tool,
 };
 pub use mcp::load_mcp_config;

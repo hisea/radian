@@ -53,9 +53,21 @@ pub const TASK_SUMMARY_LIMIT_CHARS: usize = 4000;
 /// Every other bounded text (a `git status`/`git diff --stat`) is cut here.
 pub const TASK_DETAIL_LIMIT_CHARS: usize = 4000;
 
-/// The wait a call gets when it names no `timeout_ms` (ADR 0030 R9's 10-minute R9
+/// The wait a call gets when it names no `timeout_secs` (ADR 0030 R9's 10-minute R9
 /// timeout, reused as the lead's own patience).
-pub const DEFAULT_WAIT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
+pub const DEFAULT_WAIT_TIMEOUT_SECS: f64 = 600.0;
+
+/// Parses a `timeout_secs` argument (ADR 0030 O4: seconds, fractions allowed) into a duration.
+/// A negative, non-finite or unrepresentable value is an `invalid_arguments` failure. There is no
+/// artificial upper bound; the only limit is how large a `Duration` can be.
+fn wait_timeout(secs: Option<f64>) -> Result<Duration, ToolFailure> {
+    let secs = secs.unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS);
+    Duration::try_from_secs_f64(secs).map_err(|_| {
+        invalid(format!(
+            "`timeout_secs` must be a finite, non-negative number of seconds, not {secs}"
+        ))
+    })
+}
 
 /// The lead tool names, in the order the provider advertises them. The host adds these to the
 /// session profile as `allow` rules (ADR 0030 slice 6); the mode gate decides whether they run.
@@ -158,16 +170,18 @@ pub fn specs() -> Vec<ToolSpec> {
                           finishes its turn (including its end-of-task commit), or the timeout \
                           elapses (`still_running`). A timeout never cancels the task."
                 .into(),
-            input_schema: wait_schema(true),
+            input_schema: wait_task_schema(),
             concurrency: ToolConcurrency::Shared,
         },
         ToolSpec {
             name: "wait_any".into(),
-            description: "Block until any task raises a question or approval, or finishes its \
-                          turn; the first one wins and the others keep running. On timeout it \
-                          returns `still_running`. A timeout never cancels a task."
-                .into(),
-            input_schema: wait_schema(false),
+            description:
+                "Block until any task in `ids` raises a question or approval, or finishes \
+                          its turn; the first one wins and the others keep running. Tasks not in \
+                          `ids` are ignored (their events stay pending). On timeout it returns \
+                          `still_running`. A timeout never cancels a task."
+                    .into(),
+            input_schema: wait_any_schema(),
             concurrency: ToolConcurrency::Shared,
         },
         ToolSpec {
@@ -293,24 +307,43 @@ pub fn specs() -> Vec<ToolSpec> {
     ]
 }
 
-/// The `wait_task`/`wait_any` schema. `wait_any` takes no id.
-fn wait_schema(with_id: bool) -> Value {
-    let mut properties = json!({
-        "timeout_ms": {
-            "type": "integer",
-            "minimum": 0,
-            "description": "How long to wait, in milliseconds. Defaults to 600000 (10 minutes)."
-        }
-    });
-    let mut required = Vec::new();
-    if with_id {
-        properties["id"] = json!({ "type": "string" });
-        required.push("id");
-    }
+/// The `wait_task` schema.
+fn wait_task_schema() -> Value {
     json!({
         "type": "object",
-        "properties": properties,
-        "required": required,
+        "properties": {
+            "id": { "type": "string" },
+            "timeout_secs": {
+                "type": "number",
+                "minimum": 0,
+                "description": "How long to wait, in seconds (fractions allowed). Defaults to \
+                                600 (10 minutes)."
+            }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+    })
+}
+
+/// The `wait_any` schema. `ids` is required and non-empty.
+fn wait_any_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ids": {
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1,
+                "description": "The task ids to watch; the first of them to finish or ask wins."
+            },
+            "timeout_secs": {
+                "type": "number",
+                "minimum": 0,
+                "description": "How long to wait, in seconds (fractions allowed). Defaults to \
+                                600 (10 minutes)."
+            }
+        },
+        "required": ["ids"],
         "additionalProperties": false
     })
 }
@@ -402,13 +435,14 @@ struct SpawnArgs {
 #[serde(deny_unknown_fields)]
 struct WaitArgs {
     id: String,
-    timeout_ms: Option<u64>,
+    timeout_secs: Option<f64>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WaitAnyArgs {
-    timeout_ms: Option<u64>,
+    ids: Vec<String>,
+    timeout_secs: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -524,8 +558,9 @@ impl LeadSession {
             .registry
             .get(&args.id)
             .ok_or_else(|| fail("no_such_task", format!("no task `{}`", args.id)))?;
-        let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS);
+        let timeout = wait_timeout(args.timeout_secs)?;
+        let deadline = Instant::now() + timeout;
         // Subscribe before the first check: an event raised between the check and the wait is
         // never lost (the watch version advanced after the receiver captured it).
         let mut pending = self.registry.pending().subscribe();
@@ -543,7 +578,7 @@ impl LeadSession {
                     return Err(fail("cancelled", "the wait was cancelled"));
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    return Ok(still_running(&args.id, timeout_ms));
+                    return Ok(still_running(&args.id, timeout_secs));
                 }
                 _ = pending.changed() => {}
                 _ = turns.changed() => {}
@@ -557,21 +592,32 @@ impl LeadSession {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
         let args: WaitAnyArgs = parse(call)?;
-        let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        let records: Vec<Arc<TaskRecord>> = self
-            .registry
-            .ids()
-            .iter()
-            .filter_map(|id| self.registry.get(id))
-            .collect();
+        if args.ids.is_empty() {
+            return Err(invalid("`ids` must not be empty"));
+        }
+        let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS);
+        let timeout = wait_timeout(args.timeout_secs)?;
+        let deadline = Instant::now() + timeout;
+        // Every id must exist before the wait starts (ADR 0030 O4): an unknown id is a failure,
+        // not a silent skip. Duplicates are fine; the watch set is deduped.
+        let mut records: Vec<Arc<TaskRecord>> = Vec::new();
+        for id in &args.ids {
+            let record = self
+                .registry
+                .get(id)
+                .ok_or_else(|| fail("no_such_task", format!("no task `{id}`")))?;
+            if !records.iter().any(|known| known.id == *id) {
+                records.push(record);
+            }
+        }
         let mut pending = self.registry.pending().subscribe();
         let mut turns: Vec<watch::Receiver<u64>> = records
             .iter()
             .map(|record| record.subscribe_turns())
             .collect();
         loop {
-            if let Some(view) = self.registry.pending_next() {
+            // Only the `ids` set: a question another task raised stays pending for a later wait.
+            if let Some(view) = self.registry.pending_next_in(&args.ids) {
                 return Ok(event_output(&view));
             }
             if let Some(record) = records
@@ -586,7 +632,7 @@ impl LeadSession {
                     return Err(fail("cancelled", "the wait was cancelled"));
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    return Ok(any_still_running(timeout_ms));
+                    return Ok(any_still_running(timeout_secs));
                 }
                 _ = pending.changed() => {}
                 _ = wait_any_turn(&mut turns) => {}
@@ -954,28 +1000,28 @@ fn event_output(view: &TaskPendingView) -> ToolOutput {
 }
 
 /// A `wait_task` timeout: the task is untouched and still running.
-fn still_running(task: &str, timeout_ms: u64) -> ToolOutput {
+fn still_running(task: &str, timeout_secs: f64) -> ToolOutput {
     ToolOutput {
         content: vec![agent_core::ContentPart::text(format!(
-            "task `{task}` is still running (waited {timeout_ms} ms)"
+            "task `{task}` is still running (waited {timeout_secs} s)"
         ))],
         structured: Some(json!({
             "task": task,
             "event": "still_running",
-            "timeout_ms": timeout_ms,
+            "timeout_secs": timeout_secs,
         })),
     }
 }
 
-/// A `wait_any` timeout: no task finished or asked within the wait.
-fn any_still_running(timeout_ms: u64) -> ToolOutput {
+/// A `wait_any` timeout: no task in `ids` finished or asked within the wait.
+fn any_still_running(timeout_secs: f64) -> ToolOutput {
     ToolOutput {
         content: vec![agent_core::ContentPart::text(format!(
-            "no task finished or asked (waited {timeout_ms} ms)"
+            "no task finished or asked (waited {timeout_secs} s)"
         ))],
         structured: Some(json!({
             "event": "still_running",
-            "timeout_ms": timeout_ms,
+            "timeout_secs": timeout_secs,
         })),
     }
 }

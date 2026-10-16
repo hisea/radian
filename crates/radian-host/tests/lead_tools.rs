@@ -398,7 +398,7 @@ async fn wait_task_returns_a_question_then_the_finish() {
     let output = run_tool(
         &session,
         "wait_task",
-        json!({"id": "t1", "timeout_ms": 20000}),
+        json!({"id": "t1", "timeout_secs": 20}),
     )
     .await
     .expect("wait");
@@ -419,7 +419,7 @@ async fn wait_task_returns_a_question_then_the_finish() {
     let output = run_tool(
         &session,
         "wait_task",
-        json!({"id": "t1", "timeout_ms": 20000}),
+        json!({"id": "t1", "timeout_secs": 20}),
     )
     .await
     .expect("wait");
@@ -446,12 +446,16 @@ async fn a_timeout_returns_still_running_and_keeps_the_task() {
         .spawn(SpawnRequest::new("t1"))
         .await
         .expect("spawn");
-    let output = run_tool(&session, "wait_task", json!({"id": "t1", "timeout_ms": 20}))
-        .await
-        .expect("wait");
+    let output = run_tool(
+        &session,
+        "wait_task",
+        json!({"id": "t1", "timeout_secs": 0.02}),
+    )
+    .await
+    .expect("wait");
     let value = structured(&output);
     assert_eq!(value["event"], "still_running", "{value}");
-    assert_eq!(value["timeout_ms"], 20);
+    assert_eq!(value["timeout_secs"], 0.02);
     let record = fixture.registry.get("t1").expect("the task is untouched");
     assert!(!record.running(), "the timeout must not leave it running");
     assert!(record.last_outcome().is_none(), "no turn ended");
@@ -468,6 +472,122 @@ async fn a_timeout_returns_still_running_and_keeps_the_task() {
         .expect("the task's inbox still works");
     wait_requests(&server, 1).await;
     fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// A negative (or otherwise unrepresentable) `timeout_secs` is a bad-arguments failure, on both
+/// waits.
+#[tokio::test]
+async fn a_bad_timeout_is_refused() {
+    let fixture = Fixture::new("bad-timeout", "http://127.0.0.1:1/v1");
+    let session = fixture.lead_session().await;
+    fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    for arguments in [
+        json!({"id": "t1", "timeout_secs": -1.0}),
+        json!({"id": "t1", "timeout_secs": 1e300}),
+    ] {
+        let error = run_tool(&session, "wait_task", arguments)
+            .await
+            .expect_err("a bad timeout must be refused");
+        assert_eq!(error.code, "invalid_arguments", "{error:?}");
+    }
+    let error = run_tool(
+        &session,
+        "wait_any",
+        json!({"ids": ["t1"], "timeout_secs": -1.0}),
+    )
+    .await
+    .expect_err("a bad timeout must be refused");
+    assert_eq!(error.code, "invalid_arguments", "{error:?}");
+    fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// `wait_any` requires a non-empty `ids` and every id must exist before it waits.
+#[tokio::test]
+async fn wait_any_requires_a_known_non_empty_id_set() {
+    let fixture = Fixture::new("any-ids", "http://127.0.0.1:1/v1");
+    let session = fixture.lead_session().await;
+    fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let error = run_tool(&session, "wait_any", json!({"ids": []}))
+        .await
+        .expect_err("an empty id set must be refused");
+    assert_eq!(error.code, "invalid_arguments", "{error:?}");
+    let error = run_tool(&session, "wait_any", json!({"ids": ["t1", "ghost"]}))
+        .await
+        .expect_err("an unknown id must be refused before waiting");
+    assert_eq!(error.code, "no_such_task", "{error:?}");
+    fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// `wait_any` watches only its `ids`: a question from a task outside the set stays pending.
+#[tokio::test]
+async fn wait_any_ignores_a_task_not_in_ids() {
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_q",
+            "ask_user",
+            r#"{"questions":[{"id":"q1","prompt":"Go?","kind":"text"}]}"#,
+        ),
+        text_reply("done"),
+    ])
+    .await;
+    let fixture = Fixture::new("any-filter", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let session = fixture.lead_session().await;
+    // t1 never runs (no brief); t2 asks.
+    fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let mut request = SpawnRequest::new("t2");
+    request.brief = Some("do it".into());
+    fixture.registry.spawn(request).await.expect("spawn");
+    // Wait until t2's question is pending (peek does not take it).
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while fixture.registry.pending().peek().is_none() {
+        assert!(std::time::Instant::now() < deadline, "t2 never asked");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // t1 only: t2's question is not an event for this wait, so it times out and stays pending.
+    let output = run_tool(
+        &session,
+        "wait_any",
+        json!({"ids": ["t1"], "timeout_secs": 0.2}),
+    )
+    .await
+    .expect("wait");
+    assert_eq!(structured(&output)["event"], "still_running");
+    let pending = fixture
+        .registry
+        .pending()
+        .peek()
+        .expect("t2's question is still pending");
+    assert_eq!(pending.task_id, "t2");
+
+    // The later wait that names t2 takes it.
+    let output = run_tool(
+        &session,
+        "wait_any",
+        json!({"ids": ["t2"], "timeout_secs": 20}),
+    )
+    .await
+    .expect("wait");
+    let value = structured(&output);
+    assert_eq!(value["event"], "question", "{value}");
+    assert_eq!(value["task"], "t2");
+    fixture.registry.remove("t1", true).await.ok();
+    fixture.registry.remove("t2", true).await.ok();
 }
 
 /// `wait_any` returns a task that asks and leaves the other untouched.
@@ -496,9 +616,13 @@ async fn wait_any_returns_a_question_and_leaves_the_others() {
         .await
         .expect("spawn");
 
-    let output = run_tool(&session, "wait_any", json!({"timeout_ms": 20000}))
-        .await
-        .expect("wait");
+    let output = run_tool(
+        &session,
+        "wait_any",
+        json!({"ids": ["t1", "t2"], "timeout_secs": 20}),
+    )
+    .await
+    .expect("wait");
     let value = structured(&output);
     assert_eq!(value["event"], "question", "{value}");
     assert_eq!(value["task"], "t1");
@@ -528,9 +652,13 @@ async fn wait_any_returns_the_first_finisher() {
     request.brief = Some("do it".into());
     fixture.registry.spawn(request).await.expect("spawn");
 
-    let output = run_tool(&session, "wait_any", json!({"timeout_ms": 20000}))
-        .await
-        .expect("wait");
+    let output = run_tool(
+        &session,
+        "wait_any",
+        json!({"ids": ["t1"], "timeout_secs": 20}),
+    )
+    .await
+    .expect("wait");
     let value = structured(&output);
     assert_eq!(value["event"], "finished", "{value}");
     assert_eq!(value["task"], "t1");
@@ -555,7 +683,7 @@ async fn a_long_summary_is_cut_and_says_so() {
     let output = run_tool(
         &session,
         "wait_task",
-        json!({"id": "t1", "timeout_ms": 20000}),
+        json!({"id": "t1", "timeout_secs": 20}),
     )
     .await
     .expect("wait");
@@ -714,7 +842,7 @@ async fn a_lead_turn_stays_user_and_a_task_turn_is_subagent() {
                 "spawn_task",
                 r#"{"id":"t1","brief":"do it","isolation":"shared"}"#,
             ),
-            ("call_2", "wait_any", r#"{"timeout_ms":20000}"#),
+            ("call_2", "wait_any", r#"{"ids":["t1"],"timeout_secs":20}"#),
         ]),
         text_reply("task done"),
         tool_reply("call_3", "shell", r#"{"command":"echo hi"}"#),

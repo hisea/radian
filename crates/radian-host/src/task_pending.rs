@@ -246,24 +246,32 @@ impl TaskPendingQueue {
     /// (ADR 0030). Returns `None` when nothing is waiting. Entries whose
     /// waiting end is gone are dropped first, so a cancelled task's event never blocks the lead.
     pub fn next(&self) -> Option<TaskPendingView> {
-        self.take(None)
+        self.take_where(|_| true)
     }
 
     /// [`TaskPendingQueue::next`] restricted to one task (ADR 0030 slice 6's `wait_task { id }`):
     /// the first event that task raised, untouched by another task's earlier event.
     pub fn next_for(&self, task_id: &str) -> Option<TaskPendingView> {
-        self.take(Some(task_id))
+        self.take_where(|task| task == task_id)
     }
 
-    /// The shared body of [`TaskPendingQueue::next`]/[`TaskPendingQueue::next_for`].
-    fn take(&self, task_id: Option<&str>) -> Option<TaskPendingView> {
+    /// [`TaskPendingQueue::next`] restricted to a set of tasks (ADR 0030 slice 6's
+    /// `wait_any { ids }`): the first event raised by any of them, **in arrival order**. An event
+    /// from a task outside the set is left pending for a later wait.
+    pub fn next_in(&self, task_ids: &[String]) -> Option<TaskPendingView> {
+        self.take_where(|task| task_ids.iter().any(|id| id == task))
+    }
+
+    /// The shared body of the `next*` methods: the first not-yet-taken entry the predicate
+    /// accepts, taken and with its R9 timeout started.
+    fn take_where(&self, matches: impl Fn(&str) -> bool) -> Option<TaskPendingView> {
         let view = {
             let mut state = self.lock();
             retain_open(&mut state);
             let position = state
                 .entries
                 .iter()
-                .position(|entry| !entry.taken && task_id.is_none_or(|id| entry.task_id == id))?;
+                .position(|entry| !entry.taken && matches(&entry.task_id))?;
             let entry = &mut state.entries[position];
             entry.taken = true;
             TaskPendingView {
