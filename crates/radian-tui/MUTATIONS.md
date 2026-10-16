@@ -1893,3 +1893,25 @@ of the table); FM-1's one-line-fold mutant also trips the cancelled-call head, w
 suite missed: `a_small_tool_is_one_line_until_it_is_expanded` uses a **one-line** `read`, so the
 old `hidden > 1` clause was never exercised — the new test uses a 100-line result to pin it.
 Files restored with `cp` + `cmp` after the run.
+
+## multiline-cmd: a multi-line command folds with its block (ADR 0035's 2026-10-16 note, option A)
+
+Base `d151bd7` (the code and its tests; this record follows). In-place mutations: the source
+backed up under `.radian/scratch/mut/`, the patched file restored with a plain `cp` and `cmp`ed
+byte-for-byte (`git status --short` empty after each one). Each mutation ran
+`timeout 600 cargo test -p radian-tui --locked --test card --no-fail-fast <test>`.
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| ML-1 | the fold marker is on the first head row only | `blocks.rs::styled_head_rows` / `styled_body_rows`: the command's continuation rows become `Frame::Head`, so `render_head_row` draws the marker on each | `card::a_multiline_command_folds_with_its_block` (the expanded rows read `◻ print(1)`, not `│ print(1)`) | ✅ (1 FAILED) |
+| ML-2 | a folded block hides the command's other lines | `blocks.rs::call_body_expanded` returns `true` unconditionally, so `collapsed` draws the 39 lines too | `card::a_multiline_command_folds_with_its_block` (the folded head gains 39 `│ ` rows) | ✅ (1 FAILED) |
+| ML-3 | the meta stays on the first row | `head_rows` passes no tail to `styled_head_rows` and appends it to the last row instead | `card::a_multiline_command_folds_with_its_block` (the meta lands on `│ PY · exit 0 ✓`, the head row loses it) | ✅ (1 FAILED) |
+| ML-4 | N counts the command's remaining lines, never the output's | `head_rows` passes `card.result_lines` to `head_tail` instead of `last` | `card::a_multiline_command_folds_with_its_block` (the note reads `… (+2 lines)` for a 40-line command) | ✅ (1 FAILED) |
+| ML-5 | a result row's selection offsets are the entry's own | `blocks.rs::body_plan_lines`: the lift by `source.start` removed (the pre-existing relative-offset bug) | `card::a_copy_of_a_multiline_command_has_no_marker_rail_or_note` (the copy loses the output's second line) | ✅ (1 FAILED) |
+
+5/5 caught, no misses and no equivalent mutants. ML-1..ML-4 are the four behaviours the task
+names, each pinned by the one three-state test; ML-5 is the pre-existing offset bug the copy
+requirement depends on, pinned by the copy test (the same mutation leaves
+`a_copy_of_a_block_has_no_marker_meta_or_status` green, because its single-line result starts at
+offset 0).
+

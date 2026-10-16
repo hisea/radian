@@ -839,7 +839,7 @@ fn heredoc_app(fold: ToolFold, result: Option<&str>) -> App {
 fn a_multiline_command_folds_with_its_block() {
     // Folded (`collapsed`): the head only, the note and the result's hidden count.
     let mut app = heredoc_app(ToolFold::Collapsed, Some("one\ntwo"));
-    let lines = rows(&render(&mut app, 80, 20), 80, 20);
+    let lines = rows(&render(&mut app, 80, 50), 80, 50);
     let block = block_rows(&lines);
     assert_eq!(
         block,
@@ -849,7 +849,7 @@ fn a_multiline_command_folds_with_its_block() {
 
     // Preview (`errors`): the head with the note, then the output's preview rows only.
     let mut app = heredoc_app(ToolFold::Errors, Some("one\ntwo"));
-    let lines = rows(&render(&mut app, 80, 20), 80, 20);
+    let lines = rows(&render(&mut app, 80, 50), 80, 50);
     let block = block_rows(&lines);
     assert_eq!(
         block,
