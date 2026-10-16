@@ -15,7 +15,8 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 fn notices(app: &App) -> Vec<String> {
-    app.entries
+    app.session
+        .entries
         .iter()
         .filter(|entry| entry.kind == radian_tui::EntryKind::Notice)
         .map(|entry| entry.text.clone())
@@ -154,8 +155,8 @@ fn an_applied_switch_updates_the_footer_and_the_shell_flag() {
         result: Ok(()),
     });
     assert!(result.effects.is_empty());
-    assert_eq!(app.projection.read().tier(), Some("safe (session)"));
-    assert!(!app.bash_available, "safe has no shell");
+    assert_eq!(app.session.projection.read().tier(), Some("safe (session)"));
+    assert!(!app.session.bash_available, "safe has no shell");
     // ADR 0036: the tool list (and the shell description) is fixed when
     // the session opens, so the switch says so instead of leaving the text stale.
     assert!(
@@ -172,8 +173,8 @@ fn an_applied_switch_updates_the_footer_and_the_shell_flag() {
         result: Ok(()),
     });
     assert!(result.effects.is_empty());
-    assert_eq!(app.projection.read().tier(), Some("full (project)"));
-    assert!(app.bash_available, "full has a shell");
+    assert_eq!(app.session.projection.read().tier(), Some("full (project)"));
+    assert!(app.session.bash_available, "full has a shell");
 }
 
 /// A refused switch (a failed sandbox probe) is a notice, and the footer is untouched.
@@ -188,8 +189,8 @@ fn a_refused_switch_is_a_notice_and_changes_nothing() {
         result: Err("the sandbox backend is unavailable".into()),
     });
     assert!(result.effects.is_empty());
-    assert_eq!(app.projection.read().tier(), Some("workspace"));
-    assert!(app.bash_available);
+    assert_eq!(app.session.projection.read().tier(), Some("workspace"));
+    assert!(app.session.bash_available);
     assert!(
         notices(&app)
             .iter()

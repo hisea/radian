@@ -166,6 +166,11 @@ pub fn wrap_line_count(text: &str, width: usize) -> usize {
             }
             let ch_width = if ch == '\t' {
                 4
+            } else if ch.is_ascii() {
+                // `UnicodeWidthChar::width` is a table lookup; ASCII is by far the common case
+                // (the first frame counts ~40 MiB of tool output). Printable ASCII is 1, the
+                // other ASCII (control) is 0, exactly as `width` reports.
+                usize::from((0x20..0x7f).contains(&(ch as u8)))
             } else {
                 ch.width().unwrap_or(0)
             };
@@ -304,19 +309,45 @@ fn pad_glyph(pad: blocks::Pad) -> &'static str {
     }
 }
 
-/// One half-cell padding row of a banded block (ADR 0035): `glyph` repeated across
-/// `width` cells, in the band's color as the foreground and with no background of its own (the
-/// band's background is painted on the block's text rows, which this row sits half a cell
-/// against). Shared by a user block's pad rows and the `bar` input's.
-fn band_pad_line(glyph: &str, width: usize, band: Style) -> Line<'static> {
+/// The style a band's half-cell pad cell takes (ADR 0035): the band's own color as
+/// the foreground and no background of its own — the band's background is painted on the block's
+/// text rows, which these rows sit half a cell against. Under `mono` both are absent, so the half
+/// cell is the terminal default — still a visible block, just uncolored.
+fn band_pad_style(band: Style) -> Style {
     let mut style = Style::default().add_modifier(band.add_modifier);
-    // The band's own color: the background it would paint, else its foreground (`mono`, a theme
-    // with no user background). Under `mono` both are absent, so the half cell is the terminal
-    // default — still a visible block, just uncolored.
     if let Some(color) = band.bg.or(band.fg) {
         style = style.fg(color);
     }
-    Line::from(Span::styled(glyph.repeat(width), style))
+    style
+}
+
+/// One half-cell padding row of a banded block (ADR 0035): `glyph` repeated across
+/// `width` cells, in the band's color as the foreground and with no background of its own (the
+/// band's background is painted on the block's text rows, which this row sits half a cell
+/// against). A user block's pad row; the `bar` input's one carries the rail in front of it
+/// (ADR 0035, [`bar_pad_line`]).
+fn band_pad_line(glyph: &str, width: usize, band: Style) -> Line<'static> {
+    Line::from(Span::styled(glyph.repeat(width), band_pad_style(band)))
+}
+
+/// The `bar` input's half-cell padding row (ADR 0035): the rail's own cell first —
+/// `rail` is `▖` (quadrant lower left) on the row above the band, `▘` (quadrant upper left) on
+/// the row below it, both in the accent — then the band's half cell (`glyph`) across the rest.
+/// The quadrant is what lets the rail stop at the half cell: the cell keeps the terminal's own
+/// background (its right half carries no band on a pad row, which is the cost of the shape), so
+/// the rail reads as two cells tall with a straight right edge next to the `▌` text rows.
+fn bar_pad_line(
+    rail: &str,
+    rail_style: Style,
+    glyph: &str,
+    width: usize,
+    band: Style,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(rail.to_string(), rail_style)];
+    if width > 1 {
+        spans.push(Span::styled(glyph.repeat(width - 1), band_pad_style(band)));
+    }
+    Line::from(spans)
 }
 
 /// The text a frame shows for `entry`. A user message's `@` attachments are folded to one
@@ -944,15 +975,17 @@ pub fn logout_panel(
         .lines(width, theme, glyphs)
 }
 
-/// The `bar` style's left rail (ADR 0035 V3): the accent vertical bar on every input row
-/// (omp's `ACCENT_RAIL`). The `ascii` glyph set uses `|` (ADR 0027's rule: the
-/// unicode glyphs are only used when the font set has them).
-const BAR_RAIL: &str = "▎";
+/// The `bar` style's left rail (ADR 0035 V3, revision 4): the accent vertical bar on every input
+/// row (omp's `ACCENT_RAIL`). Revision 4 made it `▌` (the left **half** block): the rail is half
+/// a cell wide, so it can be continued into the band's half-cell pad rows as half-cell-wide
+/// quadrants ([`bar_pad_line`]) and read as two cells tall. The `ascii` glyph set uses `|`
+/// (ADR 0027's rule: the unicode glyphs are only used when the font set has them).
+const BAR_RAIL: &str = "▌";
 /// The `bar` rail in the `ascii` glyph set.
 const BAR_RAIL_ASCII: &str = "|";
 /// The cells before the `bar` style's text: the rail plus one cell of padding (omp's rail
-/// `defaultPaddingX = 1`). The status row's spinner starts at the same column — the text
-/// column (ADR 0035, 正文列起) — so the two read as one block.
+/// `defaultPaddingX = 1`), which is also where the status row's spinner starts (ADR 0035
+/// revision 4: the dot sits in the rail's column, the state text at this text column).
 const BAR_LEAD: usize = 2;
 
 /// The input area's height: the text rows plus the style's chrome — two rule/border rows for
@@ -1016,28 +1049,29 @@ fn bar_rail(app: &App) -> &'static str {
 }
 
 /// The status row a `bar` input carries **above** its band (ADR 0035 V3 / decision 1):
-/// `<spinner>  Working · 12s · esc to interrupt` while a turn runs, and a blank row — which
+/// `<spinner> Working · 12s · esc to interrupt` while a turn runs, and a blank row — which
 /// still occupies its line — when idle, so the band and the transcript never move when a turn
 /// starts or ends.
 ///
 /// The spinner and the state word are the ones the `lines`/`box` rule line shows (ADR 0027
-/// revision 2, `App::spinner_status`), with ADR 0027's two spaces after the
-/// spinner; the spinner takes the accent and the rest is one level weaker. The clock is the
-/// footer's `elapsed` (`TurnTimer`: the running generation, else the last one), written in
-/// whole seconds as the ADR's `12s`; `esc to interrupt` is shown exactly while a turn runs,
-/// because that is when Esc cancels it.
+/// revision 2, `App::spinner_status`). Since ADR 0035 the dot sits in the **rail's**
+/// column (0) rather than at the text column, so it is on the same vertical line as the rail;
+/// the state text starts at the text column (`BAR_LEAD`) with one cell between the two.
+/// The spinner takes the accent and the rest is one level weaker. The clock is the footer's
+/// `elapsed` (`TurnTimer`: the running generation, else the last one), written in whole seconds
+/// as the ADR's `12s`; `esc to interrupt` is shown exactly while a turn runs, because that is
+/// when Esc cancels it.
 pub fn bar_status_line(app: &App) -> Line<'static> {
     let Some(status) = app.spinner_status() else {
         return Line::from("");
     };
     let spin = app.spinner_frame();
     let mut spans = vec![
-        Span::styled(" ".repeat(BAR_LEAD), app.theme.hint),
         Span::styled(spin.glyph, app.spinner_style(spin)),
-        Span::styled("  ", app.theme.hint),
+        Span::styled(" ".repeat(BAR_LEAD - 1), app.theme.hint),
         Span::styled(status.to_string(), app.theme.hint),
     ];
-    if let Some(elapsed) = app.timer.elapsed(app.now) {
+    if let Some(elapsed) = app.session.timer.elapsed(app.now) {
         spans.push(Span::styled(
             format!(" · {}", crate::timing::format_seconds(elapsed)),
             app.theme.hint,
@@ -1249,13 +1283,13 @@ struct Segment {
 fn status_segments(app: &App) -> Vec<Segment> {
     // A queued `/model` switch (ADR 0026 D5) or `/thinking` level (D11): visible until the
     // driver applies it.
-    if let Some(next) = &app.next_model {
+    if let Some(next) = &app.session.next_model {
         return vec![Segment {
             text: format!("next: {next}"),
             style: app.theme.turn_running,
         }];
     }
-    if let Some(next) = &app.next_thinking {
+    if let Some(next) = &app.session.next_thinking {
         return vec![Segment {
             text: format!("next: thinking {next}"),
             style: app.theme.turn_running,
@@ -1263,21 +1297,21 @@ fn status_segments(app: &App) -> Vec<Segment> {
     }
     // The session facts come from the projection, not from `App` (ADR 0023 U5). One read, so
     // the whole status bar is one instant.
-    let session = app.projection.read();
+    let session = app.session.projection.read();
     let turn = session.turn();
     let turn_style = match turn {
         TurnState::Idle => app.theme.turn_idle,
         TurnState::Running => app.theme.turn_running,
         TurnState::Cancelled => app.theme.turn_cancelled,
     };
-    let position = if app.max_scroll == 0 {
+    let position = if app.session.max_scroll == 0 {
         "all".to_string()
     } else {
-        format!("{}/{}", app.scroll, app.max_scroll)
+        format!("{}/{}", app.session.scroll, app.session.max_scroll)
     };
     let mut segments = vec![
         Segment {
-            text: format!(" {} ", app.model_name),
+            text: format!(" {} ", app.session.model_name),
             style: app.theme.model,
         },
         Segment {
@@ -1308,7 +1342,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
     }
     // ADR 0026 D9: while auto is on the status bar says so, prominently — the session is
     // approving tool calls without asking.
-    if app.auto {
+    if app.session.auto {
         segments.push(Segment {
             text: "AUTO".to_string(),
             style: app.theme.auto,
@@ -1325,7 +1359,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
     // The transient note ("tool … running", "copied N chars (via OSC 52)", a compaction
     // failure) sits ahead of the long tails: a narrow terminal drops the *rightmost*
     // segments, and a note the user just caused must survive that, not be the first to go.
-    if let Some(note) = &app.note {
+    if let Some(note) = &app.session.note {
         segments.push(Segment {
             text: note.clone(),
             style: app.theme.note,
@@ -1353,7 +1387,11 @@ fn status_segments(app: &App) -> Vec<Segment> {
     segments.push(Segment {
         text: format!(
             "scroll {position} {}",
-            if app.follow { "follow" } else { "paused" }
+            if app.session.follow {
+                "follow"
+            } else {
+                "paused"
+            }
         ),
         style: Style::default(),
     });
@@ -1430,6 +1468,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let budget = (area.height as usize).saturating_sub(6);
             question_height(
                 form,
+                &app.session.session_id,
                 area.width as usize,
                 budget,
                 &app.theme,
@@ -1504,15 +1543,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The live spinner frame (ADR 0027): computed once per frame from the loop's
     // clock, so a live reasoning line and the input rule animate.
     let spinner = app.spinner_frame();
-    let (total, _) = visible_lines_with(&mut app.entries, modes, width, 0, 0, &theme, spinner);
+    let (total, _) = visible_lines_with(
+        &mut app.session.entries,
+        modes,
+        width,
+        0,
+        0,
+        &theme,
+        spinner,
+    );
     radian_session::trace::took("draw/measure", t_draw);
     app.set_viewport(chunks[0].height, total);
     let t_window = std::time::Instant::now();
     let (_, visible) = visible_lines_with(
-        &mut app.entries,
+        &mut app.session.entries,
         modes,
         width,
-        app.scroll,
+        app.session.scroll,
         height,
         &theme,
         spinner,
@@ -1528,13 +1575,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // A live transcript selection: the visible rows' selected display columns, styled with
     // the theme's `selection` role. `highlight_rows` derives from the same wrap the lines
     // above were rendered from, so the band lands exactly on the copied text.
-    let visible = match app.selection.filter(|sel| !sel.is_empty()) {
+    let visible = match app.session.selection.filter(|sel| !sel.is_empty()) {
         Some(selection) => {
             let ranges = crate::select::highlight_rows(
-                &app.entries,
+                &app.session.entries,
                 modes,
                 width,
-                app.scroll,
+                app.session.scroll,
                 visible.len(),
                 &selection,
             );
@@ -1618,6 +1665,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let budget = (area.height as usize).saturating_sub(6);
             let lines = question_panel(
                 form,
+                &app.session.session_id,
                 input_area.width as usize,
                 budget,
                 &app.theme,
@@ -1791,11 +1839,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     let text_style = band.patch(style);
                     let area_width = input_area.width as usize;
                     let mut body: Vec<Line> = vec![bar_status_line(app)];
-                    // The band's half-cell pads (ADR 0035): half a row of the band
-                    // above (`▄`) and below (`▀`) the text rows, so the band reads as extending
-                    // half a cell beyond its text. The `ascii` tier has none.
+                    // The band's half-cell pads (ADR 0035/4): half a row of the band
+                    // above and below the text rows, so the band reads as extending half a cell
+                    // beyond its text, with the rail continued into them as `▖`/`▘` so it is as
+                    // tall as the band. The `ascii` tier has none.
                     if bar_pad_rows(app) == 2 {
-                        body.push(band_pad_line("▄", area_width, band));
+                        body.push(bar_pad_line(
+                            "▖",
+                            app.theme.notice_label,
+                            "▄",
+                            area_width,
+                            band,
+                        ));
                     }
                     let text_rows: Vec<String> = if empty {
                         vec![INPUT_HINT.to_string()]
@@ -1819,7 +1874,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         body.push(Line::from(spans));
                     }
                     if bar_pad_rows(app) == 2 {
-                        body.push(band_pad_line("▀", area_width, band));
+                        body.push(bar_pad_line(
+                            "▘",
+                            app.theme.notice_label,
+                            "▀",
+                            area_width,
+                            band,
+                        ));
                     }
                     frame.render_widget(Paragraph::new(body), input_area);
                 }
@@ -1885,13 +1946,13 @@ fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
 /// The chrome segments that survive any footer layout, as one line (empty when none is on).
 fn chrome_line(app: &App, width: usize) -> Option<Line<'static>> {
     let mut segments = Vec::new();
-    if let Some(next) = &app.next_model {
+    if let Some(next) = &app.session.next_model {
         segments.push(Segment {
             text: format!("next: {next}"),
             style: app.theme.turn_running,
         });
     }
-    if let Some(next) = &app.next_thinking {
+    if let Some(next) = &app.session.next_thinking {
         segments.push(Segment {
             text: format!("next: thinking {next}"),
             style: app.theme.turn_running,
@@ -1909,13 +1970,13 @@ fn chrome_line(app: &App, width: usize) -> Option<Line<'static>> {
             style: app.theme.note,
         });
     }
-    if app.auto {
+    if app.session.auto {
         segments.push(Segment {
             text: "AUTO".to_string(),
             style: app.theme.auto,
         });
     }
-    if let Some(note) = &app.note {
+    if let Some(note) = &app.session.note {
         segments.push(Segment {
             text: note.clone(),
             style: app.theme.note,
@@ -1935,12 +1996,13 @@ pub const QUESTION_KEYS: &str = "Tab next · Space select · Enter next/submit �
 /// The height the question form's box needs: its content plus the key line, bounded.
 fn question_height(
     form: &QuestionForm,
+    own_session: &str,
     width: usize,
     max_rows: usize,
     theme: &Theme,
     glyphs: crate::footer::Glyphs,
 ) -> u16 {
-    let rows = question_panel(form, width, max_rows, theme, glyphs).len();
+    let rows = question_panel(form, own_session, width, max_rows, theme, glyphs).len();
     (rows as u16).clamp(5, MAX_QUESTION_ROWS)
 }
 
@@ -1949,6 +2011,7 @@ fn question_height(
 /// key hints in the bottom border. Pure, so the layout is testable without a terminal.
 pub fn question_panel(
     form: &QuestionForm,
+    own_session: &str,
     width: usize,
     max_rows: usize,
     theme: &Theme,
@@ -1973,7 +2036,11 @@ pub fn question_panel(
         ])];
     }
     let inner = width.saturating_sub(4).max(1);
-    let title = if form.origin.is_empty() {
+    // ADR 0024 rule 4: `Ask` alone when the asker is this process's own session
+    // (the ordinary single-session TUI); the origin only distinguishes several sessions. A
+    // TUI process has one session today (ADR 0030 slice 0), so origin == own session is the
+    // clean test.
+    let title = if form.origin.is_empty() || form.origin == own_session {
         "Ask".to_string()
     } else {
         format!("Ask · {}", form.origin)
@@ -2145,31 +2212,33 @@ fn option_line(
     let option = &question.options[row];
     let cursor = if row == answer.cursor { "❯ " } else { "  " };
     let chosen = answer.selected.contains(&option.id);
-    let mark = match (question.kind, chosen, glyphs) {
-        (radian_coding::QuestionKind::Multi, true, crate::footer::Glyphs::Ascii) => "[x]",
-        (radian_coding::QuestionKind::Multi, false, crate::footer::Glyphs::Ascii) => "[ ]",
-        (radian_coding::QuestionKind::Multi, true, _) => "☑",
-        (radian_coding::QuestionKind::Multi, false, _) => "☐",
-        (_, true, crate::footer::Glyphs::Ascii) => "(*)",
-        (_, false, crate::footer::Glyphs::Ascii) => "( )",
-        (_, true, _) => "◉",
-        (_, false, _) => "○",
+    // ADR 0024 implementation note: one marker source (`AskGlyphs`), the same
+    // checkbox pair for single and multi.
+    let g = blocks::AskGlyphs::for_glyphs(glyphs);
+    let mark = match (question.kind, chosen) {
+        (radian_coding::QuestionKind::Multi, true) => g.multi_on,
+        (radian_coding::QuestionKind::Multi, false) => g.multi_off,
+        (_, true) => g.single_on,
+        (_, false) => g.single_off,
     };
     let recommended = if option.recommended {
         " (Recommended)"
     } else {
         ""
     };
+    // The cursor and the marker are drawn in their own spans and are never bold: the font's
+    // bold face can lack the glyph and fall back to a different size (the owner's report). The
+    // marker keeps its label's role (the chosen accent / the weak body), just not the weight.
+    let label_style = if chosen {
+        theme.notice_label
+    } else {
+        theme.notice_body
+    };
+    let marker_style = label_style.remove_modifier(Modifier::BOLD);
     Line::from(vec![
-        Span::styled(cursor, theme.notice_label),
-        Span::styled(
-            format!("{mark} {}{recommended}", option.label),
-            if chosen {
-                theme.notice_label
-            } else {
-                theme.notice_body
-            },
-        ),
+        Span::styled(cursor, theme.notice_label.remove_modifier(Modifier::BOLD)),
+        Span::styled(mark, marker_style),
+        Span::styled(format!(" {}{recommended}", option.label), label_style),
     ])
 }
 
@@ -2185,20 +2254,24 @@ fn other_line(
     } else {
         "  "
     };
-    let mark = match (answer.other, glyphs) {
-        (true, crate::footer::Glyphs::Ascii) => "(*)",
-        (false, crate::footer::Glyphs::Ascii) => "( )",
-        (true, _) => "◉",
-        (false, _) => "○",
+    // ADR 0024 implementation note: `Other` uses the **same** checkbox pair as the
+    // options (it used to always draw a circle, even in a multi question), from `AskGlyphs`.
+    let g = blocks::AskGlyphs::for_glyphs(glyphs);
+    let mark = if answer.other {
+        g.single_on
+    } else {
+        g.single_off
     };
     let text = if answer.other && !answer.text.is_empty() {
         format!("Other: {}", answer.text.text())
     } else {
         "Other (type your own)".to_string()
     };
+    // The marker and the cursor are never bold, like `option_line`.
     Line::from(vec![
-        Span::styled(cursor, theme.notice_label),
-        Span::styled(format!("{mark} {text}"), theme.notice_body),
+        Span::styled(cursor, theme.notice_label.remove_modifier(Modifier::BOLD)),
+        Span::styled(mark, theme.notice_body),
+        Span::styled(format!(" {text}"), theme.notice_body),
     ])
 }
 
@@ -2500,7 +2573,13 @@ fn render_frame_row(
                 spans.push(Span::styled(command.to_owned(), patch_band(body, band)));
             } else {
                 spans.extend(body_spans(
-                    entry, row, body, theme, band, first_text, spinner,
+                    entry,
+                    row,
+                    patch_band(body, band),
+                    theme,
+                    band,
+                    first_text,
+                    spinner,
                 ));
             }
             let used = 2 + UnicodeWidthStr::width(row.text.as_str()) + if meta { 2 } else { 0 };

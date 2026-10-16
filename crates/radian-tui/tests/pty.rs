@@ -5651,6 +5651,136 @@ async fn pty_a_visible_spinner_redraws_on_its_interval() {
     );
 }
 
+/// ADR 0027: with truecolor the default pulse **breathes** — the `⏺` takes the 12
+/// colours of one sine period — and the loop wakes at the step (~117 ms), not at revision 10's
+/// 500 ms switch. The wire carries each colour as `38;2;R;G;B` in front of the glyph, so the
+/// colours themselves are checkable, not just the frame count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_pulse_breathes_through_rgb_colours() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(
+        &[],
+        &[("OPENAI_API_KEY", "sk-test"), ("COLORTERM", "truecolor")],
+        &config,
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    let _ = settled_frame_count(&mut pty);
+    // A turn that never finishes keeps the spinner visible.
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("Working", 10),
+        "the input rule must show the running state: {}",
+        pty.screen()
+    );
+    let start = frame_count(&pty);
+    std::thread::sleep(std::time::Duration::from_millis(2200));
+    let after = frame_count(&pty);
+    let breathed = dot_colours(&pty.raw());
+    pty.quit();
+    assert!(
+        after >= start + 10,
+        "the breath must redraw about every 117 ms (a two-colour switch would be 4): {start} -> {after}"
+    );
+    // The breath's 12 samples hold 7 distinct colours (the sine's levels 0, 1, 3, 6, 9, 11, 12),
+    // and one sample is missed whenever a wake lands late, so the exact ends need not appear in a
+    // given window: a two-colour switch would show 2 colours, a rotating frame 1.
+    assert!(
+        breathed.len() >= 6,
+        "the dot must take the breath's colours: {breathed:?}"
+    );
+    let theme = radian_tui::theme::Theme::dark();
+    let rgb = |style: ratatui::style::Style| match style.fg {
+        Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
+        other => panic!("an RGB theme role: {other:?}"),
+    };
+    // Every colour it took is a point on the dim -> accent line (the breath is one interpolation,
+    // not two unrelated colours), and the set reaches both ends of it.
+    let (lowest, highest) = breathed
+        .iter()
+        .map(|colour| {
+            (
+                colour,
+                mix_of(*colour, rgb(theme.truncation), rgb(theme.notice_label)),
+            )
+        })
+        .fold((1.0f64, 0.0f64), |(low, high), (_, t)| {
+            (low.min(t), high.max(t))
+        });
+    assert!(
+        lowest <= 0.15,
+        "the breath must reach the dim end: {breathed:?}"
+    );
+    assert!(highest >= 0.85, "and the accent: {breathed:?}");
+}
+
+/// Where `colour` sits between the dim end and the accent (0 = dim, 1 = accent), asserting that it
+/// is on that line: the channel that moves most fixes the position and every other channel must
+/// land within one rounding step of it.
+fn mix_of(colour: (u8, u8, u8), dim: (u8, u8, u8), accent: (u8, u8, u8)) -> f64 {
+    let colour = [colour.0, colour.1, colour.2];
+    let dim = [dim.0, dim.1, dim.2];
+    let accent = [accent.0, accent.1, accent.2];
+    let spread: [i32; 3] = std::array::from_fn(|i| i32::from(accent[i]) - i32::from(dim[i]));
+    let widest = (0..3usize)
+        .max_by_key(|i| spread[*i].abs())
+        .expect("three channels");
+    let t =
+        f64::from(i32::from(colour[widest]) - i32::from(dim[widest])) / f64::from(spread[widest]);
+    for (i, moved) in spread.iter().enumerate() {
+        let expected = f64::from(dim[i]) + t * f64::from(*moved);
+        assert!(
+            (f64::from(colour[i]) - expected).abs() <= 1.0,
+            "{colour:?} is not on the dim -> accent line (channel {i})"
+        );
+    }
+    t
+}
+
+/// The distinct 24-bit colours written immediately in front of the pulse glyph (`⏺`), in the
+/// order they first appear: the breath as it reached the terminal.
+fn dot_colours(raw: &[u8]) -> Vec<(u8, u8, u8)> {
+    let text = String::from_utf8_lossy(raw);
+    let mut out: Vec<(u8, u8, u8)> = Vec::new();
+    let mut at = 0;
+    while let Some(found) = text[at..].find("38;2;") {
+        let params = at + found + "38;2;".len();
+        at = params;
+        let Some((rgb, tail)) = text[params..].split_once('m') else {
+            break;
+        };
+        if !tail.starts_with('⏺') {
+            continue;
+        }
+        let mut parts = rgb.split(';');
+        let rgb = match (parts.next(), parts.next(), parts.next()) {
+            (Some(r), Some(g), Some(b)) => (r, g, b),
+            _ => continue,
+        };
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            rgb.0.parse::<u8>(),
+            rgb.1.parse::<u8>(),
+            rgb.2.parse::<u8>(),
+        ) && !out.contains(&(r, g, b))
+        {
+            out.push((r, g, b));
+        }
+    }
+    out
+}
+
 /// ADR 0023 U2: a signal is an event, not a poll. The loop is blocked on its channel while the
 /// app is idle; SIGTERM must take the ordinary exit path at once — far inside the signal task's
 /// 3 s watchdog, which is what would fire if the loop still had to poll for the flag.
@@ -7377,7 +7507,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("▎ /memory ", 10),
+        pty.wait_for_screen("▌ /memory ", 10),
         "Tab did not complete the command name:\n{}",
         pty.screen()
     );
@@ -7390,7 +7520,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("▎ /memory forget", 10),
+        pty.wait_for_screen("▌ /memory forget", 10),
         "Tab did not complete the subcommand:\n{}",
         pty.screen()
     );
@@ -8612,6 +8742,17 @@ impl HerdrSocket {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+}
+
+impl Drop for HerdrSocket {
+    fn drop(&mut self) {
+        // The socket binds in `/tmp` (the AF_UNIX path limit keeps it out of `_dir`), so the
+        // `TempDir` does not remove it. Remove the path here: this runs on a passing test and
+        // on a panicking one (unwinding drops the future's locals), so neither leaves a
+        // `radian-herdr-pty-*.sock` behind. The accept thread is detached and still holds the
+        // listener fd, but the file is unlinked and the inode goes away with the process.
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 

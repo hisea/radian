@@ -691,8 +691,8 @@ transcript 全扫一次 → O(n²)。**修法**：`App` 维护 `live_count`（`s
 
 | 项目 | 值 |
 |---|---|
-| `SyntaxSet` 加载（反序列化 `build.rs` 嵌入的合并 dump：默认 75 语法 + vendored TS/TSX/TOML） | **≈ 1.1 ms**（进程一次，`OnceLock`） |
-| `build.rs` 解析 200 KB 的 TypeScript YAML（构建期，一次） | ≈ 2 s/文件（`yaml-rust`；所以放在构建期） |
+| `SyntaxSet` 加载（反序列化合并 dump：默认 75 语法 + vendored TS/TSX/TOML） | **≈ 1.1 ms**（进程一次，`OnceLock`） |
+| 解析 200 KB 的 TypeScript YAML（**只在重新生成 dump 时**，不再是构建期每次都做） | ≈ 5.5 s/文件（`yaml-rust` + syntect 逐条 pattern 的正则校验；见下一节） |
 | 500 行 Rust 代码块首次高亮（含语法正则的惰性编译） | **≈ 125–285 ms** |
 | 同一块之后的高亮（正则已编译） | **≈ 130–270 ms**（5 次取样；每 1000 行 ≈ 0.22 s） |
 | TypeScript 首次解析（`fancy-regex` 编译该语法的全部正则，进程一次） | **≈ 380 ms**；之后 ≈ 0.3 ms |
@@ -793,3 +793,177 @@ R7 的门槛（稳态 < 1 ms、重排后首帧 < 100 ms）两边都在同一带�
 无退化。卡片的额外成本是每个工具条目一次「有没有真正的输出段」和「有没有元信息」的判断；
 前者已从逐行查文本改成整段一次 trim + 扫一遍 plan（`9ad3b73`）。R7 的首帧 < 100 ms 在机器
 安静时两边都满足。
+
+## radian-tui 的 build script：把它从冷构建里去掉（build-script 片，2026-10-15）
+
+**问题**：冷 `cargo test --workspace --no-run` 里最慢的单个单元是 `radian-tui` 的 build script
+（`cargo --timings` 的 `build-script (run)`）：它把 syntect 的默认语法集与 `third_party/syntaxes`
+里 vendor 的 TypeScript/TSX/TOML 合并、落成 `.packdump`。本片先量清楚它花在哪里，再比较三种做法，
+采用测得最好的那个；不改高亮的行为（见下面的冻结测试）。
+
+**方法**（同一台机器；这台机器同时跑着别的 agent 的编译，负载逐条标注，绝对值噪声大）：
+
+- **单独跑那个 build script**：`target/<profile>/build/radian-tui-*/build-script-build`，带
+  `CARGO_MANIFEST_DIR` 与 `OUT_DIR` 直接执行（3 次），阶段计时用 `Instant` 打在自己打的
+  `RADIAN_BUILD_PHASE` 行上（临时仪表，未进提交）。
+- **冷构建**：空 target 目录 + `cargo test --workspace --no-run --timings`，读 `--timings` 的
+  HTML 报告拿每个 unit 的时间线与 `radian-tui build-script (run)`。
+- **增量**：同一 target 目录里交替换 `build.rs`（两种状态只差这一个文件）再 `cargo build -p radian-tui`，
+  这样两次之间的差就是 build script 的真实代价，不受负载漂移影响。
+- 计时用 `time` / `Instant`，不用 sleep。
+
+### 1. 时间花在哪（单独运行，3 次，load 78–90）
+
+| 阶段 | 第 1 次 | 第 2 次 | 第 3 次 |
+|---|---|---|---|
+| `SyntaxSet::load_defaults_newlines()`（反序列化默认集） | 0.30 s | 0.21 s | 0.25 s |
+| parse TypeScript（200 KB YAML） | 5.57 s | 5.10 s | 5.94 s |
+| parse TypeScriptReact | 5.03 s | 5.52 s | 4.92 s |
+| parse TOML | 0.04 s | 0.05 s | 0.04 s |
+| `SyntaxSetBuilder::build()`（重新解析整集的上下文引用） | 0.76 s | 0.75 s | 0.83 s |
+| dump 写盘（431081 B） | 0.01 s | 0.02 s | 0.01 s |
+| **合计** | **11.72 s** | **11.65 s** | **12.00 s** |
+
+`sample(1)` 采到的叶子函数全在 `regex_automata`（Thompson NFA 编译 + `util::determinize`）：syntect 的
+YAML loader 对每条 pattern 调 `Regex::try_compile` 做**校验**，而 `syntect::parsing::Regex` 是懒编译的
+（dump 里存的是 pattern 字符串，运行时才编译），所以这 10.5 s 编译出来的正则**用完就丢**。这是本片
+的真正靶子：它不做任何有用的事，却要求每次冷构建都做一遍。
+
+**它确实在关键路径上**：冷构建（load 118）的时间线里，build script 在 56.5 s 开始、118.8 s 结束，
+而 radian-tui 的 lib/两个 bin/所有测试单元都要等它结束才能编译——整条构建最后完成的 4 个单元全是
+radian-tui 的（总长 166.7 s）。同期 `cargo --timings` 报的 run 是 **62.4 s**（load 118）/ **38.1 s**
+（load ~100）：那是**被抢占的墙钟**，它的 CPU 只有 ~12 s（单独跑就是 11.7 s），剩下的时间是在等核。
+
+### 2. 三种做法的测量
+
+| 做法 | build script run | 冷 wall（load） | user CPU | 采用？ |
+|---|---|---|---|---|
+| main（每次构建都生成） | 38.1 s | 89.7 s（54→108） | 7m09 | — |
+| (a1) `[profile.dev.build-override] opt-level = 3` | 3.4 s | **120.3 s**（41→118） | **10m30** | 否：proc-macro 在内的所有 build 依赖都变成优化编译 |
+| (a2) 只给该 build script 用到的 6 个 crate 设 `opt-level = 3`（`regex-automata`、`regex-syntax`、`regex`、`fancy-regex`、`syntect`、`yaml-rust`；实测包级 override 对 build-dependency 的**副本**也生效） | 6.5 s | 92.5 s（62→124） | 7m51 | 否：省下的 run 被这些 crate 的优化编译吃回去 |
+| **(b) 预生成并提交 dump，build script 只校验 + 拷贝** | **0.2 s** | 88.5 s（75→160） | **6m46** | **是** |
+
+(a2) 的 6 个 crate 及其副本优化编译的代价可以从 unit 表读出来：`regex-automata` 两份（8.5 + 6.4 s）、
+`regex-syntax` 5.2 s、`syntect` 两份（2.5 + 3.2 s）、`fancy-regex` 三份……冷构建的总 CPU 反而涨了
+约 20 s，所以 (a1)/(a2) 都放弃。
+
+**冷 wall 在这台机器上量不出 (b) 的收益**（诚实记录）：成对测了 5 组（A 先、B 后，负载一路上升）
+84.0/110.4、102.4/105.8、110.2/117.0、180.1/200.9、**166.9/167.6**（最后一组负载 ~110–120 基本同档，
+user 503 s → 489 s）。构建的墙钟由「我们拿到多少核 × 总 CPU 工作量」决定，一个 12 s CPU 的单元被
+删掉只值 ~2.8% 的 CPU，落在负载噪声里；而它在**单独**跑、或在 warm 目录里只换 `build.rs` 时看得清清楚楚：
+
+| 只改 `build.rs` 后的增量重建（同一 target，交替，两次负载 91 / 78） | main | 本片 |
+|---|---|---|
+| wall / user CPU | 18.0 s / 14.9 s | **3.1 s / 3.2 s** |
+
+差的正是那 11.7 s。改一行 radian-tui 源码的增量两边一样（2.4 s vs 2.2–2.7 s，两者都不重跑 build script）。
+
+### 3. 采用 (b) 的形态
+
+- 合并后的集合**提交**为 `crates/radian-tui/assets/syntaxes.packdump`（431081 B，
+  md5 `34b85cf9241b1ceb6672355035c27c40`）。它是输入的纯函数：同一个未优化、一个 `opt-level = 3` 的
+  build script 产出**逐字节相同**的 dump，所以「用 digest 判断是否需要重新生成」是可靠的。
+- `crates/radian-tui/assets/syntaxes.packdump.digest` 是三个语法文件（含 recipe 字符串）的 FNV-1a 64。
+  build script 先算 digest：不一致就**构建失败**并给出重新生成的命令——旧的 dump 不可能被静默用掉。
+- build script 还会用**同一个** syntect 把 dump 反序列化一次：syntect 升级导致 dump 格式变化时，
+  失败发生在构建期，而不是第一段代码高亮时。
+- 重新生成是显式的：`RADIAN_REGENERATE_SYNTAXES=1 cargo build -p radian-tui`，它重写两个文件并打
+  `cargo:warning=regenerated …`，提交即可。这条路径保留在 `build.rs` 里，所以 `[build-dependencies]`
+  的 syntect 保持不变（冷构建的**编译**工作量因此与 main 完全相同）；把生成代码挪出构建图（可选
+  build-dependency + feature，或单独一个 crate）能再省下那 10 个 unit 约 23 s 的 unit 墙钟（~12 s CPU），
+  但要多一套机制，本片没有取。
+- 风险与体积：仓库 +431 KB 二进制 +25 B digest（这是仓库里第一个二进制 blob；运行时二进制体积不变，
+  dump 本来就嵌在可执行文件里）。风险是 dump 与语法文件不同步——由构建期 digest 校验 + 「改语法必须
+  重新生成」的命令覆盖；**行为**是否有变，由 `crates/radian-tui/tests/highlight.rs` 新加的冻结测试
+  （TS/TSX/TOML 固定片段的每一段文字与角色）覆盖，变异检查（把 TOML 注释的 scope 改成
+  `constant.numeric.toml` 再重新生成）会让它失败。
+
+### 局限 / 未测
+
+- 绝对值只在这台 M4 / macOS 27 / APFS 上、且这半天负载 36–231（别的 agent 在编译）的时段成立；
+  冷 wall 的 A/B 差落在这个噪声里，本片只声明「run 的 CPU 与其他所有选项」的对比。
+- 没有在空载机器上重测冷构建；按上面的模型（墙钟 = 总 CPU / 拿到的核数），空载时这 11.7 s 会
+  1:1 少在墙钟上，但**未实测**。
+- `aws-lc-sys` 的 build script（C 编译，同一台机器 19.4–46.7 s，本片时段里常是下一个最慢的单元）
+  不属本片范围，未动。
+## Resume 首帧：`push_message` 的第二次 O(n²) 与 Markdown 只数不建（resume-perf2）
+
+**方法**：一段一次性 Python pty 探针（`pty.fork` + `TIOCSWINSZ`，24×100，与
+`perf_render.rs` 的 `libc::openpty` harness 同判据：读到状态栏 `context budget off`），以
+`RADIAN_TRACE_PHASES=1` 跑 release 的 `radian --resume <id>`，把子进程 stderr 的 `[trace]`
+段表读出来。为什么不用 `perf_render.rs` 的 `dbg_resume_trace`：它的 `wait_for` 上限是 180 s，
+在负载 500+ 的几分钟里连 1k 都等不到首帧而超时；这段探针把上限放到 1200 s 只为穿过负载尖峰，
+判据与取样方式不变。会话由一段同格式的生成器写出，与共享的
+`crates/radian-session/tests/common/long_session.rs` 同一混合（1k/10k/50k → 1.6/16.3/81.8 MB，
+退出时校验解析）。两个脚本都在 `.radian/`（gitignored），不入库。
+
+**负载**：本机 `uptime` 1 分钟负载 **~97–120**（基线各节 0.4–570；先前的 pty 测量在负载
+500+ 时甚至等不到首帧）。每档 3 次。
+
+**一个测量前提**：pty 探针里 `enter_terminal` 会调 `supports_keyboard_enhancement`，终端的
+pty 既不回 kitty flags 也不回 device-attributes，于是付满 **2 s**（`terminal.rs` 写明了这条；
+真实终端只付毫秒）。所以 `terminal-ready` 里含这固定的 ~2.0 s——下表用
+`first-frame-done − 2.0 s` 作为「真实终端」的估计，并同时给出原始值。
+
+50k（66 672 条目），三次：
+
+| 段（进程起） | 本片前 run1/2/3 | 本片后 run1/2/3 |
+|---|---|---|
+| `open/parse-once` | 481 / 284 / 218 | 247 / 186 / 466 |
+| `open-session-done` | 1342 / 868 / 944 | 928 / 607 / 1823 |
+| `terminal-ready`（含 2 s pty 查询） | 3351 / 2888 / 2986 | 2955 / 2612 / 3859 |
+| `history-read` | 0（= terminal-ready，见下） | 0 |
+| **`entries-built` 增量** | **1473 / 872 / 3050** | **22 / 32 / 24** |
+| **`line-counts`（66 672 条目）** | **1373 / 468 / 1644** | **65 / 87 / 74** |
+| `first-frame-done` | 6204 / 4238 / 7693 | 3061 / 2748 / 3963 |
+| 减掉 2 s pty 查询 | ~4200 / 2200 / 5700 | **~1050 / 750 / 1950** |
+| pty 首帧 `FIRST_FRAME_MS` | 6215 / 4246 / 7703 | 3075 / 2758 / 3973 |
+
+1k / 10k 的 `first-frame-done`：本片前 2226 / 2415，本片后 2146–2185 / 2225–2532
+（小档位里 2 s 查询占绝对多数，差别看不清）。
+
+**两处原因**
+
+1. **`push_message` 还有第二次 O(n²)（本片修）**。每个工具结果先用一次**从后往前**的扫描
+   按 call id 找到它的调用（这一步本来就对），然后又用 `entries.iter().position()` **从头**
+   扫一遍拿插入下标——resume 时调用就在末尾，这次前扫要走过几乎整个 transcript。resume-perf A
+   只修掉了每条消息的 `retain` 全扫，没看到这一条。修法：只扫一次，复用从后扫已经拿到的下标。
+   50k 的 `entries-built` 增量从 ~0.87–3.05 s 降到 ~22–32 ms。不依赖墙钟的测试：
+   `app::tests::tool_result_pairing_does_not_walk_the_transcript`（`TOOL_PAIR_SCANS`
+   统计配对走过的条目数；变异回前扫 → 400 个结果走 240 200 条，测试失败）。
+
+2. **首帧给每个条目算行数时**不再把 Markdown 段落**排出来**（本片修）。此前
+   `line_count_cached` 对每个 Assistant 条目调 `fill_md_cache`，即 `md_lines`——解析
+   pulldown、建 `BodyLine`、逐字符建 cells；50k 的 `line-counts` 因此 ~0.47–1.64 s。现在量测走
+   `blocks::md_line_count`：与 `md_lines` **逐臂镜像**地只数行（不建行），把每个段落的行数写进
+   `Entry.md_count_cache`（键 `(width, text_len)`，不含折叠，所以 Ctrl-T 切换仍不重解析），而
+   **行缓存改由真正要排版三路径（可见窗口、选择、搜索）懒填充**。`wrap_line_count` 另给 ASCII
+   快路径（同样的宽度，不走 Unicode 表）。50k 的 `line-counts` 降到 65–87 ms。
+   不依赖墙钟的测试：`blocks::tests::the_measure_pass_never_lays_out_markdown`（`md_line_builds`
+   计数；变异成 `md_lines(..).len()` → 失败）、`a_repeat_frame_reuses_the_markdown_line_cache`
+   （懒填充；变异成不填 → 失败）、`md_line_count_matches_the_layout`（20 个 Markdown 源 × 7 个
+   宽度，与 `md_lines(..).len()` 逐一对齐；变异成不补结尾换行 → 失败），以及
+   `virtual::every_window_matches_the_full_wrap`（语料加了两种 Assistant Markdown；
+   `wrap_line_count` 的 ASCII 宽度变异在这里被抓住）。
+
+**无退化**：R7 的两个门槛不变——量测仍然只数不建，`md_count_cache` 让折叠切换不重解析（
+`a_fold_toggle_reuses_the_markdown_counts`）；稳态帧、改宽首帧走的是 `layout`/`md_lines_cached`
+的既有路径，只是行缓存由懒填充提供，重复帧命中（`a_repeat_frame_reuses_the_markdown_line_cache`）。
+带空行边的条目（首行/末行是空白段，即文本以换行开头或结尾）仍走 `line_count` 原有的
+`layout` 回退——边缘空白由排版剥掉，那是规则唯一的所在；resume 语料没有这种条目。
+
+**第 2 步（第二次完整读）在本 base 上已经是 resume-perf B 完成的**：`history-read` 在
+`terminal-ready` 之后再花 0 ms（`main.rs` 取 `host_session.history`，不再 `Session::open`）。
+本片补了任务要求的对照测试：
+`radian-host/tests/session.rs::a_resumed_history_matches_the_disk_fold_through_compaction_and_replacement`
+——一份含「已提交压缩替换 + 文件末尾未提交替换」的 fixture，直接断言 host 的初始
+`history` 与 `Session::open(path).history()` 逐条相等（未提交段被丢弃、已提交段保留）。
+
+**合并 origin/main（`39c67ad`）后**同法复测（同负载区间）：50k `line-counts` 52 / 97 / 52 ms、
+`entries-built` 增量 27 / 25 / 17 ms、`first-frame-done` 2731 / 3249 / 2990 ms，与本表一致；全套
+Verify（含 1.88）已在该合并树上重跑。
+
+**本片没做**：`open_session`（~0.6–1.8 s，parse-once + replay + recover 建 records）没有动；
+`terminal-ready` 里的 2 s pty 查询是探针环境的假象，真实终端不付；100k 条、真实 provider 首
+token 未测。
+

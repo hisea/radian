@@ -31,7 +31,10 @@ fn idle_with_text_the_first_ctrl_c_clears_it_into_the_history() {
     assert!(!app.quit, "clearing must not quit");
     assert!(!quit_asked(&result.effects), "{:?}", result.effects);
     assert!(app.input.is_empty(), "the input is cleared");
-    assert_eq!(app.history.last().map(String::as_str), Some("a draft"));
+    assert_eq!(
+        app.session.history.last().map(String::as_str),
+        Some("a draft")
+    );
     assert!(app.quit_pending.is_none(), "the window is not armed");
 }
 
@@ -103,7 +106,7 @@ fn the_deadline_input_disarms_and_redraws() {
 #[test]
 fn ctrl_c_while_running_cancels() {
     let mut app = App::new("m", "s");
-    app.projection.set_turn(TurnState::Running);
+    app.session.projection.set_turn(TurnState::Running);
     let result = app.on_key_at(ctrl_c(), Instant::now());
     assert!(matches!(result.effects.as_slice(), [Effect::Cancel]));
     assert!(!app.quit, "a cancel must not quit");

@@ -140,6 +140,22 @@ impl QuestionForm {
         self.editing_note.is_some() && self.editing_note == self.current
     }
 
+    /// Whether the focused field takes a literal space. A `text` question, a note, and an
+    /// `Other` row that is **already** chosen do; an `Other` row that is not chosen yet keeps
+    /// `space` as the select key (R3), so the first press still chooses it.
+    fn field_takes_space(&self) -> bool {
+        if self.note_focused() {
+            return true;
+        }
+        let Some(question) = self.current_question() else {
+            return false;
+        };
+        if question.kind == QuestionKind::Text {
+            return true;
+        }
+        self.text_focused() && self.current_answer().is_some_and(|answer| answer.other)
+    }
+
     fn note_mut(&mut self) -> Option<&mut Composer> {
         if !self.note_focused() {
             return None;
@@ -256,7 +272,14 @@ impl QuestionForm {
             hints.push(Hint::new("⏎", "submit"));
         }
         hints.push(Hint::new("↑/↓", "move"));
-        hints.push(Hint::new("⇥/←/→", "question"));
+        // With a free-text field focused, ←/→ move the text cursor, so the question switch is
+        // `⇥`/`⇤` alone.
+        if self.note_focused() || self.text_focused() {
+            hints.push(Hint::new("⇥/⇤", "question"));
+            hints.push(Hint::new("←/→", "cursor"));
+        } else {
+            hints.push(Hint::new("⇥/←/→", "question"));
+        }
         hints.push(Hint::new("esc", "cancel"));
         hints.push(Hint::new("alt-h", "hide"));
         hints
@@ -323,9 +346,19 @@ impl QuestionForm {
                 self.move_cursor(1);
             }
             // `Space`: a `single` question selects without advancing; a `multi` toggles (R3).
+            // In a free-text field that already holds the answer (a `text` question anywhere,
+            // an `Other` row that is chosen, a note) the space is **text**, not the select key:
+            // the form layer's `space -> form_select` binding otherwise swallowed it, so a
+            // multi-word `Other`/text answer could not be typed.
             Action::FormSelect => {
                 self.confirm_decline = false;
-                self.select();
+                if self.field_takes_space() {
+                    if let Some(text) = self.composer_mut() {
+                        text.insert_char(' ');
+                    }
+                } else {
+                    self.select();
+                }
             }
             // `Enter`: save a note, select-and-advance a `single`, toggle a `multi`, or submit.
             Action::FormSubmit => {

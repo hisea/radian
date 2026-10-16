@@ -195,10 +195,7 @@ async fn write_child_and_record(
     let created = SessionCreatedData::forked(
         request.workspace.clone(),
         request.config_snapshot.clone(),
-        ForkParent {
-            session_id: request.parent_id.clone(),
-            seq: point.seq,
-        },
+        ForkParent::fork(request.parent_id.clone(), point.seq),
     );
     let temp_path = child_temp_path(&request.child_path);
     // A temp file left by an earlier crash must not block this attempt.

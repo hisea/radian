@@ -1349,6 +1349,27 @@ catching tests are the render snapshots, not the footer ones.
 
 另记一个无效变异：「只给第 200 字节之后的第一个合成格子假偏移」——那一处的上一个字符是 ASCII，`+1` 正好是合法边界，不会 panic，不能说明覆盖缺口；MS-M2 用确定落在多字节中间的单格变异代替。
 
+## resume-perf2：`push_message` 的 O(n²) 与 Markdown 只数不建（2026-10-16）
+
+Base `oc/resume-perf2` · 就地变异：改前 `cp` 到 `.radian/mut/`，改后跑测试，再从副本写回，
+逐个 `diff` 确认与副本逐字节相同（`git status --short` 只剩本片的五个改动文件）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| RP2-M1 | 工具结果配对从前端扫（`iter_mut().enumerate()`，索引取 `rev`），即修复前的第二次 O(n²) | `app::tests::tool_result_pairing_does_not_walk_the_transcript`（400 个结果走了 240 200 条） | ✅ |
+| RP2-M2 | 计数路径改成 `md_lines(..).len()`（量测即排版） | `blocks::tests::the_measure_pass_never_lays_out_markdown` | ✅ |
+| RP2-M3 | 去掉 `md_lines_cached` 的懒填充（行缓存永不写入） | `blocks::tests::a_repeat_frame_reuses_the_markdown_line_cache` | ✅ |
+| RP2-M4 | `wrap_line_count` 的 ASCII 快路径给错宽度（+1） | `virtual::every_window_matches_the_full_wrap`（总数与实际排版不符） | ✅ |
+| RP2-M5 | `md_line_count` 去掉「补回被 pulldown 吃掉的结尾换行」 | `blocks::tests::md_line_count_matches_the_layout` | ✅ |
+
+5/5 抓住。两处过程记录：
+
+- RP2-M2 第一次变异放在 `md_line_count_cached` 的兜底分支，**没抓住**：量测时
+  `fill_md_count_cache` 先填好计数缓存，`md_line_count_cached` 总是命中，兜底分支在生产路径里
+  几乎不可达。改成变异真正的计数入口 `fill_md_count_cache` 后抓住——即变异要落在会被执行的路径上。
+- RP2-M1 的变异保留了配对的正确性（前端扫也找到同一个 call id），只放大扫描量；测试断言的是
+  「走过的条目数」，不是结果，所以抓住了「修复后的算法没被还原」这层回归。
+
 ## band-padding：带的半格留白与 thinking 贴住下一块（ADR 0035，2026-10-15）
 
 Base `a36a099` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`，每条只跑列出的测试，
@@ -1385,6 +1406,20 @@ Base `d8b7688`（worktree `.radian-worktrees/access-cmd`）· 每个变异在就
 3/3 抓住。AC-M3 的两半都在同一个 pty 用例里：写 `~/.radian/access/access.json` 时必须生效并带
 `(project)` 标记；把同样内容写进工作区文件、用干净 HOME 启动时**必须不生效**。
 
+## build-script：合并 dump 预先提交、build script 只校验与拷贝（2026-10-15）
+
+Base `39c67ad`（worktree `.radian-worktrees/build-script`）。本片没有改产品行为（新 dump 与 main 的
+build script 产出**逐字节相同**，md5 `34b85cf9241b1ceb6672355035c27c40`），新增的是构建脚本的两道
+校验与一条冻结测试。前两条是**构建期**的负向验证（手工跑，不是 `cargo test`），第三条是新测试的变异
+检查；每条跑完从 `/tmp/bs/` 的副本还原并用 `md5` 确认逐字节相同。
+
+| # | 变异 / 负向场景 | 抓住它的东西 | 结果 |
+|---|---|---|---|
+| BS-M1 | `assets/syntaxes.packdump.digest` 改成别的值（dump 与语法不同步） | `build.rs` 的 digest 校验：构建失败并打印 `RADIAN_REGENERATE_SYNTAXES=1 cargo build -p radian-tui` | ✅（`cargo build -p radian-tui` 报错退出） |
+| BS-M2 | dump 截断到 2000 B（坏文件 / syntect 格式变了的等价物） | `build.rs` 的 `from_uncompressed_dump_file` 校验：构建失败并打印同一命令 | ✅ |
+| BS-M3 | `third_party/syntaxes/TOML.sublime-syntax` 的注释 scope 改成 `constant.numeric.toml`，重新生成 dump | `highlight::the_vendored_grammars_highlight_a_fixed_snippet_identically`（Comment → Number） | ✅（1 FAILED） |
+
+BS-M1/M2 覆盖「旧的 dump 不会被静默用掉」，BS-M3 覆盖「重新生成真的改变了行为时看得见」。
 ## mode-cmd：`/mode` 的查询与切换（ADR 0038 切片 ③，2026-10-15）
 
 Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 每个变异在就地改完后跑
@@ -1411,3 +1446,74 @@ Base `acbc455`（`origin/main`）· 就地变异：改前 `cp` 到 scratchpad，
 1/1 抓住。这条是**接线**变异：白名单本身的行为由 `radian-sandbox` 的逃逸矩阵覆盖（`unix_socket` 组的
 `whitelisted_allowed` 对照），而「TUI 把解析后的列表交给 `build_sandbox`」只有源码结构能钉住
 （`run` 在 `main.rs` 里、测试够不到），所以按 `structure.rs` 的既有做法做结构断言。
+
+## pulse：呼吸 spinner（ADR 0027，2026-10-15）
+
+Base `19dc0d7`（worktree `.radian-worktrees/pulse`，分支 `dogfood/pulse`）。每个变异改完后跑
+`cargo test -p radian-tui --lib -- spinner`（或 `--bin radian`），再从 `.radian/scratch/` 的副本还原并用
+`diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| P1-M1 | `PULSE_STEPS` 12 → 2（步数退回两档） | `spinner::tests::the_breath_walks_one_sine_period_in_twelve_steps`（取样序列 `[0, 2]` ≠ `[0, 1, 3, …, 1]`，以及 ADR 两个常量的断言）、`spinner::tests::a_pulse_that_cannot_interpolate_keeps_the_two_colour_switch`（一步 ≈117 ms 的断言）、`tests::the_breath_redraws_once_per_step_and_only_when_a_spinner_is_visible`（循环唤醒 250 ms ≠ 700 ms） | ✅（3 条 FAILED） |
+| P1-M2 | `breath_color` 不再要求两端都是 RGB（非 RGB 端按 `Rgb(0, 0, 0)` 也插值） | `spinner::tests::the_breath_colour_interpolates_only_between_two_rgb_ends`（4 个 `None` 断言；`Indexed(5)` 处得到 `Rgb(45, 45, 45)`） | ✅ |
+| P1-M3 | `spinner_frame_at` 去掉 `spinner_visible()` 检查（不可见时也刷新） | `tests::the_breath_redraws_once_per_step_and_only_when_a_spinner_is_visible`（空闲那次走完两个周期得到 24 帧，应为 0） | ✅ |
+
+高亮的**正常**路径没有变：`pty_the_pulse_breathes_through_rgb_colours` 在真实 pty 上看到 `⏺` 前的
+24-bit 颜色按呼吸变化（一个周期里 7 个不同颜色、包含主题的强调色与暗色两端），而
+`pty_an_idle_screen_is_not_redrawn`（空闲零重绘）与 `pty_a_visible_spinner_redraws_on_its_interval`
+（`arc` 250 ms 不变）都仍然通过。
+
+## pulse：bar 竖条加高到半格、状态行点移到竖条列（ADR 0035，2026-10-15）
+
+同上一节的工作区。改完后跑 `cargo test -p radian-tui --test render`（`--test cursor` 一并跑），再从
+`.radian/scratch/render.rs.orig` 还原并用 `diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| R4-M1 | 留白行仍画 `▄`/`▀` 而不是 `▖`/`▘` | `render::the_bar_band_fills_the_terminal_width`（第一格 `▄` ≠ `▖`，两档宽度都查） | ✅ |
+| R4-M2 | 竖条仍是 `▎`（`BAR_RAIL` 回退） | `render::the_bar_input_style_draws_a_full_width_band_with_the_rail`、`the_bar_band_fills_the_terminal_width`、`the_bar_input_takes_the_status_row_the_pad_rows_and_its_text_rows`、`the_bar_status_row_never_moves_the_band_or_the_transcript`、`the_empty_input_shows_the_placeholder_after_the_prompt`（5 条 FAILED），以及 `pty::pty_the_slash_completion_walks_the_command_tree` 的 `▌ /memory` | ✅（5 条 FAILED） |
+| R4-M3 | 点回到正文列（状态行恢复两个前导空格与两个空格分隔） | `render::the_bar_status_row_never_moves_the_band_or_the_transcript`（第 0 格不是 `◜`）、`the_bar_rail_and_spinner_fall_back_to_ascii`、`the_input_rule_shows_the_spinner_status_while_running`、`the_input_rule_shows_compacting` | ✅（4 条 FAILED） |
+
+光标列不动的断言在 `cursor::the_bar_cursor_stays_at_the_text_column`（空输入 x=2、`ab` x=4）；
+`▖`/`▘` 这一格的前景是强调色、背景是终端默认（`the_bar_band_fills_the_terminal_width` 的第 0 格断言）。
+
+## pulse：thinking 与下面的块之间空一行（ADR 0035，2026-10-15）
+
+同上一节的工作区。变异改 `blocks.rs::block_gap`，跑 `cargo test -p radian-tui --lib` 与
+`--test render`，再从 `.radian/scratch/blocks.rs.orig` 还原并用 `diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T5-M1 | `block_gap` 恢复「thinking 贴住下面」（`prev.kind == Reasoning` → 0） | `blocks::tests::the_container_gap_is_one_line_except_within_a_block`（pair 规则）、`render::thinking_has_one_blank_line_on_both_sides`、`render::the_block_layout_snapshot`、`render::folding_changes_the_transcript_line_count` | ✅（1 + 3 条 FAILED） |
+
+行数计数与布局的一致性由结构保证（`line_count`、`md_line_count` 与绘制都走同一个 `block_gap`），
+`blocks::tests::md_line_count_matches_the_layout` 与 `tests/virtual.rs` 的窗口测试在改前改后都通过。
+另一个观察（不是本变异的缺口）：`push_message` 对没有正文的 assistant 回合也会压一个空的 Assistant
+条目，它是独立的一块，所以「thinking + 无正文的工具调用」在屏幕上会是两行空行（thinking 自己的一行
++ 空块两侧的行）；`thinking_has_one_blank_line_on_both_sides` 直接压条目来测 thinking 这条规则本身，
+并在注释里写明这一点。
+## ask-box：transcript 的 Ask 块、面板标题、待答一行、标记与两个按键（ADR 0024，2026-10-15）
+
+Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个变异就地改完后跑
+`cargo test -p radian-tui --lib -- <名字>` / `--test render` / `--test question`（`--no-fail-fast` 对
+单条用例等价），再从 `.radian/scratch/*.fixed`、`*.p2`、`*.p3`、`*.p4` 的副本写回并 `cmp` 逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ASK1-M1 | `ask_body` 去掉每行末尾的右边框 | `the_ask_block_is_closed_at_every_width` | ✅ |
+| ASK1-M2 | 底边改回 `repeat(width - 3)`（三格） | `the_ask_bottom_border_is_as_wide_as_the_top` | ✅ |
+| ASK1-M3 | 面板标题 `origin` 非空就加（去掉 own-session 判断） | `the_ask_panel_title_omits_the_own_session` | ✅ |
+| ASK2-M1 | 待答时仍画完整块（不走一行） | `a_pending_ask_is_one_line_and_becomes_the_block_once_answered` | ✅ |
+| ASK2-M2 | 闭合的结果条目（`Tail`）也画块 | `a_pending_ask_is_one_line_and_becomes_the_block_once_answered`、`a_declined_ask_shows_the_status_inside_the_block` | ✅ |
+| ASK2-M3 | 调用条目不再保留结果文本（状态行拿不到） | `a_declined_ask_shows_the_status_inside_the_block` | ✅ |
+| ASK3-M1 | 面板标记用加粗的强调样式（不再去掉 BOLD） | `the_ask_panel_marker_is_never_bold` | ✅ |
+| ASK3-M2 | `Other` 行改回画圆圈 | `the_ask_panel_uses_one_checkbox_pair_for_single_multi_and_other` | ✅ |
+| ASK3-M3 | `single_on` 改回 `◉` | `the_ask_glyphs_use_one_checkbox_pair` | ✅ |
+| ASK4-M1 | 去掉 ←/→ 的切题拦截（无字段时什么都不做） | `left_and_right_switch_questions_without_a_focused_field` | ✅ |
+| ASK4-M2 | `form_select` 永远只做选中（空格不进字段） | `typing_in_the_other_row_and_a_text_question_keeps_the_text` | ✅ |
+| ASK4-M3 | 底边提示永远写 `⇥/←/→ question` | `the_hint_row_shows_the_cursor_keys_while_a_field_has_focus` | ✅ |
+
+12/12 抓住。ASK2 的两个变异在同一条用例里：待答一行、答完同一条目成块且只有一个块。ASK4-M1/M3 是
+owner 反馈的两个按键问题的回归钉：←/→ 切题（无字段时）与底边提示跟随聚焦状态。`check-glyph-coverage.py`
+的结果（☐/☑ 缺 SF Mono / JetBrains Mono Nerd / Cascadia Code）写在 ADR 0024 的「实施补充」里。

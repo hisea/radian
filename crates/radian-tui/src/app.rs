@@ -186,8 +186,13 @@ pub struct Entry {
     /// The entry's laid-out Markdown paragraph lines (ADR 0028 R2), keyed by `(width,
     /// text_len)` and indexed by the paragraph block's start. The layout does not depend on
     /// the reasoning/tool folds, so a global fold toggle reuses it instead of re-parsing
-    /// every Assistant entry (the R7 toggle gate).
-    pub(crate) md_cache: Option<MdCache>,
+    /// every Assistant entry (the R7 toggle gate). Filled lazily by the layout/text paths
+    /// (interior mutability), because the measure pass counts Markdown without laying it out.
+    pub(crate) md_cache: std::cell::RefCell<Option<MdCache>>,
+    /// The Markdown paragraph **line counts**, keyed the same way (resume-perf2). The measure
+    /// pass fills this from [`crate::blocks::line_count`], so the first frame (and a fold
+    /// toggle) never materializes Markdown lines for an entry it only needs to measure.
+    pub(crate) md_count_cache: Option<MdCountCache>,
 }
 
 impl Entry {
@@ -207,7 +212,8 @@ impl Entry {
             block_cache: None,
             layout_cache: None,
             diagram_cache: None,
-            md_cache: None,
+            md_cache: std::cell::RefCell::new(None),
+            md_count_cache: None,
         }
     }
 }
@@ -264,14 +270,25 @@ pub enum Overlay {
     Picker(Picker),
 }
 
-/// The Markdown layout cache: `(width, text_len, paragraphs)`, where each paragraph is
-/// `(block start, lines)`. A type alias keeps the `Option` readable in `Entry`.
+/// The Markdown **line** cache: `(width, text_len, glyphs, paragraphs)`, where each paragraph
+/// is `(block start, lines)`. A type alias keeps the `Option` readable in `Entry`. It is filled
+/// **lazily** by the paths that actually lay a paragraph out (the window, the selection and
+/// the search), never by the measure pass (resume-perf2: measuring counts a paragraph without
+/// building its lines). The glyph tier is part of the key (ADR 0035): the bullet,
+/// the quote bar, the task checkboxes and the table borders change the layout.
 pub(crate) type MdCache = (
     usize,
     usize,
     crate::footer::Glyphs,
     Vec<(usize, Vec<crate::blocks::BodyLine>)>,
 );
+
+/// The Markdown **count** cache: `(width, text_len, glyphs, paragraphs)`, where each paragraph
+/// is `(block start, line count)`. The measure pass fills it (a count is cheap — no line is
+/// built), so re-measuring the same entry after a fold toggle does not re-parse its Markdown
+/// (the R7 toggle gate). The glyph tier is in the key too: a task list's checkbox changes the
+/// marker width, so the count depends on it (ADR 0035).
+pub(crate) type MdCountCache = (usize, usize, crate::footer::Glyphs, Vec<(usize, usize)>);
 
 /// One approval as the UI shows it: the queue's id (ADR 0023 U7), the session that asked and
 /// the request itself. The queue id is what the answer names, not the permission layer's own
@@ -1239,30 +1256,29 @@ struct PendingExpand {
     text: String,
 }
 
-pub struct App {
+/// The **per-session view** (ADR 0030 slice ⓪): the state that belongs to exactly one
+/// session — its transcript and the entries' caches, its projection handle, its scroll and
+/// selection, its pending turn state, and its mode/tier markers. [`App`] owns one of these
+/// today; ADR 0030 slice ⑥ holds several and switches between them, so nothing here is
+/// shared. Chrome the whole TUI shares (theme, keymap, footer, the input composer, the layer
+/// stack and the terminal-level flags) stays on [`App`].
+pub struct SessionView {
+    /// The session's id.
+    pub session_id: String,
+    /// The model this session runs, and its display name (ADR 0027 C2 `{display_name}`): the
+    /// descriptor/catalog name when known, else the id. Set once at startup.
     pub model_name: String,
-    /// The model's display name (ADR 0027 C2 `{display_name}`): the descriptor/catalog name
-    /// when known, else the id. Set once at startup.
     pub model_display: Option<String>,
     /// The provider's name for the footer's `{provider}` placeholder. Set once at startup.
     pub provider: Option<String>,
-    /// The session's working directory (the footer's `{path_home}`), and whether the git
-    /// branch was read. Both are startup facts; the branch is refreshed by the host (this
-    /// slice reads it once and exposes [`App::set_git_branch`] for the refresh).
+    /// The session's working directory (the footer's `{path_home}`) and the git branch the
+    /// host read for it. Both are startup facts; the branch is refreshed by the host.
     pub cwd: Option<PathBuf>,
     pub git_branch: Option<String>,
-    /// The machine's hostname (ADR 0027 `host`), read once at startup.
-    pub hostname: Option<String>,
-    /// The model's catalog unit prices (ADR 0027). Kept for the host's startup
-    /// wiring and its own tests; the footer's `cost` reads the **projection's** accumulated
-    /// fee, because the fee is per call at the price in force then (a `/model` switch does not
-    /// re-price earlier calls). [`App::set_model_price`] records it in both places.
+    /// The model's catalog unit prices (ADR 0027). The footer's `cost` reads the
+    /// **projection's** accumulated fee, because the fee is per call at the price in force
+    /// then (a `/model` switch does not re-price earlier calls).
     pub model_price: Option<radian_host::ModelPrice>,
-    /// Whether automatic compaction is on (`context`'s `{auto}` marker), set once at startup.
-    pub auto_compact: bool,
-    /// The loop's current instant (ADR 0027). The timer never reads the wall clock;
-    /// the loop stamps `now` once per iteration and tests set it to inject time.
-    pub now: Instant,
     /// The spinner's origin (ADR 0027): `now - started` is the tick the spinner
     /// frame is a function of. Set at construction; tests set it to inject time.
     pub spinner_origin: Instant,
@@ -1271,23 +1287,12 @@ pub struct App {
     /// The applied thinking level (ADR 0026 D11), for the footer's `reasoning` item. A queued
     /// switch shows the queued level until the driver applies it.
     pub thinking_level: Option<String>,
-    /// The footer (ADR 0027 C2): its preset, glyphs and rows. Set from `[tui.footer]` at
-    /// startup; the default is the two-row `pi` preset.
-    pub footer: crate::footer::Footer,
-    /// The contributor store (ADR 0027 C3). The background tasks write it; the renderer reads a
-    /// snapshot, and the `git_branch`/`worktree`/`status` items come from it.
-    pub contributions: std::sync::Arc<radian_host::ContributionStore>,
-    /// `[tui.widgets]`: contributor items on a line above/below the input box (ADR 0027 C3).
-    pub widgets: radian_host::config::TuiWidgetsConfig,
-    pub session_id: String,
     pub entries: Vec<Entry>,
     /// How many entries are currently `live` (fed by stream deltas, not yet a committed
     /// message). Maintained so `push_message` scans the transcript for live entries only
     /// when there are some: a resumed session pushes every message with none, and the old
     /// unconditional `retain` was O(n^2) there (resume-perf A).
     live_count: usize,
-    /// The input composer: text plus a cursor (ADR 0009 Phase 4).
-    pub input: Composer,
     /// This session's submitted inputs, oldest first (sent messages and `/…` commands). Not
     /// persisted; a resume rebuilds it from the journal's user messages.
     pub history: Vec<String>,
@@ -1302,14 +1307,13 @@ pub struct App {
     /// back to the bottom, or new content while it is set, pins it again.
     pub follow: bool,
     /// The session facts (ADR 0023 U5): turn, usage, budget, tier, MCP counts, the last tool
-    /// call and the streaming buffer. `App` holds a **read handle** only; the host's
+    /// call and the streaming buffer. `SessionView` holds a **read handle** only; the host's
     /// `SessionFacade` owns the projection, and every fact is written there, never here.
     pub projection: Arc<SessionProjection>,
-    pub quit: bool,
-    pub note: Option<String>,
     /// The call ids of the tools running right now (ADR 0027's status note). A
     /// batch can run several; the note clears only when the last one finishes, so the footer
     /// does not say "tool shell running" while the next model request is already in flight.
+    pub note: Option<String>,
     running_tools: std::collections::HashSet<String>,
     /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
     /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
@@ -1317,7 +1321,7 @@ pub struct App {
     pub session_ended: Option<String>,
     /// Whether the last turn's boundary is on disk (the runtime `TurnFinished` was seen). A
     /// `/fork` requested while a turn is still being written waits for it (see
-    /// [`App::pending_fork`]).
+    /// [`SessionView::pending_fork`]).
     pub turn_committed: bool,
     /// A `/fork` waiting for the turn boundary to reach the journal, with its deadline.
     pub pending_fork: Option<Instant>,
@@ -1325,18 +1329,12 @@ pub struct App {
     /// (ADR 0027). Set on `CompactionStarted`, cleared when it finishes, fails or
     /// is skipped.
     pub compacting: bool,
-    /// How many requests the queue holds (ADR 0023 U7), for the status bar.
-    pub pending: usize,
     /// The startup screen: the leading block of entries (wordmark,
     /// collapsed information, safety lines, Tip). `None` before the host sets it.
     pub startup_screen: Option<StartupScreen>,
     /// How many leading entries are the startup block, so a toggle replaces exactly it and
     /// leaves the history alone.
     startup_len: usize,
-    /// When the first idle Ctrl-C armed "press again to quit": the
-    /// deadline a second Ctrl-C must beat. `None` means not armed. Pure state; the wall clock
-    /// arrives on [`Input::Cancel`], so `update` never reads the clock.
-    pub quit_pending: Option<Instant>,
     /// The in-session auto-approval state (ADR 0026 D9). The status bar shows `AUTO` while
     /// it is on; the approval box's `!` key and `/auto` switch it. The live policy itself
     /// is the hooks' — the loop applies it through [`Effect::SetApprovalPolicy`] — this is
@@ -1347,6 +1345,73 @@ pub struct App {
     /// a run-time switch. A UI/startup label, not a session fact (the tier itself is in the
     /// projection).
     pub access_source: crate::profile::AccessSource,
+    /// The queued switch, shown as `next: <provider/model>` until the driver applies it.
+    pub next_model: Option<String>,
+    /// The queued thinking level (D11), cleared when the driver applies it.
+    pub next_thinking: Option<String>,
+    /// The `!`/`!!` command currently running (ADR 0033); `Some` blocks a second one.
+    pub bash_running: Option<String>,
+    /// A `!`/`!!` command submitted while a turn was running: it starts when the turn ends.
+    pub queued_bash: Option<(String, bool)>,
+    /// Whether this session has a shell (`!`) at all: false on the `safe` tier (ADR 0012).
+    pub bash_available: bool,
+    /// The exact `Ran \`cmd\`` text we displayed live as a [`EntryKind::Bash`] block for a `!`
+    /// command. When that message is admitted to the transcript, `push_message` skips it so
+    /// the block is not shown twice; a resume has no pending text and renders it as a block.
+    bash_context_pending: Option<String>,
+    pub total_lines: usize,
+    pub view_height: u16,
+    pub max_scroll: usize,
+    /// The workspace root, so `Tab` can complete `@` file references. `None` until the host
+    /// sets it; without it `Tab` does nothing.
+    pub workspace: Option<PathBuf>,
+    /// The transcript width the renderer last used, so a find recomputes on a resize.
+    pub transcript_width: usize,
+    /// The transcript selection, anchored to entries and offsets ([`Selection`]) — never to
+    /// cells — so new output, scrolling and reflow leave it where it was. `Some` also while
+    /// the drag is still moving; the renderer highlights it each frame.
+    pub selection: Option<Selection>,
+    /// The live left-button gesture, from press to release.
+    selecting: Option<SelectDrag>,
+    /// The last press, for double/triple-click detection.
+    last_click: Option<LastClick>,
+    /// The revision and token counts of the compaction that just finished (ADR 0028 R5): the
+    /// summary message that follows takes them for its one-liner. Empty on a resume replay.
+    /// The last `CompactionFinished`'s numbers, handed to the summary message that follows it
+    /// (ADR 0018). `(revision, tokens_before, tokens_after, deterministic, dropped)`.
+    pending_compaction: Option<(u64, u64, u64, bool, u64)>,
+}
+
+/// The whole TUI's state: the global chrome every session view shares, plus exactly one
+/// [`SessionView`] today (ADR 0030 slice ⓪). The chrome is what is set once from config and
+/// the terminal (theme, keymap, footer, the input composer, the layer stack, the queue count
+/// and the terminal-level flags); the session's transcript, projection, scroll/selection and
+/// turn state live in [`SessionView`] so a later slice can hold several and switch.
+pub struct App {
+    /// The machine's hostname (ADR 0027 `host`), read once at startup.
+    pub hostname: Option<String>,
+    /// Whether automatic compaction is on (`context`'s `{auto}` marker), set once at startup.
+    pub auto_compact: bool,
+    /// The loop's current instant (ADR 0027). The timer never reads the wall clock;
+    /// the loop stamps `now` once per iteration and tests set it to inject time.
+    pub now: Instant,
+    /// The footer (ADR 0027 C2): its preset, glyphs and rows. Set from `[tui.footer]` at
+    /// startup; the default is the two-row `pi` preset.
+    pub footer: crate::footer::Footer,
+    /// The contributor store (ADR 0027 C3). The background tasks write it; the renderer reads a
+    /// snapshot, and the `git_branch`/`worktree`/`status` items come from it.
+    pub contributions: std::sync::Arc<radian_host::ContributionStore>,
+    /// `[tui.widgets]`: contributor items on a line above/below the input box (ADR 0027 C3).
+    pub widgets: radian_host::config::TuiWidgetsConfig,
+    /// The input composer: text plus a cursor (ADR 0009 Phase 4).
+    pub input: Composer,
+    pub quit: bool,
+    /// How many requests the queue holds (ADR 0023 U7), for the status bar.
+    pub pending: usize,
+    /// When the first idle Ctrl-C armed "press again to quit": the
+    /// deadline a second Ctrl-C must beat. `None` means not armed. Pure state; the wall clock
+    /// arrives on [`Input::Cancel`], so `update` never reads the clock.
+    pub quit_pending: Option<Instant>,
     /// The last request the UI answered: the queue's head stays that request for a moment, and
     /// re-showing it would flash a form the user just submitted.
     last_answered: Option<u64>,
@@ -1372,20 +1437,6 @@ pub struct App {
     /// The host fetch the current completion waits for: a result is applied only when it
     /// answers *this* fetch, so a stale answer cannot land on a newer line.
     pending_fetch: Option<command::Fetch>,
-    /// The queued switch, shown as `next: <provider/model>` until the driver applies it.
-    pub next_model: Option<String>,
-    /// The queued thinking level (D11), cleared when the driver applies it.
-    pub next_thinking: Option<String>,
-    /// The `!`/`!!` command currently running (ADR 0033); `Some` blocks a second one.
-    pub bash_running: Option<String>,
-    /// A `!`/`!!` command submitted while a turn was running: it starts when the turn ends.
-    pub queued_bash: Option<(String, bool)>,
-    /// Whether this session has a shell (`!`) at all: false on the `safe` tier (ADR 0012).
-    pub bash_available: bool,
-    /// The exact `Ran \`cmd\`` text we displayed live as a [`EntryKind::Bash`] block for a `!`
-    /// command. When that message is admitted to the transcript, `push_message` skips it so
-    /// the block is not shown twice; a resume has no pending text and renders it as a block.
-    bash_context_pending: Option<String>,
     /// The color theme (config `tui.theme`, `NO_COLOR`).
     pub theme: Theme,
     /// `tui.brand` (ADR 0027): the brand text, or `None` for the glyph set's
@@ -1397,33 +1448,12 @@ pub struct App {
     pub keymap: Keymap,
     /// How the input area is drawn (config `tui.input_style`), defaulting to `bar`.
     pub input_style: InputStyle,
-    pub total_lines: usize,
-    pub view_height: u16,
-    pub max_scroll: usize,
-    /// The workspace root, so `Tab` can complete `@` file references. `None` until the host
-    /// sets it; without it `Tab` does nothing.
-    pub workspace: Option<PathBuf>,
-    /// The transcript width the renderer last used, so a find recomputes on a resize.
-    pub transcript_width: usize,
     /// The startup phase (ADR 0023 U4): [`Startup::Picking`] while the pre-session `--pick`
     /// overlay is the whole point of the loop, [`Startup::Session`] otherwise.
     pub startup: Startup,
     /// Set when the picker resolves during [`Startup::Picking`]. The pre-session loop leaves
     /// as soon as it is `Some`; the caller reads it with [`App::take_picker_outcome`].
     picker_outcome: Option<PickerOutcome>,
-    /// The transcript selection, anchored to entries and offsets ([`Selection`]) — never to
-    /// cells — so new output, scrolling and reflow leave it where it was. `Some` also while
-    /// the drag is still moving; the renderer highlights it each frame.
-    pub selection: Option<Selection>,
-    /// The live left-button gesture, from press to release.
-    selecting: Option<SelectDrag>,
-    /// The last press, for double/triple-click detection.
-    last_click: Option<LastClick>,
-    /// The revision and token counts of the compaction that just finished (ADR 0028 R5): the
-    /// summary message that follows takes them for its one-liner. Empty on a resume replay.
-    /// The last `CompactionFinished`'s numbers, handed to the summary message that follows it
-    /// (ADR 0018). `(revision, tokens_before, tokens_after, deterministic, dropped)`.
-    pending_compaction: Option<(u64, u64, u64, bool, u64)>,
     /// Whether mouse reporting is on (`tui.mouse`, default on). With it off the terminal
     /// never sends a mouse event and every mouse method here is a no-op: none of the
     /// selection/copy features exist (the belt behind the terminal's suspenders).
@@ -1444,49 +1474,24 @@ pub struct App {
     /// info string names a common language. `false` renders every code block as plain text.
     /// Part of `DisplayModes`, so it is in the layout cache key.
     pub highlight_enabled: bool,
+    /// The one session view this process holds today (ADR 0030 slice ⓪). A later slice
+    /// (ADR 0030 slice ⑥) keeps several and switches between them.
+    pub session: SessionView,
 }
 
 impl App {
     pub fn new(model_name: impl Into<String>, session_id: impl Into<String>) -> Self {
         Self {
-            model_name: model_name.into(),
-            model_display: None,
-            provider: None,
-            cwd: None,
-            git_branch: None,
             hostname: None,
-            model_price: None,
             auto_compact: true,
             now: Instant::now(),
-            spinner_origin: Instant::now(),
-            timer: crate::timing::TurnTimer::default(),
-            thinking_level: None,
             footer: crate::footer::Footer::default(),
             contributions: radian_host::ContributionStore::new(),
             widgets: radian_host::config::TuiWidgetsConfig::default(),
-            session_id: session_id.into(),
-            entries: Vec::new(),
-            live_count: 0,
             input: Composer::new(),
-            history: Vec::new(),
-            history_cursor: None,
-            history_stash: String::new(),
-            scroll: 0,
-            follow: true,
-            projection: Arc::new(SessionProjection::new()),
             quit: false,
-            note: None,
-            running_tools: std::collections::HashSet::new(),
-            session_ended: None,
-            turn_committed: true,
-            pending_fork: None,
-            compacting: false,
             pending: 0,
-            startup_screen: None,
-            startup_len: 0,
             quit_pending: None,
-            auto: false,
-            access_source: crate::profile::AccessSource::Default,
             last_answered: None,
             layers: vec![Layer::Surface],
             memory_enabled: false,
@@ -1495,28 +1500,13 @@ impl App {
             mention_completion: None,
             completion_cursor: 0,
             pending_fetch: None,
-            next_model: None,
-            next_thinking: None,
-            bash_running: None,
-            queued_bash: None,
-            bash_available: true,
-            bash_context_pending: None,
             theme: Theme::default(),
             brand: None,
             spinner_kind: crate::spinner::Kind::default(),
             keymap: Keymap::default(),
             input_style: InputStyle::default(),
-            total_lines: 0,
-            view_height: 0,
-            max_scroll: 0,
-            workspace: None,
-            transcript_width: 80,
             startup: Startup::Session,
             picker_outcome: None,
-            selection: None,
-            selecting: None,
-            last_click: None,
-            pending_compaction: None,
             mouse_enabled: true,
             clipboard: ClipboardMode::Osc52,
             // ADR 0028 R3's default: thinking collapsed to one line.
@@ -1524,9 +1514,53 @@ impl App {
             tool_display: crate::tools::ToolDisplay::default(),
             mermaid_enabled: true,
             highlight_enabled: true,
+            session: SessionView {
+                session_id: session_id.into(),
+                model_name: model_name.into(),
+                model_display: None,
+                provider: None,
+                cwd: None,
+                git_branch: None,
+                model_price: None,
+                spinner_origin: Instant::now(),
+                timer: crate::timing::TurnTimer::default(),
+                thinking_level: None,
+                entries: Vec::new(),
+                live_count: 0,
+                history: Vec::new(),
+                history_cursor: None,
+                history_stash: String::new(),
+                scroll: 0,
+                follow: true,
+                projection: Arc::new(SessionProjection::new()),
+                note: None,
+                running_tools: std::collections::HashSet::new(),
+                session_ended: None,
+                turn_committed: true,
+                pending_fork: None,
+                compacting: false,
+                startup_screen: None,
+                startup_len: 0,
+                auto: false,
+                access_source: crate::profile::AccessSource::Default,
+                next_model: None,
+                next_thinking: None,
+                bash_running: None,
+                queued_bash: None,
+                bash_available: true,
+                bash_context_pending: None,
+                total_lines: 0,
+                view_height: 0,
+                max_scroll: 0,
+                workspace: None,
+                transcript_width: 80,
+                selection: None,
+                selecting: None,
+                last_click: None,
+                pending_compaction: None,
+            },
         }
     }
-
     /// Enters the pre-session `--pick` phase: the picker overlay is pushed **focused** (it is
     /// the whole point of the phase) and [`Startup`] becomes [`Startup::Picking`].
     pub fn start_picking(&mut self, mut picker: Picker) {
@@ -1570,12 +1604,12 @@ impl App {
     /// The host normally writes this through the projection when it opens the session; the
     /// method is the seam the tests use.
     pub fn set_context_window(&mut self, input_budget: Option<u64>) {
-        self.projection.set_context_window(input_budget);
+        self.session.projection.set_context_window(input_budget);
     }
 
     /// Records the permission tier's display name, for the status bar.
     pub fn set_tier(&mut self, tier: impl Into<String>) {
-        self.projection.set_tier(Some(tier.into()));
+        self.session.projection.set_tier(Some(tier.into()));
     }
 
     /// Whether this process has a memory root, for `/memory`. Set once at startup; the service
@@ -1587,13 +1621,13 @@ impl App {
     /// The session's in-session auto state (ADR 0026 D9), set at startup from the resolved
     /// policy and afterwards only by the switch itself.
     pub fn set_auto(&mut self, auto: bool) {
-        self.auto = auto;
+        self.session.auto = auto;
     }
 
     /// Where the tier in force came from (ADR 0038 decision 3): the startup resolution, or the
     /// run-time switch's own record. `/access` with no argument prints it.
     pub fn set_access_source(&mut self, source: crate::profile::AccessSource) {
-        self.access_source = source;
+        self.session.access_source = source;
     }
 
     /// Applies the wired `tui.*` configuration. A bad keymap (a key bound to two actions) is
@@ -1693,7 +1727,7 @@ impl App {
     /// Records the MCP state: how many servers are configured, and what the opened session
     /// reported (if it has opened).
     pub fn set_mcp(&mut self, configured: usize, open: Option<(usize, usize)>) {
-        self.projection.set_mcp(configured, open);
+        self.session.projection.set_mcp(configured, open);
     }
 
     /// Replaces the read handle with the host's projection, so the renderer reads the same
@@ -1702,7 +1736,7 @@ impl App {
     /// queue's length, and whether the startup trust prompt is waiting.
     pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool) {
         let trust = matches!(self.top_modal(), Some(Modal::Trust(_)));
-        (self.projection.read().turn(), self.pending, trust)
+        (self.session.projection.read().turn(), self.pending, trust)
     }
 
     /// What is blocking, for herdr's category-only message (ADR 0034 H2). The approval's tool
@@ -1718,44 +1752,44 @@ impl App {
     }
 
     pub fn set_projection(&mut self, projection: Arc<SessionProjection>) {
-        self.projection = projection;
+        self.session.projection = projection;
     }
 
     /// Records the transcript viewport. Called by the renderer with the measured transcript
     /// size, so scroll math works on wrapped lines without the app knowing how to wrap.
     pub fn set_viewport(&mut self, view_height: u16, total_lines: usize) {
-        self.view_height = view_height;
-        self.total_lines = total_lines;
-        self.max_scroll = total_lines.saturating_sub(usize::from(view_height));
-        if self.follow {
-            self.scroll = self.max_scroll;
+        self.session.view_height = view_height;
+        self.session.total_lines = total_lines;
+        self.session.max_scroll = total_lines.saturating_sub(usize::from(view_height));
+        if self.session.follow {
+            self.session.scroll = self.session.max_scroll;
         } else {
-            self.scroll = self.scroll.min(self.max_scroll);
+            self.session.scroll = self.session.scroll.min(self.session.max_scroll);
         }
     }
 
     pub fn is_following(&self) -> bool {
-        self.follow
+        self.session.follow
     }
 
     fn set_scroll(&mut self, next: usize) {
-        self.scroll = next.min(self.max_scroll);
-        self.follow = self.scroll >= self.max_scroll;
+        self.session.scroll = next.min(self.session.max_scroll);
+        self.session.follow = self.session.scroll >= self.session.max_scroll;
     }
 
     pub fn scroll_by(&mut self, delta: i32) {
         let step = delta.unsigned_abs() as usize;
         let next = if delta < 0 {
-            self.scroll.saturating_sub(step)
+            self.session.scroll.saturating_sub(step)
         } else {
-            self.scroll.saturating_add(step)
+            self.session.scroll.saturating_add(step)
         };
         self.set_scroll(next);
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll = self.max_scroll;
-        self.follow = true;
+        self.session.scroll = self.session.max_scroll;
+        self.session.follow = true;
     }
 
     /// One mouse-wheel notch (ADR 0023 U2, plan B). It acts on the topmost **scrollable**
@@ -1798,7 +1832,7 @@ impl App {
 
     /// Whether a left-button drag is live (the loop auto-scrolls only while it is).
     pub fn is_selecting(&self) -> bool {
-        self.selecting.is_some()
+        self.session.selecting.is_some()
     }
 
     /// The left button went down. Any press clears the previous selection (a later release
@@ -1811,11 +1845,11 @@ impl App {
             return UpdateResult::none();
         }
         let count = self.bump_click_count(row, col);
-        let had = self.selection.take();
+        let had = self.session.selection.take();
         let inside = !self.has_modal()
             && self.picker().is_none()
-            && (row as usize) < usize::from(self.view_height)
-            && self.transcript_width > 0;
+            && (row as usize) < usize::from(self.session.view_height)
+            && self.session.transcript_width > 0;
         let cleared = had.is_some();
         if !inside {
             return cleared
@@ -1824,11 +1858,11 @@ impl App {
         }
         // The fixed end is located once, here: a scroll during the drag moves the view, not
         // the anchor. An empty transcript simply starts nothing.
-        let press_line = self.scroll + row as usize;
+        let press_line = self.session.scroll + row as usize;
         let Some(hit) = select::locate_hit(
-            &self.entries,
+            &self.session.entries,
             self.display_modes(),
-            self.transcript_width,
+            self.session.transcript_width,
             press_line,
             col as usize,
         ) else {
@@ -1841,14 +1875,14 @@ impl App {
         // the entry).
         let (anchor, anchor_on_char) = match count {
             2 => match select::run_at(
-                &self.entries,
+                &self.session.entries,
                 self.display_modes(),
-                self.transcript_width,
+                self.session.transcript_width,
                 press_line,
                 col as usize,
             ) {
                 Some((start, end)) => {
-                    self.selection = Some(Selection {
+                    self.session.selection = Some(Selection {
                         anchor: start,
                         head: end,
                     });
@@ -1857,9 +1891,9 @@ impl App {
                 None => (hit.anchor, hit.on_char),
             },
             3 => {
-                let len = select::entry_display_len(&self.entries, hit.anchor.entry);
+                let len = select::entry_display_len(&self.session.entries, hit.anchor.entry);
                 if len > 0 {
-                    self.selection = Some(Selection {
+                    self.session.selection = Some(Selection {
                         anchor: Anchor {
                             entry: hit.anchor.entry,
                             offset: 0,
@@ -1882,7 +1916,7 @@ impl App {
             }
             _ => (hit.anchor, hit.on_char),
         };
-        self.selecting = Some(SelectDrag {
+        self.session.selecting = Some(SelectDrag {
             press: (row, col),
             last: (row, col),
             moved: false,
@@ -1898,7 +1932,7 @@ impl App {
     /// The press counter for double/triple-click: one more when the same cell is pressed
     /// again inside [`DOUBLE_CLICK_WINDOW`] (capped at 3), otherwise back to 1.
     fn bump_click_count(&mut self, row: u16, col: u16) -> usize {
-        let next = match self.last_click {
+        let next = match self.session.last_click {
             Some(click)
                 if click.cell == (row, col) && click.at.elapsed() <= DOUBLE_CLICK_WINDOW =>
             {
@@ -1906,7 +1940,7 @@ impl App {
             }
             _ => 1,
         };
-        self.last_click = Some(LastClick {
+        self.session.last_click = Some(LastClick {
             at: std::time::Instant::now(),
             cell: (row, col),
             count: next,
@@ -1916,10 +1950,10 @@ impl App {
 
     /// The left button moved while held: extend the selection to the pointer's cell.
     pub fn mouse_drag(&mut self, row: u16, col: u16) -> UpdateResult {
-        if !self.mouse_enabled || self.selecting.is_none() {
+        if !self.mouse_enabled || self.session.selecting.is_none() {
             return UpdateResult::none();
         }
-        if let Some(drag) = self.selecting.as_mut() {
+        if let Some(drag) = self.session.selecting.as_mut() {
             if (row, col) != drag.press {
                 drag.moved = true;
             }
@@ -1933,34 +1967,34 @@ impl App {
     /// through the char under it ([`Self::extend_selection_to`]). A click — the pointer
     /// never left the press cell — leaves nothing selected and copies nothing.
     pub fn mouse_up(&mut self, row: u16, col: u16) -> UpdateResult {
-        let Some(drag) = self.selecting else {
+        let Some(drag) = self.session.selecting else {
             return UpdateResult::none();
         };
         if !self.mouse_enabled {
             return UpdateResult::none();
         }
-        self.selecting = None;
+        self.session.selecting = None;
         if drag.count == 1 && !drag.moved && (row, col) == drag.press {
             // The click: the press already cleared; nothing to copy. A double/triple click's
             // release copies the word or entry it just selected.
             return UpdateResult::none();
         }
         self.extend_selection_to(row, col);
-        let Some(selection) = self.selection else {
+        let Some(selection) = self.session.selection else {
             return UpdateResult::none();
         };
         if selection.is_empty() {
-            self.selection = None;
+            self.session.selection = None;
             return UpdateResult::none();
         }
-        let text = select::logical_text(&self.entries, &selection);
+        let text = select::logical_text(&self.session.entries, &selection);
         if text.is_empty() {
-            self.selection = None;
+            self.session.selection = None;
             return UpdateResult::dirty();
         }
         // Refuse the absurd honestly, with the reason: the transcript selection's own line.
         if text.len() > MAX_CLIPBOARD_BYTES {
-            self.selection = None;
+            self.session.selection = None;
             self.push_notice(format!(
                 "selection too large to copy: {} bytes (the limit is {})",
                 text.len(),
@@ -1980,10 +2014,10 @@ impl App {
     /// re-located under the pointer. Returns whether anything changed. The loop calls this
     /// only while a drag is live, on its `recv_timeout` tick.
     pub fn mouse_autoscroll(&mut self) -> bool {
-        let Some(drag) = self.selecting else {
+        let Some(drag) = self.session.selecting else {
             return false;
         };
-        let view = usize::from(self.view_height.max(1));
+        let view = usize::from(self.session.view_height.max(1));
         let direction: i32 = if drag.last.0 == 0 {
             -1
         } else if drag.last.0 as usize >= view {
@@ -1991,9 +2025,9 @@ impl App {
         } else {
             return false;
         };
-        let before = self.scroll;
+        let before = self.session.scroll;
         self.scroll_by(direction);
-        if self.scroll == before {
+        if self.session.scroll == before {
             return false;
         }
         self.extend_selection_to(drag.last.0, drag.last.1);
@@ -2007,14 +2041,14 @@ impl App {
     /// boundary) is a plain boundary and extends nothing. The stored selection is the
     /// normalized `start..end`; rendering and copying read exactly this range.
     fn extend_selection_to(&mut self, row: u16, col: u16) {
-        let Some(drag) = self.selecting else {
+        let Some(drag) = self.session.selecting else {
             return;
         };
-        let head_line = self.scroll + row as usize;
+        let head_line = self.session.scroll + row as usize;
         let Some(hit) = select::locate_hit(
-            &self.entries,
+            &self.session.entries,
             self.display_modes(),
-            self.transcript_width,
+            self.session.transcript_width,
             head_line,
             col as usize,
         ) else {
@@ -2032,9 +2066,9 @@ impl App {
             drag.anchor_on_char
         };
         if end_on_char {
-            end.offset += select::char_len_at(&self.entries, end).unwrap_or(1);
+            end.offset += select::char_len_at(&self.session.entries, end).unwrap_or(1);
         }
-        self.selection = Some(Selection {
+        self.session.selection = Some(Selection {
             anchor: start,
             head: end,
         });
@@ -2268,13 +2302,13 @@ impl App {
     /// Records the transcript width the renderer used. A width change re-wraps the transcript,
     /// so an open find box recomputes its matches — once per resize, never per frame.
     pub fn set_transcript_width(&mut self, width: usize) {
-        if self.transcript_width == width {
+        if self.session.transcript_width == width {
             return;
         }
-        self.transcript_width = width;
+        self.session.transcript_width = width;
         // The wordmark drops to its one-line fallback below a width; rebuilding is cheap and
         // only happens when the width actually changed.
-        if self.startup_screen.is_some() {
+        if self.session.startup_screen.is_some() {
             self.rebuild_startup_entries();
         }
         if self.find_state().is_some() {
@@ -2284,13 +2318,13 @@ impl App {
 
     /// Sets the startup screen and builds its leading entry block.
     pub fn set_startup(&mut self, startup: StartupScreen) {
-        self.startup_screen = Some(startup);
+        self.session.startup_screen = Some(startup);
         self.rebuild_startup_entries();
     }
 
     /// `Ctrl-P` (the `toggle_startup` action): fold or unfold the startup information.
     pub fn toggle_startup(&mut self) -> UpdateResult {
-        let Some(startup) = self.startup_screen.as_mut() else {
+        let Some(startup) = self.session.startup_screen.as_mut() else {
             return UpdateResult::none();
         };
         startup.expanded = !startup.expanded;
@@ -2302,14 +2336,15 @@ impl App {
     /// when it fits the current width), the collapsed line or the full lines, the safety
     /// lines (always shown), and the Tip.
     fn rebuild_startup_entries(&mut self) {
-        let Some(startup) = self.startup_screen.clone() else {
-            self.entries
-                .drain(0..self.startup_len.min(self.entries.len()));
-            self.startup_len = 0;
+        let Some(startup) = self.session.startup_screen.clone() else {
+            self.session
+                .entries
+                .drain(0..self.session.startup_len.min(self.session.entries.len()));
+            self.session.startup_len = 0;
             return;
         };
         let mut block: Vec<Entry> = startup
-            .banner_for_width(self.transcript_width)
+            .banner_for_width(self.session.transcript_width)
             .into_iter()
             .map(|line| Entry::new(EntryKind::Banner, line))
             .collect();
@@ -2334,9 +2369,9 @@ impl App {
             block.push(Entry::new(EntryKind::Tip, tip.clone()));
         }
         let block_len = block.len();
-        let replace = self.startup_len.min(self.entries.len());
-        self.entries.splice(0..replace, block);
-        self.startup_len = block_len;
+        let replace = self.session.startup_len.min(self.session.entries.len());
+        self.session.entries.splice(0..replace, block);
+        self.session.startup_len = block_len;
     }
 
     /// The open find box, if any.
@@ -2360,7 +2395,7 @@ impl App {
         if self.has_modal() || self.find_state().is_some() {
             return;
         }
-        let anchored = self.scroll;
+        let anchored = self.session.scroll;
         self.push_overlay(Overlay::Find(FindState::open(anchored)));
     }
 
@@ -2386,14 +2421,12 @@ impl App {
     }
 
     fn find_recompute(&mut self) {
-        let width = self.transcript_width;
-        // Split the borrow: the entries to match and the layer that holds the query are two
-        // different fields of `self`.
+        let width = self.session.transcript_width;
+        // Split the borrow: the entries to match (the session view) and the layer that holds
+        // the query (the app chrome) are two different fields.
         let modes = self.display_modes();
-        let App {
-            entries, layers, ..
-        } = self;
-        if let Some(find) = layers.iter_mut().rev().find_map(|layer| match layer {
+        let entries = &self.session.entries;
+        if let Some(find) = self.layers.iter_mut().rev().find_map(|layer| match layer {
             Layer::Overlay(Overlay::Find(find)) => Some(find),
             _ => None,
         }) {
@@ -2420,7 +2453,7 @@ impl App {
     /// belongs right after its call, rule 4): the anchors name entries by index, so an
     /// insertion must carry them along or a selection would point at the wrong entry.
     fn shift_anchors(&mut self, from: usize) {
-        if let Some(selection) = &mut self.selection {
+        if let Some(selection) = &mut self.session.selection {
             for anchor in [&mut selection.anchor, &mut selection.head] {
                 if anchor.entry >= from {
                     anchor.entry += 1;
@@ -2431,7 +2464,7 @@ impl App {
 
     /// Drops every per-entry fold override (ADR 0028 R6): a global fold toggle moots them.
     fn clear_fold_overrides(&mut self) {
-        for entry in self.entries.iter_mut() {
+        for entry in self.session.entries.iter_mut() {
             entry.fold_override = None;
         }
     }
@@ -2451,34 +2484,34 @@ impl App {
         else {
             return;
         };
-        if entry >= self.entries.len() {
+        if entry >= self.session.entries.len() {
             return;
         }
         let modes = self.display_modes();
         // Does this entry's display hide content? (Its count can coincide with the expanded
         // one and still hide the text - a one-line thinking channel does exactly that.)
-        let folded = crate::blocks::is_folded(&self.entries[entry], modes);
+        let folded = crate::blocks::is_folded(&self.session.entries[entry], modes);
         if folded {
             // Exactly one override at a time.
-            for other in self.entries.iter_mut() {
+            for other in self.session.entries.iter_mut() {
                 other.fold_override = None;
             }
-            self.entries[entry].fold_override = Some(true);
-            self.note = Some("expanded 1 folded entry for the match".to_string());
+            self.session.entries[entry].fold_override = Some(true);
+            self.session.note = Some("expanded 1 folded entry for the match".to_string());
         }
         // The display line of the match: the expanded line index only maps onto the display
         // when the entries above it are laid out folded, so walk the display counts (the
         // entry itself is measured with its override, so its own lines line up).
         let modes = self.display_modes();
-        let width = self.transcript_width;
+        let width = self.session.transcript_width;
         let mut display_line = 0usize;
-        for item in self.entries[..entry].iter_mut() {
+        for item in self.session.entries[..entry].iter_mut() {
             display_line += crate::blocks::line_count_cached(item, modes, width);
         }
         let line = display_line + line;
-        let height = usize::from(self.view_height.max(1));
-        self.scroll = crate::find::centered_scroll(line, height, self.max_scroll);
-        self.follow = false;
+        let height = usize::from(self.session.view_height.max(1));
+        self.session.scroll = crate::find::centered_scroll(line, height, self.session.max_scroll);
+        self.session.follow = false;
     }
 
     /// Shows the queue's head (ADR 0023 U7). The head is the only pending request on screen:
@@ -2584,7 +2617,7 @@ impl App {
                 response: PendingResponse::Approval(ApprovalOutcome::AllowOnce),
             });
         }
-        self.auto = true;
+        self.session.auto = true;
         self.push_notice(
             "auto: tool calls are approved without asking for the rest of this session; \
              deny rules and the sandbox still apply",
@@ -2684,7 +2717,7 @@ impl App {
             Input::ForkDeadline => {
                 // The wait for the turn boundary ran out: say so and drop the fork, so no
                 // empty child session is created.
-                if self.pending_fork.take().is_some() {
+                if self.session.pending_fork.take().is_some() {
                     self.push_notice("still writing the turn; try again");
                 }
                 UpdateResult::dirty()
@@ -2864,12 +2897,16 @@ impl App {
                     Ok(()) => {
                         // The startup source is spent: this is a run-time switch, remembered or
                         // not. The footer's tier item reads the projection, so re-mark it.
-                        self.access_source = if remember {
+                        self.session.access_source = if remember {
                             crate::profile::AccessSource::Project
                         } else {
                             crate::profile::AccessSource::Session
                         };
-                        self.set_tier(format!("{}{}", tier.as_str(), self.access_source.suffix()));
+                        self.set_tier(format!(
+                            "{}{}",
+                            tier.as_str(),
+                            self.session.access_source.suffix()
+                        ));
                         // `!`/`!!` exist whenever the new tier has a sandbox (`full` and
                         // `workspace`; not `safe`).
                         self.set_bash_available(tier != crate::profile::Tier::Safe);
@@ -2899,7 +2936,9 @@ impl App {
                     Ok(()) => {
                         // The layer itself switches at the next turn (the loop's `set_mode`
                         // queues the change); the projection is the UI's mirror of it.
-                        self.projection.set_mode(Some(mode.as_str().to_string()));
+                        self.session
+                            .projection
+                            .set_mode(Some(mode.as_str().to_string()));
                         self.push_notice(format!(
                             "mode: {} from the next turn (role prompt)",
                             mode.as_str()
@@ -2991,7 +3030,7 @@ impl App {
             // The loop's clipboard write finished; its notice says what Radian did ("copied N
             // chars (via OSC 52)"), never that the clipboard holds it — OSC 52 has no receipt.
             Input::ClipboardDone(notice) => {
-                self.note = Some(notice);
+                self.session.note = Some(notice);
                 UpdateResult::dirty()
             }
             Input::ThemeReady { theme, notices } => {
@@ -3033,11 +3072,27 @@ impl App {
         // The question form is the one modal whose keys are rebindable (ADR 0024 Q7): its own
         // actions come from the `form` layer, and everything else that can edit text goes to
         // the focused field. A key the form does not want is swallowed, never passed down.
-        if matches!(self.top_modal(), Some(Modal::Question(_))) {
+        if let Some(Modal::Question(form)) = self.top_modal() {
             // `alt-h` collapses the panel (ADR 0024 R3): it is the form's own key,
             // not a rebindable `form` action.
             if key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::ALT) {
                 return Some(Input::Form(FormKey::Hide));
+            }
+            // ←/→ switch questions while no free-text field has focus (the hint row says so);
+            // with the `Other` row, a `text` question or a note focused they fall through to
+            // the composer's cursor actions below. feedback: ←/→ used to do nothing
+            // outside a field.
+            let field_focused = form.note_focused() || form.text_focused();
+            if !field_focused && key.modifiers.is_empty() {
+                match key.code {
+                    KeyCode::Left => {
+                        return Some(Input::Form(FormKey::Action(Action::FormPrev)));
+                    }
+                    KeyCode::Right => {
+                        return Some(Input::Form(FormKey::Action(Action::FormNext)));
+                    }
+                    _ => {}
+                }
             }
             if let Some(action) = self.keymap.form_action_for(key) {
                 return Some(Input::Form(FormKey::Action(action)));
@@ -3302,7 +3357,7 @@ impl App {
     /// The current turn state, read from the projection (ADR 0023 U5). `update` reads it to
     /// decide between cancel and quit, and between a steer and a follow-up; it never writes it.
     fn turn(&self) -> TurnState {
-        self.projection.read().turn()
+        self.session.projection.read().turn()
     }
 
     /// `Esc`'s escalation (unchanged, ): cancel a running turn, otherwise
@@ -3331,9 +3386,9 @@ impl App {
         }
         if !self.input.is_empty() {
             let text = std::mem::take(&mut self.input).text();
-            self.history.push(text);
-            self.history_cursor = None;
-            self.history_stash.clear();
+            self.session.history.push(text);
+            self.session.history_cursor = None;
+            self.session.history_stash.clear();
             self.quit_pending = None;
             return UpdateResult::dirty();
         }
@@ -3361,14 +3416,14 @@ impl App {
                     return self.accept_slash_candidate();
                 }
                 let text = std::mem::take(&mut self.input).text();
-                self.history_cursor = None;
-                self.history_stash.clear();
+                self.session.history_cursor = None;
+                self.session.history_stash.clear();
                 if text.trim().is_empty() {
                     return UpdateResult::dirty();
                 }
                 // Every submitted line (messages and `//` escapes and `/…` commands) joins the
                 // session history; browsing edits never change it.
-                self.history.push(text.clone());
+                self.session.history.push(text.clone());
                 let trimmed = text.trim();
                 // `//x` is the escape: send it as the ordinary message `/x`.
                 if let Some(escaped) = trimmed.strip_prefix("//") {
@@ -3443,7 +3498,7 @@ impl App {
                 if self.input.text().starts_with('/') {
                     return self.accept_slash_candidate();
                 }
-                if self.workspace.is_none() {
+                if self.session.workspace.is_none() {
                     self.completion_clear();
                     return UpdateResult::dirty();
                 }
@@ -3507,11 +3562,11 @@ impl App {
                 UpdateResult::dirty()
             }
             Action::ScrollPageUp => {
-                self.scroll_by(-(self.view_height.max(1) as i32));
+                self.scroll_by(-(self.session.view_height.max(1) as i32));
                 UpdateResult::dirty()
             }
             Action::ScrollPageDown => {
-                self.scroll_by(self.view_height.max(1) as i32);
+                self.scroll_by(self.session.view_height.max(1) as i32);
                 UpdateResult::dirty()
             }
             Action::ScrollLineUp => {
@@ -3535,11 +3590,11 @@ impl App {
                 // an empty one cancels a running turn or quits.
                 if !self.input.is_empty() {
                     let text = std::mem::take(&mut self.input).text();
-                    self.history.push(text);
-                    self.history_cursor = None;
-                    self.history_stash.clear();
+                    self.session.history.push(text);
+                    self.session.history_cursor = None;
+                    self.session.history_stash.clear();
                     UpdateResult::dirty()
-                } else if self.bash_running.is_some() {
+                } else if self.session.bash_running.is_some() {
                     // Esc cancels the running `!` command (ADR 0033); the task reports back
                     // as a cancelled `BashDone`.
                     self.push_notice("cancelling the command…");
@@ -3616,18 +3671,18 @@ impl App {
     fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
         if let RuntimeEvent::TurnFinished { .. } = event {
             // The turn boundary is on disk: a `/fork` that was waiting for it can run now.
-            self.turn_committed = true;
-            if self.pending_fork.take().is_some() {
+            self.session.turn_committed = true;
+            if self.session.pending_fork.take().is_some() {
                 return UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork));
             }
         }
         if matches!(event, RuntimeEvent::ConfigChanged { .. }) {
             // The driver applied the queued change: the status bar's `next:` promise is done.
-            self.next_model = None;
-            self.next_thinking = None;
+            self.session.next_model = None;
+            self.session.next_thinking = None;
         }
         if let RuntimeEvent::TurnFailed { message, .. } = event {
-            self.entries.push(Entry::new(
+            self.session.entries.push(Entry::new(
                 EntryKind::Notice,
                 format!("turn failed: {message}"),
             ));
@@ -3635,7 +3690,7 @@ impl App {
             // automatic compaction did not keep the request inside the window. The host only
             // has the text, so the prefix is what identifies it.
             if radian_host::is_context_overflow(message) {
-                self.entries.push(Entry::new(
+                self.session.entries.push(Entry::new(
                     EntryKind::Notice,
                     radian_host::CONTEXT_OVERFLOW_HELP.to_string(),
                 ));
@@ -3675,12 +3730,13 @@ impl App {
         match result {
             Ok(expansion) => {
                 for warning in &expansion.warnings {
-                    self.entries
+                    self.session
+                        .entries
                         .push(Entry::new(EntryKind::Notice, warning.clone()));
                 }
                 let attached = expansion.attached();
                 if !attached.is_empty() {
-                    self.entries.push(Entry::new(
+                    self.session.entries.push(Entry::new(
                         EntryKind::Notice,
                         format!(
                             "attached {} file(s): {}",
@@ -3699,7 +3755,8 @@ impl App {
                 UpdateResult::effect(effect)
             }
             Err(error) => {
-                self.entries
+                self.session
+                    .entries
                     .push(Entry::new(EntryKind::Notice, format!("not sent: {error}")));
                 self.restore_input(pending.text);
                 UpdateResult::dirty()
@@ -3832,7 +3889,8 @@ impl App {
                 }
             }
             MemoryResult::NeedsConfirmation { command, prompt } => {
-                self.entries
+                self.session
+                    .entries
                     .push(Entry::new(EntryKind::Notice, format!("{prompt} [y/N]")));
                 self.push_modal(Modal::ConfirmCommand(PendingCommand {
                     command,
@@ -3874,33 +3932,33 @@ impl App {
     /// `Up` on the first input line: the previous history entry. Starts browsing by stashing
     /// the current line, so `Down` past the newest entry restores it. False with no history.
     pub fn history_up(&mut self) -> bool {
-        if self.history.is_empty() {
+        if self.session.history.is_empty() {
             return false;
         }
-        let next = match self.history_cursor {
+        let next = match self.session.history_cursor {
             None => {
-                self.history_stash = self.input.text();
-                self.history.len() - 1
+                self.session.history_stash = self.input.text();
+                self.session.history.len() - 1
             }
             Some(0) => return false,
             Some(i) => i - 1,
         };
-        self.history_cursor = Some(next);
-        self.input.set_text(&self.history[next]);
+        self.session.history_cursor = Some(next);
+        self.input.set_text(&self.session.history[next]);
         true
     }
 
     /// `Down` on the last input line: the next history entry, or the stashed draft at the end.
     pub fn history_down(&mut self) -> bool {
-        let Some(i) = self.history_cursor else {
+        let Some(i) = self.session.history_cursor else {
             return false;
         };
-        if i + 1 < self.history.len() {
-            self.history_cursor = Some(i + 1);
-            self.input.set_text(&self.history[i + 1]);
+        if i + 1 < self.session.history.len() {
+            self.session.history_cursor = Some(i + 1);
+            self.input.set_text(&self.session.history[i + 1]);
         } else {
-            self.history_cursor = None;
-            let stash = std::mem::take(&mut self.history_stash);
+            self.session.history_cursor = None;
+            let stash = std::mem::take(&mut self.session.history_stash);
             self.input.set_text(&stash);
         }
         true
@@ -3913,7 +3971,7 @@ impl App {
             if let Message::User { content, meta } = message
                 && matches!(meta.source, None | Some(agent_core::InputSource::User))
             {
-                self.history.push(text_of(content));
+                self.session.history.push(text_of(content));
             }
         }
     }
@@ -3950,22 +4008,22 @@ impl App {
     /// A `!`/`!!` command (ADR 0033): one at a time, and while a turn is running it waits for
     /// the turn to end rather than racing it. The `safe` tier has no shell at all.
     fn begin_bash(&mut self, command: String, exclude_from_context: bool) -> UpdateResult {
-        if !self.bash_available {
+        if !self.session.bash_available {
             self.push_notice(
                 "the `safe` tier has no shell (ADR 0012); `!` needs a shell-capable tier",
             );
             return UpdateResult::dirty();
         }
-        if self.bash_running.is_some() {
+        if self.session.bash_running.is_some() {
             self.push_notice("a shell command is already running; Esc cancels it first");
             return UpdateResult::dirty();
         }
         if self.turn() == TurnState::Running {
-            self.queued_bash = Some((command, exclude_from_context));
+            self.session.queued_bash = Some((command, exclude_from_context));
             self.push_notice("a turn is running; the command runs when it ends");
             return UpdateResult::dirty();
         }
-        self.bash_running = Some(command.clone());
+        self.session.bash_running = Some(command.clone());
         UpdateResult::effect(Effect::RunBash {
             command,
             exclude_from_context,
@@ -3981,7 +4039,7 @@ impl App {
         exclude_from_context: bool,
         result: Result<radian_coding::UserBash, String>,
     ) -> UpdateResult {
-        self.bash_running = None;
+        self.session.bash_running = None;
         let mut effects = Vec::new();
         let (exit_code, cancelled) = match &result {
             Ok(run) => (run.exit_code, run.cancelled),
@@ -3989,17 +4047,18 @@ impl App {
         };
         match result {
             Ok(run) => {
-                self.entries
+                self.session
+                    .entries
                     .push(bash_entry(&command, exclude_from_context, &run));
                 if !exclude_from_context {
                     let text = bash_context_text(&command, &run);
                     // Shown live; the same message coming back through the transcript is
                     // skipped so the block is not drawn twice.
-                    self.bash_context_pending = Some(text.clone());
+                    self.session.bash_context_pending = Some(text.clone());
                     effects.push(Effect::Inject(Message::user(text)));
                 }
             }
-            Err(error) => self.entries.push(Entry::new(
+            Err(error) => self.session.entries.push(Entry::new(
                 EntryKind::Notice,
                 format!("!{command}: {error}"),
             )),
@@ -4047,7 +4106,7 @@ impl App {
             command::Outcome::Fork => {
                 // ADR 0022 §1: fork only when the session is idle. The decision is app state,
                 // so it is made here rather than in the loop.
-                if self.session_ended.is_some() {
+                if self.session.session_ended.is_some() {
                     self.push_notice(
                         "the session has ended; there is nothing to fork (`/fork` needs a live \
                          session)",
@@ -4063,8 +4122,8 @@ impl App {
                 // The turn ended (idle) but its boundary may not be on disk yet: the fork
                 // reads the parent file, so it would copy an empty history. Wait for the
                 // journaled `TurnFinished` (bounded by `FORK_COMMIT_WAIT`).
-                if !self.turn_committed {
-                    self.pending_fork = Some(self.now + FORK_COMMIT_WAIT);
+                if !self.session.turn_committed {
+                    self.session.pending_fork = Some(self.now + FORK_COMMIT_WAIT);
                     return UpdateResult::dirty();
                 }
                 UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork))
@@ -4122,7 +4181,7 @@ impl App {
                 // ADR 0026 D9: the in-session switch. `/auto on` needs no confirmation (it is
                 // typed, not one keypress), and a no-op switch is still recorded — the audit
                 // line says who switched, so the journal keeps every command.
-                self.auto = on;
+                self.session.auto = on;
                 if on {
                     self.push_notice(
                         "auto: tool calls are approved without asking for the rest of this \
@@ -4138,6 +4197,7 @@ impl App {
             command::Outcome::Access(name) => match name {
                 None => {
                     let current = self
+                        .session
                         .projection
                         .read()
                         .tier()
@@ -4145,7 +4205,7 @@ impl App {
                         .unwrap_or_else(|| "unknown".to_owned());
                     self.push_notice(format!(
                         "access: {current} (from {})",
-                        self.access_source.label()
+                        self.session.access_source.label()
                     ));
                     UpdateResult::dirty()
                 }
@@ -4160,6 +4220,7 @@ impl App {
                     // The projection's tier may carry a source suffix (`full (project)`); the
                     // tier name is the first word.
                     let current = self
+                        .session
                         .projection
                         .read()
                         .tier()
@@ -4187,6 +4248,7 @@ impl App {
             command::Outcome::ModeSwitch(name) => match name {
                 None => {
                     let current = self
+                        .session
                         .projection
                         .read()
                         .mode()
@@ -4262,7 +4324,7 @@ impl App {
     /// Queues the route (D5) and says what happens next. The cache warning is the accepted
     /// cost of a switch (ADR 0026 已接受的代价).
     fn queue_model(&mut self, provider: String, model: String) -> UpdateResult {
-        self.next_model = Some(format!("{provider}/{model}"));
+        self.session.next_model = Some(format!("{provider}/{model}"));
         self.push_notice(format!(
             "next turn: {provider}/{model}; the first turn after a switch will not hit the cache"
         ));
@@ -4286,7 +4348,7 @@ impl App {
                 supported.join("/")
             ));
         }
-        self.next_thinking = Some(applied.clone());
+        self.session.next_thinking = Some(applied.clone());
         self.push_notice(format!("next turn: thinking {applied}"));
         UpdateResult::effect(Effect::QueueThinking { level: applied })
     }
@@ -4314,7 +4376,9 @@ impl App {
 
     /// Pushes a notice entry. Public so the event loop can show a `/compact` result.
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        self.entries.push(Entry::new(EntryKind::Notice, text));
+        self.session
+            .entries
+            .push(Entry::new(EntryKind::Notice, text));
     }
 
     /// Applies a live event. Deltas build `live` entries; the committed message
@@ -4329,13 +4393,14 @@ impl App {
             // the transcript, the note and the effects.
             AgentEvent::TurnStarted => {
                 // The turn is being written now; a `/fork` must wait for its `TurnFinished`.
-                self.turn_committed = false;
+                self.session.turn_committed = false;
             }
             // ADR 0027: the local turn timer starts with the model request and
             // stops with its response. The token count is the model's reported output.
-            AgentEvent::ModelRequestStarted { .. } => self.timer.request_started(self.now),
+            AgentEvent::ModelRequestStarted { .. } => self.session.timer.request_started(self.now),
             AgentEvent::ModelResponseReceived { usage, .. } => {
-                self.timer
+                self.session
+                    .timer
                     .response_finished(self.now, usage.as_ref().and_then(|usage| usage.output));
             }
             // ADR 0017: a transient failure is being retried. The failed attempt's
@@ -4347,29 +4412,29 @@ impl App {
                 reason,
             } => {
                 self.drop_live();
-                self.note = Some(format!(
+                self.session.note = Some(format!(
                     "retrying {attempt}/{max} in {}s: {reason}",
                     delay.as_secs()
                 ));
             }
             AgentEvent::ToolStarted { call_id, name, .. } => {
-                self.running_tools.insert(call_id.clone());
-                self.note = Some(format!("tool {name} running"));
+                self.session.running_tools.insert(call_id.clone());
+                self.session.note = Some(format!("tool {name} running"));
             }
             AgentEvent::ToolFinished { call_id, .. } => {
                 // The tool is done. Clear the note only when no other tool in the batch is
                 // still running; otherwise the footer keeps naming a running one.
-                self.running_tools.remove(call_id);
-                if self.running_tools.is_empty() {
-                    self.note = None;
+                self.session.running_tools.remove(call_id);
+                if self.session.running_tools.is_empty() {
+                    self.session.note = None;
                 }
             }
             AgentEvent::TranscriptAppended { message, .. } => self.push_message(message),
             // ADR 0018: compaction is visible to the user as it happens.
             AgentEvent::CompactionStarted { tokens_before, .. } => {
-                self.note = Some("compacting context".to_string());
-                self.compacting = true;
-                self.entries.push(Entry::new(
+                self.session.note = Some("compacting context".to_string());
+                self.session.compacting = true;
+                self.session.entries.push(Entry::new(
                     EntryKind::Notice,
                     format!("context over the budget ({tokens_before} tokens); compacting…"),
                 ));
@@ -4382,8 +4447,8 @@ impl App {
                 dropped,
                 ..
             } => {
-                self.note = None;
-                self.compacting = false;
+                self.session.note = None;
+                self.session.compacting = false;
                 // ADR 0018, decision 3: a deterministic fallback says so and names
                 // how many messages it dropped; a model summary keeps the token line.
                 let text = if *deterministic {
@@ -4391,10 +4456,10 @@ impl App {
                 } else {
                     format!("context compacted ({tokens_before} → {tokens_after} tokens)")
                 };
-                self.entries.push(Entry::new(EntryKind::Notice, text));
+                self.session.entries.push(Entry::new(EntryKind::Notice, text));
                 // The summary message arrives right after this event (ADR 0018): the numbers
                 // are handed to it, since the journaled message does not carry them.
-                self.pending_compaction = Some((
+                self.session.pending_compaction = Some((
                     *revision,
                     *tokens_before,
                     *tokens_after,
@@ -4403,16 +4468,16 @@ impl App {
                 ));
             }
             AgentEvent::CompactionFailed { reason } => {
-                self.note = None;
-                self.compacting = false;
-                self.entries.push(Entry::new(
+                self.session.note = None;
+                self.session.compacting = false;
+                self.session.entries.push(Entry::new(
                     EntryKind::Notice,
                     format!("compaction failed: {reason}"),
                 ));
             }
             // A skip means nothing was summarized (ADR 0018): the flag must not stick.
             AgentEvent::CompactionSkipped { .. } => {
-                self.compacting = false;
+                self.session.compacting = false;
             }
             AgentEvent::RunFinished { status: _ } => {
                 // The turn is over. A pending approval is not cleared here: the permission
@@ -4420,11 +4485,11 @@ impl App {
                 // the queue drops the element and wakes the UI (ADR 0023 U7). Driving the modal
                 // from the queue alone is what makes "the waiter gave up" and "the turn ended"
                 // the same event.
-                self.note = None;
-                self.running_tools.clear();
-                self.compacting = false;
+                self.session.note = None;
+                self.session.running_tools.clear();
+                self.session.compacting = false;
                 // ADR 0033: a `!` submitted behind the turn starts now.
-                if let Some((command, exclude_from_context)) = self.queued_bash.take() {
+                if let Some((command, exclude_from_context)) = self.session.queued_bash.take() {
                     effects.extend(self.begin_bash(command, exclude_from_context).effects);
                 }
             }
@@ -4437,6 +4502,7 @@ impl App {
     /// stream arrives as a snapshot, so this replaces rather than appends.
     fn set_live(&mut self, kind: EntryKind, text: &str) {
         match self
+            .session
             .entries
             .iter_mut()
             .rev()
@@ -4446,8 +4512,8 @@ impl App {
             None => {
                 let mut entry = Entry::new(kind, text);
                 entry.live = true;
-                self.entries.push(entry);
-                self.live_count += 1;
+                self.session.entries.push(entry);
+                self.session.live_count += 1;
             }
         }
     }
@@ -4456,13 +4522,13 @@ impl App {
     /// (`push_message`), and so does a retry: the failed attempt's deltas are live-only
     /// (ADR 0010/0017 revision 1). The scan runs only when one exists (resume-perf A).
     fn drop_live(&mut self) {
-        if self.live_count > 0 {
+        if self.session.live_count > 0 {
             let mut scanned = 0u64;
-            self.entries.retain(|entry| {
+            self.session.entries.retain(|entry| {
                 scanned += 1;
                 !entry.live
             });
-            self.live_count = 0;
+            self.session.live_count = 0;
             #[cfg(test)]
             LIVE_SCANS.with(|count| count.set(count.get() + scanned));
         }
@@ -4483,12 +4549,12 @@ impl App {
         // one (no pending text) is drawn as a block.
         if let Message::User { .. } = message {
             let text = message.text();
-            if self.bash_context_pending.as_deref() == Some(text.as_str()) {
-                self.bash_context_pending = None;
+            if self.session.bash_context_pending.as_deref() == Some(text.as_str()) {
+                self.session.bash_context_pending = None;
                 return;
             }
             if let Some(entry) = bash_entry_from_context(&text) {
-                self.entries.push(entry);
+                self.session.entries.push(entry);
                 return;
             }
         }
@@ -4512,7 +4578,7 @@ impl App {
                     // `CompactionFinished` event that preceded this message; a resume replay
                     // does not, and omits them.
                     if let Some((revision, before, after, deterministic, dropped)) =
-                        self.pending_compaction.take()
+                        self.session.pending_compaction.take()
                     {
                         info.revision = Some(revision);
                         info.tokens_before = Some(before);
@@ -4524,12 +4590,12 @@ impl App {
                     }
                     let mut entry = Entry::new(EntryKind::Compaction, info.display_text());
                     entry.compaction = Some(Box::new(info));
-                    self.entries.push(entry);
+                    self.session.entries.push(entry);
                     return;
                 }
                 // ADR 0018: an attachment is its own part, so the display renders
                 // it as `[file: P, N lines]` rather than joining its body into the message.
-                self.entries.push(Entry::new(
+                self.session.entries.push(Entry::new(
                     EntryKind::User,
                     crate::mention::display_parts(content),
                 ));
@@ -4543,12 +4609,13 @@ impl App {
             } => {
                 let reasoning = text_of(reasoning);
                 if !reasoning.is_empty() {
-                    self.entries
+                    self.session
+                        .entries
                         .push(Entry::new(EntryKind::Reasoning, reasoning));
                 }
                 let mut entry = Entry::new(EntryKind::Assistant, text_of(content));
                 entry.interrupted = *interrupted;
-                self.entries.push(entry);
+                self.session.entries.push(entry);
                 // One card per call (ADR 0028 R4): each carries its own name and arguments,
                 // and its text is the same header the renderer will show, so the head stays
                 // selectable and copyable character for character.
@@ -4573,36 +4640,56 @@ impl App {
                     // A call with no result yet is a whole card of its own (ADR 0028 revision
                     // 2); the pairing below turns it into the head of the merged card.
                     entry.card = crate::blocks::Card::Solo;
-                    self.entries.push(entry);
+                    self.session.entries.push(entry);
                 }
             }
             Message::Tool { result, .. } => {
                 // The result pairs with its call **by id** (the same key the live and the
                 // resume paths carry), so a batch of calls pairs correctly whatever order
                 // their results arrive in.
-                let paired = self
-                    .entries
-                    .iter_mut()
-                    .rev()
-                    .find(|entry| {
-                        entry.kind == EntryKind::ToolCall
-                            && entry
-                                .tool
-                                .as_ref()
-                                .is_some_and(|card| card.call_id == result.call_id)
-                    })
-                    .and_then(|entry| {
+                //
+                // The pairing is a **single** scan from the back: the call is the most recent
+                // matching card, and the index it found is reused for the insertion below.
+                // (A second front `position` for the index walked the whole transcript per
+                // result — the same O(n^2) family as the `retain` resume-perf A fixed.)
+                let [_, ok_glyph, failed_glyph] = self.footer.glyphs().tool_status();
+                let mut paired: Option<(String, serde_json::Value)> = None;
+                let mut call_index: Option<usize> = None;
+                let len = self.session.entries.len();
+                for (rev, entry) in self.session.entries.iter_mut().rev().enumerate() {
+                    #[cfg(test)]
+                    TOOL_PAIR_SCANS.with(|count| count.set(count.get() + 1));
+                    if entry.kind == EntryKind::ToolCall
+                        && entry
+                            .tool
+                            .as_ref()
+                            .is_some_and(|card| card.call_id == result.call_id)
+                    {
                         entry.result = Some(result.is_error);
-                        let card = entry.tool.as_mut()?;
-                        card.structured = result.structured.clone();
-                        // The header can only be final now (the `shell` exit code comes from
-                        // the result), so the entry's text - what renders and copies - is
-                        // regenerated from the same function the layout uses.
-                        let [_, ok, failed] = self.footer.glyphs().tool_status();
-                        let glyph = if result.is_error { failed } else { ok };
-                        entry.text = crate::tools::call_text(card, glyph, &result.text());
-                        Some((card.name.clone(), card.arguments.clone()))
-                    });
+                        if let Some(card) = entry.tool.as_mut() {
+                            card.structured = result.structured.clone();
+                            // The header can only be final now (the `shell` exit code comes
+                            // from the result), so the entry's text - what renders and copies -
+                            // is regenerated from the same function the layout uses.
+                            let glyph = if result.is_error {
+                                failed_glyph
+                            } else {
+                                ok_glyph
+                            };
+                            // ADR 0024: the call entry draws the whole ask block
+                            // (its result entry is blank), so it keeps the result's own text
+                            // for the declined/cancelled status line inside the box.
+                            entry.text = if card.name == "ask_user" {
+                                result.text()
+                            } else {
+                                crate::tools::call_text(card, glyph, &result.text())
+                            };
+                            paired = Some((card.name.clone(), card.arguments.clone()));
+                        }
+                        call_index = Some(len - 1 - rev);
+                        break;
+                    }
+                }
                 let (name, arguments) = paired.unwrap_or_default();
                 let mut card = crate::tools::ToolCard::new(result.call_id.clone(), name, arguments);
                 card.structured = result.structured.clone();
@@ -4620,24 +4707,18 @@ impl App {
                 // entries are the UI's own order; the journal keeps the message order, so a
                 // resume replay runs this same code and lands on the same order. A result
                 // whose call is gone (a torn transcript) is appended.
-                match self.entries.iter().position(|entry| {
-                    entry.kind == EntryKind::ToolCall
-                        && entry
-                            .tool
-                            .as_ref()
-                            .is_some_and(|call| call.call_id == result.call_id)
-                }) {
+                match call_index {
                     Some(index) => {
                         // The call heads the merged card and this result closes it (ADR 0028
                         // revision 2): the drawing merges them, the data stays two entries.
-                        self.entries[index].card = crate::blocks::Card::Head;
+                        self.session.entries[index].card = crate::blocks::Card::Head;
                         entry.card = crate::blocks::Card::Tail;
-                        self.entries.insert(index + 1, entry);
+                        self.session.entries.insert(index + 1, entry);
                         // The insertion shifts every later entry: a selection anchored to one
                         // of them moves with it.
                         self.shift_anchors(index + 1);
                     }
-                    None => self.entries.push(entry),
+                    None => self.session.entries.push(entry),
                 }
             }
         }
@@ -4664,6 +4745,14 @@ thread_local! {
     pub(crate) static LIVE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+// Test-only: how many entries the tool-result pairing has walked. A unit test asserts it stays
+// linear in the transcript when every result pairs with the most recent call, which is the
+// property the O(n^2) fix rests on (no wall clock). Thread-local for the same reason as above.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TOOL_PAIR_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The `@`-mention slice needs exactly one `App` method. Kept in its own block at the end of
 /// the file so it merges cleanly with the composer work that owns the rest of the input
 /// handling.
@@ -4676,7 +4765,7 @@ impl App {
 
     /// Records the workspace root, so `Tab` can complete `@` file references against it.
     pub fn set_workspace(&mut self, workspace: impl Into<PathBuf>) {
-        self.workspace = Some(workspace.into());
+        self.session.workspace = Some(workspace.into());
     }
 
     /// The footer's startup facts (ADR 0027 C2): the working directory, the model's display
@@ -4688,17 +4777,17 @@ impl App {
         provider: Option<String>,
         thinking_level: Option<String>,
     ) {
-        self.cwd = cwd;
-        self.model_display = model_display;
-        self.provider = provider;
-        self.thinking_level = thinking_level;
+        self.session.cwd = cwd;
+        self.session.model_display = model_display;
+        self.session.provider = provider;
+        self.session.thinking_level = thinking_level;
     }
 
     /// The background-refreshed git branch (ADR 0027 C2: the draw path never runs git). The
     /// host's `GitContributor` is the normal writer now; this setter remains for a host that
     /// has a first value without the contributor.
     pub fn set_git_branch(&mut self, branch: Option<String>) {
-        self.git_branch = branch;
+        self.session.git_branch = branch;
     }
 
     /// The machine's hostname (ADR 0027), read once at startup.
@@ -4710,8 +4799,8 @@ impl App {
     /// projection, which is what prices each arriving call: the footer reads the accumulated
     /// fee from there, because a call keeps the price it arrived under even after a switch.
     pub fn set_model_price(&mut self, price: Option<radian_host::ModelPrice>) {
-        self.model_price = price.clone();
-        self.projection.set_price(price);
+        self.session.model_price = price.clone();
+        self.session.projection.set_price(price);
     }
 
     /// Whether automatic compaction is on (ADR 0027).
@@ -4724,20 +4813,45 @@ impl App {
         self.now = now;
     }
 
-    /// The spinner's current frame (ADR 0027): a function of the injected clock,
-    /// so a test advances it with `set_now`.
+    /// The spinner's current frame (ADR 0027/13): a function of the injected clock,
+    /// so a test advances it with `set_now`. Whether the pulse interpolates comes from the theme
+    /// (and the glyph set); a frame is a pure function of its inputs, which is what makes
+    /// "redraw only when it changed" a comparison of frames.
     pub fn spinner_frame(&self) -> crate::spinner::Frame {
-        let tick = self.now.saturating_duration_since(self.spinner_origin);
-        crate::spinner::frame(self.spinner_kind, self.footer_glyphs(), tick)
+        let tick = self
+            .now
+            .saturating_duration_since(self.session.spinner_origin);
+        crate::spinner::frame(
+            self.spinner_kind,
+            self.footer_glyphs(),
+            self.theme.pulse_can_breathe(),
+            tick,
+        )
     }
 
-    /// The style for a spinner frame: the pulse alternates between the accent and the weak
-    /// level; the rotating frames stay on the accent.
+    /// How long the spinner's current frame stays (ADR 0027/13): the breath's step
+    /// while the pulse interpolates, its 500 ms two-colour switch when it cannot, and the
+    /// rotating kinds' 250 ms. The loop wakes at this interval while a spinner is visible.
+    pub fn spinner_interval(&self) -> Duration {
+        crate::spinner::frame_interval(
+            self.spinner_kind,
+            self.footer_glyphs(),
+            self.theme.pulse_can_breathe(),
+        )
+    }
+
+    /// The style for a spinner frame: the pulse breathes between the accent and the dim level
+    /// when both ends are RGB (ADR 0027); otherwise it is revision 10's two-colour
+    /// switch, and the rotating frames stay on the accent.
     pub fn spinner_style(&self, frame: crate::spinner::Frame) -> ratatui::style::Style {
-        if frame.dim {
-            self.theme.truncation
-        } else {
-            self.theme.notice_label
+        let accent = self.theme.notice_label;
+        let dim = self.theme.truncation;
+        match crate::spinner::breath_color(accent.fg, dim.fg, frame.step) {
+            // The breath interpolates the colour only: the accent's other attributes (its bold)
+            // stay at every step, so no weight pops in the middle of the breath.
+            Some(color) => accent.fg(color),
+            None if frame.step == crate::spinner::PULSE_DIM_STEP => dim,
+            None => accent,
         }
     }
 
@@ -4752,13 +4866,13 @@ impl App {
             return Some("Waiting for your answer");
         }
         // A running compaction is the most specific state (ADR 0018).
-        if self.compacting {
+        if self.session.compacting {
             return Some("Compacting");
         }
         if self.turn_running() {
             return Some("Working");
         }
-        if self.bash_running.is_some() {
+        if self.session.bash_running.is_some() {
             return Some("Running a command");
         }
         None
@@ -4774,8 +4888,9 @@ impl App {
     /// a live reasoning line, or a running tool card. Only then does the loop animate.
     pub fn spinner_visible(&self) -> bool {
         self.spinner_status().is_some()
-            || self.entries.iter().any(|entry| entry.live)
+            || self.session.entries.iter().any(|entry| entry.live)
             || self
+                .session
                 .entries
                 .iter()
                 .any(|entry| entry.kind == EntryKind::ToolCall && entry.result.is_none())
@@ -4784,7 +4899,7 @@ impl App {
     /// Whether this session has a shell for `!` (ADR 0033): false on the `safe` tier, which
     /// has no sandbox at all (ADR 0012).
     pub fn set_bash_available(&mut self, available: bool) {
-        self.bash_available = available;
+        self.session.bash_available = available;
     }
 
     /// The contributor store the renderer reads (ADR 0027 C3).
@@ -4797,7 +4912,7 @@ impl App {
 
     /// The applied thinking level, once the driver reports it (ADR 0026 D11).
     pub fn set_thinking_level(&mut self, level: Option<String>) {
-        self.thinking_level = level;
+        self.session.thinking_level = level;
     }
 
     /// The footer's glyph set, for the items that draw an icon.
@@ -4891,7 +5006,7 @@ mod tests {
     fn the_spinner_frame_follows_the_injected_clock() {
         let mut app = App::new("m", "s");
         app.spinner_kind = crate::spinner::Kind::Arc;
-        let base = app.spinner_origin;
+        let base = app.session.spinner_origin;
         app.set_now(base);
         assert_eq!(app.spinner_frame().glyph, "◜");
         app.set_now(base + std::time::Duration::from_millis(250));
@@ -4899,19 +5014,31 @@ mod tests {
         app.set_now(base + std::time::Duration::from_millis(500));
         assert_eq!(app.spinner_frame().glyph, "◞");
 
-        // The default pulse keeps its glyph and only changes the phase every 500 ms.
+        // The default pulse keeps its glyph and only changes its colour: with a non-RGB theme
+        // (revision 13 decision 3) it is revision 10's two-colour switch, every 500 ms.
         app.spinner_kind = crate::spinner::Kind::Pulse;
+        app.theme = crate::theme::Theme::mono();
         app.set_now(base);
-        assert!(!app.spinner_frame().dim);
+        assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_ACCENT_STEP);
         app.set_now(base + std::time::Duration::from_millis(500));
-        assert!(app.spinner_frame().dim);
+        assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_DIM_STEP);
+        // An RGB theme breathes instead: the step advances every ~117 ms.
+        app.theme = crate::theme::Theme::dark();
+        app.set_now(base);
+        assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_DIM_STEP);
+        app.set_now(base + app.spinner_interval());
+        assert!(
+            app.spinner_frame().step > crate::spinner::PULSE_DIM_STEP,
+            "the second sample is already brighter"
+        );
+        assert_eq!(app.spinner_interval(), crate::spinner::pulse_step());
     }
 
     /// ADR 0018 + ADR 0027: the compaction events drive the `Compacting` status.
     #[test]
     fn the_compacting_status_follows_the_compaction_events() {
         let mut app = App::new("m", "s");
-        app.projection.set_turn(TurnState::Running);
+        app.session.projection.set_turn(TurnState::Running);
         assert_eq!(app.spinner_status(), Some("Working"));
 
         app.apply_event(&AgentEvent::CompactionStarted {
@@ -4969,11 +5096,12 @@ mod tests {
             dropped: 7,
         });
         assert!(
-            app.entries
+            app.session
+                .entries
                 .iter()
                 .any(|entry| entry.text == "compacted without a summary (7 dropped)"),
             "the notice names the count: {:?}",
-            app.entries.iter().map(|e| &e.text).collect::<Vec<_>>()
+            app.session.entries.iter().map(|e| &e.text).collect::<Vec<_>>()
         );
 
         let message = agent_core::compaction::compacted_history(
@@ -4984,6 +5112,7 @@ mod tests {
         .unwrap();
         app.push_message(&message[0]);
         let info = app
+            .session
             .entries
             .iter()
             .find_map(|entry| entry.compaction.as_deref())
@@ -5003,7 +5132,7 @@ mod tests {
     fn a_retrying_event_drops_the_live_block_and_names_the_attempt() {
         let mut app = App::new("m", "s");
         app.set_live(EntryKind::Assistant, "half an answer");
-        assert_eq!(app.live_count, 1);
+        assert_eq!(app.session.live_count, 1);
 
         app.apply_event(&AgentEvent::ModelRetrying {
             attempt: 1,
@@ -5013,12 +5142,12 @@ mod tests {
         });
 
         assert_eq!(
-            app.live_count, 0,
+            app.session.live_count, 0,
             "the failed attempt's partial text must be gone"
         );
-        assert!(app.entries.iter().all(|entry| !entry.live));
+        assert!(app.session.entries.iter().all(|entry| !entry.live));
         assert_eq!(
-            app.note.as_deref(),
+            app.session.note.as_deref(),
             Some("retrying 1/3 in 4s: the stream ended before the response was complete")
         );
     }
@@ -5047,11 +5176,18 @@ mod tests {
                 exclude_from_context: false,
             }]
         );
-        assert_eq!(app.bash_running.as_deref(), Some("echo hi"));
+        assert_eq!(app.session.bash_running.as_deref(), Some("echo hi"));
         // A second one is refused (one at a time).
         let second = app.run_slash_command("!echo again");
         assert!(second.effects.is_empty());
-        assert!(app.entries.last().unwrap().text.contains("already running"));
+        assert!(
+            app.session
+                .entries
+                .last()
+                .unwrap()
+                .text
+                .contains("already running")
+        );
     }
 
     /// ADR 0012: the `safe` tier has no shell, so `!` never runs there.
@@ -5061,11 +5197,11 @@ mod tests {
         app.set_bash_available(false);
         let result = app.run_slash_command("!echo hi");
         assert!(result.effects.is_empty());
-        assert!(app.bash_running.is_none());
+        assert!(app.session.bash_running.is_none());
         assert!(
-            app.entries.last().unwrap().text.contains("safe"),
+            app.session.entries.last().unwrap().text.contains("safe"),
             "{}",
-            app.entries.last().unwrap().text
+            app.session.entries.last().unwrap().text
         );
     }
 
@@ -5073,17 +5209,17 @@ mod tests {
     #[test]
     fn a_bang_queues_behind_a_running_turn() {
         let mut app = App::new("m", "s");
-        app.projection.set_turn(TurnState::Running);
+        app.session.projection.set_turn(TurnState::Running);
         let result = app.run_slash_command("!echo hi");
         assert!(result.effects.is_empty());
         assert_eq!(
-            app.queued_bash,
+            app.session.queued_bash,
             Some(("echo hi".to_owned(), false)),
             "queued, not run"
         );
         // The event sink writes the Idle fact before the app sees the event; the test does
         // the same.
-        app.projection.set_turn(TurnState::Idle);
+        app.session.projection.set_turn(TurnState::Idle);
         let effects = app.apply_event(&AgentEvent::RunFinished {
             status: agent_core::RunStatus::Completed,
         });
@@ -5091,7 +5227,7 @@ mod tests {
             matches!(effects.as_slice(), [Effect::RunBash { command, .. }] if command == "echo hi"),
             "{effects:?}"
         );
-        assert_eq!(app.bash_running.as_deref(), Some("echo hi"));
+        assert_eq!(app.session.bash_running.as_deref(), Some("echo hi"));
     }
 
     /// `!` shows a block, injects the `Ran \`cmd\`` message and audits; `!!` only shows and
@@ -5118,7 +5254,7 @@ mod tests {
                 ..
             }
         ));
-        let entry = app.entries.last().unwrap();
+        let entry = app.session.entries.last().unwrap();
         assert!(matches!(
             entry.kind,
             EntryKind::Bash {
@@ -5145,7 +5281,7 @@ mod tests {
             result.effects
         );
         assert!(matches!(
-            app.entries.last().unwrap().kind,
+            app.session.entries.last().unwrap().kind,
             EntryKind::Bash {
                 exclude_from_context: true
             }
@@ -5163,10 +5299,10 @@ mod tests {
             exclude_from_context: false,
             result: Ok(a_run(Some(0), "hi\n")),
         });
-        let before = app.entries.len();
+        let before = app.session.entries.len();
         let text = bash_context_text("echo hi", &a_run(Some(0), "hi\n"));
         app.push_message(&Message::user(text));
-        assert_eq!(app.entries.len(), before, "no duplicate block");
+        assert_eq!(app.session.entries.len(), before, "no duplicate block");
     }
 
     /// A resumed `!` context message (no live block) renders as a Bash block, not user prose.
@@ -5176,7 +5312,7 @@ mod tests {
         let text = bash_context_text("echo hi", &a_run(Some(0), "hi\n"));
         app.push_message(&Message::user(text));
         assert!(matches!(
-            app.entries.last().unwrap().kind,
+            app.session.entries.last().unwrap().kind,
             EntryKind::Bash {
                 exclude_from_context: false
             }
@@ -5201,7 +5337,7 @@ mod tests {
         for message in filler(2_000) {
             app.push_message(&message);
         }
-        assert_eq!(app.entries.len(), 2_000);
+        assert_eq!(app.session.entries.len(), 2_000);
         let before = scans();
         for message in filler(1_000) {
             app.push_message(&message);
@@ -5221,8 +5357,8 @@ mod tests {
         let before = scans();
         app.push_message(&agent_core::Message::user("committed"));
         assert!(scans() > before, "a live entry makes the walk run");
-        assert!(app.entries.iter().all(|entry| !entry.live));
-        assert_eq!(app.live_count, 0);
+        assert!(app.session.entries.iter().all(|entry| !entry.live));
+        assert_eq!(app.session.live_count, 0);
     }
 
     /// A live entry is not always a suffix: a compaction notice can sit after it. The drop
@@ -5231,21 +5367,142 @@ mod tests {
     fn push_message_drops_a_live_entry_that_is_not_at_the_tail() {
         let mut app = App::new("m", "s");
         app.set_live(EntryKind::Assistant, "partial");
-        app.entries.push(Entry::new(
+        app.session.entries.push(Entry::new(
             EntryKind::Notice,
             "context over the budget; compacting\u{2026}",
         ));
         app.push_message(&agent_core::Message::user("committed"));
         assert!(
-            app.entries.iter().all(|entry| !entry.live),
+            app.session.entries.iter().all(|entry| !entry.live),
             "the live entry is dropped wherever it sits"
         );
         assert!(
-            app.entries
+            app.session
+                .entries
                 .iter()
                 .any(|entry| entry.kind == EntryKind::Notice),
             "the non-live entry after it survives"
         );
-        assert_eq!(app.live_count, 0);
+        assert_eq!(app.session.live_count, 0);
+    }
+
+    fn pair_scans() -> u64 {
+        TOOL_PAIR_SCANS.with(std::cell::Cell::get)
+    }
+
+    /// A resume replays assistant tool calls and their results in order, so every result pairs
+    /// with the most recent call. The pairing must not walk the transcript from the front: that
+    /// was a second O(n^2) over the whole resume (resume-perf2). The number of entries walked
+    /// is the property; no wall clock.
+    #[test]
+    fn tool_result_pairing_does_not_walk_the_transcript() {
+        use agent_core::{ContentPart, ToolCall, ToolResult};
+
+        let mut app = App::new("m", "s");
+        let pairs = 400u64;
+        let before = pair_scans();
+        for i in 0..pairs {
+            app.push_message(&agent_core::Message::Assistant {
+                content: Vec::new(),
+                reasoning: Vec::new(),
+                tool_calls: vec![ToolCall {
+                    id: format!("call-{i}"),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "file.txt"}),
+                }],
+                provider_payload: None,
+                interrupted: false,
+                meta: Default::default(),
+            });
+            app.push_message(&agent_core::Message::Tool {
+                result: ToolResult::success(format!("call-{i}"), vec![ContentPart::text("ok")]),
+                meta: Default::default(),
+            });
+        }
+        let scanned = pair_scans() - before;
+        assert!(
+            scanned <= pairs * 4,
+            "pairing {pairs} results walked {scanned} entries; it must not scan the transcript"
+        );
+        // The results still pair: one Assistant entry, one call and one result per pair.
+        assert_eq!(app.session.entries.len() as u64, pairs * 3);
+    }
+
+    /// The pairing search is a scan from the back, so it finds the most recent matching call.
+    /// A batch of calls (one assistant message, several results) pairs each result with its own
+    /// call, not the first one in the batch.
+    #[test]
+    fn a_batch_of_tool_results_pairs_each_with_its_own_call() {
+        use agent_core::{ContentPart, ToolCall, ToolResult};
+
+        let mut app = App::new("m", "s");
+        app.push_message(&agent_core::Message::Assistant {
+            content: Vec::new(),
+            reasoning: Vec::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "a".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "a"}),
+                },
+                ToolCall {
+                    id: "b".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "b"}),
+                },
+            ],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        });
+        // The results arrive in the reverse order (allowed): each must pair with its own call.
+        for id in ["b", "a"] {
+            app.push_message(&agent_core::Message::Tool {
+                result: ToolResult::success(id.to_owned(), vec![ContentPart::text("ok")]),
+                meta: Default::default(),
+            });
+        }
+        let order: Vec<&str> = app
+            .session
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::ToolCall)
+            .filter_map(|entry| entry.tool.as_ref().map(|card| card.call_id.as_str()))
+            .collect();
+        assert_eq!(order, vec!["a", "b"], "the calls keep their order");
+        // Each result sits right after **its own** call (rule 4): call a, result a, call b,
+        // result b - not every call then every result.
+        let layout: Vec<(EntryKind, String)> = app
+            .session
+            .entries
+            .iter()
+            .map(|entry| {
+                let id = entry
+                    .tool
+                    .as_ref()
+                    .map(|card| card.call_id.clone())
+                    .unwrap_or_default();
+                (entry.kind, id)
+            })
+            .collect();
+        assert_eq!(
+            layout,
+            vec![
+                (EntryKind::Assistant, String::new()),
+                (EntryKind::ToolCall, "a".to_owned()),
+                (EntryKind::ToolResult, "a".to_owned()),
+                (EntryKind::ToolCall, "b".to_owned()),
+                (EntryKind::ToolResult, "b".to_owned()),
+            ]
+        );
+        // Both calls paired with their own result.
+        let calls: Vec<Option<bool>> = app
+            .session
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::ToolCall)
+            .map(|entry| entry.result)
+            .collect();
+        assert_eq!(calls, vec![Some(false), Some(false)]);
     }
 }

@@ -928,6 +928,15 @@ impl Theme {
         self.name == ThemeName::Mono
     }
 
+    /// Whether the default pulse can interpolate between its two ends (ADR 0027
+    /// decision 3): both ends of the breath — the accent ([`Self::notice_label`]) and the dim
+    /// level ([`Self::truncation`]) — must be RGB. A 16/256-colour resolution and `mono` are
+    /// not, and keep revision 10's two-colour switch.
+    pub fn pulse_can_breathe(&self) -> bool {
+        matches!(self.notice_label.fg, Some(Color::Rgb(..)))
+            && matches!(self.truncation.fg, Some(Color::Rgb(..)))
+    }
+
     /// Whether `NO_COLOR` is set to a non-empty value (the no-color.org convention).
     pub fn no_color_env() -> bool {
         std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
@@ -981,6 +990,20 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0027: only a theme whose two ends of the breath are RGB lets
+    /// the pulse interpolate. A 256-colour resolution (an RGB value downgraded for the
+    /// terminal) and `mono` fall back to revision 10's two-colour switch.
+    #[test]
+    fn only_an_rgb_theme_can_breathe() {
+        assert!(Theme::dark().pulse_can_breathe());
+        assert!(Theme::light().pulse_can_breathe());
+        assert!(
+            !Theme::builtin(ThemeName::Dark, false).pulse_can_breathe(),
+            "without truecolor the ends are indexed colors"
+        );
+        assert!(!Theme::mono().pulse_can_breathe());
+    }
 
     /// A unique scratch directory per test, removed on drop.
     struct Scratch(std::path::PathBuf);

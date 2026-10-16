@@ -3,18 +3,34 @@
 //! selection mapping ([`crate::select`]) reads the same [`BodyLine`]s — one geometry, two
 //! consumers, so what is highlighted is what is copied.
 //!
-//! Two caches live on [`crate::app::Entry`]:
+//! Caches live on [`crate::app::Entry`]:
 //!
 //! - the **block** cache (parsed ranges, keyed by text length and the reasoning mode — the
 //!   fold state is part of the key, ADR 0028 R1). Parsing is incremental: closed blocks are
 //!   reused, only the trailing open block is re-parsed, so a streaming frame's parse cost does
 //!   not grow with the entry's length (the text only ever grows while live);
-//! - the **line count** cache (keyed by width, text length and the mode, as before).
+//! - the **line count** cache (keyed by width, text length and the mode, as before);
+//! - the **Markdown count** cache (keyed by width and text length): the measure pass fills it
+//!   with per-paragraph line counts, so it never lays Markdown out (resume-perf2);
+//! - the **Markdown line** cache, filled lazily by the paths that lay a paragraph out (the
+//!   window, the selection, the search).
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{Entry, EntryKind};
 use crate::tools::{self, DisplayModes};
+
+// How many Markdown paragraphs `md_lines` has laid out, for the tests that prove the measure
+// pass only counts (resume-perf2). Thread-local, like the highlight counter: parallel tests in
+// one binary must not share a process-global counter.
+thread_local! {
+    static MD_LINE_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of Markdown paragraphs laid out so far **on this thread**.
+pub fn md_line_builds() -> u64 {
+    MD_LINE_BUILDS.with(std::cell::Cell::get)
+}
 
 /// How the reasoning channel displays (ADR 0028 R3). The fold state is part of the block and
 /// layout cache keys: toggling it re-lays the affected entries out.
@@ -753,11 +769,12 @@ fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
 ///   call, with no gap in between;
 /// * either side is a user block: its pad row is the separation already (painted in a theme
 ///   with a user background, blank in one without - the shape is the same either way);
-/// * the previous entry is the thinking channel (ADR 0035): it hugs the block below
-///   it (the reply or the tool call it introduces), so the folded one-liner reads as part of
-///   what follows. The gap **above** thinking is unchanged.
+/// * the startup block: one block built from several entries (see [`is_startup_block`]).
 ///
-/// Otherwise exactly one line. The counting ([`line_count`]'s callers), the drawing
+/// Otherwise exactly one line -- the thinking channel included: ADR 0035 replaced
+/// revision 3's "the folded one-liner hugs the block it introduces" with one blank line on both
+/// sides, because a folded `> thinking (N lines)` against the reply read as one cramped block.
+/// The counting ([`line_count`]'s callers), the drawing
 /// ([`crate::render::visible_lines`]), the selection mapping and the find geometry all call
 /// this, so a gap cannot exist in one and not the other.
 pub fn block_gap(prev: Option<&Entry>, next: &Entry) -> usize {
@@ -770,10 +787,6 @@ pub fn block_gap(prev: Option<&Entry>, next: &Entry) -> usize {
     // The startup block is **one** block built from several entries (the wordmark, the folded
     // line or the full lines, the safety lines that never fold, the Tip): no gaps inside it.
     if is_startup_block(prev.kind) && is_startup_block(next.kind) {
-        return 0;
-    }
-    // ADR 0035: thinking hugs the block below it.
-    if prev.kind == EntryKind::Reasoning {
         return 0;
     }
     if prev.kind == EntryKind::User || next.kind == EntryKind::User {
@@ -840,6 +853,12 @@ pub fn expanded(entry: &Entry, global: bool) -> bool {
 /// per entry — the virtualization budget (ADR 0028 R7) depends on this.
 pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     let mode = modes.reasoning;
+    // The `ask_user` block is not a card: its shape follows the card's arguments and result
+    // (ADR 0024), and its result entry is blank when it closes the call. Count it
+    // through the layout so the total always equals the drawing.
+    if is_ask_entry(entry) {
+        return layout(entry, &[], modes, width).len();
+    }
     if let Some(count) = cheap_count(entry, modes) {
         return count;
     }
@@ -849,7 +868,8 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     // A blank edge line is stripped by the layout; the cheap arms below do not know that, so
     // this entry goes through the layout itself (the one place the rule lives). Highlighting
     // is a color-only pass and must not run here: the measure pass is the cheap one
-    // (`tui.display.highlight`'s lazy rule).
+    // (`tui.display.highlight`'s lazy rule). This arm **does** lay Markdown out; an entry with
+    // no blank edge counts without it (resume-perf2, `md_line_count`).
     if has_blank_edge(&text) {
         // Keep the caller's glyph tier: it decides whether a banded block has padding rows
         // (ADR 0035), so the count must use the same one the draw does. Only the
@@ -990,42 +1010,51 @@ pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -
     {
         return lines;
     }
-    // Render this width's diagrams once and keep them: the key is `(width, text_len)`, so a
-    // resize re-renders (a `TooWide` failure can succeed on a wider terminal) and an append
-    // re-renders (a longer source is a different diagram).
-    if modes.mermaid && entry.kind == EntryKind::Assistant {
-        let blocks = blocks_for(entry, modes.reasoning);
-        let text = crate::render::display_text(entry);
-        let sources = mermaid_sources(&blocks, &text, modes.mermaid);
-        let fresh = entry
-            .diagram_cache
-            .as_ref()
-            .filter(|(cached_width, cached_len, _)| {
-                *cached_width == width && *cached_len == text_len
-            })
-            .is_none();
-        if fresh {
-            let outcomes = sources
-                .iter()
-                .map(|source| diagram_for(source, width))
-                .collect();
-            entry.diagram_cache = Some((width, text_len, outcomes));
-        }
-    }
-    // The Markdown paragraph lines do not depend on the folds, so cache them by
-    // `(width, text_len)`: a global fold toggle re-counts the entries but does not re-parse
-    // them (the R7 toggle gate).
     if entry.kind == EntryKind::Assistant {
         let blocks = blocks_for(entry, modes.reasoning);
+        // Render this width's diagrams once and keep them: the key is `(width, text_len)`, so a
+        // resize re-renders (a `TooWide` failure can succeed on a wider terminal) and an append
+        // re-renders (a longer source is a different diagram).
+        if modes.mermaid {
+            let text = crate::render::display_text(entry);
+            let sources = mermaid_sources(&blocks, &text, modes.mermaid);
+            let fresh = entry
+                .diagram_cache
+                .as_ref()
+                .filter(|(cached_width, cached_len, _)| {
+                    *cached_width == width && *cached_len == text_len
+                })
+                .is_none();
+            if fresh {
+                let outcomes = sources
+                    .iter()
+                    .map(|source| diagram_for(source, width))
+                    .collect();
+                entry.diagram_cache = Some((width, text_len, outcomes));
+            }
+        }
+        // The Markdown paragraph counts do not depend on the folds, so cache them by
+        // `(width, text_len)`: a global fold toggle re-counts the entries but does not re-parse
+        // their Markdown (the R7 toggle gate). **Counts only** (resume-perf2): the first frame
+        // must not lay every Assistant paragraph out.
         // The same body width `layout`/`line_count` look up with, or the cache never hits.
         let body_width = width
             .saturating_sub(crate::render::marker_prefix(entry.kind).width())
             .max(1);
-        fill_md_cache(entry, &blocks, body_width, modes.glyphs);
+        fill_md_count_cache(entry, &blocks, body_width, modes.glyphs);
     }
     let lines = line_count(entry, modes, width);
     entry.layout_cache = Some((key, lines));
     lines
+}
+
+/// Whether the entry is part of an `ask_user` pair (either the call or its result): its block
+/// has its own shape, so the count goes through the layout.
+fn is_ask_entry(entry: &Entry) -> bool {
+    entry
+        .tool
+        .as_deref()
+        .is_some_and(|card| card.name == "ask_user")
 }
 
 /// Counts that need no layout pass at all.
@@ -1243,9 +1272,14 @@ fn layout_unstripped(
             // ADR 0024 R1: an `ask_user` call is the boxed question block, with no
             // answers yet (the result entry carries them).
             match entry.tool.as_deref() {
-                Some(card) if card.name == "ask_user" => {
-                    ask_block(card, &text, false, body_width, modes.glyphs)
-                }
+                // ADR 0024 rules 1-2: a pending ask is one dim line (the questions
+                // are drawn in the panel below, not twice); once it is answered, declined or
+                // cancelled the **same** entry draws the full closed block. The result entry
+                // stays blank (below), so the ask never appears twice.
+                Some(card) if card.name == "ask_user" => match entry.result {
+                    None => ask_pending_line(card),
+                    Some(is_error) => ask_block(card, &text, is_error, body_width, modes.glyphs),
+                },
                 // The call line, laid out like a code line: never wrapped, truncated with `…`
                 // when it does not fit (a shell command's own newlines do wrap). The entry's
                 // text **is** this header (set at push time from the same function), so the
@@ -1288,7 +1322,14 @@ fn layout_unstripped(
             if let Some(card) = card
                 && card.name == "ask_user"
             {
-                return ask_block(card, &text, entry.is_error, body_width, modes.glyphs);
+                // ADR 0024: the call entry draws the whole block, so a result that
+                // closes it (a merged `Tail`) draws nothing. A torn result whose call is gone
+                // has no block above it, so it still draws one.
+                return if entry.card == crate::blocks::Card::Tail {
+                    Vec::new()
+                } else {
+                    ask_block(card, &text, entry.is_error, body_width, modes.glyphs)
+                };
             }
             let plan = match card {
                 Some(card) => tools::body_plan(
@@ -1326,24 +1367,27 @@ fn layout_unstripped(
 }
 
 /// The box and mark glyphs of the `ask_user` block (ADR 0024 R1): unicode by
-/// default, pure ASCII under `glyphs = ascii`.
-struct AskGlyphs {
-    top_left: char,
-    top_right: char,
-    bottom_left: char,
-    bottom_right: char,
-    horizontal: char,
-    tee_left: char,
-    tee_right: char,
-    single_on: &'static str,
-    single_off: &'static str,
-    multi_on: &'static str,
-    multi_off: &'static str,
-    desc: &'static str,
+/// default, pure ASCII under `glyphs = ascii`. The one marker source for the transcript block
+/// **and** the panel (ADR 0024 implementation note): single, multi and `Other`
+/// share the checkbox pair.
+pub(crate) struct AskGlyphs {
+    pub(crate) top_left: char,
+    pub(crate) top_right: char,
+    pub(crate) bottom_left: char,
+    pub(crate) bottom_right: char,
+    pub(crate) horizontal: char,
+    pub(crate) vertical: char,
+    pub(crate) tee_left: char,
+    pub(crate) tee_right: char,
+    pub(crate) single_on: &'static str,
+    pub(crate) single_off: &'static str,
+    pub(crate) multi_on: &'static str,
+    pub(crate) multi_off: &'static str,
+    pub(crate) desc: &'static str,
 }
 
 impl AskGlyphs {
-    fn for_glyphs(glyphs: crate::footer::Glyphs) -> Self {
+    pub(crate) fn for_glyphs(glyphs: crate::footer::Glyphs) -> Self {
         match glyphs {
             crate::footer::Glyphs::Ascii => Self {
                 top_left: '+',
@@ -1351,10 +1395,11 @@ impl AskGlyphs {
                 bottom_left: '+',
                 bottom_right: '+',
                 horizontal: '-',
+                vertical: '|',
                 tee_left: '+',
                 tee_right: '+',
-                single_on: "(*)",
-                single_off: "( )",
+                single_on: "[x]",
+                single_off: "[ ]",
                 multi_on: "[x]",
                 multi_off: "[ ]",
                 desc: "->",
@@ -1365,10 +1410,11 @@ impl AskGlyphs {
                 bottom_left: '╰',
                 bottom_right: '╯',
                 horizontal: '─',
+                vertical: '│',
                 tee_left: '├',
                 tee_right: '┤',
-                single_on: "◉",
-                single_off: "○",
+                single_on: "☑",
+                single_off: "☐",
                 multi_on: "☑",
                 multi_off: "☐",
                 desc: "↳",
@@ -1403,6 +1449,23 @@ fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
         md: Some(md),
         syntax: None,
     }
+}
+
+/// A pending `ask_user` call (ADR 0024 rule 1): one weak line in the card's
+/// title-row style. The questions live in the panel below until they are answered, so the
+/// same ask is never drawn twice. The count comes from the call's own arguments.
+fn ask_pending_line(card: &tools::ToolCard) -> Vec<BodyLine> {
+    let count = card
+        .arguments
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let text = format!(
+        " Ask {count} question{} · answering below",
+        if count == 1 { "" } else { "s" }
+    );
+    vec![ask_line(vec![(text, MdStyle::Dim)])]
 }
 
 /// The `ask_user` card as a boxed block (ADR 0024 R1): the request from the call's
@@ -1457,12 +1520,12 @@ fn ask_block(
             .get("prompt")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        for line in ask_wrap(prompt, width.saturating_sub(2)) {
-            out.push(ask_line(vec![
-                (" ".to_string(), MdStyle::Dim),
-                (line, MdStyle::Accent),
-            ]));
-        }
+        out.extend(ask_body(
+            &g,
+            width,
+            (" ".to_string(), MdStyle::Dim),
+            (prompt.to_owned(), MdStyle::Accent),
+        ));
         let reply = answers.and_then(|answers| {
             answers
                 .iter()
@@ -1502,28 +1565,34 @@ fn ask_block(
                 {
                     label.push_str(" (Recommended)");
                 }
-                out.push(ask_line(vec![
+                out.extend(ask_body(
+                    &g,
+                    width,
                     (format!("  {mark} "), MdStyle::Dim),
                     (label, MdStyle::Plain),
-                ]));
+                ));
                 if let Some(description) = option
                     .get("description")
                     .and_then(serde_json::Value::as_str)
                 {
-                    out.push(ask_line(vec![
+                    out.extend(ask_body(
+                        &g,
+                        width,
                         (format!("     {} ", g.desc), MdStyle::Dim),
                         (description.to_owned(), MdStyle::Muted),
-                    ]));
+                    ));
                 }
             }
         }
         if let Some(reply) = reply {
             for (key, style) in [("other", MdStyle::Muted), ("note", MdStyle::Muted)] {
                 if let Some(value) = reply.get(key).and_then(serde_json::Value::as_str) {
-                    out.push(ask_line(vec![
+                    out.extend(ask_body(
+                        &g,
+                        width,
                         (format!("  {key}: "), MdStyle::Dim),
                         (value.to_owned(), style),
-                    ]));
+                    ));
                 }
             }
         }
@@ -1531,15 +1600,14 @@ fn ask_block(
     // Declined/cancelled (an error result) is one status line; the text is the tool failure.
     if is_error {
         let status = text.lines().next().unwrap_or("(no answer)").to_owned();
-        out.push(ask_line(vec![
+        out.extend(ask_body(
+            &g,
+            width,
             (" ".to_string(), MdStyle::Dim),
             (status, MdStyle::Muted),
-        ]));
+        ));
     }
-    out.push(ask_line(vec![(
-        format!("{}{}{}", g.bottom_left, g.horizontal, g.bottom_right),
-        MdStyle::Dim,
-    )]));
+    out.push(ask_line(ask_bottom_border(&g, width)));
     out
 }
 
@@ -1590,6 +1658,56 @@ fn ask_wrap(text: &str, width: usize) -> Vec<String> {
                 .collect()
         })
         .collect()
+}
+
+/// One bordered content row of the ask block (ADR 0024 rule 3): the left border in
+/// the box's first column, `prefix` (the indent and the mark), the value wrapped to whatever
+/// the prefix leaves of the inner width (CJK by display width), padded with blanks, and the
+/// right border in the box's last column. A continuation row keeps the value's column, so the
+/// right border never moves. One line per wrapped row.
+fn ask_body(
+    g: &AskGlyphs,
+    width: usize,
+    prefix: (String, MdStyle),
+    value: (String, MdStyle),
+) -> Vec<BodyLine> {
+    let inner = width.saturating_sub(2);
+    let prefix_width = UnicodeWidthStr::width(prefix.0.as_str());
+    let avail = inner.saturating_sub(prefix_width).max(1);
+    ask_wrap(&value.0, avail)
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let lead = if index == 0 {
+                prefix.0.clone()
+            } else {
+                " ".repeat(prefix_width)
+            };
+            let used = prefix_width + UnicodeWidthStr::width(chunk.as_str());
+            let pad = inner.saturating_sub(used);
+            ask_line(vec![
+                (g.vertical.to_string(), MdStyle::Dim),
+                (lead, prefix.1),
+                (chunk, value.1),
+                (" ".repeat(pad), MdStyle::Dim),
+                (g.vertical.to_string(), MdStyle::Dim),
+            ])
+        })
+        .collect()
+}
+
+/// The block's bottom border (ADR 0024 rule 3): as wide as the top border, so the
+/// box is closed.
+fn ask_bottom_border(g: &AskGlyphs, width: usize) -> Vec<(String, MdStyle)> {
+    vec![(
+        format!(
+            "{}{}{}",
+            g.bottom_left,
+            g.horizontal.to_string().repeat(width.saturating_sub(2)),
+            g.bottom_right
+        ),
+        MdStyle::Dim,
+    )]
 }
 
 /// The call entry's content rows (ADR 0028 rule 1): the head status line, then the
@@ -2322,6 +2440,7 @@ pub(crate) fn md_lines(
     width: usize,
     glyphs: crate::footer::Glyphs,
 ) -> Vec<BodyLine> {
+    MD_LINE_BUILDS.with(|calls| calls.set(calls.get() + 1));
     let blocks = crate::markdown::parse(source, base);
     let glyphs = MdGlyphs::for_glyphs(glyphs);
     let mut out = Vec::new();
@@ -2356,8 +2475,11 @@ pub(crate) fn md_lines(
     out
 }
 
-/// The Markdown lines of the paragraph at `[start, end)`: the entry's cache when it holds them,
-/// else rendered fresh (the immutable paths may not have run the mutable measure pass).
+/// The Markdown lines of the paragraph at `[start, end)`: the entry's `(width, text_len,
+/// glyphs)` cache when it holds them, else rendered fresh. A miss **fills** the cache
+/// (resume-perf2: the measure pass counts Markdown without laying it out, so the layout/text
+/// paths — the window, the selection and the search — are what fill it). The layout does not
+/// depend on the folds, so a fold toggle reuses the cache and stays inside the R7 gate.
 fn md_lines_cached(
     entry: &Entry,
     start: usize,
@@ -2366,19 +2488,38 @@ fn md_lines_cached(
     glyphs: crate::footer::Glyphs,
     text: &str,
 ) -> Vec<BodyLine> {
-    if let Some((cached_width, cached_len, cached_glyphs, paragraphs)) = &entry.md_cache
+    let text_len = entry.text.len();
+    if let Some((cached_width, cached_len, cached_glyphs, paragraphs)) = &*entry.md_cache.borrow()
         && *cached_width == width
-        && *cached_len == entry.text.len()
+        && *cached_len == text_len
         && *cached_glyphs == glyphs
         && let Some((_, lines)) = paragraphs.iter().find(|(at, _)| *at == start)
     {
         return lines.clone();
     }
-    md_lines(&text[start..end], start, width, glyphs)
+    let lines = md_lines(&text[start..end], start, width, glyphs);
+    {
+        let mut cache = entry.md_cache.borrow_mut();
+        let fresh = cache
+            .as_ref()
+            .is_none_or(|(cached_width, cached_len, cached_glyphs, _)| {
+                *cached_width != width || *cached_len != text_len || *cached_glyphs != glyphs
+            });
+        if fresh {
+            *cache = Some((width, text_len, glyphs, vec![(start, lines.clone())]));
+        } else if let Some((_, _, _, paragraphs)) = cache.as_mut()
+            && !paragraphs.iter().any(|(at, _)| *at == start)
+        {
+            paragraphs.push((start, lines.clone()));
+        }
+    }
+    lines
 }
 
-/// The Markdown line count of the paragraph at `[start, end)` without cloning the cached lines
-/// (the per-frame measure path).
+/// The Markdown line count of the paragraph at `[start, end)`: from the measure pass's count
+/// cache, else from the line cache, else **counted without building a line** (resume-perf2).
+/// The first frame and a fold toggle take the first or last arm, so neither lays out Markdown
+/// for an entry it only needs to measure.
 fn md_line_count_cached(
     entry: &Entry,
     start: usize,
@@ -2387,23 +2528,38 @@ fn md_line_count_cached(
     glyphs: crate::footer::Glyphs,
     text: &str,
 ) -> usize {
-    if let Some((cached_width, cached_len, cached_glyphs, paragraphs)) = &entry.md_cache
+    let text_len = entry.text.len();
+    if let Some((cached_width, cached_len, cached_glyphs, counts)) = &entry.md_count_cache
         && *cached_width == width
-        && *cached_len == entry.text.len()
+        && *cached_len == text_len
+        && *cached_glyphs == glyphs
+        && let Some((_, count)) = counts.iter().find(|(at, _)| *at == start)
+    {
+        return *count;
+    }
+    if let Some((cached_width, cached_len, cached_glyphs, paragraphs)) = &*entry.md_cache.borrow()
+        && *cached_width == width
+        && *cached_len == text_len
         && *cached_glyphs == glyphs
         && let Some((_, lines)) = paragraphs.iter().find(|(at, _)| *at == start)
     {
         return lines.len();
     }
-    md_lines(&text[start..end], start, width, glyphs).len()
+    md_line_count(&text[start..end], start, width, glyphs)
 }
 
-/// Builds the entry's Markdown paragraph-line cache for `width` (the mutable measure pass), so
-/// the following `layout`/`line_count` reuse it.
-fn fill_md_cache(entry: &mut Entry, blocks: &[Block], width: usize, glyphs: crate::footer::Glyphs) {
+/// Builds the entry's Markdown paragraph **counts** for `width` (the mutable measure pass), so
+/// the following `line_count` and a later fold toggle reuse them instead of re-parsing. Counts
+/// only: no line is built (resume-perf2, the first-frame cost). The glyph tier is in the key.
+fn fill_md_count_cache(
+    entry: &mut Entry,
+    blocks: &[Block],
+    width: usize,
+    glyphs: crate::footer::Glyphs,
+) {
     let text_len = entry.text.len();
     let fresh = entry
-        .md_cache
+        .md_count_cache
         .as_ref()
         .filter(|(cached_width, cached_len, cached_glyphs, _)| {
             *cached_width == width && *cached_len == text_len && *cached_glyphs == glyphs
@@ -2413,13 +2569,226 @@ fn fill_md_cache(entry: &mut Entry, blocks: &[Block], width: usize, glyphs: crat
         return;
     }
     let text = crate::render::display_text(entry);
-    let mut paragraphs = Vec::new();
+    let mut counts = Vec::new();
     for block in blocks {
         if let Block::Paragraph { start, end, .. } = block {
-            paragraphs.push((*start, md_lines(&text[*start..*end], *start, width, glyphs)));
+            counts.push((
+                *start,
+                md_line_count(&text[*start..*end], *start, width, glyphs),
+            ));
         }
     }
-    entry.md_cache = Some((width, text_len, glyphs, paragraphs));
+    entry.md_count_cache = Some((width, text_len, glyphs, counts));
+}
+
+/// The number of display lines [`md_lines`] would lay out for `source`, **without building a
+/// line** (resume-perf2: the first frame and a fold toggle count Markdown; they must not lay
+/// it out). This mirrors `md_lines` exactly — a count that drifts from the layout would give
+/// the wrong total and the wrong scroll position — and `md_line_count_matches_the_layout` holds
+/// the two together. The glyph tier is passed in: a task list's checkbox and the table rules
+/// change the geometry (ADR 0035).
+pub(crate) fn md_line_count(
+    source: &str,
+    base: usize,
+    width: usize,
+    glyphs: crate::footer::Glyphs,
+) -> usize {
+    let blocks = crate::markdown::parse(source, base);
+    let glyphs = MdGlyphs::for_glyphs(glyphs);
+    let (mut lines, mut last_non_empty) = (0usize, false);
+    for (index, block) in blocks.iter().enumerate() {
+        // ADR 0035 V1: exactly one blank line between block-level Markdown elements, managed by
+        // `md_lines` and not by the source's blank lines. It counts even when the block itself
+        // lays out no line (an empty quote, a lone task marker).
+        if index > 0 {
+            lines += 1;
+            last_non_empty = false;
+        }
+        let (count, last) = md_block_count(block, width, base, 0, &glyphs);
+        if count > 0 {
+            lines += count;
+            last_non_empty = last;
+        }
+    }
+    // `md_lines` restores the trailing newline pulldown drops as one empty line, unless the
+    // layout already ends on an empty line.
+    if source.ends_with('\n') && lines > 0 && last_non_empty {
+        lines += 1;
+    }
+    if lines == 0 {
+        lines = 1;
+    }
+    lines
+}
+
+/// [`md_line_count`] over a list of parsed blocks: the lines, and whether the **last** line is
+/// non-empty (only meaningful when the count is non-zero).
+fn md_blocks_count(
+    blocks: &[crate::markdown::MdBlock],
+    width: usize,
+    base: usize,
+    indent: usize,
+    glyphs: &MdGlyphs,
+) -> (usize, bool) {
+    let mut count = 0usize;
+    let mut last_non_empty = false;
+    for block in blocks {
+        let (lines, last) = md_block_count(block, width, base, indent, glyphs);
+        if lines > 0 {
+            count += lines;
+            last_non_empty = last;
+        }
+    }
+    (count, last_non_empty)
+}
+
+/// The lines one parsed Markdown block lays out to, and whether its last line is non-empty.
+/// Mirrors [`md_blocks`] arm by arm, glyph tier included.
+fn md_block_count(
+    block: &crate::markdown::MdBlock,
+    width: usize,
+    base: usize,
+    indent: usize,
+    glyphs: &MdGlyphs,
+) -> (usize, bool) {
+    use crate::markdown::MdBlock;
+    match block {
+        MdBlock::Paragraph(pieces) => md_wrap_count(
+            pieces.iter().map(|piece| piece.text.as_str()),
+            0,
+            width,
+            indent,
+        ),
+        MdBlock::Heading { level, pieces } => {
+            // The synthesized prefix (`level` `#`s and a space) is all width-1 cells.
+            let prefix = *level as usize + 1;
+            md_wrap_count(
+                pieces.iter().map(|piece| piece.text.as_str()),
+                prefix,
+                width,
+                indent,
+            )
+        }
+        // A task marker on its own draws nothing (ADR 0035); inside an item it is
+        // the marker, handled by the `List` arm below.
+        MdBlock::TaskMarker { .. } => (0, false),
+        MdBlock::List { ordered, items } => {
+            // Per item: its lines, or one marker line when it has none. The marker/indent pad
+            // makes every emitted line non-empty, so the last line is too.
+            let mut count = 0usize;
+            for (index, item) in items.iter().enumerate() {
+                // The marker width is the layout's: `☐ ` is 2 cells, the ascii `[ ] ` is 4, and
+                // `10. ` is 4 (ADR 0035). The body is the item with the task marker
+                // dropped, exactly as `md_blocks` drops it.
+                let (marker_width, body) = match item.first() {
+                    Some(MdBlock::TaskMarker { checked }) => {
+                        let marker = if *checked {
+                            glyphs.task_checked
+                        } else {
+                            glyphs.task_unchecked
+                        };
+                        (UnicodeWidthStr::width(marker), &item[1..])
+                    }
+                    _ => {
+                        let marker = match ordered {
+                            Some(first) => format!("{}. ", first + index as u64),
+                            None => glyphs.bullet.to_owned(),
+                        };
+                        (UnicodeWidthStr::width(marker.as_str()), item.as_slice())
+                    }
+                };
+                let (item_lines, _) =
+                    md_blocks_count(body, width, base, indent + marker_width, glyphs);
+                count += item_lines.max(1);
+            }
+            (count, count > 0)
+        }
+        MdBlock::Quote(inner) => {
+            // `md_blocks` lays the quote out by the bar's width; each line gets the bar, which
+            // makes every emitted line non-empty.
+            let marker_width = UnicodeWidthStr::width(glyphs.quote);
+            let (count, _) = md_blocks_count(
+                inner,
+                width.saturating_sub(marker_width).max(1),
+                base,
+                indent,
+                glyphs,
+            );
+            (count, count > 0)
+        }
+        MdBlock::Rule => (1, true),
+        MdBlock::Table { head, rows } => {
+            // Tables are rare and their geometry is intricate: build and count (this path is
+            // not the resume corpus; it must stay correct, not fastest). `md_table` now draws a
+            // border between every two rows, so the built length is the count.
+            let built = md_table(head, rows, base, width, indent, glyphs);
+            let count = built.len();
+            (
+                count,
+                built.last().is_some_and(|line| !line.text.is_empty()),
+            )
+        }
+    }
+}
+
+/// The rows [`md_wrap`] would produce for `texts` (with a synthesized `prefix_width`-wide
+/// prefix), without building a cell or a line. Mirrors `md_wrap` exactly: no space collapsing,
+/// a newline forces a row, a space at a soft break is dropped, and the indent narrows the
+/// width.
+fn md_wrap_count<'a>(
+    texts: impl Iterator<Item = &'a str>,
+    prefix_width: usize,
+    width: usize,
+    indent: usize,
+) -> (usize, bool) {
+    let width = width.saturating_sub(indent).max(1);
+    let mut lines = 0usize;
+    let mut used = prefix_width;
+    let mut row_non_empty = prefix_width > 0;
+    let mut trailing_break = false;
+    let mut last_non_empty = false;
+    for text in texts {
+        for ch in text.chars() {
+            if ch == '\n' {
+                lines += 1;
+                last_non_empty = row_non_empty;
+                used = 0;
+                row_non_empty = false;
+                trailing_break = true;
+                continue;
+            }
+            let cell = ascii_width(ch).unwrap_or_else(|| UnicodeWidthChar::width(ch).unwrap_or(0));
+            if used + cell > width && row_non_empty {
+                lines += 1;
+                last_non_empty = row_non_empty;
+                used = 0;
+                row_non_empty = false;
+                trailing_break = false;
+                if ch == ' ' {
+                    continue;
+                }
+            }
+            used += cell;
+            row_non_empty = true;
+            trailing_break = false;
+        }
+    }
+    if row_non_empty || lines == 0 || trailing_break {
+        lines += 1;
+        last_non_empty = row_non_empty;
+    }
+    (lines, last_non_empty)
+}
+
+/// The display width of an ASCII character, or `None` for a non-ASCII one (the caller falls
+/// back to `UnicodeWidthChar::width`). `md_wrap` treats a tab as width 0 (`width('\t')` is
+/// `None`), unlike the prose [`crate::render::wrap`], which expands it to four.
+fn ascii_width(ch: char) -> Option<usize> {
+    if ch.is_ascii() {
+        Some(usize::from((0x20..0x7f).contains(&(ch as u8))))
+    } else {
+        None
+    }
 }
 
 /// The highlighted lines of the closed code block at `[start, end)`, or `None` when
@@ -3054,6 +3423,164 @@ mod tests {
         Entry::new(EntryKind::Assistant, text)
     }
 
+    /// A corpus that exercises every `MdBlock` arm `md_line_count` mirrors, plus the edge
+    /// cases `md_lines` post-processes (a trailing newline, an empty source).
+    const MARKDOWN_SOURCES: &[&str] = &[
+        "",
+        "\n",
+        "plain prose with several words that will wrap at a narrow width\n",
+        "# Heading one\n\nbody text under it\n",
+        "- item one\n- item two\n  - nested item\n",
+        "1. first\n2. second\n10. tenth\n",
+        // ADR 0035: a task list, whose `☐ `/`☑ ` (ascii `[ ] `/`[x] `) markers
+        // change width with the glyph tier.
+        "- [ ] todo\n- [x] done\n- [ ] a longer task that wraps at a narrow width\n",
+        "> a quoted line that is long enough to wrap\n",
+        "---\n",
+        "| column a | column b |\n| --- | --- |\n| value one | value two |\n",
+        // ADR 0035: every two rows get a border now, not only the header.
+        "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n",
+        // The HTML subset: `<br>` is a break, `<hr>` a rule, `<blockquote>` a quote.
+        "a<br>b\n\n<hr>\n\n<blockquote>q</blockquote>\n",
+        "text with a [link](https://example.com/a/b) and **bold** and `code`\n",
+        "line one\nline two\nline three\n",
+        "a\n\n\nb\n",
+        "unbrokenverylongsinglewordthatmusthardsplitacrosslines\n",
+        "这是一段中文说明，用来测试在终端宽度下的换行与显示宽度计算是否正确。\n",
+        "a table too wide | for the | terminal | to draw | here\n|---|---|---|---|\n|1|2|3|4|\n",
+        "tab\there and a control \x07 char\n",
+        "**bold** then *italic* then `code` then normal\n",
+        "```\nnot a fence in md_lines\n```\n",
+    ];
+
+    /// resume-perf2: the measure pass counts Markdown; the count must equal the layout's line
+    /// count exactly, or the total (and the scroll position) would drift. The window-vs-full
+    /// test in `tests/virtual.rs` covers the entry path; this one pins the mirrored count
+    /// function against `md_lines` directly, across every block shape, width and glyph tier.
+    /// ADR 0035 adds a **banded user block** (two half-cell rows under
+    /// `unicode`/`nerd`, none under `ascii`), which the entry-level `line_count` must know.
+    #[test]
+    fn md_line_count_matches_the_layout() {
+        for glyphs in [
+            crate::footer::Glyphs::Unicode,
+            crate::footer::Glyphs::Nerd,
+            crate::footer::Glyphs::Ascii,
+        ] {
+            for source in MARKDOWN_SOURCES {
+                for width in [2usize, 4, 10, 20, 40, 80, 120] {
+                    assert_eq!(
+                        md_line_count(source, 0, width, glyphs),
+                        md_lines(source, 0, width, glyphs).len(),
+                        "source {source:?} width {width} glyphs {glyphs:?}"
+                    );
+                }
+            }
+        }
+        // The banded user block: the entry-level counter (what the measure pass runs) equals
+        // the layout, pad rows included, under every tier.
+        for glyphs in [
+            crate::footer::Glyphs::Unicode,
+            crate::footer::Glyphs::Nerd,
+            crate::footer::Glyphs::Ascii,
+        ] {
+            let modes = DisplayModes { glyphs, ..EXPANDED };
+            let entry = Entry::new(EntryKind::User, "a banded user block that wraps a little");
+            for width in [8usize, 12, 30, 80] {
+                assert_eq!(
+                    line_count(&entry, modes, width),
+                    layout(&entry, &[], modes, width).len(),
+                    "user band width {width} glyphs {glyphs:?}"
+                );
+            }
+        }
+    }
+
+    /// resume-perf2: the frame that measures every entry (the first frame, and the one after a
+    /// fold toggle) must not lay Markdown out. The counter is the proof; a visible window does
+    /// lay it out. (The highlight slice's `the_measure_pass_never_highlights` is the same
+    /// shape.) The text has no blank edge: an entry with one takes `line_count`'s layout
+    /// fallback (the edge-stripping rule lives in the layout), which does lay Markdown out.
+    #[test]
+    fn the_measure_pass_never_lays_out_markdown() {
+        let theme = crate::theme::Theme::dark();
+        let modes = modes_with(ReasoningMode::Collapsed);
+        let mut entries: Vec<Entry> = (0..8)
+            .map(|i| {
+                assistant(&format!(
+                    "# Heading {i}\n\nA paragraph with **bold** and `code` and enough words to \
+                     wrap at the width.\n\n- one\n- two\n  - nested\n\n> a quote"
+                ))
+            })
+            .collect();
+        let before = md_line_builds();
+        // Height 0: measure only, no visible line is laid out.
+        let (total, lines) = crate::render::visible_lines(&mut entries, modes, 80, 0, 0, &theme);
+        assert!(total > 0 && lines.is_empty(), "measured {total}");
+        assert_eq!(
+            md_line_builds(),
+            before,
+            "the measure pass must not lay Markdown out"
+        );
+        // A visible window does lay its entries out.
+        let _ = crate::render::visible_lines(&mut entries, modes, 80, 0, 20, &theme);
+        assert!(
+            md_line_builds() > before,
+            "laying a visible entry out must lay its Markdown out"
+        );
+    }
+
+    /// resume-perf2: the Markdown line cache is filled by the layout path (the measure pass no
+    /// longer fills it), so a repeat frame at the same width reuses it instead of re-parsing.
+    #[test]
+    fn a_repeat_frame_reuses_the_markdown_line_cache() {
+        let theme = crate::theme::Theme::dark();
+        let width = 60;
+        let mut entries = vec![assistant(
+            "# Title\n\nbody words that wrap over a couple of lines at this width\n\n> quote",
+        )];
+        let _ = crate::render::visible_lines(&mut entries, EXPANDED, width, 0, 20, &theme);
+        let after_first = md_line_builds();
+        let _ = crate::render::visible_lines(&mut entries, EXPANDED, width, 0, 20, &theme);
+        assert_eq!(
+            md_line_builds(),
+            after_first,
+            "the second frame must reuse the Markdown line cache"
+        );
+    }
+
+    /// resume-perf2 / R7: a fold toggle re-measures every entry. The **count** cache (width and
+    /// text length, not the folds) must carry the Markdown counts across the toggle, so the
+    /// toggle does not re-parse Markdown.
+    #[test]
+    fn a_fold_toggle_reuses_the_markdown_counts() {
+        let theme = crate::theme::Theme::dark();
+        let mut entries = vec![assistant(
+            "# Title\n\nbody words that wrap over a couple of lines at this width",
+        )];
+        let _ = crate::render::visible_lines(
+            &mut entries,
+            modes_with(ReasoningMode::Expanded),
+            80,
+            0,
+            0,
+            &theme,
+        );
+        let after_measure = md_line_builds();
+        let _ = crate::render::visible_lines(
+            &mut entries,
+            modes_with(ReasoningMode::Collapsed),
+            80,
+            0,
+            0,
+            &theme,
+        );
+        assert_eq!(
+            md_line_builds(),
+            after_measure,
+            "a fold toggle must reuse the Markdown counts, not lay Markdown out"
+        );
+    }
+
     /// A streaming append re-parses only the trailing open block: the closed prefix is copied
     /// from `prev` verbatim (ADR 0028 R1). A sentinel in `prev` proves it, because a re-parse
     /// would replace it with the real block.
@@ -3088,6 +3615,7 @@ mod tests {
         let user = Entry::new(EntryKind::User, "hi");
         let assistant = Entry::new(EntryKind::Assistant, "hello");
         let notice = Entry::new(EntryKind::Notice, "note");
+        let thinking = Entry::new(EntryKind::Reasoning, "a thought");
         let banner = Entry::new(EntryKind::Banner, "radian");
         let startup = Entry::new(EntryKind::Startup, "profile: x");
         let mut call = Entry::new(EntryKind::ToolCall, "-> shell");
@@ -3113,6 +3641,28 @@ mod tests {
         assert_eq!(block_gap(Some(&assistant), &notice), 1, "ordinary blocks");
         assert_eq!(block_gap(Some(&assistant), &user), 0, "a user block's pad");
         assert_eq!(block_gap(Some(&user), &assistant), 0, "the same pad");
+        // ADR 0035: thinking keeps the container's one blank line below it, next to
+        // the reply and next to a tool call.
+        assert_eq!(
+            block_gap(Some(&thinking), &assistant),
+            1,
+            "one line between thinking and the reply"
+        );
+        assert_eq!(
+            block_gap(Some(&thinking), &call),
+            1,
+            "one line between thinking and a call"
+        );
+        assert_eq!(
+            block_gap(Some(&thinking), &thinking),
+            1,
+            "two thinking entries are two blocks"
+        );
+        assert_eq!(
+            block_gap(Some(&assistant), &thinking),
+            1,
+            "one line above thinking too"
+        );
         assert_eq!(block_gap(Some(&call), &result), 0, "a result hugs its call");
         assert_eq!(
             block_gap(Some(&call), &other),
@@ -3563,7 +4113,7 @@ mod tests {
         assert!(
             unanswered
                 .iter()
-                .any(|t| t.contains("○ Option A (Recommended)")),
+                .any(|t| t.contains("☐ Option A (Recommended)")),
             "{unanswered:?}"
         );
         assert!(
@@ -3572,13 +4122,13 @@ mod tests {
         );
         assert!(unanswered.last().unwrap().ends_with('╯'), "{unanswered:?}");
 
-        // Answered: the chosen option is `◉` and the note shows.
+        // Answered: the chosen option is `☑` and the note shows.
         let mut answered_card = card.clone();
         answered_card.structured =
             Some(json!({"answers":[{"id":"pick","selected":["a"],"note":"go with A"}]}));
         let answered = texts(&answered_card, false, crate::footer::Glyphs::Unicode);
         assert!(
-            answered.iter().any(|t| t.contains("◉ Option A")),
+            answered.iter().any(|t| t.contains("☑ Option A")),
             "{answered:?}"
         );
         assert!(
@@ -3597,7 +4147,7 @@ mod tests {
         let ascii = texts(&card, false, crate::footer::Glyphs::Ascii);
         assert!(ascii[0].starts_with("+- Ask 1 question"), "{ascii:?}");
         assert!(
-            ascii.iter().any(|t| t.contains("( ) Option A")),
+            ascii.iter().any(|t| t.contains("[ ] Option A")),
             "{ascii:?}"
         );
         assert!(
@@ -3605,5 +4155,115 @@ mod tests {
             "{ascii:?}"
         );
         assert!(!ascii.iter().any(|t| t.contains('╭')), "{ascii:?}");
+    }
+
+    /// ADR 0024 rule 3: the ask block is a closed box. Every row - the top border,
+    /// every divider and every body row - has the box's width and ends in one of the right
+    /// border glyphs, at a narrow and a wide width, under unicode and ascii, with a prompt,
+    /// option labels and descriptions long enough (in CJK display cells) to wrap.
+    #[test]
+    fn the_ask_block_is_closed_at_every_width() {
+        use serde_json::json;
+        let unanswered = tools::ToolCard::new(
+            "c1",
+            "ask_user",
+            json!({"questions":[{
+                "id":"intent","kind":"text",
+                "prompt":"你的整条消息本来就包含了这段话，所以我只是把它原样转述一遍，好让这一段足够长从而必须折行"
+            }]}),
+        );
+        let mut answered = tools::ToolCard::new(
+            "c2",
+            "ask_user",
+            json!({"questions":[{
+                "id":"pick","kind":"single",
+                "options":[
+                    {"id":"a","label":"第一个选项","description":"这是第一个选项的说明文字，也足够长到需要折行"},
+                    {"id":"b","label":"Option B","recommended":true}
+                ]
+            }]}),
+        );
+        answered.structured = Some(json!({"answers":[
+            {"id":"pick","selected":["a"],"other":"我自己写的另一个答案","note":"一条够长的备注，也应该被折到内宽以内"}
+        ]}));
+        let mut multi = tools::ToolCard::new(
+            "c3",
+            "ask_user",
+            json!({"questions":[{"id":"tiers","kind":"multi","options":[
+                {"id":"safe","label":"safe"},{"id":"workspace","label":"workspace"}]}]}),
+        );
+        multi.structured =
+            Some(json!({"answers":[{"id":"tiers","selected":["safe","workspace"]}]}));
+        for width in [40usize, 100] {
+            for glyphs in [crate::footer::Glyphs::Unicode, crate::footer::Glyphs::Ascii] {
+                let g = AskGlyphs::for_glyphs(glyphs);
+                let rights = [g.top_right, g.tee_right, g.vertical, g.bottom_right];
+                for (card, label) in [
+                    (&unanswered, "unanswered"),
+                    (&answered, "answered"),
+                    (&multi, "multi"),
+                ] {
+                    let lines = ask_block(card, "user declined to answer", false, width, glyphs);
+                    for line in &lines {
+                        assert_eq!(
+                            UnicodeWidthStr::width(line.text.as_str()),
+                            width,
+                            "{label} at width {width} with {glyphs:?} is not the box width: {:?}",
+                            line.text
+                        );
+                        assert!(
+                            line.text
+                                .chars()
+                                .last()
+                                .is_some_and(|c| rights.contains(&c)),
+                            "{label} at width {width} with {glyphs:?} does not end in a right \
+                             border glyph: {:?}",
+                            line.text
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// ADR 0024 rule 3: the bottom border runs the full width, like the top.
+    #[test]
+    fn the_ask_bottom_border_is_as_wide_as_the_top() {
+        use serde_json::json;
+        let card = tools::ToolCard::new(
+            "c1",
+            "ask_user",
+            json!({"questions":[{"id":"q","kind":"text","prompt":"hi"}]}),
+        );
+        for width in [40usize, 100] {
+            for glyphs in [crate::footer::Glyphs::Unicode, crate::footer::Glyphs::Ascii] {
+                let lines = ask_block(&card, "", false, width, glyphs);
+                let top = UnicodeWidthStr::width(lines.first().unwrap().text.as_str());
+                let bottom = UnicodeWidthStr::width(lines.last().unwrap().text.as_str());
+                assert_eq!(top, width, "{glyphs:?}");
+                assert_eq!(
+                    top,
+                    bottom,
+                    "the bottom border must be as wide as the top ({glyphs:?}): {:?}",
+                    lines.last().unwrap().text
+                );
+            }
+        }
+    }
+
+    /// ADR 0024 implementation note: single, multi and `Other` share one marker
+    /// pair - the checkbox `☐`/`☑` under unicode, `[ ]`/`[x]` under ascii.
+    #[test]
+    fn the_ask_glyphs_use_one_checkbox_pair() {
+        let g = AskGlyphs::for_glyphs(crate::footer::Glyphs::Unicode);
+        assert_eq!(g.single_off, "☐");
+        assert_eq!(g.single_on, "☑");
+        assert_eq!(g.multi_off, g.single_off);
+        assert_eq!(g.multi_on, g.single_on);
+        let g = AskGlyphs::for_glyphs(crate::footer::Glyphs::Ascii);
+        assert_eq!(g.single_off, "[ ]");
+        assert_eq!(g.single_on, "[x]");
+        assert_eq!(g.multi_off, g.single_off);
+        assert_eq!(g.multi_on, g.single_on);
     }
 }

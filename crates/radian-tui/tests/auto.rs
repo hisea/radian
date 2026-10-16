@@ -39,7 +39,8 @@ fn approval_app() -> App {
 }
 
 fn notices(app: &App) -> Vec<String> {
-    app.entries
+    app.session
+        .entries
         .iter()
         .filter(|entry| entry.kind == radian_tui::EntryKind::Notice)
         .map(|entry| entry.text.clone())
@@ -64,7 +65,7 @@ fn the_auto_key_approves_this_request_and_turns_auto_on() {
         ],
         "{effects:?}"
     );
-    assert!(app.auto, "`!` turns auto on for the session");
+    assert!(app.session.auto, "`!` turns auto on for the session");
     assert!(
         notices(&app)
             .iter()
@@ -89,7 +90,7 @@ fn y_stays_allow_once_and_never_enables_auto() {
             }],
             "{code:?}"
         );
-        assert!(!app.auto, "{code:?} must not enable auto");
+        assert!(!app.session.auto, "{code:?} must not enable auto");
         assert!(
             !notices(&app).iter().any(|notice| notice.contains("auto:")),
             "{code:?} must not announce auto: {:?}",
@@ -117,7 +118,7 @@ fn the_other_answer_keys_do_not_touch_auto() {
             }],
             "{code:?}"
         );
-        assert!(!app.auto, "{code:?} must not enable auto");
+        assert!(!app.session.auto, "{code:?} must not enable auto");
     }
 }
 
@@ -134,7 +135,7 @@ fn auto_on_and_off_commands() {
             vec![Effect::SetApprovalPolicy { on: true }],
             "{command}"
         );
-        assert!(app.auto, "{command} turns auto on");
+        assert!(app.session.auto, "{command} turns auto on");
     }
     for command in ["/auto off", "/yolo off"] {
         let mut app = App::new("m", "s");
@@ -146,7 +147,7 @@ fn auto_on_and_off_commands() {
             vec![Effect::SetApprovalPolicy { on: false }],
             "{command}"
         );
-        assert!(!app.auto, "{command} turns auto off");
+        assert!(!app.session.auto, "{command} turns auto off");
     }
 }
 
@@ -158,7 +159,7 @@ fn a_wrong_auto_argument_is_a_usage_notice() {
         app.input = command.into();
         let effects = app.on_key(key(KeyCode::Enter)).effects;
         assert!(effects.is_empty(), "{command}: {effects:?}");
-        assert!(!app.auto, "{command} must not enable auto");
+        assert!(!app.session.auto, "{command} must not enable auto");
         assert!(
             notices(&app)
                 .iter()
