@@ -1106,3 +1106,30 @@ Base：本文件所在分支 `oc/orch-s6b`（在 origin/main + 切片 6a 之上�
 
 4/4 抓住。heavy 门的两条变异（忽略取消、非重活也占槽）记录在
 `crates/radian-coding/MUTATIONS.md`：SC-1、SC-2，均被 `tests/heavy.rs` 抓住。
+
+### orch-s6b review fix 2（2026-10-16）：每个 task 恰好写一条 `TaskFinished`
+
+修的是切片 6b2 review 发现的注册表 bug：`TaskFinished` 原来只在收尾提交**失败**时写（`schedule_commit`
+里的 `if let EndCommit::Failed`），所以正常结束的 task 在 lead 的 journal 里是 `TaskSpawned` 无
+`TaskFinished`，resume 时全被当成 `unknown_after_crash`，TUI 的 task 计数也永不下降。
+
+Base：`oc/orch-s6b`（fix 1 之后）。变异就地改 `crates/radian-host/src/task.rs`，改完从
+`.radian/scratch/mut/task.rs` 副本还原并 `diff -q` 确认字节一致；结束时 `git status --short` 只剩
+`task.rs` 与 `tests/task.rs`。脚本 `.radian/scratch/mutate-fix2.py`（不提交）。每条
+`cargo test -p radian-host --test task <test> --no-fail-fast -- --exact`。
+
+| # | 变异的需求 | 变异 | 结果 | 抓住它的测试（rc=101） |
+|---|---|---|---|---|
+| S6B-F2-1 | 正常结束也要写一条 `TaskFinished`（不止失败时） | 回到今天的代码：只在 `error.is_some()` 时调 `write_finished` | ✅ 36.7s | `a_normal_worktree_end_writes_one_finished_after_git_committed`（等 `TaskFinished` 超时 30s 后 panic） |
+| S6B-F2-2 | `TaskFinished` 写在收尾提交**之后** | 在 `spawn_blocking` 收尾提交之前就调一次 `write_finished` | ✅ 9.7s | 同上（提交还被 `CommitGate` 卡住时 lead 日志里已出现 `TaskFinished`，`is_empty()` 断言失败） |
+| S6B-F2-3 | 正常结束后 `remove` 不再写第二条 | 去掉 `write_finished` 的 once-only 守卫，并把 `remove` 的 `if end.is_none()` 改成 `if true` | ✅ 5.2s | `a_second_turn_and_a_later_remove_add_no_finished`（remove 后又写一条 `cancelled`，计数 2） |
+
+3/3 抓住。F2-3 需两处一起改才可观测：只把 `remove` 的条件改成恒真，once-only 守卫仍会拦下第二条，
+所以真正的不变量在守卫；变异记录两者一起改，如实写明。
+
+**归一执行的语义**：`schedule_commit` 现在对 worktree 与 `shared` 都跑（`shared`/无仓库只是
+`EndCommit::None`），在收尾提交（含 `GitCommitted` 审计）之后写那一条 `TaskFinished`；`remove`
+在没有 turn 结束（state 仍 `Idle`）时补一条 `cancelled`。`TaskFinisher::finished` 的 `AtomicBool`
+保证每 task 至多一条；第二个 turn 结束因为 `CommitState != Idle` 直接返回，也不会写第二条
+（ADR 0030 O3：一个 task 一个 turn）。
+

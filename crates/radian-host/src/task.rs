@@ -27,8 +27,12 @@
 //! - an end-of-task commit: when the task's turn ends, the worktree's uncommitted changes are
 //!   committed by the host with the fixed message `radian: end of task <id> (<outcome>)`
 //!   (ADR 0030 item 1 B). With no changes, no commit is made. The commit is
-//!   **awaitable** (ADR 0039 decision 7): [`TaskRecord::await_end_commit`] resolves it, a
-//!   failure is recorded in a `TaskFinished`, and [`TaskRegistry::remove`] waits for it.
+//!   **awaitable** (ADR 0039 decision 7): [`TaskRecord::await_end_commit`] resolves it, and
+//!   [`TaskRegistry::remove`] waits for it.
+//! - exactly one `TaskFinished` when the task ends (ADR 0030 O5): after the end-of-task commit
+//!   for a worktree task (`shared` has no commit, so at the turn end), or `cancelled` once when
+//!   the task is removed before any turn ended. A second turn end, and a removal after a normal
+//!   end, write nothing: the first end is the task's end (ADR 0030 O3, one task is one turn).
 //!
 //! Spawning is one transaction (ADR 0039 decision 5). A [`SpawnGuard`] owns the worktree from
 //! the moment it exists and — after `open_session` — the session's driver; it is disarmed only
@@ -1157,6 +1161,7 @@ impl TaskRegistry {
             turns: watch::channel(0u64).0,
             // ADR 0030 O8: a turn end frees a `max_tasks` slot, so wake the FIFO pump.
             notify: Arc::clone(&self.pump),
+            finished: AtomicBool::new(false),
         });
         let inner = Arc::clone(&bindings.runtime_events);
         bindings.runtime_events = Arc::new(TaskRuntimeEvents {
@@ -1260,7 +1265,16 @@ impl TaskRegistry {
         record.session.stop();
         let _ = record.session.join().await;
         // ADR 0039 decision 7: the end-of-task commit lands (or fails) before the worktree goes.
-        let _ = record.await_end_commit().await;
+        let end = record.await_end_commit().await;
+        // ADR 0030 O5: a task removed before any turn ended still writes its one
+        // `TaskFinished`, `cancelled`. A task that ended wrote it at its turn end instead, so
+        // `end` is `Some` and this is skipped (`write_finished` is once-only as well).
+        if end.is_none() {
+            record
+                .finisher
+                .write_finished(TurnOutcome::Cancelled, None)
+                .await;
+        }
         if let Some(worktree) = &record.worktree {
             if !force && worktree_is_dirty(worktree)? {
                 return Err(TaskError::new(format!(
@@ -1908,6 +1922,9 @@ struct TaskFinisher {
     turns: watch::Sender<u64>,
     /// The FIFO pump wake (ADR 0030 O4/O8): a turn end frees a `max_tasks` slot.
     notify: Arc<Notify>,
+    /// Set by the first end (a turn end or a removal), so the task writes exactly one
+    /// `TaskFinished` (ADR 0030 O5): a second turn end or a later removal writes nothing.
+    finished: AtomicBool,
 }
 
 impl TaskFinisher {
@@ -1953,17 +1970,12 @@ impl TaskFinisher {
         self.notify.notify_one();
     }
 
-    /// On a turn boundary of a worktree task, run the end-of-task commit off the runtime thread.
-    /// `shared` tasks and a second overlapping event do nothing. A failed commit is written to
-    /// the lead's journal as a `TaskFinished` (ADR 0039 decision 7), so it is the task's outcome
-    /// and not a silent audit line.
+    /// On the turn boundary that ends the task, run the end-of-task commit off the runtime
+    /// thread and write the task's one `TaskFinished` (ADR 0030 O5). A worktree task's record
+    /// follows its commit; a `shared` task has no commit, so its record is the turn end alone.
+    /// A second turn end does nothing: the first end is the task's end (ADR 0030 O3, one task is
+    /// one turn), and [`TaskFinisher::write_finished`] is once-only regardless.
     fn schedule_commit(self: &Arc<Self>, outcome: TurnOutcome) {
-        let Some(worktree) = self.worktree.clone() else {
-            return; // shared: no worktree, no end commit (ADR 0030 O3)
-        };
-        let Some(pin) = self.pin.clone() else {
-            return;
-        };
         {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if !matches!(*state, CommitState::Idle) {
@@ -1971,6 +1983,8 @@ impl TaskFinisher {
             }
             *state = CommitState::Running;
         }
+        let worktree = self.worktree.clone();
+        let pin = self.pin.clone();
         let id = self.id.clone();
         let branch = self.branch.clone();
         let protected = self.protected.clone();
@@ -1979,55 +1993,78 @@ impl TaskFinisher {
         let gate = self.gate.clone();
         let this = Arc::clone(self);
         self.runtime.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                if let Some(gate) = &gate {
-                    gate();
-                }
-                end_of_task_commit(
-                    &id,
-                    &outcome,
-                    &worktree,
-                    &pin,
-                    branch.as_deref(),
-                    &protected,
-                    &filters,
-                )
-            })
-            .await;
-            let end = match result {
-                Ok(Ok(Some(committed))) => {
-                    // Audit (best effort): the commit already happened; a write failure is not
-                    // the caller's problem, exactly like `git_commit`'s own audit.
-                    if let Some(journal) = &journal {
-                        let _ = journal
-                            .append_runtime_event(RuntimeEvent::GitCommitted {
-                                commit: committed.commit.clone(),
-                                branch: committed.branch.clone(),
-                                files: committed.files,
-                            })
-                            .await;
-                    }
-                    EndCommit::Committed(committed)
-                }
-                Ok(Ok(None)) => EndCommit::None,
-                Ok(Err(failure)) => EndCommit::Failed(failure.message),
-                Err(error) => {
-                    EndCommit::Failed(format!("the end-of-task commit task failed: {error}"))
-                }
-            };
-            if let EndCommit::Failed(message) = &end {
-                let _ = this
-                    .lead_journal
-                    .append_runtime_event(RuntimeEvent::TaskFinished {
-                        agent_session_id: this.id.clone(),
-                        outcome,
-                        error: Some(message.clone()),
+            let end = match (worktree, pin) {
+                (Some(worktree), Some(pin)) => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        if let Some(gate) = &gate {
+                            gate();
+                        }
+                        end_of_task_commit(
+                            &id,
+                            &outcome,
+                            &worktree,
+                            &pin,
+                            branch.as_deref(),
+                            &protected,
+                            &filters,
+                        )
                     })
                     .await;
-            }
+                    match result {
+                        Ok(Ok(Some(committed))) => {
+                            // Audit (best effort): the commit already happened; a write failure
+                            // is not the caller's problem, exactly like `git_commit`'s own audit.
+                            if let Some(journal) = &journal {
+                                let _ = journal
+                                    .append_runtime_event(RuntimeEvent::GitCommitted {
+                                        commit: committed.commit.clone(),
+                                        branch: committed.branch.clone(),
+                                        files: committed.files,
+                                    })
+                                    .await;
+                            }
+                            EndCommit::Committed(committed)
+                        }
+                        Ok(Ok(None)) => EndCommit::None,
+                        Ok(Err(failure)) => EndCommit::Failed(failure.message),
+                        Err(error) => EndCommit::Failed(format!(
+                            "the end-of-task commit task failed: {error}"
+                        )),
+                    }
+                }
+                // `shared` (ADR 0030 O3), or a worktree with no repository to commit in: no
+                // end-of-task commit.
+                _ => EndCommit::None,
+            };
+            // ADR 0030 O5 / ADR 0039 decision 7: the one `TaskFinished`, written after the
+            // commit (and after the `GitCommitted` audit) so the record follows the commit. Its
+            // `error` is the commit's failure, when the commit failed.
+            let error = match &end {
+                EndCommit::Failed(message) => Some(message.clone()),
+                _ => None,
+            };
+            this.write_finished(outcome, error).await;
             *this.state.lock().unwrap_or_else(|e| e.into_inner()) = CommitState::Done(end);
             let _ = this.done.send(true);
         });
+    }
+
+    /// Writes this task's one `TaskFinished` to the lead's journal (ADR 0030 O5). The first
+    /// caller wins; a second turn end or a later removal writes nothing. `error` is `Some` only
+    /// for an abnormal end: a failed end-of-task commit here, or a spawn rolled back after its
+    /// `TaskSpawned` (that path writes its own, before any turn can run).
+    async fn write_finished(&self, outcome: TurnOutcome, error: Option<String>) {
+        if self.finished.swap(true, Ordering::SeqCst) {
+            return; // exactly one `TaskFinished` per task
+        }
+        let _ = self
+            .lead_journal
+            .append_runtime_event(RuntimeEvent::TaskFinished {
+                agent_session_id: self.id.clone(),
+                outcome,
+                error,
+            })
+            .await;
     }
 
     /// Resolves when the end-of-task commit has finished (ADR 0039 decision 7). `None` when no
