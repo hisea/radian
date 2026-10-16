@@ -580,7 +580,7 @@ fn a_long_option_list_scrolls_to_keep_the_cursor_visible() {
     // The panel lays the whole list out; the frame clips it to the modal height.
     form.answers[0].cursor = 11;
     let shown = panel_text(&form, 40);
-    assert!(shown.contains("❯ ☐ Option 11"), "{shown}");
+    assert!(shown.contains("❯ ○ Option 11"), "{shown}");
     assert!(shown.contains("Option 0"), "{shown}");
 }
 
@@ -1687,8 +1687,9 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     assert_eq!(app.tool_display.fold, ToolFold::Errors);
 }
 
-/// The `git_diff` body colors the four line kinds with the theme's own roles (ADR 0028 R4 +
-/// ADR 0029): added, removed, context and the hunk/file-header structure.
+/// The `git_diff` body colors its rows with the theme's own roles (ADR 0028 decision
+/// 5 + ADR 0029): added, removed, context, and the hunk/file-header structure — whose rows now
+/// carry a line number and a synthesized space after the sign.
 #[test]
 fn a_git_diff_body_colors_its_line_kinds() {
     let mut app = App::new("m", "s");
@@ -1718,14 +1719,21 @@ fn a_git_diff_body_colors_its_line_kinds() {
     let terminal = render(&mut app, 70, 20);
     let theme = app.theme;
     let style = |needle: &str| style_of(&terminal, needle).expect(needle);
-    assert_eq!(style("+new line").fg, theme.diff_added.fg, "added");
-    assert_eq!(style("-old line").fg, theme.diff_removed.fg, "removed");
+    assert_eq!(style("+ new line").fg, theme.diff_added.fg, "added");
+    assert_eq!(style("- old line").fg, theme.diff_removed.fg, "removed");
     assert_eq!(style("context").fg, theme.diff_context.fg, "context");
-    assert_eq!(style("@@").fg, theme.diff_hunk.fg, "@@ is structure");
+    // `@@` and the file header are structure: the weak `frame` role (ADR 0028
+    // decision 5), never the accent `diff_hunk` used to carry.
+    assert_eq!(style("@@").fg, theme.frame.fg, "@@ is structure");
     assert_eq!(
         style("diff --git").fg,
-        theme.diff_hunk.fg,
+        theme.frame.fg,
         "the file header is structure"
+    );
+    assert_ne!(
+        style("@@").fg,
+        theme.notice_label.fg,
+        "@@ is not the accent"
     );
     // The head's counts come from the same text.
     let text = screen(&terminal);
@@ -1733,7 +1741,9 @@ fn a_git_diff_body_colors_its_line_kinds() {
 }
 
 /// A `patch` card shows the replacement: the head's +N/-M and the `-old`/`+new` body, whose
-/// lines carry the diff roles. The body **is** the entry's text, so it copies as shown.
+/// lines carry the diff roles. The body **is** the entry's text, so it copies as shown. This
+/// result carries no `hunks`, so the body keeps the numberless form (ADR 0028
+/// decision 5's fallback): the sign column, no gutter.
 #[test]
 fn a_patch_card_shows_the_replacement_with_diff_roles() {
     let mut app = App::new("m", "s");
@@ -2072,8 +2082,8 @@ fn the_list_and_memory_cards_have_their_own_heads() {
             "ask_user",
             serde_json::json!({"questions": [{"id": "q1"}, {"id": "q2"}]}),
             serde_json::json!({"request_id": "r", "answers": []}),
-            // ADR 0024 R1: the call is a boxed block, not the plain head.
-            "Ask 2 questions",
+            // ADR 0028: the record is an open frame, not the plain head.
+            "╭─ ask",
         ),
         (
             "memory_get",
@@ -2148,6 +2158,8 @@ fn a_compaction_summary_is_one_line_that_expands() {
         tokens_before: 12_000,
         tokens_after: 4_000,
         below_target: false,
+        deterministic: false,
+        dropped: 0,
     });
     live.apply_event(&AgentEvent::TranscriptAppended {
         index: 0,
@@ -2944,8 +2956,9 @@ fn the_ask_panel_title_omits_the_own_session() {
 }
 
 /// ADR 0024 rules 1-2: while the ask is pending the transcript shows one weak line
-/// ("the questions are in the panel below"); once the answer arrives the **same** entry draws
-/// the full closed block, and the result entry stays blank, so the ask is never drawn twice.
+/// ("the questions are in the panel below"), now the open frame's top line; once the answer
+/// arrives the **same** entry draws the full open block, and the result entry stays blank, so
+/// the ask is never drawn twice.
 #[test]
 fn a_pending_ask_is_one_line_and_becomes_the_block_once_answered() {
     let mut app = App::new("m", "s");
@@ -2965,24 +2978,24 @@ fn a_pending_ask_is_one_line_and_becomes_the_block_once_answered() {
         }],
     ));
 
-    // Pending: one line, no questions or options, and only one "Ask" line.
+    // Pending: one line - the open frame's top - no questions or options, and only one ask line.
     let pending = screen(&render(&mut app, 70, 16));
     assert!(
-        pending.contains("-> Ask 2 questions · answering below"),
-        "the pending one-liner: {pending}"
+        pending.contains("╭─ ask · 2 questions · answering below"),
+        "the pending one-liner is the open frame's top: {pending}"
     );
     assert!(
         !pending.contains("Pick one") && !pending.contains("Option A"),
         "the pending line carries no questions or options: {pending}"
     );
     assert_eq!(
-        pending.matches("Ask 2 questions").count(),
+        pending.matches("ask · 2 questions").count(),
         1,
-        "only one Ask line while pending: {pending}"
+        "only one ask line while pending: {pending}"
     );
 
-    // Answered: the same call entry becomes the full closed block (its `->` marker kept), and
-    // the result entry draws nothing, so there is exactly one block.
+    // Answered: the same call entry becomes the full open block, and the result entry draws
+    // nothing, so there is exactly one block.
     app.push_message(&Message::Tool {
         result: ToolResult {
             call_id: "c1".into(),
@@ -2997,24 +3010,23 @@ fn a_pending_ask_is_one_line_and_becomes_the_block_once_answered() {
     });
     let answered = screen(&render(&mut app, 70, 20));
     assert!(
-        answered.contains("->╭─ Ask 2 questions"),
-        "the same entry draws the block, keeping its marker: {answered}"
+        answered.contains("╭─ ask"),
+        "the same entry draws the open block: {answered}"
     );
     assert!(answered.contains("Pick one"), "{answered}");
-    assert!(answered.contains("☑ Option A"), "{answered}");
+    assert!(answered.contains("◉ Option A"), "{answered}");
     assert!(
         !answered.contains("answering below"),
         "the pending line is gone: {answered}"
     );
     assert_eq!(
-        answered.matches("╭─ Ask 2 questions").count(),
+        answered.matches("╭─ ask").count(),
         1,
         "exactly one block, not two: {answered}"
     );
 }
 
-/// ADR 0024 rule 2: a declined ask shows its status line inside the same closed
-/// block.
+/// ADR 0024 rule 2: a declined ask shows its status line inside the same open frame.
 #[test]
 fn a_declined_ask_shows_the_status_inside_the_block() {
     let mut app = App::new("m", "s");
@@ -3040,19 +3052,19 @@ fn a_declined_ask_shows_the_status_inside_the_block() {
     });
     let declined = screen(&render(&mut app, 70, 16));
     assert!(
-        declined.contains("->╭─ Ask 1 question"),
-        "the declined block keeps the call marker: {declined}"
+        declined.contains("╭─ ask"),
+        "the declined record is the open frame: {declined}"
     );
     assert!(
-        declined.contains("user declined to answer"),
-        "the status line stays inside the box: {declined}"
+        declined.contains("│ user declined to answer"),
+        "the status line sits in the frame's body column: {declined}"
     );
     assert!(
         !declined.contains("answering below"),
         "the pending line is gone: {declined}"
     );
     assert_eq!(
-        declined.matches("╭─ Ask 1 question").count(),
+        declined.matches("╭─ ask").count(),
         1,
         "exactly one block: {declined}"
     );
@@ -3123,7 +3135,8 @@ fn ask_panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> St
 }
 
 /// The chosen option's marker is drawn in its own span and is never bold: the owner's font
-/// draws a glyph missing from its bold face at a smaller size (ADR 0024 note).
+/// draws a glyph missing from its bold face at a smaller size (ADR 0024 note; the
+/// circle pair of ADR 0028 is used for the same reason).
 #[test]
 fn the_ask_panel_marker_is_never_bold() {
     let mut form = radian_tui::question::QuestionForm::new(
@@ -3151,7 +3164,7 @@ fn the_ask_panel_marker_is_never_bold() {
         })
         .unwrap();
 
-    let marker = style_of(&terminal, "☑").expect("the chosen marker cell");
+    let marker = style_of(&terminal, "◉").expect("the chosen marker cell");
     assert!(
         !marker.add_modifier.contains(Modifier::BOLD),
         "the chosen marker must not be bold: {marker:?}"
@@ -3169,10 +3182,44 @@ fn the_ask_panel_marker_is_never_bold() {
     );
 }
 
-/// Single, multi and `Other` all draw the same checkbox pair (ADR 0024 note): the
-/// old circle pair is gone.
+/// The transcript record's chosen marker is drawn in its own span and is never bold too: the
+/// circle pair is only safe while the marker is not bold (ADR 0028).
 #[test]
-fn the_ask_panel_uses_one_checkbox_pair_for_single_multi_and_other() {
+fn the_transcript_ask_marker_is_never_bold() {
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "ask_user".into(),
+            arguments: serde_json::json!({"questions":[{"id":"q","kind":"single","prompt":"Pick",
+                "options":[{"id":"a","label":"Alpha"},{"id":"b","label":"Beta"}]}]}),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("Pick → Alpha")],
+            structured: Some(serde_json::json!({"answers":[{"id":"q","selected":["a"]}]})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    let terminal = render(&mut app, 70, 18);
+    let marker = style_of(&terminal, "◉").expect("the chosen marker in the transcript");
+    assert!(
+        !marker.add_modifier.contains(Modifier::BOLD),
+        "the transcript's chosen marker must not be bold: {marker:?}"
+    );
+}
+
+/// Single, multi and `Other` all draw the same circle pair (ADR 0028):
+/// the checkbox pair is gone.
+#[test]
+fn the_ask_panel_uses_one_circle_pair_for_single_multi_and_other() {
     let mut single = radian_tui::question::QuestionForm::new(
         7,
         "session".into(),
@@ -3184,18 +3231,18 @@ fn the_ask_panel_uses_one_checkbox_pair_for_single_multi_and_other() {
     );
     single.answers[0].selected = vec!["a".into()];
     let text = ask_panel_text(&single, 60);
-    assert!(text.contains("☑ Alpha"), "the chosen single option: {text}");
+    assert!(text.contains("◉ Alpha"), "the chosen single option: {text}");
     assert!(
-        text.contains("☐ Beta"),
+        text.contains("○ Beta"),
         "the unchosen single option: {text}"
     );
-    assert!(text.contains("☐ Other (type your own)"), "{text}");
+    assert!(text.contains("○ Other (type your own)"), "{text}");
     assert!(
-        !text.contains('○')
-            && !text.contains('◉')
-            && !text.contains("(*)")
-            && !text.contains("( )"),
-        "no circle markers: {text}"
+        !text.contains('☐')
+            && !text.contains('☑')
+            && !text.contains("[ ]")
+            && !text.contains("[x]"),
+        "no checkbox markers: {text}"
     );
 
     let mut multi = radian_tui::question::QuestionForm::new(
@@ -3209,9 +3256,9 @@ fn the_ask_panel_uses_one_checkbox_pair_for_single_multi_and_other() {
     );
     multi.answers[0].selected = vec!["a".into()];
     let text = ask_panel_text(&multi, 60);
-    assert!(text.contains("☑ Alpha"), "{text}");
-    assert!(text.contains("☐ Beta"), "{text}");
-    assert!(!text.contains('○') && !text.contains('◉'), "{text}");
+    assert!(text.contains("◉ Alpha"), "{text}");
+    assert!(text.contains("○ Beta"), "{text}");
+    assert!(!text.contains('☐') && !text.contains('☑'), "{text}");
 
     let mut other = radian_tui::question::QuestionForm::new(
         7,
@@ -3226,13 +3273,13 @@ fn the_ask_panel_uses_one_checkbox_pair_for_single_multi_and_other() {
     other.answers[0].cursor = 1;
     let text = ask_panel_text(&other, 60);
     assert!(
-        text.contains("☑ Other"),
-        "the chosen Other row uses the checked box, not a circle: {text}"
+        text.contains("◉ Other"),
+        "the chosen Other row uses the filled circle, not a checked box: {text}"
     );
 }
 
 /// The panel and the transcript block draw the markers from the same source, so both show the
-/// checkbox pair (ADR 0024 note).
+/// circle pair (ADR 0028).
 #[test]
 fn the_ask_panel_and_the_transcript_block_use_the_same_markers() {
     let mut form = radian_tui::question::QuestionForm::new(
@@ -3246,7 +3293,7 @@ fn the_ask_panel_and_the_transcript_block_use_the_same_markers() {
     );
     form.answers[0].selected = vec!["a".into()];
     let panel = ask_panel_text(&form, 60);
-    assert!(panel.contains('☑') && panel.contains('☐'), "{panel}");
+    assert!(panel.contains('◉') && panel.contains('○'), "{panel}");
 
     let mut card = radian_tui::tools::ToolCard::new(
         "c1",
@@ -3264,11 +3311,11 @@ fn the_ask_panel_and_the_transcript_block_use_the_same_markers() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        block_text.contains('☑') && block_text.contains('☐'),
+        block_text.contains('◉') && block_text.contains('○'),
         "the transcript block uses the same pair: {block_text}"
     );
     assert!(
-        !block_text.contains('○') && !block_text.contains('◉'),
+        !block_text.contains('☐') && !block_text.contains('☑'),
         "{block_text}"
     );
 }

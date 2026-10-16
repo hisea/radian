@@ -417,6 +417,10 @@ pub enum MdStyle {
     Accent,
     Muted,
     Dim,
+    /// A diff row's own roles (ADR 0028): the synthesized line number,
+    /// the sign and the code, which one row carries at once. Not Markdown either; the same
+    /// per-piece mechanism.
+    Diff(crate::tools::DiffRole),
     /// A quote's `│ ` bar (`mdQuoteBorder`).
     QuoteBar,
     /// A list bullet or number (`mdListBullet`).
@@ -916,6 +920,9 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                     tools::BodyLine::Text { source, .. } => {
                         crate::render::wrap_line_count(&text[source.clone()], body_width)
                     }
+                    // A diff row never wraps: one row, one transcript line (ADR 0028
+                    // decision 5, R9).
+                    tools::BodyLine::Diff(_) => 1,
                     tools::BodyLine::Hint(_) => 1,
                 })
                 .sum();
@@ -1241,15 +1248,16 @@ fn layout_unstripped(
             lines
         }
         (EntryKind::ToolCall, _) => {
-            // ADR 0024 R1: an `ask_user` call is the boxed question block, with no
+            // ADR 0024 R1: an `ask_user` call is the question record, with no
             // answers yet (the result entry carries them).
             match entry.tool.as_deref() {
-                // ADR 0024 rules 1-2: a pending ask is one dim line (the questions
-                // are drawn in the panel below, not twice); once it is answered, declined or
-                // cancelled the **same** entry draws the full closed block. The result entry
-                // stays blank (below), so the ask never appears twice.
+                // ADR 0024 rules 1-2 / ADR 0028: a pending ask
+                // is one weak line - the open frame's top (the questions are drawn in the panel
+                // below, not twice); once it is answered, declined or cancelled the **same**
+                // entry draws the full open frame. The result entry stays blank (below), so the
+                // ask never appears twice.
                 Some(card) if card.name == "ask_user" => match entry.result {
-                    None => ask_pending_line(card),
+                    None => ask_pending_line(card, body_width, modes.glyphs),
                     Some(is_error) => ask_block(card, &text, is_error, body_width, modes.glyphs),
                 },
                 // The call line, laid out like a code line: never wrapped, truncated with `…`
@@ -1338,19 +1346,17 @@ fn layout_unstripped(
     }
 }
 
-/// The box and mark glyphs of the `ask_user` block (ADR 0024 R1): unicode by
-/// default, pure ASCII under `glyphs = ascii`. The one marker source for the transcript block
-/// **and** the panel (ADR 0024 implementation note): single, multi and `Other`
-/// share the checkbox pair.
+/// The frame and mark glyphs of the `ask_user` record (ADR 0028 /
+/// ADR 0035): an **open** frame - `╭─ <label> ───…` for the top line and
+/// the three-cell `╰──` tail, unicode by default and pure ASCII under `glyphs = ascii`. The one
+/// marker source for the transcript record **and** the panel (ADR 0024
+/// implementation note): single, multi and `Other` share the circle pair (ADR 0028
+/// decision 2 - `○`/`◉`, never bold).
 pub(crate) struct AskGlyphs {
     pub(crate) top_left: char,
-    pub(crate) top_right: char,
     pub(crate) bottom_left: char,
-    pub(crate) bottom_right: char,
     pub(crate) horizontal: char,
     pub(crate) vertical: char,
-    pub(crate) tee_left: char,
-    pub(crate) tee_right: char,
     pub(crate) single_on: &'static str,
     pub(crate) single_off: &'static str,
     pub(crate) multi_on: &'static str,
@@ -1363,40 +1369,34 @@ impl AskGlyphs {
         match glyphs {
             crate::footer::Glyphs::Ascii => Self {
                 top_left: '+',
-                top_right: '+',
                 bottom_left: '+',
-                bottom_right: '+',
                 horizontal: '-',
                 vertical: '|',
-                tee_left: '+',
-                tee_right: '+',
-                single_on: "[x]",
-                single_off: "[ ]",
-                multi_on: "[x]",
-                multi_off: "[ ]",
+                single_on: "(*)",
+                single_off: "( )",
+                multi_on: "(*)",
+                multi_off: "( )",
                 desc: "->",
             },
             crate::footer::Glyphs::Unicode | crate::footer::Glyphs::Nerd => Self {
                 top_left: '╭',
-                top_right: '╮',
                 bottom_left: '╰',
-                bottom_right: '╯',
                 horizontal: '─',
                 vertical: '│',
-                tee_left: '├',
-                tee_right: '┤',
-                single_on: "☑",
-                single_off: "☐",
-                multi_on: "☑",
-                multi_off: "☐",
+                single_on: "◉",
+                single_off: "○",
+                multi_on: "◉",
+                multi_off: "○",
                 desc: "↳",
             },
         }
     }
 }
 
-/// A synthesized `ask_user` line: no source characters (it neither copies nor matches), styled
-/// by `md` pieces.
+/// A synthesized `ask_user` frame line: no source characters (it neither copies nor matches),
+/// styled by `md` pieces. `code` is set so the renderer emits an empty lead and the frame's
+/// `╭`/`│`/`╰` sits in the marker column at column 1 (ADR 0035); the
+/// block draws its own marker column, so the entry's `->` marker is not used.
 fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
     let text: String = pieces.iter().map(|(text, _)| text.as_str()).collect();
     let md: Vec<MdPiece> = pieces
@@ -1411,7 +1411,7 @@ fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
         chars: Vec::new(),
         end: 0,
         text,
-        code: false,
+        code: true,
         pad: Pad::None,
         frame: Frame::None,
         role: tools::LineRole::Normal,
@@ -1423,26 +1423,34 @@ fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
     }
 }
 
-/// A pending `ask_user` call (ADR 0024 rule 1): one weak line in the card's
-/// title-row style. The questions live in the panel below until they are answered, so the
-/// same ask is never drawn twice. The count comes from the call's own arguments.
-fn ask_pending_line(card: &tools::ToolCard) -> Vec<BodyLine> {
+/// A pending `ask_user` call (ADR 0024 rule 1): one weak line, now the open frame's
+/// top line (`╭─ ask · N question(s) · answering below ───…`). The questions live in the panel
+/// below until they are answered, so the same ask is never drawn twice. The count comes from
+/// the call's own arguments.
+fn ask_pending_line(
+    card: &tools::ToolCard,
+    width: usize,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<BodyLine> {
     let count = card
         .arguments
         .get("questions")
         .and_then(serde_json::Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
-    let text = format!(
-        " Ask {count} question{} · answering below",
+    let label = format!(
+        "ask · {count} question{} · answering below",
         if count == 1 { "" } else { "s" }
     );
-    vec![ask_line(vec![(text, MdStyle::Dim)])]
+    let g = AskGlyphs::for_glyphs(glyphs);
+    vec![ask_line(ask_top(&g, width, &label))]
 }
 
-/// The `ask_user` card as a boxed block (ADR 0024 R1): the request from the call's
-/// `arguments`, the answers from the result's `structured`. Three states: unanswered (the call,
-/// no structured result), answered, and declined/cancelled (an error result).
+/// The `ask_user` record as an open frame (ADR 0028): the request from
+/// the call's `arguments`, the answers from the result's `structured`. Three states:
+/// unanswered (the call, no structured result), answered, and declined/cancelled (an error
+/// result). The content is the ADR 0024 R1 structure (prompt, options, `↳`
+/// description, answer/note, status); only the frame is the open one.
 fn ask_block(
     card: &tools::ToolCard,
     text: &str,
@@ -1463,9 +1471,10 @@ fn ask_block(
         .and_then(|value| value.get("answers"))
         .and_then(serde_json::Value::as_array);
     let mut out = Vec::new();
-    let count = questions.len();
-    let title = format!("Ask {count} question{}", if count == 1 { "" } else { "s" });
-    out.push(ask_line(ask_top_border(&g, width, &title)));
+    // ADR 0028 / ADR 0035: the open frame's top
+    // line carries the bare label `ask`; the per-question `[id] · kind · options:N` divider is
+    // gone (the prompt, options, `↳` description and answer are the only content).
+    out.push(ask_line(ask_top(&g, width, "ask")));
     for question in &questions {
         let id = question
             .get("id")
@@ -1478,24 +1487,15 @@ fn ask_block(
         let options = question
             .get("options")
             .and_then(serde_json::Value::as_array);
-        let mut label = format!("[{id}]");
-        if kind != "single" {
-            label.push_str(&format!(" · {kind}"));
-        }
-        if let Some(options) = options
-            && !options.is_empty()
-        {
-            label.push_str(&format!(" · options:{}", options.len()));
-        }
-        out.push(ask_line(ask_divider(&g, width, &label)));
         let prompt = question
             .get("prompt")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
+        // The prompt is the frame's first body line, at the body column (no extra indent).
         out.extend(ask_body(
             &g,
             width,
-            (" ".to_string(), MdStyle::Dim),
+            (String::new(), MdStyle::Dim),
             (prompt.to_owned(), MdStyle::Accent),
         ));
         let reply = answers.and_then(|answers| {
@@ -1537,20 +1537,22 @@ fn ask_block(
                 {
                     label.push_str(" (Recommended)");
                 }
+                // The circle marker sits at the body column (column 3); the label follows.
                 out.extend(ask_body(
                     &g,
                     width,
-                    (format!("  {mark} "), MdStyle::Dim),
+                    (format!("{mark} "), MdStyle::Dim),
                     (label, MdStyle::Plain),
                 ));
                 if let Some(description) = option
                     .get("description")
                     .and_then(serde_json::Value::as_str)
                 {
+                    // The `↳` description is indented two cells under the option's label.
                     out.extend(ask_body(
                         &g,
                         width,
-                        (format!("     {} ", g.desc), MdStyle::Dim),
+                        (format!("  {} ", g.desc), MdStyle::Dim),
                         (description.to_owned(), MdStyle::Muted),
                     ));
                 }
@@ -1575,47 +1577,27 @@ fn ask_block(
         out.extend(ask_body(
             &g,
             width,
-            (" ".to_string(), MdStyle::Dim),
+            (String::new(), MdStyle::Dim),
             (status, MdStyle::Muted),
         ));
     }
-    out.push(ask_line(ask_bottom_border(&g, width)));
+    out.push(ask_line(ask_bottom(&g)));
     out
 }
 
-/// The block's top border with the title embedded (ADR 0024 R1).
-fn ask_top_border(g: &AskGlyphs, width: usize, title: &str) -> Vec<(String, MdStyle)> {
+/// The open frame's top line (ADR 0028 / ADR 0035):
+/// `╭─ <label> ───…`, with the rule running to the body width and **no** right corner. The whole
+/// line is the frame role (`md_hr` until slice ⓪ lands, per ADR 0035).
+fn ask_top(g: &AskGlyphs, width: usize, label: &str) -> Vec<(String, MdStyle)> {
+    let prefix = format!("{}{} ", g.top_left, g.horizontal);
     let mut pieces = vec![
-        (format!("{}{} ", g.top_left, g.horizontal), MdStyle::Dim),
-        (title.to_owned(), MdStyle::Heading),
-        (" ".to_string(), MdStyle::Dim),
+        (prefix.clone(), MdStyle::Rule),
+        (label.to_owned(), MdStyle::Rule),
+        (" ".to_string(), MdStyle::Rule),
     ];
-    let used =
-        unicode_width::UnicodeWidthStr::width(format!("{}{} ", g.top_left, g.horizontal).as_str())
-            + unicode_width::UnicodeWidthStr::width(title)
-            + 1
-            + 1;
+    let used = UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(label) + 1;
     let fill = width.saturating_sub(used);
-    pieces.push((g.horizontal.to_string().repeat(fill), MdStyle::Dim));
-    pieces.push((g.top_right.to_string(), MdStyle::Dim));
-    pieces
-}
-
-/// A labeled `├──┤` divider (ADR 0024 R1): `[id] · kind · options:N`.
-fn ask_divider(g: &AskGlyphs, width: usize, label: &str) -> Vec<(String, MdStyle)> {
-    let prefix = format!("{}{} ", g.tee_left, g.horizontal);
-    let mut pieces = vec![
-        (prefix.clone(), MdStyle::Dim),
-        (label.to_owned(), MdStyle::Muted),
-        (" ".to_string(), MdStyle::Dim),
-    ];
-    let used = unicode_width::UnicodeWidthStr::width(prefix.as_str())
-        + unicode_width::UnicodeWidthStr::width(label)
-        + 1
-        + 1;
-    let fill = width.saturating_sub(used);
-    pieces.push((g.horizontal.to_string().repeat(fill), MdStyle::Dim));
-    pieces.push((g.tee_right.to_string(), MdStyle::Dim));
+    pieces.push((g.horizontal.to_string().repeat(fill), MdStyle::Rule));
     pieces
 }
 
@@ -1632,18 +1614,20 @@ fn ask_wrap(text: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
-/// One bordered content row of the ask block (ADR 0024 rule 3): the left border in
-/// the box's first column, `prefix` (the indent and the mark), the value wrapped to whatever
-/// the prefix leaves of the inner width (CJK by display width), padded with blanks, and the
-/// right border in the box's last column. A continuation row keeps the value's column, so the
-/// right border never moves. One line per wrapped row.
+/// One content row of the open frame (ADR 0028 / ADR 0035
+/// decision 1): the marker column `│ ` in columns 1-2, `prefix` (the marker or indent, at
+/// column 3), and the value wrapped to whatever the prefix leaves of the body width (CJK by
+/// display width). A continuation row repeats the prefix's cells so the value's column holds.
+/// There is no right border and no trailing padding - the owner's picture leaves the body rows
+/// open (a banded theme pads them on screen, which is slice ①'s concern, not this one).
 fn ask_body(
     g: &AskGlyphs,
     width: usize,
     prefix: (String, MdStyle),
     value: (String, MdStyle),
 ) -> Vec<BodyLine> {
-    let inner = width.saturating_sub(2);
+    let marker = format!("{} ", g.vertical);
+    let inner = width.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
     let prefix_width = UnicodeWidthStr::width(prefix.0.as_str());
     let avail = inner.saturating_sub(prefix_width).max(1);
     ask_wrap(&value.0, avail)
@@ -1655,30 +1639,22 @@ fn ask_body(
             } else {
                 " ".repeat(prefix_width)
             };
-            let used = prefix_width + UnicodeWidthStr::width(chunk.as_str());
-            let pad = inner.saturating_sub(used);
             ask_line(vec![
-                (g.vertical.to_string(), MdStyle::Dim),
+                (marker.clone(), MdStyle::Rule),
                 (lead, prefix.1),
                 (chunk, value.1),
-                (" ".repeat(pad), MdStyle::Dim),
-                (g.vertical.to_string(), MdStyle::Dim),
             ])
         })
         .collect()
 }
 
-/// The block's bottom border (ADR 0024 rule 3): as wide as the top border, so the
-/// box is closed.
-fn ask_bottom_border(g: &AskGlyphs, width: usize) -> Vec<(String, MdStyle)> {
+/// The open frame's tail (ADR 0028 / ADR 0035):
+/// exactly three cells, `╰──` (ascii `+--`), in the frame role. It does not run to the top
+/// line's width.
+fn ask_bottom(g: &AskGlyphs) -> Vec<(String, MdStyle)> {
     vec![(
-        format!(
-            "{}{}{}",
-            g.bottom_left,
-            g.horizontal.to_string().repeat(width.saturating_sub(2)),
-            g.bottom_right
-        ),
-        MdStyle::Dim,
+        format!("{}{}{}", g.bottom_left, g.horizontal, g.horizontal),
+        MdStyle::Rule,
     )]
 }
 
@@ -1772,10 +1748,7 @@ fn frame_plan(card: Card, has_output: bool, has_meta: bool) -> FramePlan {
 fn plan_has_output(plan: &[tools::BodyLine], text: &str) -> bool {
     // One whole-text blankness test (trimming scans only the ends) and one plan scan: this
     // runs for every tool entry on a resize, so it must not walk the body line by line.
-    !text.trim().is_empty()
-        && plan
-            .iter()
-            .any(|line| matches!(line, tools::BodyLine::Text { .. }))
+    !text.trim().is_empty() && plan.iter().any(tools::BodyLine::is_content)
 }
 
 /// How many rows a frame adds to a card's content.
@@ -1924,10 +1897,13 @@ fn card_meta(entry: &Entry) -> Option<String> {
 }
 
 /// Turns a tool body plan into laid-out lines: a text line wraps like prose at the body width
-/// (tabs expanded, its characters keeping their source offsets), a hint is one synthesized line.
+/// (tabs expanded, its characters keeping their source offsets), a diff row is laid out as one
+/// line (never wrapped: truncated with `…`, ADR 0028), a hint is one
+/// synthesized line.
 fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> Vec<BodyLine> {
+    let highlights = diff_highlights(plan, text);
     let mut out = Vec::new();
-    for line in plan {
+    for (index, line) in plan.iter().enumerate() {
         match line {
             tools::BodyLine::Text { source, role } => {
                 let slice = text.get(source.clone()).unwrap_or("");
@@ -1935,6 +1911,9 @@ fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> V
                     laid.role = *role;
                     out.push(laid);
                 }
+            }
+            tools::BodyLine::Diff(row) => {
+                out.push(diff_line(row, highlights[index].as_ref(), text, body_width));
             }
             tools::BodyLine::Hint(hint) => out.push(BodyLine {
                 chars: Vec::new(),
@@ -1953,6 +1932,160 @@ fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> V
         }
     }
     out
+}
+
+/// One diff row's highlighted code: the highlighted lines of its **run** (consecutive rows of
+/// the same language, highlighted as one block so multi-line state carries across them, like a
+/// fenced code block) and the row's own line within the run.
+struct DiffHighlight {
+    lines: std::sync::Arc<Vec<crate::highlight::HighlightedLine>>,
+    line: usize,
+}
+
+/// Highlights the diff rows' code (the sign stripped), run by run. A row whose language is
+/// unknown — or whose side of the diff was removed, so its code is the old file's — gets
+/// `None` and draws unhighlighted. Highlighting never changes the text, only the roles.
+fn diff_highlights(plan: &[tools::BodyLine], text: &str) -> Vec<Option<DiffHighlight>> {
+    let mut out: Vec<Option<DiffHighlight>> = (0..plan.len()).map(|_| None).collect();
+    let mut index = 0usize;
+    while index < plan.len() {
+        let Some(lang) = diff_lang(&plan[index]) else {
+            index += 1;
+            continue;
+        };
+        let start = index;
+        let mut body = String::new();
+        while let Some(row) = plan.get(index).and_then(diff_row) {
+            if row.lang != Some(lang) {
+                break;
+            }
+            body.push_str(diff_code(row, text));
+            body.push('\n');
+            index += 1;
+        }
+        if let Some(lines) = crate::highlight::highlighted(&body, lang) {
+            for (offset, slot) in out[start..index].iter_mut().enumerate() {
+                *slot = Some(DiffHighlight {
+                    lines: std::sync::Arc::clone(&lines),
+                    line: offset,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The language a plan line's code highlights with, when the line is a diff row that names one.
+fn diff_lang(line: &tools::BodyLine) -> Option<&'static str> {
+    diff_row(line)?.lang
+}
+
+/// The plan line as a diff row, when it is one.
+fn diff_row(line: &tools::BodyLine) -> Option<&tools::DiffRow> {
+    match line {
+        tools::BodyLine::Diff(row) => Some(row),
+        _ => None,
+    }
+}
+
+/// A diff row's code: its text without the sign (everything after the row's first character).
+fn diff_code<'a>(row: &tools::DiffRow, text: &'a str) -> &'a str {
+    let slice = text.get(row.source.clone()).unwrap_or("");
+    let sign_len = slice.chars().next().map_or(0, char::len_utf8);
+    &slice[sign_len..]
+}
+
+/// Lays one diff row out (ADR 0028): `│ `-free (the card's frame draws the
+/// marker column), the line number right-aligned in four cells plus a space, the sign, a space,
+/// then the code. The number and the two spaces are **synthesized**: they are drawn but carry no
+/// source offset, so a copy of the row is the row's own text — the sign and the code — exactly as
+/// it was before. The code never wraps: the row is truncated to `width` with `…` like a code line
+/// (R9), and the pieces of a highlighted code line take the syntax roles (the same table a code
+/// block uses).
+fn diff_line(
+    row: &tools::DiffRow,
+    highlight: Option<&DiffHighlight>,
+    text: &str,
+    width: usize,
+) -> BodyLine {
+    let slice = text.get(row.source.clone()).unwrap_or("");
+    let sign_len = slice.chars().next().map_or(0, char::len_utf8);
+    let (sign, code) = slice.split_at(sign_len);
+    // The gutter is four cells and a space; the numberless fallback has none, and keeps today's
+    // form: the sign column, then the code.
+    let gutter = row
+        .number
+        .map(|number| format!("{number:>4} "))
+        .unwrap_or_default();
+    let gap = if row.number.is_some() { " " } else { "" };
+    let plain = format!("{gutter}{sign}{gap}{code}");
+    // One role and one source offset per drawn character, in `plain`'s own order.
+    let mut cells: Vec<(char, tools::DiffRole, Option<usize>)> =
+        Vec::with_capacity(plain.chars().count());
+    for ch in gutter.chars() {
+        cells.push((ch, tools::DiffRole::Number, None));
+    }
+    for ch in sign.chars() {
+        cells.push((ch, row.kind.sign_role(), Some(row.source.start)));
+    }
+    for ch in gap.chars() {
+        cells.push((ch, row.kind.sign_role(), None));
+    }
+    // The code's roles: the highlighted piece covering each of its characters, or the row's own
+    // code role when the language is unknown (the entry's text is the only source of the text
+    // either way — highlighting changes the roles, never the characters).
+    let plain_code = tools::DiffRole::Syntax(crate::highlight::SyntaxRole::Plain);
+    let mut code_roles: Vec<tools::DiffRole> = Vec::new();
+    match highlight.and_then(|highlight| highlight.lines.get(highlight.line)) {
+        Some(pieces) => {
+            for (text, role) in pieces {
+                for _ in text.chars() {
+                    code_roles.push(tools::DiffRole::Syntax(*role));
+                }
+            }
+            code_roles.truncate(code.chars().count());
+            code_roles.resize(code.chars().count(), plain_code);
+        }
+        None => code_roles.resize(code.chars().count(), row.kind.code_role()),
+    }
+    for (index, (offset, ch)) in code.char_indices().enumerate() {
+        cells.push((
+            ch,
+            code_roles[index],
+            Some(row.source.start + sign_len + offset),
+        ));
+    }
+    // The layout: the same rule as a code line (tabs expand to four cells, a row that does not
+    // fit keeps `width - 1` cells and ends in `…`).
+    let (rendered, kept, _cut) = code_line_layout(&plain, width);
+    let starts: Vec<usize> = plain.char_indices().map(|(byte, _)| byte).collect();
+    let mut pieces: Vec<MdPiece> = Vec::with_capacity(rendered.chars().count());
+    let mut cursor = 0usize;
+    for (index, ch) in rendered.chars().enumerate() {
+        let Some(&byte) = kept.get(index) else {
+            // The ellipsis: it takes the last kept cell's role and offset, so the cut tail
+            // still copies the characters it stands for (R9).
+            if let Some(last) = pieces.last() {
+                pieces.push(MdPiece {
+                    text: ch.to_string(),
+                    style: last.style,
+                    offset: last.offset,
+                });
+            }
+            continue;
+        };
+        while cursor + 1 < cells.len() && starts[cursor] != byte {
+            cursor += 1;
+        }
+        if let Some((_, role, offset)) = cells.get(cursor) {
+            pieces.push(MdPiece {
+                text: ch.to_string(),
+                style: MdStyle::Diff(*role),
+                offset: *offset,
+            });
+        }
+    }
+    BodyLine::md(md_chars(&pieces), row.source.end, pieces)
 }
 
 /// Wraps prose into body lines (the [`crate::render::wrap_char_offsets`] view).
@@ -2210,6 +2343,12 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
                         // The same lines the layout draws (tabs expanded included).
                         let slice = text.get(source.clone()).unwrap_or("");
                         content.extend(prose_lines(slice, body_width).into_iter().map(|l| l.text));
+                    }
+                    // A diff row never wraps: the same single line the layout draws, with the
+                    // same synthesized gutter (and never highlighted: the measure phase must
+                    // not highlight, ADR 0028 R2's lazy rule).
+                    tools::BodyLine::Diff(row) => {
+                        content.push(diff_line(row, None, &text, body_width).text);
                     }
                     tools::BodyLine::Hint(hint) => content.push(hint.clone()),
                 }
@@ -4039,11 +4178,13 @@ mod tests {
         assert_eq!(pieces.last().map(|p| p.style), Some(MdStyle::Heading));
     }
 
-    /// ADR 0024 R1: the `ask_user` card is a boxed block. The call has no answers
-    /// (unanswered), the structured result marks the chosen option and shows a note, and an
-    /// error result is a declined/cancelled status.
+    /// ADR 0028 / ADR 0035: the `ask_user` record
+    /// is an **open** frame - a `╭─ ask …` top line with no right corner, `│ ` body rows, a
+    /// `╰──` tail - and single, multi and `Other` share the circle marker pair `○`/`◉`. The
+    /// unanswered, answered and declined states are the same block. The content is the ADR 0024
+    /// revision 1 R1 structure (prompt, options, `↳` description, note, status).
     #[test]
-    fn the_ask_block_is_a_boxed_question() {
+    fn the_ask_block_is_an_open_frame() {
         use serde_json::json;
         let arguments = json!({"questions":[{"id":"pick","prompt":"Pick one","kind":"single",
             "options":[{"id":"a","label":"Option A","recommended":true},
@@ -4057,16 +4198,13 @@ mod tests {
         };
 
         let unanswered = texts(&card, false, crate::footer::Glyphs::Unicode);
-        assert!(
-            unanswered[0].starts_with("╭─ Ask 1 question"),
-            "{unanswered:?}"
+        assert!(unanswered[0].starts_with("╭─ ask "), "{unanswered:?}");
+        assert_eq!(
+            unanswered[0].chars().last(),
+            Some('─'),
+            "the top line is open (no right corner): {unanswered:?}"
         );
-        assert!(unanswered[0].ends_with('╮'), "{unanswered:?}");
         assert_eq!(unanswered[0].chars().count(), 44, "{unanswered:?}");
-        assert!(
-            unanswered.iter().any(|t| t.contains("[pick]")),
-            "{unanswered:?}"
-        );
         assert!(
             unanswered.iter().any(|t| t.contains("Pick one")),
             "{unanswered:?}"
@@ -4074,22 +4212,22 @@ mod tests {
         assert!(
             unanswered
                 .iter()
-                .any(|t| t.contains("☐ Option A (Recommended)")),
+                .any(|t| t.contains("○ Option A (Recommended)")),
             "{unanswered:?}"
         );
         assert!(
             unanswered.iter().any(|t| t.contains("↳ the second")),
             "{unanswered:?}"
         );
-        assert!(unanswered.last().unwrap().ends_with('╯'), "{unanswered:?}");
+        assert_eq!(unanswered.last().unwrap(), "╰──", "{unanswered:?}");
 
-        // Answered: the chosen option is `☑` and the note shows.
+        // Answered: the chosen option is `◉` and the note shows.
         let mut answered_card = card.clone();
         answered_card.structured =
             Some(json!({"answers":[{"id":"pick","selected":["a"],"note":"go with A"}]}));
         let answered = texts(&answered_card, false, crate::footer::Glyphs::Unicode);
         assert!(
-            answered.iter().any(|t| t.contains("☑ Option A")),
+            answered.iter().any(|t| t.contains("◉ Option A")),
             "{answered:?}"
         );
         assert!(
@@ -4104,26 +4242,33 @@ mod tests {
             "{declined:?}"
         );
 
-        // The ascii fallback.
+        // The ascii fallback: `+-`/`|`/`+--` and `( )`/`(*)`.
         let ascii = texts(&card, false, crate::footer::Glyphs::Ascii);
-        assert!(ascii[0].starts_with("+- Ask 1 question"), "{ascii:?}");
+        assert!(ascii[0].starts_with("+- ask "), "{ascii:?}");
+        assert_eq!(
+            ascii[0].chars().last(),
+            Some('-'),
+            "the top line is open: {ascii:?}"
+        );
         assert!(
-            ascii.iter().any(|t| t.contains("[ ] Option A")),
+            ascii.iter().any(|t| t.contains("( ) Option A")),
             "{ascii:?}"
         );
         assert!(
             ascii.iter().any(|t| t.contains("-> the second")),
             "{ascii:?}"
         );
+        assert_eq!(ascii.last().unwrap(), "+--", "{ascii:?}");
         assert!(!ascii.iter().any(|t| t.contains('╭')), "{ascii:?}");
     }
 
-    /// ADR 0024 rule 3: the ask block is a closed box. Every row - the top border,
-    /// every divider and every body row - has the box's width and ends in one of the right
-    /// border glyphs, at a narrow and a wide width, under unicode and ascii, with a prompt,
-    /// option labels and descriptions long enough (in CJK display cells) to wrap.
+    /// ADR 0028 / ADR 0035: every body row of the
+    /// open frame starts with `│ ` in the marker column (columns 1-2) and its content starts at
+    /// column 3; the top line runs to the body width and does not close; the tail is `╰──`.
+    /// Checked at a narrow and a wide width, unicode and ascii, with a long CJK prompt, options
+    /// and a description - and no right-corner or divider glyph anywhere.
     #[test]
-    fn the_ask_block_is_closed_at_every_width() {
+    fn the_open_frame_rows_sit_in_the_marker_column() {
         use serde_json::json;
         let unanswered = tools::ToolCard::new(
             "c1",
@@ -4158,38 +4303,59 @@ mod tests {
         for width in [40usize, 100] {
             for glyphs in [crate::footer::Glyphs::Unicode, crate::footer::Glyphs::Ascii] {
                 let g = AskGlyphs::for_glyphs(glyphs);
-                let rights = [g.top_right, g.tee_right, g.vertical, g.bottom_right];
+                let marker = format!("{} ", g.vertical);
+                let top = format!("{}{} ask ", g.top_left, g.horizontal);
+                let bottom = format!("{}{}{}", g.bottom_left, g.horizontal, g.horizontal);
                 for (card, label) in [
                     (&unanswered, "unanswered"),
                     (&answered, "answered"),
                     (&multi, "multi"),
                 ] {
                     let lines = ask_block(card, "user declined to answer", false, width, glyphs);
-                    for line in &lines {
-                        assert_eq!(
-                            UnicodeWidthStr::width(line.text.as_str()),
-                            width,
-                            "{label} at width {width} with {glyphs:?} is not the box width: {:?}",
-                            line.text
-                        );
+                    let first = &lines.first().unwrap().text;
+                    assert!(
+                        first.starts_with(&top),
+                        "{label} at width {width} with {glyphs:?}: {first:?}"
+                    );
+                    assert_eq!(
+                        first.chars().last(),
+                        Some(g.horizontal),
+                        "{label} at width {width} with {glyphs:?} top is open: {first:?}"
+                    );
+                    assert_eq!(
+                        UnicodeWidthStr::width(first.as_str()),
+                        width,
+                        "{label} at width {width} with {glyphs:?} top width: {first:?}"
+                    );
+                    for line in &lines[1..lines.len() - 1] {
                         assert!(
-                            line.text
-                                .chars()
-                                .last()
-                                .is_some_and(|c| rights.contains(&c)),
-                            "{label} at width {width} with {glyphs:?} does not end in a right \
-                             border glyph: {:?}",
+                            line.text.starts_with(&marker),
+                            "{label} at width {width} with {glyphs:?}: a body row does not start \
+                             with the {} marker column: {:?}",
+                            g.vertical,
                             line.text
                         );
                     }
+                    assert_eq!(
+                        lines.last().unwrap().text,
+                        bottom,
+                        "{label} at width {width} with {glyphs:?}"
+                    );
+                    assert!(
+                        !lines
+                            .iter()
+                            .any(|line| line.text.contains('╮') || line.text.contains('╯')),
+                        "{label} at width {width} with {glyphs:?}: no closed corner anywhere"
+                    );
                 }
             }
         }
     }
 
-    /// ADR 0024 rule 3: the bottom border runs the full width, like the top.
+    /// ADR 0028: the open frame's tail is exactly three cells (`╰──`,
+    /// ascii `+--`), and the top line still runs to the body width.
     #[test]
-    fn the_ask_bottom_border_is_as_wide_as_the_top() {
+    fn the_ask_bottom_is_the_three_cell_tail() {
         use serde_json::json;
         let card = tools::ToolCard::new(
             "c1",
@@ -4198,32 +4364,39 @@ mod tests {
         );
         for width in [40usize, 100] {
             for glyphs in [crate::footer::Glyphs::Unicode, crate::footer::Glyphs::Ascii] {
+                let g = AskGlyphs::for_glyphs(glyphs);
                 let lines = ask_block(&card, "", false, width, glyphs);
-                let top = UnicodeWidthStr::width(lines.first().unwrap().text.as_str());
-                let bottom = UnicodeWidthStr::width(lines.last().unwrap().text.as_str());
-                assert_eq!(top, width, "{glyphs:?}");
                 assert_eq!(
-                    top,
-                    bottom,
-                    "the bottom border must be as wide as the top ({glyphs:?}): {:?}",
-                    lines.last().unwrap().text
+                    lines.last().unwrap().text,
+                    format!("{}{}{}", g.bottom_left, g.horizontal, g.horizontal),
+                    "{glyphs:?}"
+                );
+                assert_eq!(
+                    UnicodeWidthStr::width(lines.last().unwrap().text.as_str()),
+                    3,
+                    "the tail is three cells ({glyphs:?})"
+                );
+                assert_eq!(
+                    UnicodeWidthStr::width(lines.first().unwrap().text.as_str()),
+                    width,
+                    "the top line runs to the body width ({glyphs:?})"
                 );
             }
         }
     }
 
-    /// ADR 0024 implementation note: single, multi and `Other` share one marker
-    /// pair - the checkbox `☐`/`☑` under unicode, `[ ]`/`[x]` under ascii.
+    /// ADR 0028: single, multi and `Other` share one marker pair - the
+    /// circle `○`/`◉` under unicode, `( )`/`(*)` under ascii.
     #[test]
-    fn the_ask_glyphs_use_one_checkbox_pair() {
+    fn the_ask_glyphs_use_one_circle_pair() {
         let g = AskGlyphs::for_glyphs(crate::footer::Glyphs::Unicode);
-        assert_eq!(g.single_off, "☐");
-        assert_eq!(g.single_on, "☑");
+        assert_eq!(g.single_off, "○");
+        assert_eq!(g.single_on, "◉");
         assert_eq!(g.multi_off, g.single_off);
         assert_eq!(g.multi_on, g.single_on);
         let g = AskGlyphs::for_glyphs(crate::footer::Glyphs::Ascii);
-        assert_eq!(g.single_off, "[ ]");
-        assert_eq!(g.single_on, "[x]");
+        assert_eq!(g.single_off, "( )");
+        assert_eq!(g.single_on, "(*)");
         assert_eq!(g.multi_off, g.single_off);
         assert_eq!(g.multi_on, g.single_on);
     }

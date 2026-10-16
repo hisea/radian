@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec};
 use serde::Deserialize;
@@ -83,34 +83,37 @@ pub(crate) async fn run(
         None => limits.default_glob_results,
     };
 
-    // `resolve_existing` canonicalizes, so a symlinked `path` that escapes is refused and the
-    // base is always inside the workspace.
+    // ADR 0039 decision 2: the base is opened through the root's directory fd (no symlink in
+    // any component) and the walk descends by fd; only regular files can match.
     let requested = args.path.as_deref().unwrap_or(".");
-    let base = root.resolve_existing(requested)?;
-
     let mut matches: Vec<String> = Vec::new();
-    if base.is_file() {
-        // A file base: the pattern is matched against its own workspace-relative path.
-        if let Some(rel) = search::relative(root.root(), &base) {
-            let rel = rel.to_string_lossy().into_owned();
-            if matcher.is_match(Path::new(&rel)) {
-                matches.push(rel);
+    match root.open_dir(requested) {
+        Ok(base) => {
+            let base_rel: PathBuf = crate::safe_fs::components(Path::new(requested))
+                .map(|parts| parts.iter().collect())
+                .unwrap_or_default();
+            search::walk(&base, &base_rel, &mut |found| {
+                let rel = found.relative.to_string_lossy().into_owned();
+                if matcher.is_match(Path::new(&rel)) {
+                    matches.push(rel);
+                }
+                true
+            });
+        }
+        Err(failure) if failure.code == "not_a_directory" => {
+            // A file base: the pattern is matched against its own workspace-relative path.
+            let opened = root.open_read(requested)?;
+            if opened.stat.kind == crate::safe_fs::EntryKind::File {
+                let rel: PathBuf = crate::safe_fs::components(Path::new(requested))
+                    .map(|parts| parts.iter().collect())
+                    .unwrap_or_default();
+                let rel = rel.to_string_lossy().into_owned();
+                if matcher.is_match(Path::new(&rel)) {
+                    matches.push(rel);
+                }
             }
         }
-    } else {
-        for entry in search::walk(&base).flatten() {
-            // Directories and symlinks are skipped: only regular files can match.
-            if !search::is_regular_file(&entry) {
-                continue;
-            }
-            let Some(rel) = search::relative(root.root(), entry.path()) else {
-                continue;
-            };
-            let rel = rel.to_string_lossy().into_owned();
-            if matcher.is_match(Path::new(&rel)) {
-                matches.push(rel);
-            }
-        }
+        Err(failure) => return Err(failure),
     }
 
     matches.sort();

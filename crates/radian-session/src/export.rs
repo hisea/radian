@@ -176,11 +176,21 @@ pub fn export_markdown(session: &Session, opts: &ExportOptions) -> Result<String
                 revision,
                 tokens_before,
                 tokens_after,
+                deterministic,
                 ..
             } if committed_revisions.contains(revision) => {
-                out.push_str(&format!(
-                    "_context compacted ({tokens_before} → {tokens_after} tokens)_\n\n"
-                ));
+                // ADR 0018, decision 3: a deterministic compaction had no model
+                // summary, so the export says so instead of naming a summary size.
+                if *deterministic {
+                    out.push_str(&format!(
+                        "_context compacted without a summary ({tokens_before} → {tokens_after} \
+                         tokens)_\n\n"
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "_context compacted ({tokens_before} → {tokens_after} tokens)_\n\n"
+                    ));
+                }
             }
             EventData::MessageAppended { message, .. } => {
                 if !committed.contains(&event.seq) {
@@ -317,6 +327,7 @@ fn event_data_value(
             tokens_after,
             below_target,
             model,
+            deterministic,
         } => json!({
             "revision": revision,
             "source_revision": source_revision,
@@ -327,6 +338,7 @@ fn event_data_value(
             "tokens_after": tokens_after,
             "below_target": below_target,
             "model": model,
+            "deterministic": deterministic,
         }),
         EventData::InboxEnqueued {
             message,

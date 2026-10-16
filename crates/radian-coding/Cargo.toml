@@ -35,3 +35,9 @@ libc = "0.2"
 [dev-dependencies]
 # The `ask_user` journal test needs the journal test double (feature `testing`).
 agent-core = { path = "../agent-core", features = ["testing"] }
+# The fd-walk swap test needs the resolve hook (feature `testing`, ADR 0039 decision 2).
+radian-coding = { path = ".", features = ["testing"] }
+
+[features]
+# A test seam between the lexical path check and the first `openat` (`safe_fs::resolve_hook`).
+testing = []
