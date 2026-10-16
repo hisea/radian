@@ -389,6 +389,19 @@ pub struct LeadSession {
     specs: Vec<ToolSpec>,
 }
 
+impl LeadSession {
+    /// A lead tool session over an existing registry, **without** opening the session's driver
+    /// (ADR 0030 slice 8): the control port runs the same `spawn_task`/`wait_task`/
+    /// `task_status` handlers the model's lead tools use. The host's [`LeadTools`] provider
+    /// builds the same thing in its `open_session`.
+    pub fn new(registry: Arc<TaskRegistry>) -> Self {
+        Self {
+            specs: specs(),
+            registry,
+        }
+    }
+}
+
 impl ToolSession for LeadSession {
     fn tool_specs(&self) -> &[ToolSpec] {
         &self.specs

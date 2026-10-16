@@ -15,6 +15,7 @@ mod catalog;
 pub mod config;
 pub mod context;
 pub mod contrib;
+pub mod control;
 pub mod cost;
 mod describe;
 mod diagnostics;
@@ -95,6 +96,7 @@ pub use contrib::{
     Contribution, ContributionStore, ContributorRunner, GitContributor, Segment, SegmentRole,
     StatusContributor, Tick, spawn as spawn_contributor, spawn_gated as spawn_contributor_gated,
 };
+pub use control::{ControlServer, SUBSCRIBER_BUFFER};
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use diagnostics::{
     CleanReport, MAX_TOTAL_BYTES, RETENTION, append, cache_dir, clean, clean_startup, clean_with,
