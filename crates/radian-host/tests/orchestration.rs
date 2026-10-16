@@ -548,7 +548,11 @@ async fn the_stall_fires_once_clears_on_activity_and_fires_again() {
         "the turn has not finished while it waits"
     );
 
-    *cell.lock().unwrap() = base + chrono::Duration::seconds(31);
+    // The task's activity timestamps come from the real clock, so measure the quiet stretch
+    // from a moment taken after that activity: under a loaded machine the first events can
+    // land seconds after `base` (gate 2026-10-16: 0 notices at base + 31 s).
+    let quiet = Utc::now();
+    *cell.lock().unwrap() = quiet + chrono::Duration::seconds(31);
     assert_eq!(registry.check_stalls(), 1, "one notice at the threshold");
     let notice = registry.next_stall().expect("a notice");
     assert_eq!(notice.task_id, "t1");
@@ -559,7 +563,8 @@ async fn the_stall_fires_once_clears_on_activity_and_fires_again() {
         .answer("t1", &view.request_id, Vec::new())
         .expect("answer");
     let _view2 = wait_until(|| pending.next_for("t1")).await;
-    *cell.lock().unwrap() = base + chrono::Duration::seconds(29);
+    let quiet = Utc::now();
+    *cell.lock().unwrap() = quiet + chrono::Duration::seconds(29);
     assert_eq!(registry.check_stalls(), 0, "recent activity is not a stall");
     assert!(
         record.last_outcome().is_none(),
@@ -571,6 +576,6 @@ async fn the_stall_fires_once_clears_on_activity_and_fires_again() {
     ));
 
     // A second quiet stretch fires again.
-    *cell.lock().unwrap() = base + chrono::Duration::seconds(61);
+    *cell.lock().unwrap() = quiet + chrono::Duration::seconds(31);
     assert_eq!(registry.check_stalls(), 1, "a second episode fires again");
 }
