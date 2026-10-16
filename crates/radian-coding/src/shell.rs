@@ -239,18 +239,13 @@ pub(crate) async fn run(
             ["`command` must not be empty"],
         ));
     }
-    // The cwd check is the same workspace boundary the file tools use: absolute paths, `..`
-    // and symlinks out of the workspace are refused before anything is spawned.
+    // The cwd check is the same workspace boundary the file tools use (ADR 0039 decision 2:
+    // walked by fd, no symlink in any component, must be a directory) before anything is
+    // spawned; the sandbox policy is what confines the child itself.
     let cwd = match args.cwd.as_deref().filter(|dir| !dir.is_empty()) {
-        Some(dir) => root.resolve_existing(dir)?,
+        Some(dir) => root.checked_dir_path(dir)?,
         None => root.root().to_path_buf(),
     };
-    if !cwd.is_dir() {
-        return Err(fail(
-            "not_a_directory",
-            format!("`{}` is not a directory", args.cwd.unwrap_or_default()),
-        ));
-    }
 
     if args.background.unwrap_or(false) {
         return start_background(root, sandbox, jobs, &cwd, &args);

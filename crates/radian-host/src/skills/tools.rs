@@ -15,7 +15,7 @@ use agent_core::{
 };
 use serde_json::Value;
 
-use super::{SKILL_FILE_NAME, Skill};
+use super::{SKILL_FILE_NAME, Skill, read_skill_body};
 
 /// The largest body the tool returns. A skill bigger than this is a tool-result error rather
 /// than a truncation: half a skill is worse than a clear failure (ADR 0025 S3). The repo has no
@@ -101,7 +101,7 @@ impl ToolSession for SkillSession {
         // is read.
         let text = match skill.body {
             Some(body) => body.to_owned(),
-            None => std::fs::read_to_string(&skill.path).map_err(|error| {
+            None => read_skill_body(&skill.path).map_err(|error| {
                 ToolFailure::new(
                     "skill_unreadable",
                     format!(

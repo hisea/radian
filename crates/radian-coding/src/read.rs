@@ -175,21 +175,21 @@ pub(crate) async fn run(
         None => None,
     };
 
-    let path = match root.resolve_existing(&args.path) {
-        Ok(path) => path,
+    // ADR 0039 decision 2: the file is opened through the root's directory fd, one
+    // `openat(O_NOFOLLOW)` per component; it is never re-opened by path after a check.
+    let opened = match root.open_read(&args.path) {
+        Ok(opened) => opened,
         Err(failure) => return Err(missing_file(root, &args.path, failure)),
     };
-    let metadata = std::fs::metadata(&path).map_err(|e| io_failure(&args.path, e))?;
-    if !metadata.is_file() {
+    if opened.stat.kind != crate::safe_fs::EntryKind::File {
         return Err(fail(
             "not_a_file",
             format!("`{}` is not a regular file", args.path),
         ));
     }
-    let total = metadata.len();
+    let total = opened.stat.size;
 
-    let file = std::fs::File::open(&path).map_err(|e| io_failure(&args.path, e))?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(opened.file);
     let outcome = read_stream(&mut reader, &args.path, total, budget, offset, limit)?;
 
     let structured = outcome.structured(&args.path, total);
