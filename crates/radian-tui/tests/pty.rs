@@ -8615,6 +8615,17 @@ impl HerdrSocket {
     }
 }
 
+impl Drop for HerdrSocket {
+    fn drop(&mut self) {
+        // The socket binds in `/tmp` (the AF_UNIX path limit keeps it out of `_dir`), so the
+        // `TempDir` does not remove it. Remove the path here: this runs on a passing test and
+        // on a panicking one (unwinding drops the future's locals), so neither leaves a
+        // `radian-herdr-pty-*.sock` behind. The accept thread is detached and still holds the
+        // listener fd, but the file is unlinked and the inode goes away with the process.
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 fn herdr_env(envs: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
     envs.to_vec()
 }

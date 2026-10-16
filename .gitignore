@@ -11,3 +11,7 @@ spikes/*/target/
 /.radian-worktrees/
 # Radian's per-workspace state, including task progress notes (ADR 0036 D2).
 /.radian/
+
+# Python bytecode caches from the helper scripts (crates/*/scripts/); never tracked.
+__pycache__/
+*.pyc
