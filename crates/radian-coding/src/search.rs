@@ -12,10 +12,11 @@
 //!   gitignore is not consulted (`git_global(false)`), so the same tree gives the same result
 //!   on every machine;
 //! - the `.git` directory is pruned, not merely hidden;
-//! - `.radian-worktrees/` is pruned too (ADR 0030 O3): it holds one git worktree per task
-//!   agent, each a full checkout of the tree being searched, so descending into it would
-//!   return every file once per task (and search other branches' contents). The rule is
-//!   structural, not a `.gitignore` coincidence;
+//! - `.radian-worktrees/` is pruned too: it holds one git worktree per checkout, each a full
+//!   tree, so descending into it would return every file once per worktree (and search other
+//!   branches' contents). Task agents' worktrees no longer live there (ADR 0039 decision 4:
+//!   they moved to `~/.radian/worktrees/<repo-key>/`), but the one-off and integration
+//!   worktrees of ADR 0030 O7 still do. The rule is structural, not a `.gitignore` coincidence;
 //! - symlinks are never followed: a symlinked file is not a match and a symlinked directory is
 //!   not descended, so a link pointing out of the workspace is never read;
 //! - dot-files other than `.git` are included: the model asked for a tree, not for hidden-file
@@ -46,14 +47,15 @@ pub(crate) fn walk(base: &Path) -> Walk {
 }
 
 /// Directory names the walk prunes **and their whole subtree**: `.git` (never searchable) and
-/// `.radian-worktrees/` (ADR 0030 O3: one full worktree per task agent lives there, so walking
-/// it would return the tree once per task). `filter_entry` drops a directory *and its subtree*,
+/// `.radian-worktrees/` (one full git worktree per checkout lives there, so walking it would
+/// return the tree once per worktree). `filter_entry` drops a directory *and its subtree*,
 /// which is why this is not an after-the-fact name test.
 pub(crate) const SKIPPED_DIR_NAMES: &[&str] = &[".git", RADIAN_WORKTREES];
 
-/// The per-workspace root of the task agents' git worktrees (ADR 0030 O3). The walk prunes it
-/// entirely; `list` omits the entry, so a directory listing is not cluttered by N full
-/// checkouts of the same tree.
+/// The workspace-local root of one-off git worktrees (ADR 0030 O7: the lead's integration
+/// worktree). The walk prunes it entirely; `list` omits the entry, so a directory listing is
+/// not cluttered by N full checkouts of the same tree. A **task** agent's worktree is not
+/// here any more (ADR 0039 decision 4: `~/.radian/worktrees/<repo-key>/<task-id>`).
 pub(crate) const RADIAN_WORKTREES: &str = ".radian-worktrees";
 
 fn is_not_pruned(entry: &DirEntry) -> bool {

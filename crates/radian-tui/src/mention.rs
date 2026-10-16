@@ -47,7 +47,8 @@ const TRAILING_PUNCTUATION: &[char] = &[
 ];
 
 /// Entries never offered by completion (nor, in practice, attached: they are directories).
-/// `.radian-worktrees/` is the task agents' worktree root (ADR 0030 O3).
+/// `.radian-worktrees/` is the workspace-local worktree root (ADR 0030 O7); a task agent's
+/// worktree is outside the workspace (ADR 0039 decision 4).
 const ALWAYS_HIDDEN: &[&str] = &[".git", ".radian-sandbox", ".radian-worktrees"];
 
 /// One attached file: its workspace-relative path and its text.

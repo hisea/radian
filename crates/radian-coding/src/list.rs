@@ -91,8 +91,9 @@ pub(crate) async fn run(
     let read_dir = std::fs::read_dir(&dir).map_err(|e| io_failure(requested, e))?;
     for entry in read_dir {
         let entry = entry.map_err(|e| io_failure(requested, e))?;
-        // ADR 0030 O3: the task agents' worktrees live under `.radian-worktrees/`, one full
-        // checkout each. `list` omits the entry the same way `glob`/`grep` prune its subtree.
+        // The workspace-local worktree root (ADR 0030 O7) holds one full checkout each;
+        // `list` omits the entry the same way `glob`/`grep` prune its subtree. Task agents'
+        // worktrees are outside the workspace (ADR 0039 decision 4).
         if entry.file_name() == std::ffi::OsStr::new(crate::search::RADIAN_WORKTREES) {
             continue;
         }
