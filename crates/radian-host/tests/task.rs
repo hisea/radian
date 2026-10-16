@@ -2091,3 +2091,287 @@ async fn a_definition_in_the_task_worktree_is_not_read() {
     fixture.registry.remove("t1", true).await.expect("remove");
     let _ = std::fs::remove_file(home.join("agents/wt-seam.md"));
 }
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0030 O5: every task writes exactly one `TaskFinished` when it ends.
+// ---------------------------------------------------------------------------------------------
+
+/// The `TaskFinished` records the lead's journal carries for `id`, in order.
+fn task_finished(fixture: &Fixture, id: &str) -> Vec<Value> {
+    fixture
+        .lead_journal_lines()
+        .into_iter()
+        .filter(|v| v["event"] == "TaskFinished" && v["data"]["agent_session_id"] == id)
+        .collect()
+}
+
+/// Waits (bounded, no long sleep) for the lead's journal to carry a `TaskFinished` for `id` and
+/// returns it: the end is appended from another task, so a poll is the only wait.
+async fn wait_task_finished(fixture: &Fixture, id: &str) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Some(finished) = task_finished(fixture, id).into_iter().next() {
+            return finished;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no TaskFinished for `{id}` in the lead's journal"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// The task ids the lead's journal reports as `unknown_after_crash` (ADR 0030 O5): a
+/// `TaskSpawned` with no matching `TaskFinished`. This is the pairing a resume of the lead's
+/// file performs; an empty set means every task that was started also ended.
+fn unknown_after_crash(fixture: &Fixture) -> Vec<String> {
+    let lines = fixture.lead_journal_lines();
+    let finished: std::collections::HashSet<&str> = lines
+        .iter()
+        .filter(|v| v["event"] == "TaskFinished")
+        .filter_map(|v| v["data"]["agent_session_id"].as_str())
+        .collect();
+    lines
+        .iter()
+        .filter(|v| v["event"] == "TaskSpawned")
+        .filter_map(|v| v["data"]["agent_session_id"].as_str())
+        .filter(|id| !finished.contains(id))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A worktree task that ends its turn writes exactly one `TaskFinished`, and only once its
+/// end-of-task commit has settled (ADR 0030 O5 / ADR 0039 decision 7): the record follows the
+/// commit. The commit is held in the gate, so "no record while it is held" is exact.
+#[tokio::test]
+async fn a_normal_worktree_end_writes_one_finished_after_git_committed() {
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                    "function": {"name": "write", "arguments": "{\"path\":\"made.txt\",\"content\":\"by the task\\n\"}"}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ]),
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "done"}), None),
+            chunk(json!({}), Some("stop")),
+        ]),
+    ])
+    .await;
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let entered_tx = Mutex::new(Some(entered_tx));
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let gate: CommitGate = Arc::new(move || {
+        if let Some(entered) = entered_tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = entered.send(());
+        }
+        // Block the commit until the test releases it: no sleep decides the ordering.
+        let _ = release_rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+    });
+    let fixture = Fixture::with_seams(
+        "finished-order",
+        &server.base_url,
+        TaskSeams {
+            spawn: None,
+            commit_gate: Some(gate),
+        },
+    );
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.brief = Some("write made.txt".to_owned());
+    fixture.registry.spawn(request).await.expect("spawn");
+
+    // The commit is blocked in the gate: the `TaskFinished` must not be there yet, so a reader
+    // never sees the task ended before its commit landed.
+    entered_rx.await.expect("the end-of-task commit started");
+    assert!(
+        task_finished(&fixture, "t1").is_empty(),
+        "TaskFinished must wait for the end-of-task commit"
+    );
+    release_tx.send(()).expect("release the commit");
+
+    let finished = wait_task_finished(&fixture, "t1").await;
+    assert_eq!(finished["data"]["outcome"], "completed");
+    assert!(
+        finished["data"]["error"].is_null(),
+        "a clean end carries no error: {finished}"
+    );
+    assert_eq!(task_finished(&fixture, "t1").len(), 1, "exactly one");
+    // The commit really landed, before the record: its audit is in the task's journal.
+    let task_journal = std::fs::read_to_string(fixture.session_dir.join("t1.jsonl")).unwrap();
+    assert!(
+        task_journal.contains("\"event\":\"GitCommitted\""),
+        "the end-of-task commit landed"
+    );
+
+    fixture.registry.remove("t1", false).await.expect("remove");
+}
+
+/// A `shared` task has no end-of-task commit (ADR 0030 O3), so its turn end alone writes the one
+/// `TaskFinished`.
+#[tokio::test]
+async fn a_shared_task_end_writes_one_finished() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": "done"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+    let fixture = Fixture::new("shared-finished", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.isolation = Some(Isolation::Shared);
+    request.brief = Some("say done".to_owned());
+    fixture.registry.spawn(request).await.expect("spawn");
+
+    let finished = wait_task_finished(&fixture, "t1").await;
+    assert_eq!(finished["data"]["outcome"], "completed");
+    assert!(finished["data"]["error"].is_null(), "{finished}");
+    assert_eq!(task_finished(&fixture, "t1").len(), 1, "exactly one");
+
+    // A removal after the end writes nothing more.
+    fixture.registry.remove("t1", false).await.expect("remove");
+    assert_eq!(task_finished(&fixture, "t1").len(), 1, "still one");
+}
+
+/// A task removed before any turn ended still writes exactly one `TaskFinished`, `cancelled`
+/// (ADR 0030 O5). No brief, so no turn ever ran.
+#[tokio::test]
+async fn a_task_removed_before_end_writes_one_cancelled_finished() {
+    let fixture = Fixture::new("removed-finished", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    assert!(
+        task_finished(&fixture, "t1").is_empty(),
+        "no turn ended, so no TaskFinished yet"
+    );
+
+    fixture.registry.remove("t1", false).await.expect("remove");
+    let finished = task_finished(&fixture, "t1");
+    assert_eq!(finished.len(), 1, "exactly one on removal");
+    assert_eq!(finished[0]["data"]["outcome"], "cancelled");
+    assert!(finished[0]["data"]["error"].is_null(), "{}", finished[0]);
+}
+
+/// A task **killed** before any turn ended writes its one `TaskFinished`, `cancelled` (ADR 0030
+/// O5/O12), so a kill does not read as a crash on resume. The worktree is kept.
+#[tokio::test]
+async fn a_task_killed_before_end_writes_one_cancelled_finished() {
+    let fixture = Fixture::new("killed-finished", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let record = fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let worktree = record.worktree.clone().expect("a worktree");
+
+    fixture.registry.kill("t1").await.expect("kill");
+    let finished = task_finished(&fixture, "t1");
+    assert_eq!(finished.len(), 1, "exactly one on kill");
+    assert_eq!(finished[0]["data"]["outcome"], "cancelled");
+    assert!(finished[0]["data"]["error"].is_null(), "{}", finished[0]);
+    assert!(worktree.exists(), "kill keeps the worktree");
+}
+
+/// After a normal end the lead's journal pairs every `TaskSpawned` with a `TaskFinished`, so a
+/// resume does not report the task as `unknown_after_crash` (ADR 0030 O5).
+#[tokio::test]
+async fn a_normal_end_leaves_no_task_unknown_after_crash() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": "done"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+    let fixture = Fixture::new("no-orphan", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.brief = Some("say done".to_owned());
+    fixture.registry.spawn(request).await.expect("spawn");
+    wait_task_finished(&fixture, "t1").await;
+
+    assert!(
+        unknown_after_crash(&fixture).is_empty(),
+        "a normally finished task must not read as crashed: {:?}",
+        unknown_after_crash(&fixture)
+    );
+    fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// One task is one turn (ADR 0030 O3): a second turn end and a removal after a normal end each
+/// write nothing, so the task keeps exactly its first `TaskFinished`.
+#[tokio::test]
+async fn a_second_turn_and_a_later_remove_add_no_finished() {
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "first"}), None),
+            chunk(json!({}), Some("stop")),
+        ]),
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "second"}), None),
+            chunk(json!({}), Some("stop")),
+        ]),
+    ])
+    .await;
+    let fixture = Fixture::new("no-second-finished", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.brief = Some("first".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    let first = wait_task_finished(&fixture, "t1").await;
+    assert_eq!(first["data"]["outcome"], "completed");
+
+    // A second turn: wait (bounded) for its `TurnFinished` in the task's own journal, then check
+    // the lead's journal still carries exactly one record.
+    record
+        .session
+        .inbox()
+        .followup(
+            agent_core::Message::user("again"),
+            agent_core::InputSource::Subagent,
+        )
+        .await
+        .expect("the second brief");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let text =
+            std::fs::read_to_string(fixture.session_dir.join("t1.jsonl")).unwrap_or_default();
+        if text.matches("\"event\":\"TurnFinished\"").count() >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the second turn did not end"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        task_finished(&fixture, "t1").len(),
+        1,
+        "a second turn end writes no second TaskFinished"
+    );
+
+    // A removal after the end writes nothing either: the first end is the task's end.
+    fixture.registry.remove("t1", true).await.expect("remove");
+    let finished = task_finished(&fixture, "t1");
+    assert_eq!(finished.len(), 1, "still one after removal");
+    assert_eq!(finished[0]["data"]["outcome"], "completed", "not cancelled");
+}

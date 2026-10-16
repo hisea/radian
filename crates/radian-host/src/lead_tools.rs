@@ -23,8 +23,13 @@
 //!
 //! `spawn_task` and `remove_task` are `Exclusive`; the rest are `Shared` (ADR 0030 O4).
 //!
-//! **What is not here (part b):** `max_tasks` queueing, `heavy_slots`, stall events,
-//! `send_agent`, `steer_task` and the verify runner.
+//! **Part b1 (this slice):** `spawn_task` past `max_tasks` (default 4) queues the task FIFO with
+//! a queue position (ADR 0030 O4/O8); a queued task waits through the queue in `wait_task`/
+//! `wait_any` and `remove_task` drops it. `list_tasks`/`task_status` show it as `queued` with its
+//! position. The registry also owns the process heavy gate and the `stalled` watch; those are the
+//! registry's, not a tool.
+//!
+//! **What is not here (part b2):** `send_agent`, `steer_task` and the verify runner.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -39,12 +44,13 @@ use radian_session::TurnOutcome;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::observer::{JournalObserver, SessionObserver};
 use crate::session::{SessionCommand, SessionFacade};
-use crate::task::{EndCommit, Isolation, SpawnRequest, TaskRecord, TaskRegistry};
+use crate::task::{
+    EndCommit, Isolation, QueuedTask, SpawnRequest, TaskHandle, TaskRecord, TaskRegistry,
+};
 use crate::task_pending::{TaskPendingContent, TaskPendingView};
 
 /// The committed assistant text a wait result carries is cut here (ADR 0030 R2).
@@ -641,7 +647,7 @@ impl LeadSession {
         }
         let mut request = SpawnRequest::new(id.clone());
         request.isolation = isolation;
-        request.label = args.label;
+        request.label = args.label.clone();
         request.brief = Some(args.brief);
         request.approval = approval;
         request.agent = args.agent;
@@ -650,28 +656,49 @@ impl LeadSession {
         // ADR 0030 item 3: the edge policy command is never a model argument, so
         // `spawn_task` has no way to set one and refuses the field (deny_unknown_fields).
         request.policy = None;
-        let record = self
+        let spawned = self
             .registry
-            .spawn(request)
+            .submit(request)
             .await
             .map_err(|error| fail("spawn_failed", error.to_string()))?;
-        let structured = record_json(&record);
-        let worktree = record
-            .worktree
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "the shared workspace".to_owned());
-        // ADR 0030 O11: a bad skill name is a warning on a successful spawn, never a failure.
-        let mut text = format!(
-            "spawned task `{}` ({}) at {worktree}",
-            record.id,
-            record.isolation.as_str()
-        );
-        for warning in &record.warnings {
-            text.push_str(&format!("\nwarning: {warning}"));
-        }
+        // ADR 0030 O4/O8: over `max_tasks`, the task is queued and starts FIFO later.
+        let structured = match &spawned.record {
+            Some(record) => record_json(record),
+            None => json!({
+                "task": spawned.id,
+                "state": "queued",
+                "position": spawned.position,
+                "isolation": isolation.unwrap_or_default().as_str(),
+                "label": args.label,
+            }),
+        };
+        let content = match &spawned.record {
+            Some(record) => {
+                let worktree = record
+                    .worktree
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "the shared workspace".to_owned());
+                // ADR 0030 O11: a bad skill name is a warning on a successful spawn, never a
+                // failure.
+                let mut text = format!(
+                    "spawned task `{}` ({}) at {worktree}",
+                    record.id,
+                    record.isolation.as_str()
+                );
+                for warning in &record.warnings {
+                    text.push_str(&format!("\nwarning: {warning}"));
+                }
+                text
+            }
+            None => format!(
+                "queued task `{}` at queue position {} (max_tasks reached; it starts FIFO)",
+                spawned.id,
+                spawned.position.unwrap_or(0)
+            ),
+        };
         Ok(ToolOutput {
-            content: vec![agent_core::ContentPart::text(text)],
+            content: vec![agent_core::ContentPart::text(content)],
             structured: Some(structured),
         })
     }
@@ -682,22 +709,40 @@ impl LeadSession {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
         let args: WaitArgs = parse(call)?;
-        let record = self
-            .registry
-            .get(&args.id)
-            .ok_or_else(|| fail("no_such_task", format!("no task `{}`", args.id)))?;
+        if self.registry.lookup(&args.id).is_none() {
+            return Err(fail("no_such_task", format!("no task `{}`", args.id)));
+        }
         let (timeout, timeout_secs) = wait_timeout(args.timeout_secs)?;
         let deadline = Instant::now() + timeout;
         // Subscribe before the first check: an event raised between the check and the wait is
         // never lost (the watch version advanced after the receiver captured it).
         let mut pending = self.registry.pending().subscribe();
-        let mut turns = record.subscribe_turns();
+        // ADR 0030 O4/O8: a queued task waits through the queue; the registry wake fires when it
+        // starts, fails, is removed, or advances a turn.
+        let mut wake = self.registry.subscribe();
         loop {
             if let Some(view) = self.registry.pending_next_for(&args.id) {
                 return Ok(event_output(&view));
             }
-            if !record.running() && record.last_outcome().is_some() {
-                return self.finish(&record).await;
+            match self.registry.lookup(&args.id) {
+                // Removed while queued (or gone).
+                None => {
+                    return Err(fail(
+                        "no_such_task",
+                        format!("task `{}` was removed before it started", args.id),
+                    ));
+                }
+                Some(TaskHandle::Queued(queued)) => {
+                    if let Some(message) = queued.failed() {
+                        return Err(fail("spawn_failed", message));
+                    }
+                    // Still waiting for a slot: fall through to the select.
+                }
+                Some(TaskHandle::Started(record)) => {
+                    if !record.running() && record.last_outcome().is_some() {
+                        return self.finish(&record).await;
+                    }
+                }
             }
             tokio::select! {
                 biased;
@@ -708,7 +753,7 @@ impl LeadSession {
                     return Ok(still_running(&args.id, timeout_secs));
                 }
                 _ = pending.changed() => {}
-                _ = turns.changed() => {}
+                _ = wake.changed() => {}
             }
         }
     }
@@ -725,32 +770,37 @@ impl LeadSession {
         let (timeout, timeout_secs) = wait_timeout(args.timeout_secs)?;
         let deadline = Instant::now() + timeout;
         // Every id must exist before the wait starts (ADR 0030 O4): an unknown id is a failure,
-        // not a silent skip. Duplicates are fine; the watch set is deduped.
-        let mut records: Vec<Arc<TaskRecord>> = Vec::new();
+        // not a silent skip.
         for id in &args.ids {
-            let record = self
-                .registry
-                .get(id)
-                .ok_or_else(|| fail("no_such_task", format!("no task `{id}`")))?;
-            if !records.iter().any(|known| known.id == *id) {
-                records.push(record);
+            if self.registry.lookup(id).is_none() {
+                return Err(fail("no_such_task", format!("no task `{id}`")));
             }
         }
         let mut pending = self.registry.pending().subscribe();
-        let mut turns: Vec<watch::Receiver<u64>> = records
-            .iter()
-            .map(|record| record.subscribe_turns())
-            .collect();
+        let mut wake = self.registry.subscribe();
         loop {
             // Only the `ids` set: a question another task raised stays pending for a later wait.
             if let Some(view) = self.registry.pending_next_in(&args.ids) {
                 return Ok(event_output(&view));
             }
-            if let Some(record) = records
-                .iter()
-                .find(|record| !record.running() && record.last_outcome().is_some())
-            {
-                return self.finish(record).await;
+            for id in &args.ids {
+                match self.registry.lookup(id) {
+                    // A queued task that failed to start is a result for `ids`.
+                    Some(TaskHandle::Queued(queued)) => {
+                        if let Some(message) = queued.failed() {
+                            return Err(fail("spawn_failed", message));
+                        }
+                    }
+                    // A started task that is not running and has an outcome has finished.
+                    Some(TaskHandle::Started(record))
+                        if !record.running() && record.last_outcome().is_some() =>
+                    {
+                        return self.finish(&record).await;
+                    }
+                    // A removed id is not a result; a running task or one without an outcome
+                    // still has to finish; the others may still finish.
+                    Some(_) | None => {}
+                }
             }
             tokio::select! {
                 biased;
@@ -761,7 +811,7 @@ impl LeadSession {
                     return Ok(any_still_running(timeout_secs));
                 }
                 _ = pending.changed() => {}
-                _ = wait_any_turn(&mut turns) => {}
+                _ = wake.changed() => {}
             }
         }
     }
@@ -881,15 +931,17 @@ impl LeadSession {
 
     fn task_status(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
         let args: StatusArgs = parse(call)?;
-        let record = self
-            .registry
-            .get(&args.id)
-            .ok_or_else(|| fail("no_such_task", format!("no task `{}`", args.id)))?;
-        let status = observed_status(&record);
+        let status = match self.registry.lookup(&args.id) {
+            None => return Err(fail("no_such_task", format!("no task `{}`", args.id))),
+            Some(TaskHandle::Started(record)) => observed_status(&record),
+            Some(TaskHandle::Queued(queued)) => {
+                queued_status(&queued, self.registry.queued_position(&args.id))
+            }
+        };
         Ok(ToolOutput {
             content: vec![agent_core::ContentPart::text(format!(
                 "task `{}`: {}",
-                record.id,
+                args.id,
                 status["state"].as_str().unwrap_or("unknown")
             ))],
             structured: Some(status),
@@ -898,13 +950,19 @@ impl LeadSession {
 
     fn list_tasks(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
         let _: ListArgs = parse(call)?;
-        let tasks: Vec<Value> = self
+        let mut tasks: Vec<Value> = self
             .registry
             .ids()
             .iter()
             .filter_map(|id| self.registry.get(id))
             .map(|record| observed_status(&record))
             .collect();
+        // Queued tasks (ADR 0030 O4/O8) with their position, so the lead's board sees them.
+        for (id, position) in self.registry.queued() {
+            if let Some(TaskHandle::Queued(queued)) = self.registry.lookup(&id) {
+                tasks.push(queued_status(&queued, Some(position)));
+            }
+        }
         Ok(ToolOutput {
             content: vec![agent_core::ContentPart::text(format!(
                 "{} task(s)",
@@ -916,10 +974,19 @@ impl LeadSession {
 
     fn cancel_task(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
         let args: CancelArgs = parse(call)?;
-        let record = self
-            .registry
-            .get(&args.id)
-            .ok_or_else(|| fail("no_such_task", format!("no task `{}`", args.id)))?;
+        let record = match self.registry.lookup(&args.id) {
+            None => return Err(fail("no_such_task", format!("no task `{}`", args.id))),
+            Some(TaskHandle::Queued(_)) => {
+                return Err(fail(
+                    "task_queued",
+                    format!(
+                        "task `{}` is queued, not running; `remove_task` drops it from the queue",
+                        args.id
+                    ),
+                ));
+            }
+            Some(TaskHandle::Started(record)) => record,
+        };
         record
             .session
             .command(SessionCommand::Cancel)
@@ -1004,24 +1071,6 @@ impl LeadSession {
     }
 }
 
-/// The `wait_any` wake: resolves when any of the per-task turn watches changes.
-async fn wait_any_turn(turns: &mut [watch::Receiver<u64>]) {
-    if turns.is_empty() {
-        // No tasks: wait forever (the timeout and cancellation arms still fire).
-        std::future::pending::<()>().await;
-        return;
-    }
-    let waits: Vec<_> = turns
-        .iter_mut()
-        .map(|receiver| {
-            Box::pin(async move {
-                let _ = receiver.changed().await;
-            })
-        })
-        .collect();
-    let _ = futures_util::future::select_all(waits).await;
-}
-
 /// The observer's committed facts for one task, or the empty default when its journal cannot be
 /// read yet.
 #[derive(Default)]
@@ -1074,6 +1123,20 @@ impl Observed {
             last_assistant,
         }
     }
+}
+
+/// The `task_status`/`list_tasks` payload for a **queued** task (ADR 0030 O4/O8): its position
+/// and, if its start failed, why.
+fn queued_status(queued: &Arc<QueuedTask>, position: Option<usize>) -> Value {
+    json!({
+        "task": queued.id(),
+        "state": "queued",
+        "queued": true,
+        "position": position,
+        "isolation": queued.isolation().as_str(),
+        "label": queued.label(),
+        "error": queued.failed(),
+    })
 }
 
 /// The `task_status`/`list_tasks` payload for one task: the observer's committed facts plus a

@@ -24,6 +24,11 @@
 //!   without it mounts none. The depth limit 2 stays **task-only**: a task ignores its own
 //!   `spawn: true`, a named agent does not.
 //!
+//! **`max_tasks` does not count named agents.** `max_tasks` is the process-wide cap on **task**
+//! agents (O8/O13); a named agent is an O12 long session, not a task, and this registry never
+//! touches the [`crate::task::TaskRegistry`] queue. The two registries are siblings, and only the
+//! task one is capped.
+//!
 //! The lead's journal records the creation once, as a non-critical
 //! [`RuntimeEvent::NamedAgentStarted`](radian_session::RuntimeEvent), so a resume can name the
 //! agents that were created. Killing the lead closes every named session's driver; the worktrees

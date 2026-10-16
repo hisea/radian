@@ -31,6 +31,7 @@ pub mod login;
 mod mcp;
 pub mod memory;
 pub mod mermaid;
+mod mermaid_layout;
 mod model;
 pub mod named;
 pub mod observer;
@@ -179,9 +180,10 @@ pub use skills::{
     prompt_section,
 };
 pub use task::{
-    CommitGate, EndCommit, Isolation, SpawnHook, SpawnRequest, SpawnStage, TaskBuilder,
-    TaskContext, TaskError, TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession,
-    end_of_task_commit, task_sandbox,
+    CommitGate, EndCommit, Isolation, OrchestrationLimits, QueuedTask, SpawnHook, SpawnRequest,
+    SpawnStage, Spawned, StallNotice, TaskBuilder, TaskContext, TaskError, TaskHandle,
+    TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
+    task_sandbox,
 };
 pub use task_host::{TaskHost, TaskModelFactory, named_builder, task_builder, task_lines};
 pub use task_pending::{

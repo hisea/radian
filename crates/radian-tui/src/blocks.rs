@@ -36,7 +36,7 @@ pub fn md_line_builds() -> u64 {
 /// layout cache keys: toggling it re-lays the affected entries out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReasoningMode {
-    /// One placeholder line: `▶ thinking (N lines)` (the ADR's default).
+    /// One placeholder line: `◼ thinking (N lines)` (the ADR's default).
     #[default]
     Collapsed,
     /// The full text, wrapped as prose.
@@ -296,11 +296,82 @@ pub enum Card {
 pub enum Frame {
     #[default]
     None,
-    /// The block's head row: `• ` in the marker column, `<name> <title> · <meta> <status>` from
-    /// the body column.
+    /// The block's head row: the fold marker in the marker column, `<name> <title> · <meta>
+    /// <status>` from the body column.
     Head,
     /// A body row: `│ ` in the marker column, the content from the body column.
     Body,
+}
+
+/// The tool head's fold marker (ADR 0035's 2026-10-16 "折叠标记统一" note, the owner's option A):
+/// the head row's marker is decided **only** by whether a body is drawn under it. The thinking
+/// header carries the same pair ([`crate::footer::Glyphs::open_marker`] /
+/// [`crate::footer::Glyphs::fold_marker`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadMarker {
+    /// A head-only block: a running call, a successful `read`/`grep`/`glob`/`list` (one line
+    /// whatever its result hides), or a body the layout stripped (a cancelled call). `• `
+    /// (ascii `* `).
+    Dot,
+    /// A fold hides the body: `collapsed`'s `· N lines` head. `◼ ` (ascii `+ `).
+    Folded,
+    /// A body is drawn under the head: the `errors` preview's last rows, an error body, a
+    /// `Ctrl-O`/search expansion, an expanded thinking channel. `◻ ` (ascii `- `).
+    Open,
+}
+
+impl HeadMarker {
+    /// The two-cell marker-column spelling under a glyph tier (`• `, `◼ `, `◻ `; ascii `* + -`).
+    pub fn glyph(self, glyphs: crate::footer::Glyphs) -> &'static str {
+        match self {
+            HeadMarker::Dot => match glyphs {
+                crate::footer::Glyphs::Ascii => "* ",
+                _ => "• ",
+            },
+            HeadMarker::Folded => glyphs.fold_marker(),
+            HeadMarker::Open => glyphs.open_marker(),
+        }
+    }
+}
+
+/// The marker a tool **head** row carries (ADR 0035's 2026-10-16 note, option A). `body_follows`
+/// is the caller's: the head lives on the call entry and the body on the paired result entry, so
+/// only the renderer, walking the transcript, knows whether the result lays out any line
+/// ([`crate::render::visible_lines`] passes the pair's cached count).
+///
+/// The cases, in order:
+///
+/// * a body is drawn under the head → [`HeadMarker::Open`] (`◻`);
+/// * a compact tool (`read`/`grep`/`glob`/`list`, [`crate::tools::ToolRender::compact`]) with no
+///   body drawn → [`HeadMarker::Dot`] (`•`), however many lines its result hides: the head is
+///   the whole block until an error or `Ctrl-O` draws a body;
+/// * every **other** tool that is explicitly folded (`tui.display.tool_output = "collapsed"`)
+///   with a hidden body → [`HeadMarker::Folded`] (`◼`);
+/// * otherwise it is a one-liner (a running call, an empty or cancelled result) →
+///   [`HeadMarker::Dot`] (`•`).
+pub fn head_marker(entry: &Entry, modes: DisplayModes, body_follows: bool) -> HeadMarker {
+    if body_follows {
+        return HeadMarker::Open;
+    }
+    let card = entry.tool.as_deref();
+    // A compact tool's successful call is one head line (ADR 0028): its
+    // result is never laid out under `errors`, so the head is a `•` whatever the result's size,
+    // never a fold (ADR 0035's 2026-10-16 note, option A).
+    if card.is_some_and(|card| tools::renderer_for(&card.name).compact) {
+        return HeadMarker::Dot;
+    }
+    // The head's own `· N lines` (`head_rows`) appears under exactly this condition, so the fold
+    // marker is shown exactly when the head names the hidden count.
+    let explicitly_folded =
+        modes.tools.fold == tools::ToolFold::Collapsed && entry.fold_override != Some(true);
+    // `result_lines` is the paired result's body line count (set at pairing time); it is `None`
+    // while the call runs, so a running head is a one-liner.
+    let hidden = card.and_then(|card| card.result_lines).unwrap_or(0);
+    if explicitly_folded && hidden > 0 {
+        HeadMarker::Folded
+    } else {
+        HeadMarker::Dot
+    }
 }
 
 /// One laid-out line of an entry's body. `chars`/`end` are the selection mapping's view (the
@@ -503,10 +574,12 @@ pub(crate) enum DiagramOutcome {
 }
 
 /// Renders `source` at `width` (ADR 0028 R8): a pure function of the two, so the cache key is
-/// exactly that pair. No partial diagram: `render_spans` either returns every line or an error.
+/// exactly that pair. No partial diagram: the renderer either returns every line or an error.
+/// `radian_host::mermaid::render_spans` is the one entry point (revision 6): Radian's own
+/// layered flowchart layout first, the vendored renderer for everything else.
 pub(crate) fn diagram_for(source: &str, width: usize) -> DiagramOutcome {
     let t = std::time::Instant::now();
-    let rendered = codex_mermaid::render_spans(source, width);
+    let rendered = radian_host::mermaid::render_spans(source, width);
     radian_session::trace::took("first-frame/mermaid", t);
     match rendered {
         Ok(lines) => DiagramOutcome::Rendered(
@@ -651,7 +724,7 @@ pub fn is_folded(entry: &Entry, modes: DisplayModes) -> bool {
 /// search all see the stripped form.
 fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
     // `chars.is_empty()` would also match a **synthesized** line that draws text but has no
-    // source characters — the thinking channel's `▼ thinking · …` header or a tool block's
+    // source characters — the thinking channel's `◻ thinking · …` header or a tool block's
     // head (ADR 0028/4). `text.is_empty()` is the real "blank line"
     // test; a synthesized line with text is content and must survive.
     let blank = |line: &BodyLine| !line.hint && line.text.is_empty();
@@ -2065,7 +2138,7 @@ fn reasoning_duration(entry: &Entry) -> Option<String> {
 
 /// The expanded thinking channel's header line: `thinking · <duration>`, `thinking · <spinner
 /// frame>` while streaming, and bare `thinking` for a resumed entry with no duration (ADR
-/// 0028 revision 5 decision 4). The `▼ ` marker is the marker column's, drawn by the renderer.
+/// 0028 revision 5 decision 4). The `◻ ` marker is the marker column's, drawn by the renderer.
 fn reasoning_header(entry: &Entry, spinner: crate::spinner::Frame) -> String {
     if entry.live {
         return format!("thinking · {}", spinner.glyph);
@@ -2078,7 +2151,7 @@ fn reasoning_header(entry: &Entry, spinner: crate::spinner::Frame) -> String {
 
 /// The collapsed reasoning placeholder (ADR 0028): `thinking · <duration>
 /// · N lines`, `thinking · <spinner frame>` while streaming, and `thinking · N lines` for a
-/// resumed entry. The line count is the entry's own text; the `▶ ` marker is the marker
+/// resumed entry. The line count is the entry's own text; the `◼ ` marker is the marker
 /// column's (ADR 0028 rule 5), so the body column is the same folded and expanded.
 fn placeholder(entry: &Entry, spinner: crate::spinner::Frame) -> String {
     let lines = entry.text.lines().count().max(1);
@@ -4273,7 +4346,7 @@ mod tests {
         entry.live = false;
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
         assert_eq!(lines[0].text, "thinking · 3 lines");
-        // The expanded header is a harness line of its own; the `▼ ` is the marker column's.
+        // The expanded header is a harness line of its own; the `◻ ` is the marker column's.
         let expanded = layout(&entry, &parse_blocks(&entry.text), EXPANDED, 40);
         assert_eq!(expanded.len(), 4);
         assert_eq!(expanded[0].text, "thinking");

@@ -440,6 +440,34 @@ async fn a_named_agent_mounts_the_lead_tools_only_when_spawn_is_true() {
     let _ = plain.session.join().await;
 }
 
+/// ADR 0030 O13/O8: `max_tasks` caps **task** agents. A named agent is an O12 long session, not a
+/// task, so it never occupies a task slot (the named registry does not touch the task queue).
+#[tokio::test]
+async fn a_named_agent_does_not_consume_a_task_slot() {
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let fixture = Fixture::new("slot", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    fixture
+        .registry
+        .send("writer", "hi", InputSource::User)
+        .await
+        .expect("send");
+    assert_eq!(
+        fixture.task_registry.live_count(),
+        0,
+        "a named agent is not a task: it takes no max_tasks slot"
+    );
+    assert!(
+        fixture.task_registry.queued().is_empty(),
+        "and it queues nothing"
+    );
+    fixture.registry.close_all();
+    let record = fixture.registry.get("writer").expect("record");
+    let _ = record.session.join().await;
+}
+
 /// On lead exit the named sessions close and their worktrees stay (ADR 0030 O12).
 #[tokio::test]
 async fn closing_the_lead_closes_the_sessions_and_keeps_the_worktrees() {

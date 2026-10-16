@@ -4741,7 +4741,7 @@ impl App {
         // live entry is dropped wherever it sits - the stream can leave one behind a
         // compaction notice (they are not always a suffix of `entries`).
         // The live reasoning channel's clock, taken before the drop (ADR 0028
-        // decision 4): the committed entry below carries its duration, so `▼ thinking · 3.2s`
+        // decision 4): the committed entry below carries its duration, so `◻ thinking · 3.2s`
         // survives the live-to-committed handoff. A resume has no live entry: `None`.
         let reasoning_clock = self.take_live_reasoning_clock();
         self.drop_live();

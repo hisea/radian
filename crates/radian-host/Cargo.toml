@@ -37,6 +37,9 @@ codex-mermaid = { path = "../../third_party/codex-mermaid" }
 unicode-width = "0.2.2"
 # Reused for the owner-only file/directory creation (ADR 0013) in `diagnostics`.
 radian-session = { path = "../radian-session" }
+# The journal timestamps are RFC3339 strings; the stall check (ADR 0030 R5) parses them. The
+# same `chrono` the session writer already uses to format them, so no new crate enters the tree.
+chrono = "0.4"
 # The model catalog fetches over HTTP (ADR 0018); the same client the adapters use, so no new
 # dependency is introduced.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy"] }
