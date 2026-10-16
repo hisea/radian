@@ -5,7 +5,8 @@
 //! context files), 3 skills/memory (appended by their hooks), 0b `<session>` (the volatile
 //! facts, last, so the static prefix stays cacheable).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// The built-in role prompts, verbatim from the ADR 0036 / the research §5.2-§5.4.
 pub const DEFAULT_ROLE: &str = include_str!("../prompts/default.md");
@@ -173,15 +174,118 @@ fn git_state(cwd: &Path) -> Option<(String, bool)> {
     Some((branch, dirty))
 }
 
+/// The facts layer 0b is **keyed** on (ADR 0036): switching the model
+/// or the thinking level recomputes the section; nothing else in a session does. `cwd`, the
+/// date and the git state are never refreshed between turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionKey {
+    provider: Option<String>,
+    model: String,
+    thinking: Option<String>,
+}
+
+impl SessionKey {
+    /// The key of a config slot value (ADR 0026 D5/D11: the driver merges each change into
+    /// the slot at a turn boundary). `model` is the session's startup model, used when the
+    /// slot names no route — a session that never switched.
+    pub fn of(slot: &serde_json::Value, model: &str) -> Self {
+        let route = radian_runtime::ModelRoute::from_value(slot);
+        let provider = route.as_ref().map(|route| route.provider.clone());
+        let model = route
+            .map(|route| route.model)
+            .unwrap_or_else(|| model.to_owned());
+        let thinking = slot
+            .get("thinking")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        Self {
+            provider,
+            model,
+            thinking,
+        }
+    }
+}
+
+/// Where the `<session>` hook reads its key from. The production one reads the driver's config
+/// slot (ADR 0026 D5); a caller that has another source (a test, or the `/mode` switch of
+/// ADR 0038 slice 3) supplies its own.
+pub type SessionKeySource = Arc<dyn Fn() -> SessionKey + Send + Sync>;
+
 /// The hook that appends layer 0b (`<session>`) **after** skills and memory (ADR 0036 D1), so
 /// the static prefix stays cacheable.
+///
+/// The section is computed when the hook is built and then reused **byte for byte**, except
+/// when the session's model route or thinking level changed — `/model` and `/thinking`
+/// (ADR 0036). Before revision 3 the model id in the section was the one
+/// the process started with, so `/model` left the section naming the old model.
 pub struct SessionFactsHooks {
+    /// The workspace the facts are read from (cwd, git state).
+    workspace: PathBuf,
+    /// Where the current key comes from.
+    key_source: SessionKeySource,
+    /// The section and the key it was built from; one lock, so the two cannot disagree.
+    state: Mutex<SessionFacts>,
+}
+
+struct SessionFacts {
+    key: SessionKey,
     section: String,
 }
 
 impl SessionFactsHooks {
-    pub fn new(section: String) -> Self {
-        Self { section }
+    /// The hook over the driver's config slot: `None` for a host whose model never changes.
+    pub fn new(
+        workspace: impl Into<PathBuf>,
+        model: impl Into<String>,
+        slot: Option<Arc<radian_runtime::ConfigSlot>>,
+    ) -> Self {
+        let model = model.into();
+        // The session's startup model is the fallback for a slot that names no route.
+        let fallback = model.clone();
+        let source: SessionKeySource = match slot {
+            Some(slot) => Arc::new(move || SessionKey::of(&slot.value(), &fallback)),
+            None => {
+                let fixed = SessionKey::of(&serde_json::Value::Null, &model);
+                Arc::new(move || fixed.clone())
+            }
+        };
+        Self::with_key_source(workspace, source)
+    }
+
+    /// The hook over an arbitrary key source (see [`SessionKeySource`]).
+    pub fn with_key_source(workspace: impl Into<PathBuf>, key_source: SessionKeySource) -> Self {
+        let workspace = workspace.into();
+        let key = key_source();
+        let section = session_layer(&workspace, &key.model);
+        Self {
+            workspace,
+            key_source,
+            state: Mutex::new(SessionFacts { key, section }),
+        }
+    }
+
+    /// The section as it stands now: recomputed when the model route or the thinking level
+    /// changed, byte-identical otherwise (ADR 0036 and 2).
+    fn section(&self) -> String {
+        let key = (self.key_source)();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if key != state.key {
+            state.section = session_layer(&self.workspace, &key.model);
+            state.key = key;
+        }
+        state.section.clone()
+    }
+
+    /// Recomputes the section now, even when the key did not change. This is the part of
+    /// ADR 0036's `/reload` (and, once ADR 0038 slice 3 lands, the layer-1 half of
+    /// `/mode`) that lives in this hook; recomputing the other layers is the caller's business,
+    /// not this hook's.
+    pub fn refresh(&self) -> String {
+        let key = (self.key_source)();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.section = session_layer(&self.workspace, &key.model);
+        state.key = key;
+        state.section.clone()
     }
 }
 
@@ -191,15 +295,16 @@ impl agent_core::Hooks for SessionFactsHooks {
         _cx: &agent_core::HookContext,
         request: &mut agent_core::ModelRequest,
     ) -> Result<(), agent_core::HookError> {
-        if self.section.is_empty() {
+        let section = self.section();
+        if section.is_empty() {
             return Ok(());
         }
         match &mut request.system_prompt {
             Some(system) => {
                 system.push('\n');
-                system.push_str(&self.section);
+                system.push_str(&section);
             }
-            None => request.system_prompt = Some(self.section.clone()),
+            None => request.system_prompt = Some(section),
         }
         Ok(())
     }
@@ -208,6 +313,8 @@ impl agent_core::Hooks for SessionFactsHooks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::Hooks;
+    use serde_json::json;
 
     #[test]
     fn the_three_builtin_roles_are_distinct_and_carry_their_rules() {
@@ -279,5 +386,80 @@ mod tests {
             .find_map(|line| line.strip_prefix("date: "))
             .unwrap();
         assert_eq!(date.len(), 10, "{date}");
+    }
+
+    /// The `<session>` text this hook appends to a request.
+    async fn appended(hooks: &SessionFactsHooks) -> String {
+        let mut request = agent_core::ModelRequest {
+            system_prompt: Some("base".into()),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            settings: json!({}),
+        };
+        hooks
+            .before_model_call(
+                &agent_core::HookContext {
+                    cancellation: agent_core::CancellationToken::new(),
+                    model_calls: 1,
+                },
+                &mut request,
+            )
+            .await
+            .unwrap();
+        request.system_prompt.unwrap()
+    }
+
+    /// ADR 0036: layer 0b is byte-identical from turn to turn, and the
+    /// only thing that recomputes it is a change to the model route (or the thinking level).
+    #[tokio::test]
+    async fn the_session_layer_changes_only_when_the_model_route_does() {
+        let slot = Arc::new(Mutex::new(
+            json!({"model": {"provider": "p", "model": "m-1"}}),
+        ));
+        let source = {
+            let slot = Arc::clone(&slot);
+            Arc::new(move || SessionKey::of(&slot.lock().unwrap(), "m-1"))
+        };
+        let hooks = SessionFactsHooks::with_key_source("/tmp/ws", source);
+
+        let first = appended(&hooks).await;
+        assert!(first.contains("model: m-1"), "{first}");
+
+        // Nothing changed: the bytes are identical.
+        assert_eq!(appended(&hooks).await, first);
+
+        // A change the section does not name (`/approval`) leaves it alone.
+        *slot.lock().unwrap() =
+            json!({"model": {"provider": "p", "model": "m-1"}, "approval": "never"});
+        assert_eq!(appended(&hooks).await, first);
+
+        // `/model` (ADR 0026 D5): the model id follows the route, and only that line moves.
+        *slot.lock().unwrap() = json!({"model": {"provider": "p", "model": "m-2"}});
+        let switched = appended(&hooks).await;
+        assert!(switched.contains("model: m-2"), "{switched}");
+        let before: Vec<&str> = first
+            .lines()
+            .filter(|line| !line.starts_with("model: "))
+            .collect();
+        let after: Vec<&str> = switched
+            .lines()
+            .filter(|line| !line.starts_with("model: "))
+            .collect();
+        assert_eq!(before, after, "only the model line moves");
+    }
+
+    /// The `/reload` seam (ADR 0036): the section recomputes on demand,
+    /// without waiting for a model call.
+    #[test]
+    fn refresh_recomputes_the_section_on_demand() {
+        let slot = Arc::new(Mutex::new(serde_json::Value::Null));
+        let source = {
+            let slot = Arc::clone(&slot);
+            Arc::new(move || SessionKey::of(&slot.lock().unwrap(), "m-1"))
+        };
+        let hooks = SessionFactsHooks::with_key_source("/tmp/ws", source);
+        assert!(hooks.refresh().contains("model: m-1"));
+        *slot.lock().unwrap() = json!({"model": {"provider": "p", "model": "m-3"}});
+        assert!(hooks.refresh().contains("model: m-3"));
     }
 }
