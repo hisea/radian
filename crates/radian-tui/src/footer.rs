@@ -1246,7 +1246,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 if app.footer_glyphs() == Glyphs::Ascii {
                     " auto".to_string()
                 } else {
-                    // `⟲` (U+27F2) is missing from six of the seven fonts (revision 4): `~`.
+                    // `⟲` (U+27F2) is not in every reference font (revision 4): `~`.
                     " ~".to_string()
                 }
             } else {
@@ -1468,8 +1468,8 @@ fn render_bar(item: &Item, fraction: f64) -> String {
 /// icon carry one; the rest are plain text.
 fn glyph(id: &str, glyphs: Glyphs) -> &'static str {
     match (id, glyphs) {
-        // ADR 0027: the unicode icons must exist in all seven mainstream coding
-        // fonts (see the README's coverage table), so `⌂ ◷ ◫ ◐ ⛁ ⬡` are replaced or dropped.
+        // ADR 0027/6: the unicode icons must exist in all six reference fonts (see
+        // the README's coverage table), so `⌂ ◷ ◫ ◐ ⛁ ⬡` are replaced or dropped.
         // `@ # *` and `»` are in every one; the rest are text-only.
         ("host", Glyphs::Unicode) => "@ ",
         ("host", Glyphs::Nerd) => "\u{f109} ",
@@ -1610,7 +1610,7 @@ mod tests {
         }
     }
 
-    /// The unicode tier only draws glyphs the seven checked fonts all have. Every item glyph
+    /// The unicode tier only draws glyphs the six checked fonts all have. Every item glyph
     /// (from the built-in presets), the spinner frames, the separators, the context bar and
     /// the auto marker are checked.
     #[test]
