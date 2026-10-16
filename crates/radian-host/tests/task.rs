@@ -447,6 +447,12 @@ async fn a_shared_task_writes_no_end_commit() {
     ])])
     .await;
     let fixture = Fixture::new("shared-end", &server.base_url);
+    // A feature branch, so an erroneous end commit on the lead workspace *could* succeed and
+    // the test can tell it apart from the correct "no commit".
+    assert!(git(
+        &fixture.lead,
+        &["checkout", "-q", "-b", "lead/feature"]
+    ));
     // The user's own uncommitted change in the lead workspace.
     std::fs::write(fixture.lead.join("user-work.txt"), "the user's change\n").unwrap();
 
@@ -456,11 +462,26 @@ async fn a_shared_task_writes_no_end_commit() {
     let record = fixture.registry.spawn(request).await.expect("spawn");
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while server.requests().len() < 1 {
+    let journal = fixture.session_dir.join("t1.jsonl");
+    loop {
+        if std::fs::read_to_string(&journal).is_ok_and(|text| text.contains("\"TurnFinished\"")) {
+            break;
+        }
         assert!(
             std::time::Instant::now() < deadline,
             "the turn did not finish"
         );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // The turn ended; give a wrong finisher a bounded window to commit the lead workspace. A
+    // correct run makes no commit, so the assertions below hold after the window.
+    let quiet = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let committed = git_out(&fixture.lead, &["log", "-1", "--pretty=%s"]) != "init"
+            || git_out(&fixture.lead, &["status", "--porcelain"]).is_empty();
+        if committed || std::time::Instant::now() >= quiet {
+            break;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
