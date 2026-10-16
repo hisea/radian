@@ -937,6 +937,7 @@ fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
     })?;
     let mut dir = open_dir(home)
         .map_err(|error| TaskError::new(format!("cannot open {}: {error}", home.display())))?;
+    let mut level = home.to_path_buf();
     for component in relative.components() {
         let std::path::Component::Normal(name) = component else {
             return Err(TaskError::new(format!(
@@ -944,24 +945,47 @@ fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
                 root.display()
             )));
         };
+        level.push(name);
         let name = CString::new(name.as_encoded_bytes())
             .map_err(|_| TaskError::new("the worktree root path is not valid UTF-8"))?;
         let next = match open_dir_at(dir.as_fd(), &name) {
             Ok(next) => next,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                make_dir_at(dir.as_fd(), &name).map_err(|error| {
-                    TaskError::new(format!(
-                        "cannot create a level of {}: {error}",
-                        root.display()
-                    ))
-                })?;
-                open_dir_at(dir.as_fd(), &name).map_err(|error| root_error(root, &error))?
+                #[cfg(feature = "testing")]
+                crate::task::testing::worktree_before_mkdir(&level);
+                create_missing_level(dir.as_fd(), &name, root)?
             }
             Err(error) => return Err(root_error(root, &error)),
         };
         dir = next;
     }
     Ok(())
+}
+
+/// Creates a level of the worktree root that just opened as missing, then opens it through the
+/// same `O_NOFOLLOW|O_DIRECTORY` open (ADR 0039 decision 4). Two task spawns in one process
+/// share `RADIAN_HOME/worktrees`, so both can see the same level missing and both `mkdirat` it;
+/// the loser's `EEXIST` means "someone else created it", not a failure. The open is what keeps
+/// the refusal intact: a symlink planted at the name fails there and refuses the spawn.
+#[cfg(unix)]
+fn create_missing_level(
+    parent: std::os::unix::io::BorrowedFd<'_>,
+    name: &std::ffi::CStr,
+    root: &Path,
+) -> Result<std::os::unix::io::OwnedFd, TaskError> {
+    match make_dir_at(parent, name) {
+        Ok(()) => {}
+        // Another spawn won the race for this level. Fall through to the open, which still
+        // refuses anything that is not a plain directory.
+        Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {}
+        Err(error) => {
+            return Err(TaskError::new(format!(
+                "cannot create a level of {}: {error}",
+                root.display()
+            )));
+        }
+    }
+    open_dir_at(parent, name).map_err(|error| root_error(root, &error))
 }
 
 /// The non-Unix fallback: no `openat`, so each level is checked with `symlink_metadata`.
@@ -1345,6 +1369,46 @@ impl radian_runtime::RuntimeEvents for TaskRuntimeEvents {
     fn on_runtime_event(&self, event: &RuntimeEvent) {
         self.inner.on_runtime_event(event);
         self.finisher.on_turn_event(event);
+    }
+}
+
+/// Test-only seams for the task worktree root (feature `testing`, always on for this crate's own
+/// tests through the self dev-dependency). A production build or a dependent crate never
+/// installs one, so no hook fires outside a task test.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    type BeforeMkdir = Box<dyn Fn(&Path) + Send + Sync>;
+
+    /// Armed levels of the worktree root: a hook runs the next time `vet_worktree_root` is about
+    /// to create exactly that level — after the level opened as `ENOENT`, before the `mkdirat`.
+    /// A test uses it to create the level first, which is the interleaving two concurrent spawns
+    /// produce. Keyed by level, so tests running in parallel cannot consume each other's seam.
+    static WORKTREE_BEFORE_MKDIR: Mutex<BTreeMap<PathBuf, BeforeMkdir>> =
+        Mutex::new(BTreeMap::new());
+
+    /// Arms the seam for `level`.
+    pub fn arm_worktree_before_mkdir<F>(level: &Path, hook: F)
+    where
+        F: Fn(&Path) + Send + Sync + 'static,
+    {
+        WORKTREE_BEFORE_MKDIR
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(level.to_path_buf(), Box::new(hook));
+    }
+
+    pub(crate) fn worktree_before_mkdir(level: &Path) {
+        let hook = WORKTREE_BEFORE_MKDIR
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(level);
+        if let Some(hook) = hook {
+            hook(level);
+        }
     }
 }
 

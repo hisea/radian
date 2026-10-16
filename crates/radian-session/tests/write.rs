@@ -393,12 +393,12 @@ fn a_line_appended_before_the_lock_survives_the_resume() {
     }
     // The concurrent appender: takes the lock, appends one message, releases - all before this
     // resume takes the lock.
-    *radian_session::testing::RESUME_BEFORE_LOCK.lock().unwrap() = Some(Box::new(|path| {
+    radian_session::testing::arm_resume_before_lock(&path, |path| {
         let journal = SessionJournal::resume(path, "sid").unwrap();
         journal
             .test_append_message(1, Message::user("appended"))
             .unwrap();
-    }));
+    });
     let journal = SessionJournal::resume(&path, "sid").unwrap();
     // seq 0 is SessionCreated, seq 1 and 2 are the two messages: the next append is seq 3.
     assert_eq!(
