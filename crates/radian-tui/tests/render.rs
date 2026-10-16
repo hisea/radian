@@ -1229,7 +1229,7 @@ fn thinking_has_one_blank_line_on_both_sides() {
     let terminal = render(&mut app, 40, 12);
     let text = screen(&terminal);
     let user = row_of(&terminal, "❯ q").expect("the user text");
-    let thinking = row_of(&terminal, "thinking (1 lines)").expect("the folded channel");
+    let thinking = row_of(&terminal, "thinking · 1 lines").expect("the folded channel");
     let answer = row_of(&terminal, "the answer").expect("the reply");
     assert_eq!(
         thinking,
@@ -1939,7 +1939,7 @@ fn the_block_layout_snapshot() {
         // no half-cell padding. The container's one blank line separates it from the block below.
         "❯ explain the failure".to_string(), // the user text
         "".to_string(),                      // the container gap after the user row
-        "› thinking (3 lines)".to_string(), // the folded channel: the unicode fold glyph (ADR 0027)
+        "› thinking · 3 lines".to_string(), // the folded channel: the unicode fold glyph (ADR 0027)
         "".to_string(), // ADR 0035: one blank line between thinking and the block below
         "  Looking into it.".to_string(), // the reply
         "".to_string(), // the gap
@@ -2557,7 +2557,7 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
         message: assistant_with("THE ANSWER", "FIRST THOUGHT\nSECOND THOUGHT", false, vec![]),
     });
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("› thinking (2 lines)"), "{text}");
+    assert!(text.contains("› thinking · 2 lines"), "{text}");
     assert!(
         !text.contains("FIRST THOUGHT"),
         "folded by default:
@@ -2577,7 +2577,7 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
 
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("› thinking (2 lines)"), "{text}");
+    assert!(text.contains("› thinking · 2 lines"), "{text}");
     assert!(!text.contains("FIRST THOUGHT"), "{text}");
 }
 
@@ -2599,8 +2599,8 @@ fn folding_changes_the_transcript_line_count() {
     let collapsed = app.session.total_lines;
     assert_eq!(
         expanded,
-        collapsed + 2,
-        "three thinking lines become one placeholder"
+        collapsed + 3,
+        "three thinking lines plus the header become one placeholder"
     );
     // The placeholder, one blank line (ADR 0035) and the answer.
     assert_eq!(collapsed, 3, "placeholder + the one-line gap + answer");

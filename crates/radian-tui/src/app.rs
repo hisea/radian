@@ -172,8 +172,18 @@ pub struct Entry {
     /// the global fold says, which is how a search hit opens exactly one folded entry.
     /// Cleared by the next global fold toggle. Part of the layout cache key.
     pub fold_override: Option<bool>,
-    /// The parsed blocks (ADR 0028 R1), keyed by text length and the reasoning mode. Only
-    /// filled for assistant prose (the only kind with fence grammar today).
+    /// When the live reasoning channel's **first delta** arrived (ADR 0028
+    /// decision 4). Live-only: never journaled, so a resumed entry has `None` and shows no
+    /// duration. The pair with [`Entry::reasoning_ended`] is the entry's own wall clock; the
+    /// duration is their difference.
+    pub reasoning_started: Option<Instant>,
+    /// When the reasoning entry **ended**: the commit that replaced the live view (ADR 0028
+    /// revision 5 decision 4). Live-only, like [`Entry::reasoning_started`]; a resumed entry
+    /// carries neither.
+    pub reasoning_ended: Option<Instant>,
+    /// The parsed blocks (ADR 0028 R1), keyed by text length and the reasoning mode. Filled
+    /// for assistant prose and the thinking channel's body (ADR 0028:
+    /// both carry fence grammar).
     pub(crate) block_cache: Option<((usize, ReasoningMode), Vec<Block>)>,
     /// How many lines this entry laid out to, for the width, text length and mode it was
     /// last measured at. The renderer keeps it so a frame only re-lays out entries that
@@ -209,6 +219,8 @@ impl Entry {
             card: crate::blocks::Card::None,
             error_code: None,
             fold_override: None,
+            reasoning_started: None,
+            reasoning_ended: None,
             block_cache: None,
             layout_cache: None,
             diagram_cache: None,
@@ -4560,7 +4572,9 @@ impl App {
     }
 
     /// Sets the live entry of `kind` to `text` (creating it when it does not exist yet). The
-    /// stream arrives as a snapshot, so this replaces rather than appends.
+    /// stream arrives as a snapshot, so this replaces rather than appends. The reasoning
+    /// channel's clock starts at its **first** delta (ADR 0028), from
+    /// the loop's injected instant (`self.now`): a redraw never reads the wall clock.
     fn set_live(&mut self, kind: EntryKind, text: &str) {
         match self
             .session
@@ -4569,14 +4583,45 @@ impl App {
             .rev()
             .find(|entry| entry.live && entry.kind == kind)
         {
-            Some(entry) => entry.text = text.to_owned(),
+            Some(entry) => {
+                if kind == EntryKind::Reasoning && entry.reasoning_started.is_none() {
+                    entry.reasoning_started = Some(self.now);
+                }
+                entry.text = text.to_owned();
+            }
             None => {
                 let mut entry = Entry::new(kind, text);
                 entry.live = true;
+                if kind == EntryKind::Reasoning {
+                    entry.reasoning_started = Some(self.now);
+                }
                 self.session.entries.push(entry);
                 self.session.live_count += 1;
             }
         }
+    }
+
+    /// The live reasoning channel's clock at the commit (ADR 0028): its
+    /// first delta's instant and this one, the entry's end. `None` when this message does not
+    /// replace a live reasoning entry — a resume has no live view, so a resumed thinking block
+    /// has no duration. Must run **before** [`App::drop_live`], which is the entry's end.
+    fn take_live_reasoning_clock(&mut self) -> Option<(Instant, Instant)> {
+        // The same guard as `drop_live`: a resume pushes every message with no live entry, and
+        // an unconditional reverse scan per message was the O(n^2) family `drop_live`'s count
+        // fixed (resume-perf A).
+        if self.session.live_count == 0 {
+            return None;
+        }
+        let now = self.now;
+        let entry = self
+            .session
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.live && entry.kind == EntryKind::Reasoning)?;
+        let started = entry.reasoning_started?;
+        entry.reasoning_ended = Some(now);
+        Some((started, now))
     }
 
     /// Discards every live (streaming) entry. A committed message replaces them
@@ -4604,6 +4649,10 @@ impl App {
         // message was O(n^2) (resume-perf A). The count is the number of live entries, so a
         // live entry is dropped wherever it sits - the stream can leave one behind a
         // compaction notice (they are not always a suffix of `entries`).
+        // The live reasoning channel's clock, taken before the drop (ADR 0028
+        // decision 4): the committed entry below carries its duration, so `▾ thinking · 3.2s`
+        // survives the live-to-committed handoff. A resume has no live entry: `None`.
+        let reasoning_clock = self.take_live_reasoning_clock();
         self.drop_live();
         // ADR 0033: a `!` command's `Ran \`cmd\`` context message is a Bash block, not user
         // prose. The one we already drew live is skipped so it is not shown twice; a resumed
@@ -4670,9 +4719,15 @@ impl App {
             } => {
                 let reasoning = text_of(reasoning);
                 if !reasoning.is_empty() {
-                    self.session
-                        .entries
-                        .push(Entry::new(EntryKind::Reasoning, reasoning));
+                    let mut entry = Entry::new(EntryKind::Reasoning, reasoning);
+                    // The duration measured live, carried onto the committed entry (ADR 0028
+                    // revision 5 decision 4). It rides only here: a resumed message has no
+                    // clock, so its thinking block shows no duration.
+                    if let Some((started, ended)) = reasoning_clock {
+                        entry.reasoning_started = Some(started);
+                        entry.reasoning_ended = Some(ended);
+                    }
+                    self.session.entries.push(entry);
                 }
                 let mut entry = Entry::new(EntryKind::Assistant, text_of(content));
                 entry.interrupted = *interrupted;
