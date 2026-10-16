@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -135,38 +136,50 @@ pub(crate) async fn run(
     // `resolve_existing` canonicalizes, so a symlinked `path` that escapes is refused and the
     // base is always inside the workspace.
     let requested = args.path.as_deref().unwrap_or(".");
-    let base = root.resolve_existing(requested)?;
 
-    let mut files: Vec<(PathBuf, String)> = Vec::new();
-    if base.is_file() {
-        if let Some(rel) = search::relative(root.root(), &base) {
-            let rel_string = rel.to_string_lossy().into_owned();
+    // ADR 0039 decision 2: the base and every file are opened through the root's directory
+    // fd; the walk hands back open fds, never paths to re-open.
+    let mut files: Vec<(File, String)> = Vec::new();
+    match root.open_dir(requested) {
+        Ok(base) => {
+            let base_rel = PathBuf::from(requested.trim_start_matches("./").trim_end_matches('/'));
+            let base_rel = if base_rel == Path::new(".") {
+                PathBuf::new()
+            } else {
+                base_rel
+            };
+            search::walk(&base, &base_rel, &mut |found| {
+                let rel = found.relative;
+                if let Some(filter) = &file_filter
+                    && !filter.is_match(&rel)
+                {
+                    return true;
+                }
+                files.push((found.file, rel.to_string_lossy().into_owned()));
+                true
+            });
+            files.sort_by(|a, b| a.1.cmp(&b.1));
+        }
+        Err(failure) if failure.code == "not_a_directory" => {
+            // A file base: the pattern is matched against its own workspace-relative path.
+            let opened = root.open_read(requested)?;
+            if opened.stat.kind != crate::safe_fs::EntryKind::File {
+                return Err(fail(
+                    "not_a_file",
+                    format!("`{requested}` is not a regular file"),
+                ));
+            }
+            let rel: PathBuf = crate::safe_fs::components(Path::new(requested))
+                .map(|parts| parts.iter().collect())
+                .unwrap_or_default();
             if file_filter
                 .as_ref()
-                .is_none_or(|filter| filter.is_match(rel))
+                .is_none_or(|filter| filter.is_match(&rel))
             {
-                files.push((base, rel_string));
+                files.push((opened.file, rel.to_string_lossy().into_owned()));
             }
         }
-    } else {
-        for entry in search::walk(&base).flatten() {
-            if !search::is_regular_file(&entry) {
-                continue;
-            }
-            let Some(rel) = search::relative(root.root(), entry.path()) else {
-                continue;
-            };
-            if let Some(filter) = &file_filter
-                && !filter.is_match(rel)
-            {
-                continue;
-            }
-            files.push((
-                entry.path().to_path_buf(),
-                rel.to_string_lossy().into_owned(),
-            ));
-        }
-        files.sort_by(|a, b| a.1.cmp(&b.1));
+        Err(failure) => return Err(failure),
     }
 
     let per_file_cap = limits.default_grep_matches_per_file;
@@ -174,13 +187,14 @@ pub(crate) async fn run(
     let mut total = 0usize;
     let mut files_matched = 0usize;
     let mut truncated = false;
-    for (path, rel) in &files {
+    for (file, rel) in files {
+        let rel = &rel;
         let budget = per_file_cap.min(cap.saturating_sub(total));
         if budget == 0 {
             truncated = true;
             break;
         }
-        let Scan::Matches { text, matches, cut } = scan_file(&regex, path, rel, context, budget)
+        let Scan::Matches { text, matches, cut } = scan_file(&regex, file, rel, context, budget)
         else {
             continue;
         };
@@ -238,10 +252,7 @@ enum Scan {
 
 /// Searches one file's lines, rendering at most `budget` matches. `cut` is set when a further
 /// match exists that the budget excluded.
-fn scan_file(regex: &Regex, path: &Path, rel: &str, context: usize, budget: usize) -> Scan {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return Scan::Skipped;
-    };
+fn scan_file(regex: &Regex, mut file: File, rel: &str, context: usize, budget: usize) -> Scan {
     let mut sniff = [0u8; SNIFF_BYTES];
     let mut filled = 0usize;
     loop {

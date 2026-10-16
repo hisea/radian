@@ -86,8 +86,10 @@ a limit that is exceeded keeps its semantic code (`read_limit_exceeded`, `glob_l
 
 `glob` and `grep` are `Shared`, so a batch of searches overlaps instead of queueing behind one
 another (the reason they exist: `shell` is `Exclusive`, and the safe tier has no shell at all).
-Both walk from a workspace-resolved base (`path`, default the workspace root) with the same
-per-entry rules, which `list`/`read` do not have because they look at one path:
+Both walk from a base (`path`, default the workspace root) opened through the workspace root's
+directory fd (ADR 0039 decision 2: every component `openat(O_NOFOLLOW | O_DIRECTORY)`), and the
+walk itself descends by fd and hands matched files back as open fds; nothing is re-opened by
+path. The per-entry rules, which `list`/`read` do not have because they look at one path:
 
 - `.gitignore` (and `.ignore`) files **inside** the tree are respected, with or without a git
   repository; no ignore file **above** the base and no global gitignore is consulted, so the
@@ -128,26 +130,40 @@ result. Matches are capped per file (`default_grep_matches_per_file`) and in tot
 
 Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 
-- absolute paths, `..`, symlink escapes, symlinked-parent escapes are refused with the
-  single code `path_outside_workspace`;
-- a symlinked workspace root works (the root is canonicalized once);
-- `write`/`patch` refuse a symlink at the destination (`path_is_symlink`) and a
-  hard-linked destination (`hard_link_refused`);
-- the write open uses `O_NOFOLLOW` as defence in depth.
+- absolute paths and `..` are refused before any filesystem access (`path_outside_workspace`);
+- **every path is opened through the workspace root's directory fd** (`safe_fs`, ADR 0039
+  decision 2): one `openat(dirfd, name, O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)` per parent, the
+  leaf with `O_NOFOLLOW` (`O_CREAT` for `write`), and the tool reads or writes through that fd.
+  No tool re-opens a path string after a check, so a parent directory swapped for a symlink
+  while the tool runs is refused, not followed (`tests/safe_fs.rs`: a hook between the lexical
+  check and the first `openat` performs the swap; no sleeps);
+- **a symlink anywhere in the path is refused, inside or outside the workspace.** A link whose
+  target stays inside is `path_is_symlink` and the message names the target as a
+  workspace-relative path (``docs/current` is a symlink to `docs/v2`; use that path`), so the
+  model retries in one step; a link that leaves the workspace, or whose target cannot be
+  resolved, is `path_outside_workspace` and the message never prints the outside path. The
+  target is read with `readlinkat` on the same fd and never opened. **Behaviour change
+  (2026-10-16): a symlink inside the workspace is no longer followed by the file tools; use the
+  target path.**
+- a symlinked workspace root works (the root is canonicalized once, then held as an fd);
+- `write`/`patch` check the open fd to be a regular file with one hard link **before**
+  truncating (`hard_link_refused`); `list`/`glob`/`grep` classify entries with
+  `fstatat(AT_SYMLINK_NOFOLLOW)` and descend by fd, so a walk never follows a link out.
 
 **Not** enforced — stated, not hidden:
 
 - **Hard links cannot be read-protected.** A pre-existing hard link inside the workspace to
   an outside file is readable; only `write`/`patch` refuse it (via `nlink > 1`). The tools
   cannot create links, so the link must already exist.
-- **TOCTOU is only partly mitigated.** The final component is protected by `O_NOFOLLOW`; a
-  parent directory swapped for a symlink between canonicalization and the open is not
-  caught.
+- **Hard links inside the workspace are followed for reads** (the fd walk sees a regular
+  file; see above).
 - **Sensitive contents are not filtered.** Reading a secret file puts it in the session
   JSONL (ADR 0006 §11). Treat session files as sensitive.
 - **`git` is a child process** and can read `~/.gitconfig` and the repository. It is told
   not to take optional locks; tests assert `.git` is unchanged, but no sandbox wraps it.
-- Windows: no `O_NOFOLLOW` and no link count; the extra checks are Unix-only.
+- Windows: `safe_fs` falls back to std's path-based opens with no symlink defence and no link
+  count; the fd walk is Unix-only (tested on macOS; Linux uses the same per-component
+  `openat`, `openat2(RESOLVE_BENEATH)` is not used).
 - **`shell`'s confinement is exactly the sandbox's** (tests in `tests/shell.rs`). Under
   `workspace` writes are confined to the workspace, the fake sensitive path in the test
   is unreadable and the network is on (ADR 0016); **the macOS backend leaves `mach-lookup`

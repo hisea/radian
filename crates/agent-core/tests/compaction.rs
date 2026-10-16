@@ -3,10 +3,11 @@
 
 use agent_core::{
     ContentPart, InputSource, Message, MessageMeta, PlanError, SUMMARY_FACTS_DELETE_OLDEST,
-    SUMMARY_FACTS_ORDER_RULE, SUMMARY_PLANS_ARE_NOT_FACTS, SummaryError, ToolCall, ToolResult,
-    check_summary, compacted_history, keep_target, message_tokens, plan, shorten_request,
-    shorten_target, summary_max_tokens, summary_request, summary_system_prompt, units,
-    verified_facts_max_tokens,
+    SUMMARY_FACTS_ORDER_RULE, SUMMARY_PLANS_ARE_NOT_FACTS, SummaryError, TOOL_RESULT_LIMIT_CHARS,
+    ToolCall, ToolResult, check_summary, compacted_history, deterministic_summary,
+    deterministic_summary_line, keep_target, message_tokens, plan, shorten_request, shorten_target,
+    summary_max_tokens, summary_request, summary_system_prompt, truncate_kept_tool_results,
+    truncate_tool_result_text, units, verified_facts_max_tokens,
 };
 use serde_json::{Value, json};
 
@@ -924,5 +925,116 @@ fn the_selection_is_the_contiguous_newest_run() {
             "short 3"
         ],
         "the long one and everything older are omitted"
+    );
+}
+
+/// ADR 0018, decision 3: [`select_user_messages_tracked`] returns, next to the list,
+/// how many of the newly summarized user messages that list carries. The deterministic fallback
+/// subtracts that count from the removed prefix to report `N`, so it must count only the new
+/// messages (not the previous list's) and only the carried ones (not the omitted).
+#[test]
+fn the_tracked_count_names_only_carried_new_messages() {
+    use agent_core::{RetainedUserMessage, select_user_messages_tracked};
+
+    // Everything fits: both new user messages are carried.
+    let budget = Some(16_000); // U = U₁ = 1000
+    let messages = vec![
+        user_sourced("task", Some(InputSource::User)),
+        user_sourced("next", Some(InputSource::User)),
+    ];
+    let (kept, carried) = select_user_messages_tracked(&[], &messages, budget);
+    assert_eq!(texts(&kept), ["task", "next"]);
+    assert_eq!(carried, 2);
+
+    // The previous list's own entry is carried but is not one of the new messages.
+    let previous = vec![RetainedUserMessage { text: "old".into() }];
+    let (kept, carried) = select_user_messages_tracked(&previous, &messages, budget);
+    assert_eq!(texts(&kept), ["old", "task", "next"]);
+    assert_eq!(carried, 2, "the previous entry is not a new message");
+
+    // An omitted new message is not carried.
+    let many = vec![
+        user_sourced("first", Some(InputSource::User)),
+        user_sourced(&"x".repeat(8_000), Some(InputSource::User)), // over `U`, not the newest
+        user_sourced("newest", Some(InputSource::User)),
+    ];
+    let (kept, carried) = select_user_messages_tracked(&[], &many, budget);
+    assert_eq!(
+        texts(&kept),
+        ["first", "[1 earlier user messages omitted]", "newest"]
+    );
+    assert_eq!(carried, 2, "the omitted one is not carried");
+}
+
+// ---------- ADR 0018, decision 3: the deterministic fallback ----------
+
+/// The truncation keeps the marker **inside** the limit, so a kept tool result never grows past
+/// `TOOL_RESULT_LIMIT_CHARS`; a result that already fits is untouched.
+#[test]
+fn a_truncated_tool_result_keeps_the_marker_within_the_limit() {
+    let long = "x".repeat(TOOL_RESULT_LIMIT_CHARS + 5_000);
+    let cut = truncate_tool_result_text(&long).expect("over the limit");
+    assert!(
+        cut.chars().count() <= TOOL_RESULT_LIMIT_CHARS,
+        "the marker must fit, got {} characters",
+        cut.chars().count()
+    );
+    assert!(cut.contains("[truncated"), "{cut}");
+    assert!(cut.starts_with("xxx"), "{cut}");
+
+    // A result that already fits is left as it is.
+    assert_eq!(truncate_tool_result_text("short"), None);
+
+    // Cutting is by `char`: a multi-byte character is never split.
+    let wide = "é".repeat(TOOL_RESULT_LIMIT_CHARS + 10);
+    let cut = truncate_tool_result_text(&wide).expect("over the limit");
+    assert!(
+        cut.chars()
+            .all(|c| c == 'é' || !c.is_alphanumeric() || c.is_ascii())
+    );
+    assert!(cut.chars().count() <= TOOL_RESULT_LIMIT_CHARS);
+}
+
+/// `truncate_kept_tool_results` cuts only the over-long results and counts them (the `M` in the
+/// deterministic fixed line), leaving its other messages untouched.
+#[test]
+fn truncate_kept_tool_results_cuts_only_over_long_results() {
+    let mut kept = vec![
+        assistant_calls(&["c1", "c2"]),
+        tool_with_text("c1", &"a".repeat(TOOL_RESULT_LIMIT_CHARS + 1)),
+        tool_with_text("c2", "short"),
+    ];
+    assert_eq!(truncate_kept_tool_results(&mut kept), 1);
+    let Message::Tool { result, .. } = &kept[1] else {
+        unreachable!()
+    };
+    assert!(result.text().chars().count() <= TOOL_RESULT_LIMIT_CHARS);
+    let Message::Tool { result, .. } = &kept[2] else {
+        unreachable!()
+    };
+    assert_eq!(result.text(), "short");
+    assert!(matches!(kept[0], Message::Assistant { .. }));
+}
+
+/// The deterministic summary is the previous model summary verbatim (trimmed) plus the fixed
+/// line naming what was dropped and cut.
+#[test]
+fn the_deterministic_summary_keeps_the_previous_summary_verbatim() {
+    assert_eq!(
+        deterministic_summary(None, 3, 2),
+        deterministic_summary_line(3, 2)
+    );
+    let line = deterministic_summary_line(3, 2);
+    assert!(line.contains("3 messages dropped"), "{line}");
+    assert!(line.contains("2 tool results truncated"), "{line}");
+
+    let with = deterministic_summary(Some("  the old summary  "), 0, 0);
+    assert!(with.starts_with("the old summary"), "{with}");
+    assert!(with.ends_with(&deterministic_summary_line(0, 0)), "{with}");
+
+    // A blank previous summary is treated as none.
+    assert_eq!(
+        deterministic_summary(Some("   "), 1, 0),
+        deterministic_summary_line(1, 0)
     );
 }
