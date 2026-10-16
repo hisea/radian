@@ -1255,3 +1255,21 @@ Base `a3eb856`（分支 `oc/orch-s8`）· 就地改 `src/control.rs`，每次从
 
 4/4 抓住。CTL-2 的「抓住」表现为 panic/abort（tokio 禁止在运行时线程上 `blocking_send`），
 这正是变异要证明的：扇出绝不能在生产事件的线程上等待客户端。
+
+## ADR 0030 片 9：项目编排配置、信任门、快照、沙箱 verify（2026-10-16）
+
+Base `11a25d9` · worktree 内就地改 `src/orchestration.rs` / `src/task.rs`，每个变异从内存里的
+原始字节还原并用 `==` 断言逐字节相同（脚本 `.radian/scratch/mutate-s9.py`，跑完 `git status`
+为空）；每个变异跑单条测试 `cargo test -p radian-host --no-fail-fast <测试>`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| MUT9-1 | `load_project` 无视 `trusted`（`if !trusted` → `if false`）：未信任的工作区也读项目文件 | ✅ failed | `an_untrusted_workspace_reads_no_project_config_and_no_policy`（未信任时 `policy`/`verify` 非空）；集成 `the_edge_policy_comes_from_a_trusted_project_config_only` 的未信任一半同理 |
+| MUT9-2 | verify 不走沙箱（把 `sandbox.command_str("/bin/sh", …)` 换成裸 `std::process::Command`） | ✅ failed | `verify_runs_in_the_task_sandbox`（禁读目录里的 `cat` 成功了，`exit_code == Some(0)`） |
+| MUT9-3 | verify 从 **task 自己的 worktree** 读（`self.orchestration.verify` → `load_project(worktree, true)`） | ✅ failed | `a_tasks_own_dot_radian_and_a_later_edit_do_not_change_the_running_task`（命令是 `echo task` 而不是 `echo lead`） |
+| MUT9-4 | 快照在 spawn 时重读 lead 工作区（`self.orchestration.verify` → `load_project(&self.workspace, true)`） | ✅ failed | 同上（spawn 后写进 lead 的 `echo changed` 生效了） |
+| MUT9-5 | 策略命令不从快照填（`policy.or_else(|| …)` → `let policy = policy;`） | ✅ failed | `the_edge_policy_comes_from_a_trusted_project_config_only`（受信任时 `record.policy` 仍是 `None`） |
+
+5/5 抓住。MUT9-1 同时钉住「未信任时 verify 与 policy 都不读」这一条门的两个面（同一个
+`if !trusted` 早退）。MUT9-3 与 MUT9-4 都用同一条快照测试，但变异点不同：一个从 task 的
+worktree 读，一个在 spawn 时重读 lead 的文件。
