@@ -1425,7 +1425,9 @@ the generic card — its arguments and output are that server's own, not the bui
 `tui.display.tool_preview_lines` (default 5) fold the bodies; `Ctrl-O` (`toggle_tool_output`)
 steps through them; a failed call's body is never hidden. The status line still carries the
 `tool <name> running` note, so the call, the wait for approval, execution and the result stay
-distinguishable states.
+distinguishable states. The note names a tool that is **still running** — a batch's calls settle
+in completion order, so the last call to start may not be the last to finish — and it cannot
+outlive its batch: the next model request drops it.
 
 ## Compaction summaries and search over folded content (ADR 0028 R5/R6)
 

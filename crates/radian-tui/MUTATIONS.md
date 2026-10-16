@@ -1493,3 +1493,20 @@ Base `19dc0d7`（worktree `.radian-worktrees/pulse`，分支 `dogfood/pulse`）�
 条目，它是独立的一块，所以「thinking + 无正文的工具调用」在屏幕上会是两行空行（thinking 自己的一行
 + 空块两侧的行）；`thinking_has_one_blank_line_on_both_sides` 直接压条目来测 thinking 这条规则本身，
 并在注释里写明这一点。
+
+## status：footer 的 `tool <name> running` note 与 Esc（2026-10-16）
+
+Base `d8e4c28`（worktree `.radian-worktrees/build-script`，分支 `dogfood/status`）· 就地变异：改前把
+`crates/radian-tui/src/app.rs` 复制到 `.radian/scratch/app.rs.status-orig`，变异脚本带 `assert old in s`
+（no-op 会显式 PATCH FAILED）；每条跑完从副本写回并用 `cmp` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S1-M1 | `SessionView::finish_tool` 只清 note、不把 note 移到仍在运行的调用（退回旧行为：`if note_is_the_tools && self.running_tools.is_empty() { self.note = None }`） | `render::the_note_names_a_tool_that_is_still_running`（`left: Some("tool read running")`，应为 `tool shell running`） | ✅ |
+| S1-M2 | `ModelRequestStarted` 不再调用 `forget_running_tools()` | `render::the_tool_note_does_not_survive_the_next_model_request`（note 停在 `Some("tool shell running")`，应为 `None`） | ✅ |
+| E1 | `Action::Escape` 的空输入分支退回 `UpdateResult::none()`（2026-10-14 报告的症状：Esc 什么都不做） | `input::esc_on_an_empty_input_cancels_a_running_turn`（`left: []`，应为 `[Cancel]`） | ✅ |
+
+前两条是修复各自的配对变异，且都只由目标测试抓住（同一文件里另两条 note 测试保持绿色）。E1 没有
+对应的修复（Esc 在 `2b55c50` 与今天都是 `cancel_or_quit_now()`，那条报告复现不出来），它证明这条回归
+测试不是空转：把 Esc 的空输入分支改回「什么都不做」，它立刻失败。
+
