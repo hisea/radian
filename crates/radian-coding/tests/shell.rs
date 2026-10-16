@@ -21,7 +21,7 @@ use agent_core::{
 use common::{TempDir, sentinel_outside};
 use radian_coding::{CodingTools, CodingToolsError, Limits};
 use radian_sandbox::{
-    ProbeReport, Sandbox, SandboxBackend, SandboxError, SandboxMode, SandboxPolicy,
+    ProbeReport, Sandbox, SandboxBackend, SandboxError, SandboxMode, SandboxPolicy, SandboxSlot,
 };
 use serde_json::{Value, json};
 
@@ -862,4 +862,43 @@ async fn a_user_bash_honours_cancellation() {
         .await
         .expect("the run reported a cancellation");
     assert!(out.cancelled, "{out:?}");
+}
+
+// ---------- 9. the run-time tier switch (ADR 0038 slice 2) ----------
+
+/// The sandbox is read from a shared slot at the start of every call: a swap takes effect on
+/// the **next** call. A confined sandbox denies a write outside the workspace; after the slot
+/// is swapped to `full`, the same command succeeds.
+#[tokio::test]
+async fn a_swapped_slot_changes_the_next_call() {
+    let dir = TempDir::new("shell-slot");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let outside = sentinel_outside(&dir);
+    let target = outside.join("escape.txt");
+
+    let Some(confined) = sandbox(SandboxMode::WorkspaceWrite, &root, &[]) else {
+        return; // no working backend here: skip rather than pretend
+    };
+    let slot = SandboxSlot::with(confined);
+    let tools = CodingTools::with_sandbox_slot(&root, slot.clone()).expect("matching workspaces");
+
+    // Confined: the outside write is denied.
+    let (ok, _) = sh(&tools, &format!("echo escape > {}", target.display())).await;
+    assert!(
+        !ok,
+        "a write outside the workspace must fail while confined"
+    );
+    assert!(!target.exists(), "the escape must not have landed");
+
+    // Swap to `full`; the very next call is unconfined.
+    slot.set(Some(
+        Sandbox::new(SandboxMode::FullAccess, &root).expect("full-access needs no backend"),
+    ));
+    let (ok, _) = sh(&tools, &format!("echo escape > {}", target.display())).await;
+    assert!(ok, "after the swap the next call must be unconfined");
+    assert!(
+        target.exists(),
+        "the write must land once the sandbox is off"
+    );
 }

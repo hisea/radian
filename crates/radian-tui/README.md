@@ -237,6 +237,13 @@ find_next = ["ctrl-g", "shift-enter"]
   rows) or `classic` (today's one line, byte-for-byte). `separator` joins items (default
   `" │ "`, any string), each row may override it, and `separator_style` styles it (default the
   `footer_separator` role, dim). `glyphs` is `unicode` (default), `nerd` or `ascii`.
+  `context_line` is `off` (default; the gap between a row's left and right groups is spaces) or
+  `percentage` (ADR 0027 item 4, following omp's `statusLine.contextLine`: the gap
+  becomes a `─` rule, the used fraction of the context window in the `budget` role and the rest
+  in the `footer_separator` role; with no known budget the gap stays spaces, never a fabricated
+  percentage). `transparent = true` (default `false`; ADR 0027 item 5, omp's
+  `statusLine.transparent`) clears every footer cell's background - a configured item style's
+  included - so the footer inherits the terminal's own background.
   `[tui.footer.items.<id>]` gives one item its `symbol`/`style`/`symbol_style`/`format`/
   `disabled`; a bare id in a row takes it, an inline table wins. Each `[[tui.footer.rows]]` has
   a `left` and a `right` group; an item is a bare id or a table with `item`, `icon`/`symbol`,
@@ -281,13 +288,15 @@ find_next = ["ctrl-g", "shift-enter"]
 `git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。`[tui.widgets]`
 的 `above_input`/`below_input` 把同样的条目 id 放到输入框上/下一行。
 
-#### Glyph coverage (ADR 0027)
+#### Glyph coverage (ADR 0027 and 6)
 
 A glyph the font does not have is drawn by a system fallback font with different metrics, so it
 sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
-characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code, Operator
-Mono and Source Code Pro have. The brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under
-`ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner's default
+characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code and
+Source Code Pro have (ADR 0027: Operator Mono left the reference set, and the tier's
+token arrows became `↑`/`↓`, its success `✓`, its fold marker `›` and its truncation `…`). The
+brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under `ascii`; `㎭` (U+33AD) is gone
+(East-Asian-Wide, off-baseline fallback). The spinner's default
 is `pulse` (`⏺`, one cell); the covered optional kind is `quadrant` (`▖▘▝▗`). The arc
 (`◜◝◞◟`), the braille (`⠋⠙⠸⠴`) and `pulse` itself are the **documented exceptions** to this
 rule (ADR 0027/10: the owner picked them after seeing them), so a font without them
@@ -299,35 +308,36 @@ not installed is printed as `未查`, never guessed. The unit test
 `footer::tests::unicode_tier_glyphs_are_all_verified_covered` keeps a new unicode-tier glyph
 from slipping in unchecked.
 
-| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Operator Mono | Source Code Pro |
-|---|---|---|---|---|---|---|---|---|---|
-| `R` | U+0052 | brand (unicode) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `@` | U+0040 | host | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `»` | U+00BB | speed | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `*` | U+002A | reasoning | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `#` | U+0023 | session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `^` | U+005E | tokens in | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `v` | U+0076 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `~` `+` `×` | U+007E/2B/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `>` | U+003E | reasoning fold marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▗` | U+2597 | spinner frame 4 (`quadrant`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Source Code Pro |
+|---|---|---|---|---|---|---|---|---|
+| `R` | U+0052 | brand (unicode) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `@` | U+0040 | host | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `»` | U+00BB | speed | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `*` | U+002A | reasoning | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `#` | U+0023 | session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `↑` | U+2191 | tokens in | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `↓` | U+2193 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `~` `✓` `×` | U+007E/2713/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `›` | U+203A | reasoning fold marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `…` | U+2026 | truncation | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▗` | U+2597 | spinner frame 4 (`quadrant`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 Documented exceptions (allowed to fall back; the test keeps them in a separate set):
 
-| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Operator Mono | Source Code Pro |
-|---|---|---|---|---|---|---|---|---|---|
-| `⏺` | U+23FA | spinner default (`pulse`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `◜` `◝` `◞` `◟` | U+25DC…DF | spinner `arc` | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
-| `⠋` `⠙` `⠹` `⠸` `⠼` `⠴` `⠦` `⠧` `⠇` `⠏` | U+280B… | spinner `braille` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Source Code Pro |
+|---|---|---|---|---|---|---|---|---|
+| `⏺` | U+23FA | spinner default (`pulse`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `◜` `◝` `◞` `◟` | U+25DC…DF | spinner `arc` | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ |
+| `⠋` `⠙` `⠹` `⠸` `⠼` `⠴` `⠦` `⠧` `⠇` `⠏` | U+280B… | spinner `braille` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
 
-Replaced or dropped in the `unicode` tier (they were not in all seven fonts):
+Replaced or dropped in the `unicode` tier (they were not in all six fonts):
 
 | was | U+ | now |
 |---|---|---|
@@ -337,18 +347,18 @@ Replaced or dropped in the `unicode` tier (they were not in all seven fonts):
 | `◐` reasoning | U+25D0 | `*` |
 | `⛁` session | U+26C1 | `#` |
 | `⬡` tier | U+2B21 | no icon (text only) |
-| `↑` `↓` tokens | U+2191/3 | `^` `v` |
+| `^` `v` tokens | U+005E/76 | `↑` `↓` |
 | `⟲` auto | U+27F2 | `~` |
 | `⠋⠙⠸⠴` spinner | U+280B… | `▖▘▝▗` |
-| `▸` thinking fold | U+25B8 | `>` |
-| `⟳` `✔` `✘` tool status | U+27F3/2714/2718 | `~` `+` `×` |
+| `▸` thinking fold | U+25B8 | `›` |
+| `⟳` `✔` `✘` tool status | U+27F3/2714/2718 | `~` `✓` `×` |
 | `▶` `▼` startup fold | U+25B6/BC | `+` `-` |
 | `㎭` brand | U+33AD | `R` / `󰰠` / `rad` |
 
-Not in the all-seven set but kept (they are not tier-gated icons): the `❯` input prompt (the
+Not in the all-six set but kept (they are not tier-gated icons): the `❯` input prompt (the
 owner's choice; `box` style only) and text arrows (`→`, `•` in the question UI — `•` is in all
-seven, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
-characters (`╭╮╯╰`, `┌┐└┘`, `─│`) are in all seven.
+six, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
+characters (`╭╮╯╰`, `┌┐└┘`, `─│`) are in all six.
 - `theme`: `dark` and `light` are **pi's own palettes**, read
   through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
   brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color
@@ -611,6 +621,12 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
   `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
   without reading as an error? pty automation asserts the text, not the prominence.
+- **the `/access` confirmation and marker** (ADR 0038 slice 2): type `/access` — does it name
+  the current tier and its source (`flag`/`config`/`project`/`session`/`default`)? Type
+  `/access full` — does the confirmation panel make "full means no sandbox" obvious, is the
+  default highlight on `cancel`, and do ↑/↓/Enter/Esc feel right? After "remember for this
+  project", restart — is the tier applied and is the `(project)` marker readable in the footer
+  and the startup summary? pty automation asserts the text, not the feel (ADR 0009).
 - **the input area's three styles**: is the default `bar` band
   comfortable — the rail clear, the band reaching the right edge, multi-line and a CJK line
   banded on every row, and the status row above it (`◜  Working · 12s · esc to interrupt`) not

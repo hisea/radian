@@ -13,7 +13,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use radian_permissions::ApprovalRequest;
 
 use crate::app::{
-    App, Entry, EntryKind, Modal, TrustWizard, TurnState, budget_status_text, mcp_text, usage_text,
+    AccessChoice, AccessWizard, App, Entry, EntryKind, Modal, TrustWizard, TurnState,
+    budget_status_text, mcp_text, usage_text,
 };
 use crate::blocks::{self, BodyLine};
 use crate::login::LoginWizard;
@@ -425,13 +426,13 @@ fn render_row(
     }
     // The collapsed reasoning placeholder is one synthetic line: its marker is the marker
     // column's own glyph (ADR 0028 rule 5), so the body column does not move
-    // between folded and expanded. `>` stands in for `▸` (ADR 0027: `▸` is not in
-    // all seven checked fonts).
+    // between folded and expanded. The marker is the tier's fold glyph (ADR 0027
+    // item 2: `›` for unicode, `>` for nerd/ascii; `▸` is not in all six checked fonts).
     let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
     let lead = if row.code {
         String::new()
     } else if placeholder {
-        "> ".to_string()
+        format!("{} ", glyphs.fold_marker())
     } else if first_text {
         prefix.to_string()
     } else {
@@ -853,6 +854,47 @@ fn trust_height(
     glyphs: crate::footer::Glyphs,
 ) -> u16 {
     trust_panel(wizard, width, theme, glyphs).len() as u16
+}
+
+/// The `/access full` confirmation (ADR 0038 slice 2, ADR 0035): the shared panel
+/// with a warning line, the three choices through [`crate::select_list`], and the hardcoded
+/// key hints. The default cursor is `cancel`, so Enter does not open the sandbox.
+pub fn access_panel(
+    wizard: &AccessWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
+    let ascii = glyphs == crate::footer::Glyphs::Ascii;
+    let inner = width.saturating_sub(4).max(1);
+    let items: Vec<crate::select_list::Item> = AccessChoice::ALL
+        .iter()
+        .map(|choice| crate::select_list::Item::new(choice.label()))
+        .collect();
+    let list =
+        crate::select_list::view(theme, &items, "", wizard.cursor, items.len(), inner, ascii);
+    let mut panel = crate::panel::Panel::new("/access full").row(Line::from(Span::styled(
+        "full means no sandbox: commands run with your full access",
+        theme.text,
+    )));
+    for line in list.lines {
+        panel = panel.row(line);
+    }
+    panel = panel
+        .hint("↑/↓", "choose")
+        .hint("⏎", "select")
+        .hint("esc", "cancel");
+    panel.lines(width, theme, glyphs)
+}
+
+/// The `/access full` panel's height, measured from the panel itself.
+fn access_height(
+    wizard: &AccessWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> u16 {
+    access_panel(wizard, width, theme, glyphs).len() as u16
 }
 
 /// The `/logout` confirmation (ADR 0035): the shared panel with the provider and
@@ -1369,6 +1411,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Modal::Trust(wizard)) => {
             trust_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
         }
+        // The `/access full` confirmation: one header row, three options and the two borders.
+        Some(Modal::AccessFull(wizard)) => {
+            access_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
+        }
         // The find box replaces the input with a **bordered** box: three rows (top border, the
         // query, bottom border). `bar`'s input (its status row plus one text row) can be
         // shorter than that, so the height is raised for the box, never lowered for the others.
@@ -1560,6 +1606,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Modal::ConfirmLogout(provider)) => {
             let lines = logout_panel(
                 provider,
+                input_area.width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), input_area);
+        }
+        Some(Modal::AccessFull(wizard)) => {
+            let lines = access_panel(
+                wizard,
                 input_area.width as usize,
                 &app.theme,
                 app.footer_glyphs(),
