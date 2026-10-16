@@ -129,22 +129,22 @@ impl MergeOutcome {
     }
 }
 
-/// Merges `task_branch` (e.g. `radian/<id>`) into the integration worktree's branch
+/// Merges `task_branch` (e.g. `radian/<id>`) into the integration branch
 /// (ADR 0030): `git merge --no-ff --no-commit` through the shared host
-/// `git` helper (no hook, no filter), then the `git_commit` path with `radian/integration` as the
+/// `git` helper (no hook, no filter), then the `git_commit` path with `integration_branch` as the
 /// only allowed branch. A conflict is aborted before returning (decision 6).
 ///
 /// `pin` is the integration worktree's [`RepoPin`]; `protected` and `filters` come from the
 /// lead's session (the same rules the task's own commits use).
 pub fn merge_task_branch(
-    integration: &Integration,
+    worktree: &Path,
+    integration_branch: &str,
     task_id: &str,
     task_branch: &str,
     pin: &RepoPin,
     protected: &[String],
     filters: &[String],
 ) -> Result<MergeOutcome, TaskError> {
-    let worktree = &integration.worktree;
     // `--no-ff` forces a merge commit even when the branch could fast-forward, so the integration
     // branch always shows one commit per task (ADR 0030). `--no-commit`
     // leaves the result staged so the commit goes through the tested `git_commit` path below.
@@ -181,7 +181,7 @@ pub fn merge_task_branch(
         pin,
         &message,
         &[],
-        Some(&integration.branch),
+        Some(integration_branch),
         protected,
         filters,
         // `refuse_main = true`: the merge must never commit on a protected branch; the
@@ -197,14 +197,9 @@ pub fn merge_task_branch(
                 .map_err(TaskError::new)?
                 .args(["merge", "--abort"])
                 .output();
-            Err(TaskError::new(test_error_message(&failure)))
+            Err(TaskError::new(failure.message))
         }
     }
-}
-
-/// The message of a `ToolFailure` (its `Display`), for a `TaskError`.
-fn test_error_message(failure: &agent_core::ToolFailure) -> String {
-    failure.message.clone()
 }
 
 /// The `git` output lines of a host call in `dir`, empty on failure.

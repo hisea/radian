@@ -1426,6 +1426,62 @@ impl TaskRegistry {
         }
     }
 
+    /// Merges one task's branch into the lead's integration worktree (ADR 0030
+    /// decisions 4 and 6): a `shared` task is refused (it has no branch), the integration
+    /// worktree is created lazily, and the merge is host-side `git merge --no-ff` committed
+    /// through the `git_commit` path with `radian/integration` as the only allowed branch. A
+    /// conflict aborts and is reported (never left in progress).
+    ///
+    /// The permission decision (`merge_needs_human`) and the `before_merge` event and the
+    /// integration verify are the caller's (`lead_tools`/`session`): they need the orchestration
+    /// snapshot, which the tool wires around this call.
+    pub async fn integrate(
+        &self,
+        id: &str,
+    ) -> Result<
+        (
+            crate::integration::Integration,
+            crate::integration::MergeOutcome,
+        ),
+        TaskError,
+    > {
+        {
+            let record = self
+                .get(id)
+                .ok_or_else(|| TaskError::new(format!("no task `{id}`")))?;
+            let task_branch = record.branch.clone().ok_or_else(|| {
+                TaskError::new(format!(
+                    "task `{id}` is `shared`; it has no branch to integrate (ADR 0030 O3)"
+                ))
+            })?;
+            let integration = self.ensure_integration().await?;
+            let worktree = integration.worktree.clone();
+            let branch = integration.branch.clone();
+            let id_owned = id.to_owned();
+            let filters = default_allowed_filters();
+            let outcome = tokio::task::spawn_blocking(move || {
+                let pin = RepoPin::resolve(&worktree).ok_or_else(|| {
+                    TaskError::new(format!(
+                        "the integration worktree {} is not a git repository",
+                        worktree.display()
+                    ))
+                })?;
+                crate::integration::merge_task_branch(
+                    &worktree,
+                    &branch,
+                    &id_owned,
+                    &task_branch,
+                    &pin,
+                    &[],
+                    &filters,
+                )
+            })
+            .await
+            .map_err(|error| TaskError::new(format!("integration task failed: {error}")))??;
+            Ok((integration, outcome))
+        }
+    }
+
     /// Closes a task and removes its worktree (ADR 0030 O3: `remove_task`).
     ///
     /// The session is stopped and its driver joined first, so nothing writes while the worktree

@@ -90,7 +90,7 @@ fn wait_timeout(secs: Option<f64>) -> Result<(Duration, f64), ToolFailure> {
 /// The lead tool names, in the order the provider advertises them. The host adds these to the
 /// session profile as `allow` rules (ADR 0030 slice 6); the mode gate decides whether they run.
 /// `send_agent`/`wait_agent` are the named-agent pair of slice 7 part b (ADR 0030 O4/O12).
-pub const LEAD_TOOL_NAMES: [&str; 12] = [
+pub const LEAD_TOOL_NAMES: [&str; 13] = [
     "spawn_task",
     "send_agent",
     "wait_task",
@@ -103,7 +103,14 @@ pub const LEAD_TOOL_NAMES: [&str; 12] = [
     "list_tasks",
     "cancel_task",
     "remove_task",
+    "integrate_task",
 ];
+
+/// The command the lead reports to the human for moving the user's branch onto the integration
+/// branch (ADR 0030; ADR 0030 O7). The lead never runs it.
+pub fn human_merge_command(integration_branch: &str) -> String {
+    format!("git merge --ff-only {integration_branch}")
+}
 
 fn fail(code: &str, message: impl Into<String>) -> ToolFailure {
     ToolFailure::new(code, message)
@@ -375,6 +382,22 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
             concurrency: ToolConcurrency::Exclusive,
         },
+        ToolSpec {
+            name: "integrate_task".into(),
+            description: "Merge a task's branch into your integration branch and rerun the \
+                          project's verify there. Only that task's `radian/<id>` branch is \
+                          merged; the user's branch is never touched. A conflict aborts the \
+                          merge and returns the conflicted paths. Your delivery ends at the \
+                          integration branch."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "The task to merge." } },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            concurrency: ToolConcurrency::Exclusive,
+        },
     ]
 }
 
@@ -542,6 +565,7 @@ pub async fn run(
         "list_tasks" => lead.list_tasks(call),
         "cancel_task" => lead.cancel_task(call),
         "remove_task" => lead.remove_task(call).await,
+        "integrate_task" => lead.integrate_task(call).await,
         other => Err(fail(
             "unknown_tool",
             format!("`{other}` is not one of the lead tools"),
@@ -646,6 +670,12 @@ struct CancelArgs {
 struct RemoveArgs {
     id: String,
     force: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntegrateArgs {
+    id: String,
 }
 
 impl LeadSession {
@@ -1051,6 +1081,76 @@ impl LeadSession {
             .await
             .map_err(|error| fail("remove_failed", error.to_string()))?;
         Ok(ToolOutput::text(format!("removed task `{}`", args.id)))
+    }
+
+    /// `integrate_task { id }` (ADR 0030): merge the task's branch into the
+    /// lead's integration branch. A `shared` task (no branch) and an existing integration branch
+    /// are refused. The result always names the command the human runs to move the user's branch.
+    async fn integrate_task(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
+        let args: IntegrateArgs = parse(call)?;
+        let (integration, outcome) = self
+            .registry
+            .integrate(&args.id)
+            .await
+            .map_err(|error| fail("integrate_failed", error.to_string()))?;
+        let branch = integration.branch.clone();
+        let command = human_merge_command(&branch);
+        let (structured, content) = match &outcome {
+            crate::integration::MergeOutcome::Merged(committed) => (
+                json!({
+                    "task": args.id,
+                    "event": "merged",
+                    "branch": branch,
+                    "commit": committed.commit,
+                    "files": committed.files,
+                    "human_command": command,
+                }),
+                format!(
+                    "merged task `{}` into `{branch}` (commit {}). Your delivery ends at \
+                     `{branch}`; the user's branch moves only when they run `{command}`.",
+                    args.id, committed.commit
+                ),
+            ),
+            crate::integration::MergeOutcome::AlreadyUpToDate => (
+                json!({
+                    "task": args.id,
+                    "event": "already_up_to_date",
+                    "branch": branch,
+                    "human_command": command,
+                }),
+                format!("task `{}` is already merged into `{branch}`.", args.id),
+            ),
+            crate::integration::MergeOutcome::Conflict {
+                paths,
+                status,
+                stderr,
+            } => (
+                json!({
+                    "task": args.id,
+                    "event": "conflict",
+                    "branch": branch,
+                    "paths": paths,
+                    "status": status,
+                    "stderr": stderr,
+                    "human_command": command,
+                }),
+                format!(
+                    "merging task `{}` conflicted and was aborted; the integration worktree is \
+                     left clean. Conflicted paths: {}. Resolve them with a task based on \
+                     `{branch}`, or report to the user.",
+                    args.id,
+                    if paths.is_empty() {
+                        "(none reported)".to_owned()
+                    } else {
+                        paths.join(", ")
+                    }
+                ),
+            ),
+        };
+        Ok(ToolOutput {
+            content: vec![agent_core::ContentPart::text(content)],
+            structured: Some(structured),
+        })
     }
 
     /// Builds the `finished` result: the committed summary (bounded) plus the host-side facts
