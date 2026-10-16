@@ -230,12 +230,11 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
 /// The default (unicode) spelling, also what [`marker_prefix`] returns for the width.
 const USER_MARKER: &str = "❯ ";
 
-/// The expanded thinking channel's header marker (ADR 0035). The design's
-/// `▸`/`▾` are not in all six checked fonts on the **folded** side, where the footer's existing
-/// `fold_marker()` is the replacement (`›`, see the README's "replaced or dropped" table); the
-/// expanded side keeps `▾` (there is no covered down-triangle). `ascii` maps to `v` (ADR 0035
-/// revision 6 decision 11). Two cells under every tier.
-const REASONING_MARKER: &str = "▾ ";
+/// The expanded thinking channel's header marker (ADR 0035, with the
+/// owner's 2026-10-16 glyph note: `▼`/`▶` replace the design's `▾`/`▸`, which miss Fira Code
+/// and Source Code Pro). `ascii` maps to `v` (ADR 0035). Two cells
+/// under every tier.
+const REASONING_MARKER: &str = "▼ ";
 
 /// The thinking channel's header marker in the terminal's glyph set.
 fn reasoning_marker(glyphs: crate::footer::Glyphs) -> &'static str {
@@ -466,8 +465,8 @@ fn render_row(
     }
     // The collapsed reasoning placeholder is one synthetic line: its marker is the marker
     // column's own glyph (ADR 0028 rule 5), so the body column does not move
-    // between folded and expanded. The marker is the tier's fold glyph (ADR 0027
-    // item 2: `›` for unicode, `>` for nerd/ascii; `▸` is not in all six checked fonts).
+    // between folded and expanded. The marker is the tier's fold glyph (ADR 0035
+    // decision 2 with the owner's glyph note: `▶` for unicode/nerd, `>` under ascii).
     let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
     // An expanded thinking row (ADR 0028): the header carries the expand
     // marker, every other **prose** row the `│ ` rail in the marker column, so the body stays at

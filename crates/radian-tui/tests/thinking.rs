@@ -1,6 +1,6 @@
-//! The thinking channel (ADR 0028): the `▾ thinking · <duration>`
+//! The thinking channel (ADR 0028): the `▼ thinking · <duration>`
 //! header, the `│ ` rail with a single-colour Markdown body, the folded one-liner
-//! `▸ thinking · <duration> · N lines`, and the duration that only an entry measured live
+//! `▶ thinking · <duration> · N lines`, and the duration that only an entry measured live
 //! has (a resumed one shows none).
 //!
 //! These assert the **rendered** frame (TestBackend), because the shapes are the point: the
@@ -142,7 +142,7 @@ fn stream(app: &mut App, projection: &SessionProjection, kind: StreamKind, text:
     app.update(radian_tui::app::Input::Stream(projection.snapshot()));
 }
 
-/// The expanded header is `▾ thinking · …` and every body row carries the `│ ` rail in
+/// The expanded header is `▼ thinking · …` and every body row carries the `│ ` rail in
 /// columns 1-2, at 80 and 40 columns.
 #[test]
 fn the_expanded_thinking_has_a_header_and_a_rail() {
@@ -153,9 +153,9 @@ fn the_expanded_thinking_has_a_header_and_a_rail() {
         resumed(&mut app, "first thought\nsecond thought");
         let terminal = render(&mut app, width, 12);
         let text = screen(&terminal);
-        let header = row_of(&terminal, "▾ thinking").expect("the expanded header");
+        let header = row_of(&terminal, "▼ thinking").expect("the expanded header");
         assert!(
-            row(&terminal, header as u16).starts_with("▾ thinking"),
+            row(&terminal, header as u16).starts_with("▼ thinking"),
             "the header sits in the marker column: {text}"
         );
         let body = row_of(&terminal, "first thought").expect("the body");
@@ -166,7 +166,7 @@ fn the_expanded_thinking_has_a_header_and_a_rail() {
     }
 }
 
-/// Folded, the channel is one line: `▸ thinking · N lines` (the existing fold glyph), and the
+/// Folded, the channel is one line: `▶ thinking · N lines` (the tier's fold glyph), and the
 /// body is not drawn.
 #[test]
 fn the_folded_thinking_is_one_line_with_the_line_count() {
@@ -174,7 +174,7 @@ fn the_folded_thinking_is_one_line_with_the_line_count() {
     classic_footer(&mut app);
     resumed(&mut app, "first thought\nsecond thought");
     let text = screen(&render(&mut app, 80, 10));
-    assert!(text.contains("› thinking · 2 lines"), "{text}");
+    assert!(text.contains("▶ thinking · 2 lines"), "{text}");
     assert!(!text.contains("first thought"), "{text}");
 }
 
@@ -193,9 +193,9 @@ fn streaming_shows_the_spinner_not_the_duration() {
         let glyph = app.spinner_frame().glyph;
         let text = screen(&render(&mut app, 80, 10));
         let marker = if mode == ReasoningMode::Expanded {
-            "▾"
+            "▼"
         } else {
-            "›"
+            "▶"
         };
         assert!(
             text.contains(&format!("{marker} thinking · {glyph}")),
@@ -224,7 +224,7 @@ fn the_duration_is_shown_for_a_live_entry_and_absent_for_a_resumed_one() {
     });
     let text = screen(&render(&mut app, 80, 10));
     assert!(
-        text.contains("▾ thinking · 3.2s"),
+        text.contains("▼ thinking · 3.2s"),
         "a live entry keeps its measured duration: {text}"
     );
 
@@ -238,7 +238,7 @@ fn the_duration_is_shown_for_a_live_entry_and_absent_for_a_resumed_one() {
     let header = row_of(&terminal, "thinking").expect("the resumed header");
     assert_eq!(
         row(&terminal, header as u16).trim_end(),
-        "▾ thinking",
+        "▼ thinking",
         "a resumed entry has no duration: {text}"
     );
     assert!(
@@ -314,7 +314,7 @@ fn every_thinking_body_cell_is_the_reasoning_colour() {
 }
 
 /// Under `ascii`, the thinking markers are `v`/`>` and the rail is `|` (ADR 0035
-/// decision 11: `▾/▸→v/>`, `│→|`).
+/// decision 11: `▼/▶→v/>`, `│→|`; the owner's 2026-10-16 glyph note replaced `▾`/`▸`).
 #[test]
 fn the_thinking_markers_follow_the_ascii_glyph_tier() {
     let mut app = App::new("m", "s");

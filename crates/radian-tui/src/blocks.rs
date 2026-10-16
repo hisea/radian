@@ -36,7 +36,7 @@ pub fn md_line_builds() -> u64 {
 /// layout cache keys: toggling it re-lays the affected entries out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReasoningMode {
-    /// One placeholder line: `▸ thinking (N lines)` (the ADR's default).
+    /// One placeholder line: `▶ thinking (N lines)` (the ADR's default).
     #[default]
     Collapsed,
     /// The full text, wrapped as prose.
@@ -397,7 +397,7 @@ pub enum MdStyle {
     ToolName,
     /// A tool head's status glyph when the call succeeded (`✓`, `status_ok`).
     StatusOk,
-    /// A tool head's status glyph when the call failed (`✗`, `status_error`).
+    /// A tool head's status glyph when the call failed (`×`, `status_error`).
     StatusError,
     /// A tool head's running indicator: the live pulse frame, drawn in place of the
     /// placeholder cell the layout carries (ADR 0027/13).
@@ -1686,13 +1686,14 @@ fn head_status(entry: &Entry, card: Option<&tools::ToolCard>) -> HeadStatus {
     }
 }
 
-/// The status glyphs `✓`/`✗` (ADR 0028). `ascii` draws `+`/`x`; the
-/// `nerd` tier keeps the footer's Font Awesome pair. The **running** state draws the live
-/// spinner frame instead ([`running_glyph`] is the non-animated placeholder the layout
-/// carries).
+/// The status glyphs `✓`/`×` (ADR 0028 with the owner's 2026-10-16 glyph
+/// note: `×` replaces the crossed mark U+2717, which misses Cascadia Code, Fira Code and Source
+/// Code Pro). `ascii` draws `+`/`x`; the `nerd` tier keeps the footer's Font Awesome pair. The
+/// **running** state draws the live spinner frame instead ([`running_glyph`] is the
+/// non-animated placeholder the layout carries).
 pub(crate) fn status_marks(glyphs: crate::footer::Glyphs) -> (char, char) {
     match glyphs {
-        crate::footer::Glyphs::Unicode => ('✓', '✗'),
+        crate::footer::Glyphs::Unicode => ('✓', '×'),
         crate::footer::Glyphs::Nerd => ('\u{f00c}', '\u{f00d}'),
         crate::footer::Glyphs::Ascii => ('+', 'x'),
     }
@@ -1999,7 +2000,7 @@ fn reasoning_duration(entry: &Entry) -> Option<String> {
 
 /// The expanded thinking channel's header line: `thinking · <duration>`, `thinking · <spinner
 /// frame>` while streaming, and bare `thinking` for a resumed entry with no duration (ADR
-/// 0028 revision 5 decision 4). The `▾ ` marker is the marker column's, drawn by the renderer.
+/// 0028 revision 5 decision 4). The `▼ ` marker is the marker column's, drawn by the renderer.
 fn reasoning_header(entry: &Entry, spinner: crate::spinner::Frame) -> String {
     if entry.live {
         return format!("thinking · {}", spinner.glyph);
@@ -2012,7 +2013,7 @@ fn reasoning_header(entry: &Entry, spinner: crate::spinner::Frame) -> String {
 
 /// The collapsed reasoning placeholder (ADR 0028): `thinking · <duration>
 /// · N lines`, `thinking · <spinner frame>` while streaming, and `thinking · N lines` for a
-/// resumed entry. The line count is the entry's own text; the `▸ ` marker is the marker
+/// resumed entry. The line count is the entry's own text; the `▶ ` marker is the marker
 /// column's (ADR 0028 rule 5), so the body column is the same folded and expanded.
 fn placeholder(entry: &Entry, spinner: crate::spinner::Frame) -> String {
     let lines = entry.text.lines().count().max(1);
@@ -4129,7 +4130,7 @@ mod tests {
         entry.live = false;
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
         assert_eq!(lines[0].text, "thinking · 3 lines");
-        // The expanded header is a harness line of its own; the `▾ ` is the marker column's.
+        // The expanded header is a harness line of its own; the `▼ ` is the marker column's.
         let expanded = layout(&entry, &parse_blocks(&entry.text), EXPANDED, 40);
         assert_eq!(expanded.len(), 4);
         assert_eq!(expanded[0].text, "thinking");

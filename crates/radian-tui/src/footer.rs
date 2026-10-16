@@ -103,12 +103,13 @@ impl Glyphs {
         }
     }
 
-    /// The folded-reasoning marker: `›` for the unicode tier (revision 6 item 2; `▸` is not in
-    /// all six fonts and `›` is), `>` for the other tiers.
+    /// The folded-reasoning marker: `▶` for the unicode and nerd tiers (ADR 0035
+    /// decision 2 with the owner's 2026-10-16 glyph note: the design's `▸` misses Fira Code
+    /// and Source Code Pro, and `▶` is in all six reference fonts), `>` under `ascii`.
     pub fn fold_marker(self) -> &'static str {
         match self {
-            Self::Unicode => "›",
-            Self::Nerd | Self::Ascii => ">",
+            Self::Unicode | Self::Nerd => "▶",
+            Self::Ascii => ">",
         }
     }
 }
@@ -1682,10 +1683,11 @@ mod tests {
     use super::*;
 
     /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027 and 6, plus
-    /// ADR 0035's band half cells). Each one is checked against the six fonts by
-    /// `scripts/check-glyph-coverage.py` and listed in the README's coverage table. A new glyph
-    /// makes this test fail until it is re-checked and added here.
-    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓›…▄▀";
+    /// ADR 0035's band half cells and the owner's 2026-10-16 glyph note: `×` for a
+    /// failed tool head, `▼`/`▶` for the thinking header). Each one is checked against the six
+    /// fonts by `scripts/check-glyph-coverage.py` and listed in the README's coverage table. A
+    /// new glyph makes this test fail until it is re-checked and added here.
+    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓▼▶•╭╰…▄▀";
 
     /// The documented exceptions to the coverage rule (ADR 0027/10): the owner
     /// picked the arc and the pulse after seeing them, and braille is an opt-in, so these may

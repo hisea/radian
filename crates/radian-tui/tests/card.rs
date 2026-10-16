@@ -39,9 +39,10 @@ fn rows(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> Vec<String
 }
 
 /// The status glyphs the transcript's head ends with (ADR 0028): `✓`
-/// when the call succeeded, `✗` when it failed. The `ascii` tier draws `+`/`x`.
+/// when the call succeeded, `×` when it failed (the owner's 2026-10-16 glyph note; U+2717
+/// misses Cascadia Code, Fira Code and Source Code Pro). The `ascii` tier draws `+`/`x`.
 const OK: char = '✓';
-const FAILED: char = '✗';
+const FAILED: char = '×';
 
 /// A shell call, with its result if `result` is `Some`.
 fn shell_app(result: Option<ToolResult>) -> App {
@@ -146,7 +147,7 @@ fn a_failed_call_ends_the_head_with_a_cross_and_shows_the_error_body() {
     let terminal = render(&mut app, 80, 20);
     let lines = rows(&terminal, 80, 20);
     let block = block_rows(&lines);
-    assert_eq!(block[0], "• shell $ make test · exit 2 ✗", "{block:?}");
+    assert_eq!(block[0], "• shell $ make test · exit 2 ×", "{block:?}");
     assert_eq!(block[1], "│ boom", "the error body: {block:?}");
     // The head's cross and the error body carry the error roles.
     let buffer = terminal.backend().buffer();
@@ -159,7 +160,7 @@ fn a_failed_call_ends_the_head_with_a_cross_and_shows_the_error_body() {
             .unwrap_or_else(|| panic!("{ch:?} is on screen"));
         buffer.cell((x, y)).map(|c| c.fg)
     };
-    assert_eq!(cell_of(FAILED), app.theme.status_error.fg, "the `✗` role");
+    assert_eq!(cell_of(FAILED), app.theme.status_error.fg, "the `×` role");
     assert_eq!(
         cell_of('b'),
         app.theme.tool_result_error.fg,
