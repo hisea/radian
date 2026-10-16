@@ -1472,7 +1472,8 @@ impl SessionView {
     /// call to start is the one a user watching the footer most likely wants named.
     pub(crate) fn start_tool(&mut self, call_id: &str, name: &str) {
         if !self.running_tools.iter().any(|(id, _)| id == call_id) {
-            self.running_tools.push((call_id.to_owned(), name.to_owned()));
+            self.running_tools
+                .push((call_id.to_owned(), name.to_owned()));
         }
         self.note_for_running_tools();
     }
