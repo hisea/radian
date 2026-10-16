@@ -1468,6 +1468,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let budget = (area.height as usize).saturating_sub(6);
             question_height(
                 form,
+                &app.session.session_id,
                 area.width as usize,
                 budget,
                 &app.theme,
@@ -1664,6 +1665,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let budget = (area.height as usize).saturating_sub(6);
             let lines = question_panel(
                 form,
+                &app.session.session_id,
                 input_area.width as usize,
                 budget,
                 &app.theme,
@@ -1994,12 +1996,13 @@ pub const QUESTION_KEYS: &str = "Tab next · Space select · Enter next/submit �
 /// The height the question form's box needs: its content plus the key line, bounded.
 fn question_height(
     form: &QuestionForm,
+    own_session: &str,
     width: usize,
     max_rows: usize,
     theme: &Theme,
     glyphs: crate::footer::Glyphs,
 ) -> u16 {
-    let rows = question_panel(form, width, max_rows, theme, glyphs).len();
+    let rows = question_panel(form, own_session, width, max_rows, theme, glyphs).len();
     (rows as u16).clamp(5, MAX_QUESTION_ROWS)
 }
 
@@ -2008,6 +2011,7 @@ fn question_height(
 /// key hints in the bottom border. Pure, so the layout is testable without a terminal.
 pub fn question_panel(
     form: &QuestionForm,
+    own_session: &str,
     width: usize,
     max_rows: usize,
     theme: &Theme,
@@ -2032,7 +2036,11 @@ pub fn question_panel(
         ])];
     }
     let inner = width.saturating_sub(4).max(1);
-    let title = if form.origin.is_empty() {
+    // ADR 0024 rule 4: `Ask` alone when the asker is this process's own session
+    // (the ordinary single-session TUI); the origin only distinguishes several sessions. A
+    // TUI process has one session today (ADR 0030 slice 0), so origin == own session is the
+    // clean test.
+    let title = if form.origin.is_empty() || form.origin == own_session {
         "Ask".to_string()
     } else {
         format!("Ask · {}", form.origin)
@@ -2204,31 +2212,33 @@ fn option_line(
     let option = &question.options[row];
     let cursor = if row == answer.cursor { "❯ " } else { "  " };
     let chosen = answer.selected.contains(&option.id);
-    let mark = match (question.kind, chosen, glyphs) {
-        (radian_coding::QuestionKind::Multi, true, crate::footer::Glyphs::Ascii) => "[x]",
-        (radian_coding::QuestionKind::Multi, false, crate::footer::Glyphs::Ascii) => "[ ]",
-        (radian_coding::QuestionKind::Multi, true, _) => "☑",
-        (radian_coding::QuestionKind::Multi, false, _) => "☐",
-        (_, true, crate::footer::Glyphs::Ascii) => "(*)",
-        (_, false, crate::footer::Glyphs::Ascii) => "( )",
-        (_, true, _) => "◉",
-        (_, false, _) => "○",
+    // ADR 0024 implementation note: one marker source (`AskGlyphs`), the same
+    // checkbox pair for single and multi.
+    let g = blocks::AskGlyphs::for_glyphs(glyphs);
+    let mark = match (question.kind, chosen) {
+        (radian_coding::QuestionKind::Multi, true) => g.multi_on,
+        (radian_coding::QuestionKind::Multi, false) => g.multi_off,
+        (_, true) => g.single_on,
+        (_, false) => g.single_off,
     };
     let recommended = if option.recommended {
         " (Recommended)"
     } else {
         ""
     };
+    // The cursor and the marker are drawn in their own spans and are never bold: the font's
+    // bold face can lack the glyph and fall back to a different size (the owner's report). The
+    // marker keeps its label's role (the chosen accent / the weak body), just not the weight.
+    let label_style = if chosen {
+        theme.notice_label
+    } else {
+        theme.notice_body
+    };
+    let marker_style = label_style.remove_modifier(Modifier::BOLD);
     Line::from(vec![
-        Span::styled(cursor, theme.notice_label),
-        Span::styled(
-            format!("{mark} {}{recommended}", option.label),
-            if chosen {
-                theme.notice_label
-            } else {
-                theme.notice_body
-            },
-        ),
+        Span::styled(cursor, theme.notice_label.remove_modifier(Modifier::BOLD)),
+        Span::styled(mark, marker_style),
+        Span::styled(format!(" {}{recommended}", option.label), label_style),
     ])
 }
 
@@ -2244,20 +2254,24 @@ fn other_line(
     } else {
         "  "
     };
-    let mark = match (answer.other, glyphs) {
-        (true, crate::footer::Glyphs::Ascii) => "(*)",
-        (false, crate::footer::Glyphs::Ascii) => "( )",
-        (true, _) => "◉",
-        (false, _) => "○",
+    // ADR 0024 implementation note: `Other` uses the **same** checkbox pair as the
+    // options (it used to always draw a circle, even in a multi question), from `AskGlyphs`.
+    let g = blocks::AskGlyphs::for_glyphs(glyphs);
+    let mark = if answer.other {
+        g.single_on
+    } else {
+        g.single_off
     };
     let text = if answer.other && !answer.text.is_empty() {
         format!("Other: {}", answer.text.text())
     } else {
         "Other (type your own)".to_string()
     };
+    // The marker and the cursor are never bold, like `option_line`.
     Line::from(vec![
-        Span::styled(cursor, theme.notice_label),
-        Span::styled(format!("{mark} {text}"), theme.notice_body),
+        Span::styled(cursor, theme.notice_label.remove_modifier(Modifier::BOLD)),
+        Span::styled(mark, theme.notice_body),
+        Span::styled(format!(" {text}"), theme.notice_body),
     ])
 }
 
