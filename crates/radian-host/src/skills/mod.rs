@@ -56,14 +56,12 @@ impl SkillSource {
     }
 }
 
-/// The built-in skills, compiled in (ADR 0025). `(name, SKILL.md text)`.
-pub const BUILTIN: &[(&str, &str)] = &[
-    ("diagrams", include_str!("../../skills/diagrams/SKILL.md")),
-    (
-        "theme-import",
-        include_str!("../../skills/theme-import/SKILL.md"),
-    ),
-];
+/// The built-in skills, compiled in (ADR 0025; the `diagrams` skill was deleted by
+/// ADR 0042's supplement, so `theme-import` is the only one). `(name, SKILL.md text)`.
+pub const BUILTIN: &[(&str, &str)] = &[(
+    "theme-import",
+    include_str!("../../skills/theme-import/SKILL.md"),
+)];
 
 /// One discovered skill. `path` is the `SKILL.md` (absolute); `dir` is its directory, the base
 /// for relative paths in the body (ADR 0025 S3). For a built-in skill `body` is the embedded
@@ -931,49 +929,21 @@ mod tests {
         assert_eq!(names, ["solo"], "{:?}", discovery.warnings);
     }
 
-    /// ADR 0025: the compiled-in `diagrams` skill is discovered, marked `builtin`,
-    /// and listed by `/skills`.
-    #[test]
-    fn the_builtin_diagrams_skill_is_discovered_and_listed() {
-        let discovery = discover_with_extras(None, &[], true, &[]);
-        let skill = discovery
-            .skills
-            .iter()
-            .find(|skill| skill.name == "diagrams")
-            .expect("the built-in diagrams skill");
-        assert_eq!(skill.source, SkillSource::Builtin);
-        assert!(skill.body.is_some(), "the body is embedded");
-        assert!(!skill.description.is_empty());
-        let notices = notices(&discovery.skills);
-        assert!(
-            notices
-                .iter()
-                .any(|line| line.contains("diagrams") && line.contains("[builtin]")),
-            "{notices:?}"
-        );
-        // It is a completion candidate too.
-        assert!(
-            completion_candidates(&discovery.skills)
-                .iter()
-                .any(|(name, _)| name == "diagrams")
-        );
-    }
-
     /// A user-level skill of the same name wins; the built-in is shadowed with the usual
     /// warning.
     #[test]
     fn a_user_skill_of_the_same_name_overrides_the_builtin() {
         let scratch = Scratch::new("builtin-override");
-        scratch.skill("diagrams", &frontmatter("diagrams", "My own."));
+        scratch.skill("theme-import", &frontmatter("theme-import", "My own."));
         let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[], true, &[]);
-        let diagrams: Vec<&Skill> = discovery
+        let theme_import: Vec<&Skill> = discovery
             .skills
             .iter()
-            .filter(|skill| skill.name == "diagrams")
+            .filter(|skill| skill.name == "theme-import")
             .collect();
-        assert_eq!(diagrams.len(), 1, "only one wins");
-        assert_eq!(diagrams[0].source, SkillSource::User);
-        assert_eq!(diagrams[0].description, "My own.");
+        assert_eq!(theme_import.len(), 1, "only one wins");
+        assert_eq!(theme_import[0].source, SkillSource::User);
+        assert_eq!(theme_import[0].description, "My own.");
         assert!(
             discovery.warnings.iter().any(|w| w.contains("shadows")),
             "{:?}",
@@ -981,7 +951,7 @@ mod tests {
         );
     }
 
-    /// `[skills] builtin = false` turns every built-in off; `disabled` turns one off by name.
+    /// `[skills] builtin = false` turns the built-in off; `disabled` turns it off by name.
     #[test]
     fn builtin_false_and_disabled_turn_the_builtin_off() {
         assert!(
@@ -990,14 +960,9 @@ mod tests {
                 .is_empty()
         );
         assert!(
-            discover_with_extras(
-                None,
-                &[],
-                true,
-                &["diagrams".to_owned(), "theme-import".to_owned()]
-            )
-            .skills
-            .is_empty()
+            discover_with_extras(None, &[], true, &["theme-import".to_owned()])
+                .skills
+                .is_empty()
         );
     }
 
