@@ -784,3 +784,18 @@ cli -- memory` after `cargo build -p radian-tui --bin radian`, and `cargo test -
 6/6 caught. In each run only the tests listed above failed (the rest of the `memory::` filter
 stayed green); AC-1 also reds the three CLI tests and the pty test above, which is what the two
 end-to-end tests are for.
+
+## resume-perf2: the resume history is the driver's recovered fold (2026-10-16)
+
+Base `oc/resume-perf2` · in-place, each mutation copied to `.radian/mut/` first and restored from
+the copy afterwards (`diff` compared, `git status --short` empty), `--no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RH-A | `recovery_parse` forced `None`, so the driver parses the journal again (the pre-resume-perf-B second read) | ✅ caught (open count 2, expected 1) | `a_resume_parses_the_journal_once` |
+| RH-B | the host does not take the driver's recovered history (`recovered_history = Vec::new()`) | ✅ caught (host history `[]`, disk fold non-empty) | `a_resumed_history_matches_the_disk_fold_through_compaction_and_replacement` |
+
+2/2 caught. The two mutations are the two halves of the same promise: RH-A pins that the resume
+parses the journal **once** (B's counter test), RH-B pins that the host's initial view is exactly
+that parse's fold, on a fixture with a committed compaction replacement and a pending one at end
+of file (the test this slice adds).
