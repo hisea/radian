@@ -35,8 +35,8 @@ fn version_prints_the_program_name_and_the_cargo_package_version() {
     );
 }
 
-/// The `rad` alias is a second `[[bin]]` on the same `src/main.rs`; `--version` must match the
-/// `radian` binary byte for byte.
+/// The `rad` alias is a second `[[bin]]` that shares `radian_tui::cli::run_cli` with `radian`;
+/// `--version` must match the `radian` binary byte for byte.
 #[test]
 fn the_rad_alias_prints_the_same_version_as_radian() {
     let radian = version_of(env!("CARGO_BIN_EXE_radian"));
