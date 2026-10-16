@@ -163,7 +163,7 @@ fn a_failed_call_labels_its_section_error() {
         error_code: None,
     }));
     let failed = status(&app)[2];
-    let terminal = render(&mut app, 80, 12);
+    let terminal = render(&mut app, 80, 20);
     let text = screen(&terminal);
     assert!(
         text.contains(&format!("{failed} shell: make test")),
@@ -176,10 +176,10 @@ fn a_failed_call_labels_its_section_error() {
     // (ADR 0035 V3), so find its top and bottom borders instead of hardcoding rows.
     let buffer = terminal.backend().buffer();
     let symbol = |y: u16| buffer.cell((0, y)).map(|c| c.symbol().to_string());
-    let top = (0..12)
+    let top = (0..20)
         .find(|&y| symbol(y).as_deref() == Some("┌"))
         .expect("top border");
-    let bottom = (0..12)
+    let bottom = (0..20)
         .rev()
         .find(|&y| symbol(y).as_deref() == Some("└"))
         .expect("bottom border");

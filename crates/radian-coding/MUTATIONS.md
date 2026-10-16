@@ -275,3 +275,13 @@ Base `ea8d251` · 就地变异（改源码），每个变异前把文件复制�
 |---|---|---|---|
 | A1 | `clean` 不再删除值为 `""` 的可选参数（把 `""` 当成一个值） | `args::an_empty_optional_argument_is_treated_as_absent`（`offset: ""` 变成类型错误） | ✅ |
 | A2 | `invalid` 只打印第一个问题（`.take(1)`） | `args::an_argument_error_lists_every_problem_and_echoes_the_arguments`（三个问题只出现一个） | ✅ |
+
+### shell 工具描述：读文件与搜索用只读工具（2026-10-15）
+
+Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 变异就地改完后跑
+`cargo test -p radian-coding --test shell --no-fail-fast -- the_shell_description`，再从
+`/tmp/mut/shell.rs.bak` 还原并用 `diff -q` 确认逐字节相同。
+
+| # | 变异（行为） | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SD-1 | 删掉描述里的 `Read files with read and list, and search with grep and glob … while shell runs alone`（回到只提 "Use `shell` to run programs"） | `the_shell_description_points_file_reading_and_searching_at_the_read_only_tools`（三段关键句都断言） | ✅ |

@@ -1,25 +1,39 @@
-//! Deterministic memory injection (ADR 0021 D6) as an `agent_core::Hooks` implementation.
+//! Deterministic memory injection (ADR 0021 D6, revision 2) as an `agent_core::Hooks`
+//! implementation plus the per-turn addition seam.
 //!
-//! Before every model call, [`MemoryHooks`] appends a fixed memory block to the **system
+//! Before every model call, [`MemoryHooks`] appends the **fixed** memory block to the **system
 //! prompt** (never to `messages`), selecting whole Active records in the D6 order and staying
-//! under the configured token budget. It records the injected `(id, revision, scope)` set as a
-//! non-critical `MemoryInjected` runtime event when the set changes.
+//! under the configured token budget. The block is computed **once per process** (revision 2
+//! decision 2) and ranked by the **session's first user message** (decision 1), so the system
+//! prompt's bytes never change between turns and a provider's prompt cache stays valid.
 //!
-//! Two rules matter more than the rest:
+//! Later turns' new hits are appended as **one System message** through the inbox's `inject`
+//! lane instead (decision 3): [`addition_for_turn`] ranks the Active records this turn's text
+//! hits that neither the fixed block nor an earlier addition in the transcript already carries.
+//! It records the injected `(id, revision, scope)` set — the fixed block plus the transcript's
+//! additions — as a non-critical `MemoryInjected` runtime event when the set changes.
+//!
+//! Three rules matter more than the rest:
 //!
 //! - **A memory failure never fails the turn** (ADR 0021 invariant 2). A read error, a broken
 //!   log or a failed audit append produces one warning and no injection; the hook returns
 //!   `Ok`.
 //! - **Determinism**: the same memory state and query text produce a byte-identical block, so
 //!   prompt caching is not invalidated by a reshuffle.
+//! - **The transcript is the addition ledger** (decision 3). Compression that folds an addition
+//!   into a summary removes its ids from the ledger, so a later turn may append it again.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use agent_core::{HookContext, HookError, Hooks, ModelRequest, RequestSize};
+use agent_core::{
+    ContentPart, HookContext, HookError, Hooks, InputSource, Message, MessageMeta, ModelRequest,
+    OpaqueJson, RequestSize,
+};
 use radian_memory::{MemoryRecord, Scope, SearchQuery, Source};
 use radian_session::{MemoryInjectedRecord, RuntimeEvent, SessionJournal};
 
-use super::service::{MemoryService, ScopeSelection};
+use super::service::{MemoryService, MemoryServiceError, ScopeSelection};
 
 /// The injected block's fixed first lines (ADR 0021 D6/invariant 4). It is a heading and a
 /// low-trust note, not an instruction.
@@ -32,8 +46,9 @@ pub const TRUSTED_TITLE: &str = "\n### Memory: user or confirmed\n";
 /// The agent-unverified segment heading (ADR 0021 D6: the two segments are labelled apart).
 pub const UNVERIFIED_TITLE: &str = "\n### Memory: unverified, written by the agent\n";
 
-/// The ADR 0021 D6 injection budget. The configuration file is not implemented yet, so this
-/// is a constant structure with the documented defaults.
+/// The ADR 0021 D6 injection budget, with revision 2 decision 5's two addition keys. The
+/// configuration file is not wired for memory injection yet, so this is a constant structure
+/// with the documented defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InjectionConfig {
     /// Hard cap on the whole block. `global_budget`/`project_budget` are soft: one scope may
@@ -45,6 +60,11 @@ pub struct InjectionConfig {
     pub project_budget: u64,
     /// Passed to the conservative estimator (ADR 0015 C2).
     pub bytes_per_token: u32,
+    /// `[memory.injection] additions` (ADR 0021): append later turns'
+    /// new hits as one System message. `false` leaves the fixed block as the only injection.
+    pub additions: bool,
+    /// `[memory.injection] addition_budget`: the hard cap on one turn's addition.
+    pub addition_budget: u64,
 }
 
 impl Default for InjectionConfig {
@@ -54,6 +74,8 @@ impl Default for InjectionConfig {
             global_budget: 500,
             project_budget: 1500,
             bytes_per_token: agent_core::DEFAULT_BYTES_PER_TOKEN,
+            additions: true,
+            addition_budget: 500,
         }
     }
 }
@@ -66,6 +88,9 @@ pub struct Injection {
     pub records: Vec<MemoryRecord>,
     pub text: String,
 }
+
+/// The `origin.kind` of a per-turn memory addition (ADR 0021).
+pub const ADDITION_KIND: &str = "memory_addition";
 
 /// Plans one injection from the current view of both scopes (Project then Global, already
 /// deduplicated by the storage layer's `view`) and the request's query text.
@@ -81,6 +106,39 @@ pub fn plan(view: &[MemoryRecord], query: &str, config: &InjectionConfig) -> Inj
         },
     );
     let records = select(ranked, config);
+    let text = render(&records);
+    Injection { records, text }
+}
+
+/// Plans one turn's **addition** (ADR 0021): the records this turn's
+/// user message **hits** — the same keyword rule `memory_search` uses, so a turn whose text
+/// hits nothing appends nothing — that are neither in the fixed block nor already in the
+/// transcript's additions (`exclude`). The hits are selected whole, in the D6 order, under
+/// `addition_budget`.
+///
+/// Pure and deterministic, like [`plan`].
+pub fn plan_additions(
+    view: &[MemoryRecord],
+    query: &str,
+    exclude: &HashSet<String>,
+    config: &InjectionConfig,
+) -> Injection {
+    let hits = radian_memory::search(
+        view,
+        &SearchQuery {
+            text: Some(query.to_owned()),
+            key: None,
+            include_archived: false,
+        },
+    )
+    .into_iter()
+    .filter(|record| !exclude.contains(record.id.0.as_str()))
+    .collect();
+    let budget = InjectionConfig {
+        max_tokens: config.addition_budget,
+        ..*config
+    };
+    let records = select(hits, &budget);
     let text = render(&records);
     Injection { records, text }
 }
@@ -214,29 +272,238 @@ fn request_size_of(text: &str) -> RequestSize {
     size
 }
 
-/// The text of the last user message in the request, or empty when there is none. The match
-/// score uses it as the query (ADR 0021 D6).
-fn last_user_text(request: &ModelRequest) -> String {
-    request
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.is_user())
-        .map(|message| message.text())
-        .unwrap_or_default()
+/// The text of the **session's first user message** (ADR 0021): the
+/// first `Message::User` whose source is `User` or missing, in transcript order. It is the
+/// fixed block's ranking query; `radian exec -p` is that prompt. `None` when the transcript
+/// has no user message yet.
+pub fn first_user_text(messages: &[Message]) -> Option<String> {
+    messages.iter().find_map(|message| {
+        let Message::User { meta, .. } = message else {
+            return None;
+        };
+        match meta.source {
+            None | Some(InputSource::User) => Some(message.text()),
+            Some(_) => None,
+        }
+    })
 }
 
-/// The injection hook: it reads memory, appends the block, and records the injected set.
-pub struct MemoryHooks {
-    /// `None` when this process has no memory root (`RADIAN_HOME`/`HOME`): the hook is then a
-    /// no-op, which is how "closing memory changes nothing" (invariant 1) is expressed without
-    /// changing the agent's hook type.
+/// The `(id, revision, scope)` set of one injection, the shape `MemoryInjected` carries.
+fn injected_records(records: &[MemoryRecord]) -> Vec<MemoryInjectedRecord> {
+    records
+        .iter()
+        .map(|record| MemoryInjectedRecord {
+            id: record.id.to_string(),
+            revision: record.revision,
+            scope: serde_json::to_value(&record.scope).unwrap_or(serde_json::Value::Null),
+        })
+        .collect()
+}
+
+/// The `origin` a memory-addition message carries: `{"kind":"memory_addition","records":[…]}`.
+/// Only id, revision and scope — never the content.
+pub fn addition_origin(records: &[MemoryInjectedRecord]) -> OpaqueJson {
+    let value = serde_json::json!({
+        "kind": ADDITION_KIND,
+        "records": records,
+    });
+    OpaqueJson::parse(value.to_string()).expect("the origin we build is valid JSON")
+}
+
+/// The record set one transcript message contributes to the ledger: a `memory_addition` System
+/// message's `origin.records`, read from the metadata — never parsed out of the body (the same
+/// rule the compaction summary follows). Any other message contributes nothing.
+pub fn addition_records(message: &Message) -> Vec<MemoryInjectedRecord> {
+    let Message::User { meta, .. } = message else {
+        return Vec::new();
+    };
+    if meta.source != Some(InputSource::System) {
+        return Vec::new();
+    }
+    let Some(origin) = &meta.origin else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(origin.get()) else {
+        return Vec::new();
+    };
+    if value.get("kind").and_then(|kind| kind.as_str()) != Some(ADDITION_KIND) {
+        return Vec::new();
+    }
+    serde_json::from_value(value.get("records").cloned().unwrap_or_default()).unwrap_or_default()
+}
+
+/// The **dedup ledger** (ADR 0021): every record the transcript's
+/// `memory_addition` messages carry, in transcript order. Compression that folds an addition
+/// into a summary removes it from the transcript, so its ids leave the ledger with it.
+pub fn addition_ledger(transcript: &[Message]) -> Vec<MemoryInjectedRecord> {
+    transcript.iter().flat_map(addition_records).collect()
+}
+
+/// The record ids the ledger holds, for the candidate filter.
+fn excluded_ids(records: &[MemoryInjectedRecord]) -> HashSet<String> {
+    records.iter().map(|record| record.id.clone()).collect()
+}
+
+/// What one process computed for the lifetime of the session (ADR 0021,
+/// ADR 0036).
+#[derive(Default)]
+struct State {
+    /// The fixed block, computed by the first caller and reused byte-for-byte afterwards.
+    fixed: Option<Injection>,
+    /// The last set written to the journal, so an unchanged set is not written again.
+    last: Vec<MemoryInjectedRecord>,
+}
+
+/// The memory injection the system-prompt hook and the per-turn addition seam share.
+///
+/// One instance per session: it owns the fixed block's lifetime, exactly like the skills
+/// section (ADR 0025) and the context files (ADR 0036 C2).
+pub struct MemoryInjection {
+    /// `None` when this process has no memory root (`RADIAN_HOME`/`HOME`): the injection is
+    /// then a no-op, which is how "closing memory changes nothing" (invariant 1) is expressed
+    /// without changing the agent's hook type.
     service: Option<MemoryService>,
     journal: Arc<SessionJournal>,
     config: InjectionConfig,
     warn: Arc<dyn Fn(&str) + Send + Sync>,
-    /// The last set written to the journal, so an unchanged set is not written again.
-    last: Mutex<Vec<MemoryInjectedRecord>>,
+    state: Mutex<State>,
+}
+
+impl MemoryInjection {
+    pub fn new(
+        service: Option<MemoryService>,
+        journal: Arc<SessionJournal>,
+        config: InjectionConfig,
+        warn: Arc<dyn Fn(&str) + Send + Sync>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            service,
+            journal,
+            config,
+            warn,
+            state: Mutex::new(State::default()),
+        })
+    }
+
+    pub fn config(&self) -> InjectionConfig {
+        self.config
+    }
+
+    /// The current view (Project then Global, deduplicated) for injection.
+    fn view(&self) -> Result<Vec<MemoryRecord>, MemoryServiceError> {
+        match &self.service {
+            Some(service) => service.list(ScopeSelection::Default, true),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The fixed block, computed **once per process** (ADR 0021). The
+    /// first caller's `query` wins: the addition seam runs at the start of a user turn, where
+    /// the first user message is not in the transcript yet, so it passes this turn's text as
+    /// the fallback; the system-prompt hook passes the request's first user message. Both name
+    /// the same message on the session's first turn, and later turns reuse the cached block.
+    ///
+    /// A read failure is not cached, so a later call can still inject (the failure is the
+    /// caller's to warn about).
+    pub fn fixed(&self, query: impl FnOnce() -> String) -> Result<Injection, MemoryServiceError> {
+        if let Some(fixed) = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .fixed
+            .clone()
+        {
+            return Ok(fixed);
+        }
+        let view = self.view()?;
+        let injection = plan(&view, &query(), &self.config);
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).fixed = Some(injection.clone());
+        Ok(injection)
+    }
+
+    /// The one System message a user turn's new hits become, or `None` when nothing is new
+    /// (ADR 0021). `transcript` is the transcript **before** the turn's
+    /// user message is committed, so the ledger is what earlier turns appended.
+    ///
+    /// The returned message is a `Message::user` (the inbox accepts no other role) with
+    /// `meta.source = System` and the `memory_addition` origin; the driver sets the source
+    /// again on the way in.
+    pub fn addition_for_turn(&self, text: &str, transcript: &[Message]) -> Option<Message> {
+        if !self.config.additions {
+            return None;
+        }
+        // The fixed block first: the two must never carry the same record.
+        let fixed =
+            match self.fixed(|| first_user_text(transcript).unwrap_or_else(|| text.to_owned())) {
+                Ok(fixed) => fixed,
+                Err(error) => {
+                    (self.warn)(&format!(
+                        "memory read failed; nothing appended this turn: {error}"
+                    ));
+                    return None;
+                }
+            };
+        let view = match self.view() {
+            Ok(view) => view,
+            Err(error) => {
+                (self.warn)(&format!(
+                    "memory read failed; nothing appended this turn: {error}"
+                ));
+                return None;
+            }
+        };
+        let mut exclude = excluded_ids(&injected_records(&fixed.records));
+        exclude.extend(excluded_ids(&addition_ledger(transcript)));
+        let injection = plan_additions(&view, text, &exclude, &self.config);
+        if injection.records.is_empty() {
+            return None;
+        }
+        let records = injected_records(&injection.records);
+        Some(Message::User {
+            content: vec![ContentPart::text(addition_body(&injection.text))],
+            meta: MessageMeta {
+                id: None,
+                source: Some(InputSource::System),
+                origin: Some(addition_origin(&records)),
+            },
+        })
+    }
+
+    /// Writes `MemoryInjected` when the set changed. Audit only (`critical: false`): a failed
+    /// append is a warning, never a turn failure, exactly like the permission audit sink.
+    async fn record(&self, records: Vec<MemoryInjectedRecord>) {
+        let changed = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.last != records
+        };
+        if !changed {
+            return;
+        }
+        if let Err(error) = self
+            .journal
+            .append_runtime_event(RuntimeEvent::MemoryInjected {
+                records: records.clone(),
+            })
+            .await
+        {
+            (self.warn)(&format!("could not record MemoryInjected: {error}"));
+        }
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).last = records;
+    }
+}
+
+/// The body of one addition message: the same rendered block the system prompt carries
+/// (ADR 0021: the same low-trust note, the same renderer, the same
+/// escapes), fenced as `<memory>…</memory>` so a reader can tell an injected note from the
+/// user's own words.
+fn addition_body(text: &str) -> String {
+    format!("<memory>{text}\n</memory>")
+}
+
+/// The injection hook: it appends the **fixed** block to the system prompt and records the
+/// injected set (ADR 0021 and 3).
+pub struct MemoryHooks {
+    injection: Arc<MemoryInjection>,
 }
 
 impl MemoryHooks {
@@ -246,25 +513,17 @@ impl MemoryHooks {
         config: InjectionConfig,
         warn: Arc<dyn Fn(&str) + Send + Sync>,
     ) -> Self {
-        Self {
-            service,
-            journal,
-            config,
-            warn,
-            last: Mutex::new(Vec::new()),
-        }
+        Self::from_shared(MemoryInjection::new(service, journal, config, warn))
+    }
+
+    /// The hook over an injection another part of the host also uses (the per-turn addition
+    /// seam), so the two cannot disagree about the fixed block.
+    pub fn from_shared(injection: Arc<MemoryInjection>) -> Self {
+        Self { injection }
     }
 
     pub fn config(&self) -> InjectionConfig {
-        self.config
-    }
-
-    /// The current view (Project then Global, deduplicated) for injection.
-    fn view(&self) -> Result<Vec<MemoryRecord>, super::MemoryServiceError> {
-        match &self.service {
-            Some(service) => service.list(ScopeSelection::Default, true),
-            None => Ok(Vec::new()),
-        }
+        self.injection.config()
     }
 }
 
@@ -275,52 +534,40 @@ impl Hooks for MemoryHooks {
         request: &mut ModelRequest,
     ) -> Result<(), HookError> {
         // A read failure is never a turn failure (ADR 0021 invariant 2): warn, inject nothing.
-        let view = match self.view() {
-            Ok(view) => view,
+        let fixed = match self
+            .injection
+            .fixed(|| first_user_text(&request.messages).unwrap_or_default())
+        {
+            Ok(fixed) => fixed,
             Err(error) => {
-                (self.warn)(&format!(
+                (self.injection.warn)(&format!(
                     "memory read failed; nothing injected this turn: {error}"
                 ));
                 return Ok(());
             }
         };
-        let injection = plan(&view, &last_user_text(request), &self.config);
-        if !injection.text.is_empty() {
+        if !fixed.text.is_empty() {
             match &mut request.system_prompt {
-                Some(system) => system.push_str(&injection.text),
-                None => request.system_prompt = Some(injection.text.clone()),
+                Some(system) => system.push_str(&fixed.text),
+                None => request.system_prompt = Some(fixed.text.clone()),
             }
         }
-
-        let records: Vec<MemoryInjectedRecord> = injection
-            .records
-            .iter()
-            .map(|record| MemoryInjectedRecord {
-                id: record.id.to_string(),
-                revision: record.revision,
-                scope: serde_json::to_value(&record.scope).unwrap_or(serde_json::Value::Null),
-            })
-            .collect();
-        let changed = {
-            let last = self.last.lock().unwrap_or_else(|e| e.into_inner());
-            *last != records
-        };
-        if changed {
-            // Audit only (critical: false). A failed append is a warning, never a turn
-            // failure, exactly like the permission audit sink.
-            if let Err(error) = self
-                .journal
-                .append_runtime_event(RuntimeEvent::MemoryInjected {
-                    records: records.clone(),
-                })
-                .await
-            {
-                (self.warn)(&format!("could not record MemoryInjected: {error}"));
-            }
-            *self.last.lock().unwrap_or_else(|e| e.into_inner()) = records;
-        }
+        // The set is the fixed block plus what the transcript's additions already carry
+        // (ADR 0021).
+        let mut records = injected_records(&fixed.records);
+        records.extend(addition_ledger(&request.messages));
+        self.injection.record(records).await;
         Ok(())
     }
+}
+
+/// The driver's per-turn addition seam over a [`MemoryInjection`] (ADR 0021
+/// decision 3): the message the driver puts in the inbox's `inject` lane for one user turn, or
+/// `None`.
+pub fn addition_seam(injection: Arc<MemoryInjection>) -> radian_runtime::TurnAdditions {
+    Arc::new(move |text: &str, transcript: &[Message]| {
+        injection.addition_for_turn(text, transcript)
+    })
 }
 
 #[cfg(test)]
@@ -397,6 +644,29 @@ mod tests {
         assert_eq!(one_line("a\nb"), "a\\nb");
         assert_eq!(one_line("a\\nb"), "a\\\\nb");
         assert_eq!(one_line("a\r\nb"), "a\\r\\nb");
+    }
+
+    /// ADR 0021: the query is the session's **first** user message, and a
+    /// System-source user-role message (a job notification, an addition, a compaction summary)
+    /// is not one.
+    #[test]
+    fn the_query_is_the_first_user_message() {
+        let summary = Message::User {
+            content: vec![agent_core::ContentPart::text("This is a summary.")],
+            meta: agent_core::MessageMeta {
+                id: None,
+                source: Some(InputSource::System),
+                origin: Some(OpaqueJson::parse(r#"{"kind":"compaction_summary"}"#).unwrap()),
+            },
+        };
+        let transcript = vec![
+            summary,
+            Message::user("first"),
+            Message::user("second"),
+            Message::user("third"),
+        ];
+        assert_eq!(first_user_text(&transcript).as_deref(), Some("first"));
+        assert_eq!(first_user_text(&[]), None);
     }
 
     fn project(id: &str) -> Scope {
@@ -609,6 +879,45 @@ mod tests {
         )];
         let text = plan(&view, "", &InjectionConfig::default()).text;
         assert!(text.contains(&content), "the whole content is present");
+    }
+
+    /// A record the request's text does not mention is injected after the ones that match
+    /// (D6: the score orders, it does not filter) — and the query a *process* uses is the first
+    /// user message, so the two orderings differ.
+    #[test]
+    fn the_fixed_block_orders_by_the_first_user_message_not_the_last() {
+        let view = vec![
+            record(
+                "parser",
+                project("p1"),
+                Source::User,
+                Kind::Fact,
+                None,
+                "about parsers",
+                "2026-01-01T00:00:00Z",
+            ),
+            record(
+                "style",
+                project("p1"),
+                Source::User,
+                Kind::Fact,
+                None,
+                "about styles",
+                "2026-01-01T00:00:00Z",
+            ),
+        ];
+        let transcript = vec![Message::user("parsers"), Message::user("styles")];
+        let query = first_user_text(&transcript).unwrap();
+        assert_eq!(
+            ids(&plan(&view, &query, &InjectionConfig::default())),
+            ["parser", "style"]
+        );
+        // The last user message — what the pre-revision code used — orders them the other way,
+        // so this pins the change (ADR 0021).
+        assert_eq!(
+            ids(&plan(&view, "styles", &InjectionConfig::default())),
+            ["style", "parser"]
+        );
     }
 
     #[test]

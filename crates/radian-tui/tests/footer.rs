@@ -605,6 +605,65 @@ fn a_compaction_usage_reaches_the_footer_totals() {
     assert_eq!(app.projection.read().cost_micros(), Some(330_000), "$0.33");
 }
 
+/// ADR 0027: a call with a non-zero counter the catalog cannot price
+/// shows `≥` (a lower bound), not a number that looks exact.
+#[test]
+fn an_incomplete_fee_is_marked() {
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&rows(vec![item("cost")]));
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 3_000_000,
+        output: 15_000_000,
+        cache_read: Some(300_000),
+        cache_write: None, // the catalog lists no cache-write rate
+        tiers: Vec::new(),
+    }));
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(10_000),
+        cache_write: Some(10_000),
+        input_includes_cache: Some(false),
+        ..Default::default()
+    });
+
+    assert!(app.projection.read().cost_incomplete());
+    let terminal = render(&mut app, 120, 12);
+    let line = row(&terminal, 11);
+    assert!(line.contains("≥$0.030"), "the incomplete marker: {line:?}");
+}
+
+/// ADR 0027: a total re-priced from an old record shows `~`, and the
+/// estimate wins when the total is also incomplete (`~≥` would be unreadable).
+#[test]
+fn an_estimated_fee_shows_the_tilde_and_wins_over_incomplete() {
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&rows(vec![item("cost")]));
+    let price = radian_host::ModelPrice {
+        input: 3_000_000,
+        output: 15_000_000,
+        cache_read: Some(300_000),
+        cache_write: None,
+        tiers: Vec::new(),
+    };
+    // The resume path for an old record: re-priced with today's catalog and marked estimated.
+    app.projection.add_usage_at(
+        Some(&price),
+        &agent_core::ModelUsage {
+            input: Some(10_000),
+            cache_write: Some(10_000),
+            input_includes_cache: Some(false),
+            ..Default::default()
+        },
+    );
+
+    let read = app.projection.read();
+    assert!(read.cost_estimated() && read.cost_incomplete());
+    drop(read);
+    let terminal = render(&mut app, 120, 12);
+    let line = row(&terminal, 11);
+    assert!(line.contains("~$0.030"), "the estimate marker: {line:?}");
+    assert!(!line.contains("~≥"), "the estimate wins: {line:?}");
+}
+
 /// The `cost` item shows the fee accumulated **per call, at the price in force when the call
 /// arrived** (ADR 0027). Without a price it hides rather than showing `$0.00`.
 #[test]
@@ -1207,7 +1266,9 @@ fn the_deck_numbers_row_matches_the_sample() {
     app.set_model_price(Some(radian_host::ModelPrice {
         input: 967_333,
         output: 0,
-        cache_read: None,
+        // Priced at zero, not absent: a **non-zero** cache read with no rate makes the fee
+        // incomplete (`≥`, ADR 0027) and this sample row is the complete shape.
+        cache_read: Some(0),
         cache_write: None,
         tiers: Vec::new(),
     }));

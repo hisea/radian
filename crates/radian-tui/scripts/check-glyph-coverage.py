@@ -62,6 +62,8 @@ GLYPHS = [
     ("│", "footer separator"),
     ("━", "context bar fill"),
     ("─", "context bar empty"),
+    ("▄", "band top padding (ADR 0035)"),
+    ("▀", "band bottom padding (ADR 0035)"),
     ("▖", "spinner frame 1"),
     ("▘", "spinner frame 2"),
     ("▝", "spinner frame 3"),

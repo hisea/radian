@@ -759,7 +759,8 @@ fn the_bar_input_style_draws_a_full_width_band_with_the_rail() {
     assert_band_across(&terminal, (first + 1) as u16, wide.theme.input_bar.bg, 12);
 }
 
-/// The band reaches the terminal's last column at both widths the brief pins (80 and 120).
+/// The band reaches the terminal's last column at both widths the brief pins (80 and 120), and
+/// its half-cell pads (ADR 0035) do too: `▄` above, `▀` below, in the band's color.
 #[test]
 fn the_bar_band_fills_the_terminal_width() {
     use radian_tui::render::InputStyle;
@@ -769,7 +770,17 @@ fn the_bar_band_fills_the_terminal_width() {
         app.input = "wide".into();
         let terminal = render(&mut app, width, 8);
         let y = row_of(&terminal, "▎ wide").expect("the band") as u16;
-        assert_band_across(&terminal, y, app.theme.input_bar.bg, width);
+        let band = app.theme.input_bar.bg;
+        assert_band_across(&terminal, y, band, width);
+        assert_eq!(row(&terminal, y - 1), "▄".repeat(width as usize), "{width}");
+        assert_eq!(row(&terminal, y + 1), "▀".repeat(width as usize), "{width}");
+        for (y, glyph) in [(y - 1, "▄"), (y + 1, "▀")] {
+            for col in [0u16, width - 1] {
+                let style = cell_style(&terminal, col, y);
+                assert_eq!(style.fg, band, "the {glyph} pad's color at {col}");
+                assert_eq!(style.bg, Some(Color::Reset), "the {glyph} pad's background");
+            }
+        }
     }
 }
 
@@ -790,8 +801,11 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     let idle = render(&mut app, 80, 10);
     let band_row = row_of(&idle, "▎ hello").expect("the band");
     let transcript_row = row_of(&idle, "a question").expect("the transcript");
-    // Idle: the row above the band is blank (but there).
-    assert_eq!(row(&idle, (band_row - 1) as u16).trim_end(), "");
+    // The band's half-cell pads are always there (ADR 0035): `▄` above, `▀` below.
+    assert!(row(&idle, (band_row - 1) as u16).starts_with('▄'));
+    assert!(row(&idle, (band_row + 1) as u16).starts_with('▀'));
+    // The status row is one above the top pad, and blank (but there) while idle.
+    assert_eq!(row(&idle, (band_row - 2) as u16).trim_end(), "");
     assert!(!screen(&idle).contains("Working"));
 
     app.projection.set_turn(radian_tui::TurnState::Running);
@@ -808,7 +822,7 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
         Some(transcript_row),
         "the transcript must not move either"
     );
-    let status = row(&running, (band_row - 1) as u16);
+    let status = row(&running, (band_row - 2) as u16);
     assert!(
         status.contains("◜  Working · 12s · esc to interrupt"),
         "the live status row: {status:?}"
@@ -819,13 +833,13 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     let after = render(&mut app, 80, 10);
     assert_eq!(row_of(&after, "▎ hello"), Some(band_row));
     assert_eq!(row_of(&after, "a question"), Some(transcript_row));
-    assert_eq!(row(&after, (band_row - 1) as u16).trim_end(), "");
+    assert_eq!(row(&after, (band_row - 2) as u16).trim_end(), "");
 
     // A running `!` is a status but not a **turn**: its row carries the state without the
     // turn's interrupt hint (Esc does not cancel a `!` through this path).
     app.bash_running = Some("sleep 1".to_string());
     let terminal = render(&mut app, 80, 10);
-    let status = row(&terminal, (band_row - 1) as u16);
+    let status = row(&terminal, (band_row - 2) as u16);
     assert!(status.contains("Running a command"), "{status:?}");
     assert!(
         !status.contains("esc to interrupt"),
@@ -834,34 +848,40 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     app.bash_running = None;
 }
 
-/// ADR 0035 V3: `bar` spends exactly one row on the status row and one per input row — no rule
-/// or border rows and no slack. The band is the input area's last row (the `classic` status bar
-/// is directly below it), and a two-row input grows the band by exactly one row.
+/// ADR 0035 V3 + revision 3: `bar` spends one row on the status row, one per input row and the
+/// band's two half-cell pad rows (`▄` above, `▀` below) — no rule or border rows and no slack.
+/// The bottom pad is the input area's last row (the `classic` status bar is directly below it),
+/// and a two-row input grows the band by exactly one row.
 #[test]
-fn the_bar_input_takes_exactly_the_status_row_and_its_text_rows() {
+fn the_bar_input_takes_the_status_row_the_pad_rows_and_its_text_rows() {
     use radian_tui::render::InputStyle;
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
     app.input_style = InputStyle::Bar;
     app.input = "hello".into();
-    // Height 8, the one-row `classic` status bar at row 7: the status row is 5, the band 6.
+    // Height 8, the one-row `classic` status bar at row 7: the status row is 3, the top pad 4,
+    // the band 5, the bottom pad 6.
     let terminal = render(&mut app, 20, 8);
     assert_eq!(
         row_of(&terminal, "▎ hello"),
-        Some(6),
-        "the band is the input's last row:\n{}",
+        Some(5),
+        "the band sits between the two pad rows:\n{}",
         screen(&terminal)
     );
-    assert_eq!(row(&terminal, 5).trim_end(), "", "the blank status row");
+    assert_eq!(row(&terminal, 3).trim_end(), "", "the blank status row");
+    assert!(row(&terminal, 4).starts_with('▄'), "the top pad");
+    assert!(row(&terminal, 6).starts_with('▀'), "the bottom pad");
 
     app.input = "one\ntwo".into();
     let terminal = render(&mut app, 20, 8);
     assert_eq!(
         row_of(&terminal, "▎ one"),
-        Some(5),
+        Some(4),
         "the status row moved up"
     );
-    assert_eq!(row_of(&terminal, "▎ two"), Some(6));
+    assert_eq!(row_of(&terminal, "▎ two"), Some(5));
+    assert!(row(&terminal, 3).starts_with('▄'), "the top pad");
+    assert!(row(&terminal, 6).starts_with('▀'), "the bottom pad");
 }
 
 /// `tui.footer.glyphs = "ascii"` reaches the rail and the status spinner too (ADR 0027
@@ -881,10 +901,104 @@ fn the_bar_rail_and_spinner_fall_back_to_ascii() {
     let text = screen(&render(&mut app, 40, 10));
     assert!(text.contains("| hi"), "the ascii rail:\n{text}");
     assert!(!text.contains('▎'), "no unicode rail:\n{text}");
+    // ADR 0035: the `ascii` tier gets no half-cell band padding.
+    assert!(
+        !text.contains('▄') && !text.contains('▀'),
+        "no band padding under ascii:\n{text}"
+    );
     assert!(
         text.contains("*  Working · esc to interrupt"),
         "the ascii pulse glyph: \n{text}"
     );
+}
+
+/// ADR 0035: the `ascii` glyph tier gets no half-cell padding — a user
+/// block is just its text rows, so two of them sit on consecutive lines (the container's gap
+/// between them is still zero, as it is a user block on each side).
+#[test]
+fn the_ascii_tier_has_no_band_padding() {
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".to_string()),
+        ..Default::default()
+    });
+    app.push_message(&Message::user("hello"));
+    app.push_message(&Message::user("again"));
+    let terminal = render(&mut app, 40, 10);
+    let text = screen(&terminal);
+    assert!(!text.contains('▄') && !text.contains('▀'), "{text}");
+    // No pad rows: the two user blocks are two rows in a row.
+    assert_eq!(row_of(&terminal, "> hello"), Some(0), "{text}");
+    assert_eq!(row_of(&terminal, "> again"), Some(1), "{text}");
+}
+
+/// ADR 0035: the folded thinking line hugs the block below it (the reply
+/// or the tool call it introduces), while the gap above it stays one line — here the user
+/// block's bottom pad.
+#[test]
+fn thinking_hugs_the_block_below() {
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.push_message(&Message::user("q"));
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: assistant_with("the answer", "a thought", false, vec![]),
+    });
+    let terminal = render(&mut app, 40, 12);
+    let text = screen(&terminal);
+    let user = row_of(&terminal, "> q").expect("the user text");
+    let thinking = row_of(&terminal, "thinking (1 lines)").expect("the folded channel");
+    let answer = row_of(&terminal, "the answer").expect("the reply");
+    assert_eq!(
+        thinking,
+        user + 2,
+        "the user block's bottom pad is the one-line gap above thinking:\n{text}"
+    );
+    assert_eq!(
+        answer,
+        thinking + 1,
+        "the reply hugs thinking, with no gap:\n{text}"
+    );
+}
+
+/// ADR 0027 item 2 / ADR 0035: the `unicode` tier's tool
+/// success glyph is `✓` (not `+`). A regression to `+` fails here — the review found the change
+/// untested, so the rendered glyph is pinned.
+#[test]
+fn the_unicode_tool_success_glyph_is_a_check_mark() {
+    assert_eq!(
+        radian_tui::footer::Glyphs::Unicode.tool_status()[1],
+        "✓",
+        "the unicode tier's success glyph"
+    );
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "true"}),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("ok")],
+            structured: Some(serde_json::json!({"command": "true", "exit_code": 0})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    let text = screen(&render(&mut app, 60, 12));
+    assert!(
+        text.contains("✓ shell"),
+        "a completed card draws the check mark:\n{text}"
+    );
+    assert!(!text.contains("+ shell"), "never the old `+`:\n{text}");
 }
 
 /// A transcript selection draws with the theme's `selection` role: the band lands exactly on
@@ -907,7 +1021,9 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
         head: locate(&app.entries, EXPANDED, 40, 1, 17).expect("head"),
     };
     app.selection = Some(selection);
-    let terminal = render(&mut app, 40, 6);
+    // Tall enough that the whole three-row user block is on screen (the `bar` input is four
+    // rows with the half-cell pads, ADR 0035).
+    let terminal = render(&mut app, 40, 10);
     let text = screen(&terminal);
     assert!(text.contains("hello selection"), "{text}");
     let word = style_of(&terminal, "selection").expect("the selected word is on screen");
@@ -941,7 +1057,7 @@ fn the_mono_selection_is_reversed_not_colored() {
         anchor: locate(&app.entries, EXPANDED, 40, 1, 8).expect("anchor"),
         head: locate(&app.entries, EXPANDED, 40, 1, 17).expect("head"),
     });
-    let terminal = render(&mut app, 40, 6);
+    let terminal = render(&mut app, 40, 10);
     let word = style_of(&terminal, "selection").expect("on screen");
     assert_eq!(word.bg, Some(Color::Reset), "no colored band in mono");
     assert!(
@@ -966,10 +1082,10 @@ fn an_empty_selection_draws_nothing() {
         anchor: at,
         head: at,
     });
-    let text = screen(&render(&mut app, 40, 6));
+    let text = screen(&render(&mut app, 40, 10));
     assert!(text.contains("hello selection"), "{text}");
     assert_eq!(
-        style_of(&render(&mut app, 40, 6), "selection").map(|s| s.bg),
+        style_of(&render(&mut app, 40, 10), "selection").map(|s| s.bg),
         Some(Some(Color::Rgb(33, 59, 73))),
         "no selection band: the two anchors coincide, only the user band is there"
     );
@@ -1042,11 +1158,13 @@ fn a_code_block_does_not_wrap_and_truncates_with_an_ellipsis() {
     app.push_message(&Message::assistant(format!(
         "before\n```rust\n{long}\nsecond\n```\nafter"
     )));
-    let terminal = render(&mut app, 80, 12);
+    // 16 rows: the bar input's half-cell pads (ADR 0035) take two rows from the
+    // transcript, and the prose above and below the block must stay on screen.
+    let terminal = render(&mut app, 80, 16);
     let buffer = terminal.backend().buffer();
     // Find the long line's row: it starts with 79 'x' and ends with '…' on the same row.
     let mut found = None;
-    for row in 0..12u16 {
+    for row in 0..16u16 {
         let text: String = (0..80u16)
             .map(|col| {
                 buffer
@@ -1479,12 +1597,11 @@ fn the_block_layout_snapshot() {
         )
     };
     let golden: Vec<String> = vec![
-        "".to_string(),                                  // the user block's top pad (banded)
-        "> explain the failure".to_string(),             // the user text
-        "".to_string(),                                  // the user block's bottom pad (banded)
+        "▄".repeat(80),                      // the user block's top half cell (ADR 0035)
+        "> explain the failure".to_string(), // the user text
+        "▀".repeat(80),                      // the user block's bottom half cell
         "› thinking (3 lines)".to_string(), // the folded channel: the unicode fold glyph (ADR 0027)
-        "".to_string(),                     // the container's gap
-        "  Looking into it.".to_string(),   // the assistant
+        "  Looking into it.".to_string(),   // thinking hugs the reply: no container gap
         "".to_string(),                     // the gap
         top.clone(),                        // the shell card's frame (ADR 0028)
         row(&format!("{} shell: make test", status[2])), // the head status line
@@ -1510,14 +1627,23 @@ fn the_block_layout_snapshot() {
         "".to_string(), // the gap below it
     ];
     assert_eq!(rows[..golden.len()], golden[..], "{rows:#?}");
-    // The bands: the user block's three rows, the failed card's frame and every row inside
-    // it, the successful card's differing band; a gap row carries none.
+    // The bands: the user text row paints the band; its two pad rows are a half cell of it (the
+    // band's color as the foreground, on the terminal's default background); the failed card's
+    // frame and every row inside it carry the card's band; a gap row carries none.
+    let user_band = app.theme.user.bg;
+    assert_eq!(cell_style(&terminal, 0, 1).bg, user_band, "the text row");
+    for y in [0u16, 2] {
+        let style = cell_style(&terminal, 79, y);
+        assert_eq!(style.fg, user_band, "the pad's half cell at {y}");
+        assert_eq!(
+            style.bg,
+            Some(Color::Reset),
+            "the pad has no background at {y}"
+        );
+    }
     let bg = |x: u16, y: u16| buffer.cell((x, y)).map(|c| c.bg);
-    let user_bg = bg(0, 1);
-    assert_eq!(bg(0, 0), user_bg, "the user pad carries the band");
-    assert_eq!(bg(79, 2), user_bg, "the bottom pad reaches the row's end");
-    let failed = bg(0, 7);
-    for y in 7..=16u16 {
+    let failed = bg(0, 6);
+    for y in 6..=15u16 {
         assert_eq!(
             bg(0, y),
             failed,
@@ -1525,9 +1651,9 @@ fn the_block_layout_snapshot() {
         );
         assert_eq!(bg(79, y), failed, "…to the row's end");
     }
-    assert_ne!(failed, bg(0, 5), "the assistant row has no card band");
-    assert_eq!(bg(0, 6), bg(0, 5), "a gap row is not banded");
-    assert_ne!(bg(0, 18), failed, "the successful card's band differs");
+    assert_ne!(failed, bg(0, 4), "the assistant row has no card band");
+    assert_eq!(bg(0, 5), bg(0, 4), "a gap row is not banded");
+    assert_ne!(bg(0, 17), failed, "the successful card's band differs");
 }
 
 /// A tab is four columns when the wrap decides where to break (ADR 0028 R9), not zero: a line
@@ -2127,8 +2253,9 @@ fn folding_changes_the_transcript_line_count() {
         collapsed + 2,
         "three thinking lines become one placeholder"
     );
-    // The placeholder, the container's gap line, the answer (ADR 0028 rule 1).
-    assert_eq!(collapsed, 3, "placeholder + gap + answer");
+    // The placeholder and the answer, **no** gap between them (ADR 0035: thinking
+    // hugs the block below).
+    assert_eq!(collapsed, 2, "placeholder + answer, no gap");
 }
 
 /// `tui.display.reasoning = "hidden"` removes the reasoning lines entirely.
@@ -2195,27 +2322,46 @@ fn a_startup_line_colors_its_label_with_accent() {
     );
 }
 
-/// The user block's band (ADR 0028 R4, owner acceptance): the `user` role's background covers
-/// the whole row — the marker, the text, the trailing whitespace — and the blank rows above
-/// and below it.
+/// The user block's band with the half-cell padding (ADR 0035): the text row paints
+/// the `user` band across the whole row (the marker, the text, the trailing whitespace); the
+/// rows above and below are half a cell of it (`▄`/`▀`) in the band's **color** as the glyph's
+/// foreground, on the terminal's default background. Pinned at 80 and 120 columns.
 #[test]
-fn a_user_block_paints_its_band_across_the_whole_block() {
-    let mut app = App::new("m", "s");
-    app.theme.user = ratatui::style::Style::default().bg(Color::Rgb(0x18, 0x18, 0x20));
-    app.push_message(&Message::user("hello band"));
-    let terminal = render(&mut app, 30, 8);
-    let buffer = terminal.backend().buffer();
+fn a_user_block_pads_its_band_with_half_cells_at_80_and_120() {
     let band = Color::Rgb(0x18, 0x18, 0x20);
-    // Rows 0 (pad), 1 (text) and 2 (pad) are the block; every cell carries the band.
-    for row in 0..3u16 {
-        for col in 0..30u16 {
-            let cell = buffer.cell((col, row)).expect("on screen");
-            assert_eq!(cell.bg, band, "row {row} col {col} must carry the band");
+    for width in [80u16, 120] {
+        let mut app = App::new("m", "s");
+        app.theme.user = ratatui::style::Style::default().bg(band);
+        app.push_message(&Message::user("hello band"));
+        // Tall enough for the whole three-row block plus the input's pads and the footer.
+        let terminal = render(&mut app, width, 12);
+        // Row 0 is the band's top half cell: `▄` across the whole row.
+        assert_eq!(row(&terminal, 0), "▄".repeat(width as usize), "{width}");
+        // Row 1 is the text row: the band covers it end to end.
+        assert!(row(&terminal, 1).contains("hello band"));
+        // Row 2 is the bottom half cell: `▀` across the whole row.
+        assert_eq!(row(&terminal, 2), "▀".repeat(width as usize), "{width}");
+        for col in [0u16, width - 1] {
+            for (y, glyph) in [(0u16, "▄"), (2u16, "▀")] {
+                let style = cell_style(&terminal, col, y);
+                assert_eq!(
+                    style.fg,
+                    Some(band),
+                    "the {glyph} pad's color at ({col}, {y})"
+                );
+                assert_eq!(
+                    style.bg,
+                    Some(Color::Reset),
+                    "the {glyph} pad has no background"
+                );
+            }
+            // The text row's background is the band, not a half cell.
+            assert_eq!(cell_style(&terminal, col, 1).bg, Some(band));
         }
+        // The row below the block is not painted.
+        let below = terminal.backend().buffer().cell((0, 3)).expect("on screen");
+        assert_ne!(below.bg, band);
     }
-    // The row below the block is not painted.
-    assert_ne!(buffer.cell((0, 3)).expect("on screen").bg, band);
-    assert!(screen(&terminal).contains("hello band"));
 }
 
 /// A tool card's band follows its state (ADR 0028 R4): running / success / failure, and the
@@ -2231,7 +2377,7 @@ fn a_tool_card_paints_the_state_band() {
         let mut call = Entry::new(EntryKind::ToolCall, "shell({\"command\": \"ls\"})");
         call.result = result;
         app.entries.push(call);
-        let terminal = render(&mut app, 40, 6);
+        let terminal = render(&mut app, 40, 10);
         let buffer = terminal.backend().buffer();
         assert_eq!(
             buffer.cell((0, 0)).expect("on screen").bg,
@@ -2251,7 +2397,7 @@ fn a_tool_card_paints_the_state_band() {
     let mut result = Entry::new(EntryKind::ToolResult, "line one\nline two");
     result.is_error = true;
     app.entries.push(result);
-    let terminal = render(&mut app, 40, 6);
+    let terminal = render(&mut app, 40, 10);
     let buffer = terminal.backend().buffer();
     for row in 0..2u16 {
         for col in 0..40u16 {

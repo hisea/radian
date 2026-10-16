@@ -36,6 +36,7 @@ fn the_reader_matches_the_reference_checker() {
         ("model-retries.toml", "accept"),
         ("skills-extra-paths.toml", "accept"),
         ("skills-builtin.toml", "accept"),
+        ("memory-injection.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),
         ("schema-version-lower.toml", "reject"),
@@ -170,6 +171,42 @@ fn the_tui_theme_colors_fixture_is_carried_raw() {
     assert_eq!(notice.bold, Some(true));
     // A pi name is carried like any other key; the TUI decides where it lands.
     assert!(get("mdHeading").underline == Some(false));
+}
+
+/// `memory-injection.toml` (ADR 0021): the two keys this revision adds
+/// are read; the rest of D6's table is known but unwired, so it is reported as skipped rather
+/// than refused.
+#[test]
+fn the_memory_injection_keys_are_read_and_the_rest_is_reported() {
+    let (path, text) = fixture("memory-injection.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.memory.additions, Some(false));
+    assert_eq!(config.memory.addition_budget, Some(750));
+    let injection = config.memory.injection();
+    assert!(!injection.additions);
+    assert_eq!(injection.addition_budget, 750);
+    // Everything the file did not set keeps the documented default.
+    assert_eq!(injection.max_tokens, 2000);
+    for key in [
+        "memory.injection.max_tokens",
+        "memory.injection.global_budget",
+        "memory.injection.project_budget",
+        "memory.injection.overflow",
+    ] {
+        assert!(
+            config.skipped.contains(&key.to_string()),
+            "{:?}",
+            config.skipped
+        );
+    }
+    assert!(
+        !config
+            .skipped
+            .iter()
+            .any(|key| key.starts_with("memory.injection.additions")),
+        "{:?}",
+        config.skipped
+    );
 }
 
 /// The minimal fixture carries the known `tui.mouse` preference (`false`): the reader keeps

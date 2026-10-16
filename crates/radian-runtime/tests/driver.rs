@@ -3,13 +3,13 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use agent_core::{Agent, InputSource, Message, MessageId, Step, TurnOptions};
 use common::{MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, text};
 use radian_runtime::{ConfigQueue, Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[allow(dead_code)]
 struct Env {
@@ -560,6 +560,110 @@ async fn the_resumed_model_gets_its_budget_when_the_resolver_arrives() {
     );
 }
 
+// ---------- ADR 0021: the per-turn addition seam ----------
+
+/// The host's addition goes into the `inject` lane, so it lands **after** the turn's user
+/// message and **before** its first model call; a turn the host did not claim from a user
+/// input (a background-job notification, `source = System`; ADR 0037) never calls the seam.
+#[tokio::test]
+async fn a_host_addition_lands_after_the_user_message_and_before_the_first_call() {
+    let model = ScriptedModel::new([text("one"), text("two"), text("three")]);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env("additions", model, tools).await;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&calls);
+    driver.set_turn_additions(Arc::new(move |text: &str, transcript: &[Message]| {
+        // The seam sees the transcript **before** the turn's input is committed, which is the
+        // dedup ledger (ADR 0021).
+        seen.lock()
+            .unwrap()
+            .push((text.to_owned(), transcript.len()));
+        Some(addition_message(text))
+    }));
+    let handle = tokio::spawn(async move { driver.run().await });
+
+    env.inbox
+        .followup("first", InputSource::User)
+        .await
+        .unwrap();
+    env.recorder.wait_finished().await;
+    // A job completion notification while idle: a `followup`, so it starts a turn, and its
+    // source is System (ADR 0037 decision 3).
+    env.inbox
+        .followup("job finished", InputSource::System)
+        .await
+        .unwrap();
+    env.recorder.wait_finished().await;
+    env.inbox
+        .followup("second", InputSource::User)
+        .await
+        .unwrap();
+    env.recorder.wait_finished().await;
+    handle.abort();
+
+    let history: Vec<String> = Session::open(&env.path)
+        .unwrap()
+        .history()
+        .unwrap()
+        .iter()
+        .map(Message::text)
+        .collect();
+    assert_eq!(
+        history,
+        [
+            "first",
+            "<memory>hit first</memory>",
+            "one",
+            "job finished",
+            "two",
+            "second",
+            "<memory>hit second</memory>",
+            "three",
+        ],
+        "the addition is the first message after its user message"
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![("first".to_owned(), 0), ("second".to_owned(), 5)],
+        "the seam runs once per user turn, with the transcript as the ledger"
+    );
+
+    // The addition is a durable input on the inject lane, with the System source the driver
+    // declares (never the human's).
+    let events = common::events(&env.path);
+    let injected: Vec<&Value> = events
+        .iter()
+        .filter(|(name, _, data)| {
+            name == "InboxEnqueued"
+                && data["source"] == json!("system")
+                && data["lane"] == json!("next_step")
+        })
+        .map(|(_, _, data)| data)
+        .collect();
+    assert_eq!(injected.len(), 2, "{injected:?}");
+    assert!(
+        injected[0]["message"]["user"]["meta"]["origin"]["kind"] == json!("memory_addition"),
+        "{injected:?}"
+    );
+}
+
+/// The seam's message: a user-role message (the inbox accepts no other role) whose source is
+/// System and whose origin names the records it carries.
+fn addition_message(text: &str) -> Message {
+    Message::User {
+        content: vec![agent_core::ContentPart::text(format!(
+            "<memory>hit {text}</memory>"
+        ))],
+        meta: agent_core::MessageMeta {
+            id: None,
+            source: Some(InputSource::System),
+            origin: Some(
+                agent_core::OpaqueJson::parse(r#"{"kind":"memory_addition","records":[]}"#)
+                    .unwrap(),
+            ),
+        },
+    }
+}
 // ---------- ADR 0018: the summary settings follow the switched route ----------
 
 /// A driver whose `AgentConfig.compaction_settings` is the **startup** route's form and whose

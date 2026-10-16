@@ -138,12 +138,13 @@ fn the_bar_cursor_counts_the_rails_display_width() {
         6,
         "two CJK characters"
     );
-    // The text sits on the band row, one below the status row (the status row takes the row
-    // the `lines` style spends on its top rule, so the band is one row lower).
+    // The text sits on the band row, below the status row and the band's top half-cell pad
+    // (ADR 0035: the status row takes the row the `lines` style spends on its top
+    // rule, and the top pad is one more).
     assert_eq!(
         terminal.backend().cursor_position().y,
-        6,
-        "on the band, below the status row"
+        5,
+        "on the band, below the status row and the top pad"
     );
 }
 
