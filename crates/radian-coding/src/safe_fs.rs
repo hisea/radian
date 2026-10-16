@@ -105,7 +105,9 @@ pub enum OpenMode {
     Read,
     /// `O_RDWR | O_NOFOLLOW`; the file must exist (the caller truncates after its checks).
     ReadWrite,
-    /// `O_WRONLY | O_CREAT | O_NOFOLLOW`; the caller truncates after its checks.
+    /// `O_RDWR | O_CREAT | O_NOFOLLOW`; the caller truncates after its checks. Read faces
+    /// write: the `write` tool counts the old file's lines on this same fd **before** it
+    /// truncates, so the count cannot race a second open of the path.
     WriteCreate,
     /// `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW`: the file must not exist.
     WriteNew,
@@ -400,7 +402,7 @@ mod imp {
         let flags = match mode {
             OpenMode::Read => libc::O_RDONLY | base,
             OpenMode::ReadWrite => libc::O_RDWR | base,
-            OpenMode::WriteCreate => libc::O_WRONLY | libc::O_CREAT | base,
+            OpenMode::WriteCreate => libc::O_RDWR | libc::O_CREAT | base,
             OpenMode::WriteNew => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | base,
         };
         openat(&dir, name, flags, 0o644)
@@ -582,7 +584,7 @@ mod imp {
         match mode {
             OpenMode::Read => options.read(true),
             OpenMode::ReadWrite => options.read(true).write(true),
-            OpenMode::WriteCreate => options.write(true).create(true),
+            OpenMode::WriteCreate => options.read(true).write(true).create(true),
             OpenMode::WriteNew => options.write(true).create_new(true),
         };
         options.open(&path).map_err(|e| io(parts, e))

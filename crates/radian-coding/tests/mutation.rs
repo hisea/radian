@@ -40,6 +40,84 @@ async fn write_creates_and_overwrites_a_file_verbatim() {
     assert_eq!(read(&root.join("sub/a.txt")), "two");
 }
 
+/// ADR 0028: an overwrite's result carries the **old** file's line count
+/// (`previous_lines`), so the TUI can show `+M −N`. The rule is `str::lines`': `\n`-separated,
+/// a `\r\n` pair counts once, and a final line ending adds no line.
+#[tokio::test]
+async fn write_reports_the_overwritten_files_line_count() {
+    let dir = TempDir::new("write-previous-lines");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+
+    // A new file has no old content: the field is absent, not zero.
+    let created = call(&tools, "write", json!({"path": "a.txt", "content": "x\n"}))
+        .await
+        .unwrap();
+    assert!(
+        structured(&created).get("previous_lines").is_none(),
+        "a new file has no previous_lines: {:?}",
+        structured(&created)
+    );
+
+    // An overwrite of a 3-line file (trailing newline included) reports 3.
+    std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    let overwrite = call(&tools, "write", json!({"path": "a.txt", "content": "x"}))
+        .await
+        .unwrap();
+    assert_eq!(structured(&overwrite)["previous_lines"], 3);
+    assert_eq!(structured(&overwrite)["bytes_written"], 1);
+
+    // Without a trailing newline the count is the same: the final ending adds no line.
+    std::fs::write(root.join("a.txt"), "one\ntwo\nthree").unwrap();
+    let no_trailing = call(&tools, "write", json!({"path": "a.txt", "content": "x"}))
+        .await
+        .unwrap();
+    assert_eq!(structured(&no_trailing)["previous_lines"], 3);
+
+    // A `\r\n` pair is one terminator, and an empty file counts zero (field absent).
+    std::fs::write(root.join("a.txt"), "one\r\ntwo\r\n").unwrap();
+    let crlf = call(&tools, "write", json!({"path": "a.txt", "content": "x"}))
+        .await
+        .unwrap();
+    assert_eq!(structured(&crlf)["previous_lines"], 2);
+    std::fs::write(root.join("a.txt"), "").unwrap();
+    let empty = call(&tools, "write", json!({"path": "a.txt", "content": "x"}))
+        .await
+        .unwrap();
+    assert!(
+        structured(&empty).get("previous_lines").is_none(),
+        "an empty old file has no previous_lines: {:?}",
+        structured(&empty)
+    );
+}
+
+/// The count streams the old file, so its size is independent of `max_write_bytes` (the cap
+/// applies to the new `content` only). An old file far past a tiny cap still counts.
+#[tokio::test]
+async fn write_counts_an_old_file_larger_than_max_write_bytes() {
+    let dir = TempDir::new("write-previous-lines-big");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools =
+        radian_coding::CodingTools::new(&root)
+            .unwrap()
+            .with_limits(radian_coding::Limits {
+                max_write_bytes: 4,
+                ..Default::default()
+            });
+
+    let old: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+    assert!(old.len() > 4, "the old file is past the write cap");
+    std::fs::write(root.join("big.txt"), &old).unwrap();
+
+    let output = call(&tools, "write", json!({"path": "big.txt", "content": "x"}))
+        .await
+        .unwrap();
+    assert_eq!(structured(&output)["previous_lines"], 1000);
+    assert_eq!(read(&root.join("big.txt")), "x");
+}
+
 #[tokio::test]
 async fn patch_replaces_exactly_one_occurrence() {
     let dir = TempDir::new("patch-happy");

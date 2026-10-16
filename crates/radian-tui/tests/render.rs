@@ -1783,10 +1783,10 @@ fn a_patch_card_shows_the_replacement_with_diff_roles() {
     );
 }
 
-/// A `write` card: the head counts, the body is the content (no `+` markers), and a CJK path
-/// renders.
+/// A `write` card: the head counts, the body numbers every content line as an addition
+/// (`write` is a whole-file write, ADR 0028), and a CJK path renders.
 #[test]
-fn a_write_card_shows_the_content_without_markers() {
+fn a_write_card_numbers_every_content_line() {
     // A CJK path and content: the byte count is UTF-8 bytes, the line count is lines.
     let mut app = App::new("m", "s");
     app.push_message(&assistant_with(
@@ -1816,12 +1816,19 @@ fn a_write_card_shows_the_content_without_markers() {
     // spaces so the assertion is about the text, not the terminal's cell model.
     let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(squeezed.contains("•write笔记.md·+2✓"), "{text}");
-    assert!(squeezed.contains("第一行"), "{text}");
-    assert!(squeezed.contains("第二行"), "{text}");
+    // The new file has no old content (`previous_lines` absent), so the head stays `+2`, and
+    // each content line is a numbered `Added` row. The `+` is the diff-added sign.
+    assert!(squeezed.contains("1+第一行"), "{text}");
+    assert!(squeezed.contains("2+第二行"), "{text}");
+    let sign = style_of(&terminal, "1 +").expect("the line number");
+    assert_eq!(
+        sign.fg, app.theme.diff_line_number.fg,
+        "the line number is the weak diff gutter"
+    );
     let body = style_of(&terminal, "第").expect("the content");
     assert_eq!(
         body.fg, app.theme.tool_result.fg,
-        "no diff role for a write body"
+        "plain content keeps the body style"
     );
 }
 

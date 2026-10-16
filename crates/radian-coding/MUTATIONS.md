@@ -354,3 +354,21 @@ change** — the walk refuses a link before any open, and the after-open seam sh
 what gets written — so the "defence in depth, untestable" note no longer applies. The
 parent-directory window the earlier record called "not mitigated at all" is the one M-A/M-B
 cover.
+
+## `write` 结果的 `previous_lines`（ADR 0028，2026-10-16）
+
+Base：本片 HEAD（`oc/write-diff`）· 就地变异（改 `write.rs`），每个变异前把文件复制到
+`.radian/scratch/mut/write.rs.orig`，跑完用**不带 `-p`** 的 `cp` 还原（mtime 落回当前，避开
+`radian-tui/MUTATIONS.md` 记过的「副本旧 mtime → cargo 判定新鲜、变异留在构建缓存」陷阱）并
+`cmp` 逐字节确认；结束时 `git status --short` 只剩本片自己的改动。每个变异用
+`cargo test -p radian-coding --test mutation --locked --no-fail-fast -- <test>`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| W1 | 覆盖时不再写 `previous_lines`（`if previous_lines > 0` → `if false`） | `write_reports_the_overwritten_files_line_count`、`write_counts_an_old_file_larger_than_max_write_bytes` | ✅ |
+| W2 | 先 `truncate` 再数行（读到的旧文件已被清空） | `write_reports_the_overwritten_files_line_count` | ✅ |
+| W3 | 行数公式差一（`newlines + 1`，结尾换行也算成一行） | `write_reports_the_overwritten_files_line_count` | ✅ |
+
+3/3 抓住。W1 等同本片之前的行为：旧代码的 `structured` 里根本没有 `previous_lines`，断言
+`== 3` 得到 `null` 即失败。空文件不写字面量 0（字段缺席）由同一用例末段钉住；`\r\n` 算一个换行、
+结尾换行不算新行由同一用例中段钉住。
