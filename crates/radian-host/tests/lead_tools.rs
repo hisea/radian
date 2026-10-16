@@ -1119,7 +1119,13 @@ async fn integrate_task_merges_then_verifies_and_emits_before_merge() {
     let hooks: HookLog = Arc::new(std::sync::Mutex::new(Vec::new()));
     let orchestration = radian_host::Orchestration {
         verify: vec![
+            // Reads the merged file (proves the worktree is the integration worktree's tree).
             "test -f t1.txt".to_owned(),
+            // Writes a NEW file into the integration worktree: it must succeed, which proves the
+            // sandbox root is the integration worktree (not the lead workspace, where it would be
+            // outside the root and denied).
+            "echo ok > verified.txt".to_owned(),
+            // Writes outside the root: the sandbox must deny it.
             "echo x > ../escaped".to_owned(),
         ],
         ..Default::default()
@@ -1163,9 +1169,10 @@ async fn integrate_task_merges_then_verifies_and_emits_before_merge() {
         "{value}"
     );
     let verify = value["verify"].as_array().expect("verify results");
-    assert_eq!(verify.len(), 2, "{value}");
+    assert_eq!(verify.len(), 3, "{value}");
     assert_eq!(verify[0]["status"], "ok", "{value}");
-    assert_eq!(verify[1]["status"], "failed", "{value}");
+    assert_eq!(verify[1]["status"], "ok", "{value}");
+    assert_eq!(verify[2]["status"], "failed", "{value}");
 
     let integration = registry.integration().expect("the integration worktree");
     assert!(

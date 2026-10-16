@@ -160,13 +160,115 @@ async fn the_integration_worktree_is_created_lazily_from_the_lead_head_and_never
     let again = registry.ensure_integration().await.expect("cached");
     assert_eq!(again, integration);
 
-    // A *different* registry (a second lead/process) refuses: the branch already exists.
+    // A *different* registry (a second lead/process) refuses with **our** refusal, and the branch
+    // is not reset behind the human's back (ADR 0030).
     let other = registry_for(&lead, "other");
     let error = other
         .ensure_integration()
         .await
         .expect_err("an existing integration branch must be refused");
-    assert!(error.to_string().contains("already exists"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("refusing to create the integration worktree"),
+        "the refusal must be ours: {error}"
+    );
+    assert_eq!(
+        git_output(&lead, &["rev-parse", "radian/integration"]),
+        head,
+        "an existing integration branch must never be reset"
+    );
+
+    // With the worktree gone but the branch left (a previous run that removed its worktree), the
+    // refusal is still ours and names the branch (not git's own `worktree add` failure).
+    assert!(git(
+        &lead,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            integration.worktree.to_str().unwrap()
+        ]
+    ));
+    assert!(!integration.worktree.exists());
+    let third = registry_for(&lead, "third");
+    let error = third
+        .ensure_integration()
+        .await
+        .expect_err("an existing integration branch must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("the branch `radian/integration`"),
+        "the branch refusal must name the branch: {error}"
+    );
+}
+
+/// ADR 0030: an existing integration **directory** (with no branch, e.g. a
+/// previous run that left it) is refused too, with our refusal.
+#[tokio::test]
+async fn an_existing_integration_directory_is_refused() {
+    let _ = isolated_home();
+    let lead = lead_repo("existing-dir");
+    // Create the integration worktree once, then drop the branch and the worktree registration so
+    // only a plain directory is left at the path.
+    let registry = registry_for(&lead, "lead");
+    let integration = registry.ensure_integration().await.expect("create");
+    assert!(git(
+        &lead,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            integration.worktree.to_str().unwrap()
+        ]
+    ));
+    assert!(git(&lead, &["branch", "-D", "radian/integration"]));
+    assert!(git(&lead, &["worktree", "prune"]));
+    std::fs::create_dir_all(&integration.worktree).unwrap();
+
+    let other = registry_for(&lead, "other");
+    let error = other
+        .ensure_integration()
+        .await
+        .expect_err("an existing integration directory must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("refusing to create the integration worktree"),
+        "the refusal must be ours: {error}"
+    );
+}
+
+/// ADR 0030, the ADR test "no tool can move the user branch": the
+/// integration worktree holds `radian/integration`, and `git push . radian/integration:main` into
+/// the lead's checked-out `main` is refused by `receive.denyCurrentBranch`. So even a raw push
+/// from the integration worktree cannot move the user's branch.
+#[tokio::test]
+async fn a_push_from_the_integration_worktree_cannot_move_the_user_branch() {
+    let lead = lead_repo("push");
+    let registry = registry_for(&lead, "lead");
+    let integration = registry.ensure_integration().await.expect("create");
+    let before = git_output(&lead, &["rev-parse", "main"]);
+    // Move the integration branch ahead of the user's branch, so there is something to push.
+    std::fs::write(integration.worktree.join("integrated.txt"), "x\n").unwrap();
+    commit_all(&integration.worktree, "integration ahead");
+
+    let output = std::process::Command::new("git")
+        .current_dir(&integration.worktree)
+        .args(["push", ".", "radian/integration:main"])
+        .output()
+        .expect("git push runs");
+    assert!(
+        !output.status.success(),
+        "a push onto the checked-out user branch must be refused"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("denyCurrentBranch") || stderr.contains("checked out"),
+        "the refusal must be denyCurrentBranch: {stderr}"
+    );
+    assert_eq!(git_output(&lead, &["rev-parse", "main"]), before);
 }
 
 /// ADR 0030: a task branch merges with `--no-ff` and no workspace hook
