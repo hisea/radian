@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use agent_core::{NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use radian_host::{
-    HostBindings, Isolation, LocalSession, SessionError, SessionFacade, SessionId,
+    CommitGate, HostBindings, Isolation, LocalSession, SessionError, SessionFacade, SessionId,
     SessionProjection, SessionQueue, SessionSetup, SpawnRequest, SpawnStage, TaskBuilder,
     TaskContext, TaskRegistry, TaskSeams, TaskSession, build_model, end_of_task_commit,
     open_session,
@@ -1201,6 +1201,7 @@ async fn a_failed_spawn_at(stage: SpawnStage) {
                 Ok(())
             }
         })),
+        commit_gate: None,
     };
     let fixture = Fixture::with_seams("fail", "http://127.0.0.1:1/v1", seams);
     if workspace_sandbox(&fixture.lead).is_none() {
@@ -1266,4 +1267,138 @@ async fn a_failed_spawn_at(stage: SpawnStage) {
             finished[0]
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0039 decision 7: the end-of-task commit is awaitable and its failure is task state.
+// ---------------------------------------------------------------------------------------------
+
+/// `remove` waits for a running end-of-task commit (ADR 0039 decision 7). The commit is held in
+/// the gate seam: without the await, `remove` would see the still-uncommitted worktree and
+/// refuse, so the "still running" assertion is what the mutation breaks.
+#[tokio::test]
+async fn remove_waits_for_the_end_of_task_commit() {
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                    "function": {"name": "write", "arguments": "{\"path\":\"made.txt\",\"content\":\"by the task\\n\"}"}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ]),
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "done"}), None),
+            chunk(json!({}), Some("stop")),
+        ]),
+    ])
+    .await;
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let entered_tx = Mutex::new(Some(entered_tx));
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let gate: CommitGate = Arc::new(move || {
+        if let Some(entered) = entered_tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = entered.send(());
+        }
+        // Block the commit until the test releases it: no sleep decides the ordering.
+        let _ = release_rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+    });
+    let fixture = Fixture::with_seams(
+        "remove-wait",
+        &server.base_url,
+        TaskSeams {
+            spawn: None,
+            commit_gate: Some(gate),
+        },
+    );
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.brief = Some("write made.txt".to_owned());
+    fixture.registry.spawn(request).await.expect("spawn");
+
+    // The turn ended and its commit is now blocked in the gate.
+    entered_rx.await.expect("the end-of-task commit started");
+    let mut remove = Box::pin(fixture.registry.remove("t1", false));
+    let observed = tokio::time::timeout(std::time::Duration::from_millis(500), &mut remove).await;
+    assert!(
+        observed.is_err(),
+        "remove must wait for the end-of-task commit, not read a half-committed worktree"
+    );
+
+    release_tx.send(()).expect("release the commit");
+    remove.await.expect("remove succeeds once the commit lands");
+    assert!(fixture.registry.get("t1").is_none());
+    assert!(
+        !fixture.worktree_root().join("t1").exists(),
+        "the worktree goes after the commit"
+    );
+}
+
+/// A failing end-of-task commit is part of the task's result: it lands in a `TaskFinished`
+/// (ADR 0039 decision 7), so a reader of the lead's journal sees it.
+#[tokio::test]
+async fn a_failing_end_commit_shows_in_task_finished() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": "done"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+    let fixture = Fixture::new("commit-fail", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    // Spawn with no brief, so the worktree can leave `radian/t1` before the turn: the end commit
+    // then refuses (`wrong_branch`) and the failure must be recorded.
+    let record = fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let worktree = record.worktree.clone().unwrap();
+    std::fs::write(worktree.join("change.txt"), "a change\n").unwrap();
+    assert!(git(&worktree, &["checkout", "-q", "-b", "other"]));
+    record
+        .session
+        .inbox()
+        .followup(
+            agent_core::Message::user("go"),
+            agent_core::InputSource::Subagent,
+        )
+        .await
+        .expect("the brief");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let finished = loop {
+        let lines = fixture.lead_journal_lines();
+        if let Some(finished) = lines.iter().find(|v| v["event"] == "TaskFinished") {
+            break finished.clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the failed end commit never reached TaskFinished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(finished["data"]["outcome"], "completed");
+    let error = finished["data"]["error"]
+        .as_str()
+        .expect("the commit failure is recorded");
+    assert!(error.contains("radian/t1"), "{error}");
+    assert_eq!(
+        git_out(&worktree, &["status", "--porcelain"]),
+        "?? change.txt",
+        "the failed commit left the change uncommitted"
+    );
+
+    // `remove` waits for the (failed) commit and then refuses the dirty worktree.
+    let refused = fixture.registry.remove("t1", false).await;
+    assert!(refused.is_err(), "a dirty worktree is still refused");
+    fixture
+        .registry
+        .remove("t1", true)
+        .await
+        .expect("force remove");
 }
