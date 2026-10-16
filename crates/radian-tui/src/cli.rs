@@ -1370,6 +1370,7 @@ fn run(
                 price_for: Some(Arc::clone(&route_price)),
                 protected_branches: config.git.protected_branches.clone(),
                 allowed_filters: Some(config.git.allowed_filters()),
+                shell_auto_background: config.shell.auto_background_after(),
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),

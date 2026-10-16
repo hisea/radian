@@ -791,6 +791,9 @@ struct Setup {
     skills_disabled: Vec<String>,
     /// `[memory.injection]` (ADR 0021).
     memory_injection: radian_host::memory::InjectionConfig,
+    /// `[shell] auto_background_secs` (ADR 0037), resolved by the config reader.
+    /// `None` means adoption is off.
+    shell_auto_background: Option<std::time::Duration>,
     /// `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized (ADR 0016).
     allow_unix_sockets: Vec<PathBuf>,
 }
@@ -1224,6 +1227,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         skills_builtin: config.skills.builtin.unwrap_or(true),
         skills_disabled: config.skills.disabled.clone(),
         memory_injection: config.memory.injection(),
+        shell_auto_background: config.shell.auto_background_after(),
         allow_unix_sockets: {
             let (paths, warnings) = radian_host::resolve_allow_unix_sockets(
                 &config.sandbox.allow_unix_sockets,
@@ -1622,6 +1626,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             price_for: setup.price_for,
             protected_branches: Vec::new(),
             allowed_filters: None,
+            shell_auto_background: setup.shell_auto_background,
             servers: setup.servers,
             // ADR 0036: a CLI session uses the `default` role.
             role: None,
