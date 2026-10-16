@@ -1,7 +1,9 @@
 //! The thin tool block (ADR 0028): one head line
-//! `• <tool name> <title> · <meta> <status>` and `│ `-prefixed body rows. No background, no
-//! half-cell padding, no box, no `⟦…⟧` meta row — the meta is on the head line — and no
-//! marker or status glyph ever reaches the text a copy takes.
+//! `<fold marker> <tool name> <title> · <meta> <status>` and `│ `-prefixed body rows. The head's
+//! fold marker is `•`/`◼`/`◻` (ascii `*`/`+`/`-`), decided by whether a body is drawn under it
+//! (ADR 0035's 2026-10-16 "折叠标记统一" note). No background, no half-cell padding, no box, no
+//! `⟦…⟧` meta row — the meta is on the head line — and no marker or status glyph ever reaches the
+//! text a copy takes.
 
 use agent_core::{ContentPart, Message, ToolCall, ToolResult};
 use radian_tui::app::{App, Effect, EntryKind, Input, UpdateResult};
@@ -102,12 +104,20 @@ fn with_duration(app: &mut App, ms: u64) {
     }
 }
 
+/// Whether a row is a tool block's head row (any of the three fold markers, ADR 0035's
+/// 2026-10-16 "折叠标记统一" note): `• ` one-liner, `◼ ` folded, `◻ ` body drawn.
+fn is_head_row(row: &str) -> bool {
+    ["• ", "◼ ", "◻ "]
+        .iter()
+        .any(|marker| row.starts_with(marker))
+}
+
 /// The rows a tool block occupies: the head row and its body rows.
 fn block_rows(lines: &[String]) -> Vec<&String> {
     lines
         .iter()
-        .skip_while(|line| !line.starts_with("• "))
-        .take_while(|line| line.starts_with("• ") || line.starts_with("│ "))
+        .skip_while(|line| !is_head_row(line))
+        .take_while(|line| is_head_row(line) || line.starts_with("│ "))
         .collect()
 }
 
@@ -142,7 +152,7 @@ fn the_head_line_is_the_name_the_title_the_meta_and_the_status() {
         let lines = rows(&terminal, width, 16);
         let block = block_rows(&lines);
         assert_eq!(
-            block[0], "• shell $ make test · exit 0 · 12.4s ✓",
+            block[0], "◻ shell $ make test · exit 0 · 12.4s ✓",
             "the head at {width} columns"
         );
         // The output rows: `│ ` and the text from column 3.
@@ -169,7 +179,7 @@ fn a_failed_call_ends_the_head_with_a_cross_and_shows_the_error_body() {
     let terminal = render(&mut app, 80, 20);
     let lines = rows(&terminal, 80, 20);
     let block = block_rows(&lines);
-    assert_eq!(block[0], "• shell $ make test · exit 2 ×", "{block:?}");
+    assert_eq!(block[0], "◻ shell $ make test · exit 2 ×", "{block:?}");
     assert_eq!(block[1], "│ boom", "the error body: {block:?}");
     // The head's cross and the error body carry the error roles.
     let buffer = terminal.backend().buffer();
@@ -247,7 +257,7 @@ fn the_fold_modes_decide_the_body_and_the_collapsed_meta() {
     assert_eq!(
         block,
         vec![
-            &"• shell $ make test · exit 0 ✓".to_string(),
+            &"◻ shell $ make test · exit 0 ✓".to_string(),
             &"│ line 5".to_string(),
             &"│ line 6".to_string(),
         ],
@@ -263,9 +273,122 @@ fn the_fold_modes_decide_the_body_and_the_collapsed_meta() {
     let block = block_rows(&lines);
     assert_eq!(
         block,
-        vec![&"• shell $ make test · exit 0 · 6 lines ✓".to_string()],
+        vec![&"◼ shell $ make test · exit 0 · 6 lines ✓".to_string()],
         "the head only, with the hidden count"
     );
+}
+
+/// ADR 0035's 2026-10-16 "折叠标记统一" note, option A: one fold marker for the thinking header
+/// and for an expandable tool head, decided only by whether a body is drawn under the head. Each
+/// row of the note's table, at 80 columns, in unicode and ascii:
+///
+/// * a `collapsed` shell (the `· N lines` head) → `◼ ` / `+ `;
+/// * an `errors`-preview shell (the last rows drawn) → `◻ ` / `- `;
+/// * a one-line `read` → `• ` / `* `;
+/// * a `read` hiding a hundred lines → `• ` / `* ` (a compact tool never folds under `errors`);
+/// * the same `read` with `Ctrl-O` (the expanded fold) → `◻ ` / `- `.
+#[test]
+fn the_tool_head_fold_marker_follows_the_drawn_body() {
+    /// One tool call with its result, on the given tier and fold.
+    fn tool_app(tier: &str, fold: ToolFold, name: &str, text: &str) -> App {
+        let mut app = App::new("m", "s");
+        app.apply_footer(&radian_host::config::TuiFooterConfig {
+            glyphs: Some(tier.to_string()),
+            preset: Some("classic".to_string()),
+            ..Default::default()
+        });
+        app.tool_display = ToolDisplay {
+            fold,
+            preview_lines: 2,
+        };
+        app.push_message(&Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                arguments: json!({"command": "make test", "path": "a.rs"}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        });
+        app.push_message(&Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text(text)],
+                structured: Some(json!({"command": "make test", "exit_code": 0})),
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        });
+        app
+    }
+
+    /// The head row (the first row that is neither empty nor a body rail row) and the body rows.
+    fn block(app: &mut App) -> (String, usize) {
+        let lines = rows(&render(app, 80, 20), 80, 20);
+        let head = lines
+            .iter()
+            .find(|line| !line.is_empty() && !line.starts_with("│ ") && !line.starts_with("| "))
+            .cloned()
+            .expect("a head row");
+        let body = lines
+            .iter()
+            .filter(|line| line.starts_with("│ ") || line.starts_with("| "))
+            .count();
+        (head, body)
+    }
+
+    let six = (1..=6).map(|i| format!("line {i}\n")).collect::<String>();
+    let hundred = (1..=100).map(|i| format!("line {i}\n")).collect::<String>();
+    for (tier, folded, open, dot) in [("unicode", "◼ ", "◻ ", "• "), ("ascii", "+ ", "- ", "* ")]
+    {
+        // `collapsed`: only the head shows, the six lines named in `· 6 lines` → folded.
+        let (head, body) = block(&mut tool_app(tier, ToolFold::Collapsed, "shell", &six));
+        assert!(
+            head.starts_with(folded),
+            "{tier}: collapsed shell: {head:?}"
+        );
+        assert_eq!(body, 0, "{tier}: a folded block draws no body: {head:?}");
+
+        // `errors`: the last two rows are drawn under the head → open.
+        let (head, body) = block(&mut tool_app(tier, ToolFold::Errors, "shell", &six));
+        assert!(head.starts_with(open), "{tier}: errors shell: {head:?}");
+        assert_eq!(body, 2, "{tier}: the preview rows: {head:?}");
+
+        // A one-line `read`: nothing is folded away → the dot.
+        let (head, body) = block(&mut tool_app(
+            tier,
+            ToolFold::Errors,
+            "read",
+            "fn main() {}",
+        ));
+        assert!(head.starts_with(dot), "{tier}: one-line read: {head:?}");
+        assert_eq!(body, 0, "{tier}: a one-liner draws no body: {head:?}");
+
+        // A `read` hiding a hundred lines: still the `•` one-liner — a compact tool never folds
+        // under `errors`, however many lines its result hides (ADR 0035's 2026-10-16 note, option
+        // A; reviewer fix 1: this used to fold to `◼` because the result had more than one line).
+        let (head, body) = block(&mut tool_app(tier, ToolFold::Errors, "read", &hundred));
+        assert!(head.starts_with(dot), "{tier}: a 100-line read: {head:?}");
+        assert!(
+            !head.starts_with(folded),
+            "{tier}: a read never folds: {head:?}"
+        );
+        assert_eq!(body, 0, "{tier}: a compact tool draws no body: {head:?}");
+
+        // The same `read` under `Ctrl-O` (the expanded fold): the body is drawn → open.
+        let (head, body) = block(&mut tool_app(
+            tier,
+            ToolFold::Expanded,
+            "read",
+            "fn main() {}",
+        ));
+        assert!(head.starts_with(open), "{tier}: read with Ctrl-O: {head:?}");
+        assert_eq!(body, 1, "{tier}: the expanded read body: {head:?}");
+    }
 }
 
 /// `read` is a small tool (ADR 0028): a successful call is one line, and
@@ -293,7 +416,7 @@ fn a_small_tool_is_one_line_until_it_is_expanded() {
         app.push_message(&Message::Tool {
             result: ToolResult {
                 call_id: "c1".into(),
-                content: vec![ContentPart::text("fn main() {}\nsecond line")],
+                content: vec![ContentPart::text("fn main() {}")],
                 structured: None,
                 is_error,
                 error_code: None,
@@ -303,7 +426,8 @@ fn a_small_tool_is_one_line_until_it_is_expanded() {
         app
     };
 
-    // The default fold: one head line, no body.
+    // The default fold: one head line, no body. A one-line result is a head-only `•` (ADR
+    // 0035's 2026-10-16 note: only a body drawn under the head is `◻`).
     let lines = rows(
         &render(&mut read_app(ToolFold::Errors, false), 80, 12),
         80,
@@ -316,14 +440,18 @@ fn a_small_tool_is_one_line_until_it_is_expanded() {
         "a read one-liner"
     );
 
-    // Expanded: the body rows appear.
+    // Expanded: the body rows appear under a `◻`.
     let lines = rows(
         &render(&mut read_app(ToolFold::Expanded, false), 80, 12),
         80,
         12,
     );
     let block = block_rows(&lines);
-    assert_eq!(block.len(), 3, "{block:?}");
+    assert_eq!(block.len(), 2, "{block:?}");
+    assert_eq!(
+        block[0],
+        "◻ read crates/radian-host/src/job_notify.rs 100-160 ✓"
+    );
     assert_eq!(block[1], "│ fn main() {}", "{block:?}");
 
     // An error gives it a body whatever the fold says.
@@ -333,7 +461,8 @@ fn a_small_tool_is_one_line_until_it_is_expanded() {
         12,
     );
     let block = block_rows(&lines);
-    assert_eq!(block.len(), 3, "{block:?}");
+    assert_eq!(block.len(), 2, "{block:?}");
+    assert!(block[0].starts_with('◻'), "{block:?}");
     assert!(block[0].ends_with(FAILED), "{block:?}");
 }
 
@@ -351,7 +480,7 @@ fn a_new_file_write_numbers_each_content_line() {
     app.tool_display.fold = ToolFold::Expanded;
     let lines = rows(&render(&mut app, 80, 16), 80, 16);
     let block = block_rows(&lines);
-    assert_eq!(block[0], "• write a.rs · +3 ✓", "{block:?}");
+    assert_eq!(block[0], "◻ write a.rs · +3 ✓", "{block:?}");
     // Every content line is an addition, numbered from 1; the `+` is synthesized (the entry
     // text is the content alone).
     assert_eq!(block[1], "│    1 + one", "{block:?}");
@@ -375,7 +504,7 @@ fn an_overwrite_write_head_shows_the_removed_count() {
     app.tool_display.fold = ToolFold::Expanded;
     let lines = rows(&render(&mut app, 80, 16), 80, 16);
     let block = block_rows(&lines);
-    assert_eq!(block[0], "• write a.rs · +3 −5 ✓", "{block:?}");
+    assert_eq!(block[0], "◻ write a.rs · +3 −5 ✓", "{block:?}");
     assert_eq!(block[1], "│    1 + one", "{block:?}");
 }
 
@@ -417,7 +546,7 @@ fn a_patch_block_shows_its_diff_body() {
     });
     let lines = rows(&render(&mut app, 80, 16), 80, 16);
     let block = block_rows(&lines);
-    assert_eq!(block[0], "• patch src/a.rs · +1 −1 ✓", "{block:?}");
+    assert_eq!(block[0], "◻ patch src/a.rs · +1 −1 ✓", "{block:?}");
     assert_eq!(block[1], "│ @@ -3,1 +3,1 @@", "{block:?}");
     assert_eq!(block[2], "│    3 - old one", "{block:?}");
     assert_eq!(block[3], "│    3 + new one", "{block:?}");
@@ -506,7 +635,7 @@ fn a_cjk_command_and_output_keep_the_marker_column() {
     };
     assert_eq!(
         squeeze(block[0]),
-        squeeze("• shell $ echo 你好世界 · exit 0 ✓"),
+        squeeze("◻ shell $ echo 你好世界 · exit 0 ✓"),
         "{block:?}"
     );
     assert_eq!(squeeze(block[1]), "│你好，世界", "{block:?}");
@@ -567,7 +696,7 @@ fn every_tool_row_has_no_background_and_the_marker_column_holds() {
             // whose content starts at column 3.
             for (index, row) in block.iter().enumerate() {
                 let y = lines.iter().position(|line| line == *row).unwrap() as u16;
-                if index == 0 || row.starts_with("• ") {
+                if index == 0 || is_head_row(row) {
                     assert!(row.ends_with(OK), "{row:?}");
                 } else {
                     assert!(row.starts_with("│ "), "{row:?}");
@@ -606,8 +735,9 @@ fn the_ascii_glyph_set_draws_ascii_markers_and_status() {
     assert_eq!(lines[head], "- shell $ make test · exit 0 +", "{lines:?}");
     assert_eq!(lines[head + 1], "| done", "{lines:?}");
     let all = lines.join("\n");
-    assert!(!all.contains('•'), "{all}");
-    assert!(!all.contains('│'), "{all}");
+    for unicode in ['•', '◼', '◻', '│'] {
+        assert!(!all.contains(unicode), "{unicode:?} in {all}");
+    }
 }
 
 #[test]
@@ -619,7 +749,7 @@ fn a_copy_of_a_block_has_no_marker_meta_or_status() {
     let terminal = render(&mut app, 80, 20);
     let head_row = rows(&terminal, 80, 20)
         .iter()
-        .position(|line| line.starts_with("• shell"))
+        .position(|line| is_head_row(line))
         .expect("the head row") as u16;
     let _down: UpdateResult = app.update(Input::MouseDown {
         row: head_row,
@@ -645,7 +775,7 @@ fn a_copy_of_a_block_has_no_marker_meta_or_status() {
     // glyph do not.
     assert!(copied.contains("make test"), "{copied:?}");
     assert!(copied.contains("all good"), "{copied:?}");
-    for glyph in ['•', '│', OK, FAILED, '·'] {
+    for glyph in ['•', '◼', '◻', '│', OK, FAILED, '·'] {
         assert!(!copied.contains(glyph), "{glyph:?} in {copied:?}");
     }
     assert!(

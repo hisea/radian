@@ -138,7 +138,7 @@ the provider and the model only.
 ## Layout and keys
 
 ```
-transcript: ❯ user  ·  assistant prose  ·  ▼/▶ thinking  ·  • tool head + │ body
+transcript: ❯ user  ·  assistant prose  ·  ◼/◻ thinking  ·  <fold> tool head + │ body
 ─────────────────────────────────────────────────────────────────────
 ❯ type here
 ─────────────────────────────────────────────────────────────────────
@@ -320,12 +320,13 @@ A glyph the font does not have is drawn by a system fallback font with different
 sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
 characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code and
 Source Code Pro have (ADR 0027: Operator Mono left the reference set, and the tier's
-token arrows became `↑`/`↓`, its success `✓`, its fold marker `▶` — `▸` misses Fira Code and
-Source Code Pro, the owner's 2026-10-16 note — and its truncation `…`). The
+token arrows became `↑`/`↓`, its success `✓`, its truncation `…`). The
 brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under `ascii`; `㎭` (U+33AD) is gone
 (East-Asian-Wide, off-baseline fallback). The spinner's default
 is `pulse` (`⏺`, one cell); the covered optional kind is `quadrant` (`▖▘▝▗`). The arc
-(`◜◝◞◟`), the braille (`⠋⠙⠸⠴`) and `pulse` itself are the **documented exceptions** to this
+(`◜◝◞◟`), the braille (`⠋⠙⠸⠴`), `pulse` itself, and the fold pair `◼`/`◻` (ADR 0035's
+2026-10-16 note: the owner chose them knowing four of the six reference fonts lack them) are the
+**documented exceptions** to this
 rule (ADR 0027/10: the owner picked them after seeing them), so a font without them
 draws a fallback glyph; `tui.spinner = "quadrant"` switches to the covered set.
 
@@ -346,11 +347,9 @@ from slipping in unchecked.
 | `↓` | U+2193 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `~` `✓` `×` | U+007E/2713/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `•` | U+2022 | tool block head marker (ADR 0028) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `•` | U+2022 | tool head marker, one-liner (running, empty, or a small tool; ADR 0035's 2026-10-16 note) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `│` | U+2502 | tool block body rail / open frames | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `╭` `╰` | U+256D/70 | open frame corners (ADR 0035/7) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▼` | U+25BC | thinking header, expanded (ADR 0028) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▶` | U+25B6 | thinking header, folded | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `…` | U+2026 | truncation | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -367,6 +366,8 @@ Documented exceptions (allowed to fall back; the test keeps them in a separate s
 | glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Source Code Pro |
 |---|---|---|---|---|---|---|---|---|
 | `⏺` | U+23FA | spinner default (`pulse`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `◼` | U+25FC | thinking / tool head, folded (ADR 0035's 2026-10-16 note) | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| `◻` | U+25FB | thinking / tool head, expanded | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
 | `◜` `◝` `◞` `◟` | U+25DC…DF | spinner `arc` | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ |
 | `⠋` `⠙` `⠹` `⠸` `⠼` `⠴` `⠦` `⠧` `⠇` `⠏` | U+280B… | spinner `braille` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
 
@@ -383,9 +384,10 @@ Replaced or dropped in the `unicode` tier (they were not in all six fonts):
 | `^` `v` tokens | U+005E/76 | `↑` `↓` |
 | `⟲` auto | U+27F2 | `~` |
 | `⠋⠙⠸⠴` spinner | U+280B… | `▖▘▝▗` |
-| `▸` thinking fold | U+25B8 | `▶`` are in all six) |
+| `▸` thinking fold | U+25B8 | `▶` `▼`, then `◼` `◻` |
 | `⟳` `✔` `✘` tool status | U+27F3/2714/2718 | `~` `✓` `×` |
 | `✗` tool failure | U+2717 | `×` |
+| `▶` `▼` thinking fold | U+25B6/BC | `◼` `◻` (ADR 0035's 2026-10-16 "折叠标记统一" note; documented exception) |
 | `▶` `▼` startup fold | U+25B6/BC | `+` `-` |
 | `㎭` brand | U+33AD | `R` / `󰰠` / `rad` |
 
@@ -575,19 +577,26 @@ the rest is sent as an ordinary message.
 
 - **Streaming text** (`ModelTextDelta`) appears as it arrives.
 - **Thinking** (`ModelReasoningDelta`, ADR 0014) is the thin channel (ADR 0028
-  decision 4): expanded, a `▼ thinking · <duration>` header over a `│ `-railed Markdown body
+  decision 4): expanded, a `◻ thinking · <duration>` header over a `│ `-railed Markdown body
   in one colour (the `reasoning` role, never italic); folded, the one line
-  `▶ thinking · <duration> · N lines` (while it streams the header carries a spinner frame
-  instead of the duration and the count). `Ctrl-T` toggles it; it is never sent back to a
-  provider (R4).
+  `◼ thinking · <duration> · N lines` (while it streams the header carries a spinner frame
+  instead of the duration and the count). The fold pair is the one an expandable tool head
+  carries (ADR 0035's 2026-10-16 "折叠标记统一" note). `Ctrl-T` toggles it; it is never sent back
+  to a provider (R4).
 - A committed assistant message **replaces** the live delta view, so a dropped delta cannot
   leave a duplicate.
 - An **interrupted** assistant prefix (ADR 0003) shows a yellow `[interrupted]` marker and
   italic body text.
 - Each tool call is a thin block (ADR 0028): one head line
-  `• <name> <title> · <meta> <status>` (`✓` success, `×` failure, the running spinner, or
-  `· cancelled`), and its body in `│ `-railed rows below; a small tool (`read`, `grep`, `glob`,
-  `list`) is that one line until it errors or `Ctrl-O` expands it.
+  `<fold> <name> <title> · <meta> <status>` (`✓` success, `×` failure, the running spinner, or
+  `· cancelled`), and its body in `│ `-railed rows below. The head's fold marker is decided only
+  by whether a body is drawn under it (ADR 0035's 2026-10-16 "折叠标记统一" note, option A):
+  `◻` when a body is (`errors` preview, error body, `Ctrl-O`), `◼` when the head is all that
+  shows an explicitly folded body (`collapsed`'s `· N lines`), and `•` for every other head-only
+  block (a running call, an empty result, or a `read`/`grep`/`glob`/`list` result of **any**
+  size); ascii
+  `-`/`+`/`*`. A small tool (`read`, `grep`, `glob`, `list`) is that one line — a `•`, never a
+  fold — until it errors or `Ctrl-O` expands it.
 
 ## Scroll-follow rules
 
@@ -634,8 +643,8 @@ pty automation uses a `vt100` screen model, which answers queries instantly and 
 implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's lesson):
 
 - scroll feel: does PageUp/PageDown move a comfortable amount? does follow/pause feel right?
-- thinking readability: is the single-colour `▼ thinking · 3.2s` body (no italic) readable apart
-  from the reply, is the `│ ` rail aligned, and is the folded `▶ thinking · … · N lines` line
+- thinking readability: is the single-colour `◻ thinking · 3.2s` body (no italic) readable apart
+  from the reply, is the `│ ` rail aligned, and is the folded `◼ thinking · … · N lines` line
   obvious as a fold?
 - resize: drag the window while a turn streams — no residue, status line keeps working?
 - CJK and emoji width: alignment of a pasted Chinese line and an emoji.
@@ -771,35 +780,40 @@ Run a general `workspace` session in a throwaway terminal and get the model to c
 (`tests/thin.rs`); these are the ones it cannot judge.
 
 1. **The shell block, success**: call `shell` with a short command. *Expect* one head line
-   `• shell $ <command> · exit 0 · <duration> ✓`, then a `│ ` body of the output. *Look*: is
-   the `•`/`│` rail aligned, is the meta (`· ` separated) readable, is the `✓` at the line end
+   `◻ shell $ <command> · exit 0 · <duration> ✓`, then a `│ ` body of the output. *Look*: is
+   the `◻`/`│` marker column aligned, is the meta (`· ` separated) readable, is the `✓` at the line end
    obvious, and is there **no** background band or box?
 2. **The shell block, failure**: call a command that exits non-zero. *Expect* `×` at the head's
    end and the error output in the body. *Look*: is the `×` clearly not the success `✓`, and is
    the error body's colour the error level (not the normal output's)?
 3. **The shell block, running**: call a long command. *Expect* the head ends with the spinner
-   frame (`⏺` for `pulse`) and there is no meta and no body yet. *Look*: does the frame breathe
+   frame (`⏺` for `pulse`), prefixed by the one-liner `•` (no body yet), and there is no meta
+   and no body yet. *Look*: does the frame breathe
    (see the spinner step) without moving the head, and does the head settle to `✓`/`×` with the
    meta when the call ends?
 4. **The shell block, cancelled**: Ctrl-C (or Esc) a running command. *Expect* `· cancelled`
    in the meta and **no** status glyph. *Look*: is it clear this is a cancel, not a failure?
 5. **The three fold levels**: with a multi-line output, press `Ctrl-O` through
-   `errors → expanded → collapsed`. *Expect* `errors` = the last `tool_preview_lines` rows,
-   `expanded` = all of them, `collapsed` = the head only with `· N lines` in the meta; a failed
-   call's body is never hidden. *Look*: does the head stay put as the body folds, and is the
+   `errors → expanded → collapsed`. *Expect* `errors` = the last `tool_preview_lines` rows under
+   a `◻` head, `expanded` = all of them under `◻`, `collapsed` = the head only with `· N lines`
+   in the meta and a `◼` head; a failed
+   call's body is never hidden. *Look*: does the head stay put as the body folds, is the fold
+   marker `◻`/`◼` the right one, and is the
    `N lines` count right?
 6. **The small tool (`read`)**: call `read` with a path and a range. *Expect* one line
-   `• read <path> <start>-<end> · <duration> ✓` with no body. Press `Ctrl-O`: the body appears;
+   `• read <path> <start>-<end> · <duration> ✓` with no body — a `•` one-liner however many
+   lines the result holds (a `read` never folds under `errors`). Press `Ctrl-O`: the body appears
+   under `◻`;
    make it fail: the body appears with `×`. *Look*: is the one-liner's alignment with the
    other heads right, and is the range (`100-160`) the file's 1-based numbers?
 7. **`patch` with line numbers**: ask for a patch that replaces two separate ranges in one
-   file (or `patch` by hand). *Expect* one head `• patch <path> · +N −M ✓` and, per replaced
+   file (or `patch` by hand). *Expect* one head `◻ patch <path> · +N −M ✓` and, per replaced
    range, an `@@ -old,old_lines +new,new_lines @@` line and `│ ` rows with a right-aligned
    4-cell gutter: `-` rows carry the **old** file's numbers, `+` rows the **new** file's, and
    the second range's `new_start` already includes what the first range added or removed.
    *Look*: do the numbers line up in the 4-cell column, and is the code syntax-coloured?
 8. **`write`, new and overwrite**: write a new file, then overwrite an existing one. *Expect*
-   `• write <path> · +N ✓` for a new file and `+N −M` when the result carries `previous_lines`
+   `◻ write <path> · +N ✓` for a new file and `+N −M` when the result carries `previous_lines`
    (the overwrite). *Look*: does the `−M` show only for the overwrite?
 9. **`git_diff` multi-hunk and the no-start-line fallback**: run `git_diff` on a change with
    two hunks in one file. *Expect* each hunk's `@@` (weak `frame` colour, **not** the accent)
@@ -812,11 +826,12 @@ Run a general `workspace` session in a throwaway terminal and get the model to c
     *Look*: is the marker a circle (not the old `☐`/`☑`), is it never bold, and does the
     declined line sit inside the frame?
 11. **Thinking, expanded / folded / streaming**: with a reasoning model, get a reply with
-    thinking. *Expect* expanded `▼ thinking · 3.2s` over a `│ `-railed body in **one** colour
-    (never italic); `Ctrl-T` folds it to `▶ thinking · 3.2s · N lines`; while it streams, the
+    thinking. *Expect* expanded `◻ thinking · 3.2s` over a `│ `-railed body in **one** colour
+    (never italic); `Ctrl-T` folds it to `◼ thinking · 3.2s · N lines`; while it streams, the
     header carries the spinner frame instead of the duration and the count, and there is no
     `**`/backtick markup. *Look*: is the duration only there for the entry you watched (a
-    resumed session shows none), and does the fold glyph read as a fold?
+    resumed session shows none), and does the `◼`/`◻` pair read as a fold (the same pair a
+    tool head carries)?
 12. **A table**: ask for a Markdown table with a header and inline code/emphasis in a cell.
     *Expect* the header row in the `md_heading` style (accent, bold) and the cell's inline
     code/emphasis in their own roles. *Look*: is the header visually distinct from the body
@@ -908,8 +923,10 @@ throwaway terminal, not your working one.
    send a message that calls a tool; drag-select across the user row, a tool head and a `│ `
    body row; double-click a word, triple-click a message.
    *Expect*: the user row is one plain `❯ <text>` line with **no** background and **no**
-   half-cell pad; each tool block is a thin `• ` head plus `│ ` body rows, also with **no**
-   background; the copied text matches what you selected (no `❯`, `•`, `│`, `✓`/`×` or diff
+   half-cell pad; each tool block is a thin `<fold> ` head (`•`/`◼`/`◻` by whether a body is
+   drawn) plus `│ ` body rows, also with **no**
+   background; the copied text matches what you selected (no `❯`, `•`/`◼`/`◻`, `│`, `✓`/`×` or
+   diff
    line number reaches the clipboard). *Look*: contrast in `dark`, `light` and `mono` now that
    the transcript is on the terminal background, and whether the selection highlight reads on
    it. *Fail*: record the theme, and which glyph the copy wrongly carried.
@@ -917,10 +934,12 @@ throwaway terminal, not your working one.
    *Steps*: with a reasoning model (e.g. `--thinking adaptive`), get a reply with
    reasoning; press `Ctrl-T`; then call a tool with long output and press `Ctrl-O` three times.
    *Expect*: `Ctrl-T` toggles the thinking channel between the folded one-liner
-   `▶ thinking · <duration> · N lines` and the expanded `▼ thinking · <duration>` over a `│ `
+   `◼ thinking · <duration> · N lines` and the expanded `◻ thinking · <duration>` over a `│ `
    body (default collapsed; `tui.display.reasoning` sets the start); `Ctrl-O` cycles tool output
    `errors → expanded → collapsed → errors` (default `errors`; `crates/radian-tui/src/app.rs`,
-   `ToggleToolOutput`); under `collapsed` the head's meta gains `· N lines` (the body is not
+   `ToggleToolOutput`), the head's fold marker following what is drawn (`◻` when a body is,
+   `◼` when only the head of a longer body shows); under `collapsed` the head's meta gains
+   `· N lines` (the body is not
    silently cut); the thinking block is separated from its neighbour by the container's one
    blank line (not hugged). *Fail*: record the fold state after each press and the config value.
 7. **Mermaid** (ADR 0028 R8; merge `5628737`). *Steps*: ask for a small ` ```mermaid `

@@ -18,7 +18,8 @@
 //!
 //! **The title and the meta.** A renderer's head function returns the **title** only — the
 //! call's own summary (`$ <command>`, `path 100-160`); the block's head line is
-//! `• <tool name> <title> · <meta> <status>` and the name, the meta ([`meta_parts`]) and the
+//! `<fold marker> <tool name> <title> · <meta> <status>` (`•`/`◼`/`◻`, ADR 0035's 2026-10-16
+//! "折叠标记统一" note) and the name, the meta ([`meta_parts`]) and the
 //! status glyph are the block layer's (ADR 0028).
 //!
 //! **The body plan** ([`BodyLine`]) keeps the mapping honest: a text line carries its byte
