@@ -2203,11 +2203,9 @@ fn md_lines_cached(
     let lines = md_lines(&text[start..end], start, width);
     {
         let mut cache = entry.md_cache.borrow_mut();
-        let fresh = cache
-            .as_ref()
-            .map_or(true, |(cached_width, cached_len, _)| {
-                *cached_width != width || *cached_len != text_len
-            });
+        let fresh = cache.as_ref().is_none_or(|(cached_width, cached_len, _)| {
+            *cached_width != width || *cached_len != text_len
+        });
         if fresh {
             *cache = Some((width, text_len, vec![(start, lines.clone())]));
         } else if let Some((_, _, paragraphs)) = cache.as_mut()
