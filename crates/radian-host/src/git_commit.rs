@@ -347,6 +347,7 @@ pub fn dirty(workspace: &Path, pin: &RepoPin) -> Result<bool, ToolFailure> {
 /// `refuse_main` is the ADR 0038 decision 4 switch: `true` for a task agent (which also carries
 /// an `allowed_branch`), `false` for the interactive `general`/`lead` session. A config-protected
 /// branch and a detached HEAD are refused regardless.
+#[allow(clippy::too_many_arguments)] // one branch rule per argument; a rules struct hides them
 pub fn commit(
     workspace: &Path,
     pin: &RepoPin,
