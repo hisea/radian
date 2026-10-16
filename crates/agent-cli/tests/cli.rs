@@ -3333,6 +3333,92 @@ async fn without_a_window_the_budget_is_off_and_says_so() {
     assert_eq!(server.requests().len(), 2, "{stderr}");
 }
 
+/// ADR 0015 (a zero window is unset, never a real zero): `[model] context_window = 0` leaves
+/// the window unknown in `radian exec`, exactly like the key being absent, and the turn runs
+/// with the guard off. A reader that refuses `0` fails startup here; a host that read `0` as a
+/// real window would carry a zero budget instead of no budget.
+#[tokio::test]
+async fn a_zero_context_window_in_the_config_is_unset_and_the_guard_is_off() {
+    let (dir, ws) = budget_workspace("budget-zero-config");
+    let config = write_file(
+        &dir,
+        "config.toml",
+        "schema_version = 1\n[model]\ncontext_window = 0\n",
+    );
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--config",
+                config.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert!(stderr.contains("[budget] window unknown"), "{stderr}");
+    assert!(stderr.contains("no budget"), "{stderr}");
+    assert!(
+        !stderr.contains("positive integer"),
+        "a zero window is unset, not a config error: {stderr}"
+    );
+    assert_eq!(server.requests().len(), 1, "{stderr}");
+}
+
+/// The same rule for the flag (ADR 0015): `--context-window 0` means "not given", so the
+/// catalog decides and the guard is off; the CLI does not refuse the run for a zero it would
+/// otherwise read as a window.
+#[tokio::test]
+async fn a_zero_context_window_flag_is_unset_and_the_guard_is_off() {
+    let (_dir, ws) = budget_workspace("budget-zero-flag");
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--context-window",
+                "0",
+                "--yes",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert!(stderr.contains("[budget] window unknown"), "{stderr}");
+    assert!(stderr.contains("no budget"), "{stderr}");
+    assert!(
+        !stderr.contains("at least 1 token"),
+        "a zero window is unset, not a usage error: {stderr}"
+    );
+    assert_eq!(server.requests().len(), 1, "{stderr}");
+}
+
 /// 2: over the input budget `B` the request is **still sent** and the turn completes
 /// (ADR 0018 replaced the stop). `B = C - R = 20000 - 16384 = 3616`, and the reported input
 /// (9000) is far over it.

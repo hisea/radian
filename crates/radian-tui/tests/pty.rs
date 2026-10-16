@@ -3922,6 +3922,50 @@ async fn pty_the_startup_notice_names_the_window_source() {
     pty.quit();
 }
 
+/// ADR 0015 (a zero window is unset): `[model] context_window = 0` leaves the window unknown in
+/// the TUI too, exactly like the key being absent — the startup notice says there is no budget,
+/// and no number is invented. A reader that refuses `0` fails startup here instead (the TUI is
+/// the host that passes a resolved window through unfiltered).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_zero_context_window_in_the_config_leaves_the_budget_off() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("zero-window");
+    let home = TempDir::new("zero-window-home");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "zero-window",
+            "--profile",
+            "full",
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        "schema_version = 1\n[model]\ncontext_window = 0\n",
+        24,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.expand_startup();
+    assert!(
+        pty.wait_until(10, |screen| {
+            let notice = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+            notice.contains("context window: window unknown") && notice.contains("no budget")
+        }),
+        "a zero `[model] context_window` must be unset: the startup notice must say the window \
+         is unknown:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// ADR 0021 D2/D6: the TUI shows the memory project state and the injection budget at
 /// startup. The `HOME` is private to the pty, so this never reads the real `~/.radian`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
