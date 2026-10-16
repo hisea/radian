@@ -1120,6 +1120,15 @@ fn channel_edge(
     grid.arrow(arrow.0, arrow.1, ACROSS_NEG)
 }
 
+/// One finished screen cell. `Blank` still emits a space (the vendor's filler), `Covered` is the
+/// second cell of a wide character and emits nothing at all, `Ink` is a glyph.
+#[derive(Clone, Copy)]
+enum Screen {
+    Blank,
+    Covered,
+    Ink(char, Role),
+}
+
 /// The finished picture: screen cells, then runs of one role, with trailing blanks dropped (as
 /// the vendor's `finish` does).
 fn spans(grid: &Grid, plan: &Plan) -> Vec<Vec<Span>> {
@@ -1135,7 +1144,7 @@ fn spans(grid: &Grid, plan: &Plan) -> Vec<Vec<Span>> {
         Flow::Right => (along, across),
         Flow::Left => (plan.along - 1 - along, across),
     };
-    let mut screen: Vec<Vec<(char, Role)>> = vec![vec![(' ', Role::Edge); width]; height];
+    let mut screen = vec![vec![Screen::Blank; width]; height];
     for across in 0..plan.across() {
         for along in 0..plan.along {
             let cell = grid.cell(across, along);
@@ -1148,7 +1157,7 @@ fn spans(grid: &Grid, plan: &Plan) -> Vec<Vec<Span>> {
             } else {
                 wire_glyph(&cell, plan.flow)
             };
-            screen[y][x] = (glyph, cell.role.unwrap_or(Role::Edge));
+            screen[y][x] = Screen::Ink(glyph, cell.role.unwrap_or(Role::Edge));
         }
     }
     for run in &grid.text {
@@ -1162,18 +1171,29 @@ fn spans(grid: &Grid, plan: &Plan) -> Vec<Vec<Span>> {
             let (end, _) = point(run.across + text_width - 1, run.along);
             (start, end, y)
         };
+        // The run's cells are read in reading order, so a mirrored axis (RL) starts at the
+        // leftmost of the two.
         let mut x = start.min(end);
         for ch in run.text.chars() {
-            let cell = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
-            screen[y][x] = (ch, run.role);
-            x += cell;
+            let cells = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            screen[y][x] = Screen::Ink(ch, run.role);
+            for cell in screen[y][x + 1..x + cells].iter_mut() {
+                *cell = Screen::Covered;
+            }
+            x += cells;
         }
     }
     screen
         .into_iter()
         .map(|row| {
             let mut spans: Vec<Span> = Vec::new();
-            for (ch, role) in row {
+            for cell in row {
+                let (ch, role) = match cell {
+                    // A wide character's second cell carries nothing, like the vendor's `\0`.
+                    Screen::Covered => continue,
+                    Screen::Blank => (' ', Role::Edge),
+                    Screen::Ink(ch, role) => (ch, role),
+                };
                 if let Some(last) = spans.last_mut()
                     && last.role == role
                 {

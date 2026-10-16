@@ -9,6 +9,7 @@
 
 use codex_mermaid::render as vendored;
 use radian_host::mermaid::{render, render_spans};
+use unicode_width::UnicodeWidthStr;
 
 /// The `diagrams` skill's six-node `flowchart TD`: a chain, a decision, a labelled fork and a
 /// bend.
@@ -24,6 +25,10 @@ const LR_CHAIN: &str = "flowchart LR\n    A[Input] --> B[Parse] --> C[Draw]\n";
 /// and this layout's drawing.
 const FIVE_LONG: &str = "flowchart LR\n    A[aaaaaaaaaaaaaa] --> B[bbbbbbbbbbbbbb] --> C[cccccccccccccc] --> D[dddddddddddddd] --> E[eeeeeeeeeeeeee]\n";
 const SELF_LOOP: &str = "flowchart TD\n    A[one] --> A\n";
+/// A chain plus an edge that skips the middle layer.
+const SKIP: &str = "flowchart TD\n    A[one] --> B[two] --> C[three]\n    A --> C\n";
+/// Two CJK labels: every character is two cells wide.
+const CJK: &str = "flowchart TD\n    A[请求] --> B[工作]\n";
 const SEQUENCE: &str = "sequenceDiagram\n    participant A\n    participant B\n    A->>B: hi\n";
 
 /// Renders and compares the rows, printing the whole drawing when they differ.
@@ -357,6 +362,81 @@ fn an_lr_chain_is_the_same_drawing_turned() {
     let gap = input.right + 1;
     assert_eq!(at(&rows, input.top + 1, gap), '─');
     assert_eq!(at(&rows, parse.top + 1, parse.left - 1), '►');
+}
+
+/// A forward edge that skips a layer wraps in a channel outside the canvas, the way a back edge
+/// does (ADR 0028), instead of crossing the layer between.
+#[test]
+fn a_skip_edge_wraps_outside_the_canvas() {
+    const GOLDEN: &[&str] = &[
+        " ┌─────┐",
+        " │ one ├───┐",
+        " └──┬──┘   │",
+        "    │      │",
+        "    │      │",
+        "    ▼      │",
+        " ┌──┴──┐   │",
+        " │ two │   │",
+        " └──┬──┘   │",
+        "    │      │",
+        "    │      │",
+        "    ▼      │",
+        "┌───┴───┐  │",
+        "│ three ├◄─┘",
+        "└───────┘",
+    ];
+    expect(SKIP, 80, GOLDEN);
+    let rows = rows(&render(SKIP, 80).expect("this layout draws the diagram"));
+    let one = border_of(&rows, "one");
+    let three = border_of(&rows, "three");
+    // Both ends leave and enter a box's side, with the arrowhead at the target.
+    assert_eq!(at(&rows, one.top + 1, one.right), '├');
+    assert_eq!(at(&rows, three.top + 1, three.right), '├');
+    assert_eq!(at(&rows, three.top + 1, three.right + 1), '◄');
+    assert!(
+        three.top > one.bottom,
+        "the two ends are layers apart, so it cannot be a straight line"
+    );
+    // The channel is one vertical line outside every box.
+    let channel = rows[three.top + 1]
+        .chars()
+        .collect::<Vec<char>>()
+        .iter()
+        .rposition(|ch| *ch == '┘')
+        .expect("the corner into the channel");
+    assert!(channel > three.right);
+    assert!(
+        (one.top + 2..=three.top).all(|row| at(&rows, row, channel) == '│'),
+        "the channel is one vertical line outside the boxes"
+    );
+}
+
+/// A label's width is its **display** width, not its character count (ADR 0028 R9): each CJK
+/// character takes two cells, and the second cell of a wide character carries nothing, so a
+/// label row is exactly as wide as the borders around it.
+#[test]
+fn a_cjk_label_is_sized_by_display_width() {
+    const GOLDEN: &[&str] = &[
+        "┌──────┐",
+        "│ 请求 │",
+        "└───┬──┘",
+        "    │",
+        "    │",
+        "    ▼",
+        "┌───┴──┐",
+        "│ 工作 │",
+        "└──────┘",
+    ];
+    expect(CJK, 80, GOLDEN);
+    let rows = rows(&render(CJK, 80).expect("this layout draws the diagram"));
+    for (border, text) in [(0, 1), (2, 1), (6, 7), (8, 7)] {
+        assert_eq!(
+            UnicodeWidthStr::width(rows[text].as_str()),
+            UnicodeWidthStr::width(rows[border].as_str()),
+            "a label row is as wide as its box: {:?}",
+            rows[text]
+        );
+    }
 }
 
 /// The layout is a pure function of `(source, width)`: a diagram that needs more than the width

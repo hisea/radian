@@ -1096,8 +1096,8 @@ Worktree `.radian-worktrees/build-script`, branch `dogfood/mermaid-layout`. Each
 applied in place by `.radian/scratch/mutate.py` (it asserts the anchor occurs the expected number
 of times, so a `cargo fmt` shift or a no-op patch fails loudly instead of passing as "caught"),
 the suite runs with `--no-fail-fast`, and the file is restored with a plain `cp` and `cmp`ed byte
-for byte (drivers: `.radian/scratch/mutate-layout{,2,3}.sh`). `git status --short` held only the
-test file at the end.
+for byte (drivers: `.radian/scratch/mutate-layout{,2,3,4}.sh`). `git status --short` held only the
+source and test files at the end.
 
 | # | Requirement mutated | Mutation | Caught by | Result |
 |---|---|---|---|---|
@@ -1109,8 +1109,9 @@ test file at the end.
 | L6a | decision 5 / ADR 0029: an edge's label keeps the **edge** role (vertical layout) | `adjacent_edge`: the TD label's `Role::Edge` → `Role::Text` | `the_layout_emits_only_the_three_roles` (`role_of("yes")`) | ✅ 1 failed |
 | L6b | the same, horizontal layout | the LR label's `Role::Edge` → `Role::Text` | `the_diagram_roles_come_from_the_theme` (radian-tui) | ✅ 1 failed |
 | L7 | two edges of one gap that would **cross** are refused | `draw`: `bus_rows_are_clear(graph, plan)?;` removed | `a_diagram_the_layout_refuses_is_the_vendored_render_byte_for_byte` (the crossing sample is drawn instead of falling back) | ✅ 1 failed |
+| L8 | a wide character's second cell carries nothing (ADR 0028 R9) | `spans`: `Screen::Covered => continue` → an `Edge` space | `a_cjk_label_is_sized_by_display_width` (the label row is wider than its box) | ✅ 1 failed |
 
-7 mutations, 7 caught.
+8 mutations, 8 caught.
 
 **An equivalent mutant, honestly recorded (the ADR's "回边穿过框")**: "a back edge crosses a box"
 is defended **twice** — the route's freedom pre-check (`channel_edge`'s `grid.free` loop) and the
