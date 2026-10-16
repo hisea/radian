@@ -4456,7 +4456,9 @@ impl App {
                 } else {
                     format!("context compacted ({tokens_before} → {tokens_after} tokens)")
                 };
-                self.session.entries.push(Entry::new(EntryKind::Notice, text));
+                self.session
+                    .entries
+                    .push(Entry::new(EntryKind::Notice, text));
                 // The summary message arrives right after this event (ADR 0018): the numbers
                 // are handed to it, since the journaled message does not carry them.
                 self.session.pending_compaction = Some((
@@ -5101,7 +5103,11 @@ mod tests {
                 .iter()
                 .any(|entry| entry.text == "compacted without a summary (7 dropped)"),
             "the notice names the count: {:?}",
-            app.session.entries.iter().map(|e| &e.text).collect::<Vec<_>>()
+            app.session
+                .entries
+                .iter()
+                .map(|e| &e.text)
+                .collect::<Vec<_>>()
         );
 
         let message = agent_core::compaction::compacted_history(
