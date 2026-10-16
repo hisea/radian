@@ -2352,6 +2352,7 @@ dependencies = [
  "clap",
  "codex-mermaid",
  "futures-util",
+ "libc",
  "radian-coding",
  "radian-memory",
  "radian-permissions",

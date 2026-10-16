@@ -192,7 +192,13 @@ impl ToolProvider for CodingTools {
     async fn open_session(&self) -> Result<Self::Session, ToolError> {
         let jobs = match &self.jobs {
             Some(jobs) => Arc::clone(jobs),
-            None => Arc::new(jobs::Jobs::new(self.root.root())),
+            // The host always supplies the session-owned registry (`with_jobs`, ADR 0039
+            // decision 1). A provider built directly (tests, an embedded tool set) has no
+            // session directory, so it falls back to a per-workspace directory under `.radian/`
+            // — still opened `O_EXCL|O_NOFOLLOW`, so a pre-planted symlink cannot redirect it.
+            None => Arc::new(jobs::Jobs::new(
+                self.root.root().join(".radian").join("jobs"),
+            )),
         };
         // The tool set is fixed here, once per session (ADR 0036): the
         // shell description therefore reflects the tier the session **started** in. A later
@@ -295,7 +301,7 @@ impl ToolSession for CodingSession {
                     "`shell` needs a sandbox and this session has none",
                 )),
             },
-            "job_output" => jobs::run_output(&self.jobs, &call.arguments, &cx).await,
+            "job_output" => jobs::run_output(&self.jobs, &self.limits, &call.arguments, &cx).await,
             "job_list" => jobs::run_list(&self.jobs),
             "job_kill" => jobs::run_kill(&self.jobs, &call.arguments),
             other => Err(fail(

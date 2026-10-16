@@ -220,10 +220,11 @@ pub enum EventData {
         label: Option<String>,
     },
     /// A task agent finished (ADR 0030 O5). Typed for an exact round trip; audit only, never
-    /// a transcript record.
+    /// a transcript record. `error` (ADR 0039) is optional: absent on a clean finish.
     TaskFinished {
         agent_session_id: String,
         outcome: TurnOutcome,
+        error: Option<String>,
     },
     /// A background `shell` job started (ADR 0037 decision 5). Typed for an exact round trip;
     /// audit only, never a transcript record. A start with no settle after a crash is how the
@@ -736,6 +737,7 @@ impl LineScanner {
                 EventData::TaskFinished {
                     agent_session_id: d.agent_session_id,
                     outcome: d.outcome,
+                    error: d.error,
                 }
             }
             "BackgroundJobStarted" => {
@@ -1308,6 +1310,8 @@ struct TaskSpawnedData {
 struct TaskFinishedData {
     agent_session_id: String,
     outcome: TurnOutcome,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Deserialize)]

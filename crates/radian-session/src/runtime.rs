@@ -238,10 +238,14 @@ pub enum RuntimeEvent {
         label: Option<String>,
     },
     /// A task agent finished (ADR 0030 O5). Audit only: `critical = false`. `outcome` is the
-    /// task agent's own final turn outcome.
+    /// task agent's own final turn outcome. `error` (ADR 0039 decisions 5 and 7) is why the task
+    /// ended abnormally when that is not the turn itself: a spawn that rolled back after this
+    /// `TaskSpawned` was written, or an end-of-task commit that failed. Optional, so an older
+    /// record still reads (ADR 0006 §7a) and a clean finish carries nothing extra.
     TaskFinished {
         agent_session_id: String,
         outcome: TurnOutcome,
+        error: Option<String>,
     },
     /// A background `shell` job started (ADR 0037 decision 5). Audit only: `critical =
     /// false`. The start/settle pair is how a resume learns a job existed; a start with no
@@ -250,7 +254,9 @@ pub enum RuntimeEvent {
         job_id: String,
         /// The command's first line (the summary `job_list` shows).
         command: String,
-        /// The workspace-relative output path.
+        /// The `job_output` hint, not a path (ADR 0039 decision 1): the output file lives in
+        /// the session directory and is unreadable by the model, so this field names the tool
+        /// that reads it. The shape is kept from ADR 0037 decision 5.
         output: String,
     },
     /// A background `shell` job settled (ADR 0037 decision 5). Audit only: `critical =
@@ -466,6 +472,8 @@ pub(crate) struct TaskSpawnedData<'a> {
 pub(crate) struct TaskFinishedData<'a> {
     pub agent_session_id: &'a str,
     pub outcome: TurnOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -665,9 +673,11 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
         RuntimeEvent::TaskFinished {
             agent_session_id,
             outcome,
+            error,
         } => RuntimeData::TaskFinished(TaskFinishedData {
             agent_session_id,
             outcome: *outcome,
+            error: error.as_deref(),
         }),
         RuntimeEvent::BackgroundJobStarted {
             job_id,

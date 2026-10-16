@@ -127,8 +127,9 @@ async fn the_dot_git_directory_is_skipped_by_both_tools() {
     assert_eq!(text(&out), "kept.txt:1:needle\n");
 }
 
-/// ADR 0030 O3: `.radian-worktrees/` (one full worktree per task agent) is pruned **structurally**,
-/// not by a `.gitignore` coincidence: even with no ignore file, the walk never descends into it.
+/// `.radian-worktrees/` (one full checkout per worktree; ADR 0030 O7, since ADR 0039
+/// decision 4 no longer the task agents' root) is pruned **structurally**, not by a
+/// `.gitignore` coincidence: even with no ignore file, the walk never descends into it.
 #[tokio::test]
 async fn the_radian_worktrees_directory_is_skipped_by_both_tools() {
     let dir = TempDir::new("search-worktrees");
