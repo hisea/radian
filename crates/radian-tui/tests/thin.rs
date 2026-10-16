@@ -184,11 +184,11 @@ fn shell_frame() -> App {
 const SHELL_GOLDEN: &[&str] = &[
     "  Running the checks.",
     "",
-    "• shell $ make test · exit 0 ✓",
+    "◻ shell $ make test · exit 0 ✓",
     "│ all good",
     "│ 2 passed",
     "",
-    "• shell $ make lint · exit 2 ×",
+    "◻ shell $ make lint · exit 2 ×",
     "│ boom",
     "",
     "• shell $ sleep 5 ⏺",
@@ -247,7 +247,7 @@ fn the_collapsed_shell_snapshot_shows_the_head_and_the_hidden_count() {
         &mut a,
         80,
         12,
-        &["• shell $ make test · exit 0 · 6 lines ✓"],
+        &["◼ shell $ make test · exit 0 · 6 lines ✓"],
     );
 }
 
@@ -329,7 +329,7 @@ fn diff_frame() -> App {
 const DIFF_GOLDEN: &[&str] = &[
     "  Applying the edits.",
     "",
-    "• patch src/main.rs · +3 −2 ✓",
+    "◻ patch src/main.rs · +3 −2 ✓",
     "│ @@ -10,2 +10,3 @@",
     "│   10 - let a = 1;",
     "│   11 - let b = 2;",
@@ -343,15 +343,15 @@ const DIFF_GOLDEN: &[&str] = &[
     "│   42 + let b = 2;",
     "│   43 + let c = 3;",
     "",
-    "• write a.txt · +2 ✓",
+    "◻ write a.txt · +2 ✓",
     "│    1 + one",
     "│    2 + two",
     "",
-    "• write b.txt · +2 −5 ✓",
+    "◻ write b.txt · +2 −5 ✓",
     "│    1 + three",
     "│    2 + four",
     "",
-    "• git_diff 1 files +3 −2 ✓",
+    "◻ git_diff 1 files +3 −2 ✓",
     "│ diff --git a/src/main.rs b/src/main.rs",
     "│ --- a/src/main.rs",
     "│ +++ b/src/main.rs",
@@ -364,7 +364,7 @@ const DIFF_GOLDEN: &[&str] = &[
     "│   20 + let c = 5;",
     "│   21 + let d = 6;",
     "",
-    "• git_diff 0 files +1 −1 ✓",
+    "◻ git_diff 0 files +1 −1 ✓",
     "│ -gone",
     "│ +added",
     "│ same",
@@ -410,7 +410,7 @@ fn the_thinking_snapshot_expanded_and_folded() {
             width,
             16,
             &[
-                "▼ thinking",
+                "◻ thinking",
                 "│ first thought",
                 "│ second thought",
                 "",
@@ -421,7 +421,7 @@ fn the_thinking_snapshot_expanded_and_folded() {
             &mut thinking_frame(false),
             width,
             16,
-            &["▶ thinking · 2 lines", "", "  the answer"],
+            &["◼ thinking · 2 lines", "", "  the answer"],
         );
     }
 }
@@ -445,9 +445,9 @@ fn the_streaming_thinking_snapshot_has_a_spinner_not_a_count() {
             a.update(Input::Stream(projection.snapshot()));
             a.set_now(base);
             let golden: &[&str] = if expanded {
-                &["▼ thinking · ⏺", "│ a thought"]
+                &["◻ thinking · ⏺", "│ a thought"]
             } else {
-                &["▶ thinking · ⏺"]
+                &["◼ thinking · ⏺"]
             };
             expect_transcript(&mut a, width, 16, golden);
         }
@@ -564,7 +564,7 @@ fn a_cjk_block_keeps_its_marker_column() {
     assert_eq!(got.len(), 3, "{got:?}");
     assert_eq!(
         squeeze(&got[0]),
-        squeeze("• shell $ echo 你好世界 · exit 0 ✓"),
+        squeeze("◻ shell $ echo 你好世界 · exit 0 ✓"),
         "{got:?}"
     );
     assert_eq!(squeeze(&got[1]), "│你好，世界", "{got:?}");
@@ -605,7 +605,7 @@ fn mixed_frame() -> App {
 
 /// ADR 0028's mechanical rule: every body row of a tool block and of thinking starts
 /// with `│ ` in columns 1-2 and its content begins at column 3, in every built-in theme and at
-/// both widths. The head rows are the marker column's (`•`, `▼`).
+/// both widths. The head rows are the marker column's (`•`, `◼`, `◻`).
 #[test]
 fn every_tool_and_thinking_body_row_carries_the_rail_in_any_theme() {
     for theme in [Theme::dark(), Theme::light(), Theme::mono()] {
@@ -624,7 +624,7 @@ fn every_tool_and_thinking_body_row_carries_the_rail_in_any_theme() {
                     );
                 }
                 // A tool/thinking head never starts with a leading space (the marker column).
-                if row.starts_with('•') || row.starts_with('▼') || row.starts_with('▶') {
+                if row.starts_with('•') || row.starts_with('◼') || row.starts_with('◻') {
                     assert!(!row.starts_with(' '), "{row:?}");
                 }
             }
@@ -686,7 +686,7 @@ fn a_three_hunk_diff_numbers_each_row_by_its_own_file() {
         80,
         24,
         &[
-            "• git_diff 1 files +6 −4 ✓",
+            "◻ git_diff 1 files +6 −4 ✓",
             "│ diff --git a/x.rs b/x.rs",
             "│ --- a/x.rs",
             "│ +++ b/x.rs",
@@ -753,7 +753,7 @@ fn a_copy_of_a_diff_block_has_no_marker_or_line_number() {
 
     assert!(copied.contains("let a = 1;"), "{copied:?}");
     assert!(copied.contains("let a = 2;"), "{copied:?}");
-    for glyph in ['•', '│', OK, FAILED] {
+    for glyph in ['•', '◼', '◻', '│', OK, FAILED] {
         assert!(!copied.contains(glyph), "{glyph:?} in {copied:?}");
     }
     // No synthesized gutter: every copied line is the diff's own sign + code, never `10 - …`.
