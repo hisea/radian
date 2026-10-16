@@ -12,8 +12,9 @@ Three looks:
 
   --today          what radian draws now, reconstructed from `blocks.rs` / `render.rs` /
                    `tools.rs` at origin/main 5836485 (after ADR 0028, ADR 0035)
-  --style rule     the proposal, dsh-like: no background bands, a marker in the first column,
-                   thin rules for code and diff (default)
+  --style rule     the proposal: no background bands; columns 1-2 are the marker column and
+                   hold the marker OR a thin rail (thinking, code, diff); every body row
+                   starts at column 3 (default)
   --style band     the proposal, opencode-like: raised-background cards and a `▌` rail
 
 Default prints today, then the proposal. The open points are switches, so each alternative
@@ -385,7 +386,7 @@ def render_patch(out, opt, today):
             return ADD_BG if sign == "+" else DEL_BG
         return None
 
-    diff_rows(out, opt, today, lambda sign: [("  │ ", DIM, "", None)], row_bg)
+    diff_rows(out, opt, today, lambda sign: [("│ ", DIM, "", None)], row_bg)
 
 
 # ---- assistant markdown ---------------------------------------------------------------------
@@ -426,12 +427,14 @@ def render_reply(out, opt, today):
                     out.line(margin + highlight(row, TEXT))
                 out.line(margin + [("```", DIM, "", None)])
             else:
-                # dsh: a top rule carrying the language, a thin left rule, a short bottom rule
-                top = "┌─ " + lang + " " + "─" * max(0, body - 4 - len(lang))
-                out.line(margin + [(top, DIM, "", None)])
+                # the frame lives in the marker column (cols 1-2), the code starts at col 3
+                # like every other body row: a top rule carrying the language, a thin left
+                # rule, a short bottom rule
+                top = "╭─ " + lang + " " + "─" * max(0, out.cols - 4 - len(lang))
+                out.line([(top, DIM, "", None)])
                 for row in rows:
-                    out.line(margin + [("│ ", DIM, "", None)] + highlight(row, TEXT))
-                out.line(margin + [("└" + "─" * 2, DIM, "", None)])
+                    out.line([("│ ", DIM, "", None)] + highlight(row, TEXT))
+                out.line([("╰──", DIM, "", None)])
         elif kind == "table":
             render_table(out, opt, today, lead, margin, *data)
 
