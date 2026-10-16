@@ -33,8 +33,8 @@ use radian_host::memory::MemoryService;
 use radian_host::memory::commands::{self, CommandError, MemoryCommand};
 use radian_host::{
     DEFAULT_MAX_TOKENS, ModelArgs, Provider, SESSION_PLACEHOLDER, SessionFacade, Thinking,
-    build_model, check_provider_flags, generate_session_id, load_mcp_config, parse_headers,
-    resolve_workspace, validate_session_id,
+    build_model, check_provider_flags, generate_session_id, is_local_base_url, load_mcp_config,
+    parse_headers, resolve_workspace, validate_session_id,
 };
 use radian_permissions::{Approver, AuditSink, PermissionHooks};
 use radian_runtime::{CancelCause, Inbox, InboxError};
@@ -324,6 +324,18 @@ impl From<radian_host::StdoutError> for OutputError {
         match error {
             radian_host::StdoutError::BrokenPipe => Self::BrokenPipe,
             radian_host::StdoutError::Failed(error) => Self::Write(error),
+        }
+    }
+}
+
+/// The shared `--list` (ADR 0032 slice 5). An index failure is this host's usage error (2), a
+/// stdout write failure its exit 1, and a closed reader its silent stop.
+impl From<radian_host::ListError> for OutputError {
+    fn from(error: radian_host::ListError) -> Self {
+        match error {
+            radian_host::ListError::Failed(message) => SetupError(message).into(),
+            radian_host::ListError::Write(error) => Self::Write(error),
+            radian_host::ListError::BrokenPipe => Self::BrokenPipe,
         }
     }
 }
@@ -738,7 +750,6 @@ struct Setup {
     /// The descriptor id the run started with (the switch vocabulary, ADR 0026 D5).
     provider_id: String,
     config_slot: std::sync::Arc<radian_runtime::ConfigSlot>,
-    config_queue: std::sync::Arc<radian_runtime::ConfigQueue>,
     budget_for: radian_runtime::BudgetFor,
     /// Resolves a route's catalog price from the warm cache, for the resume fold (F3).
     price_for: Option<radian_host::cost::RoutePrice>,
@@ -753,16 +764,10 @@ struct Setup {
     context_budget: Option<ContextBudget>,
     /// The window and where it came from (ADR 0018), for the startup line.
     window: radian_host::Window,
-    /// Whether the core compacts a request over `B` before sending it (ADR 0018).
-    auto_compact: bool,
-    /// The request-level settings the summary call carries (ADR 0018, decision 1),
-    /// converted from `[compaction] thinking` to the route's wire value.
-    compaction_settings: serde_json::Value,
-    /// Recomputes the summary call's settings for a switched route (ADR 0018).
-    compaction_settings_for: radian_runtime::CompactionSettingsFor,
-    /// `[model] retries` (ADR 0017): how many times a transient model failure is
-    /// retried inside one model call; `0` disables.
-    retries: u32,
+    /// The settings the CLI and the TUI resolve from the config the same way (ADR 0032 slice 5):
+    /// the retries, the compaction settings, the skills, the memory injection and the shell
+    /// auto-background. The same value builds the task builder (ADR 0030 slice 6b2).
+    settings: radian_host::SessionSettings,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
     session_id: String,
     /// The validated, canonical workspace (dogfooding D1). Resolved in `setup`, before any
@@ -787,18 +792,6 @@ struct Setup {
     config_path: Option<PathBuf>,
     /// Known-but-unwired and unknown config keys, named (never their values) at startup.
     config_skipped: Vec<String>,
-    /// The extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), resolved against
-    /// the config file's directory and the user's home.
-    skills_extra_paths: Vec<PathBuf>,
-    /// `[skills] builtin` (ADR 0025); default true.
-    skills_builtin: bool,
-    /// `[skills] disabled`: built-in skill names to leave out.
-    skills_disabled: Vec<String>,
-    /// `[memory.injection]` (ADR 0021).
-    memory_injection: radian_host::memory::InjectionConfig,
-    /// `[shell] auto_background_secs` (ADR 0037), resolved by the config reader.
-    /// `None` means adoption is off.
-    shell_auto_background: Option<std::time::Duration>,
     /// `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized (ADR 0016).
     allow_unix_sockets: Vec<PathBuf>,
     /// `[control] enabled` (ADR 0030 O6, slice 8): whether this process binds its control
@@ -1037,38 +1030,20 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         route.adapter(),
         Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
-    // ADR 0018, decision 1: the summary call's reasoning level, converted to this
-    // route's wire value with the same map `/thinking` uses. `low` by default; `"current"`
-    // keeps the conversation's level (carries no setting). A clamped level is said once.
-    let compaction_settings = {
-        let level = config.compaction.thinking.as_deref().unwrap_or("low");
-        let (settings, notice) = radian_host::compaction_settings_for(
-            &provider_ref,
-            &model_name,
-            level,
-            cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        );
-        if let Some(notice) = notice {
-            eprintln!("[compaction] {notice}");
-        }
-        settings
-    };
-    // ADR 0018: the same level, converted per route, so a `/model` switch never
-    // leaves the summary carrying the previous route's wire form.
-    let compaction_settings_for = {
-        let providers = config.providers.clone();
-        let level = config
-            .compaction
-            .thinking
-            .clone()
-            .unwrap_or_else(|| "low".to_owned());
-        let max_tokens = cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-        std::sync::Arc::new(move |provider: &str, model: &str| {
-            radian_host::compaction_settings_for_route(
-                &providers, provider, model, &level, max_tokens,
-            )
-        }) as radian_runtime::CompactionSettingsFor
-    };
+    // ADR 0032 slice 5: the settings both hosts read from the config the same way — the retries,
+    // the compaction settings (ADR 0018: `[compaction] thinking` converted
+    // to this route's wire value, `low` by default; a clamped level is said once), the skills, the
+    // memory injection and the shell auto-background.
+    let (settings, compaction_notice) = radian_host::SessionSettings::from_config(
+        &config,
+        &provider_ref,
+        &model_name,
+        cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        cli.no_auto_compact,
+    );
+    if let Some(notice) = compaction_notice {
+        eprintln!("[compaction] {notice}");
+    }
     // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
@@ -1160,7 +1135,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can
     // still carry a change the TUI wrote, so resume restores the right model (D8).
     let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
-    let config_queue = radian_runtime::ConfigQueue::new();
     let model = radian_host::SwitchableModel::new(
         initial,
         radian_host::ModelRoute::new(&provider_name, &model_name),
@@ -1274,7 +1248,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         route: (provider_name.clone(), model_name.clone()),
         task_model,
         config_slot,
-        config_queue,
         budget_for,
         price_for,
         provider,
@@ -1284,14 +1257,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         turn_timeout_secs: cli.turn_timeout_secs,
         context_budget,
         window,
-        // `--no-auto-compact` wins; otherwise the config may turn it off.
-        auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
-        compaction_settings,
-        compaction_settings_for,
-        retries: config
-            .model
-            .retries
-            .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
+        settings,
         session_id,
         workspace,
         secrets,
@@ -1300,15 +1266,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         approval: startup_approval,
         config_path: config.source.clone(),
         config_skipped: config.skipped.clone(),
-        skills_extra_paths: radian_host::config::resolve_extra_paths(
-            &config.skills.extra_paths,
-            config.source.as_deref().and_then(std::path::Path::parent),
-            radian_host::user_home().as_deref(),
-        ),
-        skills_builtin: config.skills.builtin.unwrap_or(true),
-        skills_disabled: config.skills.disabled.clone(),
-        memory_injection: config.memory.injection(),
-        shell_auto_background: config.shell.auto_background_after(),
         control_enabled: config.control.enabled,
         allow_unix_sockets: {
             let (paths, warnings) = radian_host::resolve_allow_unix_sockets(
@@ -1323,37 +1280,19 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     })
 }
 
-/// Where session files live: `--session-dir`, then `RADIAN_SESSION_DIR`, then the user's
-/// data directory.
-///
-/// Sessions are durable records, not a cache (ADR 0013 decision 4), and since ADR 0020 they
-/// live under `~/.radian/sessions` (`$RADIAN_HOME/sessions` when that is set) — the same
-/// root as the config and cache, but the sandbox denies read on this subdirectory.
+/// [`radian_host::session_dir`] with this host's error type (ADR 0032 slice 5: the rule lives in
+/// `radian-host`, so the two hosts cannot drift).
 fn session_dir(cli: &Cli) -> Result<PathBuf, SetupError> {
-    if let Some(dir) = &cli.session_dir {
-        return Ok(PathBuf::from(dir));
-    }
-    if let Ok(dir) = std::env::var("RADIAN_SESSION_DIR")
-        && !dir.is_empty()
-    {
-        return Ok(PathBuf::from(dir));
-    }
-    // ADR 0020: the default is `~/.radian/sessions` (or `$RADIAN_HOME/sessions`).
-    radian_host::sessions_dir().ok_or_else(|| {
-        SetupError("no RADIAN_HOME or HOME to place sessions under; pass --session-dir".into())
-    })
+    radian_host::session_dir(cli.session_dir.as_deref().map(std::path::Path::new))
+        .map_err(SetupError)
 }
 
-/// The workspace a session belongs to: `--workspace` when given, else the current
-/// directory. `--list` filters by the same value, so a session is only listed in the
-/// workspace it was created in. The rule lives in `radian-host` so both hosts share it.
+/// The workspace a session belongs to: `--workspace` when given, else the current directory
+/// (canonicalized and validated by the shared `radian-host` rule). `--list` filters by the same
+/// value, so a session is only listed in the workspace it was created in.
 fn session_workspace(cli: &Cli) -> Result<String, SetupError> {
-    Ok(
-        resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
-            .map_err(SetupError)?
-            .to_string_lossy()
-            .into_owned(),
-    )
+    radian_host::session_workspace(cli.workspace.as_deref().map(std::path::Path::new))
+        .map_err(SetupError)
 }
 
 /// Opens the workspace's session index through the shared host layer (ADR 0006 §10: the
@@ -1366,21 +1305,12 @@ fn session_index(cli: &Cli) -> Result<Option<(Index, String)>, SetupError> {
     Ok(index.map(|index| (index, workspace)))
 }
 
-/// `--list`: the sessions of this workspace, newest activity first.
+/// `--list`: the sessions of this workspace, newest activity first (the shared table, ADR 0032
+/// slice 5).
 fn list_sessions(cli: &Cli) -> Result<(), OutputError> {
-    let Some((index, workspace)) = session_index(cli)? else {
-        return Ok(()); // no sessions yet
-    };
-    for row in radian_host::sessions::list(&index, &workspace).map_err(SetupError)? {
-        radian_host::write_line(&format!(
-            "{}\t{}\t{}\t{}",
-            row.session_id,
-            row.created_ts.as_deref().unwrap_or("-"),
-            row.last_ts.as_deref().unwrap_or("-"),
-            row.message_count
-        ))?;
-    }
-    Ok(())
+    let dir = session_dir(cli)?;
+    let workspace = session_workspace(cli)?;
+    Ok(radian_host::list_sessions(&dir, &workspace)?)
 }
 
 /// The maximum number of `--search` hits printed in one run.
@@ -1543,23 +1473,6 @@ fn created_data(session: &Session) -> Option<&serde_json::Value> {
         EventData::Other(data) if event.event == "SessionCreated" => Some(data),
         _ => None,
     })
-}
-
-fn is_local_base_url(base_url: &str) -> bool {
-    let Some((_, rest)) = base_url.split_once("://") else {
-        return false;
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority.strip_prefix('[').map_or_else(
-        || {
-            authority
-                .rsplit_once(':')
-                .filter(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
-                .map_or(authority, |(host, _)| host)
-        },
-        |bracketed| bracketed.split(']').next().unwrap_or_default(),
-    );
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 /// A server may echo the key or a header value back in an error body; nothing this program
@@ -1760,11 +1673,11 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         sandbox: sandbox.clone(),
         sandbox_deny_read: sandbox_deny_read.clone(),
         allow_unix_sockets: setup.allow_unix_sockets.clone(),
-        retries: setup.retries,
+        retries: setup.settings.retries,
         context_budget: setup.context_budget,
-        auto_compact: setup.auto_compact,
-        compaction_settings: setup.compaction_settings.clone(),
-        compaction_settings_for: Some(setup.compaction_settings_for.clone()),
+        auto_compact: setup.settings.auto_compact,
+        compaction_settings: setup.settings.compaction_settings.clone(),
+        compaction_settings_for: setup.settings.compaction_settings_for.clone(),
         turn_options: TurnOptions {
             max_model_calls: setup.max_model_calls,
             ..TurnOptions::default()
@@ -1773,11 +1686,11 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         wording: radian_host::CLI_WORDING,
         protected_branches: Vec::new(),
         allowed_filters: None,
-        shell_auto_background: setup.shell_auto_background,
-        skills_extra_paths: setup.skills_extra_paths.clone(),
-        skills_builtin: setup.skills_builtin,
-        skills_disabled: setup.skills_disabled.clone(),
-        memory_injection: setup.memory_injection,
+        shell_auto_background: setup.settings.shell_auto_background,
+        skills_extra_paths: setup.settings.skills_extra_paths.clone(),
+        skills_builtin: setup.settings.skills_builtin,
+        skills_disabled: setup.settings.skills_disabled.clone(),
+        memory_injection: setup.settings.memory_injection,
         capabilities: radian_host::SessionCapability::ALL.to_vec(),
         audit: Arc::clone(&audit),
         // A task's own stream must not reach the lead's live view (ADR 0030 O10); the CLI prints
@@ -1786,48 +1699,32 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     });
 
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
-    // with its own bindings.
+    // with its own bindings. ADR 0032 slice 5: `LeadSetup::setup` fills what every host-opened
+    // session shares; what this host decides itself is written here.
+    // The budget startup line below reads this after the settings are handed over.
+    let auto_compact = setup.settings.auto_compact;
     let resume_session = cli.resume.is_some();
     let session = radian_host::open_session(
-        radian_host::SessionSetup {
+        radian_host::LeadSetup {
+            settings: setup.settings,
             session_id: radian_host::SessionId::new(setup.session_id.clone()),
             session_dir: sessions_for_deny.clone(),
             workspace: workspace_path.clone(),
             coding_root: cli.workspace.clone().map(std::path::PathBuf::from),
             model: setup.model,
             config_slot: setup.config_slot,
-            config_queue: setup.config_queue,
             budget_for: Some(setup.budget_for),
             price_for: setup.price_for,
             protected_branches: Vec::new(),
             allowed_filters: None,
-            shell_auto_background: setup.shell_auto_background,
             servers: setup.servers,
-            // ADR 0036: a CLI session uses the `default` role.
-            role: None,
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
-            auto_compact: setup.auto_compact,
-            compaction_settings: setup.compaction_settings,
-            compaction_settings_for: Some(setup.compaction_settings_for),
-            retries: setup.retries,
             sandbox,
             tier: profile_arg.preset(),
             profile: permission_profile,
             access_builder: None,
-            // The line host has no `/mode`; its session is not a task agent either.
-            task_agent: false,
-            parent: None,
-            allowed_branch: None,
             memory_root,
-            skills_extra_paths: setup.skills_extra_paths,
-            skills_builtin: setup.skills_builtin,
-            skills_disabled: setup.skills_disabled,
-            // A lead session is not an agent definition (ADR 0030 O11): no built-in tool
-            // allow-list and no skills allow-list.
-            tools_allow: None,
-            skills_allow: None,
-            memory_injection: setup.memory_injection,
             trust: trust_setup,
             resume: cli.resume.is_some(),
             config_snapshot: serde_json::json!({
@@ -1842,7 +1739,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             turn_timeout: setup.turn_timeout_secs.map(Duration::from_secs),
             wording: radian_host::CLI_WORDING,
             capabilities: radian_host::SessionCapability::ALL.to_vec(),
-        },
+        }
+        .setup(),
         radian_host::HostBindings {
             approvals: radian_host::ApprovalRouting::Direct(approver),
             shared_queue: None,
@@ -1958,7 +1856,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         eprintln!("[config] ignored key `{key}`");
     }
     // The numbers, the effective input budget B, and where they came from (ADR 0018).
-    let compaction = if setup.auto_compact {
+    let compaction = if auto_compact {
         "automatic compaction on"
     } else {
         "automatic compaction off"

@@ -45,6 +45,7 @@ pub mod session;
 mod session_id;
 pub mod sessions;
 pub mod skills;
+pub mod startup;
 pub mod task;
 pub mod task_host;
 pub mod task_pending;
@@ -174,6 +175,10 @@ pub use skills::{
     BUILTIN, Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillSource, SkillsHooks,
     completion_candidates, discover, discover_with_extras, expand, has_skill_file, notices,
     prompt_section,
+};
+pub use startup::{
+    LeadSetup, ListError, SessionSettings, is_local_base_url, list_sessions, session_dir,
+    session_workspace,
 };
 pub use task::{
     CommitGate, EndCommit, Isolation, OrchestrationLimits, QueuedTask, SpawnHook, SpawnRequest,
