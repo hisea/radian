@@ -527,6 +527,17 @@ async fn a_named_agent_mounts_the_lead_tools_only_when_spawn_is_true() {
         plain.session.lead_tasks().is_none(),
         "spawn: false mounts no lead tools"
     );
+    // ADR 0030: a named lead's integration branch is per-lead, so two leads
+    // never share `radian/integration`.
+    assert_eq!(
+        chief
+            .session
+            .lead_tasks()
+            .unwrap()
+            .integration_branch()
+            .as_str(),
+        "radian/integration-chief"
+    );
 
     fixture.registry.close_all();
     let _ = chief.session.join().await;

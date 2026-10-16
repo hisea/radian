@@ -26,6 +26,7 @@ pub mod git_commit;
 mod headers;
 pub mod herdr;
 mod home;
+pub mod integration;
 pub mod job_notify;
 pub mod lead_tools;
 pub mod login;
@@ -120,12 +121,16 @@ pub use home::{
     run_dir_for, sessions_dir, sessions_dir_for, skills_dir, skills_dir_for, themes_dir,
     themes_dir_for, trust_dir, trust_dir_for, user_home, worktrees_dir_for,
 };
+pub use integration::{
+    Integration, MergeOutcome, branch_for as integration_branch_for,
+    dir_name_for as integration_dir_name_for, worktree_path as integration_worktree_path,
+};
 pub use job_notify::{
     JobNotifier, MAX_CONSECUTIVE_WAKES, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message,
 };
 pub use lead_tools::{
     DEFAULT_WAIT_TIMEOUT_SECS, LEAD_TOOL_NAMES, LeadSession, LeadTools, TASK_DETAIL_LIMIT_CHARS,
-    TASK_SUMMARY_LIMIT_CHARS, run as run_lead_tool,
+    TASK_SUMMARY_LIMIT_CHARS, human_merge_command, lead_allowed_tools, run as run_lead_tool,
 };
 pub use mcp::load_mcp_config;
 pub use model::{
@@ -189,9 +194,9 @@ pub use startup::{
     session_workspace,
 };
 pub use task::{
-    CommitGate, EndCommit, Isolation, OrchestrationLimits, QueuedTask, SpawnHook, SpawnRequest,
-    SpawnStage, Spawned, StallNotice, TaskBuilder, TaskContext, TaskError, TaskHandle,
-    TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
+    CommitGate, EndCommit, Integrated, Isolation, OrchestrationLimits, QueuedTask, SpawnHook,
+    SpawnRequest, SpawnStage, Spawned, StallNotice, TaskBuilder, TaskContext, TaskError,
+    TaskHandle, TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
     task_sandbox,
 };
 pub use task_host::{TaskHost, TaskModelFactory, named_builder, task_builder, task_lines};

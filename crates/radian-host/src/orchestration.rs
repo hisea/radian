@@ -620,8 +620,8 @@ pub fn tail_chars(text: &str, limit: usize) -> (String, bool) {
 // ---------------------------------------------------------------------------
 
 /// ADR 0030 O7's four hook points. They are control-port events with these exact names; the
-/// payloads are the JSON below. `before_merge` is defined here and has **no producer** until slice
-/// 10 (the integration worktree), so nothing emits it yet.
+/// payloads are the JSON below. `before_merge` is emitted by `integrate_task` (slice 10), before
+/// each merge attempt.
 pub mod hook {
     use serde_json::{Value, json};
 
@@ -645,9 +645,21 @@ pub mod hook {
         json!({ "task": task, "idle_secs": idle_secs })
     }
 
-    /// Defined for slice 10; no producer emits it yet (ADR 0030 O7).
-    pub fn before_merge(task: &str, branch: &str, commit: Option<&str>) -> Value {
-        json!({ "task": task, "branch": branch, "commit": commit })
+    /// The `before_merge` payload (ADR 0030): the task, its branch, and both
+    /// HEADs — the task branch's commit and the integration branch's pre-merge HEAD. Emitted once
+    /// per merge attempt, a conflicting attempt included.
+    pub fn before_merge(
+        task: &str,
+        branch: &str,
+        task_head: Option<&str>,
+        integration_head: Option<&str>,
+    ) -> Value {
+        json!({
+            "task": task,
+            "branch": branch,
+            "task_head": task_head,
+            "integration_head": integration_head,
+        })
     }
 
     /// One hook event's wire shape for a subscriber: `{ "event": { "source": "hook", "name": …,
@@ -985,8 +997,10 @@ mod tests {
             serde_json::json!({ "task": "t1", "idle_secs": 42 })
         );
         assert_eq!(
-            hook::before_merge("t1", "radian/t1", Some("abc")),
-            serde_json::json!({ "task": "t1", "branch": "radian/t1", "commit": "abc" })
+            hook::before_merge("t1", "radian/t1", Some("abc"), Some("def")),
+            serde_json::json!({
+                "task": "t1", "branch": "radian/t1", "task_head": "abc", "integration_head": "def"
+            })
         );
         assert_eq!(
             hook::envelope(hook::STALLED, &hook::stalled("t1", 1)),
