@@ -59,8 +59,10 @@ confirmed (ADR 0021 D4, last bullet).
 - `search(records, &SearchQuery)` — the deterministic order (scope → trust → match score →
   `updated_at` → `id`), filtered to records every query term matches.
 - `ranked(records, &SearchQuery)` — the same scoring and order without the keyword filter (a
-  non-match scores 0). The host's memory injection ranks all Active records with this (ADR 0021
-  D6): the match score orders, it does not select.
+  non-match scores 0). The host's **fixed block** ranks all Active records with this (ADR 0021
+  D6): the match score orders, it does not select. The host's per-turn **addition** uses
+  `search` instead (ADR 0021: a turn whose text hits nothing appends
+  nothing).
 - `export(records)` / `parse(text)` — the Markdown view (flat front matter, no YAML
   dependency). An import whose block changes an existing record's `key` or `kind` is reported
   in `ImportReport::rejections` and writes nothing, instead of silently dropping the edit; a

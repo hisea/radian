@@ -252,7 +252,12 @@ pub enum Overlay {
 
 /// The Markdown layout cache: `(width, text_len, paragraphs)`, where each paragraph is
 /// `(block start, lines)`. A type alias keeps the `Option` readable in `Entry`.
-pub(crate) type MdCache = (usize, usize, Vec<(usize, Vec<crate::blocks::BodyLine>)>);
+pub(crate) type MdCache = (
+    usize,
+    usize,
+    crate::footer::Glyphs,
+    Vec<(usize, Vec<crate::blocks::BodyLine>)>,
+);
 
 /// One approval as the UI shows it: the queue's id (ADR 0023 U7), the session that asked and
 /// the request itself. The queue id is what the answer names, not the permission layer's own
@@ -578,6 +583,7 @@ fn is_user_input(input: &Input) -> bool {
         | Input::SessionDone(_)
         | Input::TrustResolved(_)
         | Input::AccessApplied { .. }
+        | Input::ModeApplied { .. }
         | Input::CommandRefused(_)
         | Input::PickerOpened(_)
         | Input::LoginVerified { .. }
@@ -833,6 +839,12 @@ pub enum Input {
         remember: bool,
         result: Result<(), String>,
     },
+    /// A mode switch finished (the result of [`Effect::SetMode`]): the mode, and the outcome (a
+    /// task agent, or a session whose layer 1 is fixed, is a refusal).
+    ModeApplied {
+        mode: radian_host::Mode,
+        result: Result<(), String>,
+    },
     /// The left button went down at a screen cell: the press that may start a transcript
     /// selection (and that clears the previous one). Only arrives when mouse reporting is on.
     MouseDown { row: u16, col: u16 },
@@ -966,6 +978,11 @@ pub enum Effect {
         tier: crate::profile::Tier,
         remember: bool,
     },
+    /// Switch the session's working mode (ADR 0038 slice 3). The loop calls the facade
+    /// (`set_mode`), which queues the durable `ConfigChanged` the driver journals at the turn
+    /// boundary, so layer 1 (the role prompt) changes at the next turn. The answer is
+    /// [`Input::ModeApplied`].
+    SetMode { mode: radian_host::Mode },
     /// Expand `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and the loop sends
     /// the folded `<skill …>` text as one user message (`steer` picks steer vs follow-up). The
     /// answer is [`Input::SkillExpanded`].
@@ -1031,6 +1048,7 @@ impl PartialEq for Effect {
                     remember: br,
                 },
             ) => at == bt && ar == br,
+            (SetMode { mode: a }, SetMode { mode: b }) => a == b,
             (
                 AnswerRequest {
                     request_id: a,
@@ -2847,8 +2865,31 @@ impl App {
                         } else {
                             self.push_notice(format!("access: {} for this session", tier.as_str()));
                         }
+                        // ADR 0036: the tool list (and the startup line)
+                        // is computed once, when the session opens. The switch changes what
+                        // runs from the next call, not the advertised text, so say so rather
+                        // than leave the description stale.
+                        self.push_notice(
+                            "the shell tool's description and the startup line are fixed for \
+                             this session; a new session shows the new tier",
+                        );
                     }
                     Err(reason) => self.push_notice(format!("cannot switch access: {reason}")),
+                }
+                UpdateResult::dirty()
+            }
+            Input::ModeApplied { mode, result } => {
+                match result {
+                    Ok(()) => {
+                        // The layer itself switches at the next turn (the loop's `set_mode`
+                        // queues the change); the projection is the UI's mirror of it.
+                        self.projection.set_mode(Some(mode.as_str().to_string()));
+                        self.push_notice(format!(
+                            "mode: {} from the next turn (role prompt)",
+                            mode.as_str()
+                        ));
+                    }
+                    Err(reason) => self.push_notice(format!("cannot switch mode: {reason}")),
                 }
                 UpdateResult::dirty()
             }
@@ -4124,6 +4165,27 @@ impl App {
                         remember: false,
                     })
                 }
+            },
+            // `/mode` (ADR 0038 slice 3): a query with no argument, otherwise a role switch. The
+            // layer changes at the next turn, so there is nothing to confirm here.
+            command::Outcome::ModeSwitch(name) => match name {
+                None => {
+                    let current = self
+                        .projection
+                        .read()
+                        .mode()
+                        .unwrap_or("general")
+                        .to_owned();
+                    self.push_notice(format!("mode: {current}"));
+                    UpdateResult::dirty()
+                }
+                Some(name) => match radian_host::Mode::parse(&name) {
+                    Ok(mode) => UpdateResult::effect(Effect::SetMode { mode }),
+                    Err(message) => {
+                        self.push_notice(message);
+                        UpdateResult::dirty()
+                    }
+                },
             },
             // `/skill:` (ADR 0025 S3): the host reads the body and the expanded text becomes a
             // user message. Whether it steers is decided here, like a typed send.

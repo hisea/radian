@@ -1438,8 +1438,22 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
         // item hides; never `$0.00` for a model whose price we do not know (v5 §5).
         "cost" => {
             let micros = session.cost_micros()?;
+            // ADR 0027 and 3: a total with a missing rate is incomplete
+            // (`≥`), and a total re-priced from old records is an estimate (`~`). The estimate
+            // wins when both hold (`~≥` would be unreadable). A recorded, complete total has no
+            // marker.
+            let marker = if session.cost_estimated() {
+                "~"
+            } else if session.cost_incomplete() {
+                "≥"
+            } else {
+                ""
+            };
             Some(ItemData {
-                values: vec![("usd", crate::timing::format_cost(micros))],
+                values: vec![(
+                    "usd",
+                    format!("{marker}{}", crate::timing::format_cost(micros)),
+                )],
                 default_format: "{usd}",
                 numeric: Some(micros / 1_000_000),
             })
@@ -1659,11 +1673,11 @@ pub fn widget_line(app: &App, ids: &[String]) -> Option<Line<'static>> {
 mod tests {
     use super::*;
 
-    /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027). Each one is
-    /// checked against the six fonts by `scripts/check-glyph-coverage.py` and listed in the
-    /// README's coverage table. A new glyph makes this test fail until it is re-checked and
-    /// added here.
-    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓›…";
+    /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027 and 6, plus
+    /// ADR 0035's band half cells). Each one is checked against the six fonts by
+    /// `scripts/check-glyph-coverage.py` and listed in the README's coverage table. A new glyph
+    /// makes this test fail until it is re-checked and added here.
+    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓›…▄▀";
 
     /// The documented exceptions to the coverage rule (ADR 0027/10): the owner
     /// picked the arc and the pulse after seeing them, and braille is an opt-in, so these may

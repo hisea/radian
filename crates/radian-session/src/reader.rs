@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::ReadError;
+use crate::fee::UsageFee;
 use crate::runtime::{
     ApprovalPolicyValue, InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision,
     TurnOutcome, TurnReason,
@@ -92,6 +93,10 @@ pub enum EventData {
     },
     ModelUsageRecorded {
         usage: ModelUsage,
+        /// The fee the call was billed at (ADR 0027). `None` on a record written
+        /// before the field existed (ADR 0007): a resume then re-prices it with the
+        /// current catalog and marks the total an estimate.
+        fee: Option<UsageFee>,
     },
     /// The real usage of one summarization model call (ADR 0018). Audit only: it does not
     /// change the history and is **not** a budget baseline.
@@ -99,6 +104,7 @@ pub enum EventData {
         revision: u64,
         model: String,
         usage: ModelUsage,
+        fee: Option<UsageFee>,
     },
     /// The candidate record of one compaction (ADR 0018). The compaction only takes effect
     /// when the following replacement commits under the same revision; on its own it changes
@@ -615,7 +621,10 @@ impl LineScanner {
                     path,
                     self.lineno,
                 )?;
-                EventData::ModelUsageRecorded { usage: d.usage }
+                EventData::ModelUsageRecorded {
+                    usage: d.usage,
+                    fee: d.fee,
+                }
             }
             "CompactionUsageRecorded" => {
                 let d: CompactionUsageData = data_of(raw, self.lineno, path)?;
@@ -633,6 +642,7 @@ impl LineScanner {
                     revision: d.revision,
                     model: d.model,
                     usage: d.usage,
+                    fee: d.fee,
                 }
             }
             "ContextCompacted" => {
@@ -1019,13 +1029,14 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
                 result: result.clone(),
             })
         }
-        EventData::ModelUsageRecorded { usage } => Some(JournalRecord::ModelUsage {
+        EventData::ModelUsageRecorded { usage, .. } => Some(JournalRecord::ModelUsage {
             usage: usage.clone(),
         }),
         EventData::CompactionUsageRecorded {
             revision,
             model,
             usage,
+            ..
         } => Some(JournalRecord::CompactionUsage {
             revision: *revision,
             model: model.clone(),
@@ -1144,6 +1155,9 @@ struct SettledData {
 #[derive(Deserialize)]
 struct UsageData {
     usage: ModelUsage,
+    /// The fee the call was billed at; absent on an older record (ADR 0007).
+    #[serde(default)]
+    fee: Option<UsageFee>,
 }
 
 #[derive(Deserialize)]
@@ -1151,6 +1165,8 @@ struct CompactionUsageData {
     revision: u64,
     model: String,
     usage: ModelUsage,
+    #[serde(default)]
+    fee: Option<UsageFee>,
 }
 
 #[derive(Deserialize)]

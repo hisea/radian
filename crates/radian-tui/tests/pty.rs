@@ -5315,6 +5315,102 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     }
 }
 
+/// The exit line must not hang the process when the terminal stops draining (a full pty output
+/// buffer, or XOFF). `main` prints it **after** `runtime.shutdown_timeout`, so the signal task
+/// — the watchdog that is the only other way a stuck process ends — is already gone; an
+/// unbounded `writeln!` to a full pty would then block forever (small-fixes-3).
+///
+/// `--exit-line-filler` makes the clean-exit reason line larger than the pty output buffer, so
+/// the write is guaranteed to block once the test stops draining. `--freeze-draw` parks the app
+/// after the first frame, so the only writes left on the exit path are the terminal restore
+/// (small, and the buffer has room for it after the drain) and the exit line itself. The child
+/// must still exit within the bound; the deadline is a failure bound, not synchronization.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_full_terminal_cannot_hang_the_exit_line() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("exit-line-hang");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = dir.path().join("sessions");
+    let frozen = dir.path().join("frozen");
+    let home = TempDir::new("exit-line-hang-home");
+    let (mut child, mut master) = spawn_direct(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "exit-line-hang",
+            "--offline-catalog",
+            "--workspace",
+            ws.to_str().unwrap(),
+            // The app stops drawing once the first frame is out; with no further writes the pty
+            // buffer cannot fill from the draw path.
+            "--freeze-draw",
+            frozen.to_str().unwrap(),
+            // Larger than any pty output buffer, so the exit line's write cannot complete once
+            // the test stops reading.
+            "--exit-line-filler",
+            "1048576",
+        ],
+        home.path(),
+    );
+
+    // The first frame is larger than the pty buffer, so the app blocks in `draw` until someone
+    // reads; the marker appears only once the frame is fully written.
+    let mut drained = Vec::new();
+    let mut buf = [0u8; 65536];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !frozen.exists() {
+        if let Ok(n) = master.read(&mut buf) {
+            drained.extend_from_slice(&buf[..n]);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the app never drew its first frame; output: {}",
+            String::from_utf8_lossy(&drained)
+        );
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "the app exited before the signal"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Empty the pty buffer: the app is frozen, so nothing else is coming from the draw path, and
+    // the restore sequences need room. A non-blocking master reports "nothing buffered" as an
+    // error, which ends the drain.
+    loop {
+        match master.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => drained.extend_from_slice(&buf[..n]),
+        }
+    }
+
+    // Stop draining and ask the app to leave. Its exit path writes the restore sequences (they
+    // fit) and then the oversized exit line, whose write blocks on the full buffer.
+    // SAFETY: signal delivery to our own child process.
+    unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM) };
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the app did not exit within 10 s of SIGTERM: the exit line blocked on the full pty \
+             (it is printed after runtime.shutdown_timeout, when the signal watchdog is gone)"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(128 + 15), "128 + SIGTERM: {status:?}");
+}
+
 /// The remaining window: the main loop can be stuck inside a long frame (a terminal write that
 /// blocks because nobody drains it), so it never sees the signal flag and only the signal task's
 /// watchdog can end the process. `--slow-draw` parks every frame, which makes that hang
@@ -9872,4 +9968,98 @@ async fn pty_resume_restores_the_access_tier() {
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0038 slice 3: `/mode lead` in the real TUI switches the role layer from the next turn.
+/// The first turn runs the general role, the notice names the switch, and the second turn's
+/// request carries the lead role prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_mode_lead_switches_the_role_prompt_from_the_next_turn() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("mode-switch");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("FIRST-OK"), text_reply("SECOND-OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().join("sessions").to_str().unwrap(),
+            "--session-id",
+            "mode",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 15), "{}", pty.screen());
+
+    pty.send(b"one\r");
+    assert!(
+        pty.wait_for_screen("FIRST-OK", 20),
+        "the first turn did not finish:\n{}",
+        pty.screen()
+    );
+
+    // `/mode` with no argument reports the current mode; `/mode lead` switches it.
+    pty.send(b"/mode\r");
+    assert!(
+        pty.wait_for_screen("mode: general", 10),
+        "the mode must be reported:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/mode lead\r");
+    assert!(
+        pty.wait_for_screen("mode: lead from the next turn", 10),
+        "the switch notice must be shown:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"two\r");
+    assert!(
+        pty.wait_for_screen("SECOND-OK", 20),
+        "the second turn did not finish:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "two turns, two requests");
+    let system = |n: usize| -> String {
+        requests[n].json()["messages"]
+            .as_array()
+            .expect("messages is an array")
+            .iter()
+            .find(|message| message["role"] == "system")
+            .and_then(|message| message["content"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert!(
+        system(0).contains("You are radian, a coding agent"),
+        "turn 1 runs the general role: {}",
+        system(0)
+    );
+    assert!(
+        system(1).contains("You are a radian lead agent"),
+        "turn 2 runs the lead role: {}",
+        system(1)
+    );
+    // Only the role layer moved: everything outside `<role>` is byte-identical.
+    let without_role = |prompt: &str| {
+        let start = prompt.find("<role>\n").expect("a <role> block") + "<role>\n".len();
+        let end = prompt.find("\n</role>").expect("the block's end");
+        format!("{}ROLE{}", &prompt[..start], &prompt[end..])
+    };
+    assert_eq!(
+        without_role(&system(0)),
+        without_role(&system(1)),
+        "only `<role>` may differ across the switch"
+    );
 }

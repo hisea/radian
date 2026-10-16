@@ -324,6 +324,8 @@ from slipping in unchecked.
 | `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▄` | U+2584 | band top padding (ADR 0035) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▀` | U+2580 | band bottom padding (ADR 0035) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -627,11 +629,30 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   default highlight on `cancel`, and do ↑/↓/Enter/Esc feel right? After "remember for this
   project", restart — is the tier applied and is the `(project)` marker readable in the footer
   and the startup summary? pty automation asserts the text, not the feel (ADR 0009).
+- **the `/mode` switch** (ADR 0038 slice 3): type `/mode` — does it name the mode in effect?
+  Type `/mode lead` — does the notice say the role changes from the next turn, and does the next
+  reply read like a project lead (it plans, briefs and reviews) rather than a coding agent?
+  `/mode general` switches back; a resumed session must open in the mode it was left in.
+- **native `git commit` in the sandbox, and its text** (ADR 0038 slice 4): in a **worktree on
+  `main`** of a real repo, start a general `workspace` session and run a `git commit` through
+  `shell` — the commit must land with native git (`git_commit` is not needed). The `shell` tool
+  description the model sees and the startup line must say git can commit/branch/stash in the
+  sandbox while `.git/config` and `.git/hooks/` stay read-only. After `/access safe` the notice
+  must say the shell description and the startup line are fixed for this session; a new session
+  must show the read-only wording. pty automation cannot see the model-facing description, so
+  this one is yours (ADR 0009).
 - **the input area's three styles**: is the default `bar` band
   comfortable — the rail clear, the band reaching the right edge, multi-line and a CJK line
   banded on every row, and the status row above it (`◜  Working · 12s · esc to interrupt`) not
   shifting the band or the transcript? Compare `input_style = "lines"` (the rule above and
   below, `> `) and `input_style = "box"`.
+- **the band's half-cell padding** (ADR 0035): the user block and the `bar` input
+  draw one row above (`▄`) and one below (`▀`) the band, in the band's color on the terminal's
+  default background. Is the join **seamless** — no thin gap between the half cells and the
+  banded rows — in Ghostty and in a font-drawn terminal? A half-block glyph is drawn by the
+  font, so a font whose blocks are not exactly half-height shows a seam or a step; record the
+  terminal and font if so. Also check the `ascii` tier has no padding row at all, and that the
+  band's half cells copy as nothing when selected (drag from a padding row into the text).
 - **notice and hint readability**: `/help`'s output and the placeholder must be
   readable on your background. `dark` now uses the terminal's default foreground for notices and
   `Gray` for hints; is that right on your terminal, and is the light palette's hint (dark gray on
@@ -773,20 +794,27 @@ throwaway terminal, not your working one.
    clean shell prompt. *Fail*: record whether the resize disarmed the quit (the `01177c2` fix)
    and whether the exit line is paste-ready.
 5. **Message and tool-card backgrounds, selection on top** (ADR 0028; merges `0f5a302`,
-   `608ce64`, `8456074`). *Steps*: send a message that calls a tool; drag-select across a user
-   message and a tool card; double-click a word, triple-click a message.
-   *Expect*: the user message and each tool card paint a **full-width** background band; the
-   selection highlight is visible **on top of** those bands (not hidden by them); the copied
-   text matches what you selected. *Look*: contrast in `dark`, `light`, `mono`. *Fail*: record
-   which role loses the selection and the theme.
+   `608ce64`, `8456074`; the band pads are ADR 0035). *Steps*: send a message that
+   calls a tool; drag-select across a user message, a padding row and a tool card;
+   double-click a word, triple-click a message.
+   *Expect*: the user message's text row and each tool card paint a **full-width** background
+   band; the user message and the `bar` input additionally draw one `▄` row above and one `▀`
+   row below the band (the half-cell padding, revision 3), the tool cards **not**; the
+   selection highlight is visible **on top of** the bands (not hidden by them); a drag that
+   starts or ends on a padding row copies no padding and does not crash; the copied text
+   matches what you selected. *Look*: contrast in `dark`, `light`, `mono`, and whether the
+   half cells join the band without a seam (see the bullet above). *Fail*: record which role
+   loses the selection, the theme, and (for the pads) the terminal and font.
 6. **Thinking fold `Ctrl-T` and tool output `Ctrl-O`** (ADR 0028 R3/R4; merges `0f5a302`,
    `608ce64`). *Steps*: with a reasoning model (e.g. `--thinking adaptive`), get a reply with
    reasoning; press `Ctrl-T`; then call a tool with long output and press `Ctrl-O` three times.
    *Expect*: `Ctrl-T` toggles reasoning between collapsed and expanded (default collapsed;
    `tui.display.reasoning` sets the start); `Ctrl-O` cycles tool output
    `errors → expanded → collapsed → errors` (default `errors`; `crates/radian-tui/src/app.rs`, `ToggleToolOutput`); the truncated body shows the `[N more
-   lines]` marker rather than silently cutting. *Fail*: record the fold state after each press
-   and the config value.
+   lines]` marker rather than silently cutting; the folded thinking line **hugs** the reply or
+   the tool card below it with no blank line between, while it is still separated from the
+   block above by one line (ADR 0035; an expanded thinking block hugs the
+   same way). *Fail*: record the fold state after each press and the config value.
 7. **Mermaid** (ADR 0028 R8; merge `5628737`). *Steps*: ask for a small ` ```mermaid `
    flowchart; widen then narrow the terminal past the `TooWide` threshold, then widen again.
    *Expect*: wide → a Unicode diagram at the body width; narrow → the **source** plus one dim
@@ -950,6 +978,18 @@ the run continues and the panic still exits 101. Tested by
 `pty_clean_exit_prints_one_reason_line`, `pty_a_panic_writes_a_redacted_panic_log`,
 `pty_panic_path_restores_the_terminal` and
 `pty_an_unwritable_diagnostics_directory_is_only_a_notice`.
+
+## The exit line is written with a bound (2026-10-15, small-fixes-3)
+
+`main` prints the reason line **after** `runtime.shutdown_timeout(2s)`, so the signal task —
+whose watchdog is the only other way a stuck process ends — is already gone. A plain blocking
+`writeln!` to a terminal that has stopped draining (a full pty output buffer, or XOFF) would
+then block the process forever. `print_exit_line` writes on its own short-lived thread and
+`main` waits at most `EXIT_LINE_WAIT` (250 ms): returning ends the process and the blocked
+writer with it, so the line is best-effort — losing it is not a failure to exit. The
+`--exit-line-filler` test hook pads that line so
+`pty_a_full_terminal_cannot_hang_the_exit_line` can fill the pty buffer (with the app frozen
+after its first frame) and prove the bound.
 
 ## Startup order (2026-10-13, dogfooding D1/D2)
 
@@ -1222,6 +1262,26 @@ costs ~2 s each, which would be a visible freeze on the first code block at runt
 embeds that dump and only deserializes it. The **language table above is what limits
 highlighting**; a grammar the set ships but the table does not name renders as plain text.
 
+## Markdown elements (ADR 0035)
+
+Assistant prose is CommonMark plus tables, strikethrough and task lists
+(`pulldown-cmark`). The renderer, not the source's blank lines, spaces the block-level
+elements: exactly one blank line between a heading, a paragraph, a list, a code block, a
+table, a quote and a rule. A heading keeps its `#` marks with the weak
+`md_heading_mark` role; the text is `md_heading` (level 1 underlined). The unordered marker
+is `-` and a continuation aligns to the marker's actual width (`10. ` is 4 cells). A task
+list shows `☐`/`☑` instead of the bullet. A quote's bar is `▏`, the rule is at most 40 cells,
+a table has a border between every two rows, and a code block shows its fence line (weak) as
+its title and end; code never wraps (ADR 0028 R9). A small HTML subset is handled: `<br>` is
+a line break, `<hr>` a rule, `<blockquote>` a quote, and every other tag is stripped with its
+text kept. The glyphs follow the footer's `glyphs` set (`unicode`/`nerd`/`ascii`): ascii uses
+`-`, `|`, `[ ]`/`[x]` and `+ - |` borders.
+
+**Copy and search see the real text, not the decorations.** A synthesized cell — a list
+bullet, a task checkbox, a quote bar, a heading's `#`, a fence line, a table border, a link's
+` (url)` — has no source offset, so a selection copy and a search match the source characters
+only; the decorations are drawn but never copied.
+
 ## Context budget and the model catalog
 
 The window comes from `--context-window TOKENS` (explicit; it never fetches — an existing
@@ -1344,10 +1404,12 @@ match`; the other entries stay folded. The override is dropped by the next globa
 (`Ctrl-T` / `Ctrl-O`); closing the search box keeps it, so the text the user searched for does
 not disappear again. The jump centers the match's **display** line, not its expanded one.
 
-Already a Notice-style one-liner (verified, R5): a memory injection never enters the transcript
-(the hook appends to the system prompt) and its only transcript trace is the startup
-`[memory] …` notice; an approval is a modal, not a transcript entry (the call and its result are
-the card). A pending question's result arrives as the `ask_user` card.
+Already a Notice-style one-liner (verified, R5): the memory **fixed block** never enters the
+transcript (the hook appends to the system prompt) and its only transcript trace is the startup
+`[memory] …` notice. A later turn's addition **does** enter it, as a `System`-source message
+(ADR 0021), which the TUI renders like any other `System` message (the same shape as
+ADR 0037's completion notice); an approval is a modal, not a transcript entry (the call and its
+result are the card). A pending question's result arrives as the `ask_user` card.
 
 ## Mermaid blocks (ADR 0028 R8)
 

@@ -293,6 +293,32 @@ fn card_band(entry: &Entry, theme: &Theme) -> Option<Style> {
     (band.bg.is_some() || !band.add_modifier.is_empty()).then_some(band)
 }
 
+/// The half-block glyph a band's padding row draws (ADR 0035): `▄` (lower half) for
+/// the row above the band, `▀` (upper half) for the row below it. `ascii` never gets a padding
+/// row ([`crate::blocks::banded_pad`]), so this is only asked for `unicode`/`nerd`.
+fn pad_glyph(pad: blocks::Pad) -> &'static str {
+    match pad {
+        blocks::Pad::Top => "▄",
+        blocks::Pad::Bottom => "▀",
+        blocks::Pad::None => "",
+    }
+}
+
+/// One half-cell padding row of a banded block (ADR 0035): `glyph` repeated across
+/// `width` cells, in the band's color as the foreground and with no background of its own (the
+/// band's background is painted on the block's text rows, which this row sits half a cell
+/// against). Shared by a user block's pad rows and the `bar` input's.
+fn band_pad_line(glyph: &str, width: usize, band: Style) -> Line<'static> {
+    let mut style = Style::default().add_modifier(band.add_modifier);
+    // The band's own color: the background it would paint, else its foreground (`mono`, a theme
+    // with no user background). Under `mono` both are absent, so the half cell is the terminal
+    // default — still a visible block, just uncolored.
+    if let Some(color) = band.bg.or(band.fg) {
+        style = style.fg(color);
+    }
+    Line::from(Span::styled(glyph.repeat(width), style))
+}
+
 /// The text a frame shows for `entry`. A user message's `@` attachments are folded to one
 /// `[file: P, N lines]` line each; every other entry shows its text unchanged. Display only:
 /// the message (and the journal) keep the full text. Also what a selection maps offsets into
@@ -335,7 +361,7 @@ fn entry_lines(
         .iter()
         .enumerate()
         .filter(|(_, line)| {
-            !line.pad
+            !line.pad.is_pad()
                 && !matches!(
                     line.frame,
                     blocks::Frame::Top | blocks::Frame::Bottom | blocks::Frame::Divider
@@ -410,10 +436,13 @@ fn render_row(
     glyphs: crate::footer::Glyphs,
     spinner: crate::spinner::Frame,
 ) -> Line<'static> {
-    if row.pad {
+    if row.pad.is_pad() {
+        // A banded block's half-cell padding row (ADR 0035): a half cell of the
+        // band, its color as the glyph's foreground and the terminal's default background, so
+        // the band reads as extending half a cell further up (`▄`) or down (`▀`). A block with
+        // no band keeps a plain blank row.
         return match band {
-            // The blank rows of a banded block carry the band too.
-            Some(band) => Line::from(Span::styled(" ".repeat(width), band)),
+            Some(band) => band_pad_line(pad_glyph(row.pad), width, band),
             None => Line::from(vec![Span::raw(String::new())]),
         };
     }
@@ -627,7 +656,7 @@ pub fn visible_lines_with(
                 .iter()
                 .enumerate()
                 .filter(|(_, line)| {
-                    !line.pad
+                    !line.pad.is_pad()
                         && !matches!(
                             line.frame,
                             blocks::Frame::Top | blocks::Frame::Bottom | blocks::Frame::Divider
@@ -935,16 +964,27 @@ fn input_height(app: &App, width: usize) -> u16 {
         .clamp(1, MAX_INPUT_ROWS);
     match app.input_style {
         InputStyle::Lines | InputStyle::Box => rows as u16 + 2,
-        InputStyle::Bar => rows as u16 + 1,
+        InputStyle::Bar => rows as u16 + 1 + bar_pad_rows(app) as u16,
+    }
+}
+
+/// The `bar` input's half-cell padding rows (ADR 0035): two (`▄` above the band,
+/// `▀` below it) under the `unicode`/`nerd` glyph tiers, none under `ascii` (decision 4). The
+/// two rows are always both present or both absent, so the band never changes height mid-frame.
+fn bar_pad_rows(app: &App) -> usize {
+    if crate::blocks::banded_pad(app.footer_glyphs()) {
+        2
+    } else {
+        0
     }
 }
 
 /// The input's visible text rows (`input_area.height` minus the same chrome `input_height`
 /// reserves for the style), at least one.
 fn input_visible_rows(app: &App, height: u16) -> usize {
-    let chrome = match app.input_style {
+    let chrome: u16 = match app.input_style {
         InputStyle::Lines | InputStyle::Box => 2,
-        InputStyle::Bar => 1,
+        InputStyle::Bar => 1 + bar_pad_rows(app) as u16,
     };
     height.saturating_sub(chrome).max(1) as usize
 }
@@ -1751,6 +1791,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     let text_style = band.patch(style);
                     let area_width = input_area.width as usize;
                     let mut body: Vec<Line> = vec![bar_status_line(app)];
+                    // The band's half-cell pads (ADR 0035): half a row of the band
+                    // above (`▄`) and below (`▀`) the text rows, so the band reads as extending
+                    // half a cell beyond its text. The `ascii` tier has none.
+                    if bar_pad_rows(app) == 2 {
+                        body.push(band_pad_line("▄", area_width, band));
+                    }
                     let text_rows: Vec<String> = if empty {
                         vec![INPUT_HINT.to_string()]
                     } else {
@@ -1772,6 +1818,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         }
                         body.push(Line::from(spans));
                     }
+                    if bar_pad_rows(app) == 2 {
+                        body.push(band_pad_line("▀", area_width, band));
+                    }
                     frame.render_widget(Paragraph::new(body), input_area);
                 }
             }
@@ -1787,8 +1836,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 };
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
                 let row = (cursor_row - offset).min(visible.saturating_sub(1)) as u16;
+                // The text rows start below the style's top chrome: the rule (or box border),
+                // or `bar`'s status row **and** its top half-cell padding row (ADR 0035
+                // revision 3).
+                let top_chrome = match app.input_style {
+                    InputStyle::Lines | InputStyle::Box => 1,
+                    // The status row, plus the band's top half-cell pad when the tier has one.
+                    InputStyle::Bar => {
+                        1 + u16::from(crate::blocks::banded_pad(app.footer_glyphs()))
+                    }
+                };
                 let x = input_area.x + lead + col;
-                let y = input_area.y + 1 + row;
+                let y = input_area.y + top_chrome + row;
                 frame.set_cursor_position((x, y));
             }
         }
@@ -2278,6 +2337,13 @@ fn body_spans(
         for piece in md {
             let style = match piece.style {
                 blocks::MdStyle::Heading => theme.md_heading,
+                blocks::MdStyle::Heading1 => theme.md_heading.add_modifier(Modifier::UNDERLINED),
+                blocks::MdStyle::HeadingMark => theme.md_heading_mark,
+                blocks::MdStyle::Strikethrough => theme.text.add_modifier(Modifier::CROSSED_OUT),
+                blocks::MdStyle::TaskUnchecked | blocks::MdStyle::TaskChecked => {
+                    theme.md_list_bullet
+                }
+                blocks::MdStyle::Fence => theme.truncation,
                 blocks::MdStyle::Bold => theme.md_heading.patch(Modifier::BOLD),
                 blocks::MdStyle::Italic => theme.text.add_modifier(Modifier::ITALIC),
                 blocks::MdStyle::Code => theme.md_code,

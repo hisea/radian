@@ -8,7 +8,7 @@ use agent_core::{InputSource, Message, recover};
 use common::{TempDir, fixture};
 use radian_session::{
     EventData, InboxLane, PermissionApprover, PermissionDecision, ReadError, ReplacementEnd,
-    Session, SessionJournal, TurnOutcome, TurnReason, WriteError,
+    Session, SessionJournal, TurnOutcome, TurnReason, UsageFee, WriteError,
 };
 use serde_json::json;
 
@@ -372,7 +372,7 @@ fn the_usage_cache_semantics_fixture_reads_back_field_for_field() {
         .events()
         .iter()
         .filter_map(|event| match &event.data {
-            EventData::ModelUsageRecorded { usage }
+            EventData::ModelUsageRecorded { usage, .. }
             | EventData::CompactionUsageRecorded { usage, .. } => Some(usage),
             _ => None,
         })
@@ -398,6 +398,37 @@ fn the_usage_cache_semantics_fixture_reads_back_field_for_field() {
     assert_eq!(
         session.history().unwrap(),
         recover(&session.journal_records()).unwrap()
+    );
+}
+
+/// ADR 0027 / ADR 0007: a usage record carries the fee the call was
+/// billed at (`micros` and an optional `incomplete`), and an older record carries none. Rust
+/// half of the differential check with `docs/schema/check-fixtures.sh`.
+#[test]
+fn the_usage_fee_fixture_reads_the_recorded_fee() {
+    let session = Session::open(fixture("usage-fee-recorded.jsonl")).unwrap();
+    assert!(session.skipped().is_empty());
+
+    let fees: Vec<(&str, Option<UsageFee>)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::ModelUsageRecorded { fee, .. } => Some(("ModelUsageRecorded", *fee)),
+            EventData::CompactionUsageRecorded { fee, .. } => {
+                Some(("CompactionUsageRecorded", *fee))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fees,
+        vec![
+            ("ModelUsageRecorded", Some(UsageFee::new(3_270, false))),
+            ("ModelUsageRecorded", Some(UsageFee::new(1_000, true))),
+            ("CompactionUsageRecorded", Some(UsageFee::new(450, false))),
+            // The old record has no field: a resume re-prices it and marks the estimate.
+            ("ModelUsageRecorded", None),
+        ]
     );
 }
 

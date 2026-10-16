@@ -53,6 +53,9 @@ impl SandboxBackend for Bwrap {
             read_only: Vec::new(),
             git_access: GitAccess::default(),
             deny_read: Vec::new(),
+            // The probe policy only needs the workspace bind; the unix-socket whitelist is empty
+            // (and the Linux backend does not restrict unix sockets yet, see the module docs).
+            allow_unix_sockets: Vec::new(),
             allow_env: vec!["PATH".into()],
         };
         let inside_file = ws.join("ok.txt");

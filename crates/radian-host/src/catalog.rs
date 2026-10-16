@@ -1081,6 +1081,35 @@ mod tests {
         assert_eq!(plain.rates_for(Some(1_000_000)).input, 3_000_000);
     }
 
+    /// ADR 0027 / research F5 with **two** tiers listed descending: `parse_tiers`
+    /// must sort ascending so `rates_for` (the highest tier the prompt exceeds) picks the right
+    /// one. With a single tier the sort could be reversed and every test still passed.
+    #[test]
+    fn the_tiers_are_parsed_ascending_whatever_the_catalog_order() {
+        let text = r#"{
+            "anthropic": {"models": {
+                "two": {"limit": {"context": 400000}, "cost": {"input": 1, "output": 2,
+                    "tiers": [
+                        {"input": 4, "output": 8, "tier": {"type": "context", "size": 256000}},
+                        {"input": 2, "output": 4, "tier": {"type": "context", "size": 128000}}]}}
+            }}
+        }"#;
+        let catalog = Catalog::parse(text).unwrap();
+        let price = catalog.price("anthropic", "two").unwrap();
+        assert_eq!(
+            price.tiers.iter().map(|tier| tier.size).collect::<Vec<_>>(),
+            vec![128_000, 256_000],
+            "the tiers must be ascending, not the catalog's order"
+        );
+        // At or below the first size: the base rates.
+        assert_eq!(price.rates_for(Some(128_000)).input, 1_000_000);
+        // Over 128K, under 256K: the 128K tier.
+        assert_eq!(price.rates_for(Some(200_000)).input, 2_000_000);
+        // Over 256K: the **highest** exceeded tier, not the first one found.
+        assert_eq!(price.rates_for(Some(300_000)).input, 4_000_000);
+        assert_eq!(price.rates_for(None).input, 1_000_000, "no prompt: base");
+    }
+
     /// ADR 0014 Q2: the catalog's `interleaved` value decides reasoning replay. A
     /// plain-text field name opens it; `reasoning_details` (a structured array), a bare `true`,
     /// and a missing entry do not.

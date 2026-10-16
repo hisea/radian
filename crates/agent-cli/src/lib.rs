@@ -789,6 +789,8 @@ struct Setup {
     skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     skills_disabled: Vec<String>,
+    /// `[memory.injection]` (ADR 0021).
+    memory_injection: radian_host::memory::InjectionConfig,
     /// `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized (ADR 0016).
     allow_unix_sockets: Vec<PathBuf>,
 }
@@ -1221,6 +1223,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         ),
         skills_builtin: config.skills.builtin.unwrap_or(true),
         skills_disabled: config.skills.disabled.clone(),
+        memory_injection: config.memory.injection(),
         allow_unix_sockets: {
             let (paths, warnings) = radian_host::resolve_allow_unix_sockets(
                 &config.sandbox.allow_unix_sockets,
@@ -1632,10 +1635,13 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             tier: profile_arg.preset(),
             profile: permission_profile,
             access_builder: None,
+            // The line host has no `/mode`; its session is not a task agent either.
+            task_agent: false,
             memory_root,
             skills_extra_paths: setup.skills_extra_paths,
             skills_builtin: setup.skills_builtin,
             skills_disabled: setup.skills_disabled,
+            memory_injection: setup.memory_injection,
             trust: trust_setup,
             resume: cli.resume.is_some(),
             config_snapshot: serde_json::json!({
