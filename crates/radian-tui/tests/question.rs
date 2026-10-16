@@ -697,6 +697,27 @@ fn space_on_other_starts_typing_and_the_cursor_is_visible() {
     );
 }
 
+/// the inline `Other` cursor sits at the composer's cursor, so `←`/`→` move
+/// it within the typed text.
+#[test]
+fn the_other_cursor_follows_the_text_cursor() {
+    let mut q = question("pick", QuestionKind::Single, vec![option("a", "A")], true);
+    q.allow_other = true;
+    let mut app = App::new("m", "s");
+    show(&mut app, vec![q]);
+    app.on_key(key(KeyCode::Down)); // the Other row
+    app.on_key(key(KeyCode::Char(' '))); // choose Other
+    for c in "abc".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    app.on_key(key(KeyCode::Left)); // move the composer cursor before `c`
+    let text = render(&mut app, 80, 24);
+    assert!(
+        text.contains("Other: ab▏c"),
+        "the cursor follows ←/→: {text}"
+    );
+}
+
 /// `Enter` with nothing chosen still advances; the question counts as
 /// unanswered and the overview marks it.
 #[test]

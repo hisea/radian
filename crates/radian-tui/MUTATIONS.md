@@ -1893,3 +1893,28 @@ of the table); FM-1's one-line-fold mutant also trips the cancelled-call head, w
 suite missed: `a_small_tool_is_one_line_until_it_is_expanded` uses a **one-line** `read`, so the
 old `hidden > 1` clause was never exercised — the new test uses a 100-line result to pin it.
 Files restored with `cp` + `cmp` after the run.
+
+## ask-keys: `Space` selects, `Enter` only advances (ADR 0024 note)
+
+Base `1442672` (the implementation commit; the run also carries the new
+`the_other_cursor_follows_the_text_cursor` test). In-place mutations: each touched source backed
+up under `.radian/scratch/mut/`, the mutated file restored with a plain `cp` and `cmp`ed
+byte-for-byte (`git status --short` clean apart from the new test). Each mutation ran
+`cargo test -p radian-tui --test <file> --no-fail-fast` (or `--lib` for the composer).
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| AK-1 | `Enter` never selects | `question.rs::FormSubmit` selects-and-advances a `single` again | `question::enter_advances_without_selecting_and_space_selects_without_advancing` | ✅ (1 FAILED) |
+| AK-2 | `Space` on `Other` shows the text cursor | `render.rs::other_line`: `answer.other && focused` -> `false` (no inline `▏`) | `question::space_on_other_starts_typing_and_the_cursor_is_visible` | ✅ (1 FAILED) |
+| AK-3 | a chosen `Other` field takes the space as text | `question.rs::field_takes_space`: the `Other` clause -> `false` | `question::space_on_other_starts_typing_and_the_cursor_is_visible` | ✅ (1 FAILED) |
+| AK-4 | `Enter` on the last question goes to `Submit`, it does not submit directly | `question.rs::FormSubmit`: the last question returns `self.submit()` | `question::{enter_walks_to_the_overview_and_submits, an_unanswered_question_is_marked_in_the_overview, a_required_question_blocks_the_submit, drafts_are_kept_between_questions, other_keeps_its_text_while_moving_with_arrows}` | ✅ (5 FAILED) |
+| AK-5 | `Enter` never toggles a `multi` | `question.rs::FormSubmit`: a `multi` toggles again | `question::a_multi_question_toggles_with_space_and_enter_only_advances` | ✅ (1 FAILED) |
+| AK-6 | the overview marks an unanswered question | `render.rs::question_panel` Submit tab: `mark` always `"✓"` | `question::an_unanswered_question_is_marked_in_the_overview` | ✅ (1 FAILED) |
+| AK-7 | choosing `Other` puts the composer cursor at the end | `composer.rs::to_end` body -> a no-op | `composer::tests::to_end_moves_the_cursor_to_the_buffer_end_from_the_middle` | ✅ (1 FAILED) |
+| AK-8 | the inline `Other` cursor follows the composer cursor | `render.rs::other_line`: `answer.text.cursor()` -> `text.chars().count()` (always the end) | `question::the_other_cursor_follows_the_text_cursor` | ✅ (1 FAILED) |
+
+8/8 caught, no misses and no equivalent mutants. AK-2/AK-3 cover the two halves of "`Space` on
+`Other` focuses it"; AK-7/AK-8 cover the new `Composer::to_end` and the inline cursor it drives.
+**Process note (AK-7):** the first run used `--lib to_end_moves_... -- --exact`, which matched 0
+tests and looked like a pass (the U3/U4 trap); the full path
+`composer::tests::to_end_moves_...` catches it.
