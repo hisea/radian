@@ -7,6 +7,7 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::args;
 use crate::fail;
 use crate::provider::Limits;
 use crate::search;
@@ -30,6 +31,44 @@ struct GrepArgs {
     max_matches: Option<u64>,
 }
 
+pub(crate) fn schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Rust regex to search for in each line."
+            },
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative directory (or file) to search; defaults to the workspace root."
+            },
+            "glob": {
+                "type": "string",
+                "description": "Only search files whose workspace-relative path matches this glob, e.g. `**/*.rs`."
+            },
+            "case_insensitive": {
+                "type": "boolean",
+                "description": "Match without regard to case; defaults to false."
+            },
+            "context": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10,
+                "description": "Lines of context to show before and after each match; defaults to 0."
+            },
+            "max_matches": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5000,
+                "description": "Maximum total matches to return; defaults to 200."
+            }
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+    })
+}
+
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "grep".into(),
@@ -41,41 +80,7 @@ pub(crate) fn spec() -> ToolSpec {
                       `case_insensitive` ignores case. Matches are capped per file and in \
                       total, with a line naming what was cut; an invalid regex is an error."
             .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "Rust regex to search for in each line."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Workspace-relative directory (or file) to search; defaults to the workspace root."
-                },
-                "glob": {
-                    "type": "string",
-                    "description": "Only search files whose workspace-relative path matches this glob, e.g. `**/*.rs`."
-                },
-                "case_insensitive": {
-                    "type": "boolean",
-                    "description": "Match without regard to case; defaults to false."
-                },
-                "context": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 10,
-                    "description": "Lines of context to show before and after each match; defaults to 0."
-                },
-                "max_matches": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 5000,
-                    "description": "Maximum total matches to return; defaults to 200."
-                }
-            },
-            "required": ["pattern"],
-            "additionalProperties": false
-        }),
+        input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
     }
 }
@@ -85,8 +90,7 @@ pub(crate) async fn run(
     limits: &Limits,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: GrepArgs = serde_json::from_value(arguments.clone())
-        .map_err(|e| fail("invalid_arguments", e.to_string()))?;
+    let args: GrepArgs = args::parse("grep", &schema(), arguments)?;
 
     let regex = regex::RegexBuilder::new(&args.pattern)
         .case_insensitive(args.case_insensitive.unwrap_or(false))
@@ -98,12 +102,13 @@ pub(crate) async fn run(
     };
     let context = args.context.unwrap_or(0);
     if context as usize > limits.max_grep_context {
-        return Err(fail(
-            "invalid_arguments",
-            format!(
-                "context {context} exceeds the {} line limit",
+        return Err(args::invalid(
+            "grep",
+            arguments,
+            [format!(
+                "`context` {context} exceeds the {} line limit",
                 limits.max_grep_context
-            ),
+            )],
         ));
     }
     let context = context as usize;

@@ -13,7 +13,7 @@ use std::ffi::{OsStr, OsString};
 use std::process::Command;
 
 use crate::error::{ProbeReport, SandboxError};
-use crate::policy::{SandboxMode, SandboxPolicy};
+use crate::policy::{GitAccess, SandboxMode, SandboxPolicy};
 use crate::{SandboxBackend, workspace_tmp};
 
 pub(crate) static BWRAP: Bwrap = Bwrap;
@@ -51,6 +51,7 @@ impl SandboxBackend for Bwrap {
             workspace: ws.clone(),
             network: false,
             read_only: Vec::new(),
+            git_access: GitAccess::default(),
             deny_read: Vec::new(),
             allow_env: vec!["PATH".into()],
         };
@@ -125,6 +126,10 @@ impl SandboxBackend for Bwrap {
                 .arg("--bind")
                 .arg(&policy.workspace)
                 .arg(&policy.workspace);
+            // ADR 0038 slice 1 is macOS-only: the whole discovered git metadata stays
+            // `--ro-bind` read-only here, whatever `policy.git_access` says (Linux is pending
+            // and nothing about it is claimed without running the VM matrix). The macOS
+            // backend is where `WritableExceptExec` opens `.git` except for the exec entries.
             for path in &policy.read_only {
                 command.arg("--ro-bind-try").arg(path).arg(path);
             }

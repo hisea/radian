@@ -39,6 +39,7 @@ use radian_sandbox::{Sandbox, SandboxMode};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::args;
 use crate::fail;
 use crate::jobs::Jobs;
 use crate::provider::Limits;
@@ -52,6 +53,53 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// How long the tool waits for the supervisor to reap the killed leader. SIGKILL is
 /// immediate; the bound only covers thread scheduling.
 const REAP_GRACE: Duration = Duration::from_secs(10);
+
+pub(crate) fn schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "The shell command; it is passed to `/bin/sh -c`."
+            },
+            "timeout_secs": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "How long the command may run before its process group is \
+                                killed. Clamped to the configured maximum. Ignored for \
+                                `background: true` unless given, in which case the job is \
+                                killed like `job_kill` and settles as timed out."
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Workspace-relative directory to run in (default: the \
+                                workspace root). Absolute paths, `..` and symlinks out \
+                                of the workspace are refused."
+            },
+            "max_output_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Output budget per stream (stdout and stderr each). Over \
+                                that, the start and the end are kept and the middle is \
+                                replaced by a marker; the end is always kept, because \
+                                that is where a failing command's error is. Clamped to \
+                                the configured maximum. Ignored for `background: true` \
+                                (the ring is fixed; the .out file is the full history)."
+            },
+            "background": {
+                "type": "boolean",
+                "description": "Run the command in the background and return at once \
+                                (default false). It keeps running under the same sandbox; \
+                                its output streams to a workspace file. Read it with \
+                                `job_output` (pass `wait: true` to wait for the end), \
+                                list jobs with `job_list`, stop one with `job_kill`. No \
+                                default timeout. Do not sleep or poll."
+            }
+        },
+        "required": ["command"],
+        "additionalProperties": false
+    })
+}
 
 /// The `shell` spec for `mode`. The description names the enforcement level, because the
 /// model (and a human reading a transcript) must be able to tell a confined run from an
@@ -96,50 +144,7 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
              have no default timeout. Do not sleep or poll; use `job_output` with `wait: \
              true` to wait for the end."
         ),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The shell command; it is passed to `/bin/sh -c`."
-                },
-                "timeout_secs": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "How long the command may run before its process group is \
-                                    killed. Clamped to the configured maximum. Ignored for \
-                                    `background: true` unless given, in which case the job is \
-                                    killed like `job_kill` and settles as timed out."
-                },
-                "cwd": {
-                    "type": "string",
-                    "description": "Workspace-relative directory to run in (default: the \
-                                    workspace root). Absolute paths, `..` and symlinks out \
-                                    of the workspace are refused."
-                },
-                "max_output_bytes": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Output budget per stream (stdout and stderr each). Over \
-                                    that, the start and the end are kept and the middle is \
-                                    replaced by a marker; the end is always kept, because \
-                                    that is where a failing command's error is. Clamped to \
-                                    the configured maximum. Ignored for `background: true` \
-                                    (the ring is fixed; the .out file is the full history)."
-                },
-                "background": {
-                    "type": "boolean",
-                    "description": "Run the command in the background and return at once \
-                                    (default false). It keeps running under the same sandbox; \
-                                    its output streams to a workspace file. Read it with \
-                                    `job_output` (pass `wait: true` to wait for the end), \
-                                    list jobs with `job_list`, stop one with `job_kill`. No \
-                                    default timeout. Do not sleep or poll."
-                }
-            },
-            "required": ["command"],
-            "additionalProperties": false
-        }),
+        input_schema: schema(),
         // A shell command has side effects and is not safe to overlap with other calls.
         concurrency: ToolConcurrency::Exclusive,
     }
@@ -211,10 +216,13 @@ pub(crate) async fn run(
     arguments: &serde_json::Value,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: ShellArgs = serde_json::from_value(arguments.clone())
-        .map_err(|e| fail("invalid_arguments", e.to_string()))?;
+    let args: ShellArgs = args::parse("shell", &schema(), arguments)?;
     if args.command.trim().is_empty() {
-        return Err(fail("invalid_arguments", "`command` must not be empty"));
+        return Err(args::invalid(
+            "shell",
+            arguments,
+            ["`command` must not be empty"],
+        ));
     }
     // The cwd check is the same workspace boundary the file tools use: absolute paths, `..`
     // and symlinks out of the workspace are refused before anything is spawned.
