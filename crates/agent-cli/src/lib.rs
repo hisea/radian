@@ -1240,12 +1240,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     let mut secrets: Vec<String> = radian_host::resolved_keys();
     secrets.extend(route.headers.iter().map(|(_, value)| value.clone()));
     secrets.retain(|secret| !secret.is_empty());
+    // ADR 0015: a zero window is unset, not an error — `WindowQuery::production` drops it, so a
+    // `--context-window 0` is read exactly like a missing window (the catalog decides).
     let context_window = cli.context_window.or(config.model.context_window);
-    if context_window == Some(0) {
-        return Err(SetupError(
-            "--context-window must be at least 1 token".into(),
-        ));
-    }
     // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
     // failure is not a startup failure: the window is then unknown and the guard stays off.
     // This runs before the session file exists.

@@ -1476,6 +1476,9 @@ fn run(
                 .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
             context_budget: window
                 .budget
+                // ADR 0015: a zero budget is unset, never a real zero-token budget (the CLI
+                // builds its session budget the same way).
+                .filter(|tokens| *tokens > 0)
                 .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
             auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
             compaction_settings: compaction_settings.clone(),
@@ -1527,6 +1530,8 @@ fn run(
                 system_prompt: cli.system.clone(),
                 context_budget: window
                     .budget
+                    // ADR 0015: a zero budget is unset, never a real zero-token budget.
+                    .filter(|tokens| *tokens > 0)
                     .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
                 compaction_settings,
