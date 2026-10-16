@@ -224,6 +224,20 @@ pub enum EndCommit {
     Failed(String),
 }
 
+/// What one `integrate_task` produced (ADR 0030, 6, 7, 9): the merge
+/// outcome and, after a successful merge, the integration verify results.
+#[derive(Debug, Clone)]
+pub struct Integrated {
+    /// The lead's integration worktree (created lazily on the first integration).
+    pub integration: crate::integration::Integration,
+    /// The merge result: merged, already up to date, or conflicted (and aborted).
+    pub outcome: crate::integration::MergeOutcome,
+    /// The `verify` results after a successful merge, in the sandbox rooted at the integration
+    /// worktree (ADR 0030). Empty when nothing merged, or when no `verify`
+    /// commands are configured.
+    pub verify: Vec<VerifyResult>,
+}
+
 /// One live task agent: its session and the facts the lead needs about it (ADR 0030 O2/O3).
 pub struct TaskRecord {
     pub id: String,
@@ -1536,39 +1550,59 @@ impl TaskRegistry {
     }
 
     /// Merges one task's branch into the lead's integration worktree (ADR 0030
-    /// decisions 4 and 6): a `shared` task is refused (it has no branch), the integration
-    /// worktree is created lazily, and the merge is host-side `git merge --no-ff` committed
-    /// through the `git_commit` path with `radian/integration` as the only allowed branch. A
-    /// conflict aborts and is reported (never left in progress).
+    /// decisions 4, 6, 7, 9): a `shared` task is refused (it has no branch), the integration
+    /// worktree is created lazily, a `before_merge` event is emitted before the attempt, the
+    /// merge is host-side `git merge --no-ff` committed through the `git_commit` path with
+    /// `radian/integration` as the only allowed branch, and after a successful merge the
+    /// orchestration's `verify` commands run in a sandbox rooted at the integration worktree,
+    /// through the heavy gate. A conflict aborts and is reported (never left in progress).
     ///
-    /// The permission decision (`merge_needs_human`) and the `before_merge` event and the
-    /// integration verify are the caller's (`lead_tools`/`session`): they need the orchestration
-    /// snapshot, which the tool wires around this call.
-    pub async fn integrate(
-        &self,
-        id: &str,
-    ) -> Result<
-        (
-            crate::integration::Integration,
-            crate::integration::MergeOutcome,
-        ),
-        TaskError,
-    > {
-        {
-            let record = self
-                .get(id)
-                .ok_or_else(|| TaskError::new(format!("no task `{id}`")))?;
-            let task_branch = record.branch.clone().ok_or_else(|| {
-                TaskError::new(format!(
-                    "task `{id}` is `shared`; it has no branch to integrate (ADR 0030 O3)"
-                ))
-            })?;
-            let integration = self.ensure_integration().await?;
-            let worktree = integration.worktree.clone();
-            let branch = integration.branch.clone();
-            let id_owned = id.to_owned();
-            let filters = default_allowed_filters();
-            let outcome = tokio::task::spawn_blocking(move || {
+    /// The permission decision (`merge_needs_human`) is the session's: `integrate_task`'s rule is
+    /// resolved before this method runs (ADR 0030).
+    pub async fn integrate(&self, id: &str) -> Result<Integrated, TaskError> {
+        let record = self
+            .get(id)
+            .ok_or_else(|| TaskError::new(format!("no task `{id}`")))?;
+        let task_branch = record.branch.clone().ok_or_else(|| {
+            TaskError::new(format!(
+                "task `{id}` is `shared`; it has no branch to integrate (ADR 0030 O3)"
+            ))
+        })?;
+        let integration = self.ensure_integration().await?;
+        let worktree = integration.worktree.clone();
+        let branch = integration.branch.clone();
+
+        // ADR 0030: `before_merge` fires once per attempt, before the merge
+        // (a conflicting attempt included), carrying the task, its branch and both HEADs.
+        let (task_head, integration_head) = {
+            let wt = worktree.clone();
+            let tb = task_branch.clone();
+            tokio::task::spawn_blocking(move || {
+                (
+                    crate::integration::rev_parse(&wt, &tb),
+                    crate::integration::rev_parse(&wt, "HEAD"),
+                )
+            })
+            .await
+            .map_err(|error| TaskError::new(format!("integration task failed: {error}")))?
+        };
+        self.hook(
+            hook::BEFORE_MERGE,
+            &hook::before_merge(
+                id,
+                &task_branch,
+                task_head.as_deref(),
+                integration_head.as_deref(),
+            ),
+        );
+
+        let id_owned = id.to_owned();
+        let filters = default_allowed_filters();
+        let outcome = {
+            let worktree = worktree.clone();
+            let branch = branch.clone();
+            let task_branch = task_branch.clone();
+            tokio::task::spawn_blocking(move || {
                 let pin = RepoPin::resolve(&worktree).ok_or_else(|| {
                     TaskError::new(format!(
                         "the integration worktree {} is not a git repository",
@@ -1586,9 +1620,44 @@ impl TaskRegistry {
                 )
             })
             .await
-            .map_err(|error| TaskError::new(format!("integration task failed: {error}")))??;
-            Ok((integration, outcome))
-        }
+            .map_err(|error| TaskError::new(format!("integration task failed: {error}")))??
+        };
+
+        // ADR 0030: after a successful merge, rerun the orchestration's
+        // `verify` in a sandbox rooted at the integration worktree, through the heavy gate. An
+        // already-up-to-date branch changed nothing, so it runs no verify.
+        let verify = if matches!(outcome, crate::integration::MergeOutcome::Merged(_))
+            && !self.orchestration.verify.is_empty()
+        {
+            match task_sandbox_policy(&worktree) {
+                Ok(policy) => {
+                    orchestration::run_verify(
+                        &self.orchestration.verify,
+                        &policy,
+                        &worktree,
+                        &self.heavy,
+                    )
+                    .await
+                }
+                Err(error) => vec![VerifyResult {
+                    command: "<sandbox>".to_owned(),
+                    exit_code: None,
+                    timed_out: false,
+                    output_tail: format!("could not build the integration sandbox: {error}"),
+                    truncated: false,
+                    queued_ms: 0,
+                    status: "spawn_failed",
+                }],
+            }
+        } else {
+            Vec::new()
+        };
+
+        Ok(Integrated {
+            integration,
+            outcome,
+            verify,
+        })
     }
 
     /// Closes a task and removes its worktree (ADR 0030 O3: `remove_task`).

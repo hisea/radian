@@ -202,6 +202,12 @@ pub fn merge_task_branch(
     }
 }
 
+/// `git rev-parse --verify --quiet <rev>` in `dir`, or `None` when it does not resolve. Used for
+/// the `before_merge` payload's two HEADs.
+pub(crate) fn rev_parse(dir: &Path, rev: &str) -> Option<String> {
+    git_text(dir, &["rev-parse", "--verify", "--quiet", rev])
+}
+
 /// The `git` output lines of a host call in `dir`, empty on failure.
 fn git_lines(dir: &Path, args: &[&str]) -> Vec<String> {
     git_text(dir, args)

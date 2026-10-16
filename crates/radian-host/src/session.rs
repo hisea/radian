@@ -1387,8 +1387,17 @@ pub async fn open_session(
     // lead tools **from the start** (ADR 0030 item 5); a task agent never does
     // (depth limit 2). The profile allows the tool names and the mode gate refuses them
     // outside `lead`, so `/mode` never adds or removes a tool (ADR 0038 decision 1).
+    //
+    // ADR 0030: `integrate_task`'s permission is `merge_needs_human`. With
+    // the default `true` it is deliberately left **unmatched**, so the rules resolve to `ask` — a
+    // human approval with this session as the origin, and a refusal (never an auto-allow) for a
+    // non-`User` turn. `false` adds the `allow` rule.
     let profile = if lead_mounted {
-        profile.with_allowed_tools(&crate::lead_tools::LEAD_TOOL_NAMES)
+        let merge_needs_human = lead_registry
+            .as_ref()
+            .map(|registry| registry.orchestration().merge_needs_human)
+            .unwrap_or(true);
+        profile.with_allowed_tools(&crate::lead_tools::lead_allowed_tools(merge_needs_human))
     } else {
         profile
     };

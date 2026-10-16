@@ -132,7 +132,7 @@ pub use job_notify::{
 };
 pub use lead_tools::{
     DEFAULT_WAIT_TIMEOUT_SECS, LEAD_TOOL_NAMES, LeadSession, LeadTools, TASK_DETAIL_LIMIT_CHARS,
-    TASK_SUMMARY_LIMIT_CHARS, run as run_lead_tool,
+    TASK_SUMMARY_LIMIT_CHARS, human_merge_command, lead_allowed_tools, run as run_lead_tool,
 };
 pub use mcp::load_mcp_config;
 pub use mermaid::{MermaidCheckSession, MermaidCheckTools, check};
@@ -197,9 +197,9 @@ pub use startup::{
     session_workspace,
 };
 pub use task::{
-    CommitGate, EndCommit, Isolation, OrchestrationLimits, QueuedTask, SpawnHook, SpawnRequest,
-    SpawnStage, Spawned, StallNotice, TaskBuilder, TaskContext, TaskError, TaskHandle,
-    TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
+    CommitGate, EndCommit, Integrated, Isolation, OrchestrationLimits, QueuedTask, SpawnHook,
+    SpawnRequest, SpawnStage, Spawned, StallNotice, TaskBuilder, TaskContext, TaskError,
+    TaskHandle, TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
     task_sandbox,
 };
 pub use task_host::{TaskHost, TaskModelFactory, named_builder, task_builder, task_lines};

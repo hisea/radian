@@ -116,6 +116,35 @@ pub fn human_merge_command(integration_branch: &str) -> String {
     format!("git merge --ff-only {integration_branch}")
 }
 
+/// The lead profile's allowed tool names (ADR 0030): every lead tool
+/// **except** `integrate_task` while `merge_needs_human` is `true`. The rules then leave
+/// `integrate_task` unmatched, so it resolves to `ask` — a human approval with this session as the
+/// origin, and a refusal for a non-`User` turn (ADR 0012). With `merge_needs_human = false` it is
+/// added to the allow list and does not ask.
+pub fn lead_allowed_tools(merge_needs_human: bool) -> Vec<&'static str> {
+    LEAD_TOOL_NAMES
+        .iter()
+        .copied()
+        .filter(|name| !(*name == "integrate_task" && merge_needs_human))
+        .collect()
+}
+
+/// A short note about the integration verify results for the tool text (ADR 0030
+/// decision 9). Empty when no verify ran.
+fn verify_note(results: &[crate::orchestration::VerifyResult]) -> String {
+    if results.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = results
+        .iter()
+        .map(|result| match result.exit_code {
+            Some(code) => format!("`{}` {} (exit {code})", result.command, result.status),
+            None => format!("`{}` {}", result.command, result.status),
+        })
+        .collect();
+    format!(" Integration verify: {}.", parts.join("; "))
+}
+
 fn fail(code: &str, message: impl Into<String>) -> ToolFailure {
     ToolFailure::new(code, message)
 }
@@ -1092,14 +1121,17 @@ impl LeadSession {
     /// are refused. The result always names the command the human runs to move the user's branch.
     async fn integrate_task(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
         let args: IntegrateArgs = parse(call)?;
-        let (integration, outcome) = self
+        let integrated = self
             .registry
             .integrate(&args.id)
             .await
             .map_err(|error| fail("integrate_failed", error.to_string()))?;
-        let branch = integration.branch.clone();
+        let branch = integrated.integration.branch.clone();
         let command = human_merge_command(&branch);
-        let (structured, content) = match &outcome {
+        // ADR 0030: the integration verify facts, in their own field.
+        let verify = serde_json::to_value(&integrated.verify).unwrap_or(Value::Null);
+        let verify_note = verify_note(&integrated.verify);
+        let (mut structured, content) = match &integrated.outcome {
             crate::integration::MergeOutcome::Merged(committed) => (
                 json!({
                     "task": args.id,
@@ -1110,8 +1142,8 @@ impl LeadSession {
                     "human_command": command,
                 }),
                 format!(
-                    "merged task `{}` into `{branch}` (commit {}). Your delivery ends at \
-                     `{branch}`; the user's branch moves only when they run `{command}`.",
+                    "merged task `{}` into `{branch}` (commit {}).{verify_note} Your delivery \
+                     ends at `{branch}`; the user's branch moves only when they run `{command}`.",
                     args.id, committed.commit
                 ),
             ),
@@ -1151,6 +1183,7 @@ impl LeadSession {
                 ),
             ),
         };
+        structured["verify"] = verify;
         Ok(ToolOutput {
             content: vec![agent_core::ContentPart::text(content)],
             structured: Some(structured),
@@ -1515,6 +1548,25 @@ mod tests {
             };
             assert_eq!(spec.concurrency, expected, "{}", spec.name);
         }
+    }
+
+    /// ADR 0030: `integrate_task` is left out of the allow list while
+    /// `merge_needs_human` is `true` (so the rules resolve it to `ask`), and included when it is
+    /// `false`.
+    #[test]
+    fn integrate_task_is_left_to_ask_while_merge_needs_human() {
+        let with_human = lead_allowed_tools(true);
+        assert!(!with_human.contains(&"integrate_task"), "{with_human:?}");
+        assert_eq!(with_human.len(), LEAD_TOOL_NAMES.len() - 1);
+        for name in LEAD_TOOL_NAMES
+            .iter()
+            .filter(|name| **name != "integrate_task")
+        {
+            assert!(with_human.contains(name), "missing {name}");
+        }
+        let without_human = lead_allowed_tools(false);
+        assert!(without_human.contains(&"integrate_task"));
+        assert_eq!(without_human.len(), LEAD_TOOL_NAMES.len());
     }
 
     #[test]

@@ -521,8 +521,9 @@ impl RuntimeEvents for RuntimeFanout {
     }
 
     /// ADR 0030 O7 / slice 9: the orchestration hook points (`task_spawned`, `task_finished`,
-    /// `stalled`) reach subscribers with their stable hook name and payload, in the same envelope
-    /// shape as a runtime event but with `source: "hook"`. `before_merge` has no producer yet.
+    /// `stalled`, `before_merge`) reach subscribers with their stable hook name and payload, in
+    /// the same envelope shape as a runtime event but with `source: "hook"`. Slice 10's
+    /// `integrate_task` is the producer of `before_merge`.
     fn on_hook_event(&self, name: &str, data: &serde_json::Value) {
         self.server
             .push(crate::orchestration::hook::envelope(name, data));

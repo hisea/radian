@@ -744,3 +744,37 @@ async fn a_session_without_a_registry_refuses_the_task_verbs() {
     let _ = session.join().await;
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+/// ADR 0030 O7 (slices 9 + 10): the orchestration hook points reach a subscriber with
+/// `source: "hook"`, in the hook envelope. `integrate_task` emits `before_merge` through the same
+/// fan-out; this pins the path a subscriber sees.
+#[tokio::test]
+async fn a_subscriber_sees_the_hook_events() {
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let fixture = Fixture::new("hooks", &server.base_url).await;
+    let mut subscriber = Client::connect(fixture.socket()).await;
+    let subscribed = subscriber
+        .request(json!({"id": 1, "verb": "subscribe"}))
+        .await;
+    assert_eq!(subscribed["ok"], true, "{subscribed}");
+
+    // A shared task with no brief: spawning writes `TaskSpawned`, which the registry also emits
+    // as the `task_spawned` hook point (ADR 0030 O7).
+    let mut request = radian_host::SpawnRequest::new("t1");
+    request.isolation = Some(radian_host::Isolation::Shared);
+    fixture.registry().spawn(request).await.expect("spawn");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let line = tokio::time::timeout_at(deadline, subscriber.read())
+            .await
+            .expect("a hook line in time");
+        let event = &line["event"];
+        if event["source"] == "hook" {
+            assert_eq!(event["name"], "task_spawned", "{line}");
+            assert_eq!(event["data"]["task"], "t1", "{line}");
+            break;
+        }
+    }
+    fixture.stop().await;
+}
