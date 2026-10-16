@@ -1605,14 +1605,12 @@ async fn the_deterministic_fallback_counts_the_whole_removed_head() {
     // The whole head (`x`, `c1`, its result) is not in the new view; only the two tail messages
     // are. That is the `drop = 0` stage: no unit was dropped beyond the plan's cut.
     let history = session.transcript();
-    for gone in ["c1"] {
-        assert!(
-            !history
-                .iter()
-                .any(|m| matches!(m, Message::Tool { result, .. } if result.call_id == gone)),
-            "{gone} must be gone"
-        );
-    }
+    assert!(
+        !history
+            .iter()
+            .any(|m| matches!(m, Message::Tool { result, .. } if result.call_id == "c1")),
+        "the c1 result must be gone"
+    );
     assert!(history.iter().any(|m| *m == Message::user("last")));
     assert!(history.iter().any(|m| *m == Message::user("go")));
 
