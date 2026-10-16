@@ -785,6 +785,7 @@ fn run(
             // The picker phase has no session and no sandbox yet.
             None,
             None,
+            None,
             // The picker phase has no session to report (ADR 0034 H1).
             None,
         )?;
@@ -959,6 +960,10 @@ fn run(
     let credential = match radian_host::resolve_key(&key_id).map_err(|e| e.to_string())? {
         Some(credential) => Some(credential),
         None if is_local_base_url(&probe_base_url) => None,
+        // `resolve_key` only ever resolves an `api_key` entry; `chatgpt`'s login is the oauth
+        // entry slice ① wrote (ADR 0026) — `credential` stays `None` for it either
+        // way (`ChatGptModel` reads `auth.json` itself, per call).
+        None if radian_host::has_login(&key_id) => None,
         None => {
             return Err(RunError::Startup(
                 match radian_host::resolve_note(&key_id).map_err(|e| e.to_string())? {
@@ -988,7 +993,9 @@ fn run(
     app.session.model_name = model_name.clone();
     let request_max_output = match provider {
         Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
-        Provider::OpenAiCompatible => None,
+        // Neither sends an explicit max-output field by default (the Responses adapter only
+        // sends `max_output_tokens` when `extra_body` asks for it, same as openai-compatible).
+        Provider::OpenAiCompatible | Provider::ChatGpt => None,
     };
     // The window's base URL: the provider's endpoint (for a named provider, its declaration).
     let catalog_base_url = provider_ref.base_url_for(&model_name, None);
@@ -1748,6 +1755,29 @@ fn run(
     } else {
         None
     };
+    // The same C4 mechanism for `chatgpt` (ADR 0026): gated on
+    // `has_login("chatgpt")` rather than a resolved api_key (there is none — the contributor
+    // refreshes the oauth entry itself, per call, exactly like `ChatGptModel`).
+    let chatgpt_usage_gate = if let Some(period) = usage_period(config.tui.usage_period_secs)
+        && radian_host::has_login("chatgpt")
+    {
+        let startup_provider = session
+            .model_route()
+            .map(|(provider, _)| provider)
+            .unwrap_or_else(|| provider_name.clone());
+        let (gate_tx, gate_rx) =
+            tokio::sync::watch::channel(chatgpt_usage_active(&startup_provider));
+        radian_host::spawn_contributor_gated(
+            runtime.handle(),
+            Arc::new(radian_host::ChatGptUsage::new(session_id.clone(), period)),
+            Arc::clone(&contributions),
+            Arc::clone(&on_tick),
+            gate_rx,
+        );
+        Some(gate_tx)
+    } else {
+        None
+    };
     app.set_contributions(Arc::clone(&contributions));
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
@@ -2072,6 +2102,7 @@ fn run(
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         bash_sandbox,
         usage_gate,
+        chatgpt_usage_gate,
         herdr.map(|(reporter, _)| reporter),
     );
     exit_trace("loop-done");
@@ -2840,6 +2871,9 @@ struct LoopContext<'a> {
     /// The opencode-go usage gate (ADR 0027): the UI flips it when `/model`
     /// switches the current provider. `None` when there is no key or the period is off.
     usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    /// The chatgpt usage gate (ADR 0026), same mechanism, flipped to
+    /// `route.provider == "chatgpt"` instead.
+    chatgpt_usage_gate: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl LoopContext<'_> {
@@ -2854,9 +2888,13 @@ impl LoopContext<'_> {
         // refreshing (no network) and its row hides; back to it, one immediate refresh.
         if let UiEvent::Runtime(radian_session::RuntimeEvent::ConfigChanged { change, .. }) = &event
             && let Some(route) = radian_host::ModelRoute::from_value(change)
-            && let Some(gate) = &self.usage_gate
         {
-            let _ = gate.send(route.provider == "opencode-go");
+            if let Some(gate) = &self.usage_gate {
+                let _ = gate.send(route.provider == "opencode-go");
+            }
+            if let Some(gate) = &self.chatgpt_usage_gate {
+                let _ = gate.send(chatgpt_usage_active(&route.provider));
+            }
         }
         let result = match event {
             UiEvent::Agent(event) => app.update(AppInput::Event(event)),
@@ -3825,6 +3863,28 @@ fn usage_period(configured: Option<u64>) -> Option<std::time::Duration> {
     }
 }
 
+/// Whether the `chatgpt` usage gate (ADR 0026) should be active for
+/// `provider`: only while the current route's provider is exactly `chatgpt`, mirroring
+/// opencode-go's own (inline) `provider == "opencode-go"` gate. Pulled into its own function
+/// — unlike opencode-go's — so a mutation to it (polling while routed elsewhere) has a direct
+/// unit test rather than needing a full TUI run to catch.
+fn chatgpt_usage_active(provider: &str) -> bool {
+    provider == radian_host::CHATGPT_PROVIDER_ID
+}
+
+#[cfg(test)]
+mod chatgpt_usage_gate_tests {
+    use super::chatgpt_usage_active;
+
+    #[test]
+    fn the_gate_is_active_only_for_chatgpt() {
+        assert!(chatgpt_usage_active("chatgpt"));
+        assert!(!chatgpt_usage_active("opencode-go"));
+        assert!(!chatgpt_usage_active("anthropic"));
+        assert!(!chatgpt_usage_active("openai"));
+    }
+}
+
 /// One step of [`run_effect_rounds`]: run one effect, or take the result events the last
 /// batch produced.
 enum RoundStep<'a, T> {
@@ -3872,6 +3932,8 @@ fn ui_loop(
     bash_sandbox: Option<radian_sandbox::Sandbox>,
     // The opencode-go usage gate (ADR 0027), flipped on a `/model` switch.
     usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    // The chatgpt usage gate (ADR 0026), same mechanism.
+    chatgpt_usage_gate: Option<tokio::sync::watch::Sender<bool>>,
     // The herdr reporter (ADR 0034), when running inside a herdr pane.
     mut herdr: Option<HerdrReporter>,
 ) -> Result<Option<i32>, String> {
@@ -3907,6 +3969,7 @@ fn ui_loop(
             bash_sandbox: bash_sandbox.clone(),
             bash_cancel: None,
             usage_gate,
+            chatgpt_usage_gate,
             herdr: herdr.take(),
         }),
     };

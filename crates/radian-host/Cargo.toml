@@ -21,6 +21,9 @@ clap = { version = "4", features = ["derive"] }
 agent-extensions = { path = "../agent-extensions" }
 agent-provider-anthropic = { path = "../agent-provider-anthropic" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
+# The `chatgpt` descriptor's wire protocol (ADR 0026 slice 3); already in the
+# workspace since slice 2.
+agent-provider-openai-responses = { path = "../agent-provider-openai-responses" }
 radian-coding = { path = "../radian-coding" }
 # `QueuedApprover` implements `radian_permissions::Approver` (ADR 0023 U7); the trait lives
 # with the approval layer.
@@ -77,4 +80,7 @@ radian-host = { path = ".", features = ["testing"] }
 radian-session = { path = "../radian-session", features = ["testing"] }
 # The catalog tests use the adapter's local mock HTTP server, never the real network.
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
+# The chatgpt provider tests use this adapter's own local mock HTTP server (never the real
+# network).
+agent-provider-openai-responses = { path = "../agent-provider-openai-responses", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

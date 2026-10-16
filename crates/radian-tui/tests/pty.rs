@@ -7286,6 +7286,98 @@ async fn pty_a_model_switch_sends_the_next_turn_to_the_new_provider() {
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
+fn pty_base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(n & 0x3f) as usize] as char);
+        }
+    }
+    out
+}
+
+/// Writes a `chatgpt` `oauth` entry (ADR 0026) directly — `write_auth_json` only
+/// knows the `api_key` shape, so a test that wants a `chatgpt` login writes it itself, at the
+/// same `RADIAN_HOME` it passes through `envs`.
+fn write_chatgpt_oauth_entry(radian_home: &Path) {
+    let header = pty_base64url(br#"{"alg":"none"}"#);
+    let payload =
+        pty_base64url(br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-pty-test"}}"#);
+    let access = format!("{header}.{payload}.sig");
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 3_600_000;
+    let dir = radian_home.join("credentials");
+    std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = dir.join("auth.json");
+    let body = serde_json::json!({
+        "chatgpt": {"type": "oauth", "access": access, "refresh": "refresh-unused", "expires": expires}
+    });
+    std::fs::write(&path, serde_json::to_string(&body).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// ADR 0026 slice 3: once there is a `chatgpt` login, `/model` lists its built-in
+/// models alongside every other descriptor's (the flat list is unconditional for a built-in -
+/// the same as `anthropic`/`openai`/`opencode-go` already are - so this also pins that the
+/// new descriptor did not accidentally gain a login gate the others do not have).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_model_lists_chatgpt_once_it_is_logged_in() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("model-chatgpt");
+    let sessions = dir.path().join("sessions");
+    let radian_home = dir.path().join("radian-home");
+    write_chatgpt_oauth_entry(&radian_home);
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "model-chatgpt",
+        ],
+        &[("RADIAN_HOME", radian_home.to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/model chatgpt/");
+    assert!(
+        pty.wait_for_screen("chatgpt/gpt-5.4", 10),
+        "the chatgpt models did not appear in the flat list:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\x1b");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
 /// D8: a resume uses the last switched model from the journal, with no flags.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]

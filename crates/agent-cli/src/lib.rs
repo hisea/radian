@@ -930,7 +930,14 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a refusal unless the
     // endpoint is local (a local server needs no key).
     let credential = radian_host::resolve_key(&key_id).map_err(|e| SetupError(e.to_string()))?;
-    if credential.is_none() && !is_local_base_url(&probe_base_url) {
+    // `resolve_key` only ever resolves an `api_key` entry; `chatgpt`'s login is the oauth
+    // entry slice ① wrote (ADR 0026) — `credential` stays `None` for it either
+    // way (`ChatGptModel` reads `auth.json` itself, per call), so the refusal below must also
+    // check `has_login`, which both shapes share.
+    if credential.is_none()
+        && !is_local_base_url(&probe_base_url)
+        && !radian_host::has_login(&key_id)
+    {
         let message = match radian_host::resolve_note(&key_id)
             .map_err(|e| SetupError(e.to_string()))?
         {
@@ -1166,7 +1173,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     );
     let request_max_output = match provider {
         Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
-        Provider::OpenAiCompatible => None,
+        // Neither sends an explicit max-output field by default (the Responses adapter only
+        // sends `max_output_tokens` when `extra_body` asks for it, same as openai-compatible).
+        Provider::OpenAiCompatible | Provider::ChatGpt => None,
     };
     let window_query = radian_host::WindowQuery::production(
         cli.context_window.or(config.model.context_window),

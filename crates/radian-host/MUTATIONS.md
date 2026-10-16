@@ -1368,6 +1368,29 @@ mutation run with `--no-fail-fast`.
 mutation for the Codex-impersonation risk (M5). M4's shared write path (`AuthStore::write`) is
 also covered by the pre-existing `A26-1`/`F2` entries above for `api_key` writes; M4 here
 confirms the **same** path protects the `oauth` entry specifically, through the oauth-only test.
+
+## ADR 0026 slice 3: wiring the chatgpt provider (2026-10-16)
+
+Base `92b11fb` (branch `oc/oauth-wire`) · mutated in place in `crates/radian-host/src/
+{oauth_chatgpt,model}.rs`, `crates/radian-tui/src/cli.rs` and
+`crates/radian-host/tests/chatgpt_lead_task.rs`, each restored from a `cp` of the
+pre-mutation file in `.radian/scratch/mutations/` and confirmed byte-identical with `cmp`
+(no `git checkout --`/`restore`, per this worktree's rules); every mutation run with
+`--no-fail-fast`.
+
+| # | Requirement mutated | Mutation | Result | Caught by |
+|---|---|---|---|---|
+| M1 | `originator` must be `radian`, never Codex's own value | `oauth_chatgpt::ORIGINATOR` changed to `"codex_cli_rs"` | ✅ FAILED | `provider::tests::the_chatgpt_descriptor_is_registered_with_responses_models_and_static_headers_only` (the descriptor's static headers) |
+| M2 | every request carries `chatgpt-account-id` | `ChatGptModel::complete` drops the `.with_header("chatgpt-account-id", …)` call | ✅ FAILED | `chatgpt_headers::headers_carry_originator_radian_and_the_account_id_from_the_token` (mock-recorded header is `None`) |
+| M3 | the usage contributor only polls while routed to `chatgpt` | `chatgpt_usage_active` changed to always return `true` | ✅ FAILED | `cli::chatgpt_usage_gate_tests::the_gate_is_active_only_for_chatgpt` |
+| M4 | a task's own route (ADR 0030 O11), not the lead's, decides its model | the end-to-end test's model factory changed to ignore `agent_model` and always build the lead's default (chatgpt) model | ✅ FAILED | `chatgpt_lead_task::a_chatgpt_lead_default_and_a_deepseek_task_route_requests_to_the_right_mock` (the routed task's outcome becomes `Failed`, since the chatgpt mock's one scripted reply is already consumed by the default-route task) |
+
+4/4 caught — exactly the task brief's list. M4 mutates the *test's own* model-factory
+closure rather than `radian-tui/src/cli.rs`'s real `task_model`: that closure is private to
+a different crate's startup function and not independently callable from a `radian-host`
+test, so the closure here (built to mirror it field-for-field, per the test file's own doc
+comment) stands in for it. The mutation and its catch are faithful to the real routing
+logic's shape, even though they do not touch the production closure's bytes.
 ## ADR 0042: 渲染侧移出 host（`mermaid_check`、`mermaid_layout`、`diagrams` skill 删除，2026-10-16）
 
 本 ADR 的 code 改动没有新的 host 变异可跑：`radian-host/src/mermaid.rs`、`mermaid_layout.rs`
