@@ -334,17 +334,17 @@ struct GitFacts {
 /// `GIT_OPTIONAL_LOCKS=0` for older git) keeps a background `git status` from refreshing the
 /// index, which would briefly take `.git/index.lock` and collide with the user's own
 /// `git add`/`commit` in another terminal ("Another git process seems to be running"). This is
-/// the standard editor/shell-prompt practice.
-fn background_git(dir: &Path) -> Command {
-    let mut command = Command::new("git");
+/// the standard editor/shell-prompt practice. ADR 0039 decision 3: the shared host no-filter
+/// overrides, so the footer refresh never runs a repository filter command; without them the
+/// read is skipped, not run unguarded.
+fn background_git(dir: &Path) -> Option<Command> {
+    let mut command = radian_coding::host_git::host_git_command(dir).ok()?;
     command
         .arg("--no-optional-locks")
-        .arg("-C")
-        .arg(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    command
+    Some(command)
 }
 
 impl GitContributor {
@@ -355,7 +355,7 @@ impl GitContributor {
     /// Like `git`, but keeps an empty successful output as `Some("")`: a clean tree is a real
     /// answer (zero changes), not a missing one.
     fn git_raw(&self, args: &[&str]) -> Option<String> {
-        let output = background_git(&self.dir).args(args).output().ok()?;
+        let output = background_git(&self.dir)?.args(args).output().ok()?;
         output
             .status
             .success()
@@ -363,7 +363,7 @@ impl GitContributor {
     }
 
     fn git(&self, args: &[&str]) -> Option<String> {
-        let output = background_git(&self.dir).args(args).output().ok()?;
+        let output = background_git(&self.dir)?.args(args).output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -517,11 +517,16 @@ mod tests {
     /// the flag is newer git's door, the variable is the one older git reads.
     #[test]
     fn the_background_git_disables_optional_locks() {
-        let command = background_git(Path::new("/tmp"));
+        let command = background_git(Path::new("/tmp")).expect("the command");
         let args: Vec<&OsStr> = command.get_args().collect();
         assert!(
             args.contains(&OsStr::new("--no-optional-locks")),
             "the flag must be on every background git call: {args:?}"
+        );
+        // ADR 0039 decision 3: the host no-filter overrides travel with it too.
+        assert!(
+            args.contains(&OsStr::new("core.attributesFile=/dev/null")),
+            "the no-filter overrides must be on a background git call: {args:?}"
         );
         let locks = command
             .get_envs()
@@ -644,5 +649,64 @@ mod tests {
         assert_eq!(store.revision(), 1);
         store.write("thing", vec![Segment::new("x", SegmentRole::Normal)]);
         assert!(!store.take_dirty(), "a repeat write is not a change");
+    }
+    /// ADR 0039 decision 3: the footer's background `git status` carries the shared no-filter
+    /// overrides, so a stat-dirty file with a filter attribute never runs the clean filter in the
+    /// host.
+    #[test]
+    fn the_git_contributor_never_runs_a_repository_filter() {
+        let dir =
+            std::env::temp_dir().join(format!("radian-contrib-gitfilter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&dir)
+                    .args(args)
+                    .status()
+                    .expect("git")
+                    .success(),
+                "git {args:?}"
+            );
+        };
+        run(&["init", "-q", "-b", "feature"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("tracked.txt"), "one\n").unwrap();
+        run(&["add", "tracked.txt"]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        let marker = std::env::temp_dir().join(format!(
+            "radian-contrib-gitfilter-marker-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let script = dir.join("evil-clean.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        run(&["config", "filter.evil.clean", script.to_str().unwrap()]);
+        std::fs::write(dir.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+        // Stat-dirty against the index, same size (git then hashes the content and runs the
+        // clean filter).
+        std::fs::write(dir.join("tracked.txt"), "two\n").unwrap();
+
+        let facts = GitContributor::new(dir.clone()).read();
+        assert_eq!(facts.branch.as_deref(), Some("feature"));
+        assert!(
+            !marker.exists(),
+            "the footer git read must not run a repository filter"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&marker);
     }
 }

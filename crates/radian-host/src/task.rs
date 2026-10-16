@@ -474,9 +474,18 @@ pub fn task_sandbox(lead: &Sandbox, workspace: &Path) -> Result<Sandbox, TaskErr
     Sandbox::from_policy(policy).map_err(|error| TaskError::new(error.to_string()))
 }
 
+/// A host `git` command in the lead's workspace with the shared no-filter overrides (ADR 0039
+/// decision 3). `git worktree add` checks files out (a smudge filter would run) and
+/// `git worktree remove` reads the clean filter to test dirtiness, so both would otherwise
+/// execute a driver reached through the writable `.gitattributes` or `$GIT_DIR/info/attributes`.
+fn worktree_git(lead: &Path) -> Result<std::process::Command, TaskError> {
+    radian_coding::host_git::host_git_command(lead).map_err(TaskError::new)
+}
+
 /// `git worktree add <worktree> -b <branch>` from the lead's workspace (host-side, ADR 0030
-/// O3). The parent directory is created first: `git worktree add` does not create it.
-fn create_worktree(lead: &Path, worktree: &Path, branch: &str) -> Result<(), TaskError> {
+/// O3). The parent directory is created first: `git worktree add` does not create it. Public so
+/// the integration tests exercise the exact code the registry runs.
+pub fn create_worktree(lead: &Path, worktree: &Path, branch: &str) -> Result<(), TaskError> {
     if let Some(parent) = worktree.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             TaskError::new(format!("cannot create {}: {error}", parent.display()))
@@ -485,8 +494,7 @@ fn create_worktree(lead: &Path, worktree: &Path, branch: &str) -> Result<(), Tas
     let path = worktree
         .to_str()
         .ok_or_else(|| TaskError::new("the worktree path is not valid UTF-8"))?;
-    let output = std::process::Command::new("git")
-        .current_dir(lead)
+    let output = worktree_git(lead)?
         .args(["worktree", "add", "-b", branch, path])
         .output()
         .map_err(|error| TaskError::new(format!("could not run git: {error}")))?;
@@ -499,19 +507,19 @@ fn create_worktree(lead: &Path, worktree: &Path, branch: &str) -> Result<(), Tas
     Ok(())
 }
 
-/// `git worktree remove [--force] <worktree>` from the lead's workspace.
-fn remove_worktree(lead: &Path, worktree: &Path, force: bool) -> Result<(), TaskError> {
+/// `git worktree remove [--force] <worktree>` from the lead's workspace. Public so the
+/// integration tests exercise the exact code the registry runs.
+pub fn remove_worktree(lead: &Path, worktree: &Path, force: bool) -> Result<(), TaskError> {
     let path = worktree
         .to_str()
         .ok_or_else(|| TaskError::new("the worktree path is not valid UTF-8"))?;
-    let mut args = vec!["worktree", "remove"];
+    let mut command = worktree_git(lead)?;
+    command.args(["worktree", "remove"]);
     if force {
-        args.push("--force");
+        command.arg("--force");
     }
-    args.push(path);
-    let output = std::process::Command::new("git")
-        .current_dir(lead)
-        .args(&args)
+    command.arg(path);
+    let output = command
         .output()
         .map_err(|error| TaskError::new(format!("could not run git: {error}")))?;
     if !output.status.success() {
