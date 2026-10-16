@@ -627,6 +627,10 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   default highlight on `cancel`, and do ↑/↓/Enter/Esc feel right? After "remember for this
   project", restart — is the tier applied and is the `(project)` marker readable in the footer
   and the startup summary? pty automation asserts the text, not the feel (ADR 0009).
+- **the `/mode` switch** (ADR 0038 slice 3): type `/mode` — does it name the mode in effect?
+  Type `/mode lead` — does the notice say the role changes from the next turn, and does the next
+  reply read like a project lead (it plans, briefs and reviews) rather than a coding agent?
+  `/mode general` switches back; a resumed session must open in the mode it was left in.
 - **the input area's three styles**: is the default `bar` band
   comfortable — the rail clear, the band reaching the right edge, multi-line and a CJK line
   banded on every row, and the status row above it (`◜  Working · 12s · esc to interrupt`) not

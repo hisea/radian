@@ -93,15 +93,26 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         Arc::new(NoopAudit),
     ));
 
+    // The role hook (ADR 0038 decision 1) writes layers 0a, 1 and 2 and runs first; a fixed
+    // role source and an empty project are enough here, because this test is about the order of
+    // the sections the other hooks append.
+    let role = Arc::new(radian_host::RoleHooks::with_role_source(
+        "<runtime>\n</runtime>",
+        "",
+        Arc::new(|_mode| "ROLE".to_owned()),
+        Arc::new(radian_host::Mode::default),
+        false,
+    ));
+
     // The volatile `<session>` facts (ADR 0036 D1): appended last.
     let facts = Arc::new(radian_host::prompt::SessionFactsHooks::new(
         &ws, "m-1", None,
     ));
 
     // The production function, called exactly as `open_session` calls it.
-    let hooks = session_hooks(permissions, memory, skills_hooks, facts);
+    let hooks = session_hooks(role, permissions, memory, skills_hooks, facts);
     let mut request = ModelRequest {
-        system_prompt: Some("base prompt".into()),
+        system_prompt: None,
         messages: vec![Message::user("what style?")],
         tools: Vec::new(),
         settings: json!({}),

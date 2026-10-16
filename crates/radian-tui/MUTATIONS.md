@@ -1333,3 +1333,18 @@ Base `d8b7688`（worktree `.radian-worktrees/access-cmd`）· 每个变异在就
 
 3/3 抓住。AC-M3 的两半都在同一个 pty 用例里：写 `~/.radian/access/access.json` 时必须生效并带
 `(project)` 标记；把同样内容写进工作区文件、用干净 HOME 启动时**必须不生效**。
+
+## mode-cmd：`/mode` 的查询与切换（ADR 0038 切片 ③，2026-10-15）
+
+Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 每个变异在就地改完后跑
+`cargo test -p radian-tui --test mode --no-fail-fast`（或 `--test pty pty_mode_lead`），再从
+`/tmp/mut/app.rs.bak` 还原并用 `diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MD-M1 | `/mode <name>` 忽略名字，永远发出 `SetMode { General }` | `mode::mode_switches_without_confirmation` | ✅ |
+| MD-M2 | `/mode`（无参数）不读投影，固定打印 `mode: general` | `mode::mode_with_no_argument_reports_the_current_mode` | ✅ |
+
+2/2 抓住。`pty::pty_mode_lead_switches_the_role_prompt_from_the_next_turn`（真 TUI、mock 模型）
+覆盖上一层的接线：`/mode lead` 的 layer 1 在下一次请求里变成 lead 角色提示词，`<role>` 之外的字节
+不变；它连跑 5 次全绿。

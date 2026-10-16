@@ -1280,6 +1280,9 @@ fn run(
                 tier: tier.preset(),
                 profile,
                 access_builder: Some(access_builder),
+                // The interactive session is the human's named `main` agent, not a task agent
+                // (ADR 0030 O13), so `/mode` is allowed.
+                task_agent: false,
                 memory_root,
                 skills_extra_paths: radian_host::config::resolve_extra_paths(
                     &config.skills.extra_paths,
@@ -2784,6 +2787,18 @@ impl LoopContext<'_> {
                         });
                     }
                 }
+                Ok(())
+            }
+            // ADR 0038 slice 3: the mode switch. The facade queues the durable `ConfigChanged`
+            // the driver journals at the next turn boundary, so layer 1 (the role prompt) is the
+            // new one from the next turn's first model request. A task agent, and a session
+            // whose role layer is fixed (`--system`), is a refusal.
+            Effect::SetMode { mode } => {
+                let result = self
+                    .session
+                    .set_mode(mode)
+                    .map_err(|refused| refused.reason);
+                self.send(AppInput::ModeApplied { mode, result });
                 Ok(())
             }
             Effect::AnswerRequest {

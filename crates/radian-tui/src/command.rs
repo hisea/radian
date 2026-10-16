@@ -25,6 +25,9 @@ pub const HELP: &str = "\
 /access [safe|workspace|full]
                       show or switch the permission tier (ADR 0038); the switch takes effect
                       at the next tool call, and `full` asks for confirmation
+/mode [general|lead]
+                      show or switch the working mode (ADR 0038); `lead` is the project-lead
+                      role prompt, and the switch takes effect at the next turn
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
@@ -100,6 +103,9 @@ pub enum Outcome {
     /// `/access [safe|workspace|full]` (ADR 0038 slice 2): show the current tier and where it
     /// came from (`None`), or switch to a named tier (`Some`).
     Access(Option<String>),
+    /// `/mode [general|lead]` (ADR 0038 slice 3): show the current mode (`None`), or switch to
+    /// a named one (`Some`). The switch takes effect at the next turn.
+    ModeSwitch(Option<String>),
     /// `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and sends
     /// `<skill name=…>…</skill>` + `args` as one user message. `args` is the raw remainder,
     /// verbatim.
@@ -246,6 +252,11 @@ pub fn tree() -> &'static [Command] {
             name: "access",
             description: "show or switch the permission tier (ADR 0038)",
             levels: &[access_level],
+        },
+        Command {
+            name: "mode",
+            description: "show or switch the working mode: general or lead (ADR 0038)",
+            levels: &[mode_level],
         },
         Command {
             name: "export",
@@ -487,6 +498,20 @@ fn access_level(_typed: &[&str], _partial: &str) -> Level {
         Candidate {
             insert: "full".to_owned(),
             description: "no sandbox; asks for confirmation".to_owned(),
+        },
+    ])
+}
+
+/// `/mode`: the two modes (ADR 0038 slice 3).
+fn mode_level(_typed: &[&str], _partial: &str) -> Level {
+    Level::Ready(vec![
+        Candidate {
+            insert: "general".to_owned(),
+            description: "the default role: a coding agent in this workspace".to_owned(),
+        },
+        Candidate {
+            insert: "lead".to_owned(),
+            description: "the lead role: turn goals into work for task agents".to_owned(),
         },
     ])
 }
@@ -894,6 +919,7 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/logout") => Outcome::Logout(logout_provider(&tokens[1..])),
         Some("/auto") | Some("/yolo") => auto_toggle(&tokens[1..]),
         Some("/access") => access_request(&tokens[1..]),
+        Some("/mode") => mode_request(&tokens[1..]),
         Some("/skills") if tokens.len() == 1 => Outcome::Skills,
         Some("/skills") => Outcome::Notices(vec!["usage: /skills (no arguments)".to_owned()]),
         Some("/jobs") => jobs_request(&tokens[1..]),
@@ -978,6 +1004,16 @@ fn access_request(args: &[String]) -> Outcome {
         (None, _) => Outcome::Access(None),
         (Some(name), None) => Outcome::Access(Some(name.clone())),
         _ => Outcome::Notices(vec!["usage: /access [safe|workspace|full]".to_owned()]),
+    }
+}
+
+/// `/mode [general|lead]` (ADR 0038 slice 3). No argument is the query; one name is the
+/// switch; anything else is a usage notice.
+fn mode_request(args: &[String]) -> Outcome {
+    match (args.first(), args.get(1)) {
+        (None, _) => Outcome::ModeSwitch(None),
+        (Some(name), None) => Outcome::ModeSwitch(Some(name.clone())),
+        _ => Outcome::Notices(vec!["usage: /mode [general|lead]".to_owned()]),
     }
 }
 

@@ -834,3 +834,23 @@ Base `b63ac20`（本 worktree，dogfood/memory-r2）· 变异直接做在本 wor
   消息总是在 transcript 里（resume/fork）或就是本轮消息（首轮），两条路给出同一个查询文本，所以把
   回退值改成 `String::new()` 只有在一个「transcript 里根本没有用户消息、而且这是新会话」的构造下才
   可区分，本片没有这样的用例。
+
+## mode-cmd：`set_mode` 的入队、journal 与角色层（ADR 0038 切片 ③，2026-10-15）
+
+Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 每个变异就地改完后跑
+`cargo test -p radian-host --lib --test mode_switch --no-fail-fast`，再从 `/tmp/mut/` 的副本还原
+并用 `diff -q` 确认逐字节相同。
+
+| # | 变异（行为） | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MODE-M1 | `RoleHooks` 的 mode 来源从 config slot 改成读 **projection**（`set_mode` 立刻写它）：切换于是同一次 turn 的下一个 model 调用就生效 | `mode_switch::a_switch_inside_a_running_turn_changes_nothing_until_the_next_turn`（turn 1 的第二次 model 调用变成 lead 角色） | ✅ |
+| MODE-M2 | `set_mode` 不再 push `{"mode": …}`（只改 projection：切了、没记） | `mode_switch::{set_mode_queues_the_change_and_the_mode_in_force_waits_for_the_turn, the_role_layer_switches_at_the_next_turn_and_no_other_layer_moves, a_resumed_session_runs_the_mode_the_journal_recorded, a_switch_inside_a_running_turn_changes_nothing_until_the_next_turn}`（4 条 FAILED） | ✅ |
+| MODE-M3 | 重建 base 时把第 2 层换成第 0a 层的字节（`assemble(..., &self.runtime)`，即切换时另一层的字节跟着动） | `prompt::tests::the_role_hook_moves_layer_one_only_when_the_mode_changes`、`mode_switch::{the_role_layer_switches_at_the_next_turn_and_no_other_layer_moves, a_resumed_session_runs_the_mode_the_journal_recorded}` | ✅ |
+
+3/3 抓住。MODE-M2 的 4 条里最强的是 resume 那条：journal 里没有 `{"mode":"lead"}`，新进程第一次请求
+就还是 general。
+
+**一条等价变异（如实记录）**：`set_mode` 里删掉 `self.facts_hooks.refresh()`（`/mode` 的 `<session>`
+那一半）没有任何测试能区分——`<session>` 段里不写 mode，重算与不重算的字节相同（只有 date/git 这类
+活读在两次计算之间变了才有差别，本片的用例都在同一个工作区、同一天、不是 git 仓库）。保留这行是因为
+ADR 0036 明说 `/mode` 与 `/model` 一样重算 0b；它是那个规则的实现，不是可测行为。

@@ -4,9 +4,15 @@
 //! selected role prompt; `--system` replaces this layer only), 2 `<project_instructions>` (the
 //! context files), 3 skills/memory (appended by their hooks), 0b `<session>` (the volatile
 //! facts, last, so the static prefix stays cacheable).
+//!
+//! Layers 0a, 1 and 2 are written by [`RoleHooks`], which runs first in the chain: layers 0a
+//! and 2 are fixed for the process and only layer 1 moves — and only when the mode does
+//! (ADR 0038 decision 1's `/mode`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use crate::home::radian_home;
 
 /// The built-in role prompts, verbatim from the ADR 0036 / the research §5.2-§5.4.
 pub const DEFAULT_ROLE: &str = include_str!("../prompts/default.md");
@@ -114,6 +120,170 @@ pub fn assemble(runtime: &str, role: &str, project: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The in-session working mode (ADR 0038 decision 1). `general` is the built-in `default` role
+/// prompt, `lead` the built-in `lead` one. Session only: it is never written to the config file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    General,
+    Lead,
+}
+
+impl Mode {
+    /// The name the user types, the durable record carries and `/mode` prints.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Lead => "lead",
+        }
+    }
+
+    /// The built-in role prompt this mode selects (ADR 0036's names).
+    pub fn role_name(self) -> &'static str {
+        match self {
+            Self::General => "default",
+            Self::Lead => "lead",
+        }
+    }
+
+    /// Parses a `/mode` argument. `Err` is the usage notice the UI shows instead.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "general" => Ok(Self::General),
+            "lead" => Ok(Self::Lead),
+            other => Err(format!("`{other}` is not a mode: use `general` or `lead`")),
+        }
+    }
+
+    /// The mode a config slot names (ADR 0038 slice 3): `/mode` queues a `{"mode": …}` change
+    /// and the driver merges it into the slot at the turn boundary, exactly like `/model`
+    /// (ADR 0026 D5). An absent or unknown value is the default.
+    pub fn of(slot: &serde_json::Value) -> Self {
+        match slot.get("mode").and_then(|value| value.as_str()) {
+            Some("lead") => Self::Lead,
+            _ => Self::General,
+        }
+    }
+}
+
+/// Where [`RoleHooks`] reads the mode in force. The production one reads the driver's config
+/// slot; a caller with another source (a test) supplies its own.
+pub type ModeSource = Arc<dyn Fn() -> Mode + Send + Sync>;
+
+/// The hook that writes layers 0a, 1 and 2, and the **only** place layer 1 is recomputed.
+///
+/// It runs first in the hook chain and writes the whole base, so the hooks after it (memory,
+/// skills, `<session>`) still append to a complete prompt. Layer 1 follows the mode in force
+/// (ADR 0038 decision 1): a `/mode` switch changes layer 1 at the next model request, while 0a
+/// and 2 stay byte-identical — they are the strings this hook was built with.
+///
+/// `--system` (or an explicit `role`) fixes layer 1 for the session: [`RoleHooks::fixed`] is
+/// then true, the mode never moves it, and the host refuses `/mode`.
+pub struct RoleHooks {
+    /// Layer 0a `<runtime>`, generated once by the host.
+    runtime: String,
+    /// Layer 2 `<project_instructions>`, read once at session start (ADR 0036 C2).
+    project: String,
+    /// Layer 1 for a mode.
+    role: Arc<dyn Fn(Mode) -> String + Send + Sync>,
+    /// Where the mode in force comes from.
+    mode: ModeSource,
+    /// Whether layer 1 is fixed for the session (see the struct doc).
+    fixed: bool,
+    /// The base and the mode it was built from; one lock, so the two cannot disagree.
+    state: Mutex<RoleState>,
+}
+
+struct RoleState {
+    mode: Mode,
+    base: String,
+}
+
+impl RoleHooks {
+    /// The production hook: the mode comes from the driver's config slot, and layer 1 is the
+    /// built-in role prompt of that mode's name. `--system` replaces layer 1 for the whole
+    /// session, and an explicit `role` (ADR 0030's agent definitions) fixes it the same way.
+    pub fn new(
+        runtime: impl Into<String>,
+        project: impl Into<String>,
+        system: Option<String>,
+        role: Option<String>,
+        slot: Option<Arc<radian_runtime::ConfigSlot>>,
+    ) -> Self {
+        let mode: ModeSource = match slot {
+            Some(slot) => Arc::new(move || Mode::of(&slot.value())),
+            None => Arc::new(Mode::default),
+        };
+        let fixed = system.is_some() || role.is_some();
+        let role: Arc<dyn Fn(Mode) -> String + Send + Sync> = match system {
+            Some(text) => Arc::new(move |_mode| text.clone()),
+            None => match role {
+                Some(name) => {
+                    Arc::new(move |_mode| role_prompt(Some(&name), radian_home().as_deref()))
+                }
+                None => {
+                    Arc::new(|mode| role_prompt(Some(mode.role_name()), radian_home().as_deref()))
+                }
+            },
+        };
+        Self::with_role_source(runtime, project, role, mode, fixed)
+    }
+
+    /// The hook over an arbitrary role source and mode source (see [`ModeSource`]).
+    pub fn with_role_source(
+        runtime: impl Into<String>,
+        project: impl Into<String>,
+        role: Arc<dyn Fn(Mode) -> String + Send + Sync>,
+        mode: ModeSource,
+        fixed: bool,
+    ) -> Self {
+        let runtime = runtime.into();
+        let project = project.into();
+        let current = mode();
+        let base = assemble(&runtime, &role(current), &project);
+        Self {
+            runtime,
+            project,
+            role,
+            mode,
+            fixed,
+            state: Mutex::new(RoleState {
+                mode: current,
+                base,
+            }),
+        }
+    }
+
+    /// The base prompt in force. Rebuilt when the mode changed; byte-identical otherwise, so a
+    /// switch to the same mode (or no switch) cannot move any layer.
+    fn base(&self) -> String {
+        let mode = (self.mode)();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.mode != mode {
+            state.base = assemble(&self.runtime, &(self.role)(mode), &self.project);
+            state.mode = mode;
+        }
+        state.base.clone()
+    }
+
+    /// Whether layer 1 is fixed for this session (`--system` or an explicit role): `/mode` is
+    /// then refused, because the switch could not take effect.
+    pub fn fixed(&self) -> bool {
+        self.fixed
+    }
+}
+
+impl agent_core::Hooks for RoleHooks {
+    async fn before_model_call(
+        &self,
+        _cx: &agent_core::HookContext,
+        request: &mut agent_core::ModelRequest,
+    ) -> Result<(), agent_core::HookError> {
+        request.system_prompt = Some(self.base());
+        Ok(())
+    }
 }
 
 /// The local date as `YYYY-MM-DD` (no time). `date +%Y-%m-%d`; a machine without `date` falls
@@ -344,6 +514,93 @@ mod tests {
         assert_eq!(role_prompt(Some("task"), Some(&dir)), TASK_ROLE);
         assert_eq!(role_prompt(Some("nope"), Some(&dir)), DEFAULT_ROLE);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A [`RoleHooks`] over a mode the test can change, with a small 0a and 2 so a wrong layer
+    /// is visible in the bytes.
+    fn role_hooks(mode: Arc<Mutex<Mode>>) -> RoleHooks {
+        let source: ModeSource = {
+            let mode = Arc::clone(&mode);
+            Arc::new(move || *mode.lock().unwrap())
+        };
+        RoleHooks::with_role_source(
+            "<runtime>\n- read: read a file\n</runtime>",
+            "<project_instructions path=\"AGENTS.md\">\nbody\n</project_instructions>",
+            Arc::new(|mode| match mode {
+                Mode::General => "GENERAL ROLE".to_owned(),
+                Mode::Lead => "LEAD ROLE".to_owned(),
+            }),
+            source,
+            false,
+        )
+    }
+
+    /// ADR 0038 decision 1: a mode switch moves layer 1 and **only** layer 1, and switching
+    /// back is byte-identical to the prompt the process started with.
+    #[test]
+    fn the_role_hook_moves_layer_one_only_when_the_mode_changes() {
+        let mode = Arc::new(Mutex::new(Mode::General));
+        let hooks = role_hooks(Arc::clone(&mode));
+        let first = hooks.base();
+        assert!(first.contains("GENERAL ROLE"), "{first}");
+        assert!(first.contains("read: read a file"), "{first}");
+        assert!(first.contains("<project_instructions"), "{first}");
+        // Nothing changed: byte for byte, however many times it is asked.
+        assert_eq!(hooks.base(), first);
+        assert_eq!(hooks.base(), first);
+
+        // A switch: layer 1 moves, and the layers around it do not.
+        *mode.lock().unwrap() = Mode::Lead;
+        let switched = hooks.base();
+        assert!(switched.contains("LEAD ROLE"), "{switched}");
+        let with_role = |text: &str| {
+            text.replace("GENERAL ROLE", "ROLE")
+                .replace("LEAD ROLE", "ROLE")
+        };
+        assert_eq!(
+            with_role(&first),
+            with_role(&switched),
+            "only layer 1 moves"
+        );
+        assert!(switched.contains("read: read a file"), "{switched}");
+        assert!(switched.contains("<project_instructions"), "{switched}");
+
+        // Back to `general`: the exact startup bytes.
+        *mode.lock().unwrap() = Mode::General;
+        assert_eq!(hooks.base(), first);
+    }
+
+    /// The mode source is what the hook follows, so the driver's slot (where `/mode` queues a
+    /// change) picks layer 1; a `--system` text and an explicit role pin it instead.
+    #[test]
+    fn the_slot_mode_picks_the_role_and_an_override_fixes_it() {
+        let home = radian_home();
+        let with_slot = |mode: &str| {
+            RoleHooks::new(
+                "rt",
+                "pj",
+                None,
+                None,
+                Some(radian_runtime::ConfigSlot::new(
+                    serde_json::json!({ "mode": mode }),
+                )),
+            )
+        };
+        for mode in [Mode::General, Mode::Lead] {
+            let role = role_prompt(Some(mode.role_name()), home.as_deref());
+            assert_eq!(
+                with_slot(mode.as_str()).base(),
+                assemble("rt", &role, "pj"),
+                "the slot's mode picks layer 1"
+            );
+        }
+
+        // `--system` and an explicit role fix layer 1: `/mode` is refused (ADR 0038).
+        let system = RoleHooks::new("rt", "pj", Some("SYSTEM".into()), None, None);
+        assert!(system.fixed());
+        assert_eq!(system.base(), assemble("rt", "SYSTEM", "pj"));
+        assert!(RoleHooks::new("rt", "pj", None, Some("task".into()), None).fixed());
+        assert!(!RoleHooks::new("rt", "pj", None, None, None).fixed());
     }
 
     #[test]

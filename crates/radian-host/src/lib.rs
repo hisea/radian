@@ -128,6 +128,7 @@ pub use pending::{
 pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };
+pub use prompt::{Mode, RoleHooks};
 pub use provider::{
     CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod,
     NamedProvider, NamedSource, Protocol, ProviderDecl, ProviderDescriptor, ProviderRef,

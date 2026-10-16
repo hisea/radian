@@ -1635,6 +1635,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             tier: profile_arg.preset(),
             profile: permission_profile,
             access_builder: None,
+            // The line host has no `/mode`; its session is not a task agent either.
+            task_agent: false,
             memory_root,
             skills_extra_paths: setup.skills_extra_paths,
             skills_builtin: setup.skills_builtin,
