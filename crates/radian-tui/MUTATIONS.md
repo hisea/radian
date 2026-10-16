@@ -1349,6 +1349,27 @@ catching tests are the render snapshots, not the footer ones.
 
 另记一个无效变异：「只给第 200 字节之后的第一个合成格子假偏移」——那一处的上一个字符是 ASCII，`+1` 正好是合法边界，不会 panic，不能说明覆盖缺口；MS-M2 用确定落在多字节中间的单格变异代替。
 
+## band-padding：带的半格留白与 thinking 贴住下一块（ADR 0035，2026-10-15）
+
+Base `a36a099` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`，每条只跑列出的测试，
+`cargo test -p radian-tui --no-fail-fast <目标> -- --exact`）。变异脚本带 `assert old in s`
+（吸取 U3/U4 的教训：no-op patch 是假通过）。结束后 `git status --short` 只剩本节的文档改动。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| BP1 | 留白行画整行空格（`glyph.repeat(width)` → `" ".repeat(width)`） | 半格留白必须真的是 `▄`/`▀` | `render::a_user_block_pads_its_band_with_half_cells_at_80_and_120` FAILED |
+| BP2 | 留白用文字色（把 `theme.text` 当带传给 `band_pad_line`） | 留白的前景色是**带的背景色**，不是文字色 | 同上 FAILED |
+| BP3 | `ascii` 档也加留白（`banded_pad` 恒为 true） | `ascii` 档没有留白行 | `blocks::tests::a_user_block_gets_padding_rows_and_they_map_to_gaps` FAILED |
+| BP4 | thinking 与下一个块之间多一行（`prev.kind == Reasoning` 返回 1） | thinking 贴住下面的块（回复或工具卡片） | `render::thinking_hugs_the_block_below` FAILED |
+| BP5 | 留白行可被复制（把 `▄` 混进 user 条目的 display text） | 留白行不参与复制 | `selection::a_selection_from_a_padding_row_copies_no_pad_characters_with_cjk` FAILED |
+| BP6 | 运行中卡片仍用 `~`（去掉 live spinner 替换，画回烘焙的字形） | 工具卡片运行中用 pulse spinner | `card::a_running_call_is_a_card_with_a_spinner_and_no_output_section` FAILED |
+| BP7 | unicode 成功图标改回 `+` | unicode 档成功图标是 `✓` | `render::the_unicode_tool_success_glyph_is_a_check_mark` FAILED |
+
+7/7 抓住，无等价变异。**BP5 说明**：字形只由 renderer 画出时，`logical_text` 只读条目的
+display text，留白永远复制不到；能进入复制的唯一路径是把半格字形当成文本实现（BP5 正是这种朴素写法），
+所以用「把 `▄` 混进 display text」模拟，`selection` 那条测试抓住。**BP6** 是既有测试
+（`card.rs` 的 `a_running_call_is_a_card_with_a_spinner_and_no_output_section`）本次一并入册：
+修订 3 决策 7 的「运行中用 pulse spinner 而不是 `~`」早已实现，之前没有变异记录。
 ## access-cmd：`/access` 确认、按项目记住、resume（ADR 0038 切片 ②，2026-10-15）
 
 Base `d8b7688`（worktree `.radian-worktrees/access-cmd`）· 每个变异在就地改完后跑

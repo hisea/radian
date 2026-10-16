@@ -211,7 +211,7 @@ fn a_width_change_recounts_and_redraws() {
         laid_out_16.iter().any(|line| line.reason),
         "a 16-column layout after an 80-column render is the fallback"
     );
-    let narrow = screen(&render(&mut app, 16, 12));
+    let narrow = screen(&render(&mut app, 16, 20));
     assert!(
         narrow.contains("mermaid:"),
         "narrow names the reason:\n{narrow}"

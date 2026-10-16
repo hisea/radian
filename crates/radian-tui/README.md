@@ -324,6 +324,8 @@ from slipping in unchecked.
 | `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▄` | U+2584 | band top padding (ADR 0035) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▀` | U+2580 | band bottom padding (ADR 0035) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -636,6 +638,13 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   banded on every row, and the status row above it (`◜  Working · 12s · esc to interrupt`) not
   shifting the band or the transcript? Compare `input_style = "lines"` (the rule above and
   below, `> `) and `input_style = "box"`.
+- **the band's half-cell padding** (ADR 0035): the user block and the `bar` input
+  draw one row above (`▄`) and one below (`▀`) the band, in the band's color on the terminal's
+  default background. Is the join **seamless** — no thin gap between the half cells and the
+  banded rows — in Ghostty and in a font-drawn terminal? A half-block glyph is drawn by the
+  font, so a font whose blocks are not exactly half-height shows a seam or a step; record the
+  terminal and font if so. Also check the `ascii` tier has no padding row at all, and that the
+  band's half cells copy as nothing when selected (drag from a padding row into the text).
 - **notice and hint readability**: `/help`'s output and the placeholder must be
   readable on your background. `dark` now uses the terminal's default foreground for notices and
   `Gray` for hints; is that right on your terminal, and is the light palette's hint (dark gray on
@@ -777,20 +786,27 @@ throwaway terminal, not your working one.
    clean shell prompt. *Fail*: record whether the resize disarmed the quit (the `01177c2` fix)
    and whether the exit line is paste-ready.
 5. **Message and tool-card backgrounds, selection on top** (ADR 0028; merges `0f5a302`,
-   `608ce64`, `8456074`). *Steps*: send a message that calls a tool; drag-select across a user
-   message and a tool card; double-click a word, triple-click a message.
-   *Expect*: the user message and each tool card paint a **full-width** background band; the
-   selection highlight is visible **on top of** those bands (not hidden by them); the copied
-   text matches what you selected. *Look*: contrast in `dark`, `light`, `mono`. *Fail*: record
-   which role loses the selection and the theme.
+   `608ce64`, `8456074`; the band pads are ADR 0035). *Steps*: send a message that
+   calls a tool; drag-select across a user message, a padding row and a tool card;
+   double-click a word, triple-click a message.
+   *Expect*: the user message's text row and each tool card paint a **full-width** background
+   band; the user message and the `bar` input additionally draw one `▄` row above and one `▀`
+   row below the band (the half-cell padding, revision 3), the tool cards **not**; the
+   selection highlight is visible **on top of** the bands (not hidden by them); a drag that
+   starts or ends on a padding row copies no padding and does not crash; the copied text
+   matches what you selected. *Look*: contrast in `dark`, `light`, `mono`, and whether the
+   half cells join the band without a seam (see the bullet above). *Fail*: record which role
+   loses the selection, the theme, and (for the pads) the terminal and font.
 6. **Thinking fold `Ctrl-T` and tool output `Ctrl-O`** (ADR 0028 R3/R4; merges `0f5a302`,
    `608ce64`). *Steps*: with a reasoning model (e.g. `--thinking adaptive`), get a reply with
    reasoning; press `Ctrl-T`; then call a tool with long output and press `Ctrl-O` three times.
    *Expect*: `Ctrl-T` toggles reasoning between collapsed and expanded (default collapsed;
    `tui.display.reasoning` sets the start); `Ctrl-O` cycles tool output
    `errors → expanded → collapsed → errors` (default `errors`; `crates/radian-tui/src/app.rs`, `ToggleToolOutput`); the truncated body shows the `[N more
-   lines]` marker rather than silently cutting. *Fail*: record the fold state after each press
-   and the config value.
+   lines]` marker rather than silently cutting; the folded thinking line **hugs** the reply or
+   the tool card below it with no blank line between, while it is still separated from the
+   block above by one line (ADR 0035; an expanded thinking block hugs the
+   same way). *Fail*: record the fold state after each press and the config value.
 7. **Mermaid** (ADR 0028 R8; merge `5628737`). *Steps*: ask for a small ` ```mermaid `
    flowchart; widen then narrow the terminal past the `TooWide` threshold, then widen again.
    *Expect*: wide → a Unicode diagram at the body width; narrow → the **source** plus one dim

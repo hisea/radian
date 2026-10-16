@@ -296,6 +296,27 @@ pub enum Frame {
     Bottom,
 }
 
+/// A banded block's half-cell padding row (ADR 0035): a half cell of the band above
+/// the block's text (`▄`, drawn with the band's color as the glyph's foreground) or below it
+/// (`▀`). The row is part of the block's geometry (the selection maps it to a gap, it never
+/// copies) and it carries no text. `None` for every line that is not such a pad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pad {
+    #[default]
+    None,
+    /// The row above the band: `▄` (the band's upper half).
+    Top,
+    /// The row below the band: `▀` (the band's lower half).
+    Bottom,
+}
+
+impl Pad {
+    /// Whether this is a padding row at all.
+    pub fn is_pad(self) -> bool {
+        !matches!(self, Pad::None)
+    }
+}
+
 /// One laid-out line of an entry's body. `chars`/`end` are the selection mapping's view (the
 /// same semantics as [`crate::render::WrappedLine`]: byte offsets into the entry's display
 /// text, `end` the gap after the line); `text` is what the body span renders.
@@ -313,8 +334,9 @@ pub struct BodyLine {
     pub text: String,
     /// This line is a code line (rendered without the prefix lead, no wrap).
     pub code: bool,
-    /// This line is a padding row around a user block.
-    pub pad: bool,
+    /// This line is a banded block's half-cell padding row (ADR 0035): a half cell
+    /// of the band above the text (`▄`) or below it (`▀`). `None` for every other line.
+    pub pad: Pad,
     /// The card frame this line draws (ADR 0028); `None` for every line that is
     /// not part of a tool card's frame.
     pub frame: Frame,
@@ -421,7 +443,7 @@ impl BodyLine {
             end,
             text,
             code: false,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -440,7 +462,7 @@ impl BodyLine {
             end: 0,
             text: String::new(),
             code: false,
-            pad: false,
+            pad: Pad::None,
             frame,
             role: tools::LineRole::Normal,
             hint: true,
@@ -459,7 +481,7 @@ impl BodyLine {
             end: 0,
             text,
             code: false,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::Meta,
             role: tools::LineRole::Normal,
             hint: true,
@@ -470,13 +492,13 @@ impl BodyLine {
         }
     }
 
-    fn pad(end: usize) -> Self {
+    fn pad(half: Pad, end: usize) -> Self {
         Self {
             chars: Vec::new(),
             end,
             text: String::new(),
             code: false,
-            pad: true,
+            pad: half,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -498,7 +520,7 @@ impl BodyLine {
             end,
             text,
             code: true,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -517,7 +539,7 @@ impl BodyLine {
             end,
             text,
             code: false,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -534,7 +556,7 @@ impl BodyLine {
             end,
             text,
             code: false,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -711,7 +733,7 @@ pub fn is_folded(entry: &Entry, modes: DisplayModes) -> bool {
 /// stays; the layout is the one place this happens, so counting, drawing, the selection
 /// mapping and the search all see the stripped form.
 fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
-    let blank = |line: &BodyLine| !line.pad && !line.hint && line.chars.is_empty();
+    let blank = |line: &BodyLine| !line.pad.is_pad() && !line.hint && line.chars.is_empty();
     let start = lines
         .iter()
         .position(|line| !blank(line))
@@ -730,7 +752,10 @@ fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
 /// * a tool call and **its own** result (matched by call id, rule 4) - the result hugs its
 ///   call, with no gap in between;
 /// * either side is a user block: its pad row is the separation already (painted in a theme
-///   with a user background, blank in one without - the shape is the same either way).
+///   with a user background, blank in one without - the shape is the same either way);
+/// * the previous entry is the thinking channel (ADR 0035): it hugs the block below
+///   it (the reply or the tool call it introduces), so the folded one-liner reads as part of
+///   what follows. The gap **above** thinking is unchanged.
 ///
 /// Otherwise exactly one line. The counting ([`line_count`]'s callers), the drawing
 /// ([`crate::render::visible_lines`]), the selection mapping and the find geometry all call
@@ -747,10 +772,21 @@ pub fn block_gap(prev: Option<&Entry>, next: &Entry) -> usize {
     if is_startup_block(prev.kind) && is_startup_block(next.kind) {
         return 0;
     }
+    // ADR 0035: thinking hugs the block below it.
+    if prev.kind == EntryKind::Reasoning {
+        return 0;
+    }
     if prev.kind == EntryKind::User || next.kind == EntryKind::User {
         return 0;
     }
     1
+}
+
+/// Whether the banded blocks get their half-cell padding rows under this glyph tier (ADR 0035
+/// revision 3 decision 4): `unicode` and `nerd` draw `▄`/`▀`, `ascii` has no half-block glyph
+/// and so gets no padding row.
+pub fn banded_pad(glyphs: crate::footer::Glyphs) -> bool {
+    glyphs != crate::footer::Glyphs::Ascii
 }
 
 /// The entries the startup block is made of (ADR 0027 §标志 / the owner's 2026-10-14 startup
@@ -815,8 +851,10 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     // is a color-only pass and must not run here: the measure pass is the cheap one
     // (`tui.display.highlight`'s lazy rule).
     if has_blank_edge(&text) {
+        // Keep the caller's glyph tier: it decides whether a banded block has padding rows
+        // (ADR 0035), so the count must use the same one the draw does. Only the
+        // costly color pass is skipped.
         let plain = DisplayModes {
-            glyphs: crate::footer::Glyphs::Unicode,
             highlight: false,
             ..modes
         };
@@ -824,8 +862,9 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     }
     match entry.kind {
         EntryKind::User => {
-            // pad + text + pad.
-            crate::render::wrap_line_count(&text, body_width) + 2
+            // The text plus the band's two half-cell padding rows (none under `ascii`).
+            let pad = if banded_pad(modes.glyphs) { 2 } else { 0 };
+            crate::render::wrap_line_count(&text, body_width) + pad
         }
         EntryKind::Assistant => {
             let mut diagram_index = 0;
@@ -1094,7 +1133,7 @@ fn layout_unstripped(
                 end: 0,
                 text: placeholder(entry, spinner),
                 code: false,
-                pad: false,
+                pad: Pad::None,
                 frame: Frame::None,
                 role: tools::LineRole::Normal,
                 hint: true,
@@ -1105,10 +1144,17 @@ fn layout_unstripped(
             }]
         }
         (EntryKind::User, _) => {
-            let mut lines = vec![BodyLine::pad(0)];
+            // ADR 0035: the user band gains a half cell above and below, replacing
+            // the full-row padding. The `ascii` glyph tier has no half-block glyph, so it gets
+            // no padding row at all (decision 4).
+            let mut lines = Vec::new();
+            if banded_pad(modes.glyphs) {
+                lines.push(BodyLine::pad(Pad::Top, 0));
+            }
             lines.extend(prose_lines(&text, body_width));
-            let end = text.len();
-            lines.push(BodyLine::pad(end));
+            if banded_pad(modes.glyphs) {
+                lines.push(BodyLine::pad(Pad::Bottom, text.len()));
+            }
             lines
         }
         (EntryKind::Assistant, _) => {
@@ -1224,7 +1270,7 @@ fn layout_unstripped(
                     end: 0,
                     text: line,
                     code: false,
-                    pad: false,
+                    pad: Pad::None,
                     frame: Frame::None,
                     role: tools::LineRole::Normal,
                     hint: true,
@@ -1348,7 +1394,7 @@ fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
         end: 0,
         text,
         code: false,
-        pad: false,
+        pad: Pad::None,
         frame: Frame::None,
         role: tools::LineRole::Normal,
         hint: true,
@@ -1576,7 +1622,7 @@ fn tool_line_at(line: &str, offset: usize, width: usize) -> Vec<BodyLine> {
         end: offset + line.len(),
         text: rendered,
         code: false,
-        pad: false,
+        pad: Pad::None,
         frame: Frame::None,
         role: tools::LineRole::Normal,
         hint: false,
@@ -1805,7 +1851,7 @@ fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> V
                 end: 0,
                 text: hint.clone(),
                 code: false,
-                pad: false,
+                pad: Pad::None,
                 frame: Frame::None,
                 role: tools::LineRole::Normal,
                 hint: true,
@@ -1972,8 +2018,9 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
     // layout when there are any (see `has_blank_edge`), so the search geometry and the drawing
     // cannot disagree.
     if has_blank_edge(&text) {
+        // Keep the caller's glyph tier (ADR 0035): it decides the band padding, so
+        // the text-only path must match the drawing.
         let plain = DisplayModes {
-            glyphs: crate::footer::Glyphs::Unicode,
             highlight: false,
             ..modes
         };
@@ -1989,9 +2036,17 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
             vec![placeholder(entry, crate::spinner::Frame::default())]
         }
         (EntryKind::User, _) => {
-            let mut lines = vec![String::new()];
+            // The band's two half-cell pad rows are empty text: they occupy rows and never
+            // match a query. The `ascii` tier has none (decision 4).
+            let pad = banded_pad(modes.glyphs);
+            let mut lines = Vec::new();
+            if pad {
+                lines.push(String::new());
+            }
             lines.extend(crate::render::wrap(&text, body_width));
-            lines.push(String::new());
+            if pad {
+                lines.push(String::new());
+            }
             lines
         }
         (EntryKind::Assistant, _) => {
@@ -2147,7 +2202,7 @@ fn code_lines(
             end,
             text,
             code: true,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -2164,7 +2219,7 @@ fn code_lines(
             end: 0,
             text: String::new(),
             code: true,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -3087,7 +3142,7 @@ mod tests {
         text.text = "hi".to_string();
         let lines = layout(&text, &[], EXPANDED, 20);
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].pad && lines[2].pad);
+        assert!(lines[0].pad.is_pad() && lines[2].pad.is_pad());
     }
 
     #[test]
@@ -3244,11 +3299,24 @@ mod tests {
         let entry = Entry::new(EntryKind::User, "hello");
         let lines = layout(&entry, &[], EXPANDED, 30);
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].pad && lines[2].pad);
+        // ADR 0035: the pads are half cells, above and below.
+        assert_eq!(lines[0].pad, Pad::Top);
+        assert_eq!(lines[2].pad, Pad::Bottom);
         assert!(lines[0].chars.is_empty());
         assert_eq!(lines[0].end, 0, "the top pad is the gap before the text");
         assert_eq!(lines[2].end, 5, "the bottom pad reaches the text's end");
         assert_eq!(lines[1].text, "hello");
+        // The `ascii` tier has no half-block glyph, so it gets no padding row: the block is
+        // just the text (decision 4).
+        let ascii = DisplayModes {
+            glyphs: crate::footer::Glyphs::Ascii,
+            ..EXPANDED
+        };
+        let lines = layout(&entry, &[], ascii, 30);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].text, "hello");
+        assert_eq!(line_count(&entry, ascii, 30), 1);
+        assert_eq!(line_count(&entry, EXPANDED, 30), 3);
     }
 
     #[test]

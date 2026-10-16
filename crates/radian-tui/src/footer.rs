@@ -1673,11 +1673,11 @@ pub fn widget_line(app: &App, ids: &[String]) -> Option<Line<'static>> {
 mod tests {
     use super::*;
 
-    /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027). Each one is
-    /// checked against the six fonts by `scripts/check-glyph-coverage.py` and listed in the
-    /// README's coverage table. A new glyph makes this test fail until it is re-checked and
-    /// added here.
-    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓›…";
+    /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027 and 6, plus
+    /// ADR 0035's band half cells). Each one is checked against the six fonts by
+    /// `scripts/check-glyph-coverage.py` and listed in the README's coverage table. A new glyph
+    /// makes this test fail until it is re-checked and added here.
+    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓›…▄▀";
 
     /// The documented exceptions to the coverage rule (ADR 0027/10): the owner
     /// picked the arc and the pulse after seeing them, and braille is an opt-in, so these may
