@@ -63,8 +63,8 @@ pub use agents::{
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
     AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, OAuthEntry, RADIAN_BASE_URL, ResolvedKey,
-    auth_path, list as list_auth, remove as remove_auth, resolve_key, resolve_note,
-    resolved_keys, upsert_api_key as upsert_auth_api_key,
+    auth_path, list as list_auth, remove as remove_auth, resolve_key, resolve_note, resolved_keys,
+    upsert_api_key as upsert_auth_api_key,
 };
 /// The machine's hostname (ADR 0027 `host`), read once at startup. `HOSTNAME` is
 /// set by most shells (and by BSD's `login`); the `hostname` command is the portable fallback.
@@ -142,7 +142,7 @@ pub use named::{
     known_definitions as known_agent_definitions,
 };
 pub use oauth_chatgpt::{
-    BrowserLogin, DeviceStart, DevicePoll, Endpoints as OAuthEndpoints, ListenerHandle,
+    BrowserLogin, CallbackListener, DevicePoll, DeviceStart, Endpoints as OAuthEndpoints,
     OAuthError, PROVIDER_ID as CHATGPT_PROVIDER_ID, RefreshError as OAuthRefreshError,
     TokenResponse as OAuthTokenResponse, device_start as oauth_device_start,
     ensure_fresh as oauth_ensure_fresh, ensure_fresh_in as oauth_ensure_fresh_in,

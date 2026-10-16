@@ -1034,7 +1034,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(scratch.path()).unwrap().permissions().mode() & 0o777;
+            let mode = std::fs::metadata(scratch.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
             assert_eq!(mode, 0o600, "{mode:04o}");
         }
     }
@@ -1056,6 +1060,34 @@ mod tests {
         assert!(keys.contains(&"sk-a".to_owned()));
         assert!(keys.contains(&"at-secret".to_owned()));
         assert!(keys.contains(&"rt-secret".to_owned()));
+    }
+
+    /// ADR 0026's acceptance item "tokens never in a log/journal/export": this is
+    /// the host-side half of that guarantee — `resolved_keys()` feeds the exact redactor
+    /// `radian-session`'s journal/export/panic-log paths use, so a scan of redacted text
+    /// proves the chain end to end rather than only that the list contains the token.
+    #[test]
+    fn oauth_tokens_are_redacted_from_journal_and_export_shaped_text() {
+        let scratch = Scratch::new("oauth-redact-e2e");
+        write_auth(
+            &scratch,
+            r#"{"chatgpt": {"type": "oauth", "access": "at-super-secret-123", "refresh": "rt-super-secret-456", "expires": 1}}"#,
+        );
+        let store = scratch.open().unwrap();
+        let secrets = store.resolved_keys();
+        let journal_line =
+            r#"{"event":"ModelRequest","headers":{"authorization":"Bearer at-super-secret-123"}}"#
+                .to_owned();
+        let export_text = "the model saw refresh token rt-super-secret-456 in a tool result";
+        let panic_text = "thread panicked: at-super-secret-123 could not be parsed";
+        for text in [journal_line.as_str(), export_text, panic_text] {
+            let redacted = radian_session::redact_text(text, &secrets);
+            assert!(
+                !redacted.contains("at-super-secret-123")
+                    && !redacted.contains("rt-super-secret-456"),
+                "{redacted}"
+            );
+        }
     }
 
     #[test]

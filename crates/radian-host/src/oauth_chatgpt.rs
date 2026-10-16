@@ -144,7 +144,9 @@ impl std::fmt::Display for OAuthError {
                 "the callback's state did not match this login; refusing it"
             ),
             Self::MissingCode => write!(f, "the callback carried no authorization code"),
-            Self::AuthorizationDenied { reason } => write!(f, "sign-in was not completed: {reason}"),
+            Self::AuthorizationDenied { reason } => {
+                write!(f, "sign-in was not completed: {reason}")
+            }
             Self::UnexpectedCallback { path } => {
                 write!(f, "a request to {path} is not this login's callback")
             }
@@ -152,10 +154,9 @@ impl std::fmt::Display for OAuthError {
             Self::TokenEndpoint { status, message } => {
                 write!(f, "OpenAI rejected the request (HTTP {status}): {message}")
             }
-            Self::MalformedToken => write!(
-                f,
-                "OpenAI's response was not a usable ChatGPT credential"
-            ),
+            Self::MalformedToken => {
+                write!(f, "OpenAI's response was not a usable ChatGPT credential")
+            }
             Self::DeviceInit { status } => {
                 write!(f, "could not start device-code sign-in (HTTP {status})")
             }
@@ -198,7 +199,10 @@ pub fn generate_pkce() -> Result<Pkce, OAuthError> {
     getrandom::fill(&mut bytes).map_err(|_| OAuthError::Io(std::io::Error::other("no OS RNG")))?;
     let verifier = base64url_encode(&bytes);
     let challenge = base64url_encode(&Sha256::digest(verifier.as_bytes()));
-    Ok(Pkce { verifier, challenge })
+    Ok(Pkce {
+        verifier,
+        challenge,
+    })
 }
 
 /// A CSRF `state` nonce: 16 random bytes, hex-encoded (so it is safe unescaped in a query
@@ -238,34 +242,72 @@ pub fn authorize_url(
     format!("{}?{query}", endpoints.authorize_url)
 }
 
-/// Binds `bind_addr`, waits for exactly one HTTP request to `path`, and returns its
-/// authorization `code` — **one-shot**: whether that single request matches `expected_state`
-/// or not, the listener answers it and then stops; a second connection attempt afterwards gets
-/// a refused connection, not a second chance (the socket is dropped as soon as this returns).
-///
-/// A mismatched `state` is refused (`Err(StateMismatch)`) **without** forwarding anything to
-/// the token endpoint — the one HTTP exchange this function performs is only ever the local
-/// browser redirect, never a network call.
+/// The bound loopback socket a login waits for its one redirect on. Split from
+/// [`wait_for_callback`] into `bind` + `wait` so a caller (or a test) can learn the actual
+/// bound port before anything tries to connect to it — essential when `bind_addr`'s port is
+/// `0` (an ephemeral port a test picks to avoid colliding with another test or a real login).
+#[derive(Debug)]
+pub struct CallbackListener {
+    listener: TcpListener,
+}
+
+impl CallbackListener {
+    /// Binds `bind_addr`. `AddrInUse` becomes [`OAuthError::PortBusy`] — the signal
+    /// [`BrowserLogin::start`] uses to tell a caller to suggest the device-code flow instead,
+    /// before anything has been shown to the user.
+    pub async fn bind(bind_addr: SocketAddr) -> Result<Self, OAuthError> {
+        let listener = TcpListener::bind(bind_addr).await.map_err(|source| {
+            if source.kind() == std::io::ErrorKind::AddrInUse {
+                OAuthError::PortBusy {
+                    port: bind_addr.port(),
+                }
+            } else {
+                OAuthError::Io(source)
+            }
+        })?;
+        Ok(Self { listener })
+    }
+
+    /// The address actually bound (useful when [`Self::bind`] was asked for an ephemeral
+    /// port).
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    /// Waits for exactly one HTTP request to `path` and returns its authorization `code` —
+    /// **one-shot**: whether that single request matches `expected_state` or not, this answers
+    /// it and returns; the listener is then dropped, so a second connection attempt afterwards
+    /// gets a refused connection, not a second chance.
+    ///
+    /// A mismatched `state` is refused (`Err(StateMismatch)`) **without** forwarding anything
+    /// to the token endpoint — the one HTTP exchange this performs is only ever the local
+    /// browser redirect, never a network call.
+    pub async fn wait(
+        self,
+        path: &str,
+        expected_state: &str,
+        timeout: Duration,
+    ) -> Result<String, OAuthError> {
+        let (stream, _) = tokio::time::timeout(timeout, self.listener.accept())
+            .await
+            .map_err(|_| OAuthError::Timeout)?
+            .map_err(OAuthError::Io)?;
+        handle_one_callback(stream, path, expected_state).await
+    }
+}
+
+/// [`CallbackListener::bind`] followed by [`CallbackListener::wait`], for a caller that has no
+/// use for the bound address (production: the port is always the fixed [`CALLBACK_PORT`]).
 pub async fn wait_for_callback(
     bind_addr: SocketAddr,
     path: &str,
     expected_state: &str,
     timeout: Duration,
 ) -> Result<String, OAuthError> {
-    let listener = TcpListener::bind(bind_addr).await.map_err(|source| {
-        if source.kind() == std::io::ErrorKind::AddrInUse {
-            OAuthError::PortBusy {
-                port: bind_addr.port(),
-            }
-        } else {
-            OAuthError::Io(source)
-        }
-    })?;
-    let (stream, _) = tokio::time::timeout(timeout, listener.accept())
+    CallbackListener::bind(bind_addr)
+        .await?
+        .wait(path, expected_state, timeout)
         .await
-        .map_err(|_| OAuthError::Timeout)?
-        .map_err(OAuthError::Io)?;
-    handle_one_callback(stream, path, expected_state).await
 }
 
 /// Reads one GET's request line, answers it, and returns the outcome. The connection is
@@ -398,19 +440,24 @@ pub struct BrowserLogin {
     redirect_uri: String,
 }
 
+impl std::fmt::Debug for BrowserLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserLogin")
+            .field("authorize_url", &self.authorize_url)
+            .field("state", &self.state)
+            .field("pkce_verifier", &"<redacted>")
+            .field("redirect_uri", &self.redirect_uri)
+            .finish()
+    }
+}
+
 impl BrowserLogin {
     /// Binds the production callback port and builds the authorization URL. `Err(PortBusy)`
     /// here is the signal to suggest the device-code flow instead — nothing has been shown to
     /// the user yet.
-    pub async fn start(endpoints: &Endpoints) -> Result<(Self, ListenerHandle), OAuthError> {
+    pub async fn start(endpoints: &Endpoints) -> Result<(Self, CallbackListener), OAuthError> {
         let addr = SocketAddr::from(([127, 0, 0, 1], CALLBACK_PORT));
-        let listener = TcpListener::bind(addr).await.map_err(|source| {
-            if source.kind() == std::io::ErrorKind::AddrInUse {
-                OAuthError::PortBusy { port: addr.port() }
-            } else {
-                OAuthError::Io(source)
-            }
-        })?;
+        let listener = CallbackListener::bind(addr).await?;
         let state = generate_state()?;
         let pkce = generate_pkce()?;
         let redirect_uri = format!("http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}");
@@ -422,7 +469,7 @@ impl BrowserLogin {
                 pkce,
                 redirect_uri,
             },
-            ListenerHandle { listener },
+            listener,
         ))
     }
 
@@ -430,23 +477,12 @@ impl BrowserLogin {
     pub async fn finish(
         self,
         endpoints: &Endpoints,
-        handle: ListenerHandle,
+        listener: CallbackListener,
         timeout: Duration,
     ) -> Result<TokenResponse, OAuthError> {
-        let (stream, _) = tokio::time::timeout(timeout, handle.listener.accept())
-            .await
-            .map_err(|_| OAuthError::Timeout)?
-            .map_err(OAuthError::Io)?;
-        let code = handle_one_callback(stream, CALLBACK_PATH, &self.state).await?;
+        let code = listener.wait(CALLBACK_PATH, &self.state, timeout).await?;
         exchange_code(endpoints, &code, &self.pkce.verifier, &self.redirect_uri).await
     }
-}
-
-/// The bound socket between [`BrowserLogin::start`] and [`BrowserLogin::finish`]. Not
-/// `Clone`/`Copy`: there is exactly one listener per login, and dropping it (a cancelled login)
-/// frees the port immediately.
-pub struct ListenerHandle {
-    listener: TcpListener,
 }
 
 /// Exchanges an authorization code for tokens.
@@ -660,6 +696,7 @@ pub async fn device_start(endpoints: &Endpoints) -> Result<DeviceStart, OAuthErr
 }
 
 /// One device-code poll's outcome.
+#[derive(Debug)]
 pub enum DevicePoll {
     /// The user has not finished the browser step yet; poll again after the interval.
     Pending,
@@ -695,7 +732,12 @@ pub async fn device_poll_once(
         let body = response.text().await.unwrap_or_default();
         if serde_json::from_str::<serde_json::Value>(&body)
             .ok()
-            .and_then(|value| value.get("error").and_then(serde_json::Value::as_str).map(str::to_owned))
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
             .as_deref()
             == Some("expired_token")
         {
@@ -825,11 +867,13 @@ pub async fn ensure_fresh_in(
     if entry.expires_at_millis > margin_deadline {
         return Ok(entry.access);
     }
-    let refreshed = refresh_token(endpoints, &entry.refresh).await.map_err(|error| {
-        RefreshError::Failed(format!(
-            "could not refresh the ChatGPT sign-in ({error}); run `/login chatgpt` again"
-        ))
-    })?;
+    let refreshed = refresh_token(endpoints, &entry.refresh)
+        .await
+        .map_err(|error| {
+            RefreshError::Failed(format!(
+                "could not refresh the ChatGPT sign-in ({error}); run `/login chatgpt` again"
+            ))
+        })?;
     store_token(store, &refreshed).map_err(RefreshError::Auth)?;
     Ok(refreshed.access)
 }
@@ -933,7 +977,15 @@ mod tests {
         // RFC 4648's own test vector ("Man" -> "TWFu"), which happens to use no `+`/`/`/pad,
         // so it is also a valid base64url vector.
         assert_eq!(base64url_encode(b"Man"), "TWFu");
-        for input in [b"".as_slice(), b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar"] {
+        for input in [
+            b"".as_slice(),
+            b"f",
+            b"fo",
+            b"foo",
+            b"foob",
+            b"fooba",
+            b"foobar",
+        ] {
             let encoded = base64url_encode(input);
             assert!(!encoded.contains('+') && !encoded.contains('/') && !encoded.contains('='));
             assert_eq!(base64url_decode(&encoded).unwrap(), input);
@@ -963,21 +1015,32 @@ mod tests {
     #[test]
     fn authorize_url_carries_the_fixed_constants_and_originator_radian() {
         let endpoints = Endpoints::default();
-        let url = authorize_url(&endpoints, "the-state", "the-challenge", "http://localhost:1455/auth/callback");
+        let url = authorize_url(
+            &endpoints,
+            "the-state",
+            "the-challenge",
+            "http://localhost:1455/auth/callback",
+        );
         assert!(url.starts_with("https://auth.openai.com/oauth/authorize?"));
         assert!(url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
         assert!(url.contains("code_challenge=the-challenge"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("state=the-state"));
         assert!(url.contains("originator=radian"));
-        assert!(!url.contains("originator=codex"), "must not impersonate Codex");
+        assert!(
+            !url.contains("originator=codex"),
+            "must not impersonate Codex"
+        );
         assert!(url.contains(&percent_encode("http://localhost:1455/auth/callback")));
     }
 
     #[test]
     fn a_matching_callback_yields_the_code() {
         let line = "GET /auth/callback?code=abc123&state=xyz HTTP/1.1";
-        assert_eq!(parse_callback(line, "/auth/callback", "xyz").unwrap(), "abc123");
+        assert_eq!(
+            parse_callback(line, "/auth/callback", "xyz").unwrap(),
+            "abc123"
+        );
     }
 
     #[test]
@@ -1002,7 +1065,10 @@ mod tests {
     fn a_request_to_another_path_is_not_this_callback() {
         let line = "GET /favicon.ico HTTP/1.1";
         let error = parse_callback(line, "/auth/callback", "xyz").unwrap_err();
-        assert!(matches!(error, OAuthError::UnexpectedCallback { .. }), "{error}");
+        assert!(
+            matches!(error, OAuthError::UnexpectedCallback { .. }),
+            "{error}"
+        );
     }
 
     #[test]
