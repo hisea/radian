@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use agent_core::{NoopSink, TurnOptions};
+use agent_core::{NoopSink, ToolCall, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use radian_host::{
     CommitGate, HostBindings, Isolation, LocalSession, SessionError, SessionFacade, SessionId,
@@ -125,6 +125,7 @@ fn model(
     session_id: &str,
     base_url: &str,
     slot: Arc<radian_runtime::ConfigSlot>,
+    route: Option<radian_host::ModelRoute>,
 ) -> radian_host::SwitchableModel {
     let model = build_model(radian_host::ModelArgs {
         provider: radian_host::Provider::OpenAiCompatible,
@@ -139,9 +140,13 @@ fn model(
         reasoning_replay: None,
     })
     .unwrap();
+    // ADR 0030 O11: a definition's `model` becomes the session's initial route. A real host
+    // resolves credentials from that route; the test's mock server answers either way.
+    let initial =
+        route.unwrap_or_else(|| radian_host::ModelRoute::new("openai-compatible", "mock"));
     radian_host::SwitchableModel::new(
         model,
-        radian_host::ModelRoute::new("openai-compatible", "mock"),
+        initial,
         slot,
         radian_host::RouteContext {
             providers: std::collections::BTreeMap::new(),
@@ -162,7 +167,16 @@ fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> T
         move |ctx: &TaskContext<'_>| -> Result<TaskSession, SessionError> {
             let workspace = ctx.workspace.to_path_buf();
             let fail = |error: String| SessionError::Message(error);
-            let slot = radian_runtime::ConfigSlot::new(Value::Null);
+            // ADR 0030 O11: the definition's route is the session's route. A real host builds the
+            // provider from it; the test's mock model answers either way, and the slot carries
+            // the route so `model_route()` reflects it.
+            let route = ctx.agent.and_then(|agent| agent.model.clone());
+            let slot = radian_runtime::ConfigSlot::new(
+                route
+                    .as_ref()
+                    .map(radian_host::ModelRoute::to_value)
+                    .unwrap_or(Value::Null),
+            );
             let stopped = Arc::clone(&stops);
             let session_id = ctx.session_id.to_owned();
             let (sandbox, tier, profile) = match ctx.isolation {
@@ -190,7 +204,7 @@ fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> T
                     session_dir: session_dir.clone(),
                     workspace: workspace.clone(),
                     coding_root: Some(workspace.clone()),
-                    model: model(ctx.session_id, &base_url, Arc::clone(&slot)),
+                    model: model(ctx.session_id, &base_url, Arc::clone(&slot), route),
                     config_slot: slot,
                     config_queue: radian_runtime::ConfigQueue::new(),
                     budget_for: None,
@@ -502,7 +516,7 @@ async fn the_task_sandbox_turns_the_network_off() {
 async fn shared_isolation_is_the_lead_workspace_and_safe() {
     let fixture = Fixture::new("shared", "http://127.0.0.1:1/v1");
     let mut request = SpawnRequest::new("t1");
-    request.isolation = Isolation::Shared;
+    request.isolation = Some(Isolation::Shared);
     let record = fixture.registry.spawn(request).await.expect("spawn");
 
     assert_eq!(record.isolation, Isolation::Shared);
@@ -575,7 +589,7 @@ async fn a_shared_task_writes_no_end_commit() {
     std::fs::write(fixture.lead.join("user-work.txt"), "the user's change\n").unwrap();
 
     let mut request = SpawnRequest::new("t1");
-    request.isolation = Isolation::Shared;
+    request.isolation = Some(Isolation::Shared);
     request.brief = Some("look around".to_owned());
     let record = fixture.registry.spawn(request).await.expect("spawn");
 
@@ -783,7 +797,7 @@ async fn open_plain(
 ) -> Arc<LocalSession> {
     let slot = radian_runtime::ConfigSlot::new(Value::Null);
     let session_id = if task_agent { "task" } else { "general" };
-    let model = model(session_id, base_url, Arc::clone(&slot));
+    let model = model(session_id, base_url, Arc::clone(&slot), None);
     let session = open_session(
         SessionSetup {
             session_id: SessionId::new(session_id),
@@ -1543,4 +1557,310 @@ async fn a_failing_end_commit_shows_in_task_finished() {
         .remove("t1", true)
         .await
         .expect("force remove");
+}
+
+// ---------------------------------------------------------------------------
+// Agent definitions (ADR 0030 O11, slice 7 part a)
+// ---------------------------------------------------------------------------
+
+/// Writes one user-level agent definition (`$RADIAN_HOME/agents/<name>.md`).
+fn write_agent(home: &Path, name: &str, text: &str) -> PathBuf {
+    let dir = home.join("agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.md"));
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+fn agent_tool_call(name: &str) -> ToolCall {
+    ToolCall {
+        id: "c1".into(),
+        name: name.into(),
+        arguments: json!({}),
+    }
+}
+
+/// The system message of the `n`th request the mock saw.
+fn system_prompt(server: &MockServer, n: usize) -> String {
+    server.requests()[n].json()["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// [`Reply`] with one assistant text then `stop`.
+fn a_text_reply(text: &str) -> Reply {
+    Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": text}), None),
+        chunk(json!({}), Some("stop")),
+    ])
+}
+
+/// `spawn_task { agent }` resolves the definition and snapshots it; the spawn arguments override
+/// the definition's fields (ADR 0030 O4/O11).
+#[tokio::test]
+async fn a_spawn_resolves_the_agent_definition_and_the_spawn_arguments_override_it() {
+    let fixture = Fixture::new("agent-def", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    write_agent(
+        &fixture.home,
+        "writer-def",
+        "---\nname: writer-def\nmodel: opencode-go/one\nprofile: safe\nspawn: true\n---\nBODY\n",
+    );
+
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("writer-def".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    assert_eq!(record.agent, "writer-def");
+    assert!(record.spawn_ignored, "spawn: true is ignored for a task");
+    assert_eq!(
+        record.session.model_route(),
+        Some(("opencode-go".to_owned(), "one".to_owned())),
+        "the definition's model is the session's route"
+    );
+    assert_eq!(
+        record.session.hooks().profile().preset,
+        Preset::Safe,
+        "the definition's profile narrows the task"
+    );
+
+    // The spawn arguments win over the definition.
+    let mut request = SpawnRequest::new("t2");
+    request.agent = Some("writer-def".to_owned());
+    request.model = Some("anthropic/two".to_owned());
+    request.profile = Some("workspace".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    assert_eq!(
+        record.session.model_route(),
+        Some(("anthropic".to_owned(), "two".to_owned()))
+    );
+    assert_eq!(
+        record.session.hooks().profile().preset,
+        Preset::WorkspaceWrite
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    fixture.registry.remove("t2", true).await.expect("remove");
+    let _ = std::fs::remove_file(fixture.home.join("agents/writer-def.md"));
+}
+
+/// The `tools` allow-list narrows the task (built-ins it does not name are denied) and can never
+/// widen a tier: a `safe` task that lists `shell` still has no shell (ADR 0030 problem 7 = A).
+#[tokio::test]
+async fn a_tools_allow_list_can_only_narrow() {
+    let fixture = Fixture::new("agent-tools", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    write_agent(
+        &fixture.home,
+        "reader",
+        "---\nname: reader\ntools: [read, list]\n---\nBODY\n",
+    );
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("reader".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    let profile = record.session.hooks().profile();
+    let action = |name: &str| {
+        radian_permissions::evaluate(profile.rules(), &profile.workspace, &agent_tool_call(name))
+            .action
+    };
+    assert_eq!(action("read"), radian_permissions::Action::Allow);
+    assert_eq!(action("list"), radian_permissions::Action::Allow);
+    assert_eq!(action("write"), radian_permissions::Action::Deny);
+    assert_eq!(action("shell"), radian_permissions::Action::Deny);
+
+    // A `safe` task that lists `shell` keeps the tier's deny: the allow-list cannot widen.
+    write_agent(
+        &fixture.home,
+        "safer",
+        "---\nname: safer\nprofile: safe\ntools: [read, shell]\n---\nBODY\n",
+    );
+    let mut request = SpawnRequest::new("t2");
+    request.agent = Some("safer".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    assert!(
+        record.sandbox_policy.is_none(),
+        "a safe task has no sandbox (the profile denies shell)"
+    );
+    let profile = record.session.hooks().profile();
+    let action = |name: &str| {
+        radian_permissions::evaluate(profile.rules(), &profile.workspace, &agent_tool_call(name))
+            .action
+    };
+    assert_eq!(action("read"), radian_permissions::Action::Allow);
+    assert_eq!(action("shell"), radian_permissions::Action::Deny);
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    fixture.registry.remove("t2", true).await.expect("remove");
+    let _ = std::fs::remove_file(fixture.home.join("agents/reader.md"));
+    let _ = std::fs::remove_file(fixture.home.join("agents/safer.md"));
+}
+
+/// Only the user level is read (a project-level definition is not, this slice): a definition
+/// that exists only in the lead's workspace is not found.
+#[tokio::test]
+async fn a_project_level_definition_is_not_read() {
+    let fixture = Fixture::new("agent-project", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let dir = fixture.lead.join(".radian/agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("proj.md"), "---\nname: proj\n---\nBODY\n").unwrap();
+
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("proj".to_owned());
+    let error = match fixture.registry.spawn(request).await {
+        Ok(_) => panic!("a project-level definition is not read"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("proj"), "{error}");
+}
+
+/// The task worktree for `id` under the isolated home. The repo key is opaque to a test, so it
+/// scans the single `worktrees/<repo-key>/` directory.
+fn task_worktree(home: &Path, id: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(home.join("worktrees")).ok()? {
+        let candidate = entry.ok()?.path().join(id);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// The definition is snapshotted at spawn: a change to the file **after** the definition was
+/// resolved (here, at the registry's `Builder` seam) does not move the running task's body or
+/// its route (ADR 0030 item 4).
+#[tokio::test]
+async fn a_definition_is_snapshotted_at_spawn() {
+    let server = MockServer::start(vec![a_text_reply("done")]).await;
+    let home = isolated_home();
+    let path = write_agent(
+        &home,
+        "snap-seam",
+        "---\nname: snap-seam\nmodel: opencode-go/old\n---\nOLD BODY\n",
+    );
+    // The registry resolves the definition before the `Builder` seam; the hook rewrites the file
+    // there, so any later re-read (enforce or session open) would see the new text.
+    let edit = path.clone();
+    let seam = Arc::new(move |stage: SpawnStage| {
+        if stage == SpawnStage::Builder {
+            std::fs::write(
+                &edit,
+                "---\nname: snap-seam\nmodel: opencode-go/new\n---\nNEW BODY\n",
+            )
+            .unwrap();
+        }
+        Ok(())
+    });
+    let fixture = Fixture::with_seams(
+        "agent-snap",
+        &server.base_url,
+        TaskSeams {
+            spawn: Some(seam),
+            commit_gate: None,
+        },
+    );
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("snap-seam".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    record
+        .session
+        .inbox()
+        .followup(
+            agent_core::Message::user("go"),
+            agent_core::InputSource::Subagent,
+        )
+        .await
+        .expect("the brief");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while server.requests().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no model request");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        record.session.model_route(),
+        Some(("opencode-go".to_owned(), "old".to_owned())),
+        "the route is the snapshot, not the edited file"
+    );
+    let system = system_prompt(&server, 0);
+    assert!(system.contains("OLD BODY"), "{system}");
+    assert!(!system.contains("NEW BODY"), "{system}");
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    let _ = std::fs::remove_file(home.join("agents/snap-seam.md"));
+}
+
+/// A definition with the same name inside the task's **own worktree** is never read: the session
+/// takes the lead-time snapshot, and the worktree is a checkout the task can write (ADR 0030
+/// revision 2 item 4).
+#[tokio::test]
+async fn a_definition_in_the_task_worktree_is_not_read() {
+    let server = MockServer::start(vec![a_text_reply("done")]).await;
+    let home = isolated_home();
+    write_agent(&home, "wt-seam", "---\nname: wt-seam\n---\nSNAPSHOT BODY\n");
+    // The worktree exists by the `Builder` seam; plant a different definition of the same name
+    // there, so a worktree read at enforce or session open would pick it up.
+    let plant = home.clone();
+    let seam = Arc::new(move |stage: SpawnStage| {
+        if stage == SpawnStage::Builder {
+            let worktree = task_worktree(&plant, "t1").expect("the worktree exists by Builder");
+            let dir = worktree.join(".radian/agents");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("wt-seam.md"),
+                "---\nname: wt-seam\n---\nWORKTREE BODY\n",
+            )
+            .unwrap();
+        }
+        Ok(())
+    });
+    let fixture = Fixture::with_seams(
+        "agent-wt",
+        &server.base_url,
+        TaskSeams {
+            spawn: Some(seam),
+            commit_gate: None,
+        },
+    );
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("wt-seam".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    record
+        .session
+        .inbox()
+        .followup(
+            agent_core::Message::user("go"),
+            agent_core::InputSource::Subagent,
+        )
+        .await
+        .expect("the brief");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while server.requests().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no model request");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let system = system_prompt(&server, 0);
+    assert!(system.contains("SNAPSHOT BODY"), "{system}");
+    assert!(!system.contains("WORKTREE BODY"), "{system}");
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    let _ = std::fs::remove_file(home.join("agents/wt-seam.md"));
 }

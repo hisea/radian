@@ -169,6 +169,19 @@ pub fn specs() -> Vec<ToolSpec> {
                         "type": "string",
                         "enum": ["auto", "on-ask"],
                         "description": "The task's approval default after the hard-deny list: `auto` (default) or `on-ask`."
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description": "The agent definition to run (`~/.radian/agents/<name>.md`); its fields are the task's, overridden by `model`/`profile`/`isolation` here. Omit for the default `task` role."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "A `provider/model` route that overrides the definition's `model`."
+                    },
+                    "profile": {
+                        "type": "string",
+                        "enum": ["safe", "workspace"],
+                        "description": "A tier that overrides the definition's `profile`; a task may only narrow (`safe` or `workspace`)."
                     }
                 },
                 "required": ["brief"],
@@ -441,6 +454,12 @@ struct SpawnArgs {
     isolation: Option<String>,
     label: Option<String>,
     approval: Option<String>,
+    /// The ADR 0030 O11 agent definition name; `None` means the task default.
+    agent: Option<String>,
+    /// A `provider/model` route (ADR 0026) that overrides the definition's `model`.
+    model: Option<String>,
+    /// A tier name that overrides the definition's `profile`. A task may only narrow.
+    profile: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -513,8 +532,9 @@ impl LeadSession {
         }
         let id = args.id.unwrap_or_else(crate::generate_session_id);
         let isolation = match args.isolation.as_deref() {
-            None | Some("worktree") => Isolation::Worktree,
-            Some("shared") => Isolation::Shared,
+            None => None,
+            Some("worktree") => Some(Isolation::Worktree),
+            Some("shared") => Some(Isolation::Shared),
             Some(other) => {
                 return Err(invalid(format!(
                     "`isolation` is `worktree` or `shared`, not {other:?}"
@@ -531,11 +551,23 @@ impl LeadSession {
                 )));
             }
         };
+        // ADR 0030 O11/O4: the definition name is resolved by the registry; `model`/`profile`
+        // override it. Both are validated here so a bad argument is an `invalid_arguments`
+        // failure, not a spawn failure.
+        if let Some(model) = args.model.as_deref() {
+            crate::agents::parse_model_route(model).map_err(|error| invalid(error.message))?;
+        }
+        if let Some(profile) = args.profile.as_deref() {
+            crate::agents::parse_tier(profile).map_err(|error| invalid(error.message))?;
+        }
         let mut request = SpawnRequest::new(id.clone());
         request.isolation = isolation;
         request.label = args.label;
         request.brief = Some(args.brief);
         request.approval = approval;
+        request.agent = args.agent;
+        request.model = args.model;
+        request.profile = args.profile;
         // ADR 0030 item 3: the edge policy command is never a model argument, so
         // `spawn_task` has no way to set one and refuses the field (deny_unknown_fields).
         request.policy = None;
@@ -958,6 +990,8 @@ fn record_json(record: &Arc<TaskRecord>) -> Value {
         "worktree": record.worktree.as_ref().map(|p| p.display().to_string()),
         "branch": record.branch,
         "label": record.label,
+        "agent": record.agent,
+        "spawn_ignored": record.spawn_ignored,
     })
 }
 
@@ -1096,5 +1130,31 @@ mod tests {
         assert_eq!(duration, Duration::from_secs(600));
         let (_, secs) = wait_timeout(Some(0.02)).expect("a fraction");
         assert_eq!(secs, 0.02);
+    }
+
+    /// ADR 0030 O4/O11: `spawn_task` takes `agent`/`model`/`profile`, refuses an unknown field,
+    /// and advertises the three in its schema.
+    #[test]
+    fn spawn_task_takes_agent_model_and_profile() {
+        let ok = ToolCall {
+            id: "c".into(),
+            name: "spawn_task".into(),
+            arguments: json!({"brief": "x", "agent": "writer", "model": "p/m", "profile": "safe"}),
+        };
+        assert!(parse::<SpawnArgs>(&ok).is_ok());
+        let unknown = ToolCall {
+            id: "c".into(),
+            name: "spawn_task".into(),
+            arguments: json!({"brief": "x", "nope": 1}),
+        };
+        assert!(parse::<SpawnArgs>(&unknown).is_err());
+        let spec = specs()
+            .into_iter()
+            .find(|spec| spec.name == "spawn_task")
+            .expect("spawn_task");
+        let properties = &spec.input_schema["properties"];
+        for field in ["agent", "model", "profile"] {
+            assert!(properties.get(field).is_some(), "schema is missing {field}");
+        }
     }
 }

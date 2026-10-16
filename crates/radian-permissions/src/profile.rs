@@ -225,6 +225,27 @@ impl Profile {
         self
     }
 
+    /// Denies every tool in `names` (ADR 0030 problem 7 = A). An agent definition's `tools`
+    /// allow-list is enforced with this: the host passes the built-ins the list does **not**
+    /// name, and `deny` outranks `allow`/`ask`, so a listed tool the tier would not mount stays
+    /// unmounted and an unlisted tool cannot run. It only ever adds `deny` rules, so it can
+    /// narrow a tier but never widen one (ADR 0030 O2).
+    pub fn with_denied_tools<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.rules.extend(names.into_iter().map(|name| {
+            Rule::new(
+                ToolMatcher::Name(name.into()),
+                ResourceMatcher::Any,
+                Action::Deny,
+            )
+            .with_reason("not in this agent's tool allow-list (ADR 0030 O11)")
+        }));
+        self
+    }
+
     fn build(
         preset: Preset,
         workspace: impl AsRef<Path>,

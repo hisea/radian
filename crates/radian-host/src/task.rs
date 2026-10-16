@@ -53,6 +53,7 @@ use radian_sandbox::{GitAccess, Sandbox, SandboxPolicy};
 use radian_session::{ForkParent, RuntimeEvent, SessionJournal, TurnOutcome};
 use tokio::sync::watch;
 
+use crate::agents::{SpawnAgent, SpawnOverrides, resolve as resolve_agent};
 use crate::git_commit::{Committed, RepoPin, default_allowed_filters};
 use crate::home::{ensure_private_dir, radian_home, worktrees_dir_for};
 use crate::session::{
@@ -113,6 +114,11 @@ pub struct TaskContext<'a> {
     pub branch: Option<&'a str>,
     /// The `SessionCreated.parent` the task records (relation `"task"`).
     pub parent: &'a ForkParent,
+    /// The agent definition resolved and snapshotted at spawn (ADR 0030 O11, slice 7). The
+    /// builder builds the model from its route and thinking level; the registry enforces the
+    /// narrowing rules on the rest. `None` only for a registry that resolves nothing (a direct
+    /// unit test of [`enforce_task_setup`]).
+    pub agent: Option<&'a SpawnAgent>,
 }
 
 /// The host-specific parts of one task session. The registry overrides the task-specific
@@ -178,6 +184,12 @@ pub struct TaskRecord {
     /// The `radian/<id>` branch, or `None` for `shared`.
     pub branch: Option<String>,
     pub label: Option<String>,
+    /// The agent definition name the task was spawned from (ADR 0030 O11); the task default is
+    /// `task`.
+    pub agent: String,
+    /// Whether the definition asked for `spawn: true`, ignored because a task is depth 2
+    /// (ADR 0030 O13).
+    pub spawn_ignored: bool,
     /// The seq of the lead's `TaskSpawned` (the task's `parent.seq`).
     pub start_seq: u64,
     /// The commit the worktree's branch was created from (the lead's HEAD at spawn), so a later
@@ -222,15 +234,18 @@ impl TaskRecord {
 pub struct SpawnRequest {
     /// The task id: `[A-Za-z0-9._-]`, 1-128 chars (it names a worktree directory and a branch).
     pub id: String,
-    pub isolation: Isolation,
+    /// How to isolate the task (ADR 0030 O3). `None` lets the agent definition's `isolation`
+    /// decide, then the `worktree` default.
+    pub isolation: Option<Isolation>,
     pub label: Option<String>,
     /// The first input, sent as a `followup` with `InputSource::Subagent` (ADR 0030 O2: a task
     /// agent's every input is `Subagent`). `None` opens the session without starting a turn.
     pub brief: Option<String>,
     /// The task's approval policy after the hard-deny list and the edge policy (ADR 0030
-    /// revision 1 R1): `None` is the task default `auto`; `Some(OnAsk)` sends every ask that
-    /// still reaches the default to the task-side pending queue (ADR 0030 slice 5). `Never` and
-    /// `Always` are refused: a task has no "never ask" and no "always ask" layer of its own.
+    /// revision 1 R1): `None` lets the agent definition's `approval`, then the task default
+    /// `auto`, decide. `Some(OnAsk)` sends every ask that still reaches the default to the
+    /// task-side pending queue (ADR 0030 slice 5). `Never` and `Always` are refused: a task has
+    /// no "never ask" and no "always ask" layer of its own.
     pub approval: Option<ApprovalPolicy>,
     /// The optional edge policy command (ADR 0030 R1 layer 2). `None` means no edge
     /// policy: the default in [`SpawnRequest::approval`] decides.
@@ -240,6 +255,12 @@ pub struct SpawnRequest {
     /// program Radian runs for the task. It is only ever run inside the task's sandbox; with no
     /// sandbox it is skipped and the request goes to the pending queue.
     pub policy: Option<crate::task_pending::PolicyCommand>,
+    /// The ADR 0030 O11 agent definition name; `None` means the task default (the `task` role).
+    pub agent: Option<String>,
+    /// A `provider/model` route (ADR 0026) that overrides the definition's `model`.
+    pub model: Option<String>,
+    /// A tier name that overrides the definition's `profile`. A task may only narrow.
+    pub profile: Option<String>,
 }
 
 impl SpawnRequest {
@@ -247,11 +268,14 @@ impl SpawnRequest {
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            isolation: Isolation::Worktree,
+            isolation: None,
             label: None,
             brief: None,
             approval: None,
             policy: None,
+            agent: None,
+            model: None,
+            profile: None,
         }
     }
 }
@@ -431,6 +455,9 @@ impl TaskRegistry {
                 brief,
                 approval,
                 policy,
+                agent,
+                model,
+                profile,
             } = request;
             validate_session_id(&id).map_err(|_| {
                 TaskError::new(format!(
@@ -440,7 +467,25 @@ impl TaskRegistry {
             if self.get(&id).is_some() {
                 return Err(TaskError::new(format!("task `{id}` already exists")));
             }
-            let approval = approval.unwrap_or(ApprovalPolicy::Auto);
+            // ADR 0030 O11 (slice 7): resolve the agent definition from the user-level dir and
+            // snapshot it now, before any session exists. The spawn arguments override the
+            // definition's fields (O4), and a profile that would widen the task floor is refused
+            // here, before the worktree is created.
+            let resolved = resolve_agent(
+                radian_home().as_deref(),
+                &SpawnOverrides {
+                    agent: agent.as_deref(),
+                    isolation,
+                    model: model.as_deref(),
+                    profile: profile.as_deref(),
+                    approval,
+                },
+            )
+            .map_err(|error| {
+                TaskError::new(format!("cannot resolve the agent definition: {error}"))
+            })?;
+            let isolation = resolved.isolation.unwrap_or_default();
+            let approval = resolved.approval.unwrap_or(ApprovalPolicy::Auto);
             if !matches!(approval, ApprovalPolicy::Auto | ApprovalPolicy::OnAsk) {
                 return Err(TaskError::new(
                     "a task's approval is `auto` or `on-ask` (ADR 0030 R1)",
@@ -451,7 +496,15 @@ impl TaskRegistry {
             // record is in the registry, so no failure below can leave a worktree or a driver.
             let mut guard = SpawnGuard::new(self.workspace.clone());
             match self
-                .spawn_inner(&mut guard, &id, isolation, label, brief, (approval, policy))
+                .spawn_inner(
+                    &mut guard,
+                    &id,
+                    isolation,
+                    label,
+                    brief,
+                    (approval, policy),
+                    resolved,
+                )
                 .await
             {
                 Ok(record) => {
@@ -478,6 +531,7 @@ impl TaskRegistry {
     }
 
     /// The fallible body of [`TaskRegistry::spawn`]; the caller owns the guard.
+    #[allow(clippy::too_many_arguments)] // the caller (spawn) destructures the request already
     async fn spawn_inner(
         &self,
         guard: &mut SpawnGuard,
@@ -488,6 +542,7 @@ impl TaskRegistry {
         // The task's approval policy and its optional edge policy command (ADR 0030 slice 5),
         // together: they are only ever read as a pair by the task approver below.
         (approval, policy): (ApprovalPolicy, Option<crate::task_pending::PolicyCommand>),
+        agent: SpawnAgent,
     ) -> Result<Arc<TaskRecord>, TaskError> {
         // 1. The workspace: a fresh worktree on `radian/<id>`, or the lead's own (shared).
         let (workspace, worktree, branch) = match isolation {
@@ -554,6 +609,7 @@ impl TaskRegistry {
             workspace: &workspace,
             branch: branch.as_deref(),
             parent: &parent,
+            agent: Some(&agent),
         })
         .map_err(|error| TaskError::new(error.to_string()))?;
         let TaskSession {
@@ -581,6 +637,7 @@ impl TaskRegistry {
             } else {
                 ApprovalPolicy::Auto
             },
+            Some(&agent),
         )?;
 
         // The task's asks and questions go to the task-side pending queue, not the human's; the
@@ -661,6 +718,8 @@ impl TaskRegistry {
             worktree,
             branch,
             label,
+            agent: agent.name.clone(),
+            spawn_ignored: agent.spawn_ignored,
             start_seq,
             start_commit,
             sandbox_policy,
@@ -783,8 +842,9 @@ impl Drop for SpawnGuard {
 }
 
 /// Enforces the task-agent invariants on a builder's setup (ADR 0030 O2/O3/O8, ADR 0036,
-/// ADR 0038 decision 4, ADR 0030 R1). Split out so a test can pin each rule without a
-/// real session.
+/// ADR 0038 decision 4, ADR 0030 R1, ADR 0030 O11). Split out so a test can pin each
+/// rule without a real session.
+#[allow(clippy::too_many_arguments)] // one enforcer over every task invariant, not a builder
 fn enforce_task_setup(
     setup: &mut SessionSetup,
     workspace: &Path,
@@ -792,6 +852,7 @@ fn enforce_task_setup(
     branch: Option<String>,
     parent: ForkParent,
     hook_approval: ApprovalPolicy,
+    agent: Option<&SpawnAgent>,
 ) -> Result<(), TaskError> {
     setup.workspace = workspace.to_path_buf();
     setup.coding_root = Some(workspace.to_path_buf());
@@ -800,10 +861,19 @@ fn enforce_task_setup(
     setup.task_agent = true;
     // ADR 0030 O8: a task agent does not open memory (its single-writer lock).
     setup.memory_root = None;
-    // ADR 0036: the task role prompt. A task agent's role comes from its brief, so
-    // `--system` (a fixed layer 1) does not apply.
-    setup.role = Some("task".to_owned());
-    setup.system_prompt = None;
+    // ADR 0036 / ADR 0030 O11: layer 1 is the definition's body. The registry
+    // resolved and snapshotted it at spawn, so the session never re-reads the file; without a
+    // definition the built-in `task` role stands. `--system` (a fixed layer 1) does not apply.
+    match agent {
+        Some(agent) => {
+            setup.role = Some(agent.name.clone());
+            setup.system_prompt = Some(agent.body.clone());
+        }
+        None => {
+            setup.role = Some("task".to_owned());
+            setup.system_prompt = None;
+        }
+    }
     match isolation {
         Isolation::Shared => {
             // ADR 0030 O3: `shared` has no worktree and is forced `safe` (read-only). No
@@ -830,7 +900,36 @@ fn enforce_task_setup(
                         .map_err(|error| TaskError::new(error.to_string()))?,
                 );
             }
+            // ADR 0030 O11: a definition's `profile` may only narrow the task floor. `full` was
+            // refused during resolution; `safe` narrows the builder's `workspace`. The profile
+            // is rebuilt for `safe` (its write/shell rules are the tier's, and the host keeps
+            // its own allow rules for `workspace`).
+            if agent.and_then(|agent| agent.profile) == Some(Preset::Safe) {
+                setup.tier = Preset::Safe;
+                // A `safe` tier has no sandbox (ADR 0012/ADR 0016): the profile denies `shell`,
+                // so nothing runs outside the host, and the worktree stays the coding root.
+                setup.sandbox = None;
+                setup.profile =
+                    Profile::safe(workspace).map_err(|error| TaskError::new(error.to_string()))?;
+            }
         }
+    }
+    // ADR 0030 problem 7 = A: the `tools` allow-list is enforced by denying every built-in it
+    // does not name, so it can narrow a tier but never widen one (`deny` outranks `allow`).
+    if let Some(tools) = agent.and_then(|agent| agent.tools.as_deref()) {
+        let denied: Vec<String> = builtin_tool_names()
+            .into_iter()
+            .filter(|name| !tools.iter().any(|allowed| allowed == name))
+            .map(str::to_owned)
+            .collect();
+        setup.profile = setup.profile.clone().with_denied_tools(denied);
+    }
+    // ADR 0030 O8: a task has no MCP server unless its definition opts in by name (the default
+    // stays none); an opted-in name with no configured server is dropped, never invented.
+    if let Some(agent) = agent {
+        setup
+            .servers
+            .retain(|server| agent.mcp.iter().any(|name| name == &server.id));
     }
     // ADR 0030 R1: the hard-deny list is added to whatever profile the builder gave,
     // and the hook's approval policy is `hook_approval` (auto only when nothing else can decide;
@@ -841,6 +940,34 @@ fn enforce_task_setup(
         .with_task_hard_deny()
         .with_approval(hook_approval);
     Ok(())
+}
+
+/// The built-in tool names a task can mount: the universe an agent definition's `tools`
+/// allow-list narrows (ADR 0030 O11). MCP tools are dynamic (they depend on a server) and are
+/// governed by the definition's `mcp` list, so they are not in it.
+fn builtin_tool_names() -> Vec<&'static str> {
+    vec![
+        "read",
+        "patch",
+        "write",
+        "list",
+        "glob",
+        "grep",
+        "shell",
+        "job_output",
+        "job_list",
+        "job_kill",
+        "git_status",
+        "git_diff",
+        "memory_search",
+        "memory_get",
+        "memory_save",
+        "memory_revise",
+        "ask_user",
+        "skill",
+        "mermaid_check",
+        "git_commit",
+    ]
 }
 
 /// The task sandbox policy for `workspace` (ADR 0030 item 2, ADR 0038 decision 5):

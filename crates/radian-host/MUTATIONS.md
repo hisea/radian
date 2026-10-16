@@ -1089,3 +1089,35 @@ inbox」与「lead 的回合来源被任务事件降低」在 part a 里**不可
 **平台说明（如实记录）**：reviewer 给的例子是 `1e15`，但 macOS 上 `Instant` 用 `i64` 秒存，`1e15` 秒加得下、不 panic
 （集成测试在变异下仍通过）。真正 panic 的是 `1e19`（`i64` 秒溢出、但仍是合法 `Duration`），所以测试用
 `1e19`；夹取去掉后集成测试确实 panic。单元测试与平台无关，两种值下都抓住夹取被去掉。
+
+## ADR 0030 切片 7 part a：agent 定义（文件）与 `spawn_task { agent }`（2026-10-16）
+
+工作树 `.radian-worktrees/orch-s7a`（分支 `oc/orch-s7a`）。每条变异就地改，跑完后从
+`.radian/scratch/mut/` 下的副本还原并 `cmp` 确认，结束 `git status --short` 只剩源码改动。
+跑法（`timeout` 包裹，`--no-fail-fast`）：
+
+```sh
+cargo test -p radian-host --lib --no-fail-fast -- prompt::tests::a_user_file_overrides_the_builtin_body_and_its_frontmatter_is_not_in_the_prompt
+cargo test -p radian-host --test task --no-fail-fast -- <下面的测试名>
+```
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S7A-1 | `agents::parse` 的 body 直接取整份文件（`body: text.to_owned()`，frontmatter 留在第 1 层） | ✅ failed | `prompt::tests::a_user_file_overrides_the_builtin_body_and_its_frontmatter_is_not_in_the_prompt` |
+| S7A-2 | `enforce_task_setup` 用 `with_allowed_tools`（加 allow）而不是 `with_denied_tools`（非名单内置工具 deny） | ✅ failed | `a_tools_allow_list_can_only_narrow`（`reader` 的 `write` 由 list 外变回允许；`safe` 里列 `shell` 也不加 allow） |
+| S7A-3 | `resolve` 里 `spawn_ignored: false`（不记录「task 忽略 spawn: true」） | ✅ failed | `a_spawn_resolves_the_agent_definition_and_the_spawn_arguments_override_it` |
+| S7A-4 | `enforce_task_setup` 不取快照 body，改回 `agents::load(name, RADIAN_HOME)` 现读用户目录 | ✅ failed | `a_definition_is_snapshotted_at_spawn`（`Builder` 缝隙在解析之后改文件，现读会看到 `NEW BODY`） |
+| S7A-5 | `enforce_task_setup` 从 task 自己的 worktree（`workspace/.radian/agents/<name>.md`）现读 body | ✅ failed | `a_definition_in_the_task_worktree_is_not_read`（`Builder` 缝隙把同名定义写进 worktree，现读会看到 `WORKTREE BODY`） |
+
+5/5 抓住。
+
+**S7A-4 / S7A-5 的做法（如实记录）**：最初这两条变异没被抓住——「起会话后改文件」对任何实现都成立，
+因为解析发生在 `spawn` 内。改用注册表的 `SpawnStage::Builder` 测试缝隙：解析在缝隙**之前**完成，缝隙在
+`enforce_task_setup` 与 `open_session` **之前**改用户文件 / 往 task worktree 写同名定义。于是「后面再读盘」
+的变异就会读到新内容，被测试抓住。两次尝试都记录在此：第一次的「事后改文件」版本变异通过（漏洞已在测试里
+补上），第二次的缝隙版本抓住。
+
+**tools 允许名单的边界（如实记录）**：ADR 0030 problem 7 = A 说的是「不在名单里的不挂」。part a 没有生产
+`TaskBuilder`（切片 6b），登记表把名单实现为**权限层的 deny**（`Profile::with_denied_tools`：名单外每个内置
+工具一条 `deny`），它只能收窄、不能放宽，可测；「不挂载」的物理挂载要等 6b 的 builder 按名单挂，已列入
+「to decide」。
