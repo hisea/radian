@@ -44,6 +44,10 @@ shlex = "2"
 syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
 ratatui = "0.30.2"
 serde_json.workspace = true
+# The TOML theme files (ADR 0029): the same parser the config uses
+# (`radian-host`), so a `[roles]` table and `[tui.colors]` share one value shape
+# (`TuiColorOverride::from_toml`). The crate is already in the tree via `radian-host`.
+toml = "0.8"
 unicode-width = "0.2.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
 

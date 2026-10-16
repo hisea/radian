@@ -1,7 +1,14 @@
-//! Loading a theme file and applying per-role overrides (ADR 0029).
+//! Loading a **legacy** pi theme JSON and applying per-role overrides (ADR 0029).
 //!
-//! A theme file is **pi's theme JSON, read as-is** (ADR 0029 decision 1): `name`,
-//! `appearance`, `vars`, `colors`, `export`. Differences from pi, both by decision:
+//! Radian's own theme format is TOML ([`super::toml_file`], ADR 0029).
+//! This module is the old loader, kept for one version so a user's existing
+//! `~/.radian/themes/<name>.json` keeps working (revision 2 decision 4): `load_file` reads
+//! `<name>.toml` first, then `<name>.json` through here with a startup hint to run
+//! `radian theme import`. The pi → Radian role mapping below is the same table the importer
+//! uses; at run time the TOML loader knows Radian role names only.
+//!
+//! A pi theme JSON is pi's own file shape: `name`, `appearance`, `vars`, `colors`, `export`.
+//! Differences from pi, both by decision:
 //!
 //! - **Leniency** (decision 4): pi invalidates the whole theme on a missing variable or a
 //!   circular reference; Radian only falls the *affected roles* back to the built-in palette
@@ -27,7 +34,9 @@ use super::{Role, Theme, ThemeName};
 /// Every role name pi's theme schema knows (56; the `required` 51 plus the 5 optional).
 /// A name outside this list in a theme file is ignored with one warning, and a
 /// `[tui.colors]` key outside this list and [`Role::ALL`] is the same.
-const PI_ROLES: &[&str] = &[
+/// Shared with the importer (ADR 0029): a pi key in this list but with no
+/// Radian target is reported as dropped.
+pub(crate) const PI_ROLES: &[&str] = &[
     "accent",
     "border",
     "borderAccent",
@@ -98,7 +107,7 @@ pub(crate) fn fg_source_for_test(role: Role) -> Option<&'static str> {
     fg_source(role)
 }
 
-fn fg_source(role: Role) -> Option<&'static str> {
+pub(crate) fn fg_source(role: Role) -> Option<&'static str> {
     match role {
         Role::Reasoning => Some("thinkingText"),
         // The footer's `reasoning` item: one role per level, fed by pi's matching
@@ -192,7 +201,7 @@ fn fg_source(role: Role) -> Option<&'static str> {
 /// (`toolPendingBg` / `toolSuccessBg` / `toolErrorBg`, ADR 0029 decision 3 + ADR 0028 R4).
 /// ADR 0029: the `user` line is a **foreground** role now, so
 /// `userMessageBg` no longer paints it — only the `bar` input keeps that band.
-fn bg_source(role: Role) -> Option<&'static str> {
+pub(crate) fn bg_source(role: Role) -> Option<&'static str> {
     match role {
         Role::InputBar => Some("userMessageBg"),
         Role::Selection => Some("selectedBg"),
@@ -206,7 +215,7 @@ fn bg_source(role: Role) -> Option<&'static str> {
 /// The Radian roles a pi role name feeds, and which channel. Most pi names feed one channel
 /// of one role; a few feed several (`error` colors both the tool errors and a cancelled
 /// turn), which is also how a `[tui.colors]` key by that name applies.
-fn targets_for_pi_name(name: &str) -> Vec<(Role, Channel)> {
+pub(crate) fn targets_for_pi_name(name: &str) -> Vec<(Role, Channel)> {
     let mut targets = Vec::new();
     for role in Role::ALL {
         if fg_source(role) == Some(name) {
@@ -220,7 +229,7 @@ fn targets_for_pi_name(name: &str) -> Vec<(Role, Channel)> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Channel {
+pub(crate) enum Channel {
     Foreground,
     Background,
 }
@@ -260,7 +269,9 @@ pub fn load(
     (resolved, warnings)
 }
 
-/// Loads `<themes_dir>/<name>.json`. A name that cannot be a file (or is pi's reserved
+/// Loads `<themes_dir>/<name>.toml` first, then `<themes_dir>/<name>.json` with the old pi
+/// loader and a one-line hint (ADR 0029: `<name>.toml` wins; the `.json`
+/// path is a one-version transition). A name that cannot be a file (or is pi's reserved
 /// `system`) never touches the disk; a missing, unreadable or broken file falls back to the
 /// built-in `dark` with one warning. The name itself is already known from the config, so a
 /// missing `name` field in the file is tolerated.
@@ -287,12 +298,28 @@ fn load_file(
         ));
         return Theme::dark();
     };
+    // ADR 0029/4: a Radian TOML theme is the format; a `.json` is the old
+    // pi format, still read this version so a user's existing file keeps working, with the
+    // import hint. The next version drops the `.json` path.
+    let toml_path = dir.join(format!("{name}.toml"));
+    if toml_path.is_file() {
+        return match std::fs::read_to_string(&toml_path) {
+            Ok(text) => super::toml_file::build(name, &text, truecolor, warnings),
+            Err(error) => {
+                warnings.push(format!(
+                    "theme `{name}`: could not read {} ({error}); using built-in dark",
+                    toml_path.display()
+                ));
+                Theme::dark()
+            }
+        };
+    }
     let path = dir.join(format!("{name}.json"));
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             warnings.push(format!(
-                "theme `{name}`: no file {} ; using built-in dark",
+                "theme `{name}`: no file {} (or {name}.toml) ; using built-in dark",
                 path.display()
             ));
             return Theme::dark();
@@ -306,7 +333,16 @@ fn load_file(
         }
     };
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(value) => build(name, &value, truecolor, warnings),
+        Ok(value) => {
+            let theme = build(name, &value, truecolor, warnings);
+            warnings.push(format!(
+                "theme `{name}`: {} is the old pi JSON format; run `radian theme import {}` to \
+                 convert it to TOML",
+                path.display(),
+                path.display()
+            ));
+            theme
+        }
         Err(error) => {
             warnings.push(format!(
                 "theme `{name}`: could not parse {} ({error}); using built-in dark",
@@ -315,6 +351,40 @@ fn load_file(
             Theme::dark()
         }
     }
+}
+
+/// Resolves a pi theme's `colors` table through its `vars` (pi's `resolveVarRefs`), then applies
+/// pi's optional-role fallbacks (its docs). Shared by the JSON loader ([`build`]) and the
+/// importer (ADR 0029): the importer needs exactly the same resolved pi
+/// colors the runtime loader would compute, so the two cannot disagree.
+pub(crate) fn resolve_pi_colors<'a>(
+    colors: &'a serde_json::Map<String, serde_json::Value>,
+    vars: &'a serde_json::Map<String, serde_json::Value>,
+) -> (BTreeMap<&'a str, ColorValue>, Problems) {
+    let mut problems = Problems::default();
+    let mut resolver = VarResolver {
+        vars,
+        memo: BTreeMap::new(),
+    };
+    let mut resolved: BTreeMap<&str, ColorValue> = BTreeMap::new();
+    for (role, value) in colors {
+        match resolver.resolve(value, &mut Vec::new()) {
+            Ok(color) => {
+                resolved.insert(role.as_str(), color);
+            }
+            Err(error) => problems.variable(error),
+        }
+    }
+    // An optional role that a Radian role consumes (the `thinking*` levels feed the footer's
+    // `reasoning` item) must not be reported missing when its fallback is present.
+    for (pi_name, fallback) in PI_FALLBACKS {
+        if !resolved.contains_key(pi_name)
+            && let Some(&fallback_color) = resolved.get(fallback)
+        {
+            resolved.insert(pi_name, fallback_color);
+        }
+    }
+    (resolved, problems)
 }
 
 /// Builds the [`Theme`] from one parsed theme file. Anything that cannot produce a color
@@ -358,33 +428,7 @@ fn build(
         return base;
     };
 
-    let mut problems = Problems::default();
-    let mut resolver = VarResolver {
-        vars,
-        memo: BTreeMap::new(),
-    };
-    // Resolve every pi role once (missing roles are simply absent), then assemble.
-    let mut resolved: BTreeMap<&str, ColorValue> = BTreeMap::new();
-    for (role, value) in colors {
-        match resolver.resolve(value, &mut Vec::new()) {
-            Ok(color) => {
-                resolved.insert(role.as_str(), color);
-            }
-            Err(error) => problems.variable(error),
-        }
-    }
-
-    // pi's optional roles inherit another role when absent (its docs). Apply that to
-    // `resolved` **before** the role loop, so an optional role that a Radian role consumes
-    // (the `thinking*` levels now feed the footer's `reasoning` item) is not reported
-    // missing when its fallback is present.
-    for (pi_name, fallback) in PI_FALLBACKS {
-        if !resolved.contains_key(pi_name)
-            && let Some(&fallback_color) = resolved.get(fallback)
-        {
-            resolved.insert(pi_name, fallback_color);
-        }
-    }
+    let (resolved, problems) = resolve_pi_colors(colors, vars);
 
     let mut theme = base;
     let mut missing: Vec<&'static str> = Vec::new();
@@ -524,7 +568,7 @@ fn apply_override(
     }
 }
 
-fn apply_modifiers(style: &mut Style, spec: &TuiColorOverride) {
+pub(crate) fn apply_modifiers(style: &mut Style, spec: &TuiColorOverride) {
     use ratatui::style::Modifier;
     for (flag, modifier) in [
         (spec.bold, Modifier::BOLD),
@@ -576,7 +620,7 @@ pub(crate) fn ratatui_color(value: ColorValue, truecolor: bool) -> Option<Color>
 
 /// Variable-resolution failures, collected so each is reported once.
 #[derive(Default)]
-struct Problems {
+pub(crate) struct Problems {
     /// `variable name -> the roles/values that wanted it` (deduplicated by name).
     missing: BTreeMap<String, usize>,
     cycles: BTreeMap<String, usize>,
@@ -603,6 +647,25 @@ impl Problems {
         unknown_roles: &[String],
         warnings: &mut Vec<String>,
     ) {
+        warnings.extend(self.into_variable_warnings(name));
+        if !missing_roles.is_empty() {
+            warnings.push(format!(
+                "theme `{name}`: missing role(s) {} — using the built-in color",
+                missing_roles.join(", ")
+            ));
+        }
+        if !unknown_roles.is_empty() {
+            warnings.push(format!(
+                "theme `{name}`: unknown role(s) {} ignored",
+                unknown_roles.join(", ")
+            ));
+        }
+    }
+
+    /// The variable problems only (missing, circular, invalid), one line each. The importer
+    /// (ADR 0029) reports roles itself and reuses just this part.
+    pub(crate) fn into_variable_warnings(self, name: &str) -> Vec<String> {
+        let mut warnings = Vec::new();
         for (variable, uses) in self.missing {
             warnings.push(format!(
                 "theme `{name}`: unknown variable `{variable}` ({uses} use(s) fell back to the \
@@ -621,18 +684,7 @@ impl Problems {
                 "theme `{name}`: invalid color value(s) {list}; those roles fell back"
             ));
         }
-        if !missing_roles.is_empty() {
-            warnings.push(format!(
-                "theme `{name}`: missing role(s) {} — using the built-in color",
-                missing_roles.join(", ")
-            ));
-        }
-        if !unknown_roles.is_empty() {
-            warnings.push(format!(
-                "theme `{name}`: unknown role(s) {} ignored",
-                unknown_roles.join(", ")
-            ));
-        }
+        warnings
     }
 }
 
@@ -1184,8 +1236,16 @@ mod tests {
                 .to_string_lossy()
                 .into_owned();
             let text = std::fs::read_to_string(&path).expect("readable");
-            let (theme, warnings) = load(Some(&name), false, true, Some(&dir), &[]);
-            assert_eq!(warnings, Vec::<String>::new(), "{name} produced warnings");
+            // The mapping is what this test pins, so it parses the JSON directly rather than
+            // going through `load` (ADR 0029: a `.toml` beside a `.json`
+            // would win there, and the `.json` path now adds the import hint).
+            let value: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+            let mut warnings = Vec::new();
+            let theme = build(&name, &value, true, &mut warnings);
+            assert!(
+                warnings.is_empty(),
+                "{name} produced warnings: {warnings:?}"
+            );
             assert_eq!(theme.name, ThemeName::File, "{name} loaded as a file theme");
             // The three levels exist (a level may legitimately be the terminal default).
             for (level, style) in [
@@ -1198,7 +1258,6 @@ mod tests {
                     "{name}: the {level} level resolved to nothing"
                 );
             }
-            let _ = text;
         }
     }
 
@@ -1302,5 +1361,77 @@ mod tests {
         assert_eq!(theme.status_ok.fg, Some(Color::Rgb(4, 4, 4)));
         assert_eq!(theme.status_warn.fg, Some(Color::Rgb(5, 5, 5)));
         assert_eq!(theme.status_error.fg, Some(Color::Rgb(6, 6, 6)));
+    }
+
+    /// ADR 0029: importing a pi theme and loading the resulting TOML gives
+    /// **the same** resolved theme, role by role, as the old JSON loader — the acceptance's
+    /// round-trip. Two real fixtures. (The bundled ones all omit `appearance`, so they import as
+    /// dark; the light fallback is pinned by the TOML loader's own test.)
+    #[test]
+    fn an_imported_fixture_round_trips_to_the_json_loader_role_by_role() {
+        for stem in ["kanagawa-wave", "catppuccin-latte"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/data/themes/{stem}.json"));
+            let text = std::fs::read_to_string(&path).expect("the fixture is readable");
+            round_trip(stem, &text);
+        }
+    }
+
+    /// Imports `text` and asserts the TOML round-trips to the JSON loader's theme, role by role.
+    fn round_trip(name: &str, text: &str) {
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        let mut json_warnings = Vec::new();
+        let mut json_theme = build(name, &value, true, &mut json_warnings);
+        assert!(json_warnings.is_empty(), "{name}: {json_warnings:?}");
+
+        let converted = crate::theme::importer::convert(text, None, name).unwrap();
+        let mut toml_warnings = Vec::new();
+        let mut toml_theme =
+            crate::theme::toml_file::build(name, &converted.toml, true, &mut toml_warnings);
+        assert!(toml_warnings.is_empty(), "{name}: {toml_warnings:?}");
+        assert_eq!(toml_theme.name, ThemeName::File);
+
+        for role in Role::ALL {
+            let left = *role.style_mut(&mut json_theme);
+            let right = *role.style_mut(&mut toml_theme);
+            assert_eq!(left, right, "{name}: role {} differs", role.as_str());
+        }
+    }
+
+    /// ADR 0029: `<name>.toml` wins over `<name>.json`; without the TOML
+    /// the old JSON loader runs and the startup warnings carry the import hint.
+    #[test]
+    fn a_toml_theme_wins_over_a_json_one_and_the_json_fallback_hints() {
+        let dir =
+            std::env::temp_dir().join(format!("radian-theme-dispatch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("both.json"),
+            r##"{"name": "both", "colors": {"userMessageText": "#ff0000"}}"##,
+        )
+        .unwrap();
+        std::fs::write(dir.join("both.toml"), "[roles]\nuser = \"#0000ff\"\n").unwrap();
+
+        let (theme, warnings) = load(Some("both"), false, true, Some(&dir), &[]);
+        assert_eq!(
+            theme.user.fg,
+            Some(Color::Rgb(0, 0, 255)),
+            "the .toml must win"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        std::fs::remove_file(dir.join("both.toml")).unwrap();
+        let (theme, warnings) = load(Some("both"), false, true, Some(&dir), &[]);
+        assert_eq!(
+            theme.user.fg,
+            Some(Color::Rgb(255, 0, 0)),
+            "the .json fallback loaded"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("radian theme import")),
+            "the .json fallback must hint: {warnings:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
