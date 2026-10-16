@@ -14,9 +14,9 @@ use std::sync::Arc;
 use agent_core::{NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use radian_host::{
-    HostBindings, Isolation, SessionError, SessionFacade, SessionId, SessionProjection,
-    SessionQueue, SessionSetup, SpawnRequest, TaskBuilder, TaskContext, TaskRegistry, TaskSession,
-    build_model, end_of_task_commit,
+    HostBindings, Isolation, LocalSession, SessionError, SessionFacade, SessionId,
+    SessionProjection, SessionQueue, SessionSetup, SpawnRequest, TaskBuilder, TaskContext,
+    TaskRegistry, TaskSession, build_model, end_of_task_commit, open_session,
 };
 use radian_permissions::{ApprovalPolicy, NoopAudit, Preset, Profile};
 use radian_sandbox::{Sandbox, SandboxPolicy};
@@ -518,6 +518,269 @@ async fn the_end_of_task_commit_makes_no_commit_without_changes() {
     assert_eq!(git_out(&worktree, &["rev-parse", "HEAD"]), before);
 
     fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// A task's `git_commit` is limited to `radian/<id>` (ADR 0030 O3): on another branch the host
+/// tool refuses, so the worktree stays on that branch and uncommitted. This is what pins the
+/// `with_allowed_branch` wiring in `open_session` (not only `commit()`'s own check).
+#[tokio::test]
+async fn a_task_git_commit_is_limited_to_its_branch() {
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                    "function": {"name": "git_commit", "arguments": "{\"message\":\"sneaky\"}"}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ]),
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "done"}), None),
+            chunk(json!({}), Some("stop")),
+        ]),
+    ])
+    .await;
+    let fixture = Fixture::new("branch", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    // Spawn with no brief, so the worktree can be put on another branch before the turn.
+    let record = fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let worktree = record.worktree.clone().unwrap();
+    std::fs::write(worktree.join("something.txt"), "a change to commit\n").unwrap();
+    assert!(git(&worktree, &["checkout", "-q", "-b", "other"]));
+
+    // Now drive the turn: the model calls `git_commit`, which must refuse (wrong branch).
+    record
+        .session
+        .inbox()
+        .followup(
+            agent_core::Message::user("commit the change"),
+            agent_core::InputSource::Subagent,
+        )
+        .await
+        .expect("the brief");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while server.requests().len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn did not finish"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        git_out(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "other"
+    );
+    assert_eq!(
+        git_out(&worktree, &["log", "-1", "--pretty=%s"]),
+        "init",
+        "the commit must be refused on a branch that is not radian/t1"
+    );
+    assert_ne!(
+        git_out(&worktree, &["status", "--porcelain"]),
+        "",
+        "the change stays uncommitted"
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// Opens a plain (non-registry) session on `repo` with the host's `git_commit`, so a test can
+/// pin the `refuse_main` wiring in `open_session` (ADR 0038 decision 4).
+async fn open_plain(
+    repo: &Path,
+    session_dir: &Path,
+    base_url: &str,
+    task_agent: bool,
+) -> Arc<LocalSession> {
+    let slot = radian_runtime::ConfigSlot::new(Value::Null);
+    let session_id = if task_agent { "task" } else { "general" };
+    let model = model(session_id, base_url, Arc::clone(&slot));
+    let session = open_session(
+        SessionSetup {
+            session_id: SessionId::new(session_id),
+            session_dir: session_dir.to_path_buf(),
+            workspace: repo.to_path_buf(),
+            coding_root: Some(repo.to_path_buf()),
+            model,
+            config_slot: slot,
+            config_queue: radian_runtime::ConfigQueue::new(),
+            budget_for: None,
+            price_for: None,
+            protected_branches: Vec::new(),
+            allowed_filters: None,
+            servers: Vec::new(),
+            role: None,
+            system_prompt: None,
+            context_budget: None,
+            auto_compact: false,
+            compaction_settings: Value::Null,
+            compaction_settings_for: None,
+            retries: 0,
+            // No sandbox: this test is about the host-side `git_commit`, which runs outside it.
+            sandbox: None,
+            tier: Preset::WorkspaceWrite,
+            profile: Profile::workspace_write(repo)
+                .unwrap()
+                .with_approval(ApprovalPolicy::Auto),
+            access_builder: None,
+            task_agent,
+            parent: None,
+            allowed_branch: None,
+            memory_root: None,
+            skills_extra_paths: Vec::new(),
+            skills_builtin: true,
+            skills_disabled: Vec::new(),
+            memory_injection: radian_host::memory::InjectionConfig::default(),
+            trust: radian_host::trust::Setup::untrusted(repo, false),
+            resume: false,
+            config_snapshot: json!({"provider": "openai-compatible", "model": "mock"}),
+            turn_options: TurnOptions::default(),
+            turn_timeout: None,
+            wording: radian_host::CLI_WORDING,
+            capabilities: radian_host::SessionCapability::ALL.to_vec(),
+        },
+        HostBindings {
+            approvals: radian_host::ApprovalRouting::Queued,
+            shared_queue: None,
+            ask_user: false,
+            audit: Arc::new(|_journal| {
+                Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
+            }),
+            events: Arc::new(NoopSink),
+            projection: Arc::new(SessionProjection::new()),
+            runtime_events: Arc::new(|_event: &radian_session::RuntimeEvent| {}),
+            driver_stopped: Arc::new(|_| {}),
+            before_driver: None,
+            memory_warning: Arc::new(|_message: &str| {}),
+            memory_notice_line: Arc::new(|_line: &str| {}),
+        },
+    )
+    .await
+    .expect("open");
+    Arc::new(session)
+}
+
+/// A mock server whose model calls `git_commit { message: "session-made" }`, then answers.
+async fn commit_server() -> MockServer {
+    MockServer::start(vec![
+        Reply::sse(&[
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                    "function": {"name": "git_commit", "arguments": "{\"message\":\"session-made\"}"}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ]),
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "done"}), None),
+            chunk(json!({}), Some("stop")),
+        ]),
+    ])
+    .await
+}
+
+/// Drive one turn and wait for it to finish (two model requests: the tool call and the answer).
+async fn drive_turn(
+    session: &Arc<LocalSession>,
+    server: &MockServer,
+    source: agent_core::InputSource,
+) {
+    session
+        .inbox()
+        .followup(agent_core::Message::user("commit it"), source)
+        .await
+        .expect("the input");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while server.requests().len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn did not finish"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// A general session's `git_commit` may commit on `main` (ADR 0038 decision 4): the wiring in
+/// `open_session` passes `refuse_main = false` for a non-task agent.
+#[tokio::test]
+async fn a_general_session_commits_on_main_through_the_session() {
+    let dir = scratch("general-main");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(git(&repo, &["init", "-q", "-b", "main"]));
+    assert!(git(
+        &repo,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]
+    ));
+    std::fs::write(repo.join("change.txt"), "x\n").unwrap();
+    let server = commit_server().await;
+    let session = open_plain(&repo, &dir.join("sessions"), &server.base_url, false).await;
+
+    drive_turn(&session, &server, agent_core::InputSource::User).await;
+    assert_eq!(
+        git_out(&repo, &["log", "-1", "--pretty=%s"]),
+        "session-made",
+        "a general session may commit on main"
+    );
+    session.stop();
+    let _ = session.join().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A task agent's `git_commit` refuses `main` even with no branch restriction (ADR 0038
+/// decision 4): the wiring passes `refuse_main = true` for a task agent.
+#[tokio::test]
+async fn a_task_agent_session_refuses_a_commit_on_main() {
+    let dir = scratch("task-main");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(git(&repo, &["init", "-q", "-b", "main"]));
+    assert!(git(
+        &repo,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]
+    ));
+    std::fs::write(repo.join("change.txt"), "x\n").unwrap();
+    let server = commit_server().await;
+    let session = open_plain(&repo, &dir.join("sessions"), &server.base_url, true).await;
+
+    drive_turn(&session, &server, agent_core::InputSource::Subagent).await;
+    assert_eq!(
+        git_out(&repo, &["log", "-1", "--pretty=%s"]),
+        "init",
+        "a task agent may not commit on main"
+    );
+    assert_ne!(git_out(&repo, &["status", "--porcelain"]), "");
+    session.stop();
+    let _ = session.join().await;
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `remove_task` refuses a dirty worktree and `force` discards it; a clean worktree is removed.
