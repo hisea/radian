@@ -125,6 +125,10 @@ pub(crate) async fn run(
     }
 
     let replacement = line_ending_new(&args.new, content.contains("\r\n"));
+    // Where each replaced range sits in the old file and in the new one (ADR 0028
+    // decision 5). The TUI draws one hunk block per range, with each row's line number; the
+    // result **text** does not change.
+    let hunks = replacement_hunks(&content, &ranges, &replacement);
     let mut updated = content;
     // Replace from the end so the earlier ranges' offsets stay valid.
     for range in ranges.iter().rev() {
@@ -174,8 +178,50 @@ pub(crate) async fn run(
             "path": args.path,
             "replaced": ranges.len(),
             "matched": layer.name(),
+            "hunks": hunks,
         })),
     })
+}
+
+/// One hunk per replaced range, in file order: the range's 1-based start line and line count in
+/// the old file, and the replacement's in the new file.
+///
+/// `ranges` are ascending (`find_all` returns them in file order), so a hunk's new-file start is
+/// its old-file start plus the line delta every **earlier** hunk introduced: deleting lines
+/// moves the later hunks up, inserting them moves the later hunks down. The TUI numbers the
+/// rows from these (ADR 0028). A line count comes from `str::lines`, which
+/// counts a trailing newline as the end of the last line (`a\nb\n` is two lines) and strips a
+/// `\r` (so a CRLF file counts the same as an LF one).
+fn replacement_hunks(
+    content: &str,
+    ranges: &[Range<usize>],
+    replacement: &str,
+) -> serde_json::Value {
+    let new_lines = replacement.lines().count();
+    let mut delta: i64 = 0;
+    let hunks: Vec<serde_json::Value> = ranges
+        .iter()
+        .map(|range| {
+            let old_start = line_of_offset(content, range.start);
+            let old_lines = content[range.clone()].lines().count();
+            let new_start = old_start as i64 + delta;
+            delta += new_lines as i64 - old_lines as i64;
+            json!({
+                "old_start": old_start,
+                "old_lines": old_lines,
+                // Always >= 1: the lines before a hunk are unchanged, so the new file has at
+                // least the old file's line 1 before it.
+                "new_start": new_start.max(1) as usize,
+                "new_lines": new_lines,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(hunks)
+}
+
+/// The 1-based line number of byte `offset` in `content`: the newlines before it, plus one.
+fn line_of_offset(content: &str, offset: usize) -> usize {
+    content[..offset.min(content.len())].matches('\n').count() + 1
 }
 
 /// Which layer located the edit. Each layer is a *locator*: the replacement text is `new`,

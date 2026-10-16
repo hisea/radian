@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{TempDir, call, structured, tools};
+use common::{TempDir, call, structured, text, tools};
 use serde_json::json;
 
 /// Layer 2: typographic quotes, dashes and no-break spaces on either side still locate the
@@ -216,5 +216,159 @@ async fn a_crlf_file_matches_an_lf_needle_and_stays_crlf() {
             .all(|(index, _)| index > 0 && after[index - 1] == b'\r'),
         "no bare LF in a CRLF file: {:?}",
         String::from_utf8_lossy(&after)
+    );
+}
+
+// ---------- the `hunks` field (ADR 0028) ----------
+
+/// One replaced range: the structured result names its 1-based start line and line count in the
+/// old file, and the replacement's in the new file. The result **text** is unchanged, and the
+/// counts come from `str::lines` (a trailing newline ends the last line, it does not add one).
+#[tokio::test]
+async fn a_hunk_names_the_replaced_range_in_both_files() {
+    let dir = TempDir::new("patch-hunks");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "one\ntwo\nthree\nfour\n");
+    let tools = tools(&root);
+
+    let output = call(
+        &tools,
+        "patch",
+        json!({"path": "f.txt", "old": "two\nthree\n", "new": "TWO\n"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        structured(&output)["hunks"],
+        json!([{"old_start": 2, "old_lines": 2, "new_start": 2, "new_lines": 1}]),
+    );
+    assert_eq!(
+        text(&output),
+        "replaced 1 occurrence in f.txt (matched by exact)",
+        "the text is unchanged"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "one\nTWO\nfour\n"
+    );
+}
+
+/// Several occurrences: one hunk each, in file order, and the line delta of the earlier hunks
+/// moves the later ones' **new** file start — a deletion shifts them up, an insertion down.
+#[tokio::test]
+async fn several_hunks_carry_the_line_delta_of_the_earlier_ones() {
+    let dir = TempDir::new("patch-hunks-many");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+
+    // A deletion: two lines become one, so the second hunk starts a line earlier in the new file.
+    dir.write("ws/del.txt", "keep\na\nb\nkeep\na\nb\nkeep\n");
+    let output = call(
+        &tools,
+        "patch",
+        json!({"path": "del.txt", "old": "a\nb\n", "new": "A\n", "replace_all": true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        structured(&output)["hunks"],
+        json!([
+            {"old_start": 2, "old_lines": 2, "new_start": 2, "new_lines": 1},
+            {"old_start": 5, "old_lines": 2, "new_start": 4, "new_lines": 1},
+        ]),
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("del.txt")).unwrap(),
+        "keep\nA\nkeep\nA\nkeep\n"
+    );
+
+    // An insertion: one line becomes two, so the second hunk starts a line later.
+    dir.write("ws/ins.txt", "y\nmid\ny\n");
+    let output = call(
+        &tools,
+        "patch",
+        json!({"path": "ins.txt", "old": "y\n", "new": "Y1\nY2\n", "replace_all": true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        structured(&output)["hunks"],
+        json!([
+            {"old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 2},
+            {"old_start": 3, "old_lines": 1, "new_start": 4, "new_lines": 2},
+        ]),
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("ins.txt")).unwrap(),
+        "Y1\nY2\nmid\nY1\nY2\n"
+    );
+}
+
+/// A CRLF file: the hunks are counted on the LF view (the `\r` is not a line of its own), and
+/// the file stays CRLF.
+#[tokio::test]
+async fn a_crlf_file_numbers_its_hunks() {
+    let dir = TempDir::new("patch-hunks-crlf");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "alpha\r\nbeta\r\ngamma\r\n");
+    let tools = tools(&root);
+
+    let output = call(
+        &tools,
+        "patch",
+        json!({"path": "f.txt", "old": "beta\n", "new": "BETA\nBETA2\n"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        structured(&output)["hunks"],
+        json!([{"old_start": 2, "old_lines": 1, "new_start": 2, "new_lines": 2}]),
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "alpha\r\nBETA\r\nBETA2\r\ngamma\r\n"
+    );
+}
+
+/// A range at line 1 and a range at the last line (a file with no trailing newline).
+#[tokio::test]
+async fn a_hunk_at_the_first_and_at_the_last_line() {
+    let dir = TempDir::new("patch-hunks-edges");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+
+    dir.write("ws/first.txt", "first\nsecond\n");
+    let output = call(
+        &tools,
+        "patch",
+        json!({"path": "first.txt", "old": "first\n", "new": "FIRST\n"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        structured(&output)["hunks"],
+        json!([{"old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1}]),
+    );
+
+    // The last line, with no trailing newline: one line, and it is the file's third.
+    dir.write("ws/last.txt", "one\ntwo\nlast");
+    let output = call(
+        &tools,
+        "patch",
+        json!({"path": "last.txt", "old": "last", "new": "LAST"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        structured(&output)["hunks"],
+        json!([{"old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1}]),
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("last.txt")).unwrap(),
+        "one\ntwo\nLAST"
     );
 }
