@@ -840,6 +840,12 @@ pub fn expanded(entry: &Entry, global: bool) -> bool {
 /// per entry — the virtualization budget (ADR 0028 R7) depends on this.
 pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     let mode = modes.reasoning;
+    // The `ask_user` block is not a card: its shape follows the card's arguments and result
+    // (ADR 0024), and its result entry is blank when it closes the call. Count it
+    // through the layout so the total always equals the drawing.
+    if is_ask_entry(entry) {
+        return layout(entry, &[], modes, width).len();
+    }
     if let Some(count) = cheap_count(entry, modes) {
         return count;
     }
@@ -1026,6 +1032,15 @@ pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -
     let lines = line_count(entry, modes, width);
     entry.layout_cache = Some((key, lines));
     lines
+}
+
+/// Whether the entry is part of an `ask_user` pair (either the call or its result): its block
+/// has its own shape, so the count goes through the layout.
+fn is_ask_entry(entry: &Entry) -> bool {
+    entry
+        .tool
+        .as_deref()
+        .is_some_and(|card| card.name == "ask_user")
 }
 
 /// Counts that need no layout pass at all.
@@ -1243,9 +1258,14 @@ fn layout_unstripped(
             // ADR 0024 R1: an `ask_user` call is the boxed question block, with no
             // answers yet (the result entry carries them).
             match entry.tool.as_deref() {
-                Some(card) if card.name == "ask_user" => {
-                    ask_block(card, &text, false, body_width, modes.glyphs)
-                }
+                // ADR 0024 rules 1-2: a pending ask is one dim line (the questions
+                // are drawn in the panel below, not twice); once it is answered, declined or
+                // cancelled the **same** entry draws the full closed block. The result entry
+                // stays blank (below), so the ask never appears twice.
+                Some(card) if card.name == "ask_user" => match entry.result {
+                    None => ask_pending_line(card),
+                    Some(is_error) => ask_block(card, &text, is_error, body_width, modes.glyphs),
+                },
                 // The call line, laid out like a code line: never wrapped, truncated with `…`
                 // when it does not fit (a shell command's own newlines do wrap). The entry's
                 // text **is** this header (set at push time from the same function), so the
@@ -1288,7 +1308,14 @@ fn layout_unstripped(
             if let Some(card) = card
                 && card.name == "ask_user"
             {
-                return ask_block(card, &text, entry.is_error, body_width, modes.glyphs);
+                // ADR 0024: the call entry draws the whole block, so a result that
+                // closes it (a merged `Tail`) draws nothing. A torn result whose call is gone
+                // has no block above it, so it still draws one.
+                return if entry.card == crate::blocks::Card::Tail {
+                    Vec::new()
+                } else {
+                    ask_block(card, &text, entry.is_error, body_width, modes.glyphs)
+                };
             }
             let plan = match card {
                 Some(card) => tools::body_plan(
@@ -1406,6 +1433,23 @@ fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
         md: Some(md),
         syntax: None,
     }
+}
+
+/// A pending `ask_user` call (ADR 0024 rule 1): one weak line in the card's
+/// title-row style. The questions live in the panel below until they are answered, so the
+/// same ask is never drawn twice. The count comes from the call's own arguments.
+fn ask_pending_line(card: &tools::ToolCard) -> Vec<BodyLine> {
+    let count = card
+        .arguments
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let text = format!(
+        " Ask {count} question{} · answering below",
+        if count == 1 { "" } else { "s" }
+    );
+    vec![ask_line(vec![(text, MdStyle::Dim)])]
 }
 
 /// The `ask_user` card as a boxed block (ADR 0024 R1): the request from the call's

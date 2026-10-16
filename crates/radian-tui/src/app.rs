@@ -4566,7 +4566,15 @@ impl App {
                         // regenerated from the same function the layout uses.
                         let [_, ok, failed] = self.footer.glyphs().tool_status();
                         let glyph = if result.is_error { failed } else { ok };
-                        entry.text = crate::tools::call_text(card, glyph, &result.text());
+                        let head = crate::tools::call_text(card, glyph, &result.text());
+                        // ADR 0024: the call entry draws the whole ask block (its
+                        // result entry is blank), so it keeps the result's own text for the
+                        // declined/cancelled status line inside the box.
+                        entry.text = if card.name == "ask_user" {
+                            result.text()
+                        } else {
+                            head
+                        };
                         Some((card.name.clone(), card.arguments.clone()))
                     });
                 let (name, arguments) = paired.unwrap_or_default();

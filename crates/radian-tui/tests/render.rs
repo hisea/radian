@@ -2625,6 +2625,121 @@ fn the_ask_panel_title_omits_the_own_session() {
         "another session keeps its origin: {other}"
     );
 }
+
+/// ADR 0024 rules 1-2: while the ask is pending the transcript shows one weak line
+/// ("the questions are in the panel below"); once the answer arrives the **same** entry draws
+/// the full closed block, and the result entry stays blank, so the ask is never drawn twice.
+#[test]
+fn a_pending_ask_is_one_line_and_becomes_the_block_once_answered() {
+    let mut app = App::new("m", "s");
+    let arguments = serde_json::json!({"questions":[
+        {"id":"pick","kind":"single","prompt":"Pick one","options":[
+            {"id":"a","label":"Option A"},{"id":"b","label":"Option B"}]},
+        {"id":"note","kind":"text","prompt":"Anything else?"}
+    ]});
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "ask_user".into(),
+            arguments,
+        }],
+    ));
+
+    // Pending: one line, no questions or options, and only one "Ask" line.
+    let pending = screen(&render(&mut app, 70, 16));
+    assert!(
+        pending.contains("-> Ask 2 questions · answering below"),
+        "the pending one-liner: {pending}"
+    );
+    assert!(
+        !pending.contains("Pick one") && !pending.contains("Option A"),
+        "the pending line carries no questions or options: {pending}"
+    );
+    assert_eq!(
+        pending.matches("Ask 2 questions").count(),
+        1,
+        "only one Ask line while pending: {pending}"
+    );
+
+    // Answered: the same call entry becomes the full closed block (its `->` marker kept), and
+    // the result entry draws nothing, so there is exactly one block.
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("Pick one → Option A")],
+            structured: Some(
+                serde_json::json!({"request_id":"r","answers":[{"id":"pick","selected":["a"]}]}),
+            ),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    let answered = screen(&render(&mut app, 70, 20));
+    assert!(
+        answered.contains("->╭─ Ask 2 questions"),
+        "the same entry draws the block, keeping its marker: {answered}"
+    );
+    assert!(answered.contains("Pick one"), "{answered}");
+    assert!(answered.contains("◉ Option A"), "{answered}");
+    assert!(
+        !answered.contains("answering below"),
+        "the pending line is gone: {answered}"
+    );
+    assert_eq!(
+        answered.matches("╭─ Ask 2 questions").count(),
+        1,
+        "exactly one block, not two: {answered}"
+    );
+}
+
+/// ADR 0024 rule 2: a declined ask shows its status line inside the same closed
+/// block.
+#[test]
+fn a_declined_ask_shows_the_status_inside_the_block() {
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "ask_user".into(),
+            arguments: serde_json::json!({"questions":[{"id":"q","kind":"text","prompt":"Say something"}]}),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("user declined to answer")],
+            structured: None,
+            is_error: true,
+            error_code: Some("user_declined".into()),
+        },
+        meta: Default::default(),
+    });
+    let declined = screen(&render(&mut app, 70, 16));
+    assert!(
+        declined.contains("->╭─ Ask 1 question"),
+        "the declined block keeps the call marker: {declined}"
+    );
+    assert!(
+        declined.contains("user declined to answer"),
+        "the status line stays inside the box: {declined}"
+    );
+    assert!(
+        !declined.contains("answering below"),
+        "the pending line is gone: {declined}"
+    );
+    assert_eq!(
+        declined.matches("╭─ Ask 1 question").count(),
+        1,
+        "exactly one block: {declined}"
+    );
+}
 #[test]
 fn the_line_count_matches_the_wrap() {
     let corpus = [
