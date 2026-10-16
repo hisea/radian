@@ -2,10 +2,17 @@
 //!
 //! A background command runs under the **same sandbox and environment** as a foreground one
 //! ([`crate::shell::sandboxed_command`]), in its own session and process group (`setsid`), but
-//! the tool returns at once. Its output streams to `<workspace>/.radian/jobs/<id>.out` (the
-//! full history) and into a bounded in-memory ring (`job_output`'s increments). The registry
-//! is per session, owned by [`crate::provider::CodingSession`]; at most
+//! the tool returns at once. Its output streams to `<id>.out` in the registry's jobs
+//! directory (the full history) and into a bounded in-memory ring (`job_output`'s increments).
+//! The registry is per session, owned by [`crate::provider::CodingSession`]; at most
 //! [`MAX_RUNNING_JOBS`] run at once.
+//!
+//! The jobs directory is a **parameter**, never derived from the workspace (ADR 0039 decision
+//! 1): the host passes the session's own directory (`<sessions_dir>/<session-id>.jobs/`,
+//! 0700, on the sandbox's deny-read list), so a model that can write the workspace cannot
+//! pre-plant a symlink the host would follow. The output file is opened
+//! `O_CREAT|O_EXCL|O_NOFOLLOW` with mode 0600, and the model reads it only through
+//! `job_output`; the fields that used to carry a path carry [`OUTPUT_HINT`] instead.
 //!
 //! The process-group invariant is the same one [`crate::shell`] uses: the leader is kept
 //! **unreaped** while its group is reserved, and every signal is sent under the `reaped`
@@ -18,7 +25,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +43,7 @@ use serde_json::json;
 
 use crate::args;
 use crate::fail;
+use crate::provider::Limits;
 use crate::shell::{lock_bool, sandboxed_command, signal_group, wait_for_exit_without_reaping};
 
 /// How many background jobs may run at once in one session (ADR 0037 decision 7). A job costs
@@ -45,7 +53,8 @@ pub const MAX_RUNNING_JOBS: usize = 4;
 
 /// The in-memory ring per job, in bytes, for `job_output` increments. 64 KiB is enough for the
 /// interesting tail of a build log between two tool calls; four jobs hold at most 256 KiB. The
-/// full history is in the `.out` file, so the ring only has to cover one read gap.
+/// `.out` file keeps the full history for the host, but the model reads only through
+/// `job_output`, so the ring is the read window and only has to cover one read gap.
 pub const JOB_RING_BYTES: usize = 64 << 10;
 
 /// SIGTERM, then SIGKILL after this grace (ADR 0037 decision 2).
@@ -57,6 +66,15 @@ const MAX_WAIT_MS: u64 = 600_000;
 
 /// How long the supervisor waits for the output readers after the group is killed.
 const READER_GRACE: Duration = Duration::from_secs(2);
+
+/// What the model sees where the output file's path used to be (ADR 0039 decision 1).
+///
+/// The output file lives in the session directory, outside the workspace and on the sandbox's
+/// deny-read list, so the model can neither open it nor be told a path it could use. Every
+/// field that once carried a workspace-relative path (`StartInfo::output`,
+/// `JobEvent::Started::output`, `JobSummary::output`, `OutputResult::output`) carries this
+/// sentence instead, which names the one channel that still reaches the output.
+pub const OUTPUT_HINT: &str = "available through job_output";
 
 /// The `job_settled` broadcast capacity. A subscriber that falls this far behind loses old
 /// notices; slice 3 re-reads the state instead of trusting the channel alone.
@@ -122,6 +140,8 @@ struct JobCell {
     ring: Ring,
     /// The model's read cursor: an absolute byte offset into everything the job produced.
     read_offset: u64,
+    /// The registry-computed output file (ADR 0039 decision 1). `job_output`'s file arguments
+    /// read this path; it is never built from a model-supplied string.
     output: PathBuf,
     /// The process group id (the leader's pid).
     pgid: u32,
@@ -142,7 +162,7 @@ pub struct JobSummary {
     pub command: String,
     pub state: JobState,
     pub elapsed: Duration,
-    /// The workspace-relative output path.
+    /// [`OUTPUT_HINT`]; the output file is not readable by the model (ADR 0039 decision 1).
     pub output: String,
 }
 
@@ -154,7 +174,8 @@ pub enum JobEvent {
         id: String,
         /// The command's first line.
         command: String,
-        /// The workspace-relative output path.
+        /// [`OUTPUT_HINT`] (ADR 0039 decision 1): the output file is outside the workspace and
+        /// unreadable by the sandbox, so this is not a path.
         output: String,
     },
     Settled {
@@ -173,7 +194,8 @@ pub struct Jobs {
 }
 
 struct JobsInner {
-    workspace: PathBuf,
+    /// The session-owned jobs directory (ADR 0039 decision 1). Every registry is given one;
+    /// it is never derived from a workspace.
     dir: PathBuf,
     state: Mutex<JobsState>,
     events: tokio::sync::broadcast::Sender<JobEvent>,
@@ -187,18 +209,31 @@ struct JobsState {
 }
 
 impl Jobs {
-    /// A registry for `workspace`. No I/O: the jobs directory is created by the first
-    /// [`Jobs::start`], so opening a session never touches the disk.
-    pub fn new(workspace: &Path) -> Self {
+    /// A registry whose output files live in `dir` (ADR 0039 decision 1). The caller owns the
+    /// directory choice: the host passes the session's own jobs directory
+    /// (`<sessions_dir>/<session-id>.jobs/`, created 0700 with `radian_session::ensure_private_dir`),
+    /// so the registry never computes a workspace path. If the directory is missing (a registry
+    /// built without a host), the first [`Jobs::start`] creates it 0700.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
         let (events, _) = tokio::sync::broadcast::channel(SETTLED_CAPACITY);
         Self {
             inner: Arc::new(JobsInner {
-                workspace: workspace.to_path_buf(),
-                dir: workspace.join(".radian").join("jobs"),
+                dir: dir.into(),
                 state: Mutex::new(JobsState::default()),
                 events,
             }),
         }
+    }
+
+    /// The directory this registry writes its output files to.
+    pub fn dir(&self) -> &Path {
+        &self.inner.dir
+    }
+
+    /// The output file for `id`. The model never sees this path (it cannot read the file); it
+    /// is here for the host and for tests.
+    pub fn output_path(&self, id: &str) -> PathBuf {
+        self.inner.dir.join(format!("{id}.out"))
     }
 
     /// Subscribe to job lifecycle notices (ADR 0037 slices 3-4). Each receiver sees every
@@ -234,7 +269,7 @@ impl Jobs {
             ));
         }
 
-        std::fs::create_dir_all(&self.inner.dir).map_err(|e| {
+        ensure_jobs_dir(&self.inner.dir).map_err(|e| {
             fail(
                 "jobs_dir",
                 format!(
@@ -244,17 +279,13 @@ impl Jobs {
             )
         })?;
         let id = next_job_id();
-        let output = self.inner.dir.join(format!("{id}.out"));
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&output)
-            .map_err(|e| {
-                fail(
-                    "jobs_output",
-                    format!("could not create {}: {e}", output.display()),
-                )
-            })?;
+        let output = self.output_path(&id);
+        let file = open_job_output(&output).map_err(|e| {
+            fail(
+                "jobs_output",
+                format!("could not create {}: {e}", output.display()),
+            )
+        })?;
 
         let mut process = sandboxed_command(sandbox, cwd, command)?;
         configure_group(&mut process);
@@ -306,6 +337,20 @@ impl Jobs {
                 let _ = done.send(());
             });
         }
+
+        // ADR 0039 decision 6: register the job and publish `Started` **before** the supervisor
+        // can publish a `Settled`. An instant command's leader can be reaped the moment the
+        // supervisor starts, so starting it any earlier lets `Settled` overtake `Started` in
+        // the journal. The readers are already running, so nothing is lost by the wait.
+        state.order.push(id.clone());
+        state.jobs.insert(id.clone(), Arc::clone(&cell));
+        drop(state);
+        let _ = self.inner.events.send(JobEvent::Started {
+            id: id.clone(),
+            command: first_line(command),
+            output: OUTPUT_HINT.to_owned(),
+        });
+
         {
             let supervisor_cell = Arc::clone(&cell);
             let events = self.inner.events.clone();
@@ -320,15 +365,10 @@ impl Jobs {
             });
         }
 
-        state.order.push(id.clone());
-        state.jobs.insert(id.clone(), Arc::clone(&cell));
-        drop(state);
-        let _ = self.inner.events.send(JobEvent::Started {
-            id: id.clone(),
-            command: first_line(command),
-            output: self.relative(&output),
-        });
-        Ok(StartInfo { id, output })
+        Ok(StartInfo {
+            id,
+            output: OUTPUT_HINT.to_owned(),
+        })
     }
 
     /// `job_output`: the increment since the last call, plus the state. `wait` blocks until
@@ -368,7 +408,7 @@ impl Jobs {
             increment,
             waited_out,
             wait_cancelled,
-            output: self.relative(&cell.output),
+            output: OUTPUT_HINT.to_owned(),
         };
         drop(cell);
         Ok(result)
@@ -388,7 +428,7 @@ impl Jobs {
                     command: cell.command.clone(),
                     state: cell.state.clone(),
                     elapsed: cell.started.elapsed(),
-                    output: self.relative(&cell.output),
+                    output: OUTPUT_HINT.to_owned(),
                 })
             })
             .collect()
@@ -430,7 +470,7 @@ impl Jobs {
         let cell = lock(&cell);
         Some((
             cell.state.clone(),
-            self.relative(&cell.output),
+            OUTPUT_HINT.to_owned(),
             cell.ring.tail(max),
         ))
     }
@@ -474,12 +514,6 @@ impl Jobs {
     fn lock_state(&self) -> std::sync::MutexGuard<'_, JobsState> {
         self.inner.state.lock().unwrap_or_else(|e| e.into_inner())
     }
-
-    fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.inner.workspace)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| path.to_string_lossy().into_owned())
-    }
 }
 
 impl Drop for Jobs {
@@ -491,9 +525,11 @@ impl Drop for Jobs {
 }
 
 /// What `start` returns.
+#[derive(Debug)]
 pub struct StartInfo {
     pub id: String,
-    pub output: PathBuf,
+    /// [`OUTPUT_HINT`]: the model reads the output through `job_output` (ADR 0039 decision 1).
+    pub output: String,
 }
 
 /// What `job_output` returns.
@@ -506,6 +542,7 @@ pub(crate) struct OutputResult {
     pub waited_out: bool,
     /// The turn was cancelled while waiting: the job is untouched.
     pub wait_cancelled: bool,
+    /// [`OUTPUT_HINT`] (ADR 0039 decision 1).
     pub output: String,
 }
 
@@ -513,6 +550,50 @@ pub(crate) struct OutputResult {
 pub(crate) enum KillResult {
     Requested,
     AlreadySettled(JobState),
+}
+
+// ---------- output files ----------
+
+/// Creates the jobs directory 0700 if it is missing. The host normally creates it with
+/// `radian_session::ensure_private_dir` when the session opens; this mirrors that for a registry
+/// used without a host (tests, an embedded tool set) so the output is owner-only either way.
+fn ensure_jobs_dir(dir: &Path) -> std::io::Result<()> {
+    if dir.exists() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    let created = {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    };
+    #[cfg(not(unix))]
+    let created = std::fs::create_dir_all(dir);
+    match created {
+        // Another thread or process won the race; the directory is there.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        other => other,
+    }
+}
+
+/// Opens a job's output file for appending, creating it **exclusively** and refusing to follow
+/// a symlink at the destination (ADR 0039 decision 1): `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600.
+///
+/// `create_new` already refuses an existing path, and a symlink is an existing path, so
+/// `O_NOFOLLOW` is defence in depth here: when the destination is a symlink the two are
+/// equivalent, which `job_output_security` pins. The pair is what the ADR asks for.
+fn open_job_output(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.append(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 // ---------- output ----------
@@ -752,13 +833,35 @@ pub(crate) fn output_schema() -> serde_json::Value {
             "wait": {
                 "type": "boolean",
                 "description": "Block until the job ends (or timeout_ms elapses). Default \
-                                false: return the output so far at once."
+                                false: return the output so far at once. Ignored by the file \
+                                arguments below."
             },
             "timeout_ms": {
                 "type": "integer",
                 "minimum": 1,
                 "description": "How long `wait` may block, in milliseconds (default 30000, \
                                 maximum 600000). On timeout the job keeps running."
+            },
+            "from_line": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "1-based line of the job's **full output file** to start at. \
+                                Use with max_lines to page past what the ring kept."
+            },
+            "max_lines": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum full-file lines to return from from_line."
+            },
+            "tail_lines": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Return the last N lines of the full output file."
+            },
+            "pattern": {
+                "type": "string",
+                "description": "Return only full-file lines matching this Rust regex (same \
+                                convention as `grep`), numbered and capped."
             }
         },
         "required": ["job_id"],
@@ -774,9 +877,13 @@ pub(crate) fn output_spec() -> ToolSpec {
                       signal n / killed / timed out). Do not sleep or poll: pass `wait: true` \
                       to block until the job ends (or `timeout_ms` elapses; the default is \
                       30000, the maximum 600000). A wait timeout returns `[status: running]` \
-                      and does **not** kill the job. The job's full history is in the `.out` \
-                      file named when it started; read that with the `read` tool for anything \
-                      the ring dropped."
+                      and does **not** kill the job. The job's output file is outside the \
+                      workspace and not readable from inside the sandbox, so this tool is the \
+                      only way to read it. The incremental read above is a bounded ring; when \
+                      it has dropped bytes, read the full file by line with `tail_lines` (the \
+                      last N), `from_line`/`max_lines` (a range, numbered like `read`), or \
+                      `pattern` (only matching lines). The file result names the file's total \
+                      line count and whether more remains, so you can page."
             .into(),
         input_schema: output_schema(),
         concurrency: ToolConcurrency::Shared,
@@ -788,9 +895,9 @@ pub(crate) fn list_spec() -> ToolSpec {
     ToolSpec {
         name: "job_list".into(),
         description: "List this session's background `shell` jobs: id, the command's first \
-                      line, its state (running / exited n / signal n / killed / timed out), how \
-                      long it has run, and its output file. Use `job_output` to read one and \
-                      `job_kill` to stop one."
+                      line, its state (running / exited n / signal n / killed / timed out), and \
+                      how long it has run. Use `job_output` to read one and `job_kill` to stop \
+                      one."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -838,14 +945,107 @@ struct OutputArgs {
     job_id: String,
     wait: Option<bool>,
     timeout_ms: Option<u64>,
+    /// 1-based line of the full output file to start at.
+    from_line: Option<u64>,
+    /// Maximum full-file lines to return from `from_line`.
+    max_lines: Option<u64>,
+    /// The last N lines of the full output file.
+    tail_lines: Option<u64>,
+    /// Only full-file lines matching this Rust regex.
+    pattern: Option<String>,
+}
+
+/// Which part of the **full** output file a `job_output` call asks for (ADR 0039 decision 1: the
+/// model reads the whole output through this tool). The three modes are mutually exclusive;
+/// `None` is the unchanged incremental ring read.
+enum FileMode {
+    Range {
+        from_line: u64,
+        max_lines: Option<u64>,
+    },
+    Tail {
+        lines: u64,
+    },
+    Pattern {
+        source: String,
+        regex: regex::Regex,
+    },
+}
+
+impl FileMode {
+    /// The file mode the arguments request, or `None` for the ring behaviour. `wait`/`timeout_ms`
+    /// do not apply to a file mode: it reads the file as it stands right now.
+    fn from_args(args: &OutputArgs, raw: &serde_json::Value) -> Result<Option<Self>, ToolFailure> {
+        let requested = [
+            args.pattern.is_some(),
+            args.tail_lines.is_some(),
+            args.from_line.is_some() || args.max_lines.is_some(),
+        ]
+        .into_iter()
+        .filter(|wanted| *wanted)
+        .count();
+        if requested == 0 {
+            return Ok(None);
+        }
+        if requested > 1 {
+            return Err(args::invalid(
+                "job_output",
+                raw,
+                ["use only one of `pattern`, `tail_lines`, or `from_line`/`max_lines`"],
+            ));
+        }
+        if let Some(lines) = args.tail_lines {
+            if lines < 1 {
+                return Err(args::invalid(
+                    "job_output",
+                    raw,
+                    ["`tail_lines` must be at least 1"],
+                ));
+            }
+            return Ok(Some(FileMode::Tail { lines }));
+        }
+        if let Some(source) = &args.pattern {
+            let regex = regex::Regex::new(source)
+                .map_err(|error| fail("invalid_regex", format!("`{source}`: {error}")))?;
+            return Ok(Some(FileMode::Pattern {
+                source: source.clone(),
+                regex,
+            }));
+        }
+        let from_line = args.from_line.unwrap_or(1);
+        if from_line < 1 {
+            return Err(args::invalid(
+                "job_output",
+                raw,
+                ["`from_line` must be at least 1"],
+            ));
+        }
+        if let Some(lines) = args.max_lines
+            && lines < 1
+        {
+            return Err(args::invalid(
+                "job_output",
+                raw,
+                ["`max_lines` must be at least 1"],
+            ));
+        }
+        Ok(Some(FileMode::Range {
+            from_line,
+            max_lines: args.max_lines,
+        }))
+    }
 }
 
 pub(crate) async fn run_output(
     jobs: &Jobs,
+    limits: &Limits,
     arguments: &serde_json::Value,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
     let args: OutputArgs = args::parse("job_output", &output_schema(), arguments)?;
+    if let Some(mode) = FileMode::from_args(&args, arguments)? {
+        return read_output_file(jobs, &args.job_id, mode, limits);
+    }
     let timeout = Duration::from_millis(
         args.timeout_ms
             .unwrap_or(DEFAULT_WAIT_MS)
@@ -871,8 +1071,9 @@ pub(crate) async fn run_output(
     }
     if result.dropped > 0 {
         text.push_str(&format!(
-            "[{} bytes dropped from the ring; read {} for the full history]\n",
-            result.dropped, result.output
+            "[{} bytes dropped before this read; page the full file with tail_lines, \
+             from_line/max_lines or pattern]\n",
+            result.dropped
         ));
     }
     if result.waited_out {
@@ -897,6 +1098,282 @@ pub(crate) async fn run_output(
             "dropped_bytes": result.dropped,
         })),
     })
+}
+
+// ---------- reading the full output file ----------
+
+/// The most a single file line contributes before it is marked `[truncated]` (grep's cap).
+const JOB_LINE_BYTES: usize = crate::grep::MAX_LINE_BYTES;
+
+/// Opens a job's output file for reading. The path comes from the registry cell, never a
+/// model-supplied string; `O_NOFOLLOW` refuses a symlink at the final component. That is
+/// defence in depth — the host created the file itself with `O_EXCL` in a directory the model
+/// cannot write — but it keeps the read path on the same rule as the write path.
+fn open_job_output_read(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+/// The number of lines in `path` as the read tool numbers them: a trailing newline does not add
+/// an empty final line, and a non-empty file with no final newline has one more line.
+fn count_output_lines(path: &Path) -> std::io::Result<u64> {
+    let mut reader = BufReader::new(open_job_output_read(path)?);
+    let mut count = 0u64;
+    let mut any = false;
+    let mut last_was_newline = true;
+    let mut buf = [0u8; 64 << 10];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        any = true;
+        for &byte in &buf[..n] {
+            if byte == b'\n' {
+                count += 1;
+                last_was_newline = true;
+            } else {
+                last_was_newline = false;
+            }
+        }
+    }
+    if any && !last_was_newline {
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// A line range of the full output file, already numbered `N: `.
+struct RangeRead {
+    content: String,
+    start_line: u64,
+    end_line: u64,
+    returned: u64,
+    next_line: Option<u64>,
+}
+
+/// Reads at most `max_lines` numbered lines from `from_line`, bounded by `budget` bytes. The
+/// skip is constant memory; each line is capped at [`JOB_LINE_BYTES`].
+fn read_output_range(
+    path: &Path,
+    from_line: u64,
+    max_lines: Option<u64>,
+    budget: usize,
+) -> std::io::Result<RangeRead> {
+    let mut reader = BufReader::new(open_job_output_read(path)?);
+    crate::read::skip_lines(&mut reader, (from_line - 1) as i64)?;
+    let mut content = String::new();
+    let mut line: Vec<u8> = Vec::new();
+    let mut lineno = from_line;
+    let mut returned = 0u64;
+    let mut next_line = None;
+    loop {
+        if let Some(max) = max_lines
+            && returned >= max
+        {
+            next_line = Some(lineno);
+            break;
+        }
+        let truncated = match crate::grep::read_line_capped(&mut reader, &mut line, JOB_LINE_BYTES)?
+        {
+            crate::grep::LineRead::Eof => break,
+            crate::grep::LineRead::Complete => false,
+            crate::grep::LineRead::TooLong => true,
+        };
+        let text = crate::grep::strip_line_end(&line);
+        let entry = if truncated {
+            format!("{lineno}: {text}[truncated]\n")
+        } else {
+            format!("{lineno}: {text}\n")
+        };
+        if content.len() + entry.len() > budget {
+            next_line = Some(lineno);
+            break;
+        }
+        content.push_str(&entry);
+        returned += 1;
+        lineno += 1;
+    }
+    Ok(RangeRead {
+        content,
+        start_line: from_line,
+        end_line: if returned == 0 {
+            from_line.saturating_sub(1)
+        } else {
+            lineno - 1
+        },
+        returned,
+        next_line,
+    })
+}
+
+/// Matching lines of the full output file, already numbered `N: `.
+struct PatternRead {
+    content: String,
+    total_lines: u64,
+    matches: u64,
+    cut: bool,
+}
+
+/// Scans the whole file for `regex`, numbering the matching lines, capped at `cap` matches and
+/// `budget` bytes. The scan continues to end of file so the result can name the total line
+/// count and the model can page with `from_line`/`tail_lines`.
+fn pattern_output(
+    path: &Path,
+    regex: &regex::Regex,
+    budget: usize,
+    cap: usize,
+) -> std::io::Result<PatternRead> {
+    let mut reader = BufReader::new(open_job_output_read(path)?);
+    let mut content = String::new();
+    let mut line: Vec<u8> = Vec::new();
+    let mut lineno = 1u64;
+    let mut matches = 0u64;
+    let mut cut = false;
+    loop {
+        let truncated = match crate::grep::read_line_capped(&mut reader, &mut line, JOB_LINE_BYTES)?
+        {
+            crate::grep::LineRead::Eof => break,
+            crate::grep::LineRead::Complete => false,
+            crate::grep::LineRead::TooLong => true,
+        };
+        let text = crate::grep::strip_line_end(&line);
+        if regex.is_match(&text) && !cut {
+            if matches >= cap as u64 {
+                cut = true;
+            } else {
+                let entry = if truncated {
+                    format!("{lineno}: {text}[truncated]\n")
+                } else {
+                    format!("{lineno}: {text}\n")
+                };
+                if content.len() + entry.len() > budget {
+                    cut = true;
+                } else {
+                    content.push_str(&entry);
+                    matches += 1;
+                }
+            }
+        }
+        lineno += 1;
+    }
+    Ok(PatternRead {
+        content,
+        total_lines: lineno - 1,
+        matches,
+        cut,
+    })
+}
+
+/// The read of a job's own output file failed. The path is not shown to the model.
+fn read_failure(error: &std::io::Error) -> ToolFailure {
+    fail(
+        "jobs_output",
+        format!("could not read the job's output file: {error}"),
+    )
+}
+
+fn read_output_file(
+    jobs: &Jobs,
+    id: &str,
+    mode: FileMode,
+    limits: &Limits,
+) -> Result<ToolOutput, ToolFailure> {
+    // The id must be a real registry key; a path-like id is an unknown job, never a path.
+    let cell = jobs.get(id)?;
+    let path = lock(&cell).output.clone();
+    let budget = limits.default_read_bytes;
+    match mode {
+        FileMode::Range {
+            from_line,
+            max_lines,
+        } => {
+            let total = count_output_lines(&path).map_err(|e| read_failure(&e))?;
+            let range = read_output_range(&path, from_line, max_lines, budget)
+                .map_err(|e| read_failure(&e))?;
+            Ok(render_range(id, "range", range, total))
+        }
+        FileMode::Tail { lines } => {
+            let total = count_output_lines(&path).map_err(|e| read_failure(&e))?;
+            // 1-based: the last `lines` lines are `total - lines + 1 ..= total`.
+            let start = total.saturating_sub(lines) + 1;
+            let range = read_output_range(&path, start, Some(lines), budget)
+                .map_err(|e| read_failure(&e))?;
+            Ok(render_range(id, "tail", range, total))
+        }
+        FileMode::Pattern { source, regex } => {
+            let scan = pattern_output(&path, &regex, budget, limits.default_grep_matches)
+                .map_err(|e| read_failure(&e))?;
+            Ok(render_pattern(id, &source, scan))
+        }
+    }
+}
+
+fn render_range(id: &str, mode: &str, range: RangeRead, total: u64) -> ToolOutput {
+    let mut text = range.content.clone();
+    if range.returned == 0 {
+        text.push_str(&format!(
+            "[no lines in that range of the output file ({total} lines total)]\n"
+        ));
+    } else {
+        text.push_str(&format!(
+            "[output file: {total} lines; showing lines {}-{}]\n",
+            range.start_line, range.end_line
+        ));
+        match range.next_line {
+            Some(next) => text.push_str(&format!(
+                "[more remains: call job_output with from_line={next}]\n"
+            )),
+            None => text.push_str("[end of output file]\n"),
+        }
+    }
+    let structured = json!({
+        "job_id": id,
+        "source": "file",
+        "mode": mode,
+        "total_lines": total,
+        "start_line": range.start_line,
+        "end_line": range.end_line,
+        "returned": range.returned,
+        "next_line": range.next_line,
+        "truncated": range.next_line.is_some(),
+    });
+    ToolOutput {
+        content: vec![ContentPart::text(text)],
+        structured: Some(structured),
+    }
+}
+
+fn render_pattern(id: &str, source: &str, scan: PatternRead) -> ToolOutput {
+    let mut text = scan.content.clone();
+    if scan.matches == 0 {
+        text.push_str(&format!("[no matches for `{source}`]\n"));
+    }
+    text.push_str(&format!(
+        "[output file: {} lines; {} matching line(s) for `{source}`{}]\n",
+        scan.total_lines,
+        scan.matches,
+        if scan.cut { "; more were cut" } else { "" }
+    ));
+    let structured = json!({
+        "job_id": id,
+        "source": "file",
+        "mode": "pattern",
+        "pattern": source,
+        "total_lines": scan.total_lines,
+        "matches": scan.matches,
+        "truncated": scan.cut,
+    });
+    ToolOutput {
+        content: vec![ContentPart::text(text)],
+        structured: Some(structured),
+    }
 }
 
 pub(crate) fn run_list(jobs: &Jobs) -> Result<ToolOutput, ToolFailure> {

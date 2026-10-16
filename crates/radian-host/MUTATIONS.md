@@ -986,3 +986,11 @@ SG-F1-M1 的行为测试假绿（只有守卫抓住）；改成同大小后行�
 **S4-5 的同步方式**：收尾提交被一个 seam（`CommitGate`）卡住，测试用 oneshot 收到「提交已进入」，
 不用 sleep 同步；「仍未被唤醒」用有界 `timeout` 观测。变异（remove 不等）会在提交还卡住时读到
 未提交的工作树并拒绝，因此 `timeout` 返回 Ok，断言失败。
+## ADR 0039 决定 6：通知方在 spawn 之前同步订阅（2026-10-16）
+
+工作树 `oc/sec-jobs`（base `0e9baef`）· 变异就地改 `job_notify.rs`、跑完从
+`.radian/scratch/mut/job_notify.rs.orig` 还原并 `diff -q` 确认，`git status --short` 干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SJ6 | `JobNotifier::spawn` 把 `self.jobs.subscribe()` 放回 `runtime.spawn(async move { … })` 内部 | `job_notify::the_first_job_events_are_not_lost`（首个 job 的 `Started`/`Settled` 都不在 journal 里） | ✅ failed |
