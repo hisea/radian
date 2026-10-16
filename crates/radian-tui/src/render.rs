@@ -2411,7 +2411,9 @@ fn body_spans(
             let style = match piece.style {
                 blocks::MdStyle::Heading => theme.md_heading,
                 blocks::MdStyle::Heading1 => theme.md_heading.add_modifier(Modifier::UNDERLINED),
-                blocks::MdStyle::HeadingMark => theme.md_heading_mark,
+                // ADR 0035: level 3 and below are the text role plus
+                // bold, and the `#` mark (`md_heading_mark`) is no longer drawn.
+                blocks::MdStyle::HeadingMinor => theme.text.add_modifier(Modifier::BOLD),
                 blocks::MdStyle::Strikethrough => theme.text.add_modifier(Modifier::CROSSED_OUT),
                 blocks::MdStyle::TaskUnchecked | blocks::MdStyle::TaskChecked => {
                     theme.md_list_bullet

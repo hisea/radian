@@ -389,18 +389,22 @@ pub struct MdPiece {
 /// A Markdown piece's render role (ADR 0028 R2, ADR 0029 decision 3: pi's `md*` roles).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MdStyle {
-    /// A heading's text (`mdHeading`).
+    /// A level-2 heading's text: the heading role (`mdHeading`).
     Heading,
-    /// A level-1 heading's text: the heading role plus underline (ADR 0035).
+    /// A level-1 heading's text: the heading role plus underline (ADR 0035
+    /// decision 4).
     Heading1,
-    /// A heading's `#` mark (`md_heading_mark`).
-    HeadingMark,
+    /// A level-3-or-lower heading's text: the text role plus bold (ADR 0035
+    /// decision 4). `md_heading_mark` is no longer drawn; the role stays in the theme for
+    /// old theme files.
+    HeadingMinor,
     /// `~~struck~~`: the crossed-out modifier.
     Strikethrough,
     /// A task list's checkbox (`☐`/`☑`, `[ ]`/`[x]` under ascii).
     TaskUnchecked,
     TaskChecked,
-    /// A code block's fence line (weak).
+    /// A code block's fence line (weak). Retained for the layout's single fence-shaped line
+    /// helper; ADR 0035 no longer draws a fence.
     Fence,
     Bold,
     Italic,
@@ -2659,12 +2663,12 @@ fn md_block_count(
             width,
             indent,
         ),
-        MdBlock::Heading { level, pieces } => {
-            // The synthesized prefix (`level` `#`s and a space) is all width-1 cells.
-            let prefix = *level as usize + 1;
+        MdBlock::Heading { level: _, pieces } => {
+            // ADR 0035: the `#` prefix is gone, so no synthesized width
+            // precedes the heading text.
             md_wrap_count(
                 pieces.iter().map(|piece| piece.text.as_str()),
-                prefix,
+                0,
                 width,
                 indent,
             )
@@ -2833,19 +2837,15 @@ fn md_blocks(
                 ));
             }
             MdBlock::Heading { level, pieces } => {
-                // ADR 0035: the `#` marks stay but use the
-                // `md_heading_mark` role; the text is the heading role (level 1 underlined).
-                let mut line = vec![MdPiece {
-                    text: format!("{} ", "#".repeat(*level as usize)),
-                    style: MdStyle::HeadingMark,
-                    offset: None,
-                }];
-                let text_style = if *level == 1 {
-                    MdStyle::Heading1
-                } else {
-                    MdStyle::Heading
+                // ADR 0035: no `#` is drawn. Level 1 is the heading role
+                // with an underline, level 2 the heading role, level 3 and below the text role
+                // plus bold.
+                let text_style = match level {
+                    1 => MdStyle::Heading1,
+                    2 => MdStyle::Heading,
+                    _ => MdStyle::HeadingMinor,
                 };
-                line.extend(md_pieces(pieces, text_style, glyphs));
+                let line = md_pieces(pieces, text_style, glyphs);
                 out.extend(md_wrap(line, width, indent));
             }
             // A task marker is only meaningful as the first block of a task item; on its own
@@ -4059,23 +4059,29 @@ mod tests {
         assert_eq!(found, 3, "the bullet, the checkbox and the quote bar");
     }
 
-    /// A heading's `#` uses the weak role; the text is the heading role (level 1 underlined).
+    /// ADR 0035: a heading shows no `#`; level 1 is `Heading1` (the
+    /// heading role plus underline), level 2 is `Heading` (the heading role), level 3 and
+    /// below are `HeadingMinor` (the text role plus bold).
     #[test]
-    fn headings_keep_the_hash_with_their_own_role() {
-        let lines = md_lines("# H\n", 0, 40, crate::footer::Glyphs::Unicode);
-        let pieces = lines[0].md.as_ref().expect("md pieces");
-        let mark = pieces.iter().find(|p| p.style == MdStyle::HeadingMark);
-        assert_eq!(mark.map(|p| p.text.as_str()), Some("# "), "{pieces:?}");
-        assert_eq!(
-            pieces.last().map(|p| p.style),
-            Some(MdStyle::Heading1),
-            "level 1 underlines"
-        );
-        let lines = md_lines("## H\n", 0, 40, crate::footer::Glyphs::Unicode);
-        let pieces = lines[0].md.as_ref().expect("md pieces");
-        let mark = pieces.iter().find(|p| p.style == MdStyle::HeadingMark);
-        assert_eq!(mark.map(|p| p.text.as_str()), Some("## "), "{pieces:?}");
-        assert_eq!(pieces.last().map(|p| p.style), Some(MdStyle::Heading));
+    fn headings_have_no_hash_and_three_roles() {
+        for (source, expected) in [
+            ("# H\n", MdStyle::Heading1),
+            ("## H\n", MdStyle::Heading),
+            ("### H\n", MdStyle::HeadingMinor),
+            ("###### H\n", MdStyle::HeadingMinor),
+        ] {
+            let lines = md_lines(source, 0, 40, crate::footer::Glyphs::Unicode);
+            let pieces = lines[0].md.as_ref().expect("md pieces");
+            assert!(
+                pieces.iter().all(|p| !p.text.contains('#')),
+                "{source:?}: no `#` is drawn: {pieces:?}"
+            );
+            assert_eq!(
+                pieces.last().map(|p| p.style),
+                Some(expected),
+                "{source:?}: {pieces:?}"
+            );
+        }
     }
 
     /// ADR 0024 R1: the `ask_user` card is a boxed block. The call has no answers

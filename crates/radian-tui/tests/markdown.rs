@@ -10,6 +10,7 @@ use radian_tui::tools::{DisplayModes, ToolDisplay, ToolFold};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Modifier;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -106,6 +107,40 @@ fn the_block_kinds_and_inline_roles_render() {
     assert_eq!(code.fg, app.theme.md_code.fg);
     assert_eq!(bullet.fg, app.theme.md_list_bullet.fg);
     assert_ne!(heading.fg, link.fg, "roles differ");
+}
+
+/// ADR 0035: no `#` is drawn; level 1 underlines the heading role,
+/// level 2 is the heading role (bold), level 3 and below are the text role (bold).
+#[test]
+fn headings_show_no_hash_and_level_attributes() {
+    let mut app = App::new("m", "s");
+    assistant(&mut app, "# One\n\n## Two\n\n### Three\n");
+    let terminal = render(&mut app, 60, 20);
+    let text = screen(&terminal);
+    assert!(!text.contains('#'), "no `#` on any heading row:\n{text}");
+    let one = style_of(&terminal, "One").expect("level 1");
+    assert!(
+        one.add_modifier.contains(Modifier::UNDERLINED),
+        "level 1 is underlined: {one:?}"
+    );
+    let two = style_of(&terminal, "Two").expect("level 2");
+    assert!(
+        !two.add_modifier.contains(Modifier::UNDERLINED),
+        "level 2 is not underlined: {two:?}"
+    );
+    assert!(
+        two.add_modifier.contains(Modifier::BOLD),
+        "level 2 is bold: {two:?}"
+    );
+    let three = style_of(&terminal, "Three").expect("level 3");
+    assert!(
+        !three.add_modifier.contains(Modifier::UNDERLINED),
+        "level 3 is not underlined: {three:?}"
+    );
+    assert!(
+        three.add_modifier.contains(Modifier::BOLD),
+        "level 3 is bold: {three:?}"
+    );
 }
 
 /// A table draws borders when it fits, wraps a cell that does not, and falls back to the raw
@@ -686,7 +721,7 @@ fn the_sample_markdown_snapshot() {
         for needle in [
             // The CJK characters are wide, so the screen model has a cell between them;
             // assert the parts, not the contiguous string.
-            "# ",
+            // ADR 0035: no `#` is drawn on a heading.
             "Heading",
             "标",
             "题",
