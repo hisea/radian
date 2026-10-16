@@ -1158,11 +1158,13 @@ fn a_code_block_does_not_wrap_and_truncates_with_an_ellipsis() {
     app.push_message(&Message::assistant(format!(
         "before\n```rust\n{long}\nsecond\n```\nafter"
     )));
-    let terminal = render(&mut app, 80, 12);
+    // 16 rows: the bar input's half-cell pads (ADR 0035) take two rows from the
+    // transcript, and the prose above and below the block must stay on screen.
+    let terminal = render(&mut app, 80, 16);
     let buffer = terminal.backend().buffer();
     // Find the long line's row: it starts with 79 'x' and ends with '…' on the same row.
     let mut found = None;
-    for row in 0..12u16 {
+    for row in 0..16u16 {
         let text: String = (0..80u16)
             .map(|col| {
                 buffer
