@@ -538,8 +538,8 @@ async fn one_shot_streams_text_to_stdout_only() {
     assert_eq!(code, 0);
     assert_eq!(stdout, "Hello there\n");
     assert!(!stderr.contains("Hello there"), "{stderr}");
-    // The first message is the system prompt (the built-in `diagrams` skill is in it); the
-    // user's words are the user message.
+    // The first message is the system prompt (the skill list is in it); the user's words are
+    // the user message.
     assert_eq!(last_user_text(&messages_of(&server, 0)), "hi");
 }
 

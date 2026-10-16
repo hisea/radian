@@ -95,7 +95,7 @@ fn skills_builtin_and_disabled_are_carried() {
     let (path, text) = fixture("skills-builtin.toml");
     let config = config::parse(&path, &text).unwrap();
     assert_eq!(config.skills.builtin, Some(false));
-    assert_eq!(config.skills.disabled, vec!["diagrams".to_owned()]);
+    assert_eq!(config.skills.disabled, vec!["theme-import".to_owned()]);
     assert!(
         !config.skipped.iter().any(|key| key.starts_with("skills")),
         "{:?}",
