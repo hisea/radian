@@ -240,6 +240,7 @@ fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> T
                     before_driver: None,
                     memory_warning: Arc::new(|_message: &str| {}),
                     memory_notice_line: Arc::new(|_line: &str| {}),
+                    task_builder: None,
                 },
             })
         },
@@ -841,6 +842,7 @@ async fn open_plain(
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
+            task_builder: None,
         },
     )
     .await

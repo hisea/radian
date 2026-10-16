@@ -203,6 +203,22 @@ impl Profile {
         self
     }
 
+    /// Allows these tool names in **every** tier, with the normal rule priority (ADR 0030 slice
+    /// 6): the lead tools `spawn_task`, `wait_task`, … write no workspace file and run no
+    /// repository command themselves — the task worktree and its sandbox are the boundary — so
+    /// they never prompt. A `deny` rule still wins, and the host's [`crate::ToolGate`] is checked
+    /// before the rules, so `/mode general` still refuses them (ADR 0038 decision 1).
+    pub fn with_allowed_tools(mut self, names: &[&str]) -> Self {
+        self.rules.extend(names.iter().map(|name| {
+            Rule::new(
+                ToolMatcher::Name((*name).to_owned()),
+                ResourceMatcher::Any,
+                Action::Allow,
+            )
+        }));
+        self
+    }
+
     /// Replaces the approval policy (used by `custom` callers and tests).
     pub fn with_approval(mut self, approval: ApprovalPolicy) -> Self {
         self.approval = approval;

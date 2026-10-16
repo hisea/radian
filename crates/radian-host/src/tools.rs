@@ -14,6 +14,7 @@ use agent_extensions::{McpSession, McpToolProvider};
 use radian_coding::{AskSession, AskTools, CodingSession, CodingTools};
 
 use crate::git_commit::{GitCommitTools, run as run_git_commit};
+use crate::lead_tools::{LeadSession, LeadTools};
 use crate::memory::{MemorySession, MemoryTools};
 use crate::mermaid::{MermaidCheckSession, MermaidCheckTools};
 use crate::skills::tools::{SkillSession, SkillTools};
@@ -31,6 +32,9 @@ pub struct HostTools {
     /// `git_commit` (ADR 0030 R10). Runs in the host, outside the sandbox. `None` for a host
     /// with no workspace/journal (the CLI's own tool tests).
     git_commit: Option<GitCommitTools>,
+    /// The lead's task tools (ADR 0030 slice 6). `None` for a task agent (depth limit) and for
+    /// a host that supplies no task builder.
+    lead: Option<LeadTools>,
     mcp: McpToolProvider,
 }
 
@@ -48,8 +52,17 @@ impl HostTools {
             skills: None,
             mermaid: MermaidCheckTools::new(),
             git_commit,
+            lead: None,
             mcp,
         }
+    }
+
+    /// Mounts the lead's task tools from the start (ADR 0030 item 5). The permission
+    /// layer decides whether they run: a mode gate denies them outside `lead` (ADR 0038
+    /// decision 1). Never mounted for a task agent.
+    pub fn with_lead(mut self, lead: LeadTools) -> Self {
+        self.lead = Some(lead);
+        self
     }
 
     /// Mounts `ask_user`. The host calls this only when a human is there to answer; without it
@@ -120,8 +133,26 @@ impl HostTools {
                  `.git` read-only (task agents, Linux)",
             );
         }
+        if self.lead.is_some() {
+            for (name, purpose) in crate::lead_tools::specs()
+                .iter()
+                .map(|spec| (spec.name.clone(), first_line(&spec.description)))
+            {
+                out.push((name, purpose));
+            }
+        }
         out
     }
+}
+
+/// The first sentence of a tool description, for the `<runtime>` layer's one-line list.
+fn first_line(description: &str) -> String {
+    description
+        .split(". ")
+        .next()
+        .unwrap_or(description)
+        .trim()
+        .to_owned()
 }
 
 pub struct HostSession {
@@ -131,6 +162,7 @@ pub struct HostSession {
     skills: Option<SkillSession>,
     mermaid: MermaidCheckSession,
     git_commit: Option<GitCommitTools>,
+    lead: Option<LeadSession>,
     mcp: McpSession,
     specs: Vec<ToolSpec>,
     coding_names: HashSet<String>,
@@ -139,6 +171,7 @@ pub struct HostSession {
     skill_names: HashSet<String>,
     mermaid_names: HashSet<String>,
     git_commit_names: HashSet<String>,
+    lead_names: HashSet<String>,
 }
 
 impl ToolProvider for HostTools {
@@ -165,6 +198,10 @@ impl ToolProvider for HostTools {
         };
         let mermaid = self.mermaid.open_session().await?;
         let git_commit = self.git_commit.clone();
+        let lead = match &self.lead {
+            Some(lead) => Some(lead.open_session().await?),
+            None => None,
+        };
 
         let mut coding_names = HashSet::new();
         let mut memory_names = HashSet::new();
@@ -172,6 +209,7 @@ impl ToolProvider for HostTools {
         let mut skill_names = HashSet::new();
         let mut mermaid_names = HashSet::new();
         let mut git_commit_names = HashSet::new();
+        let mut lead_names = HashSet::new();
         let mut built_in_specs: Vec<ToolSpec> = Vec::new();
         if let Some(coding) = &coding {
             for spec in coding.tool_specs() {
@@ -206,6 +244,12 @@ impl ToolProvider for HostTools {
             git_commit_names.insert(git_commit_spec.name.clone());
             built_in_specs.push(git_commit_spec);
         }
+        if let Some(lead) = &lead {
+            for spec in lead.tool_specs() {
+                lead_names.insert(spec.name.clone());
+                built_in_specs.push(spec.clone());
+            }
+        }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
 
         Ok(HostSession {
@@ -215,6 +259,7 @@ impl ToolProvider for HostTools {
             skills,
             mermaid,
             git_commit,
+            lead,
             mcp,
             specs,
             coding_names,
@@ -223,6 +268,7 @@ impl ToolProvider for HostTools {
             skill_names,
             mermaid_names,
             git_commit_names,
+            lead_names,
         })
     }
 }
@@ -245,6 +291,14 @@ impl ToolSession for HostSession {
                 None => Err(ToolFailure::new(
                     "unknown_tool",
                     format!("`{}` has no host session", call.name),
+                )),
+            }
+        } else if self.lead_names.contains(&call.name) {
+            match &self.lead {
+                Some(lead) => crate::lead_tools::run(lead, call, cx).await,
+                None => Err(ToolFailure::new(
+                    "unknown_tool",
+                    format!("`{}` has no lead session", call.name),
                 )),
             }
         } else if self.mermaid_names.contains(&call.name) {

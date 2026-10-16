@@ -44,6 +44,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_core::Message;
@@ -179,6 +180,10 @@ pub struct TaskRecord {
     pub label: Option<String>,
     /// The seq of the lead's `TaskSpawned` (the task's `parent.seq`).
     pub start_seq: u64,
+    /// The commit the worktree's branch was created from (the lead's HEAD at spawn), so a later
+    /// `git diff --stat` is relative to the start (ADR 0030 R8). `None` for `shared`
+    /// and when the worktree is not a repository.
+    pub start_commit: Option<String>,
     /// The sandbox policy the task's tools run under (ADR 0030 O3): a `workspace` policy with
     /// the network off and `.git` read-only, or `None` for a host with no sandbox.
     pub sandbox_policy: Option<SandboxPolicy>,
@@ -192,6 +197,24 @@ impl TaskRecord {
     /// has ended, so no commit was ever scheduled.
     pub async fn await_end_commit(&self) -> Option<EndCommit> {
         self.finisher.await_end_commit().await
+    }
+
+    /// Whether the task's turn is running right now (ADR 0030 slice 6's `wait_task`): `true`
+    /// from the committed `TurnStarted` until the next turn boundary.
+    pub fn running(&self) -> bool {
+        self.finisher.running()
+    }
+
+    /// The outcome of the last turn the task ended, or `None` before its first. `wait_task`/
+    /// `wait_any` read it: a task that is not running with a `Some` outcome has finished.
+    pub fn last_outcome(&self) -> Option<TurnOutcome> {
+        self.finisher.last_outcome()
+    }
+
+    /// A receiver that changes on every turn boundary and every turn start, so `wait_task`/
+    /// `wait_any` wake without polling.
+    pub fn subscribe_turns(&self) -> watch::Receiver<u64> {
+        self.finisher.subscribe_turns()
     }
 }
 
@@ -336,6 +359,18 @@ impl TaskRegistry {
         self.pending.next()
     }
 
+    /// [`TaskRegistry::pending_next`] restricted to one task (ADR 0030 slice 6's `wait_task`):
+    /// the lead's wait for `id` never takes another task's event.
+    pub fn pending_next_for(&self, id: &str) -> Option<TaskPendingView> {
+        self.pending.next_for(id)
+    }
+
+    /// [`TaskRegistry::pending_next`] restricted to a set of tasks (ADR 0030 slice 6's
+    /// `wait_any { ids }`): the first event raised by any of them, in arrival order.
+    pub fn pending_next_in(&self, ids: &[String]) -> Option<TaskPendingView> {
+        self.pending.next_in(ids)
+    }
+
     /// Sets the R9 timeout applied to each taken event (ADR 0030).
     pub fn set_pending_timeout(&self, timeout: std::time::Duration) {
         self.pending.set_timeout(timeout);
@@ -381,57 +416,65 @@ impl TaskRegistry {
     /// the task session with the enforced invariants, and (if a brief was given) send it as a
     /// `Subagent` input. A failure at any step after the worktree exists removes it again; a
     /// failure after `TaskSpawned` was written also appends the paired `TaskFinished`.
-    pub async fn spawn(&self, request: SpawnRequest) -> Result<Arc<TaskRecord>, TaskError> {
-        let SpawnRequest {
-            id,
-            isolation,
-            label,
-            brief,
-            approval,
-            policy,
-        } = request;
-        validate_session_id(&id).map_err(|_| {
-            TaskError::new(format!(
-                "invalid task id {id:?}: [A-Za-z0-9._-], 1-128 chars"
-            ))
-        })?;
-        if self.get(&id).is_some() {
-            return Err(TaskError::new(format!("task `{id}` already exists")));
-        }
-        let approval = approval.unwrap_or(ApprovalPolicy::Auto);
-        if !matches!(approval, ApprovalPolicy::Auto | ApprovalPolicy::OnAsk) {
-            return Err(TaskError::new(
-                "a task's approval is `auto` or `on-ask` (ADR 0030 R1)",
-            ));
-        }
+    /// `send_task`'s future is **boxed** (a type-erased `BoxFuture`): `spawn` calls `open_session`,
+    /// and a lead tool that calls `open_session` would otherwise recurse in the async `Send`
+    /// inference (open_session's driver runs the tools, one of which is `spawn_task`).
+    pub fn spawn(
+        &self,
+        request: SpawnRequest,
+    ) -> futures_util::future::BoxFuture<'_, Result<Arc<TaskRecord>, TaskError>> {
+        Box::pin(async move {
+            let SpawnRequest {
+                id,
+                isolation,
+                label,
+                brief,
+                approval,
+                policy,
+            } = request;
+            validate_session_id(&id).map_err(|_| {
+                TaskError::new(format!(
+                    "invalid task id {id:?}: [A-Za-z0-9._-], 1-128 chars"
+                ))
+            })?;
+            if self.get(&id).is_some() {
+                return Err(TaskError::new(format!("task `{id}` already exists")));
+            }
+            let approval = approval.unwrap_or(ApprovalPolicy::Auto);
+            if !matches!(approval, ApprovalPolicy::Auto | ApprovalPolicy::OnAsk) {
+                return Err(TaskError::new(
+                    "a task's approval is `auto` or `on-ask` (ADR 0030 R1)",
+                ));
+            }
 
-        // The guard owns everything the spawn has built so far; it is disarmed only once the
-        // record is in the registry, so no failure below can leave a worktree or a driver.
-        let mut guard = SpawnGuard::new(self.workspace.clone());
-        match self
-            .spawn_inner(&mut guard, &id, isolation, label, brief, (approval, policy))
-            .await
-        {
-            Ok(record) => {
-                guard.disarm();
-                Ok(record)
-            }
-            Err(error) => {
-                // ADR 0039 decision 5: the `TaskSpawned` this spawn wrote needs a pair.
-                if guard.spawned {
-                    let _ = self
-                        .lead_journal
-                        .append_runtime_event(RuntimeEvent::TaskFinished {
-                            agent_session_id: id.clone(),
-                            outcome: TurnOutcome::Failed,
-                            error: Some(error.to_string()),
-                        })
-                        .await;
+            // The guard owns everything the spawn has built so far; it is disarmed only once the
+            // record is in the registry, so no failure below can leave a worktree or a driver.
+            let mut guard = SpawnGuard::new(self.workspace.clone());
+            match self
+                .spawn_inner(&mut guard, &id, isolation, label, brief, (approval, policy))
+                .await
+            {
+                Ok(record) => {
+                    guard.disarm();
+                    Ok(record)
                 }
-                guard.rollback().await;
-                Err(error)
+                Err(error) => {
+                    // ADR 0039 decision 5: the `TaskSpawned` this spawn wrote needs a pair.
+                    if guard.spawned {
+                        let _ = self
+                            .lead_journal
+                            .append_runtime_event(RuntimeEvent::TaskFinished {
+                                agent_session_id: id.clone(),
+                                outcome: TurnOutcome::Failed,
+                                error: Some(error.to_string()),
+                            })
+                            .await;
+                    }
+                    guard.rollback().await;
+                    Err(error)
+                }
             }
-        }
+        })
     }
 
     /// The fallible body of [`TaskRegistry::spawn`]; the caller owns the guard.
@@ -471,6 +514,19 @@ impl TaskRegistry {
                 (worktree.clone(), Some(worktree), Some(br))
             }
             Isolation::Shared => (self.workspace.clone(), None, None),
+        };
+
+        // The branch point, for a later `git diff --stat` relative to the start (ADR 0030 R8).
+        // A failed read leaves it `None`; `list_tasks` then omits the diff rather than inventing one.
+        let start_commit = match &worktree {
+            Some(wt) => {
+                let wt = wt.clone();
+                tokio::task::spawn_blocking(move || git_head(&wt))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            None => None,
         };
 
         // 2. The lead's `TaskSpawned`, before the task session exists. `parent.seq` is its seq.
@@ -558,6 +614,9 @@ impl TaskRegistry {
             gate: self.seams.commit_gate.clone(),
             state: Mutex::new(CommitState::Idle),
             done: watch::channel(false).0,
+            running: AtomicBool::new(false),
+            last_outcome: Mutex::new(None),
+            turns: watch::channel(0u64).0,
         });
         let inner = Arc::clone(&bindings.runtime_events);
         bindings.runtime_events = Arc::new(TaskRuntimeEvents {
@@ -578,6 +637,12 @@ impl TaskRegistry {
         );
         guard.session = Some(Arc::clone(&session));
         let _ = finisher.journal.set(Arc::clone(session.journal()));
+        // ADR 0030 O2 / ADR 0012 decision 5: every input a task agent receives is `Subagent`,
+        // so its turn source is `Subagent` — never the human's, and it can borrow no session
+        // grant. Set once: nothing else feeds a task's inbox.
+        session
+            .hooks()
+            .set_turn_source(Some(agent_core::InputSource::Subagent));
 
         // 4. The brief, as a `Subagent` input (ADR 0030 O2).
         if let Some(brief) = brief {
@@ -597,6 +662,7 @@ impl TaskRegistry {
             branch,
             label,
             start_seq,
+            start_commit,
             sandbox_policy,
             finisher,
         });
@@ -1158,6 +1224,21 @@ pub fn remove_worktree(lead: &Path, worktree: &Path, force: bool) -> Result<(), 
     Ok(())
 }
 
+/// The worktree's HEAD commit, or `None` when it is not a repository (or git fails). A host
+/// `git` call through the shared helper.
+fn git_head(worktree: &Path) -> Option<String> {
+    let output = radian_coding::host_git::host_git_command(worktree)
+        .ok()?
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!head.is_empty()).then_some(head)
+}
+
 /// Whether the worktree has changes `git status --porcelain` reports. Resolves the pin the way
 /// `git_commit` does so a swapped repository is seen, then reads the status.
 fn worktree_is_dirty(worktree: &Path) -> Result<bool, TaskError> {
@@ -1246,19 +1327,61 @@ struct TaskFinisher {
     state: Mutex<CommitState>,
     /// `true` once the commit finished; the record's `await_end_commit` waits on it.
     done: watch::Sender<bool>,
+    /// Whether the task's turn is running (ADR 0030 slice 6): set on `TurnStarted`, cleared on
+    /// a turn boundary, so `wait_task`/`wait_any` can tell "still working" from "finished".
+    running: AtomicBool,
+    /// The last turn's outcome; `None` before the first turn.
+    last_outcome: Mutex<Option<TurnOutcome>>,
+    /// Bumped on every turn start and turn boundary, so a waiter wakes without polling.
+    turns: watch::Sender<u64>,
 }
 
 impl TaskFinisher {
-    /// On a turn boundary (`TurnFinished`/`TurnFailed`) of a worktree task, run the end-of-task
-    /// commit off the runtime thread. `shared` tasks and a second overlapping event do nothing.
-    /// A failed commit is written to the lead's journal as a `TaskFinished` (ADR 0039 decision
-    /// 7), so it is the task's outcome and not a silent audit line.
+    fn running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    fn last_outcome(&self) -> Option<TurnOutcome> {
+        *self.last_outcome.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn subscribe_turns(&self) -> watch::Receiver<u64> {
+        self.turns.subscribe()
+    }
+
+    fn signal_turn(&self) {
+        self.turns
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    /// Fans one runtime event into the turn signal, then schedules the end-of-task commit on a
+    /// turn boundary. The signal is bumped **after** the commit state is set to `Running`, so a
+    /// waiter that wakes on it never sees the pre-commit `Idle`.
     fn on_turn_event(self: &Arc<Self>, event: &RuntimeEvent) {
-        let outcome = match event {
-            RuntimeEvent::TurnFinished { outcome, .. } => *outcome,
-            RuntimeEvent::TurnFailed { .. } => TurnOutcome::Failed,
-            _ => return,
-        };
+        match event {
+            RuntimeEvent::TurnStarted { .. } => {
+                self.running.store(true, Ordering::SeqCst);
+                self.signal_turn();
+            }
+            RuntimeEvent::TurnFinished { outcome, .. } => self.on_turn_ended(*outcome),
+            RuntimeEvent::TurnFailed { .. } => self.on_turn_ended(TurnOutcome::Failed),
+            _ => {}
+        }
+    }
+
+    /// A turn boundary: record the outcome, run the end-of-task commit, then wake the waiters.
+    fn on_turn_ended(self: &Arc<Self>, outcome: TurnOutcome) {
+        self.running.store(false, Ordering::SeqCst);
+        *self.last_outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+        self.schedule_commit(outcome);
+        self.signal_turn();
+    }
+
+    /// On a turn boundary of a worktree task, run the end-of-task commit off the runtime thread.
+    /// `shared` tasks and a second overlapping event do nothing. A failed commit is written to
+    /// the lead's journal as a `TaskFinished` (ADR 0039 decision 7), so it is the task's outcome
+    /// and not a silent audit line.
+    fn schedule_commit(self: &Arc<Self>, outcome: TurnOutcome) {
         let Some(worktree) = self.worktree.clone() else {
             return; // shared: no worktree, no end commit (ADR 0030 O3)
         };

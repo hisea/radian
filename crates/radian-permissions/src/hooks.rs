@@ -16,6 +16,19 @@ use crate::rule::{Action, Resource, evaluate, resolve, resource_of};
 /// so a grant for `a/../b` also covers `b`.
 type GrantKey = (String, String);
 
+/// A host-installed gate on tool **names**, consulted before the rules. It returns `Some(reason)`
+/// to deny a call outright (a host policy no rule, grant or approver can widen), or `None` to let
+/// the ordinary path decide.
+///
+/// This is how ADR 0030 slice 6 mounts the lead tools from the start and lets `/mode` decide
+/// whether they work (ADR 0038 decision 1, ADR 0030 item 5): the host installs a gate
+/// that denies the lead tool names while the session's mode is `general` (with a
+/// "switch with `/mode lead`" hint) and passes them through in `lead`, where a fixed `allow`
+/// rule (ADR 0030's `Profile::with_allowed_tools`) lets them run without a prompt. It is a
+/// **deny-only** seam on purpose: a rule, a session grant or the approver can never lift it, and
+/// it can never raise an action the rules did not already allow.
+pub type ToolGate = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// The permission layer. One instance per session: it holds that session's real-time grants,
 /// which must not leak between sessions (ADR 0004 / 0006 §5.9).
 pub struct PermissionHooks {
@@ -34,6 +47,9 @@ pub struct PermissionHooks {
     /// before it (ADR 0012). A task can never borrow a human session grant, so this widens
     /// nothing beyond the task's own resolver.
     task_approver: AtomicBool,
+    /// The host's name gate (ADR 0030 slice 6): a deny-only policy consulted before the rules.
+    /// `None` in every existing host.
+    tool_gate: RwLock<Option<ToolGate>>,
     audit: Arc<dyn AuditSink>,
     /// "Allow for this session", consulted on every call (ADR 0004: real-time state).
     grants: Mutex<HashSet<GrantKey>>,
@@ -55,6 +71,7 @@ impl PermissionHooks {
             approval: RwLock::new(approval),
             approver,
             task_approver: AtomicBool::new(false),
+            tool_gate: RwLock::new(None),
             audit,
             grants: Mutex::new(HashSet::new()),
             source: Mutex::new(None),
@@ -108,6 +125,18 @@ impl PermissionHooks {
         self.task_approver.store(task_approver, Ordering::SeqCst);
     }
 
+    /// Installs the host's name gate (ADR 0030 slice 6). Deny-only: a call whose tool name the
+    /// gate refuses is denied before the rules run, and nothing else can lift it. `None` clears it.
+    pub fn set_tool_gate(&self, gate: Option<ToolGate>) {
+        *self.tool_gate.write().unwrap_or_else(|e| e.into_inner()) = gate;
+    }
+
+    /// The gate's verdict for one tool name, if a gate is installed.
+    fn gate(&self, tool: &str) -> Option<String> {
+        let gate = self.tool_gate.read().unwrap_or_else(|e| e.into_inner());
+        gate.as_ref().and_then(|gate| gate(tool))
+    }
+
     pub fn turn_source(&self) -> Option<InputSource> {
         *self.source.lock().unwrap()
     }
@@ -139,8 +168,23 @@ impl PermissionHooks {
             .insert((tool.into(), resource.into()));
     }
 
-    /// Every decision: rules first, then a session grant or the approver for `ask`.
+    /// Every decision: the host's name gate first, then rules, then a session grant or the
+    /// approver for `ask`.
     async fn decide(&self, cx: &HookContext, call: &ToolCall) -> Result<ToolDecision, HookError> {
+        let request_id = format!("perm-{}", self.next_id.fetch_add(1, Ordering::SeqCst) + 1);
+        let call_id = call.id.clone();
+        // The host's name gate is deny-only and outranks everything (ADR 0030 slice 6): a rule,
+        // a grant or the approver can never widen it.
+        if let Some(reason) = self.gate(&call.name) {
+            self.record(
+                &request_id,
+                &call_id,
+                ResolvedDecision::Deny,
+                AuditApprover::Policy,
+                Some(reason.clone()),
+            );
+            return Ok(ToolDecision::Deny { reason });
+        }
         let resource = resource_of(call);
         // The profile is read once, before any `await`: the guard must not be held across the
         // approver call (a `std` read guard is not `Send`, and the hook's future is). A
@@ -154,8 +198,6 @@ impl PermissionHooks {
             )
         };
         let action = self.apply_policy(evaluated.action);
-        let request_id = format!("perm-{}", self.next_id.fetch_add(1, Ordering::SeqCst) + 1);
-        let call_id = call.id.clone();
 
         if action == Action::Deny {
             let reason = evaluated
