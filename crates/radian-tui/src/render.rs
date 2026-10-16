@@ -2173,19 +2173,18 @@ fn option_line(
         ""
     };
     // The cursor and the marker are drawn in their own spans and are never bold: the font's
-    // bold face can lack the glyph and fall back to a different size (the owner's report).
-    let marker = theme.notice_label.remove_modifier(Modifier::BOLD);
+    // bold face can lack the glyph and fall back to a different size (the owner's report). The
+    // marker keeps its label's role (the chosen accent / the weak body), just not the weight.
+    let label_style = if chosen {
+        theme.notice_label
+    } else {
+        theme.notice_body
+    };
+    let marker_style = label_style.remove_modifier(Modifier::BOLD);
     Line::from(vec![
-        Span::styled(cursor, marker),
-        Span::styled(mark, marker),
-        Span::styled(
-            format!(" {}{recommended}", option.label),
-            if chosen {
-                theme.notice_label
-            } else {
-                theme.notice_body
-            },
-        ),
+        Span::styled(cursor, theme.notice_label.remove_modifier(Modifier::BOLD)),
+        Span::styled(mark, marker_style),
+        Span::styled(format!(" {}{recommended}", option.label), label_style),
     ])
 }
 
@@ -2215,10 +2214,9 @@ fn other_line(
         "Other (type your own)".to_string()
     };
     // The marker and the cursor are never bold, like `option_line`.
-    let marker = theme.notice_label.remove_modifier(Modifier::BOLD);
     Line::from(vec![
-        Span::styled(cursor, marker),
-        Span::styled(mark, marker),
+        Span::styled(cursor, theme.notice_label.remove_modifier(Modifier::BOLD)),
+        Span::styled(mark, theme.notice_body),
         Span::styled(format!(" {text}"), theme.notice_body),
     ])
 }
