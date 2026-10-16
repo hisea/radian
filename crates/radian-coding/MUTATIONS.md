@@ -354,3 +354,22 @@ change** — the walk refuses a link before any open, and the after-open seam sh
 what gets written — so the "defence in depth, untestable" note no longer applies. The
 parent-directory window the earlier record called "not mitigated at all" is the one M-A/M-B
 cover.
+
+## ADR 0039: read-only cargo registry and toolchain roots (2026-10-16, branch `oc/ro-roots`)
+
+Base `5410774` · in-place mutations (each source file backed up under `.radian/scratch/mut/`,
+restored from the copy and confirmed byte-identical with `diff -q`; `git status --short` shows
+only this slice's own changes at the end). Each mutation run with
+`cargo test -p radian-coding --test read_roots --no-fail-fast -- <test> --exact`.
+
+| # | Requirement mutated | Mutation | Result |
+|---|---|---|---|
+| RR0 | the roots exist at all | `ReadRoots::from_env` returns `Self::none()` | ✅ caught (`a_registry_source_file_is_read_by_absolute_path`: the read is refused) — the "tests fail before the feature" evidence |
+| RR1 | `write`/`patch` never accept a read-only root | `open_write` resolves the target with `resolve_read` and opens a `Resolved::Root` target through that root's fd with `WriteCreate` | ✅ caught (`write_to_a_registry_source_file_is_refused_and_leaves_it_alone`: the file is overwritten) |
+| RR2 | only `$CARGO_HOME/registry/src`, not all of `$CARGO_HOME` | `cargo_registry_src` returns `cargo_home` (drop `registry/src`) | ✅ caught (`a_file_in_cargo_home_outside_registry_src_is_refused`: `credentials.toml` becomes readable) |
+| RR3 | the root walk never follows a symlink | drop `O_NOFOLLOW` from the directory-level `openat` flags in `safe_fs::walk_dirs` | ✅ caught (`a_symlink_inside_the_registry_root_pointing_outside_is_refused`: the link is followed to the outside file) |
+
+4/4 caught, no misses. RR3's mutation is in the shared fd walk, so the workspace tests
+(`tests/safe_fs.rs`) catch it too; the named test is the read-roots one. RR0 is recorded because
+the brief's first rule is "tests fail on the current branch": with `from_env` disabled the
+read-root tests fail on the boundary refusal, not on a missing API.
