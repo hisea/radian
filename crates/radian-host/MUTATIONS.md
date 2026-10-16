@@ -1090,6 +1090,141 @@ inbox」与「lead 的回合来源被任务事件降低」在 part a 里**不可
 （集成测试在变异下仍通过）。真正 panic 的是 `1e19`（`i64` 秒溢出、但仍是合法 `Duration`），所以测试用
 `1e19`；夹取去掉后集成测试确实 panic。单元测试与平台无关，两种值下都抓住夹取被去掉。
 
+## ADR 0030 切片 7 part a：agent 定义（文件）与 `spawn_task { agent }`（2026-10-16）
+
+工作树 `.radian-worktrees/orch-s7a`（分支 `oc/orch-s7a`）。每条变异就地改，跑完后从
+`.radian/scratch/mut/` 下的副本还原并 `cmp` 确认，结束 `git status --short` 只剩源码改动。
+跑法（`timeout` 包裹，`--no-fail-fast`）：
+
+```sh
+cargo test -p radian-host --lib --no-fail-fast -- prompt::tests::a_user_file_overrides_the_builtin_body_and_its_frontmatter_is_not_in_the_prompt
+cargo test -p radian-host --test task --no-fail-fast -- <下面的测试名>
+```
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S7A-1 | `agents::parse` 的 body 直接取整份文件（`body: text.to_owned()`，frontmatter 留在第 1 层） | ✅ failed | `prompt::tests::a_user_file_overrides_the_builtin_body_and_its_frontmatter_is_not_in_the_prompt` |
+| S7A-2 | `enforce_task_setup` 用 `with_allowed_tools`（加 allow）而不是 `with_denied_tools`（非名单内置工具 deny） | ✅ failed | `a_tools_allow_list_can_only_narrow`（`reader` 的 `write` 由 list 外变回允许；`safe` 里列 `shell` 也不加 allow） |
+| S7A-3 | `resolve` 里 `spawn_ignored: false`（不记录「task 忽略 spawn: true」） | ✅ failed | `a_spawn_resolves_the_agent_definition_and_the_spawn_arguments_override_it` |
+| S7A-4 | `enforce_task_setup` 不取快照 body，改回 `agents::load(name, RADIAN_HOME)` 现读用户目录 | ✅ failed | `a_definition_is_snapshotted_at_spawn`（`Builder` 缝隙在解析之后改文件，现读会看到 `NEW BODY`） |
+| S7A-5 | `enforce_task_setup` 从 task 自己的 worktree（`workspace/.radian/agents/<name>.md`）现读 body | ✅ failed | `a_definition_in_the_task_worktree_is_not_read`（`Builder` 缝隙把同名定义写进 worktree，现读会看到 `WORKTREE BODY`） |
+| S7A-6 | `task_host::build_task` 不把 `ctx.agent` 交给模型工厂（`(host.model)(session_id, slot, ctx.agent)` 换成 `None`） | ✅ failed | `task_host::the_builder_hands_the_agent_definition_to_the_model_factory`（工厂没收到定义，`seen` 为 `None`） |
+
+6/6 抓住。
+
+**S7A-4 / S7A-5 的做法（如实记录）**：最初这两条变异没被抓住——「起会话后改文件」对任何实现都成立，
+因为解析发生在 `spawn` 内。改用注册表的 `SpawnStage::Builder` 测试缝隙：解析在缝隙**之前**完成，缝隙在
+`enforce_task_setup` 与 `open_session` **之前**改用户文件 / 往 task worktree 写同名定义。于是「后面再读盘」
+的变异就会读到新内容，被测试抓住。两次尝试都记录在此：第一次的「事后改文件」版本变异通过（漏洞已在测试里
+补上），第二次的缝隙版本抓住。
+
+**tools 允许名单的边界（如实记录）**：ADR 0030 problem 7 = A 说的是「不在名单里的不挂」。本片把名单实现为
+**权限层的 deny**（`Profile::with_denied_tools`：名单外每个内置工具一条 `deny`），它只能收窄、不能放宽，可测；
+生产 `task_host.rs`（与 origin/main 的 6b2 合并后）仍按宿主常驻工具挂载，没有按名单**物理卸载**的槽。物理卸载
+列入「to decide」。
+
+**与 6b2 合并后的补充（S7A-6）**：`origin/main` 在本片进行中合入了切片 6b2（`crates/radian-host/src/task_host.rs`，
+生产 `TaskBuilder`）。本片按它的 `TaskModelFactory` 接缝把定义交给宿主：工厂签名加 `Option<&SpawnAgent>`，定义的
+`model`/`thinking` 成为任务的 route 与 thinking 级别（route 的凭据由宿主按 `/model` 的同一路径解析，没有复制）；
+`TaskHost` 多一个 `servers` 字段，builder 交出宿主配置的 MCP 集合，registry 只留定义 `mcp` 里点名的（默认仍为 none）。
+
+## ADR 0030 切片 7 part a 复核修订 1：`tools` 卸载与 `skills` 允许名单（2026-10-16）
+
+工作树 `.radian-worktrees/orch-s7a`（分支 `oc/orch-s7a`，基 `5625f6f`）。每条变异就地改，跑单个测试，
+再从 `.radian/scratch/mut/` 的副本 `cp` 还原并 `cmp` 确认；跑完 `git status --short` 只剩源码改动。跑法
+（`timeout` 包裹，`--no-fail-fast`）：
+
+```sh
+cargo test -p radian-host --test task --no-fail-fast -- <下面的测试名>
+```
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| RF1-1 | `open_session` 不把 `tools_allow` 交给 `HostTools`（`with_tool_allow(tools_allow)` 去掉，只剩权限层 deny） | ✅ failed | `a_tools_allow_list_unmounts_the_unlisted_built_ins`（工具规格变成全部内置工具：`ask_user, git_commit, … write`，`<runtime>` 也列出 `write`；模型脚本里对 `write` 的调用变成 `no tool named`） |
+| RF1-2 | `open_session` 忽略 `skills_allow`（`Some(_) => discovery.skills`，不过滤目录） | ✅ failed | `a_skills_allow_list_keeps_only_the_named_skills`（目录里出现 `s7a-two, diagrams, theme-import`，不止名单里的 `s7a-one`） |
+| RF1-3 | 注册表不计算缺失技能名（`let warnings: Vec<String> = Vec::new();`，丢掉了「未找到的技能名」警告） | ✅ failed | `an_unknown_skill_name_is_a_spawn_warning_not_a_failure`（`record.warnings` 为空） |
+
+3/3 抓住。
+
+**`git_commit` 的处理（如实记录）**：`git_commit` 是允许名单宇宙里的一个内置工具（`builtin_tool_names`），
+本片早先已按名单 deny 它。卸载因此也把它卸掉：`tools: [read, list]` 的任务工具规格恰好是 `list, read`，
+`git_commit` 不在其中。O3 的收尾提交由宿主自己完成，不需要任务挂 `git_commit`。
+## orch-s6b（2026-10-16，ADR 0030 切片 6 b1）：max_tasks 队列、heavy 门、stall
+
+Base：本文件所在分支 `oc/orch-s6b`（在 origin/main + 切片 6a 之上）。变异就地施加：源文件先复制到
+`.radian/scratch/mut/`，改完跑一条命名的测试，再从副本还原并用 `diff -q` 确认字节一致（本仓库禁用
+`git checkout --`）。每条 `cargo test ... <test> --no-fail-fast -- --exact`。驱动脚本
+`.radian/scratch/mutate.py`（不提交）。
+
+| # | 变异的需求 | 变异 | 结果 | 抓住它的测试（rc=101） |
+|---|---|---|---|---|
+| S6B-1 | `max_tasks` 是硬上限（超过就排队） | `TaskRegistry::submit` 的上限判断改成 `if true`，永远 `spawn` | ✅ 8.8s | `spawn_past_max_tasks_queues_fifo_and_starts_when_a_slot_frees`（builder seam 断言 live 超过 max_tasks） |
+| S6B-2 | 队列 FIFO | `dispatch` 把 `pop_front` 换成 `pop_back` | ✅ 35.2s | `spawn_past_max_tasks_queues_fifo_and_starts_when_a_slot_frees`（先起 t4；t3 永不开始，`wait_until` 超时） |
+| S6B-5 | stall 每个 episode 只发一次 | `check_stalls` 忽略 `stall_active`，每次检查都推通知 | ✅ 6.9s | `the_stall_fires_once_clears_on_activity_and_fires_again`（第二次 `check_stalls()` 返回 1 而非 0） |
+| S6B-6 | stall 从不干预（不取消任务） | `check_stalls` 发通知后加 `session.command(Cancel)` | ✅ 1.7s | `the_stall_fires_once_clears_on_activity_and_fires_again`（第二次检查后 `last_outcome()` 变成 `Some`） |
+
+4/4 抓住。heavy 门的两条变异（忽略取消、非重活也占槽）记录在
+`crates/radian-coding/MUTATIONS.md`：SC-1、SC-2，均被 `tests/heavy.rs` 抓住。
+
+### orch-s6b review fix 2（2026-10-16）：每个 task 恰好写一条 `TaskFinished`
+
+修的是切片 6b2 review 发现的注册表 bug：`TaskFinished` 原来只在收尾提交**失败**时写（`schedule_commit`
+里的 `if let EndCommit::Failed`），所以正常结束的 task 在 lead 的 journal 里是 `TaskSpawned` 无
+`TaskFinished`，resume 时全被当成 `unknown_after_crash`，TUI 的 task 计数也永不下降。
+
+Base：`oc/orch-s6b`（fix 1 之后）。变异就地改 `crates/radian-host/src/task.rs`，改完从
+`.radian/scratch/mut/task.rs` 副本还原并 `diff -q` 确认字节一致；结束时 `git status --short` 只剩
+`task.rs` 与 `tests/task.rs`。脚本 `.radian/scratch/mutate-fix2.py`（不提交）。每条
+`cargo test -p radian-host --test task <test> --no-fail-fast -- --exact`。
+
+| # | 变异的需求 | 变异 | 结果 | 抓住它的测试（rc=101） |
+|---|---|---|---|---|
+| S6B-F2-1 | 正常结束也要写一条 `TaskFinished`（不止失败时） | 回到今天的代码：只在 `error.is_some()` 时调 `write_finished` | ✅ 41.5s | `a_normal_worktree_end_writes_one_finished_after_git_committed`（等 `TaskFinished` 超时 30s 后 panic） |
+| S6B-F2-2 | `TaskFinished` 写在收尾提交**之后** | 在 `spawn_blocking` 收尾提交之前就调一次 `write_finished` | ✅ 6.5s | 同上（提交还被 `CommitGate` 卡住时 lead 日志里已出现 `TaskFinished`，`is_empty()` 断言失败） |
+| S6B-F2-3 | 正常结束后 `remove` 不再写第二条 | 去掉 `write_finished` 的 once-only 守卫，并把 `remove` 的 `if end.is_none()` 改成 `if true` | ✅ 4.5s | `a_second_turn_and_a_later_remove_add_no_finished`（remove 后又写一条 `cancelled`，计数 2） |
+| S6B-F2-4 | `kill` 在任何 turn 结束前也要写一条 `cancelled` | 删掉 `kill` 里的 `if end.is_none() { write_finished(Cancelled) }` | ✅ 3.9s | `a_task_killed_before_end_writes_one_cancelled_finished`（`kill` 后一条都没有） |
+
+4/4 抓住（F2-1..3 在 fix 提交上跑过一次，合并 origin/main 后连同 `kill` 的 F2-4 重跑，四条都抓住）。F2-3 需两处一起改才可观测：只把 `remove` 的条件改成恒真，once-only 守卫仍会拦下第二条，所以真正的不变量在守卫；变异记录两者一起改，如实写明。
+
+**归一执行的语义**：`schedule_commit` 现在对 worktree 与 `shared` 都跑（`shared`/无仓库只是
+`EndCommit::None`），在收尾提交（含 `GitCommitted` 审计）之后写那一条 `TaskFinished`，并调 host 的
+notifier（ADR 0030 O10，TUI 的 `TaskFinished` 通知行与 task 计数读它）；`remove` 与 `kill` 在没有
+turn 结束（state 仍 `Idle`）时各补一条 `cancelled`。`TaskFinisher::finished` 的 `AtomicBool`
+保证每 task 至多一条；第二个 turn 结束因为 `CommitState != Idle` 直接返回，也不会写第二条
+（ADR 0030 O3：一个 task 一个 turn）。
+
+## ADR 0028: radian's own layered flowchart layout (2026-10-16)
+
+Worktree `.radian-worktrees/build-script`, branch `dogfood/mermaid-layout`. Each mutation is
+applied in place by `.radian/scratch/mutate.py` (it asserts the anchor occurs the expected number
+of times, so a `cargo fmt` shift or a no-op patch fails loudly instead of passing as "caught"),
+the suite runs with `--no-fail-fast`, and the file is restored with a plain `cp` and `cmp`ed byte
+for byte (drivers: `.radian/scratch/mutate-layout{,2,3,4,5}.sh`). `git status --short` held only the
+source and test files at the end.
+
+| # | Requirement mutated | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| L1 | decision 3: an adjacent edge leaves the **middle** of a box (`mermaid_layout.rs::adjacent_edge`) | `let source = from.centre();` → `from.across_end()` | `the_owner_chain_is_a_centred_column_of_three_row_boxes` (the fork's `┴` is off the box's middle, so the connector is no longer one column), `a_diamond_splits_and_joins_on_the_bus_rows`, `an_lr_chain_is_the_same_drawing_turned`, `a_back_edge_wraps_outside_the_canvas`, `the_width_decides_between_the_vendored_reason_and_the_drawing` | ✅ 5 failed |
+| L2 | decision 3: a box is **one row high**, not port-counted | `plan`: the vertical `along_size` back to the vendor's rule (`3 + ports`) | `the_owner_chain_...` (`bottom - top == 2`), `a_diamond_...`, `a_back_edge_...` | ✅ 3 failed |
+| L3 | decision 3: every layer is **centred** in the canvas | `place`: `let mut across = (canvas - layer_across[index]) / 2;` → `0` | `the_owner_chain_...` (the layer's left is not `(canvas - extent) / 2`), `a_diamond_...`, `a_back_edge_...` | ✅ 3 failed |
+| L4 | decision 3: a back edge leaves a box's **side** and wraps **outside** the canvas | `channel_edge`: `let out = (from.across_end(), from.mid_along());` → `(from.centre(), ...)`, so the run starts inside the box | `a_back_edge_wraps_outside_the_canvas` (the route is refused, the diagram becomes the vendor's) and `accepts_the_same_samples_as_the_vendored_renderer` | ✅ 2 failed |
+| L5 | decision 4: a refusal goes to the **vendored renderer**, not an error | `mermaid.rs::render_spans`: the fallback call → `Err(RenderError::Unsupported)` | `a_diagram_the_layout_refuses_is_the_vendored_render_byte_for_byte`, `accepts_the_same_samples_as_the_vendored_renderer`, `the_width_decides_...` | ✅ 3 failed |
+| L6a | decision 5 / ADR 0029: an edge's label keeps the **edge** role (vertical layout) | `adjacent_edge`: the TD label's `Role::Edge` → `Role::Text` | `the_layout_emits_only_the_three_roles` (`role_of("yes")`) | ✅ 1 failed |
+| L6b | the same, horizontal layout | the LR label's `Role::Edge` → `Role::Text` | `the_diagram_roles_come_from_the_theme` (radian-tui) | ✅ 1 failed |
+| L7 | two edges of one gap that would **cross** are refused | `draw`: `bus_rows_are_clear(graph, plan)?;` removed | `a_diagram_the_layout_refuses_is_the_vendored_render_byte_for_byte` (the crossing sample is drawn instead of falling back) | ✅ 1 failed |
+| L8 | a wide character's second cell carries nothing (ADR 0028 R9) | `spans`: `Screen::Covered => continue` → an `Edge` space | `a_cjk_label_is_sized_by_display_width` (the label row is wider than its box) | ✅ 1 failed |
+| L9 | a stadium's corners are rounded (decision 3) *and* turned with the layout | `round_corners`: `round_glyph(screen_bits(cell.bits, flow))` → `round_glyph(cell.bits)` | `a_stadium_keeps_its_corners_rounded` (the `LR` golden gets `╭`/`╰` in the wrong corners) | ✅ 1 failed |
+
+9 mutations, 9 caught.
+
+**An equivalent mutant, honestly recorded (the ADR's "回边穿过框")**: "a back edge crosses a box"
+is defended **twice** — the route's freedom pre-check (`channel_edge`'s `grid.free` loop) and the
+grid's own refusal to draw over text or an arrowhead (`Grid::wire`/`Grid::arrow`). Removing
+either one alone changes no output on any sample: the first round of this check removed the
+`grid.free` pre-checks (`mutate-layout.sh` M4) and the whole suite stayed green, because the
+route is stopped by the label text of the box in its way. L4 is the observable form of the same
+requirement: the route then starts inside the box, the layout refuses it, and the back-edge
+snapshot sees the vendor's drawing instead of the layout's.
 ## ADR 0030 片 6b2：宿主的真任务 builder（2026-10-16）
 
 Base `2f41f69` · 在 worktree 内直接改文件、跑单个测试、再从 `.radian/scratch/mut/` 的副本

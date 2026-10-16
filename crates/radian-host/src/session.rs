@@ -408,6 +408,14 @@ pub struct SessionSetup {
     pub skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     pub skills_disabled: Vec<String>,
+    /// ADR 0030 O11: the agent definition's built-in tool allow-list. `None` mounts every
+    /// built-in the host has; `Some` mounts only the named ones ("not in the list is not
+    /// mounted"). MCP tools are not in this universe — [`SessionSetup::servers`] governs them.
+    pub tools_allow: Option<Vec<String>>,
+    /// ADR 0030 O11: the agent definition's `skills` allow-list. `None` loads every discovered
+    /// skill (today's behaviour); `Some` keeps only the named ones in the catalog, and a name
+    /// discovery did not find is reported at spawn, never a failure.
+    pub skills_allow: Option<Vec<String>>,
     /// The memory injection configuration (ADR 0021). The host builds it
     /// from `[memory.injection]`; `InjectionConfig::default()` is the documented D6 table.
     pub memory_injection: InjectionConfig,
@@ -1126,6 +1134,8 @@ pub async fn open_session(
         skills_extra_paths,
         skills_builtin,
         skills_disabled,
+        tools_allow,
+        skills_allow,
         memory_injection,
         trust,
         resume,
@@ -1180,12 +1190,9 @@ pub async fn open_session(
     // `<sessions_dir>/<session-id>.jobs/`. It is a sibling of the session file, so the
     // sandbox's deny-read rule on the sessions directory covers it.
     let jobs_dir = session_dir.join(format!("{}.jobs", session_id.as_str()));
-    let (coding, jobs) = build_coding_tools(
-        coding_root.as_deref(),
-        sandbox_slot.clone(),
-        &jobs_dir,
-        shell_auto_background,
-    )?;
+    // ADR 0030 O8: the coding tools (and so `shell`) are built **after** the lead registry
+    // below, once the registry has installed the process heavy gate, so every session's shell
+    // reads the configured gate (see the registry block).
     // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
     // there are coding tools. It is its own provider, so a host without `--workspace` still
     // advertises it. `None` is what the model sees as "no such tool".
@@ -1302,6 +1309,17 @@ pub async fn open_session(
         None
     };
 
+    // ADR 0030 O8: the built-in coding tools are built here, after the registry has installed
+    // the process heavy gate, so this session's `shell` (the lead's, and every task's through
+    // its own `open_session`) queues on the same slots. The registry resolves the process gate
+    // at construction; [`radian_coding::HeavySlots::process`] then returns it for every session.
+    let (coding, jobs) = build_coding_tools(
+        coding_root.as_deref(),
+        sandbox_slot.clone(),
+        &jobs_dir,
+        shell_auto_background,
+    )?;
+
     // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line
     // prompt answers them directly. A task agent routes to its own task approver (ADR 0030
     // slice 5), which is the one case a non-human turn may reach the approver.
@@ -1343,7 +1361,13 @@ pub async fn open_session(
         for warning in &discovery.warnings {
             memory_warning(warning);
         }
-        discovery.skills
+        // ADR 0030 O11: an agent definition's `skills` list is the allow-list for this session's
+        // catalog. `None` is every discovered skill (the lead and an undefined task). The
+        // missing-name warning is reported at spawn by the registry, not here.
+        match &skills_allow {
+            Some(allow) => skills::restrict_to(discovery.skills, allow),
+            None => discovery.skills,
+        }
     };
     let shared_skills = Arc::new(skills);
     let skills_hooks = Arc::new(SkillsHooks::new(&shared_skills));
@@ -1369,7 +1393,8 @@ pub async fn open_session(
                 allowed_filters.unwrap_or_else(crate::git_commit::default_allowed_filters),
             )
     });
-    let mut tools = HostTools::new(coding, memory_tools, mcp.clone(), git_commit);
+    let mut tools =
+        HostTools::new(coding, memory_tools, mcp.clone(), git_commit).with_tool_allow(tools_allow);
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
         tools = tools.with_ask(ask);
@@ -1883,7 +1908,7 @@ mod tests {
         );
 
         let info = jobs
-            .start(&full_access(&ws), &ws, "echo hi", None)
+            .start(&full_access(&ws), &ws, "echo hi", None, None)
             .expect("start the job");
         let output = jobs.output_path(&info.id);
         assert!(output.starts_with(&jobs_dir), "{}", output.display());

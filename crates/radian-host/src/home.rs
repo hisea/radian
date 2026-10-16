@@ -67,6 +67,11 @@ pub fn skills_dir_for(root: &Path) -> PathBuf {
 pub fn trust_dir_for(root: &Path) -> PathBuf {
     root.join("trust")
 }
+/// The agent-definition directory (ADR 0030 O11): `~/.radian/agents`. Agent-definition files
+/// are user configuration, read by the host at session start.
+pub fn agents_dir_for(root: &Path) -> PathBuf {
+    root.join("agents")
+}
 /// The task agents' worktree root (ADR 0039 decision 4): `<radian-home>/worktrees`. Each
 /// repository gets its own directory below it; the registry appends the repo key.
 pub fn worktrees_dir_for(root: &Path) -> PathBuf {
@@ -134,6 +139,12 @@ pub fn themes_dir() -> Option<PathBuf> {
 /// by shell inside the sandbox, so the directory is not on the deny-read list.
 pub fn skills_dir() -> Option<PathBuf> {
     Some(private(skills_dir_for(&radian_home()?)))
+}
+
+/// The agent-definition directory for this process, created 0700. Sandbox-readable: a
+/// definition's body is read by the host and becomes the model's layer-1 prompt, like config.
+pub fn agents_dir() -> Option<PathBuf> {
+    Some(private(agents_dir_for(&radian_home()?)))
 }
 
 /// The trust directory for this process, created 0700. **Sandbox-denied** (ADR 0031 T2): it

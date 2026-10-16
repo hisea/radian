@@ -1105,7 +1105,28 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         let reasoning_effort = reasoning_effort.clone();
         let reasoning_replay = reasoning_replay.clone();
         std::sync::Arc::new(
-            move |session_id: &str, slot: std::sync::Arc<radian_runtime::ConfigSlot>| {
+            move |session_id: &str,
+                  slot: std::sync::Arc<radian_runtime::ConfigSlot>,
+                  agent: Option<&radian_host::SpawnAgent>| {
+                // ADR 0030 O11: an agent definition's `model` and `thinking` are the task's
+                // route and level. The route's credential is resolved here the same way a
+                // `/model` switch resolves it — never copied into the snapshot.
+                if let Some(route) = agent.and_then(|agent| agent.model.clone()) {
+                    let ctx = radian_host::RouteContext {
+                        providers: providers.clone(),
+                        session_id: session_id.to_owned(),
+                        user_headers: user_headers.clone(),
+                        include_usage,
+                        max_tokens,
+                        thinking: agent
+                            .and_then(|agent| agent.thinking.clone())
+                            .unwrap_or_else(|| route_thinking.clone()),
+                        thinking_budget,
+                    };
+                    let args = ctx.args_for(&route.provider, &route.model)?;
+                    let initial = build_model(args).map_err(|error| error.to_string())?;
+                    return Ok(radian_host::SwitchableModel::new(initial, route, slot, ctx));
+                }
                 let initial = build_model(ModelArgs {
                     provider,
                     base_url: base_url.clone(),
@@ -1735,6 +1756,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         session_dir: sessions_for_deny.clone(),
         model: setup.task_model.clone(),
         route: setup.route.clone(),
+        servers: setup.servers.clone(),
         sandbox: sandbox.clone(),
         sandbox_deny_read: sandbox_deny_read.clone(),
         allow_unix_sockets: setup.allow_unix_sockets.clone(),
@@ -1801,6 +1823,10 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             skills_extra_paths: setup.skills_extra_paths,
             skills_builtin: setup.skills_builtin,
             skills_disabled: setup.skills_disabled,
+            // A lead session is not an agent definition (ADR 0030 O11): no built-in tool
+            // allow-list and no skills allow-list.
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: setup.memory_injection,
             trust: trust_setup,
             resume: cli.resume.is_some(),

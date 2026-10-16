@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use agent_core::{NoopSink, TurnOptions};
+use agent_core::{NoopSink, ToolCall, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use radian_host::{
     CommitGate, HostBindings, Isolation, LocalSession, SessionError, SessionFacade, SessionId,
@@ -125,6 +125,7 @@ fn model(
     session_id: &str,
     base_url: &str,
     slot: Arc<radian_runtime::ConfigSlot>,
+    route: Option<radian_host::ModelRoute>,
 ) -> radian_host::SwitchableModel {
     let model = build_model(radian_host::ModelArgs {
         provider: radian_host::Provider::OpenAiCompatible,
@@ -139,9 +140,13 @@ fn model(
         reasoning_replay: None,
     })
     .unwrap();
+    // ADR 0030 O11: a definition's `model` becomes the session's initial route. A real host
+    // resolves credentials from that route; the test's mock server answers either way.
+    let initial =
+        route.unwrap_or_else(|| radian_host::ModelRoute::new("openai-compatible", "mock"));
     radian_host::SwitchableModel::new(
         model,
-        radian_host::ModelRoute::new("openai-compatible", "mock"),
+        initial,
         slot,
         radian_host::RouteContext {
             providers: std::collections::BTreeMap::new(),
@@ -162,7 +167,16 @@ fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> T
         move |ctx: &TaskContext<'_>| -> Result<TaskSession, SessionError> {
             let workspace = ctx.workspace.to_path_buf();
             let fail = |error: String| SessionError::Message(error);
-            let slot = radian_runtime::ConfigSlot::new(Value::Null);
+            // ADR 0030 O11: the definition's route is the session's route. A real host builds the
+            // provider from it; the test's mock model answers either way, and the slot carries
+            // the route so `model_route()` reflects it.
+            let route = ctx.agent.and_then(|agent| agent.model.clone());
+            let slot = radian_runtime::ConfigSlot::new(
+                route
+                    .as_ref()
+                    .map(radian_host::ModelRoute::to_value)
+                    .unwrap_or(Value::Null),
+            );
             let stopped = Arc::clone(&stops);
             let session_id = ctx.session_id.to_owned();
             let (sandbox, tier, profile) = match ctx.isolation {
@@ -190,7 +204,7 @@ fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> T
                     session_dir: session_dir.clone(),
                     workspace: workspace.clone(),
                     coding_root: Some(workspace.clone()),
-                    model: model(ctx.session_id, &base_url, Arc::clone(&slot)),
+                    model: model(ctx.session_id, &base_url, Arc::clone(&slot), route),
                     config_slot: slot,
                     config_queue: radian_runtime::ConfigQueue::new(),
                     budget_for: None,
@@ -218,6 +232,8 @@ fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> T
                     skills_extra_paths: Vec::new(),
                     skills_builtin: true,
                     skills_disabled: Vec::new(),
+                    tools_allow: None,
+                    skills_allow: None,
                     memory_injection: radian_host::memory::InjectionConfig::default(),
                     trust: radian_host::trust::Setup::untrusted(&workspace, false),
                     resume: false,
@@ -503,7 +519,7 @@ async fn the_task_sandbox_turns_the_network_off() {
 async fn shared_isolation_is_the_lead_workspace_and_safe() {
     let fixture = Fixture::new("shared", "http://127.0.0.1:1/v1");
     let mut request = SpawnRequest::new("t1");
-    request.isolation = Isolation::Shared;
+    request.isolation = Some(Isolation::Shared);
     let record = fixture.registry.spawn(request).await.expect("spawn");
 
     assert_eq!(record.isolation, Isolation::Shared);
@@ -576,7 +592,7 @@ async fn a_shared_task_writes_no_end_commit() {
     std::fs::write(fixture.lead.join("user-work.txt"), "the user's change\n").unwrap();
 
     let mut request = SpawnRequest::new("t1");
-    request.isolation = Isolation::Shared;
+    request.isolation = Some(Isolation::Shared);
     request.brief = Some("look around".to_owned());
     let record = fixture.registry.spawn(request).await.expect("spawn");
 
@@ -784,7 +800,7 @@ async fn open_plain(
 ) -> Arc<LocalSession> {
     let slot = radian_runtime::ConfigSlot::new(Value::Null);
     let session_id = if task_agent { "task" } else { "general" };
-    let model = model(session_id, base_url, Arc::clone(&slot));
+    let model = model(session_id, base_url, Arc::clone(&slot), None);
     let session = open_session(
         SessionSetup {
             session_id: SessionId::new(session_id),
@@ -821,6 +837,8 @@ async fn open_plain(
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
             skills_disabled: Vec::new(),
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
             trust: radian_host::trust::Setup::untrusted(repo, false),
             resume: false,
@@ -1545,4 +1563,813 @@ async fn a_failing_end_commit_shows_in_task_finished() {
         .remove("t1", true)
         .await
         .expect("force remove");
+}
+
+// ---------------------------------------------------------------------------
+// Agent definitions (ADR 0030 O11, slice 7 part a)
+// ---------------------------------------------------------------------------
+
+/// Writes one user-level agent definition (`$RADIAN_HOME/agents/<name>.md`).
+fn write_agent(home: &Path, name: &str, text: &str) -> PathBuf {
+    let dir = home.join("agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.md"));
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// Writes one user-level skill (`$RADIAN_HOME/skills/<name>/SKILL.md`) so a task's catalog has
+/// something the definition's `skills` list can name (ADR 0025 / ADR 0030 O11).
+fn write_skill(home: &Path, name: &str, description: &str) -> PathBuf {
+    let dir = home.join("skills").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("SKILL.md");
+    std::fs::write(
+        &path,
+        format!("---\nname: {name}\ndescription: {description}\n---\nBody.\n"),
+    )
+    .unwrap();
+    path
+}
+
+fn agent_tool_call(name: &str) -> ToolCall {
+    ToolCall {
+        id: "c1".into(),
+        name: name.into(),
+        arguments: json!({}),
+    }
+}
+
+/// The system message of the `n`th request the mock saw.
+fn system_prompt(server: &MockServer, n: usize) -> String {
+    server.requests()[n].json()["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The text of the tool result for `call_id` in the `n`-th recorded request.
+fn tool_result(server: &MockServer, n: usize, call_id: &str) -> String {
+    server.requests()[n].json()["messages"]
+        .as_array()
+        .map(|messages| {
+            messages
+                .iter()
+                .filter(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
+                .filter_map(|message| message["content"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// [`Reply`] with one assistant text then `stop`.
+fn a_text_reply(text: &str) -> Reply {
+    Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": text}), None),
+        chunk(json!({}), Some("stop")),
+    ])
+}
+
+/// `spawn_task { agent }` resolves the definition and snapshots it; the spawn arguments override
+/// the definition's fields (ADR 0030 O4/O11).
+#[tokio::test]
+async fn a_spawn_resolves_the_agent_definition_and_the_spawn_arguments_override_it() {
+    let fixture = Fixture::new("agent-def", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    write_agent(
+        &fixture.home,
+        "writer-def",
+        "---\nname: writer-def\nmodel: opencode-go/one\nprofile: safe\nspawn: true\n---\nBODY\n",
+    );
+
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("writer-def".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    assert_eq!(record.agent, "writer-def");
+    assert!(record.spawn_ignored, "spawn: true is ignored for a task");
+    assert_eq!(
+        record.session.model_route(),
+        Some(("opencode-go".to_owned(), "one".to_owned())),
+        "the definition's model is the session's route"
+    );
+    assert_eq!(
+        record.session.hooks().profile().preset,
+        Preset::Safe,
+        "the definition's profile narrows the task"
+    );
+
+    // The spawn arguments win over the definition.
+    let mut request = SpawnRequest::new("t2");
+    request.agent = Some("writer-def".to_owned());
+    request.model = Some("anthropic/two".to_owned());
+    request.profile = Some("workspace".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    assert_eq!(
+        record.session.model_route(),
+        Some(("anthropic".to_owned(), "two".to_owned()))
+    );
+    assert_eq!(
+        record.session.hooks().profile().preset,
+        Preset::WorkspaceWrite
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    fixture.registry.remove("t2", true).await.expect("remove");
+    let _ = std::fs::remove_file(fixture.home.join("agents/writer-def.md"));
+}
+
+/// The `tools` allow-list narrows the task (built-ins it does not name are denied) and can never
+/// widen a tier: a `safe` task that lists `shell` still has no shell (ADR 0030 problem 7 = A).
+#[tokio::test]
+async fn a_tools_allow_list_can_only_narrow() {
+    let fixture = Fixture::new("agent-tools", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    write_agent(
+        &fixture.home,
+        "reader",
+        "---\nname: reader\ntools: [read, list]\n---\nBODY\n",
+    );
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("reader".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    let profile = record.session.hooks().profile();
+    let action = |name: &str| {
+        radian_permissions::evaluate(profile.rules(), &profile.workspace, &agent_tool_call(name))
+            .action
+    };
+    assert_eq!(action("read"), radian_permissions::Action::Allow);
+    assert_eq!(action("list"), radian_permissions::Action::Allow);
+    assert_eq!(action("write"), radian_permissions::Action::Deny);
+    assert_eq!(action("shell"), radian_permissions::Action::Deny);
+
+    // A `safe` task that lists `shell` keeps the tier's deny: the allow-list cannot widen.
+    write_agent(
+        &fixture.home,
+        "safer",
+        "---\nname: safer\nprofile: safe\ntools: [read, shell]\n---\nBODY\n",
+    );
+    let mut request = SpawnRequest::new("t2");
+    request.agent = Some("safer".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    assert!(
+        record.sandbox_policy.is_none(),
+        "a safe task has no sandbox (the profile denies shell)"
+    );
+    let profile = record.session.hooks().profile();
+    let action = |name: &str| {
+        radian_permissions::evaluate(profile.rules(), &profile.workspace, &agent_tool_call(name))
+            .action
+    };
+    assert_eq!(action("read"), radian_permissions::Action::Allow);
+    assert_eq!(action("shell"), radian_permissions::Action::Deny);
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    fixture.registry.remove("t2", true).await.expect("remove");
+    let _ = std::fs::remove_file(fixture.home.join("agents/reader.md"));
+    let _ = std::fs::remove_file(fixture.home.join("agents/safer.md"));
+}
+
+/// ADR 0030 O11 / problem 7 = A: the `tools` allow-list is a **physical unmount**, not only a
+/// permission deny. A task with `tools: [read, list]` advertises exactly those built-ins to the
+/// model and lists exactly those in its `<runtime>` layer; a call to `write` is an unknown tool
+/// and executes nothing. `git_commit` is a built-in like any other — the end-of-task commit is
+/// host-side and needs no tool — so a list that omits it unmounts it too. The permission `deny`
+/// the registry also installs stays beneath the unmount (defence in depth).
+#[tokio::test]
+async fn a_tools_allow_list_unmounts_the_unlisted_built_ins() {
+    // The model's first call is `write`, which the allow-list must have unmounted.
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                    "function": {"name": "write", "arguments": "{\"path\":\"made.txt\",\"content\":\"x\\n\"}"}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ]),
+        a_text_reply("done"),
+    ])
+    .await;
+    let fixture = Fixture::new("agent-unmount", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    write_agent(
+        &fixture.home,
+        "unmount-reader",
+        "---\nname: unmount-reader\ntools: [read, list]\n---\nBODY\n",
+    );
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("unmount-reader".to_owned());
+    request.brief = Some("go".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    let worktree = record.worktree.clone().expect("a worktree");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while server.requests().len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn did not finish"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // The tool specs the model actually received: exactly the allow-list.
+    let mut tools: Vec<String> = server.requests()[0].json()["tools"]
+        .as_array()
+        .expect("the request carries a tools array")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+        .collect();
+    tools.sort();
+    assert_eq!(
+        tools,
+        ["list", "read"],
+        "only the allow-listed built-ins are mounted"
+    );
+
+    // Layer 0a lists what is mounted and nothing else.
+    let system = system_prompt(&server, 0);
+    assert!(system.contains("- read:"), "{system}");
+    assert!(system.contains("- list:"), "{system}");
+    assert!(
+        !system.contains("- write:"),
+        "an unmounted built-in must not be in <runtime>: {system}"
+    );
+
+    // Calling the unmounted tool is an unknown tool: it ran nothing and wrote no file.
+    let result = tool_result(&server, 1, "c1");
+    assert!(
+        result.contains("no tool named") && result.contains("write"),
+        "{result}"
+    );
+    assert!(
+        !worktree.join("made.txt").exists(),
+        "an unmounted tool must not run"
+    );
+
+    // The deny rules are kept as defence in depth beside the unmount.
+    let profile = record.session.hooks().profile();
+    let action = |name: &str| {
+        radian_permissions::evaluate(profile.rules(), &profile.workspace, &agent_tool_call(name))
+            .action
+    };
+    assert_eq!(action("read"), radian_permissions::Action::Allow);
+    assert_eq!(action("write"), radian_permissions::Action::Deny);
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    let _ = std::fs::remove_file(fixture.home.join("agents/unmount-reader.md"));
+}
+
+/// ADR 0030 O11: a definition's `skills` list is the task's skill catalog — every other
+/// discovered skill is dropped. Other tasks and the lead keep all of them (absent = all).
+#[tokio::test]
+async fn a_skills_allow_list_keeps_only_the_named_skills() {
+    let fixture = Fixture::new("agent-skills", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let one = write_skill(&fixture.home, "s7a-one", "One.");
+    let two = write_skill(&fixture.home, "s7a-two", "Two.");
+    write_agent(
+        &fixture.home,
+        "skills-reader",
+        "---\nname: skills-reader\nskills: [s7a-one]\n---\nBODY\n",
+    );
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("skills-reader".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+
+    let names: Vec<&str> = record
+        .session
+        .skills()
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["s7a-one"],
+        "only the allow-listed skill is in the task's catalog"
+    );
+
+    // A task without a `skills` list still sees every discovered skill (absent = all).
+    let mut request = SpawnRequest::new("t2");
+    request.agent = Some("skills-none".to_owned());
+    write_agent(
+        &fixture.home,
+        "skills-none",
+        "---\nname: skills-none\n---\nBODY\n",
+    );
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    let names: Vec<&str> = record
+        .session
+        .skills()
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"s7a-one") && names.contains(&"s7a-two"),
+        "{names:?}"
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    fixture.registry.remove("t2", true).await.expect("remove");
+    let _ = std::fs::remove_file(one);
+    let _ = std::fs::remove_file(two);
+    let _ = std::fs::remove_file(fixture.home.join("agents/skills-reader.md"));
+    let _ = std::fs::remove_file(fixture.home.join("agents/skills-none.md"));
+}
+
+/// ADR 0030 O11: a `skills` name that does not exist is a spawn-time warning in the result, not
+/// a failure. The task opens, its catalog excludes the name, and the missing name is reported.
+#[tokio::test]
+async fn an_unknown_skill_name_is_a_spawn_warning_not_a_failure() {
+    let fixture = Fixture::new("agent-skill-missing", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    write_agent(
+        &fixture.home,
+        "missing-reader",
+        "---\nname: missing-reader\nskills: [s7a-nope]\n---\nBODY\n",
+    );
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("missing-reader".to_owned());
+    let record = fixture
+        .registry
+        .spawn(request)
+        .await
+        .expect("the spawn succeeds");
+
+    assert!(
+        record.warnings.iter().any(|w| w.contains("s7a-nope")),
+        "the missing skill is a warning: {:?}",
+        record.warnings
+    );
+    assert!(
+        !record
+            .session
+            .skills()
+            .iter()
+            .any(|skill| skill.name == "s7a-nope"),
+        "a missing skill is never invented"
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    let _ = std::fs::remove_file(fixture.home.join("agents/missing-reader.md"));
+}
+
+/// Only the user level is read (a project-level definition is not, this slice): a definition
+/// that exists only in the lead's workspace is not found.
+#[tokio::test]
+async fn a_project_level_definition_is_not_read() {
+    let fixture = Fixture::new("agent-project", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let dir = fixture.lead.join(".radian/agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("proj.md"), "---\nname: proj\n---\nBODY\n").unwrap();
+
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("proj".to_owned());
+    let error = match fixture.registry.spawn(request).await {
+        Ok(_) => panic!("a project-level definition is not read"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("proj"), "{error}");
+}
+
+/// The task worktree for `id` under the isolated home. The repo key is opaque to a test, so it
+/// scans the single `worktrees/<repo-key>/` directory.
+fn task_worktree(home: &Path, id: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(home.join("worktrees")).ok()? {
+        let candidate = entry.ok()?.path().join(id);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// The definition is snapshotted at spawn: a change to the file **after** the definition was
+/// resolved (here, at the registry's `Builder` seam) does not move the running task's body or
+/// its route (ADR 0030 item 4).
+#[tokio::test]
+async fn a_definition_is_snapshotted_at_spawn() {
+    let server = MockServer::start(vec![a_text_reply("done")]).await;
+    let home = isolated_home();
+    let path = write_agent(
+        &home,
+        "snap-seam",
+        "---\nname: snap-seam\nmodel: opencode-go/old\n---\nOLD BODY\n",
+    );
+    // The registry resolves the definition before the `Builder` seam; the hook rewrites the file
+    // there, so any later re-read (enforce or session open) would see the new text.
+    let edit = path.clone();
+    let seam = Arc::new(move |stage: SpawnStage| {
+        if stage == SpawnStage::Builder {
+            std::fs::write(
+                &edit,
+                "---\nname: snap-seam\nmodel: opencode-go/new\n---\nNEW BODY\n",
+            )
+            .unwrap();
+        }
+        Ok(())
+    });
+    let fixture = Fixture::with_seams(
+        "agent-snap",
+        &server.base_url,
+        TaskSeams {
+            spawn: Some(seam),
+            commit_gate: None,
+        },
+    );
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("snap-seam".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    record
+        .session
+        .inbox()
+        .followup(
+            agent_core::Message::user("go"),
+            agent_core::InputSource::Subagent,
+        )
+        .await
+        .expect("the brief");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while server.requests().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no model request");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        record.session.model_route(),
+        Some(("opencode-go".to_owned(), "old".to_owned())),
+        "the route is the snapshot, not the edited file"
+    );
+    let system = system_prompt(&server, 0);
+    assert!(system.contains("OLD BODY"), "{system}");
+    assert!(!system.contains("NEW BODY"), "{system}");
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    let _ = std::fs::remove_file(home.join("agents/snap-seam.md"));
+}
+
+/// A definition with the same name inside the task's **own worktree** is never read: the session
+/// takes the lead-time snapshot, and the worktree is a checkout the task can write (ADR 0030
+/// revision 2 item 4).
+#[tokio::test]
+async fn a_definition_in_the_task_worktree_is_not_read() {
+    let server = MockServer::start(vec![a_text_reply("done")]).await;
+    let home = isolated_home();
+    write_agent(&home, "wt-seam", "---\nname: wt-seam\n---\nSNAPSHOT BODY\n");
+    // The worktree exists by the `Builder` seam; plant a different definition of the same name
+    // there, so a worktree read at enforce or session open would pick it up.
+    let plant = home.clone();
+    let seam = Arc::new(move |stage: SpawnStage| {
+        if stage == SpawnStage::Builder {
+            let worktree = task_worktree(&plant, "t1").expect("the worktree exists by Builder");
+            let dir = worktree.join(".radian/agents");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("wt-seam.md"),
+                "---\nname: wt-seam\n---\nWORKTREE BODY\n",
+            )
+            .unwrap();
+        }
+        Ok(())
+    });
+    let fixture = Fixture::with_seams(
+        "agent-wt",
+        &server.base_url,
+        TaskSeams {
+            spawn: Some(seam),
+            commit_gate: None,
+        },
+    );
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("wt-seam".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    record
+        .session
+        .inbox()
+        .followup(
+            agent_core::Message::user("go"),
+            agent_core::InputSource::Subagent,
+        )
+        .await
+        .expect("the brief");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while server.requests().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no model request");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let system = system_prompt(&server, 0);
+    assert!(system.contains("SNAPSHOT BODY"), "{system}");
+    assert!(!system.contains("WORKTREE BODY"), "{system}");
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    let _ = std::fs::remove_file(home.join("agents/wt-seam.md"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0030 O5: every task writes exactly one `TaskFinished` when it ends.
+// ---------------------------------------------------------------------------------------------
+
+/// The `TaskFinished` records the lead's journal carries for `id`, in order.
+fn task_finished(fixture: &Fixture, id: &str) -> Vec<Value> {
+    fixture
+        .lead_journal_lines()
+        .into_iter()
+        .filter(|v| v["event"] == "TaskFinished" && v["data"]["agent_session_id"] == id)
+        .collect()
+}
+
+/// Waits (bounded, no long sleep) for the lead's journal to carry a `TaskFinished` for `id` and
+/// returns it: the end is appended from another task, so a poll is the only wait.
+async fn wait_task_finished(fixture: &Fixture, id: &str) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Some(finished) = task_finished(fixture, id).into_iter().next() {
+            return finished;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no TaskFinished for `{id}` in the lead's journal"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// The task ids the lead's journal reports as `unknown_after_crash` (ADR 0030 O5): a
+/// `TaskSpawned` with no matching `TaskFinished`. This is the pairing a resume of the lead's
+/// file performs; an empty set means every task that was started also ended.
+fn unknown_after_crash(fixture: &Fixture) -> Vec<String> {
+    let lines = fixture.lead_journal_lines();
+    let finished: std::collections::HashSet<&str> = lines
+        .iter()
+        .filter(|v| v["event"] == "TaskFinished")
+        .filter_map(|v| v["data"]["agent_session_id"].as_str())
+        .collect();
+    lines
+        .iter()
+        .filter(|v| v["event"] == "TaskSpawned")
+        .filter_map(|v| v["data"]["agent_session_id"].as_str())
+        .filter(|id| !finished.contains(id))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A worktree task that ends its turn writes exactly one `TaskFinished`, and only once its
+/// end-of-task commit has settled (ADR 0030 O5 / ADR 0039 decision 7): the record follows the
+/// commit. The commit is held in the gate, so "no record while it is held" is exact.
+#[tokio::test]
+async fn a_normal_worktree_end_writes_one_finished_after_git_committed() {
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                    "function": {"name": "write", "arguments": "{\"path\":\"made.txt\",\"content\":\"by the task\\n\"}"}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ]),
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "done"}), None),
+            chunk(json!({}), Some("stop")),
+        ]),
+    ])
+    .await;
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let entered_tx = Mutex::new(Some(entered_tx));
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let gate: CommitGate = Arc::new(move || {
+        if let Some(entered) = entered_tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = entered.send(());
+        }
+        // Block the commit until the test releases it: no sleep decides the ordering.
+        let _ = release_rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+    });
+    let fixture = Fixture::with_seams(
+        "finished-order",
+        &server.base_url,
+        TaskSeams {
+            spawn: None,
+            commit_gate: Some(gate),
+        },
+    );
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.brief = Some("write made.txt".to_owned());
+    fixture.registry.spawn(request).await.expect("spawn");
+
+    // The commit is blocked in the gate: the `TaskFinished` must not be there yet, so a reader
+    // never sees the task ended before its commit landed.
+    entered_rx.await.expect("the end-of-task commit started");
+    assert!(
+        task_finished(&fixture, "t1").is_empty(),
+        "TaskFinished must wait for the end-of-task commit"
+    );
+    release_tx.send(()).expect("release the commit");
+
+    let finished = wait_task_finished(&fixture, "t1").await;
+    assert_eq!(finished["data"]["outcome"], "completed");
+    assert!(
+        finished["data"]["error"].is_null(),
+        "a clean end carries no error: {finished}"
+    );
+    assert_eq!(task_finished(&fixture, "t1").len(), 1, "exactly one");
+    // The commit really landed, before the record: its audit is in the task's journal.
+    let task_journal = std::fs::read_to_string(fixture.session_dir.join("t1.jsonl")).unwrap();
+    assert!(
+        task_journal.contains("\"event\":\"GitCommitted\""),
+        "the end-of-task commit landed"
+    );
+
+    fixture.registry.remove("t1", false).await.expect("remove");
+}
+
+/// A `shared` task has no end-of-task commit (ADR 0030 O3), so its turn end alone writes the one
+/// `TaskFinished`.
+#[tokio::test]
+async fn a_shared_task_end_writes_one_finished() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": "done"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+    let fixture = Fixture::new("shared-finished", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.isolation = Some(Isolation::Shared);
+    request.brief = Some("say done".to_owned());
+    fixture.registry.spawn(request).await.expect("spawn");
+
+    let finished = wait_task_finished(&fixture, "t1").await;
+    assert_eq!(finished["data"]["outcome"], "completed");
+    assert!(finished["data"]["error"].is_null(), "{finished}");
+    assert_eq!(task_finished(&fixture, "t1").len(), 1, "exactly one");
+
+    // A removal after the end writes nothing more.
+    fixture.registry.remove("t1", false).await.expect("remove");
+    assert_eq!(task_finished(&fixture, "t1").len(), 1, "still one");
+}
+
+/// A task removed before any turn ended still writes exactly one `TaskFinished`, `cancelled`
+/// (ADR 0030 O5). No brief, so no turn ever ran.
+#[tokio::test]
+async fn a_task_removed_before_end_writes_one_cancelled_finished() {
+    let fixture = Fixture::new("removed-finished", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    assert!(
+        task_finished(&fixture, "t1").is_empty(),
+        "no turn ended, so no TaskFinished yet"
+    );
+
+    fixture.registry.remove("t1", false).await.expect("remove");
+    let finished = task_finished(&fixture, "t1");
+    assert_eq!(finished.len(), 1, "exactly one on removal");
+    assert_eq!(finished[0]["data"]["outcome"], "cancelled");
+    assert!(finished[0]["data"]["error"].is_null(), "{}", finished[0]);
+}
+
+/// A task **killed** before any turn ended writes its one `TaskFinished`, `cancelled` (ADR 0030
+/// O5/O12), so a kill does not read as a crash on resume. The worktree is kept.
+#[tokio::test]
+async fn a_task_killed_before_end_writes_one_cancelled_finished() {
+    let fixture = Fixture::new("killed-finished", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let record = fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let worktree = record.worktree.clone().expect("a worktree");
+
+    fixture.registry.kill("t1").await.expect("kill");
+    let finished = task_finished(&fixture, "t1");
+    assert_eq!(finished.len(), 1, "exactly one on kill");
+    assert_eq!(finished[0]["data"]["outcome"], "cancelled");
+    assert!(finished[0]["data"]["error"].is_null(), "{}", finished[0]);
+    assert!(worktree.exists(), "kill keeps the worktree");
+}
+
+/// After a normal end the lead's journal pairs every `TaskSpawned` with a `TaskFinished`, so a
+/// resume does not report the task as `unknown_after_crash` (ADR 0030 O5).
+#[tokio::test]
+async fn a_normal_end_leaves_no_task_unknown_after_crash() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": "done"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+    let fixture = Fixture::new("no-orphan", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.brief = Some("say done".to_owned());
+    fixture.registry.spawn(request).await.expect("spawn");
+    wait_task_finished(&fixture, "t1").await;
+
+    assert!(
+        unknown_after_crash(&fixture).is_empty(),
+        "a normally finished task must not read as crashed: {:?}",
+        unknown_after_crash(&fixture)
+    );
+    fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// One task is one turn (ADR 0030 O3): a second turn end and a removal after a normal end each
+/// write nothing, so the task keeps exactly its first `TaskFinished`.
+#[tokio::test]
+async fn a_second_turn_and_a_later_remove_add_no_finished() {
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "first"}), None),
+            chunk(json!({}), Some("stop")),
+        ]),
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "second"}), None),
+            chunk(json!({}), Some("stop")),
+        ]),
+    ])
+    .await;
+    let fixture = Fixture::new("no-second-finished", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.brief = Some("first".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    let first = wait_task_finished(&fixture, "t1").await;
+    assert_eq!(first["data"]["outcome"], "completed");
+
+    // A second turn: wait (bounded) for its `TurnFinished` in the task's own journal, then check
+    // the lead's journal still carries exactly one record.
+    record
+        .session
+        .inbox()
+        .followup(
+            agent_core::Message::user("again"),
+            agent_core::InputSource::Subagent,
+        )
+        .await
+        .expect("the second brief");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let text =
+            std::fs::read_to_string(fixture.session_dir.join("t1.jsonl")).unwrap_or_default();
+        if text.matches("\"event\":\"TurnFinished\"").count() >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the second turn did not end"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        task_finished(&fixture, "t1").len(),
+        1,
+        "a second turn end writes no second TaskFinished"
+    );
+
+    // A removal after the end writes nothing either: the first end is the task's end.
+    fixture.registry.remove("t1", true).await.expect("remove");
+    let finished = task_finished(&fixture, "t1");
+    assert_eq!(finished.len(), 1, "still one after removal");
+    assert_eq!(finished[0]["data"]["outcome"], "completed", "not cancelled");
 }

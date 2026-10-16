@@ -155,6 +155,8 @@ fn builder(session_dir: PathBuf, base_url: String, mount_lead_in_tasks: bool) ->
                     skills_extra_paths: Vec::new(),
                     skills_builtin: true,
                     skills_disabled: Vec::new(),
+                    tools_allow: None,
+                    skills_allow: None,
                     memory_injection: radian_host::memory::InjectionConfig::default(),
                     trust: radian_host::trust::Setup::untrusted(&workspace, false),
                     resume: false,
@@ -1111,6 +1113,8 @@ async fn open_lead_inner(
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
             skills_disabled: Vec::new(),
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
             trust: radian_host::trust::Setup::untrusted(workspace, false),
             resume: false,
@@ -1209,4 +1213,40 @@ fn tool_result(server: &MockServer, n: usize, call_id: &str) -> String {
                 .join("\n")
         })
         .unwrap_or_default()
+}
+
+/// `spawn_task { agent }` resolves a user-level definition and records it (ADR 0030 O11): the
+/// result names the definition and says a `spawn: true` definition was ignored for the task
+/// (depth limit 2). The definition's effect on model/profile/tools is pinned by
+/// `tests/task.rs` (the registry is where the snapshot is applied).
+#[tokio::test]
+async fn spawn_task_with_an_agent_records_the_definition() {
+    let fixture = Fixture::new("spawn-agent", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let home = isolated_home();
+    let dir = home.join("agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("lead-agent.md");
+    std::fs::write(&path, "---\nname: lead-agent\nspawn: true\n---\nBODY\n").unwrap();
+
+    let session = fixture.lead_session().await;
+    let output = run_tool(
+        &session,
+        "spawn_task",
+        json!({"brief": "x", "agent": "lead-agent"}),
+    )
+    .await
+    .expect("spawn");
+    let value = structured(&output);
+    assert_eq!(value["agent"], "lead-agent");
+    assert_eq!(value["spawn_ignored"], true);
+
+    fixture
+        .registry
+        .remove(value["task"].as_str().unwrap(), true)
+        .await
+        .expect("remove");
+    let _ = std::fs::remove_file(path);
 }

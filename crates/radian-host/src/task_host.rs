@@ -27,11 +27,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_core::{ContextBudget, NoopSink, TurnOptions};
+use agent_extensions::McpServerConfig;
 use radian_permissions::{ApprovalPolicy, AuditSink, Preset, Profile};
 use radian_runtime::{CompactionSettingsFor, ConfigQueue, ConfigSlot, RuntimeEvents};
 use radian_sandbox::{Sandbox, SandboxPolicy};
 use radian_session::SessionJournal;
 
+use crate::agents::SpawnAgent;
 use crate::memory::InjectionConfig;
 use crate::model::SwitchableModel;
 use crate::observer::SessionObserver;
@@ -44,9 +46,15 @@ use crate::trust;
 
 /// Builds a task's model from the task's session id and a **fresh** config slot. The host
 /// implements this with its own `build_model` closure, so a task's model is the lead's route
-/// built again — never the lead's model object and never a copied credential.
-pub type TaskModelFactory =
-    Arc<dyn Fn(&str, Arc<ConfigSlot>) -> Result<SwitchableModel, String> + Send + Sync>;
+/// built again — never the lead's model object and never a copied credential. The third
+/// argument is the resolved agent definition (ADR 0030 O11): its `model` route and `thinking`
+/// level, when present, are the task's (the spawn args already override the definition); the
+/// host resolves the route's credential the same way `/model` does.
+pub type TaskModelFactory = Arc<
+    dyn Fn(&str, Arc<ConfigSlot>, Option<&SpawnAgent>) -> Result<SwitchableModel, String>
+        + Send
+        + Sync,
+>;
 
 /// Everything the builder needs that the hosts resolve anyway for the lead. One value per host
 /// process (the two hosts construct it once), cloned per task.
@@ -58,6 +66,10 @@ pub struct TaskHost {
     pub model: TaskModelFactory,
     /// The provider name and model name, for the task's `SessionCreated` snapshot.
     pub route: (String, String),
+    /// The lead's configured MCP servers. A task mounts **none** by default (ADR 0030 O8); the
+    /// registry keeps only the servers an agent definition's `mcp` list names, so the builder
+    /// hands the configured set and the definition opts in by name.
+    pub servers: Vec<McpServerConfig>,
     /// The lead's sandbox, when it has one: the task's deny-read list, Unix-socket whitelist and
     /// environment whitelist are inherited from it (the registry installs a `workspace` policy
     /// with the network off on top).
@@ -120,7 +132,7 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
     let workspace = ctx.workspace.to_path_buf();
     let fail = |error: String| SessionError::Message(error);
     let slot = ConfigSlot::new(serde_json::Value::Null);
-    let model = (host.model)(ctx.session_id, Arc::clone(&slot)).map_err(fail)?;
+    let model = (host.model)(ctx.session_id, Arc::clone(&slot), ctx.agent).map_err(fail)?;
     let sandbox = task_sandbox_for(host, &workspace).map_err(fail)?;
     let profile = Profile::workspace_write(&workspace)
         .map_err(|error| fail(error.to_string()))?
@@ -130,7 +142,13 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
     // A task's turn must not inherit the lead's absolute deadline; its other options carry over.
     let mut turn_options = host.turn_options.clone();
     turn_options.deadline = None;
-    let (provider, model_name) = host.route.clone();
+    // The snapshot names the route the task actually runs: the definition's (or an override),
+    // else the lead's.
+    let (provider, model_name) = ctx
+        .agent
+        .and_then(|agent| agent.model.clone())
+        .map(|route| (route.provider, route.model))
+        .unwrap_or_else(|| host.route.clone());
     Ok(TaskSession {
         setup: SessionSetup {
             session_id: SessionId::new(ctx.session_id),
@@ -146,8 +164,10 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
             protected_branches: host.protected_branches.clone(),
             allowed_filters: host.allowed_filters.clone(),
             shell_auto_background: host.shell_auto_background,
-            // ADR 0030 O8: a task mounts no MCP server by default. The builder passes none.
-            servers: Vec::new(),
+            // ADR 0030 O8: a task mounts no MCP server by default. The builder hands the lead's
+            // configured set; the registry keeps only the ones the definition names, so the
+            // default stays none and an explicit `mcp` list opts in by name.
+            servers: host.servers.clone(),
             // The registry sets the `task` role; `--system` (a fixed layer 1) does not apply.
             role: None,
             system_prompt: None,
@@ -169,6 +189,10 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
             skills_extra_paths: host.skills_extra_paths.clone(),
             skills_builtin: host.skills_builtin,
             skills_disabled: host.skills_disabled.clone(),
+            // The registry's `enforce_task_setup` fills both from the resolved definition; the
+            // builder's defaults are "no narrowing".
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: host.memory_injection,
             // A task's worktree is a fresh, untrusted directory (ADR 0031).
             trust: trust::Setup::untrusted(&workspace, false),
