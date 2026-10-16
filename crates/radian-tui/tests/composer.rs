@@ -92,7 +92,7 @@ fn shift_up_scrolls_the_transcript() {
 }
 
 #[test]
-fn esc_clears_a_non_empty_input_and_quits_only_when_empty() {
+fn esc_clears_a_non_empty_input_and_does_nothing_when_empty() {
     let mut app = App::new("m", "s");
     app.input.set_text("unsent");
     assert!(
@@ -105,9 +105,15 @@ fn esc_clears_a_non_empty_input_and_quits_only_when_empty() {
     app.on_key(key(KeyCode::Up));
     assert_eq!(app.input, "unsent");
 
+    // Idle and empty, Esc does nothing: it never quits a session.
     app.input.clear();
-    assert_eq!(app.on_key(key(KeyCode::Esc)).effects, vec![Effect::Quit]);
-    assert!(app.quit);
+    let result = app.on_key(key(KeyCode::Esc));
+    assert!(
+        result.effects.is_empty(),
+        "Esc must not quit an idle session: {:?}",
+        result.effects
+    );
+    assert!(!app.quit);
 }
 
 #[test]
