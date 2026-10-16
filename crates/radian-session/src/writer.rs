@@ -28,13 +28,51 @@ const LOCK_RETRY_BUDGET: Duration = Duration::from_millis(200);
 /// The first retry delay; each retry doubles it (`1, 2, 4, …` ms) until the budget is spent.
 const LOCK_RETRY_FIRST: Duration = Duration::from_millis(1);
 
-/// The parent a forked session came from (ADR 0022). `seq` is the parent's fork point: the
-/// seq of a `TurnFinished` (or 0 for "the session start"), which is also what the parent's
-/// `SessionForked` records.
+/// The parent a derived session came from. For a fork (ADR 0022) it names the parent and the
+/// fork point — the seq of a `TurnFinished` (or 0 for "the session start"), which is also what
+/// the parent's `SessionForked` records. For a task agent (ADR 0030 O2) it names the lead and
+/// the seq of the lead's `TaskSpawned`.
+///
+/// `relation` distinguishes the two. A `parent` written before ADR 0030 carries no `relation`
+/// and reads as `"fork"` ([`default_relation`]); ADR 0006 §7(a) forward compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkParent {
     pub session_id: String,
     pub seq: u64,
+    #[serde(default = "default_relation")]
+    pub relation: String,
+}
+
+/// The `relation` of a `parent` line written before ADR 0030 added the field: an old line read
+/// by a new reader is a fork (ADR 0006 §7a).
+fn default_relation() -> String {
+    "fork".to_owned()
+}
+
+impl ForkParent {
+    /// A fork's parent (ADR 0022): the lineage at the parent's fork point.
+    pub fn fork(session_id: impl Into<String>, seq: u64) -> Self {
+        Self {
+            session_id: session_id.into(),
+            seq,
+            relation: "fork".to_owned(),
+        }
+    }
+
+    /// A task agent's parent lead (ADR 0030 O2). `seq` is the lead's `TaskSpawned` seq. Slice 4
+    /// is the first producer; this slice only constructs it in a test.
+    pub fn task(session_id: impl Into<String>, seq: u64) -> Self {
+        Self {
+            session_id: session_id.into(),
+            seq,
+            relation: "task".to_owned(),
+        }
+    }
+
+    /// The relation. A `parent` without one reads back as `"fork"` (ADR 0006 §7a).
+    pub fn relation(&self) -> &str {
+        &self.relation
+    }
 }
 
 /// What a new session file's `SessionCreated` line carries. `workspace` and
@@ -65,6 +103,16 @@ impl SessionCreatedData {
         config_snapshot: Value,
         parent: ForkParent,
     ) -> Self {
+        Self {
+            workspace: workspace.into(),
+            config_snapshot,
+            parent: Some(parent),
+        }
+    }
+
+    /// The `SessionCreated` payload of a task agent (ADR 0030 O2): `parent` names the lead and
+    /// the seq of the lead's `TaskSpawned`. Slice 4 is the first producer.
+    pub fn task(workspace: impl Into<String>, config_snapshot: Value, parent: ForkParent) -> Self {
         Self {
             workspace: workspace.into(),
             config_snapshot,
