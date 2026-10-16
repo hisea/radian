@@ -829,6 +829,143 @@ mod tests {
         assert_eq!(whole, "short");
     }
 
+    /// A temp worktree for the verify-runner tests.
+    fn verify_scratch(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("radian-verify-{}-{label}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::canonicalize(&dir).unwrap()
+    }
+
+    /// ADR 0030 R2: each verify command records its exit code and a bounded output tail; the
+    /// command runs under `/bin/sh -c` in the worktree.
+    #[tokio::test]
+    async fn verify_records_the_exit_code_and_the_tail_each_command() {
+        let worktree = verify_scratch("record");
+        let policy = SandboxPolicy::workspace_write(&worktree).unwrap();
+        if Sandbox::from_policy(policy.clone()).is_err() {
+            return; // no sandbox backend here
+        }
+        let heavy = HeavySlots::new(2, ["cargo test"]);
+        let results = run_verify(
+            &[
+                "echo hello".to_owned(),
+                "exit 7".to_owned(),
+                "printf 'x%.0s' $(seq 1 5000)".to_owned(),
+            ],
+            &policy,
+            &worktree,
+            &heavy,
+        )
+        .await;
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].exit_code, Some(0));
+        assert_eq!(results[0].status, "ok");
+        assert!(results[0].output_tail.contains("hello"));
+        assert_eq!(results[1].exit_code, Some(7));
+        assert_eq!(results[1].status, "failed");
+        // The tail is bounded and says so; the end of the output is kept.
+        assert!(results[2].truncated);
+        assert!(results[2].output_tail.contains("[… output truncated"));
+        assert!(results[2].output_tail.ends_with("xxxxx"));
+        let _ = std::fs::remove_dir_all(&worktree);
+    }
+
+    /// A `cargo test` verify waits for a heavy slot (ADR 0030 O8/R4): while the only slot is held
+    /// it does not run, and a light command runs ungated.
+    #[tokio::test]
+    async fn a_heavy_verify_waits_for_a_heavy_slot() {
+        let worktree = verify_scratch("heavy");
+        let policy = SandboxPolicy::workspace_write(&worktree).unwrap();
+        if Sandbox::from_policy(policy.clone()).is_err() {
+            return;
+        }
+        let gate = HeavySlots::new(1, ["cargo test"]);
+        let held = gate
+            .acquire("cargo test", &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        // A light command ignores the (full) gate.
+        let light = run_verify(&["echo light".to_owned()], &policy, &worktree, &gate).await;
+        assert_eq!(light[0].exit_code, Some(0));
+        // The heavy command cannot finish while the slot is held.
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(80),
+            run_verify(
+                &["cargo test --version".to_owned()],
+                &policy,
+                &worktree,
+                &gate,
+            ),
+        )
+        .await;
+        assert!(blocked.is_err(), "the heavy verify must wait for a slot");
+        drop(held);
+        // With the slot free it runs (and records how long it queued).
+        let done = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_verify(
+                &["cargo test --version".to_owned()],
+                &policy,
+                &worktree,
+                &gate,
+            ),
+        )
+        .await
+        .expect("the heavy verify runs once a slot frees");
+        assert!(!done[0].timed_out);
+        let _ = std::fs::remove_dir_all(&worktree);
+    }
+
+    /// ADR 0030 O7 rev 2 item 4: a verify command runs in the task's sandbox, so a denied read is
+    /// refused and a write outside the worktree fails.
+    #[tokio::test]
+    async fn verify_runs_in_the_task_sandbox() {
+        let root = verify_scratch("sandbox");
+        let worktree = root.join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let secret_dir = root.join("secret");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        let secret = secret_dir.join("credentials");
+        std::fs::write(&secret, "sk-do-not-read\n").unwrap();
+        let outside = root.join("outside.txt");
+        let mut policy = SandboxPolicy::workspace_write(&worktree).unwrap();
+        policy.deny_read = vec![secret_dir.clone()];
+        if Sandbox::from_policy(policy.clone()).is_err() {
+            return;
+        }
+        let heavy = HeavySlots::new(2, ["cargo test"]);
+        let results = run_verify(
+            &[
+                format!("cat {}", secret.display()),
+                format!("echo escaped > {}", outside.display()),
+            ],
+            &policy,
+            &worktree,
+            &heavy,
+        )
+        .await;
+        assert_ne!(
+            results[0].exit_code,
+            Some(0),
+            "a denied read must fail: {:?}",
+            results[0]
+        );
+        assert_ne!(
+            results[1].exit_code,
+            Some(0),
+            "a write outside the worktree must fail: {:?}",
+            results[1]
+        );
+        assert!(!outside.exists(), "the write escaped the sandbox");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_hook_names_and_payloads_are_stable() {
         assert_eq!(
