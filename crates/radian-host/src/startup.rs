@@ -328,6 +328,7 @@ impl LeadSetup {
             task_agent: false,
             parent: None,
             allowed_branch: None,
+            git_commit_requires_branch: false,
             memory_root: self.memory_root,
             skills_extra_paths: settings.skills_extra_paths,
             skills_builtin: settings.skills_builtin,

@@ -398,6 +398,14 @@ pub struct SessionSetup {
     /// When set, `git_commit` may only commit to this branch (a task agent's `radian/<id>`,
     /// ADR 0030 O3). `None` for a session with no branch restriction.
     pub allowed_branch: Option<String>,
+    /// Whether `git_commit` commits only to this session's **own** branch (ADR 0030 O3).
+    /// `true` for every agent the orchestration opens (a task agent, a named agent): when the
+    /// session has a branch (a worktree's `radian/...`) the tool is mounted and restricted to
+    /// it; when it has none (an `isolation = "shared"` agent, which runs in the human's own
+    /// workspace) the tool is **not mounted at all** — a shared agent must not be able to
+    /// commit onto whatever branch the human has checked out. `false` for the human's own
+    /// interactive `general`/`lead` session, which may commit on its checked-out branch.
+    pub git_commit_requires_branch: bool,
     /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
     pub memory_root: Option<PathBuf>,
     /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
@@ -492,6 +500,10 @@ pub struct HostBindings {
     /// `/mode` gate (ADR 0038 decision 1); `None` mounts none. A task session never mounts them
     /// (depth limit 2), whatever its builder returns.
     pub task_builder: Option<crate::task::TaskBuilder>,
+    /// Builds the host-specific parts of a **named** session (ADR 0030 O12, slice 7 part b).
+    /// `Some` builds the lead's named-agent registry, so the session can create and command
+    /// named agents (`send_agent`); `None` has no named agents. A task session never gets one.
+    pub named_builder: Option<crate::named::NamedBuilder>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).
@@ -558,6 +570,11 @@ pub struct LocalSession {
     task_agent: bool,
     /// The lead's task registry (ADR 0030 slice 6), or `None` for a session with no lead tools.
     lead: Option<Arc<crate::task::TaskRegistry>>,
+    /// The lead's named-agent registry (ADR 0030 O12), or `None` for a session with none.
+    named: Option<Arc<crate::named::NamedRegistry>>,
+    /// Whether a turn is running right now (the driver's own flag, `false` before the first
+    /// turn). A named agent's `/send` and `wait_agent` read it to tell "busy" from "idle".
+    turn_running: Arc<std::sync::atomic::AtomicBool>,
     /// Whether layer 1 is fixed for the session (`--system` or an explicit role): `set_mode`
     /// refuses then.
     role_fixed: bool,
@@ -625,6 +642,17 @@ impl LocalSession {
     /// interface to it; this is for the host (the TUI's task count, `/tasks`).
     pub fn lead_tasks(&self) -> Option<&Arc<crate::task::TaskRegistry>> {
         self.lead.as_ref()
+    }
+
+    /// The lead's named-agent registry (ADR 0030 O12), or `None`. For the host's `/send`.
+    pub fn named_agents(&self) -> Option<&Arc<crate::named::NamedRegistry>> {
+        self.named.as_ref()
+    }
+
+    /// Whether a turn is running right now (the driver's flag). `false` before the first turn and
+    /// between turns; a named agent's `send` uses it to choose "queued" over "started".
+    pub fn turn_running(&self) -> bool {
+        self.turn_running.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn projection(&self) -> &Arc<SessionProjection> {
@@ -772,6 +800,10 @@ impl LocalSession {
     /// Asks the driver to stop gracefully (idempotent) and aborts this session's pending
     /// requests.
     pub fn stop(&self) {
+        // ADR 0030 O12: a lead's named agents close with it; their worktrees stay on disk.
+        if let Some(named) = &self.named {
+            named.close_all();
+        }
         self.close_pending();
         if let Some(stop) = self.driver.stop.lock().unwrap().take() {
             let _ = stop.send(());
@@ -1107,6 +1139,7 @@ pub async fn open_session(
         memory_warning,
         memory_notice_line,
         task_builder,
+        named_builder,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -1130,6 +1163,7 @@ pub async fn open_session(
         task_agent,
         parent,
         allowed_branch,
+        git_commit_requires_branch,
         memory_root,
         skills_extra_paths,
         skills_builtin,
@@ -1309,6 +1343,21 @@ pub async fn open_session(
         None
     };
 
+    // The lead's named-agent registry (ADR 0030 O12, slice 7b): built the same way, over the
+    // lead's workspace, journal and queue. A task agent never builds one.
+    let named_registry = if task_agent {
+        None
+    } else {
+        named_builder.map(|builder| {
+            Arc::new(crate::named::NamedRegistry::new(
+                workspace.clone(),
+                Arc::clone(&journal),
+                Arc::clone(&queue),
+                builder,
+            ))
+        })
+    };
+
     // ADR 0030 O8: the built-in coding tools are built here, after the registry has installed
     // the process heavy gate, so this session's `shell` (the lead's, and every task's through
     // its own `open_session`) queues on the same slots. The registry resolves the process gate
@@ -1383,16 +1432,23 @@ pub async fn open_session(
     let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
     // ADR 0030 R10: pin the repository now, before the model runs. A workspace that is not a
-    // git repository does not mount `git_commit` at all.
-    let git_commit = crate::git_commit::RepoPin::resolve(&workspace).map(|pin| {
-        crate::git_commit::GitCommitTools::new(workspace.clone(), Arc::clone(&journal), pin)
-            .with_allowed_branch(allowed_branch)
-            .with_refuse_main(task_agent)
-            .with_protected_branches(protected_branches)
-            .with_allowed_filters(
-                allowed_filters.unwrap_or_else(crate::git_commit::default_allowed_filters),
-            )
-    });
+    // git repository does not mount `git_commit` at all. ADR 0030 O3: an agent that may commit
+    // only to its own branch does not mount `git_commit` when it has none (a `shared` agent in
+    // the human's workspace); the human's own interactive session (`false`) always mounts it.
+    let git_commit = if git_commit_requires_branch && allowed_branch.is_none() {
+        None
+    } else {
+        crate::git_commit::RepoPin::resolve(&workspace).map(|pin| {
+            crate::git_commit::GitCommitTools::new(workspace.clone(), Arc::clone(&journal), pin)
+                .with_allowed_branch(allowed_branch)
+                .with_require_branch(git_commit_requires_branch)
+                .with_refuse_main(task_agent)
+                .with_protected_branches(protected_branches)
+                .with_allowed_filters(
+                    allowed_filters.unwrap_or_else(crate::git_commit::default_allowed_filters),
+                )
+        })
+    };
     let mut tools =
         HostTools::new(coding, memory_tools, mcp.clone(), git_commit).with_tool_allow(tools_allow);
     let ask_registered = ask.is_some();
@@ -1406,7 +1462,10 @@ pub async fn open_session(
     // stay in the model's list in every mode (`/mode` never adds or removes one, revision 5 item
     // 5); the gate turns a call into a "switch with /mode lead" refusal in `general`.
     if let Some(registry) = &lead_registry {
-        tools = tools.with_lead(crate::lead_tools::LeadTools::new(Arc::clone(registry)));
+        tools = tools.with_lead(
+            crate::lead_tools::LeadTools::new(Arc::clone(registry))
+                .with_named(named_registry.clone()),
+        );
         hooks.set_tool_gate(Some(lead_mode_gate(Arc::clone(&config_slot))));
     }
     // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> lists
@@ -1654,6 +1713,8 @@ pub async fn open_session(
         access_builder,
         task_agent,
         lead: lead_registry,
+        named: named_registry,
+        turn_running,
         role_fixed,
         facts_hooks,
         projection,

@@ -233,6 +233,58 @@ async fn feed_and_wait(mut child: Child, input: &str) -> (i32, String, String) {
     )
 }
 
+/// Feeds one message per turn: writes a line, then waits for that turn's `TurnFinished` in the
+/// session journal before writing the next. The wait matters when the CLI reads stdin while a
+/// turn is in flight — `--yes`, or nobody to ask — because a line written early is taken as a
+/// **steer** and joins the running turn (ADR 0011) instead of opening the next one, so a
+/// two-line feed becomes one turn (three model calls, not four) under load. `sessions` is the
+/// session directory to watch. Every line must be a message that opens its own turn.
+async fn feed_turns_and_wait(
+    mut child: Child,
+    sessions: &Path,
+    lines: &[&str],
+) -> (i32, String, String) {
+    let mut stdin = child.stdin.take().unwrap();
+    for (index, line) in lines.iter().enumerate() {
+        stdin.write_all(line.as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
+        stdin.flush().await.unwrap();
+        let turns = index + 1;
+        wait_until(
+            &format!("{turns} TurnFinished under {}", sessions.display()),
+            || journal_turns(sessions) >= turns,
+        )
+        .await;
+    }
+    drop(stdin);
+    let output = tokio::time::timeout(EXIT_WATCHDOG, child.wait_with_output())
+        .await
+        .expect("the CLI did not exit within the watchdog")
+        .expect("wait");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// The number of `TurnFinished` events across the session files in `sessions`.
+fn journal_turns(sessions: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(sessions) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .map(|entry| {
+            std::fs::read_to_string(entry.path())
+                .unwrap_or_default()
+                .matches("\"event\":\"TurnFinished\"")
+                .count()
+        })
+        .sum()
+}
+
 fn sigint(child: &Child) {
     // SAFETY: signal delivery to our own child process.
     unsafe {
@@ -6027,7 +6079,7 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
         text_reply("done"),
     ])
     .await;
-    let (code, _, stderr) = feed_and_wait(
+    let (code, _, stderr) = feed_turns_and_wait(
         spawn_radian(
             &[
                 "--model",
@@ -6045,8 +6097,9 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
                 ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
             ],
         ),
+        &env.sessions,
         // Turn 1 writes and saves the record; turn 2's text hits it.
-        "first\nsecond\n",
+        &["first", "second"],
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
@@ -6415,7 +6468,7 @@ async fn memory_additions_can_be_turned_off_in_the_config() {
         text_reply("done"),
     ])
     .await;
-    let (code, _, stderr) = feed_and_wait(
+    let (code, _, stderr) = feed_turns_and_wait(
         spawn_radian(
             &[
                 "--model",
@@ -6435,7 +6488,8 @@ async fn memory_additions_can_be_turned_off_in_the_config() {
                 ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
             ],
         ),
-        "first\nsecond\n",
+        &env.sessions,
+        &["first", "second"],
     )
     .await;
     assert_eq!(code, 0, "{stderr}");

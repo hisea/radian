@@ -20,6 +20,7 @@ KNOWN_EVENTS = {
     "ProjectTrustChanged", "UserBash", "GitCommitted",
     "BackgroundJobStarted", "BackgroundJobSettled",
     "TaskSpawned", "TaskFinished",
+    "NamedAgentStarted",
 }
 # ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
@@ -225,6 +226,18 @@ EXPECT = {
         skips=[],
         repair={},
         parent=("14111111-1111-4111-8111-111111111111", 3, "task"),
+    ),
+    "named-agent.jsonl": dict(
+        outcome="accept",
+        events=3,
+        skips=[],
+        repair={},
+        named_agent_started=(
+            1,
+            "writer",
+            "14333333-3333-4333-8333-333333333333",
+            "/work/radian-home/worktrees/example-0f3a1c9b7d2e/agent/writer",
+        ),
     ),
     "policy-approval.jsonl": dict(
         outcome="accept",
@@ -845,6 +858,25 @@ def check_fixture(name, exp):
             raise Corruption(
                 f"{name}: task_finished_error {finished} != 期望 {[tuple(exp['task_finished_error'])]}"
             )
+    if "named_agent_started" in exp:
+        started = [
+            (
+                e["seq"],
+                e["data"].get("name"),
+                e["data"].get("agent_session_id"),
+                e["data"].get("worktree"),
+            )
+            for e in events
+            if e["event"] == "NamedAgentStarted"
+        ]
+        if started != [tuple(exp["named_agent_started"])]:
+            raise Corruption(
+                f"{name}: named_agent_started {started} != 期望 {[tuple(exp['named_agent_started'])]}"
+            )
+        # ADR 0030 O12：命名 agent 的创建审计是非 critical 事件。
+        for e in events:
+            if e["event"] == "NamedAgentStarted" and e["critical"]:
+                raise Corruption(f"{name}: NamedAgentStarted 必须是 critical:false")
     if "policy_resolved" in exp:
         resolved = [
             (e["seq"], e["data"].get("approver"), e["data"].get("policy"))

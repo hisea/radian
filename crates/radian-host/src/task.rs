@@ -342,10 +342,21 @@ pub struct Spawned {
     pub position: Option<usize>,
 }
 
+/// The agent definition resolved **and snapshotted at `spawn_task`** (ADR 0030 item 4):
+/// carried through the `max_tasks` queue so a queued task never re-reads the file when it starts.
+#[derive(Clone)]
+struct ResolvedAgent {
+    agent: SpawnAgent,
+    isolation: Isolation,
+    approval: ApprovalPolicy,
+}
+
 /// A task accepted but not yet started: over `max_tasks`, it waits FIFO (ADR 0030 O4/O8).
 pub struct QueuedTask {
     id: String,
     request: SpawnRequest,
+    /// The definition snapshot taken at submit time (ADR 0030 item 4).
+    resolved: ResolvedAgent,
     state: Mutex<QueuedState>,
 }
 
@@ -359,10 +370,11 @@ enum QueuedState {
 }
 
 impl QueuedTask {
-    fn new(request: SpawnRequest) -> Self {
+    fn new(request: SpawnRequest, resolved: ResolvedAgent) -> Self {
         Self {
             id: request.id.clone(),
             request,
+            resolved,
             state: Mutex::new(QueuedState::Waiting),
         }
     }
@@ -376,7 +388,7 @@ impl QueuedTask {
     }
 
     pub fn isolation(&self) -> Isolation {
-        self.request.isolation.unwrap_or_default()
+        self.resolved.isolation
     }
 
     /// The start failure, if one happened.
@@ -420,9 +432,9 @@ pub struct StallNotice {
 /// The task agents' worktree root (ADR 0039 decision 4): `<radian-home>/worktrees/<repo-key>`,
 /// plus the radian home the symlink check starts from.
 #[derive(Debug, Clone)]
-struct WorktreeRoot {
-    home: PathBuf,
-    root: PathBuf,
+pub(crate) struct WorktreeRoot {
+    pub(crate) home: PathBuf,
+    pub(crate) root: PathBuf,
 }
 
 /// The registry a lead holds: it keys live task agents by id and owns their worktrees
@@ -763,8 +775,13 @@ impl TaskRegistry {
             {
                 return Err(TaskError::new(format!("task `{id}` already exists")));
             }
+            // ADR 0030 item 4: snapshot the definition **here**, at the `spawn_task`
+            // call, and carry it through the queue. A queued task must not re-read the file (or
+            // re-resolve against a later edit) when a slot frees; and a bad definition is the
+            // caller's error now, not a queued failure.
+            let resolved = resolve_task(&request)?;
             if self.live_count() < self.limits.max_tasks {
-                let record = self.spawn(request).await?;
+                let record = self.spawn_resolved(request, resolved).await?;
                 self.bump_wake();
                 return Ok(Spawned {
                     id,
@@ -772,7 +789,7 @@ impl TaskRegistry {
                     position: None,
                 });
             }
-            let queued = Arc::new(QueuedTask::new(request));
+            let queued = Arc::new(QueuedTask::new(request, resolved));
             {
                 self.queued_tasks
                     .lock()
@@ -865,8 +882,10 @@ impl TaskRegistry {
                 continue; // removed between the pop and here
             };
             let request = queued.request.clone();
-            // The queued ticket is no longer in `tasks`, so `spawn`'s duplicate check is clear.
-            match self.spawn(request).await {
+            let resolved = queued.resolved.clone();
+            // The queued ticket is no longer in `tasks`, so `spawn_resolved`'s duplicate check is
+            // clear. `resolved` is the snapshot taken at submit (ADR 0030 item 4).
+            match self.spawn_resolved(request, resolved).await {
                 Ok(_record) => {
                     // Started: drop the ticket; `get(id)` now finds the record.
                     self.queued_tasks
@@ -1006,10 +1025,11 @@ impl TaskRegistry {
 
     /// Spawns a task agent (ADR 0030 O2/O3) as one transaction (ADR 0039 decision 5).
     ///
-    /// Steps, in order: create the worktree, append the lead's `TaskSpawned`, build and open
-    /// the task session with the enforced invariants, and (if a brief was given) send it as a
-    /// `Subagent` input. A failure at any step after the worktree exists removes it again; a
-    /// failure after `TaskSpawned` was written also appends the paired `TaskFinished`.
+    /// Steps, in order: resolve and snapshot the agent definition (ADR 0030 item 4),
+    /// create the worktree, append the lead's `TaskSpawned`, build and open the task session with
+    /// the enforced invariants, and (if a brief was given) send it as a `Subagent` input. A
+    /// failure at any step after the worktree exists removes it again; a failure after
+    /// `TaskSpawned` was written also appends the paired `TaskFinished`.
     /// `send_task`'s future is **boxed** (a type-erased `BoxFuture`): `spawn` calls `open_session`,
     /// and a lead tool that calls `open_session` would otherwise recurse in the async `Send`
     /// inference (open_session's driver runs the tools, one of which is `spawn_task`).
@@ -1018,16 +1038,27 @@ impl TaskRegistry {
         request: SpawnRequest,
     ) -> futures_util::future::BoxFuture<'_, Result<Arc<TaskRecord>, TaskError>> {
         Box::pin(async move {
+            let resolved = resolve_task(&request)?;
+            self.spawn_resolved(request, resolved).await
+        })
+    }
+
+    /// The spawn transaction after the definition is resolved (ADR 0030 O2/O3, ADR 0039
+    /// decision 5). [`TaskRegistry::spawn`] resolves then calls this; [`TaskRegistry::submit`]
+    /// resolves at the `spawn_task` call and calls this both immediately and from the FIFO pump,
+    /// so a queued task starts from its submit-time snapshot.
+    fn spawn_resolved(
+        &self,
+        request: SpawnRequest,
+        resolved: ResolvedAgent,
+    ) -> futures_util::future::BoxFuture<'_, Result<Arc<TaskRecord>, TaskError>> {
+        Box::pin(async move {
             let SpawnRequest {
                 id,
-                isolation,
                 label,
                 brief,
-                approval,
                 policy,
-                agent,
-                model,
-                profile,
+                ..
             } = request;
             validate_session_id(&id).map_err(|_| {
                 TaskError::new(format!(
@@ -1037,30 +1068,11 @@ impl TaskRegistry {
             if self.get(&id).is_some() {
                 return Err(TaskError::new(format!("task `{id}` already exists")));
             }
-            // ADR 0030 O11 (slice 7): resolve the agent definition from the user-level dir and
-            // snapshot it now, before any session exists. The spawn arguments override the
-            // definition's fields (O4), and a profile that would widen the task floor is refused
-            // here, before the worktree is created.
-            let resolved = resolve_agent(
-                radian_home().as_deref(),
-                &SpawnOverrides {
-                    agent: agent.as_deref(),
-                    isolation,
-                    model: model.as_deref(),
-                    profile: profile.as_deref(),
-                    approval,
-                },
-            )
-            .map_err(|error| {
-                TaskError::new(format!("cannot resolve the agent definition: {error}"))
-            })?;
-            let isolation = resolved.isolation.unwrap_or_default();
-            let approval = resolved.approval.unwrap_or(ApprovalPolicy::Auto);
-            if !matches!(approval, ApprovalPolicy::Auto | ApprovalPolicy::OnAsk) {
-                return Err(TaskError::new(
-                    "a task's approval is `auto` or `on-ask` (ADR 0030 R1)",
-                ));
-            }
+            let ResolvedAgent {
+                agent,
+                isolation,
+                approval,
+            } = resolved;
 
             // The guard owns everything the spawn has built so far; it is disarmed only once the
             // record is in the registry, so no failure below can leave a worktree or a driver.
@@ -1073,7 +1085,7 @@ impl TaskRegistry {
                     label,
                     brief,
                     (approval, policy),
-                    resolved,
+                    agent,
                 )
                 .await
             {
@@ -1525,6 +1537,10 @@ fn enforce_task_setup(
     setup.parent = Some(parent);
     setup.allowed_branch = branch;
     setup.task_agent = true;
+    // ADR 0030 O3: a task commits only to its own branch. A `shared` task has none, so it does
+    // not mount `git_commit` (and the tool would refuse if it reached it); a worktree task gets
+    // its `radian/<id>` and the tool is limited to it.
+    setup.git_commit_requires_branch = true;
     // ADR 0030 O8: a task agent does not open memory (its single-writer lock).
     setup.memory_root = None;
     // ADR 0036 / ADR 0030 O11: layer 1 is the definition's body. The registry
@@ -1621,8 +1637,9 @@ fn enforce_task_setup(
 
 /// The built-in tool names a task can mount: the universe an agent definition's `tools`
 /// allow-list narrows (ADR 0030 O11). MCP tools are dynamic (they depend on a server) and are
-/// governed by the definition's `mcp` list, so they are not in it.
-fn builtin_tool_names() -> Vec<&'static str> {
+/// governed by the definition's `mcp` list, so they are not in it. A named agent's allow-list
+/// narrows the same universe.
+pub(crate) fn builtin_tool_names() -> Vec<&'static str> {
     vec![
         "read",
         "patch",
@@ -1670,9 +1687,39 @@ pub fn task_sandbox(lead: &Sandbox, workspace: &Path) -> Result<Sandbox, TaskErr
     Sandbox::from_policy(policy).map_err(|error| TaskError::new(error.to_string()))
 }
 
+/// Resolves and snapshots the agent definition for one `spawn_task` call (ADR 0030 O11, revision
+/// 2 item 4). The spawn arguments override the definition's fields (O4), and a profile that would
+/// widen the task floor is refused here, before the worktree is created. `submit` calls this
+/// **before** queueing, so a queued task starts from this snapshot and never re-reads the file.
+fn resolve_task(request: &SpawnRequest) -> Result<ResolvedAgent, TaskError> {
+    let resolved = resolve_agent(
+        radian_home().as_deref(),
+        &SpawnOverrides {
+            agent: request.agent.as_deref(),
+            isolation: request.isolation,
+            model: request.model.as_deref(),
+            profile: request.profile.as_deref(),
+            approval: request.approval,
+        },
+    )
+    .map_err(|error| TaskError::new(format!("cannot resolve the agent definition: {error}")))?;
+    let isolation = resolved.isolation.unwrap_or_default();
+    let approval = resolved.approval.unwrap_or(ApprovalPolicy::Auto);
+    if !matches!(approval, ApprovalPolicy::Auto | ApprovalPolicy::OnAsk) {
+        return Err(TaskError::new(
+            "a task's approval is `auto` or `on-ask` (ADR 0030 R1)",
+        ));
+    }
+    Ok(ResolvedAgent {
+        agent: resolved,
+        isolation,
+        approval,
+    })
+}
+
 /// The task worktree root for `workspace` (ADR 0039 decision 4), or `None` when the workspace
 /// is not a git repository or this process has no usable `~/.radian`.
-fn task_worktree_root(workspace: &Path) -> Option<WorktreeRoot> {
+pub(crate) fn task_worktree_root(workspace: &Path) -> Option<WorktreeRoot> {
     let home = radian_home()?;
     let common = git_common_dir(workspace)?;
     let root = worktrees_dir_for(&home).join(repo_key(&common));
@@ -2087,7 +2134,8 @@ pub fn end_of_task_commit(
     }
     let message = format!("radian: end of task {id} ({})", outcome_word(outcome));
     // `refuse_main = true`: a task agent's rule (ADR 0038 decision 4); with `allowed_branch`
-    // it is also limited to its own branch.
+    // it is also limited to its own branch. `require_branch = true`: a task with no branch of
+    // its own (a `shared` task) never reaches here, but the tool refuses if it does.
     crate::git_commit::commit(
         worktree,
         pin,
@@ -2096,6 +2144,7 @@ pub fn end_of_task_commit(
         allowed_branch,
         protected,
         filters,
+        true,
         true,
     )
     .map(Some)

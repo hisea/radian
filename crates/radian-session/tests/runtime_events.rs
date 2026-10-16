@@ -415,6 +415,74 @@ async fn the_task_events_round_trip_and_are_not_critical() {
     assert!(session.history().unwrap().is_empty());
 }
 
+/// ADR 0030 O12: `NamedAgentStarted` round-trips typed, is `critical = false`, skips its optional
+/// `worktree`, and never enters the transcript fold. It is a new event, not `TaskSpawned`: a
+/// named agent is resumable, so it must not read as `unknown_after_crash`.
+#[tokio::test]
+async fn the_named_agent_event_round_trips_and_is_not_critical() {
+    let dir = TempDir::new("named-events");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, "sid-named", created()).unwrap();
+
+    let started = RuntimeEvent::NamedAgentStarted {
+        name: "writer".into(),
+        agent_session_id: "writer".into(),
+        worktree: Some("/home/u/.radian/worktrees/example-0f3a/agent/writer".into()),
+    };
+    assert_eq!(started.name(), "NamedAgentStarted");
+    assert!(
+        !started.critical(),
+        "a named agent event is audit (ADR 0030 O12)"
+    );
+    journal.append_runtime_event(started).await.unwrap();
+    // A `shared` named agent has no worktree; the field is skipped.
+    journal
+        .append_runtime_event(RuntimeEvent::NamedAgentStarted {
+            name: "helper".into(),
+            agent_session_id: "helper".into(),
+            worktree: None,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let bare = raw
+        .lines()
+        .find(|line| line.contains("\"name\":\"helper\""))
+        .expect("the bare NamedAgentStarted line");
+    assert!(!bare.contains("worktree"), "{bare}");
+
+    let session = Session::open(&path).unwrap();
+    assert!(session.skipped().is_empty());
+    let started: Vec<(String, String, Option<String>)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::NamedAgentStarted {
+                name,
+                agent_session_id,
+                worktree,
+            } => Some((name.clone(), agent_session_id.clone(), worktree.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        started,
+        vec![
+            (
+                "writer".to_string(),
+                "writer".to_string(),
+                Some("/home/u/.radian/worktrees/example-0f3a/agent/writer".to_string()),
+            ),
+            ("helper".to_string(), "helper".to_string(), None),
+        ]
+    );
+    // Audit only: never a transcript record.
+    assert!(session.journal_records().is_empty());
+    assert!(session.history().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn the_new_method_respects_the_single_writer_lock() {
     let dir = TempDir::new("runtime-lock");

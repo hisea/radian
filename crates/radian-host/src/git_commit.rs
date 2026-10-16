@@ -181,6 +181,12 @@ pub struct GitCommitTools {
     journal: Arc<SessionJournal>,
     /// When set, only this branch may be committed to (a task agent's `radian/<id>`).
     allowed_branch: Option<String>,
+    /// Whether this session may commit only to its own branch (ADR 0030 O3). When `true` and
+    /// there is no `allowed_branch`, the tool refuses: a session without a branch of its own (a
+    /// `shared` agent) must never commit onto the human's checked-out branch. `open_session`
+    /// does not mount the tool in that case, so this is the defence in depth for a session that
+    /// reached the tool anyway.
+    require_branch: bool,
     /// Whether `main`/`master` are refused (ADR 0038 decision 4). `true` for a task agent (the
     /// narrow default); `false` for the interactive `general`/`lead` sessions, which may commit
     /// on `main`. A configured protected branch and a detached HEAD are always refused.
@@ -201,6 +207,7 @@ impl GitCommitTools {
             workspace: workspace.into(),
             journal,
             allowed_branch: None,
+            require_branch: false,
             refuse_main: true,
             protected_branches: Vec::new(),
             allowed_filters: default_allowed_filters(),
@@ -212,6 +219,14 @@ impl GitCommitTools {
     /// interactive session passes `None`).
     pub fn with_allowed_branch(mut self, branch: Option<String>) -> Self {
         self.allowed_branch = branch;
+        self
+    }
+
+    /// ADR 0030 O3: this session may commit only to its own branch. With no `allowed_branch` the
+    /// tool refuses every commit (the `shared` agent case), so a `shared` agent can never commit
+    /// onto the human's checked-out branch even if it reaches the tool.
+    pub fn with_require_branch(mut self, require: bool) -> Self {
+        self.require_branch = require;
         self
     }
 
@@ -285,6 +300,7 @@ pub async fn run(tools: &GitCommitTools, call: &ToolCall) -> Result<ToolOutput, 
     let protected = tools.protected_branches.clone();
     let allowed_filters = tools.allowed_filters.clone();
     let refuse_main = tools.refuse_main;
+    let require_branch = tools.require_branch;
     let message = args.message;
     let paths = args.paths.unwrap_or_default();
     let committed = tokio::task::spawn_blocking(move || {
@@ -297,6 +313,7 @@ pub async fn run(tools: &GitCommitTools, call: &ToolCall) -> Result<ToolOutput, 
             &protected,
             &allowed_filters,
             refuse_main,
+            require_branch,
         )
     })
     .await
@@ -354,8 +371,10 @@ pub fn dirty(workspace: &Path, pin: &RepoPin) -> Result<bool, ToolFailure> {
 /// integration tests exercise the exact code the tool runs.
 ///
 /// `refuse_main` is the ADR 0038 decision 4 switch: `true` for a task agent (which also carries
-/// an `allowed_branch`), `false` for the interactive `general`/`lead` session. A config-protected
-/// branch and a detached HEAD are refused regardless.
+/// an `allowed_branch`), `false` for the interactive `general`/`lead` session. `require_branch`
+/// is the ADR 0030 O3 switch: `true` for an agent that may commit only to its own branch, so
+/// with no `allowed_branch` the call is refused; `false` for the human's own session. A
+/// config-protected branch and a detached HEAD are refused regardless.
 #[allow(clippy::too_many_arguments)] // one branch rule per argument; a rules struct hides them
 pub fn commit(
     workspace: &Path,
@@ -366,6 +385,7 @@ pub fn commit(
     protected: &[String],
     allowed_filters: &[String],
     refuse_main: bool,
+    require_branch: bool,
 ) -> Result<Committed, ToolFailure> {
     // The repository must still be the one pinned at session open: a `.git/` the model created
     // in the workspace (when there was none, or when the real one is above it) would otherwise
@@ -381,6 +401,16 @@ pub fn commit(
         return Err(fail(
             "detached_head",
             "HEAD is detached; check out a branch before committing",
+        ));
+    }
+    // ADR 0030 O3: an agent with no branch of its own (a `shared` agent) may not commit at all.
+    if require_branch && allowed_branch.is_none() {
+        return Err(fail(
+            "no_branch",
+            format!(
+                "this agent has no branch of its own; refusing to commit on `{branch}` \
+                 (ADR 0030 O3)"
+            ),
         ));
     }
     // `main`/`master` are refused only for a task agent (ADR 0038 decision 4); a configured
@@ -1055,6 +1085,7 @@ mod tests {
             &[],
             &default_allowed_filters(),
             true,
+            false,
         )
         .expect_err("a .radian path must be refused");
         assert_eq!(error.code, "radian_path", "{error:?}");
@@ -1069,6 +1100,7 @@ mod tests {
             &[],
             &default_allowed_filters(),
             true,
+            false,
         );
         assert!(committed.is_ok(), "{committed:?}");
         let _ = std::fs::remove_dir_all(&dir);
