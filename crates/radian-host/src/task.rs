@@ -1659,7 +1659,6 @@ pub(crate) fn builtin_tool_names() -> Vec<&'static str> {
         "memory_revise",
         "ask_user",
         "skill",
-        "mermaid_check",
         "git_commit",
     ]
 }

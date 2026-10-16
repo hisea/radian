@@ -51,7 +51,6 @@ import sys
 #   crates/radian-coding/src/ask.rs:397        ask_user        Exclusive
 #   crates/radian-host/src/git_commit.rs:81    git_commit      Exclusive
 #   crates/radian-host/src/skills/tools.rs:185 skill           Shared
-#   crates/radian-host/src/mermaid.rs:181      mermaid_check   Shared
 #   crates/radian-host/src/memory/tools.rs:372 memory_search   Shared
 #   crates/radian-host/src/memory/tools.rs:388 memory_get      Shared
 #   crates/radian-host/src/memory/tools.rs:424 memory_save     Exclusive
@@ -79,7 +78,6 @@ BUILT_IN = {
     "ask_user": "Exclusive",
     "git_commit": "Exclusive",
     "skill": "Shared",
-    "mermaid_check": "Shared",
     "memory_search": "Shared",
     "memory_get": "Shared",
     "memory_save": "Exclusive",

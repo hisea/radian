@@ -310,9 +310,7 @@ fn read_only() -> Vec<Rule> {
 /// **is not a permission**, so reading one never prompts and grants nothing. Both still go
 /// through the ordinary hook path.
 fn always_allowed() -> Vec<Rule> {
-    // `mermaid_check` (ADR 0028 R8 / ADR 0025) joins them: it renders text and reads no
-    // file, so it is `allow` in every tier too.
-    ["ask_user", "skill", "mermaid_check"]
+    ["ask_user", "skill"]
         .into_iter()
         .map(|name| {
             Rule::new(
@@ -444,20 +442,6 @@ mod tests {
             let tier = profile.preset.as_str();
             assert_eq!(action(&profile, "glob"), Action::Allow, "{tier}");
             assert_eq!(action(&profile, "grep"), Action::Allow, "{tier}");
-        }
-    }
-
-    /// ADR 0028 R8: `mermaid_check` is read-only, so every tier allows it.
-    #[test]
-    fn mermaid_check_is_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
-        for profile in [
-            Profile::safe(&ws).unwrap(),
-            Profile::workspace_write(&ws).unwrap(),
-            Profile::full_access(&ws).unwrap(),
-        ] {
-            let tier = profile.preset.as_str();
-            assert_eq!(action(&profile, "mermaid_check"), Action::Allow, "{tier}");
         }
     }
 

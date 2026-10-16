@@ -33,9 +33,10 @@ radian-runtime = { path = "../radian-runtime" }
 radian-sandbox = { path = "../radian-sandbox" }
 radian-session = { path = "../radian-session" }
 clap = { version = "4", features = ["derive"] }
-# The vendored Mermaid renderer (ADR 0028 R8): the transcript draws a closed ```mermaid block
-# as Unicode box drawing. Vendored unchanged under third_party/codex-mermaid.
-codex-mermaid = { path = "../../third_party/codex-mermaid" }
+# The vendored Mermaid renderer (ADR 0042): the transcript draws a closed ```mermaid block
+# as Unicode box drawing. `radian-tui` depends on the crate directly (ADR 0042 supplement:
+# there is no `radian-host` entry point any more, and radian-host stays ratatui-free).
+grok-mermaid = { path = "../../third_party/grok-mermaid" }
 # Assistant-text Markdown (ADR 0028 R2): CommonMark + tables, no syntax highlighting (slice 5).
 # `default-features = false` drops the HTML renderer and the SIMD scanner: this crate only
 # walks the event stream, and the build stays dependency-light on the 1.88 MSRV.
