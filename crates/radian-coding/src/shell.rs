@@ -104,8 +104,23 @@ pub(crate) fn schema() -> serde_json::Value {
 /// The `shell` spec for `mode`. The description names the enforcement level, because the
 /// model (and a human reading a transcript) must be able to tell a confined run from an
 /// unsandboxed one.
-pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
+///
+/// `git_writable` is the sandbox's **effective** answer for this session (ADR 0038 decision 4;
+/// [`radian_sandbox::Sandbox::git_writable_except_exec`]), not the policy's request: a general
+/// session in the `workspace` tier on macOS can commit with native git, while a task agent (or
+/// any backend without the carve-out, Linux) still keeps `.git` read-only, and the description
+/// says which. It is ignored outside `workspace` mode.
+pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
     let confinement = match mode {
+        SandboxMode::WorkspaceWrite if git_writable => {
+            "The command runs under the OS sandbox in `workspace` mode: writes are \
+             confined to the workspace, the repository's `.git` is writable so native \
+             `git commit`, `git branch` and `git stash` work in the sandbox (only the \
+             entries git can execute — `.git/config`, `.git/config.worktree` and \
+             `.git/hooks/` — stay read-only), sensitive directories such as `~/.ssh` are \
+             not readable, and the network is **on** (outbound and local-loopback connect, \
+             bind and listen are allowed)."
+        }
         SandboxMode::WorkspaceWrite => {
             "The command runs under the OS sandbox in `workspace` mode: writes are \
              confined to the workspace, the repository's `.git` is read-only, sensitive \

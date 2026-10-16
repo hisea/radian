@@ -53,6 +53,18 @@ pub trait SandboxBackend: Send + Sync {
         program: &OsStr,
         args: &[OsString],
     ) -> Result<Command, SandboxError>;
+
+    /// Whether this backend **enforces** [`GitAccess::WritableExceptExec`] for `policy`
+    /// (ADR 0038 decision 4): the discovered git metadata is writable except the entries git
+    /// can execute. The default is `false`: a backend that does not implement the carve-out
+    /// keeps the whole metadata read-only whatever the policy asks for, and the safe default
+    /// means a new backend can never claim a writability it does not enforce (Linux is still
+    /// pending). The shell tool's description and the startup line read this — via
+    /// [`Sandbox::git_writable_except_exec`] — not `policy.git_access`, so they cannot claim
+    /// that native `git commit` works when the backend would deny it.
+    fn git_writable_except_exec(&self, _policy: &SandboxPolicy) -> bool {
+        false
+    }
 }
 
 /// The backend used for `FullAccess`: it wraps nothing. It is never chosen for an enforced
@@ -194,6 +206,17 @@ impl Sandbox {
 
     pub fn backend_name(&self) -> &'static str {
         self.backend.name()
+    }
+
+    /// Whether native git can write the repository metadata (`.git`) under this sandbox, with
+    /// only the entries git can execute (`config`, `config.worktree`, `hooks/`) left read-only
+    /// (ADR 0038 decision 4). This is the **effective** answer for this session: the policy may
+    /// ask for [`GitAccess::WritableExceptExec`], but the backend must be able to enforce the
+    /// carve-out. The shell tool's description and the startup line read this, so a session
+    /// whose `.git` is still read-only (a task agent, or any `workspace` session on a backend
+    /// without the carve-out) keeps the read-only wording.
+    pub fn git_writable_except_exec(&self) -> bool {
+        self.backend.git_writable_except_exec(&self.policy)
     }
 
     pub fn probe(&self) -> &ProbeReport {

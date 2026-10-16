@@ -194,11 +194,19 @@ impl ToolProvider for CodingTools {
             Some(jobs) => Arc::clone(jobs),
             None => Arc::new(jobs::Jobs::new(self.root.root())),
         };
+        // The tool set is fixed here, once per session (ADR 0036): the
+        // shell description therefore reflects the tier the session **started** in. A later
+        // `/access` swap changes what runs, not the advertised text (the `/access` notice says
+        // so). `git_writable` is the sandbox's effective answer, not the policy's request.
+        let sandbox = self.sandbox.get();
+        let shell = sandbox
+            .as_ref()
+            .map(|sandbox| (sandbox.mode(), sandbox.git_writable_except_exec()));
         Ok(CodingSession {
             root: Arc::clone(&self.root),
             limits: self.limits,
             sandbox: self.sandbox.clone(),
-            specs: specs(self.sandbox.mode()),
+            specs: specs(shell),
             jobs,
         })
     }
@@ -228,7 +236,7 @@ impl CodingSession {
     }
 }
 
-fn specs(shell_mode: Option<SandboxMode>) -> Vec<ToolSpec> {
+fn specs(shell: Option<(SandboxMode, bool)>) -> Vec<ToolSpec> {
     let mut specs = vec![
         read::spec(),
         write::spec(),
@@ -239,8 +247,8 @@ fn specs(shell_mode: Option<SandboxMode>) -> Vec<ToolSpec> {
         git::status_spec(),
         git::diff_spec(),
     ];
-    if let Some(mode) = shell_mode {
-        specs.push(shell::spec(mode));
+    if let Some((mode, git_writable)) = shell {
+        specs.push(shell::spec(mode, git_writable));
         // The job tools exist only with `shell`: without a sandbox there are no jobs.
         specs.push(jobs::output_spec());
         specs.push(jobs::list_spec());

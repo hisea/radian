@@ -902,3 +902,91 @@ async fn a_swapped_slot_changes_the_next_call() {
         "the write must land once the sandbox is off"
     );
 }
+
+// ---------- 10. the shell description tells the truth about `.git` (ADR 0038 slice 4) ----------
+
+/// A backend whose **effective** git answer is fixed, so the description is testable under both
+/// answers without a real probe and on any platform: the real Linux backend never opens `.git`,
+/// and a bare `sandbox()` here would keep the read-only default. `git_writable_except_exec` is
+/// what `CodingTools::open_session` reads (through the `Sandbox`), so this is the exact seam the
+/// product uses.
+struct GitBackend(bool);
+
+impl SandboxBackend for GitBackend {
+    fn name(&self) -> &'static str {
+        "test-git"
+    }
+
+    fn probe(&self) -> Result<ProbeReport, SandboxError> {
+        Ok(ProbeReport {
+            backend: self.name(),
+            detail: "test".into(),
+        })
+    }
+
+    fn command(
+        &self,
+        policy: &SandboxPolicy,
+        program: &OsStr,
+        args: &[OsString],
+    ) -> Result<Command, SandboxError> {
+        let mut command = Command::new(program);
+        command.args(args).current_dir(&policy.workspace);
+        Ok(command)
+    }
+
+    fn git_writable_except_exec(&self, _policy: &SandboxPolicy) -> bool {
+        self.0
+    }
+}
+
+static GIT_WRITABLE: GitBackend = GitBackend(true);
+static GIT_READ_ONLY: GitBackend = GitBackend(false);
+
+async fn shell_description(backend: &'static dyn SandboxBackend, root: &Path) -> String {
+    let sandbox =
+        Sandbox::from_backend(backend, SandboxMode::WorkspaceWrite, root).expect("a test sandbox");
+    let tools = CodingTools::with_sandbox(root, sandbox).expect("matching workspaces");
+    tools
+        .open_session()
+        .await
+        .unwrap()
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "shell")
+        .expect("shell is advertised with a sandbox")
+        .description
+        .clone()
+}
+
+/// ADR 0038 decision 4: with the writable carve-out in force the shell description says git can
+/// commit, branch and stash in the sandbox and that the executable entries stay read-only; with
+/// the read-only answer it keeps today's wording (`.git` read-only, `git commit` fails by
+/// design). The two mutations this catches are showing either text under the other answer.
+#[tokio::test]
+async fn the_shell_description_follows_the_effective_git_access() {
+    let dir = TempDir::new("shell-git-text");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let writable = shell_description(&GIT_WRITABLE, &root).await;
+    assert!(writable.contains("git commit"), "{writable}");
+    assert!(writable.contains("git branch"), "{writable}");
+    assert!(writable.contains("git stash"), "{writable}");
+    assert!(writable.contains("stay read-only"), "{writable}");
+    assert!(
+        !writable.contains("`git commit` fails by design"),
+        "{writable}"
+    );
+
+    let read_only = shell_description(&GIT_READ_ONLY, &root).await;
+    assert!(
+        read_only.contains("the repository's `.git` is read-only"),
+        "{read_only}"
+    );
+    assert!(
+        read_only.contains("`git commit` fails by design"),
+        "{read_only}"
+    );
+    assert!(!read_only.contains("git stash"), "{read_only}");
+}

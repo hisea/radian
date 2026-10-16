@@ -53,7 +53,7 @@ pub fn describe(
                 sandbox.backend_name(),
                 sandbox.probe().detail
             ),
-            workspace_sandbox_facts(wording),
+            workspace_sandbox_facts(wording, sandbox.git_writable_except_exec()),
         ),
         (SandboxMode::FullAccess, _) => (
             "full (chosen explicitly; never a default)".into(),
@@ -69,12 +69,23 @@ pub fn describe(
 }
 
 /// The `workspace` tier's "what it actually means" sentence. It does not depend on the
-/// backend, so it takes only the wording (and is testable without building a `Sandbox`).
-/// "network is on" is plain text: this string is printed as-is by both hosts, so it must
-/// carry no Markdown (ADR 0027; the model-facing wording in `radian-coding` is separate).
-fn workspace_sandbox_facts(wording: Wording) -> String {
+/// backend, so it takes only the wording and the git answer (and is testable without building a
+/// `Sandbox`). `git_writable` is the sandbox's **effective** answer
+/// ([`radian_sandbox::Sandbox::git_writable_except_exec`], ADR 0038 decision 4), not the
+/// policy's request: a task agent (or a backend without the carve-out, Linux) keeps the
+/// read-only wording, and only a session that can really commit with native git gets the
+/// writable one. "network is on" is plain text: this string is printed as-is by both hosts, so
+/// it must carry no Markdown (ADR 0027; the model-facing wording in `radian-coding` is
+/// separate).
+fn workspace_sandbox_facts(wording: Wording, git_writable: bool) -> String {
+    let git = if git_writable {
+        "repository metadata is writable so native git can commit, branch and stash there, \
+         except the entries git can execute (config and hooks), which stay read-only"
+    } else {
+        "repository metadata is read-only"
+    };
     format!(
-        "{}: writes are confined to the workspace, repository metadata is read-only, \
+        "{}: writes are confined to the workspace, {git}, \
          sensitive directories are not readable by default, and the network is on \
          (outbound and local-loopback connect, bind and listen are allowed). MCP \
          servers are NOT sandboxed in this build and run with your full access. The IPC \
@@ -143,13 +154,101 @@ mod tests {
     /// emphasis (`**on**` used to show as literal stars).
     #[test]
     fn the_workspace_facts_have_no_markdown() {
-        let facts = workspace_sandbox_facts(TUI_WORDING);
+        let facts = workspace_sandbox_facts(TUI_WORDING, false);
         assert!(facts.contains("network is on"), "{facts}");
         assert!(!facts.contains("**"), "no Markdown emphasis: {facts}");
         assert!(facts.contains("MCP servers are NOT sandboxed"), "{facts}");
         assert!(
-            workspace_sandbox_facts(CLI_WORDING).contains("commands and built-in tools:"),
+            workspace_sandbox_facts(CLI_WORDING, false).contains("commands and built-in tools:"),
             "the CLI wording names its own confined subject"
         );
+    }
+
+    /// ADR 0038 decision 4: the facts sentence follows the sandbox's **effective** git access,
+    /// not the policy's request. A session that can really commit with native git says so (and
+    /// that config and hooks stay read-only); a task agent (or any backend without the
+    /// carve-out, Linux) keeps the read-only wording. This is the line the startup block shows
+    /// and the `<runtime>` layer carries.
+    #[test]
+    fn the_workspace_facts_follow_the_effective_git_access() {
+        let writable = workspace_sandbox_facts(TUI_WORDING, true);
+        assert!(
+            writable.contains("native git can commit, branch and stash"),
+            "{writable}"
+        );
+        assert!(writable.contains("config and hooks"), "{writable}");
+        assert!(
+            !writable.contains("repository metadata is read-only"),
+            "{writable}"
+        );
+
+        let read_only = workspace_sandbox_facts(TUI_WORDING, false);
+        assert!(
+            read_only.contains("repository metadata is read-only"),
+            "{read_only}"
+        );
+        assert!(!read_only.contains("native git can commit"), "{read_only}");
+    }
+
+    /// A backend whose effective git answer is fixed, so the wiring from `describe` through
+    /// `Sandbox::git_writable_except_exec` is testable without a real probe.
+    struct GitBackend(bool);
+
+    impl radian_sandbox::SandboxBackend for GitBackend {
+        fn name(&self) -> &'static str {
+            "test-git"
+        }
+
+        fn probe(&self) -> Result<radian_sandbox::ProbeReport, radian_sandbox::SandboxError> {
+            Ok(radian_sandbox::ProbeReport {
+                backend: self.name(),
+                detail: "test".into(),
+            })
+        }
+
+        fn command(
+            &self,
+            policy: &radian_sandbox::SandboxPolicy,
+            program: &std::ffi::OsStr,
+            args: &[std::ffi::OsString],
+        ) -> Result<std::process::Command, radian_sandbox::SandboxError> {
+            let mut command = std::process::Command::new(program);
+            command.args(args).current_dir(&policy.workspace);
+            Ok(command)
+        }
+
+        fn git_writable_except_exec(&self, _policy: &radian_sandbox::SandboxPolicy) -> bool {
+            self.0
+        }
+    }
+
+    static GIT_WRITABLE: GitBackend = GitBackend(true);
+    static GIT_READ_ONLY: GitBackend = GitBackend(false);
+
+    /// The startup line reads the **sandbox's** effective answer, not a hand-passed flag: with a
+    /// backend that enforces the carve-out the facts say native git can commit, and with one
+    /// that does not (the Linux shape) they stay read-only. Swapping the two is the mutation
+    /// this catches.
+    #[test]
+    fn the_startup_line_reports_the_sandboxes_effective_git_access() {
+        let dir = std::env::temp_dir().join(format!("radian-describe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writable = Sandbox::from_backend(&GIT_WRITABLE, SandboxMode::WorkspaceWrite, &dir)
+            .expect("a test sandbox");
+        let (_, facts) = describe(SandboxMode::WorkspaceWrite, Some(&writable), TUI_WORDING);
+        assert!(
+            facts.contains("native git can commit, branch and stash"),
+            "{facts}"
+        );
+
+        let read_only = Sandbox::from_backend(&GIT_READ_ONLY, SandboxMode::WorkspaceWrite, &dir)
+            .expect("a test sandbox");
+        let (_, facts) = describe(SandboxMode::WorkspaceWrite, Some(&read_only), TUI_WORDING);
+        assert!(
+            facts.contains("repository metadata is read-only"),
+            "{facts}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
