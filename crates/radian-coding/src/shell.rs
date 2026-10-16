@@ -25,7 +25,8 @@
 //!   scope; the drain is bounded so even that cannot hang the tool.
 //! - Output is capped; the model is told how many bytes were discarded.
 
-use std::io::Read;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
@@ -41,7 +42,7 @@ use serde_json::json;
 
 use crate::args;
 use crate::fail;
-use crate::jobs::Jobs;
+use crate::jobs::{AdoptedHandle, JobCell, Jobs};
 use crate::provider::Limits;
 use crate::workspace::WorkspaceRoot;
 
@@ -68,7 +69,10 @@ pub(crate) fn schema() -> serde_json::Value {
                 "description": "How long the command may run before its process group is \
                                 killed. Clamped to the configured maximum. Ignored for \
                                 `background: true` unless given, in which case the job is \
-                                killed like `job_kill` and settles as timed out."
+                                killed like `job_kill` and settles as timed out. For a \
+                                foreground command this deadline is kept from the command's \
+                                start even if the command is moved to the background when it \
+                                runs past the auto-background threshold."
             },
             "cwd": {
                 "type": "string",
@@ -155,7 +159,11 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
              because that is where a failing command's error is). The process group is \
              killed on timeout or cancellation. The timeout is clamped to the configured \
              maximum (600 s by default); for a command that needs longer use `background: \
-             true`, which has no default timeout. Use `cwd` (workspace-relative) to run \
+             true`, which has no default timeout. A foreground command still running after the \
+             configured auto-background threshold (120 s by default) is moved to the \
+             background **in place** — the same process, never restarted — and this call \
+             returns at once with a job id, its output file, and the output so far. Use `cwd` \
+             (workspace-relative) to run \
              somewhere other than the workspace root. Set `background: true` for a command \
              that outlives the foreground timeout: it returns at once with a job id, and the \
              three `job_*` tools read, list and stop it. `job_output` is a bounded \
@@ -203,9 +211,15 @@ pub async fn run_user_bash(
         limits.default_shell_timeout,
         limits.default_shell_output_bytes,
         cancel,
+        // ADR 0037: `!`/`!!` never turn into a background job.
+        None,
     )
     .await
     .map_err(|failure| failure.message)?;
+    // `execute` cannot adopt without an `Adopt` specification.
+    let ExecOutcome::Ran(outcome) = outcome else {
+        unreachable!("a user `!` command never adopts a job");
+    };
     Ok(UserBash {
         stdout: outcome.stdout.render(),
         stderr: outcome.stderr.render(),
@@ -256,29 +270,62 @@ pub(crate) async fn run(
         return start_background(root, sandbox, jobs, &cwd, &args);
     }
 
-    let (timeout, clamped) = clamp_timeout(args.timeout_secs, limits);
+    let (deadline, clamped) = clamp_timeout(args.timeout_secs, limits);
     let (output_cap, output_clamped) = clamp_output(args.max_output_bytes, limits);
+
+    // ADR 0037: a foreground command still running after `auto_background_after`
+    // is adopted by the job registry in place. The foreground wait is the threshold itself
+    // when the model gave no `timeout_secs` (the threshold is what replaces the default cap:
+    // there is no foreground cap after adoption); with an explicit `timeout_secs` the
+    // deadline is that value **from the command's start**, and adoption only happens when
+    // the threshold falls before it (the job is then killed at the original deadline).
+    let auto = limits
+        .auto_background_after
+        .filter(|after| !after.is_zero());
+    let (wait, adopt_threshold, explicit_deadline) = match auto {
+        Some(after) if args.timeout_secs.is_none() => (after, Some(after), None),
+        Some(after) if after < deadline => (after, Some(after), Some(deadline)),
+        _ => (deadline, None, None),
+    };
 
     let outcome = execute(
         sandbox,
         &cwd,
         &args.command,
-        timeout,
+        wait,
         output_cap,
         &cx.cancellation,
+        adopt_threshold.map(|_| Adopt {
+            jobs,
+            command: &args.command,
+            explicit_deadline,
+        }),
     )
     .await?;
-    Ok(report(
-        &args.command,
-        root.root(),
-        &cwd,
-        sandbox.mode(),
-        timeout,
-        clamped,
-        output_cap,
-        output_clamped,
-        &outcome,
-    ))
+    match outcome {
+        ExecOutcome::Ran(outcome) => Ok(report(
+            &args.command,
+            root.root(),
+            &cwd,
+            sandbox.mode(),
+            explicit_deadline.unwrap_or(wait),
+            clamped,
+            output_cap,
+            output_clamped,
+            &outcome,
+        )),
+        ExecOutcome::Adopted(info) => Ok(adopted_report(
+            &args.command,
+            root.root(),
+            &cwd,
+            sandbox.mode(),
+            wait,
+            clamped,
+            output_cap,
+            output_clamped,
+            &info,
+        )),
+    }
 }
 
 /// Starts `command` as a background job (ADR 0037) and returns the one-line acknowledgement:
@@ -380,6 +427,24 @@ pub(crate) fn sandboxed_command(
     Ok(process)
 }
 
+/// What a foreground [`execute`] produced (ADR 0037): the finished outcome, or the
+/// job the still-running call was adopted into.
+pub(crate) enum ExecOutcome {
+    Ran(Outcome),
+    Adopted(crate::jobs::AdoptInfo),
+}
+
+/// The adoption parameters for a foreground [`execute`] (ADR 0037). Present only
+/// when `auto_background_after` is on and the threshold can be reached before the foreground
+/// deadline; `None` keeps the pre-revision behaviour.
+struct Adopt<'a> {
+    jobs: &'a Jobs,
+    command: &'a str,
+    /// The explicit `timeout_secs` from the command's start, if any: the adopted job is
+    /// killed then, not at the threshold.
+    explicit_deadline: Option<Duration>,
+}
+
 async fn execute(
     sandbox: &Sandbox,
     cwd: &Path,
@@ -387,7 +452,8 @@ async fn execute(
     timeout: Duration,
     output_cap: usize,
     cancel: &CancellationToken,
-) -> Result<Outcome, ToolFailure> {
+    adopt: Option<Adopt<'_>>,
+) -> Result<ExecOutcome, ToolFailure> {
     let mut process = sandboxed_command(sandbox, cwd, command)?;
 
     let started = Instant::now();
@@ -400,17 +466,70 @@ async fn execute(
 
     let mut timed_out = false;
     let mut cancelled = false;
-    let kill = tokio::select! {
+    let mut slots_full = false;
+
+    // Phase 1: wait for the end, the foreground deadline (the adoption threshold when an
+    // `Adopt` is active), or the turn's cancellation.
+    let mut timer_fired = false;
+    let mut kill = tokio::select! {
         finished = supervised.finished() => !finished,
         () = tokio::time::sleep(timeout) => {
-            timed_out = true;
-            true
+            timer_fired = true;
+            false
         }
         () = cancel.cancelled() => {
             cancelled = true;
             true
         }
     };
+
+    if !kill && timer_fired {
+        match &adopt {
+            None => {
+                timed_out = true;
+                kill = true;
+            }
+            Some(spec) => {
+                let remaining = spec
+                    .explicit_deadline
+                    .map(|deadline| deadline.saturating_sub(started.elapsed()));
+                match spec
+                    .jobs
+                    .adopt(&supervised, spec.command, started, remaining)
+                {
+                    Ok(info) => return Ok(ExecOutcome::Adopted(info)),
+                    // No free slot (ADR 0037): do not adopt. The call
+                    // keeps running to its foreground deadline and is killed there.
+                    Err(_) => {
+                        slots_full = true;
+                        let rest = remaining.unwrap_or(Duration::ZERO);
+                        if rest.is_zero() {
+                            timed_out = true;
+                            kill = true;
+                        } else {
+                            let mut rest_fired = false;
+                            let rest_kill = tokio::select! {
+                                finished = supervised.finished() => !finished,
+                                () = tokio::time::sleep(rest) => {
+                                    rest_fired = true;
+                                    false
+                                }
+                                () = cancel.cancelled() => {
+                                    cancelled = true;
+                                    true
+                                }
+                            };
+                            if rest_fired {
+                                timed_out = true;
+                            }
+                            kill = rest_kill || rest_fired;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if kill {
         supervised.kill_tree();
     }
@@ -419,14 +538,19 @@ async fn execute(
     let mut outcome = supervised.take_outcome();
     outcome.timed_out = timed_out;
     outcome.cancelled = cancelled;
+    outcome.slots_full = slots_full;
     outcome.duration = started.elapsed();
-    Ok(outcome)
+    Ok(ExecOutcome::Ran(outcome))
 }
 
 // ---------- supervision ----------
 
 #[derive(Default)]
 struct Capped {
+    /// The first quarter of the budget, kept verbatim.
+    head_cap: usize,
+    /// The last three quarters, kept as a ring.
+    tail_cap: usize,
     /// The first part of the stream, kept verbatim.
     head: Vec<u8>,
     /// The last part of the stream. A ring in spirit: it is trimmed as it grows, so memory
@@ -437,6 +561,46 @@ struct Capped {
 }
 
 impl Capped {
+    /// A capture with `cap` bytes of budget: the first quarter as the head, the last three
+    /// quarters as the tail.
+    fn with_cap(cap: usize) -> Self {
+        let head_cap = cap / 4;
+        Self {
+            head_cap,
+            tail_cap: cap - head_cap,
+            ..Self::default()
+        }
+    }
+
+    /// Adds one chunk, trimming the tail as it grows (amortized O(1) per byte; the buffer
+    /// never exceeds twice the tail cap).
+    fn push(&mut self, bytes: &[u8]) {
+        self.total += bytes.len() as u64;
+        let head_take = self
+            .head_cap
+            .saturating_sub(self.head.len())
+            .min(bytes.len());
+        self.head.extend_from_slice(&bytes[..head_take]);
+        let rest = &bytes[head_take..];
+        if rest.is_empty() {
+            return;
+        }
+        self.tail.extend_from_slice(rest);
+        if self.tail_cap > 0 && self.tail.len() > 2 * self.tail_cap {
+            let drop = self.tail.len() - self.tail_cap;
+            self.tail.drain(..drop);
+        }
+    }
+
+    /// Trims the tail to its cap. Called once at end of stream (and before a promotion), so a
+    /// small tail is exactly the retained budget rather than up to twice it.
+    fn trim(&mut self) {
+        if self.tail_cap > 0 && self.tail.len() > self.tail_cap {
+            let drop = self.tail.len() - self.tail_cap;
+            self.tail.drain(..drop);
+        }
+    }
+
     /// Bytes that are in neither `head` nor `tail`.
     fn discarded(&self) -> u64 {
         self.total - (self.head.len() + self.tail.len()) as u64
@@ -456,21 +620,101 @@ impl Capped {
             return String::from_utf8_lossy(&bytes).into_owned();
         }
         let mut out = String::from_utf8_lossy(&self.head).into_owned();
-        out.push_str(&format!(
-            "\n[... {} bytes discarded; showing the start and the end ...]\n",
-            self.discarded()
-        ));
+        out.push_str(&self.marker());
         out.push_str(&String::from_utf8_lossy(&self.tail));
         out
     }
+
+    /// The marker that names the discarded middle, on its own line.
+    fn marker(&self) -> String {
+        format!(
+            "\n[... {} bytes discarded; showing the start and the end ...]\n",
+            self.discarded()
+        )
+    }
+
+    /// Writes the retained bytes (head, marker if the middle was dropped, then tail) to `out`.
+    /// Used to seed a job's output file when a foreground command is adopted (ADR 0037
+    /// revision 1). Returns the number of bytes written.
+    fn write_to(&self, out: &mut impl Write) -> std::io::Result<u64> {
+        out.write_all(&self.head)?;
+        let mut written = self.head.len() as u64;
+        if self.is_truncated() {
+            let marker = self.marker();
+            out.write_all(marker.as_bytes())?;
+            written += marker.len() as u64;
+        }
+        out.write_all(&self.tail)?;
+        Ok(written + self.tail.len() as u64)
+    }
 }
 
-struct Outcome {
-    status: Option<ExitStatus>,
+/// One output stream's destination (ADR 0037): the foreground executor's bounded
+/// head+tail capture, until [`StreamSink::promote`] switches it — under this lock, at
+/// adoption — to the job's `.out` file plus the [`JobCell`] ring.
+///
+/// A reader takes the lock once per chunk, and `promote` takes it too, so a promotion is
+/// atomic with respect to one chunk: no byte is lost, and none is written twice.
+pub(crate) struct StreamSink {
+    capped: Capped,
+    job: Option<JobSink>,
+}
+
+struct JobSink {
+    file: File,
+    cell: Arc<Mutex<JobCell>>,
+}
+
+impl StreamSink {
+    fn new(cap: usize) -> Self {
+        Self {
+            capped: Capped::with_cap(cap),
+            job: None,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        match &mut self.job {
+            None => self.capped.push(bytes),
+            Some(job) => {
+                let _ = job.file.write_all(bytes);
+                let mut cell = lock(&job.cell);
+                cell.push_ring(bytes);
+            }
+        }
+    }
+
+    /// Flushes the retained pre-adoption output into `file`, then switches to job mode.
+    /// Returns `(bytes written to the file, the rendered pre-adoption output)`. The caller
+    /// holds this sink's lock; the file is written before the sink can accept more bytes.
+    pub(crate) fn promote(&mut self, mut file: File, cell: Arc<Mutex<JobCell>>) -> (u64, String) {
+        self.capped.trim();
+        let rendered = self.capped.render();
+        let written = self.capped.write_to(&mut file).unwrap_or(0);
+        self.capped = Capped::default();
+        self.job = Some(JobSink { file, cell });
+        (written, rendered)
+    }
+
+    /// Takes the captured head+tail at end of stream. Empty for a stream that was promoted
+    /// (its bytes went to the job instead). Trimmed to the exact budget, so the reported size
+    /// is the budget and not up to twice it.
+    fn take_capped(&mut self) -> Capped {
+        let mut capped = std::mem::take(&mut self.capped);
+        capped.trim();
+        capped
+    }
+}
+
+pub(crate) struct Outcome {
+    pub(crate) status: Option<ExitStatus>,
     stdout: Capped,
     stderr: Capped,
     timed_out: bool,
     cancelled: bool,
+    /// The call was not adopted because all job slots were busy (ADR 0037
+    /// decision 4).
+    slots_full: bool,
     duration: Duration,
     /// The readers did not reach EOF within the drain grace after the group was killed.
     drain_incomplete: bool,
@@ -484,6 +728,7 @@ impl Default for Outcome {
             stderr: Capped::default(),
             timed_out: false,
             cancelled: false,
+            slots_full: false,
             duration: Duration::ZERO,
             drain_incomplete: false,
         }
@@ -495,11 +740,22 @@ impl Default for Outcome {
 /// group id cannot have been reused), then reaps and drains. [`Supervised::kill_tree`] takes
 /// the same lock, so a timeout or cancellation can only signal a group that is still
 /// reserved.
-struct Supervised {
-    pid: u32,
-    reaped: Arc<Mutex<bool>>,
-    done: tokio::sync::watch::Receiver<bool>,
-    outcome: Arc<Mutex<Option<Outcome>>>,
+///
+/// A foreground command adopted by the job registry (ADR 0037) keeps this same
+/// child and this same supervisor: `Jobs::adopt` installs an [`AdoptedHandle`] into
+/// `adopted`, and the supervisor settles the job after it reaps. Nothing is restarted.
+pub(crate) struct Supervised {
+    pub(crate) pid: u32,
+    pub(crate) reaped: Arc<Mutex<bool>>,
+    pub(crate) done: tokio::sync::watch::Receiver<bool>,
+    pub(crate) outcome: Arc<Mutex<Option<Outcome>>>,
+    /// The foreground capture of each stream, promotable to a job's file+ring.
+    pub(crate) stdout: Arc<Mutex<StreamSink>>,
+    pub(crate) stderr: Arc<Mutex<StreamSink>>,
+    /// The job this command was adopted into, if any. The supervisor takes it once and
+    /// settles; `Jobs::adopt` takes it too if the supervisor already finished (exactly one of
+    /// the two wins the take).
+    pub(crate) adopted: Arc<Mutex<Option<AdoptedHandle>>>,
     _supervisor: thread::JoinHandle<()>,
 }
 
@@ -533,24 +789,37 @@ impl Supervised {
         let stderr = child.stderr.take().expect("stderr was piped");
 
         // Each stream gets its own budget: a flooding stdout must not squeeze out the one
-        // stderr line that explains the failure.
+        // stderr line that explains the failure. Each stream also owns a sink so it can be
+        // promoted to a job in place (ADR 0037).
+        let stdout_sink = Arc::new(Mutex::new(StreamSink::new(cap)));
+        let stderr_sink = Arc::new(Mutex::new(StreamSink::new(cap)));
         let (out_tx, out_rx) = mpsc::channel();
         let (err_tx, err_rx) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = out_tx.send(read_capped(stdout, cap));
-        });
-        thread::spawn(move || {
-            let _ = err_tx.send(read_capped(stderr, cap));
-        });
+        {
+            let sink = Arc::clone(&stdout_sink);
+            thread::spawn(move || {
+                read_stream(stdout, Arc::clone(&sink));
+                let _ = out_tx.send(lock(&sink).take_capped());
+            });
+        }
+        {
+            let sink = Arc::clone(&stderr_sink);
+            thread::spawn(move || {
+                read_stream(stderr, Arc::clone(&sink));
+                let _ = err_tx.send(lock(&sink).take_capped());
+            });
+        }
 
         let reaped = Arc::new(Mutex::new(false));
         let outcome = Arc::new(Mutex::new(None));
+        let adopted: Arc<Mutex<Option<AdoptedHandle>>> = Arc::new(Mutex::new(None));
         let (done_tx, done) = tokio::sync::watch::channel(false);
         let supervisor = thread::Builder::new()
             .name("shell-supervisor".into())
             .spawn({
                 let reaped = Arc::clone(&reaped);
                 let outcome = Arc::clone(&outcome);
+                let adopted = Arc::clone(&adopted);
                 move || {
                     wait_for_exit_without_reaping(pid);
                     let status = {
@@ -571,7 +840,14 @@ impl Supervised {
                         drain_incomplete: !(out_drained && err_drained),
                         ..Outcome::default()
                     });
+                    // Publish `done` **before** taking the adopted handle: `Jobs::adopt`'s
+                    // fallback only takes the handle when `done` is already set, so exactly
+                    // one side ever settles (ADR 0037).
                     let _ = done_tx.send(true);
+                    let handle = adopted.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    if let Some(handle) = handle {
+                        handle.settle(status);
+                    }
                 }
             })?;
 
@@ -580,6 +856,9 @@ impl Supervised {
             reaped,
             done,
             outcome,
+            stdout: stdout_sink,
+            stderr: stderr_sink,
+            adopted,
             _supervisor: supervisor,
         })
     }
@@ -623,45 +902,41 @@ fn collect(rx: &mpsc::Receiver<Capped>) -> (Capped, bool) {
     }
 }
 
-/// Reads to EOF, keeping at most `cap` bytes per stream: the first quarter as the head and
-/// the last three quarters as the tail, with a count of what fell in between. Reading
-/// continues past the cap (and the tail is trimmed as it goes), so a chatty command neither
-/// blocks on a full pipe nor grows this process's memory with its output.
+/// Reads to EOF, keeping at most `cap` bytes: the first quarter as the head and the last
+/// three quarters as the tail, with a count of what fell in between. Reading continues past
+/// the cap (and the tail is trimmed as it goes), so a chatty command neither blocks on a full
+/// pipe nor grows this process's memory with its output.
+///
+/// The tool itself reads through [`StreamSink`] (so a running command can be adopted in
+/// place); this is the plain capture the reader tests pin.
+#[cfg(test)]
 fn read_capped(mut reader: impl Read, cap: usize) -> Capped {
-    let head_cap = cap / 4;
-    let tail_cap = cap - head_cap;
-    let mut capped = Capped::default();
+    let mut capped = Capped::with_cap(cap);
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
-            Ok(n) => {
-                capped.total += n as u64;
-                let bytes = &buf[..n];
-                let head_take = head_cap.saturating_sub(capped.head.len()).min(n);
-                capped.head.extend_from_slice(&bytes[..head_take]);
-                let rest = &bytes[head_take..];
-                if rest.is_empty() {
-                    continue;
-                }
-                capped.tail.extend_from_slice(rest);
-                // Trim in whole-tail chunks: amortized O(1) per byte, and the buffer never
-                // exceeds twice the tail cap.
-                if tail_cap > 0 && capped.tail.len() > 2 * tail_cap {
-                    let drop = capped.tail.len() - tail_cap;
-                    capped.tail.drain(..drop);
-                }
-            }
+            Ok(n) => capped.push(&buf[..n]),
         }
     }
-    if tail_cap > 0 && capped.tail.len() > tail_cap {
-        let drop = capped.tail.len() - tail_cap;
-        capped.tail.drain(..drop);
-    }
+    capped.trim();
     capped
 }
 
-fn lock(mutex: &Mutex<bool>) -> MutexGuard<'_, bool> {
+/// Reads a stream to EOF, handing each chunk to the shared sink. The sink decides where the
+/// bytes go (the foreground capture, or the job's file and ring after adoption), so a running
+/// command can be promoted without restarting its readers (ADR 0037).
+fn read_stream(mut reader: impl Read, sink: Arc<Mutex<StreamSink>>) {
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => lock(&sink).push(&buf[..n]),
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -752,6 +1027,13 @@ fn report(
     if outcome.cancelled {
         text.push_str("[cancelled; the process group was killed]\n");
     }
+    if outcome.slots_full {
+        text.push_str(
+            "[all background job slots were busy, so this call was **not** moved to the \
+             background; it ran to its foreground timeout. Finish a job with `job_output \
+             wait: true`, stop one with `job_kill`, or list them with `job_list`.]\n",
+        );
+    }
     match exit_code {
         Some(code) => text.push_str(&format!("exit code: {code}\n")),
         None => text.push_str("exit code: none (killed by a signal)\n"),
@@ -811,6 +1093,7 @@ fn report(
             "signal": signal,
             "timed_out": outcome.timed_out,
             "cancelled": outcome.cancelled,
+            "slots_full": outcome.slots_full,
             "timeout_secs": timeout.as_secs(),
             "timeout_clamped": clamped,
             "output_bytes_per_stream": output_cap,
@@ -822,6 +1105,76 @@ fn report(
             "stdout_truncated_bytes": outcome.stdout.discarded(),
             "stderr_truncated_bytes": outcome.stderr.discarded(),
             "duration_ms": outcome.duration.as_millis() as u64,
+        })),
+    }
+}
+
+/// The result of a foreground call that was adopted by the job registry in place (ADR 0037
+/// revision 1): the job id, the `job_output` hint, and a bounded tail of the output produced
+/// before adoption. The command is **not** restarted, and its output file already holds that
+/// pre-adoption output.
+#[allow(clippy::too_many_arguments)]
+fn adopted_report(
+    command: &str,
+    workspace: &Path,
+    cwd: &Path,
+    mode: SandboxMode,
+    threshold: Duration,
+    clamped: bool,
+    output_cap: usize,
+    output_clamped: bool,
+    info: &crate::jobs::AdoptInfo,
+) -> ToolOutput {
+    let mut text = String::new();
+    text.push_str(&format!("$ {command}\n"));
+    text.push_str(&format!(
+        "[still running after {threshold:?}; moved to the background as job {id} — the same \
+         process, not restarted. Its output is {output}. Read it with `job_output` (pass \
+         `wait: true` to wait for the end); `job_list` lists this session's jobs and \
+         `job_kill` stops one. Do not sleep or poll.]\n",
+        id = info.id,
+        output = info.output,
+    ));
+    text.push_str("--- stdout so far ---\n");
+    text.push_str(&info.stdout);
+    if !info.stdout.is_empty() && !info.stdout.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("--- stderr so far ---\n");
+    text.push_str(&info.stderr);
+    if !info.stderr.is_empty() && !info.stderr.ends_with('\n') {
+        text.push('\n');
+    }
+    if clamped {
+        text.push_str(&format!(
+            "[timeout clamped to the configured maximum of {threshold:?}]\n"
+        ));
+    }
+    if output_clamped {
+        text.push_str(&format!(
+            "[output budget clamped to the configured maximum of {output_cap} bytes per stream]\n"
+        ));
+    }
+
+    let cwd_relative = cwd
+        .strip_prefix(workspace)
+        .ok()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".into());
+
+    ToolOutput {
+        content: vec![ContentPart::text(text)],
+        structured: Some(json!({
+            "background": true,
+            "adopted": true,
+            "job_id": info.id,
+            "output": info.output,
+            "command": command,
+            "cwd": cwd_relative,
+            "sandbox_mode": mode.as_str(),
+            "auto_background_secs": threshold.as_secs(),
+            "adopted_bytes": info.adopted_bytes,
         })),
     }
 }
