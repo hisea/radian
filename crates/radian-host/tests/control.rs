@@ -778,3 +778,21 @@ async fn a_subscriber_sees_the_hook_events() {
     }
     fixture.stop().await;
 }
+
+/// ADR 0030: `integrate_task` is **not** a control-port verb (v0), so an
+/// external lead cannot merge over the port.
+#[tokio::test]
+async fn integrate_task_is_not_a_control_port_verb() {
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let fixture = Fixture::new("no-integrate-verb", &server.base_url).await;
+    let mut client = Client::connect(fixture.socket()).await;
+    let response = client
+        .request(json!({"id": 1, "verb": "integrate_task", "task": "t1"}))
+        .await;
+    assert_eq!(response["ok"], false, "{response}");
+    assert!(
+        response["error"].as_str().unwrap().contains("unknown verb"),
+        "{response}"
+    );
+    fixture.stop().await;
+}
