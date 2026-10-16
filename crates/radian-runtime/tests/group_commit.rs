@@ -175,6 +175,7 @@ async fn a_crash_between_sync_points_keeps_the_invariant() {
     );
 
     let mut crashed_cases = 0;
+    let mut unknown_cases = 0;
     for k in 1..=reference.writes {
         let dir = TempDir::new("gc-case");
         let effects_dir = TempDir::new("gc-effects");
@@ -229,9 +230,16 @@ async fn a_crash_between_sync_points_keeps_the_invariant() {
                     Some(expected),
                     "k={k}: {call_id} without a settle must be {expected}: {result:?}"
                 );
+                if expected == "outcome_unknown_after_crash" {
+                    unknown_cases += 1;
+                }
             }
         }
     }
+    assert!(
+        unknown_cases >= 1,
+        "at least one crash must land after a tool started but before it settled"
+    );
     assert_eq!(
         crashed_cases, reference.writes,
         "the injected crash must have fired at every record boundary"
