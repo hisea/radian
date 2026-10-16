@@ -1439,7 +1439,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let budget = (area.height as usize).saturating_sub(6);
             question_height(
                 form,
-                &app.session_id,
+                &app.session.session_id,
                 area.width as usize,
                 budget,
                 &app.theme,
@@ -1636,7 +1636,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let budget = (area.height as usize).saturating_sub(6);
             let lines = question_panel(
                 form,
-                &app.session_id,
+                &app.session.session_id,
                 input_area.width as usize,
                 budget,
                 &app.theme,
