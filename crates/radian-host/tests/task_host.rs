@@ -320,12 +320,15 @@ async fn a_shared_task_has_no_worktree_and_no_network() {
     registry.remove("t1", true).await.expect("remove");
 }
 
-/// ADR 0030 O12: `/tasks kill` closes the session and keeps the worktree, unlike `remove`.
+/// ADR 0030 O12: `/tasks kill` closes the session and keeps the worktree, unlike `remove`. A
+/// task killed before any turn ended still writes one `TaskFinished`, `cancelled` (ADR 0030 O5),
+/// which the host's notifier sees (the TUI's notice and task count read from it).
 #[tokio::test]
 async fn kill_closes_the_task_and_keeps_the_worktree() {
     let server = MockServer::start(vec![text_reply("done")]).await;
     let fixture = Fixture::new("kill");
-    let registry = fixture.registry(&server.base_url, recorder(), recorder());
+    let lead_seen = recorder();
+    let registry = fixture.registry(&server.base_url, recorder(), Arc::clone(&lead_seen));
 
     let record = registry
         .spawn(SpawnRequest::new("t1"))
@@ -342,6 +345,19 @@ async fn kill_closes_the_task_and_keeps_the_worktree() {
     );
     // The branch is still there too.
     assert!(git(&fixture.lead, &["rev-parse", "--verify", "radian/t1"]));
+
+    // The kill wrote the one TaskFinished, cancelled, and the notifier saw it.
+    let seen = lead_seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::TaskFinished {
+                outcome: TurnOutcome::Cancelled,
+                ..
+            }
+        )),
+        "the notifier must see the cancelled TaskFinished: {seen:?}"
+    );
 }
 
 /// ADR 0030 O11: the production builder hands the resolved agent definition to the model

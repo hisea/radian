@@ -1190,12 +1190,9 @@ pub async fn open_session(
     // `<sessions_dir>/<session-id>.jobs/`. It is a sibling of the session file, so the
     // sandbox's deny-read rule on the sessions directory covers it.
     let jobs_dir = session_dir.join(format!("{}.jobs", session_id.as_str()));
-    let (coding, jobs) = build_coding_tools(
-        coding_root.as_deref(),
-        sandbox_slot.clone(),
-        &jobs_dir,
-        shell_auto_background,
-    )?;
+    // ADR 0030 O8: the coding tools (and so `shell`) are built **after** the lead registry
+    // below, once the registry has installed the process heavy gate, so every session's shell
+    // reads the configured gate (see the registry block).
     // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
     // there are coding tools. It is its own provider, so a host without `--workspace` still
     // advertises it. `None` is what the model sees as "no such tool".
@@ -1311,6 +1308,17 @@ pub async fn open_session(
     } else {
         None
     };
+
+    // ADR 0030 O8: the built-in coding tools are built here, after the registry has installed
+    // the process heavy gate, so this session's `shell` (the lead's, and every task's through
+    // its own `open_session`) queues on the same slots. The registry resolves the process gate
+    // at construction; [`radian_coding::HeavySlots::process`] then returns it for every session.
+    let (coding, jobs) = build_coding_tools(
+        coding_root.as_deref(),
+        sandbox_slot.clone(),
+        &jobs_dir,
+        shell_auto_background,
+    )?;
 
     // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line
     // prompt answers them directly. A task agent routes to its own task approver (ADR 0030
@@ -1900,7 +1908,7 @@ mod tests {
         );
 
         let info = jobs
-            .start(&full_access(&ws), &ws, "echo hi", None)
+            .start(&full_access(&ws), &ws, "echo hi", None, None)
             .expect("start the job");
         let output = jobs.output_path(&info.id);
         assert!(output.starts_with(&jobs_dir), "{}", output.display());

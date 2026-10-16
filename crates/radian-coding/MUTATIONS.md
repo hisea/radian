@@ -391,6 +391,19 @@ only this slice's own changes at the end). Each mutation run with
 the brief's first rule is "tests fail on the current branch": with `from_env` disabled the
 read-root tests fail on the boundary refusal, not on a missing API.
 
+## orch-s6b（2026-10-16，ADR 0030 O8 / 修订 1 R4）：heavy 门的 host 接线
+
+Base 是 `oc/orch-s6b`。变异就地施加，源文件先复制到 `.radian/scratch/mut/`，改完跑一条命名的测试，
+再从副本还原并用 `diff -q` 确认字节一致（禁用 `git checkout --`）。每条
+`cargo test -p radian-coding --test heavy <test> --no-fail-fast -- --exact`。
+
+| # | 变异的需求 | 变异 | 结果 | 抓住它的测试（rc=101） |
+|---|---|---|---|---|
+| SC-1 | 排队等槽可以被取消，且取消后不运行命令 | `HeavySlots::acquire` 的 `select!` 里把 `cancel.cancelled()` 分支换成永不就绪的 future（等于忽略取消） | ✅ 7.0s | `cancelling_a_queued_heavy_command_runs_nothing`（取消后仍占住 5s 超时，且标记文件被创建） |
+| SC-2 | 非重活命令不占槽、不排队 | `HeavySlots::acquire` 去掉非重活的提前返回（`if !self.is_heavy(command)` 改成 `if false`） | ✅ 6.9s | `a_heavy_command_waits_for_the_slot_and_a_light_one_does_not`（light 命令在槽被占时也等待，5s 超时） |
+
+2/2 抓住。`heavy.rs` 里 `is_heavy` 的前缀匹配（默认模式、边界、`bash -c` 不可见）由同文件的单元测试
+`the_default_patterns_match_their_commands_and_only_theirs` 钉住。
 ## review fix 1：读写打开被拒时回退到只写、跳过行数（2026-10-16）
 
 Base：本片 HEAD（`oc/write-diff`，fix 1 提交前）· 就地变异（改 `workspace.rs`），变异前复制到
@@ -405,6 +418,22 @@ Base：本片 HEAD（`oc/write-diff`，fix 1 提交前）· 就地变异（改 `
 普通覆盖不受影响。RF1 就是 a035006 的可观测行为，所以 0200 用例在 a035006 上必失败。0200 用例在
 root 下跳过（root 无视 mode 位，构造不出那次拒绝），跳过前先探测能否读一个 0200 文件。
 
+## orch-s6b review fix 1：后台重活 job 在 settle 时释放槽（2026-10-16）
+
+Base `f1be5b1`（本片 HEAD）· 就地变异（改 `jobs.rs` 的 `supervise`），变异前把文件复制到
+`.radian/scratch/mut/jobs.rs.orig`，跑完用**不带 `-p`** 的 `cp` 还原并用 `cmp` 逐字节确认；
+结束时 `git status --short` 只有本片自己的测试改动。每个变异用
+`cargo test -p radian-coding --test heavy --locked --no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SC-3 | 删掉 `supervise` 里的 `cell.heavy = None;`（settle 不释放槽） | `a_settled_background_heavy_job_releases_its_slot`、`a_killed_background_heavy_job_releases_its_slot` | ✅ failed |
+
+这一格是评审补的洞：settle 释放槽原先无测试覆盖。已 settle 的 cell 为 `job_list` 留在注册表里，
+所以删掉那一行后，结束的后台重活 job 一直攥着槽，直到 cell 被 drop，之后每条重活命令都会永远排队：
+两个跑完的 `cargo test` 就能堵死所有后续重活。两个新用例在 settle/`job_kill` 之后断言
+`gate.available() == 1`，并让第二条重活命令在 5 s 超时内跑完（变异下断言先失败，不依赖超时）。
+`cancel`、非重活不占槽、等待可取消由上一节的 SC-1/SC-2 钉住。
 ## ADR 0037：前台 shell 调用过阈值转后台（2026-10-16，branch `oc/auto-bg`）
 
 Base：本片 HEAD · 就地变异（改 `shell.rs` / `jobs.rs`），变异前把文件复制到
@@ -430,3 +459,20 @@ Base：本片 HEAD · 就地变异（改 `shell.rs` / `jobs.rs`），变异前�
 没有；把阈值设回「永不」（`None`）时 `a_long_foreground_command_is_adopted_in_place`
 在 60 s 前台默认超时下也永远不会返回 job id。语义上，AB1–AB5 的任一变异等价于把这条行为拿掉，
 对应用例即失败（上表）。
+
+### orch-s6b 合并 origin/main（2026-10-16）：转后台的重活命令把 heavy 槽带进 job
+
+`oc/auto-bg` 与 `oc/orch-s6b` 都动 `shell.rs`/`jobs.rs`：前者加了「前台命令过阈值就地转后台」，
+后者加了 heavy 槽门。合并时必须两样都留：转后台的重活命令要把手上的 `HeavyPermit` 经
+`Adopt`/`Jobs::adopt` 传进 job（和 `Jobs::start` 一样），job settle 时再释放。变异就地改
+`crates/radian-coding/src/shell.rs`（adopt 调用处），跑完从 `.radian/scratch/mut/shell.rs.fix2orig`
+还原并 `diff -q` 确认字节一致。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MH-1 | 转后台时不把 heavy permit 带进 job（`.adopt(..., heavy)` 换成 `None`，permit 随前台 `run` 返回即释放） | `an_adopted_foreground_heavy_command_holds_and_releases_its_slot`（转后台后 `gate.available()` 已是 1，断言应为 0） | ✅ failed (rc=101, 4.0s) |
+
+新用例：`an_adopted_foreground_heavy_command_holds_and_releases_its_slot`（`tests/heavy.rs`）——
+前台重活命令（`echo heavy adopt; sleep 600`）过 300 ms 阈值转后台后 `gate.available() == 0`，
+`job_kill` 使其 settle 后 `== 1`。
+
