@@ -409,7 +409,7 @@ impl TaskRegistry {
         // record is in the registry, so no failure below can leave a worktree or a driver.
         let mut guard = SpawnGuard::new(self.workspace.clone());
         match self
-            .spawn_inner(&mut guard, &id, isolation, label, brief, approval, policy)
+            .spawn_inner(&mut guard, &id, isolation, label, brief, (approval, policy))
             .await
         {
             Ok(record) => {
@@ -442,8 +442,9 @@ impl TaskRegistry {
         isolation: Isolation,
         label: Option<String>,
         brief: Option<String>,
-        approval: ApprovalPolicy,
-        policy: Option<crate::task_pending::PolicyCommand>,
+        // The task's approval policy and its optional edge policy command (ADR 0030 slice 5),
+        // together: they are only ever read as a pair by the task approver below.
+        (approval, policy): (ApprovalPolicy, Option<crate::task_pending::PolicyCommand>),
     ) -> Result<Arc<TaskRecord>, TaskError> {
         // 1. The workspace: a fresh worktree on `radian/<id>`, or the lead's own (shared).
         let (workspace, worktree, branch) = match isolation {
