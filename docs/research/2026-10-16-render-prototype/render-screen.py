@@ -26,6 +26,9 @@ The rules the proposal keeps everywhere (that is the point: one set, every compo
 Switches: --width N (default 110) --panel on|off --menu on|off --modal none|approval|ask
           --input rule|bar --marks on|off --numbers on|off --today (the current look, for
           the transcript only; reconstructed from origin/main 5836485)
+          --theme dark|light|<pi theme>  (radian's built-ins, or one of the 19 bundled pi
+          themes such as tokyo-night, catppuccin-latte, gruvbox-dark; a pi theme paints its
+          own page background)
 """
 import argparse
 import sys
@@ -44,6 +47,21 @@ ACCENT_BAR, USER_BG, CARD_BG, RESET, BOLD, ITALIC = (
 fg, bg, width, inline, wrap_words, strip_inline, highlight = (
     _rp.fg, _rp.bg, _rp.width, _rp.inline, _rp.wrap_words, _rp.strip_inline, _rp.highlight)
 THOUGHT, THOUGHT_SECS, PATCH_PATH, DIFF = _rp.THOUGHT, _rp.THOUGHT_SECS, _rp.PATCH_PATH, _rp.DIFF
+PAGE_BG = None
+
+
+def apply_theme(name):
+    """Loads a theme into render-prototype's palette and re-binds this module's names."""
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import themes
+    palette, page_bg, label = themes.load(name)
+    _rp.set_palette(palette)
+    g = globals()
+    for n in _rp.PALETTE_NAMES:
+        g[n] = getattr(_rp, n)
+    g["PAGE_BG"] = page_bg
+    return label
 
 
 class Opt:
@@ -86,6 +104,11 @@ def render_row(spans, row_bg, cols):
         used += width(text)
     buf.append(f"{RESET}{bg(row_bg)}{' ' * max(0, cols - used)}{RESET}")
     return "".join(buf)
+
+
+def render_row_bg(spans, row_bg, cols):
+    """`render_row` with the theme's page background under rows that have none."""
+    return render_row(spans, row_bg or PAGE_BG, cols)
 
 
 M = [("  ", TEXT, "", None)]      # the empty marker column
@@ -440,7 +463,11 @@ def main():
     ap.add_argument("--marks", choices=["on", "off"], default="off")
     ap.add_argument("--numbers", choices=["on", "off"], default="on")
     ap.add_argument("--today", action="store_true")
+    ap.add_argument("--theme", default="dark", help="dark | light | a pi theme name or file")
     opt = ap.parse_args()
+    label = apply_theme(opt.theme)
+    if PAGE_BG:
+        sys.stdout.write(bg(PAGE_BG) + "\x1b[2J\x1b[H")
 
     panel_w = 34 if opt.panel == "on" else 0
     main_w = opt.width - panel_w - (3 if panel_w else 0)
@@ -469,13 +496,14 @@ def main():
     out = []
     for i in range(total):
         spans, row_bg = main_rows[i]
-        line = render_row(spans, row_bg, main_w)
+        line = render_row_bg(spans, row_bg, main_w)
         if side:
             s_spans, s_bg = side.rows[i] if i < len(side.rows) else ([], None)
-            divider = f"{RESET}{fg(DIM)} │ {RESET}"
-            line += divider + render_row(s_spans, s_bg, panel_w)
+            divider = f"{RESET}{bg(PAGE_BG)}{fg(DIM)} │ {RESET}"
+            line += divider + render_row_bg(s_spans, s_bg, panel_w)
         out.append(line)
     sys.stdout.write("\n".join(out) + "\n")
+    sys.stdout.write(f"{RESET}{bg(PAGE_BG)}{fg(DIM)}{'':<{opt.width}}{RESET}\n{RESET}{fg(DIM)}theme: {label}{RESET}\n")
 
 
 if __name__ == "__main__":

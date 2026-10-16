@@ -29,6 +29,7 @@ can be looked at in the terminal:
   --numbers on|off   diff rows carry a line-number gutter / bare `+`/`-` rows
   --tint on|off      added/removed diff rows get a full-width background tint
   --width N          transcript width (default 80)
+  --theme NAME       dark | light (radian built-in) | a pi theme name from the test fixtures
 
 Nothing here touches radian; it is a picture to decide from.
 """
@@ -65,11 +66,26 @@ UNDER = "\x1b[4m"
 
 
 def fg(c):
-    return f"\x1b[38;2;{c[0]};{c[1]};{c[2]}m"
+    return f"\x1b[38;2;{c[0]};{c[1]};{c[2]}m" if c else ""
 
 
 def bg(c):
     return f"\x1b[48;2;{c[0]};{c[1]};{c[2]}m" if c else ""
+
+
+PALETTE_NAMES = ["TEXT", "MUTED", "DIM", "VIOLET", "BLUE", "STRING", "GREEN", "RED", "YELLOW", "THINKING",
+                 "ACCENT_BAR", "USER_BG", "CARD_BG", "ADD_BG", "DEL_BG"]
+
+
+def set_palette(palette):
+    """Rebinds the module's colour names from a `themes.load` palette (None = terminal default)."""
+    for name in PALETTE_NAMES:
+        if name in palette:
+            globals()[name] = palette[name]
+    g = globals()
+    g["ADD_GUTTER"] = g["ADD_BG"]
+    g["DEL_GUTTER"] = g["DEL_BG"]
+    g["CTX_GUTTER"] = g["CARD_BG"]
 
 
 def width(s):
@@ -509,7 +525,15 @@ def main():
     ap.add_argument("--rail", choices=["on", "off"], default="on")
     ap.add_argument("--numbers", choices=["on", "off"], default="on")
     ap.add_argument("--tint", choices=["on", "off"], default=None)
+    ap.add_argument("--theme", default="dark", help="dark | light | a pi theme name or file (see themes.py)")
     opt = ap.parse_args()
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import themes
+    palette, page_bg, label = themes.load(opt.theme)
+    set_palette(palette)
+    if page_bg:
+        sys.stdout.write(bg(page_bg) + "\x1b[2J\x1b[H")   # paint the page with the theme's own background
     if opt.tint is None:
         opt.tint = "on" if opt.style == "band" else "off"
     out = Out(opt.width)

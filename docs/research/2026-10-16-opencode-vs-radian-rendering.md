@@ -63,7 +63,9 @@
 12. **`@@` 行改 dim。** 推荐做。
 13. **代码块改线框**（顶线带语言、左细线、短底线），取代 dim 围栏行。推荐做；0035 修订 6。
 
-ADR 归属：2、13 与风格 1 的「线 vs 带」进 **0035**（视觉语言）；1 的卡片形状、6、7、8、9、11、12 进 **0028**（内容渲染：R2/R3/R4 与修订 5）；10 的新角色进 **0029**。
+14. **主题＼�「不要求完全 compatible，我们可以自己一个格式，但是可以有一个 skill translate」；「pi theme 里面有我们不需要的可以去掉」）。** 推荐：radian 自己的主题格式，角色集只保留这套设计用到的，pi 主题用一个内建 skill 翻译成 radian 格式（翻译是一次性的文件转换，不是运行时兼容层）。这反转 ADR 0029 决定 1「格式就是 pi 的主题 JSON」，要 0029 修订 2。这套设计需要而今天没有的角色：`frame`（细线、开口框、表格线、压缩线，今天借 `md_hr`）、`tool_name`（工具行的工具名）、`diff_line_number`、`diff_added_bg`/`diff_removed_bg`（只在开底色时用）、`status_ok`/`status_warn`/`status_error`（工具行的 `✓`/`✗` 与面板的 `● ◐ ✓ ◌ ✗`）；要改的映射：`user` 从背景角色改成前景角色（`❯` 与用户文字用强调色），`diff_hunk` 从 accent 改 dim；`reasoning` 去掉 italic 是内建取值的改动。可以去掉的 pi 键（这套设计不用）：`customMessage*`、`bashMode`、`mdCodeBlockBorder`、`borderMuted`、`selectedBg` 之外的 `*Bg` 若不开底色、`thinkingOff…Max` 七档若 footer 不按档位上色。降级：设计不靠底色，0028 修订 4 第 6 条「无背景色退回方框」可作废；不做 16 色一档，`COLORTERM` 不满足就走 256 色近似（已有）。原型：`render-screen.sh --theme dark|light|<pi 主题名>`，内建 light 的值来自 `theme.rs` `mod pi` 的 light 常量，19 个 pi 主题来自测试数据（`themes.py` 按 `theme/file.rs` 的映射取键）。
+
+ADR 归属：2、13 与风格 1 的「线 vs 带」进 **0035**（视觉语言）；1 的卡片形状、6、7、8、9、11、12 进 **0028**（内容渲染：R2/R3/R4 与修订 5）；10 与 14 的角色和格式进 **0029**（修订 2）。
 
 ## 未做 / 未核实
 
