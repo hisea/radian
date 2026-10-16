@@ -1333,3 +1333,15 @@ Base `d8b7688`（worktree `.radian-worktrees/access-cmd`）· 每个变异在就
 
 3/3 抓住。AC-M3 的两半都在同一个 pty 用例里：写 `~/.radian/access/access.json` 时必须生效并带
 `(project)` 标记；把同样内容写进工作区文件、用干净 HOME 启动时**必须不生效**。
+## sandbox-unix-sockets：TUI 把 `allow_unix_sockets` 交给沙箱（ADR 0016，2026-10-15）
+
+Base `acbc455`（`origin/main`）· 就地变异：改前 `cp` 到 scratchpad，改后从副本写回并 `cmp` 逐字节相同。
+`cargo test -p radian-tui --test structure --no-fail-fast main_forwards_the_allowed_unix_sockets_to_the_sandbox`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| US-M1 | `build_sandbox` 调用的第四个实参改成 `&Vec::new()`（配置里的 socket 列表到不了沙箱） | `structure::main_forwards_the_allowed_unix_sockets_to_the_sandbox` | ✅ |
+
+1/1 抓住。这条是**接线**变异：白名单本身的行为由 `radian-sandbox` 的逃逸矩阵覆盖（`unix_socket` 组的
+`whitelisted_allowed` 对照），而「TUI 把解析后的列表交给 `build_sandbox`」只有源码结构能钉住
+（`run` 在 `main.rs` 里、测试够不到），所以按 `structure.rs` 的既有做法做结构断言。
