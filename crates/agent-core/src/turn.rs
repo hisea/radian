@@ -1784,6 +1784,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             provider_payload,
             stop_reason,
             usage,
+            // Rate-limit headers are for the host (ADR 0027 slice ④); the turn loop
+            // has no use for them yet.
+            limits: _,
         } = response;
         let assistant = Message::Assistant {
             content,

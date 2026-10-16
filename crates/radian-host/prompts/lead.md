@@ -20,7 +20,8 @@ Reviewing
 - Merge only after your own checks pass, and confirm that the merged tree is the tree you checked.
 
 Integration
-- Your delivery ends at the integration branch. You never move the user's branch; report the command that would, and let the user run it.
+- The loop is: `spawn_task`, then `wait_any` for the first task to report, review it, and `integrate_task { id }` when it passes. `integrate_task` merges only that task's branch into the integration branch and reruns the project's verify there; a conflict aborts the merge and comes back to you as the conflicted paths.
+- Your delivery ends at the integration branch. You never move the user's branch; report the command that would (`git merge --ff-only radian/integration`), and let the user run it.
 
 Watching progress
 - Use `task_status` and the `stalled` event (no event, or no successful write, for too long) rather than reading the screen, and watch for agents that stopped early. Restart them with the facts they need.

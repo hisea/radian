@@ -1762,14 +1762,23 @@ impl App {
                 crate::spinner::Kind::default()
             }),
         };
-        // An unknown `tui.input_style` is a skipped key (the reader warns once); the TUI falls
-        // back to the default.
-        self.input_style = config
-            .tui
-            .input_style
-            .as_deref()
-            .and_then(InputStyle::parse)
-            .unwrap_or_default();
+        // `tui.input_style` (ADR 0035; `bar` removed by the 2026-10-16
+        // note): `lines` (the default) or `box`. The removed `bar`, and any other unknown
+        // spelling, warns once and uses `lines` — a display preference, never a refusal
+        // (ADR 0008).
+        self.input_style = match config.tui.input_style.as_deref() {
+            None => InputStyle::default(),
+            Some("bar") => {
+                warnings.push("tui.input_style = \"bar\" was removed; using lines".into());
+                InputStyle::default()
+            }
+            Some(name) => InputStyle::parse(name).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "tui.input_style = {name:?} is not one of lines|box; using lines"
+                ));
+                InputStyle::default()
+            }),
+        };
         // `tui.display.reasoning` (ADR 0028 R3, default collapsed) and
         // `tui.display.tool_output` + `tool_preview_lines` (R4, default errors / 5). An
         // unknown spelling never reaches here (the host reader skips it with a warning).
@@ -3473,18 +3482,6 @@ impl App {
         self.session.projection.read().turn()
     }
 
-    /// `Esc`'s escalation (unchanged, ): cancel a running turn, otherwise
-    /// quit at once. Ctrl-C ([`Input::Cancel`]) is the one that asks twice.
-    fn cancel_or_quit_now(&mut self) -> UpdateResult {
-        if self.turn() == TurnState::Running {
-            self.quit_pending = None;
-            UpdateResult::quiet(Effect::Cancel)
-        } else {
-            self.quit = true;
-            UpdateResult::quiet(Effect::Quit)
-        }
-    }
-
     /// Ctrl-C (the `cancel` action), the one action whose meaning depends on the clock
     ///:
     /// - a turn is running: cancel it (unchanged);
@@ -3699,8 +3696,11 @@ impl App {
                 UpdateResult::dirty()
             }
             Action::Escape => {
-                // A non-empty input is cleared first (kept in the history, so `Up` finds it);
-                // an empty one cancels a running turn or quits.
+                // Esc never quits an idle session. In order: the menu and
+                // the find box are closed in `key_input`/`update` above; a non-empty input is
+                // cleared (kept in the history, so `Up` finds it); an empty one cancels the
+                // running `!` command or turn; otherwise it does nothing at all. Quitting is the
+                // two-press Ctrl-C (`cancel`) or `/quit`.
                 if !self.input.is_empty() {
                     let text = std::mem::take(&mut self.input).text();
                     self.session.history.push(text);
@@ -3712,8 +3712,13 @@ impl App {
                     // as a cancelled `BashDone`.
                     self.push_notice("cancelling the command…");
                     UpdateResult::effect(Effect::CancelBash)
+                } else if self.turn() == TurnState::Running {
+                    // Esc cancels the running turn (unchanged). A pending Ctrl-C quit window
+                    // is disarmed, as the old escalation did.
+                    self.quit_pending = None;
+                    UpdateResult::quiet(Effect::Cancel)
                 } else {
-                    self.cancel_or_quit_now()
+                    UpdateResult::none()
                 }
             }
             // The form actions normally arrive as `Input::Form`; a main-layer binding to one

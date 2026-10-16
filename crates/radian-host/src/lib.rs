@@ -26,17 +26,17 @@ pub mod git_commit;
 mod headers;
 pub mod herdr;
 mod home;
+pub mod integration;
 pub mod job_notify;
 pub mod lead_tools;
 pub mod login;
 mod mcp;
 pub mod memory;
-pub mod mermaid;
-mod mermaid_layout;
 mod model;
 pub mod named;
 pub mod observer;
 pub mod opencode_go;
+pub mod orchestration;
 mod output;
 pub mod pending;
 pub mod projection;
@@ -55,8 +55,8 @@ pub mod trust;
 mod workspace;
 
 pub use agents::{
-    AgentDef, AgentError, AgentSource, NamedAgent, SpawnAgent, SpawnOverrides, builtin_def,
-    load as load_agent, parse_file as parse_agent_file, parse_model_route, parse_tier,
+    AgentDef, AgentError, AgentSource, NamedAgent, SpawnAgent, SpawnDefaults, SpawnOverrides,
+    builtin_def, load as load_agent, parse_file as parse_agent_file, parse_model_route, parse_tier,
     resolve as resolve_agent, resolve_named as resolve_named_agent,
 };
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
@@ -121,15 +121,18 @@ pub use home::{
     run_dir_for, sessions_dir, sessions_dir_for, skills_dir, skills_dir_for, themes_dir,
     themes_dir_for, trust_dir, trust_dir_for, user_home, worktrees_dir_for,
 };
+pub use integration::{
+    Integration, MergeOutcome, branch_for as integration_branch_for,
+    dir_name_for as integration_dir_name_for, worktree_path as integration_worktree_path,
+};
 pub use job_notify::{
     JobNotifier, MAX_CONSECUTIVE_WAKES, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message,
 };
 pub use lead_tools::{
     DEFAULT_WAIT_TIMEOUT_SECS, LEAD_TOOL_NAMES, LeadSession, LeadTools, TASK_DETAIL_LIMIT_CHARS,
-    TASK_SUMMARY_LIMIT_CHARS, run as run_lead_tool,
+    TASK_SUMMARY_LIMIT_CHARS, human_merge_command, lead_allowed_tools, run as run_lead_tool,
 };
 pub use mcp::load_mcp_config;
-pub use mermaid::{MermaidCheckSession, MermaidCheckTools, check};
 pub use model::{
     COMPACTION_THINKING_CURRENT, DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs,
     Provider, RouteContext, SwitchableModel, Thinking, build_model, check_provider_flags,
@@ -145,6 +148,10 @@ pub use opencode_go::{
     DEFAULT_PERIOD as OPENCODE_GO_DEFAULT_PERIOD, MAX_PERIOD as OPENCODE_GO_MAX_PERIOD,
     MIN_PERIOD as OPENCODE_GO_MIN_PERIOD, OpencodeGoUsage, USAGE_URL as OPENCODE_GO_USAGE_URL,
     clamp_period as clamp_opencode_go_period,
+};
+pub use orchestration::{
+    Orchestration, OrchestrationConfig, VERIFY_TAIL_CHARS, VERIFY_TIMEOUT, VerifyResult, hook,
+    run_verify,
 };
 pub use output::{StdoutError, write_line, write_stdout};
 pub use pending::{
@@ -187,9 +194,9 @@ pub use startup::{
     session_workspace,
 };
 pub use task::{
-    CommitGate, EndCommit, Isolation, OrchestrationLimits, QueuedTask, SpawnHook, SpawnRequest,
-    SpawnStage, Spawned, StallNotice, TaskBuilder, TaskContext, TaskError, TaskHandle,
-    TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
+    CommitGate, EndCommit, Integrated, Isolation, OrchestrationLimits, QueuedTask, SpawnHook,
+    SpawnRequest, SpawnStage, Spawned, StallNotice, TaskBuilder, TaskContext, TaskError,
+    TaskHandle, TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
     task_sandbox,
 };
 pub use task_host::{TaskHost, TaskModelFactory, named_builder, task_builder, task_lines};

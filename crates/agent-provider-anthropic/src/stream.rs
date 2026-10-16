@@ -325,6 +325,7 @@ impl<'a> Assembler<'a> {
             }
         }
         Ok(ModelResponse {
+            limits: None,
             reasoning: Vec::new(),
             content,
             tool_calls,

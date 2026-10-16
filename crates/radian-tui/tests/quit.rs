@@ -113,14 +113,21 @@ fn ctrl_c_while_running_cancels() {
     assert!(app.quit_pending.is_none());
 }
 
-/// `Esc` keeps its old behavior: idle and empty, it quits at once (no second press).
+/// `Esc` never quits: idle and empty it does nothing at all — no quit, no
+/// effect, no repaint, and it does not arm the Ctrl-C window. Quitting stays the two-press
+/// Ctrl-C (above), or `/quit`.
 #[test]
-fn esc_still_quits_at_once_when_idle_and_empty() {
+fn esc_never_quits_when_idle_and_empty() {
     let mut app = App::new("m", "s");
     let result = app.on_key_at(key(KeyCode::Esc), Instant::now());
-    assert!(app.quit);
-    assert!(quit_asked(&result.effects), "{:?}", result.effects);
-    assert!(app.quit_pending.is_none());
+    assert!(!app.quit, "Esc must not quit an idle session");
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+    assert!(!quit_asked(&result.effects), "{:?}", result.effects);
+    assert!(!result.dirty, "Esc does nothing, so nothing repaints");
+    assert!(
+        app.quit_pending.is_none(),
+        "Esc does not arm the Ctrl-C quit window"
+    );
 }
 
 /// Background events and asynchronous results must not disarm the quit window (review,

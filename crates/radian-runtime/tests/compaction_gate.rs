@@ -17,6 +17,7 @@ use radian_session::{EventData, Session, SessionJournal};
 
 fn summary_response(summary: &str) -> ModelResponse {
     ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![ContentPart::text(summary)],
         tool_calls: vec![],
@@ -28,6 +29,7 @@ fn summary_response(summary: &str) -> ModelResponse {
 
 fn pause_turn_response() -> ModelResponse {
     ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![ContentPart::text("thinking")],
         tool_calls: vec![],

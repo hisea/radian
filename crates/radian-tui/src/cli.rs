@@ -1380,6 +1380,22 @@ fn run(
     }
     eprintln!("{}", radian_host::trust::status_line(&trust_setup));
 
+    // ADR 0030 slice 9: the orchestration snapshot (user config + a trusted project file) is
+    // installed process-wide before any session opens; the startup lines list the verify/policy
+    // commands that will run. The project file is read only when the workspace is trusted.
+    let (orchestration, orchestration_warnings) = radian_host::orchestration::resolve(
+        &workspace_path,
+        trust_setup.resolved.decision.as_bool(),
+        &config.orchestration,
+    );
+    for warning in &orchestration_warnings {
+        eprintln!("[orchestration] {warning}");
+    }
+    for line in orchestration.startup_lines() {
+        eprintln!("{line}");
+    }
+    radian_host::orchestration::set_process(orchestration);
+
     // ADR 0030 slice 6b2: the production task builder. Both hosts hand `radian-host` the same
     // builder, so a `spawn_task` opens a real task session (a fresh model on the lead's route,
     // a workspace-write tier, MCP off, the lead's retries/compaction/budget/skills). The

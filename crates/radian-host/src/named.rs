@@ -7,9 +7,12 @@
 //! named agent a named agent:
 //!
 //! - **First use creates, later uses reuse** (O12): `send(name, text, source)` resolves the
-//!   definition `~/.radian/agents/<name>.md` (the built-in `default`/`task`/`lead` of that name
-//!   is the fallback), snapshots it, opens **one** session, and — after that — only enqueues.
-//!   The definition is never re-read for a live name.
+//!   definition from the **lead's** definition dirs — the lead's trusted project
+//!   `<workspace>/.radian/agents/<name>.md` when the workspace is trusted (ADR 0030 O7 rev 2 item
+//!   4 / ADR 0031 T1), else `~/.radian/agents/<name>.md` (the built-in `default`/`task`/`lead` of
+//!   that name is the fallback) — snapshots it, opens **one** session, and — after that — only
+//!   enqueues. The definition is never re-read for a live name, and never from the named agent's
+//!   own worktree.
 //! - **One worktree, reused** (O12): the default isolation is a `git worktree` at
 //!   `<radian-home>/worktrees/<repo-key>/agent/<name>` on `radian/agent/<name>`, created once.
 //!   `isolation = "shared"` runs in the lead's own workspace. The worktree is **kept** when the
@@ -50,6 +53,7 @@ use tokio::sync::{Mutex as AsyncMutex, watch};
 use crate::agents::{NamedAgent, resolve_named};
 use crate::home::radian_home;
 use crate::observer::JournalObserver;
+use crate::orchestration::{self, Orchestration};
 use crate::session::{
     ApprovalRouting, LocalSession, SessionError, SessionQueue, SessionSetup, open_session,
 };
@@ -248,6 +252,14 @@ pub struct NamedRegistry {
     lead_queue: Arc<SessionQueue>,
     /// The lead's journal: `NamedAgentStarted` lands here (ADR 0030 O12).
     lead_journal: Arc<SessionJournal>,
+    /// The resolved orchestration snapshot (ADR 0030 slice 9): the lead's trusted project agent
+    /// dir (ADR 0030 O7 rev 2 item 4), resolved once, process-wide
+    /// ([`orchestration::process`]), overridable with [`NamedRegistry::with_orchestration`]. Only
+    /// the **definition dir** is read here: the snapshot's `isolation`/`model`/`profile` defaults
+    /// are `spawn_task`'s (`SpawnDefaults`, ADR 0030 O7), a task-creation rule — a named agent is
+    /// the human's own long session, so its definition and the host's own route set its model and
+    /// tier, not the task spawn defaults.
+    orchestration: Orchestration,
     builder: NamedBuilder,
     seams: NamedSeams,
     /// Serializes first-use creation, so two concurrent sends cannot open two sessions for one
@@ -272,11 +284,24 @@ impl NamedRegistry {
             worktree_root,
             lead_queue,
             lead_journal,
+            // ADR 0030 O7 rev 2 item 4 / slice 9: the lead's trusted project agent dir comes from
+            // the process orchestration snapshot (resolved once, from the lead's workspace),
+            // exactly as the task registry reads it.
+            orchestration: orchestration::process(),
             builder,
             seams: NamedSeams::default(),
             creating: AsyncMutex::new(()),
             agents: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Installs the resolved orchestration snapshot (ADR 0030 slice 9): the named path reads the
+    /// lead's trusted project agent dir from it (ADR 0030 O7 rev 2 item 4), so a named agent is
+    /// defined by the **lead's** workspace, never by its own worktree. This is the test seam;
+    /// production reads the snapshot from [`orchestration::process`].
+    pub fn with_orchestration(mut self, orchestration: Orchestration) -> Self {
+        self.orchestration = orchestration;
+        self
     }
 
     /// Installs the test seams.
@@ -413,8 +438,12 @@ impl NamedRegistry {
         if let Some(hook) = &self.seams.create {
             hook(name).map_err(NamedError::new)?;
         }
-        let agent = resolve_named(name, radian_home().as_deref())
-            .map_err(|error| NamedError::new(format!("cannot resolve agent `{name}`: {error}")))?;
+        let agent = resolve_named(
+            name,
+            radian_home().as_deref(),
+            self.orchestration.project_agents.as_deref(),
+        )
+        .map_err(|error| NamedError::new(format!("cannot resolve agent `{name}`: {error}")))?;
         let isolation = agent.isolation.unwrap_or_default();
         // A `spawn: true` named agent is a lead (O13); the builder mounts the lead tools when the
         // session's bindings carry a task builder. A named agent without it mounts none.
@@ -492,6 +521,15 @@ impl NamedRegistry {
                 return Err(NamedError::new(error.to_string()));
             }
         };
+
+        // ADR 0030: a named lead's integration branch is
+        // `radian/integration-<name>`, not the main lead's `radian/integration`. The registry only
+        // exists when the named agent mounted the lead tools (`spawn: true`).
+        if agent.spawn
+            && let Some(registry) = session.lead_tasks()
+        {
+            registry.set_lead_name(name);
+        }
 
         // ADR 0030 O11: a `skills` name discovery did not find is a warning, never a failure.
         let mut warnings = match &agent.skills {

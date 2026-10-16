@@ -212,7 +212,9 @@ struct Fixture {
     scratch: PathBuf,
     lead: PathBuf,
     session_dir: PathBuf,
+    base_url: String,
     queue: Arc<SessionQueue>,
+    lead_journal: Arc<SessionJournal>,
     registry: Arc<NamedRegistry>,
     task_registry: Arc<TaskRegistry>,
 }
@@ -267,10 +269,30 @@ impl Fixture {
             scratch,
             lead,
             session_dir,
+            base_url: base_url.to_owned(),
             queue,
+            lead_journal,
             registry,
             task_registry,
         }
+    }
+
+    /// Builds a second named registry over the same lead, journal and queue, with an explicit
+    /// orchestration snapshot (ADR 0030 O7 rev 2 item 4): the test seam for a named agent that
+    /// must read the lead's trusted project agent dir.
+    fn registry_with(
+        &self,
+        orchestration: radian_host::orchestration::Orchestration,
+    ) -> Arc<NamedRegistry> {
+        Arc::new(
+            NamedRegistry::new(
+                self.lead.clone(),
+                Arc::clone(&self.lead_journal),
+                Arc::clone(&self.queue),
+                builder(self.session_dir.clone(), self.base_url.clone()),
+            )
+            .with_orchestration(orchestration),
+        )
     }
 
     /// The lead's tool session, with both registries mounted.
@@ -334,6 +356,68 @@ async fn first_send_creates_and_the_second_reuses() {
 
     fixture.registry.close_all();
     let record = fixture.registry.get("writer").expect("the record");
+    let _ = record.session.join().await;
+}
+
+/// ADR 0030 O7 rev 2 item 4 / ADR 0031 T1: a named agent's definition is read from the LEAD's
+/// workspace (its trusted project `.radian/agents`), never from the named agent's own worktree; a
+/// project file of the same name overrides the user-level one, and the snapshot is taken once, so
+/// a later edit does not move the live session.
+#[tokio::test]
+async fn a_named_agent_reads_the_leads_project_definition_snapshot() {
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+    let fixture = Fixture::new("project-def", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    // The lead's trusted project dir, as the orchestration snapshot carries it (ADR 0030 O7).
+    let project = fixture.lead.join(".radian").join("agents");
+    std::fs::create_dir_all(&project).unwrap();
+    let def = project.join("writer.md");
+    std::fs::write(
+        &def,
+        "---\nname: writer\nisolation: shared\n---\nPROJECT WRITER\n",
+    )
+    .unwrap();
+    let registry = fixture.registry_with(radian_host::orchestration::Orchestration {
+        project_agents: Some(project.clone()),
+        ..Default::default()
+    });
+
+    // The user-level `writer` names no isolation (a worktree); the project file sets `shared`, so
+    // a `None` worktree proves the lead's project definition was read from the snapshot.
+    let first = registry
+        .send("writer", "first", InputSource::User)
+        .await
+        .expect("first send");
+    assert!(first.created, "the first send creates");
+    assert_eq!(
+        first.worktree, None,
+        "the project definition (isolation: shared) came from the lead's snapshot"
+    );
+
+    // Snapshot once: an edit to the file after creation does not move the live session.
+    std::fs::write(
+        &def,
+        "---\nname: writer\nisolation: worktree\n---\nEDITED\n",
+    )
+    .unwrap();
+    let second = registry
+        .send("writer", "second", InputSource::User)
+        .await
+        .expect("second send");
+    assert!(
+        !second.created,
+        "the live session is reused, not re-resolved"
+    );
+    assert_eq!(second.session_id, first.session_id, "same session id");
+    assert_eq!(
+        second.worktree, None,
+        "the snapshot is not re-read after the session exists"
+    );
+
+    registry.close_all();
+    let record = registry.get("writer").expect("the record");
     let _ = record.session.join().await;
 }
 
@@ -442,6 +526,17 @@ async fn a_named_agent_mounts_the_lead_tools_only_when_spawn_is_true() {
     assert!(
         plain.session.lead_tasks().is_none(),
         "spawn: false mounts no lead tools"
+    );
+    // ADR 0030: a named lead's integration branch is per-lead, so two leads
+    // never share `radian/integration`.
+    assert_eq!(
+        chief
+            .session
+            .lead_tasks()
+            .unwrap()
+            .integration_branch()
+            .as_str(),
+        "radian/integration-chief"
     );
 
     fixture.registry.close_all();

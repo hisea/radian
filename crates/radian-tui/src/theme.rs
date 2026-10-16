@@ -145,10 +145,6 @@ pub enum Role {
     ReasoningMax,
     Interrupted,
     User,
-    /// The `bar` input style's background band (ADR 0035 V3): the whole row behind the text,
-    /// plus the foreground of the text on it. pi's `userMessageBg`/`text` — the same band as a
-    /// user message block, which is omp's composer fill.
-    InputBar,
     ToolCall,
     ToolResult,
     ToolResultError,
@@ -229,7 +225,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 70] = [
+    pub const ALL: [Role; 69] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
@@ -240,7 +236,6 @@ impl Role {
         Role::ReasoningMax,
         Role::Interrupted,
         Role::User,
-        Role::InputBar,
         Role::ToolCall,
         Role::ToolResult,
         Role::ToolResultError,
@@ -315,7 +310,6 @@ impl Role {
             Role::ReasoningMax => "reasoning_max",
             Role::Interrupted => "interrupted",
             Role::User => "user",
-            Role::InputBar => "input_bar",
             Role::ToolCall => "tool_call",
             Role::ToolResult => "tool_result",
             Role::ToolResultError => "tool_result_error",
@@ -396,7 +390,6 @@ impl Role {
             Role::ReasoningMax => &mut theme.reasoning_max,
             Role::Interrupted => &mut theme.interrupted,
             Role::User => &mut theme.user,
-            Role::InputBar => &mut theme.input_bar,
             Role::ToolCall => &mut theme.tool_call,
             Role::ToolResult => &mut theme.tool_result,
             Role::ToolResultError => &mut theme.tool_result_error,
@@ -478,9 +471,6 @@ pub struct Theme {
     /// The `[interrupted]` marker (ADR 0003).
     pub interrupted: Style,
     pub user: Style,
-    /// The `bar` input style's band (ADR 0035 V3): the background behind the input's whole
-    /// row plus the level of the text on it. pi's `userMessageBg` + `text`.
-    pub input_bar: Style,
     pub tool_call: Style,
     pub tool_result: Style,
     pub tool_result_error: Style,
@@ -633,7 +623,6 @@ mod pi_dark {
     pub const YELLOW: &str = "okhsl(83 88% 67%)"; // warning
     pub const THINKING: &str = "okhsl(226 7% 65%)";
     pub const BORDER_ACCENT: &str = "okhsl(295 53% 64%)";
-    pub const USER_BG: &str = "okhsl(233 41% 24%)";
     pub const TOOL_PENDING_BG: &str = "okhsl(229 5% 24%)";
     pub const TOOL_SUCCESS_BG: &str = "okhsl(158 46% 25%)";
     pub const TOOL_ERROR_BG: &str = "okhsl(19 54% 25%)";
@@ -657,7 +646,6 @@ mod pi_light {
     pub const YELLOW: &str = "okhsl(83 99% 47%)";
     pub const THINKING: &str = "okhsl(234 8% 55%)";
     pub const BORDER_ACCENT: &str = "okhsl(295 59% 55%)";
-    pub const USER_BG: &str = "okhsl(235 19% 91%)";
     pub const TOOL_PENDING_BG: &str = "okhsl(248 3% 91%)";
     pub const TOOL_SUCCESS_BG: &str = "okhsl(156 21% 91%)";
     pub const TOOL_ERROR_BG: &str = "okhsl(24 23% 91%)";
@@ -701,12 +689,6 @@ impl Theme {
         let text = spec(pi::TEXT, Modifier::empty(), truecolor);
         let muted = spec(pi::MUTED, Modifier::empty(), truecolor);
         let dim = spec(pi::DIM, Modifier::empty(), truecolor);
-        // The band behind the `bar` input's rows (ADR 0035 V3, kept optional by revision 6):
-        // pi's `userMessageBg`. The user message itself no longer carries a band (ADR 0029
-        // revision 2 decision 2: `user` is a foreground role).
-        let band = spec_bg(pi::USER_BG, Modifier::empty(), truecolor)
-            .bg
-            .expect("a bg");
         Self {
             name: ThemeName::Dark,
             reserved: BTreeMap::new(),
@@ -715,10 +697,8 @@ impl Theme {
             // truncation, counters and completion descriptions.
             text,
             // ADR 0029/6: `user` is a foreground role in the accent
-            // colour — the `❯ ` marker and the user's words — with no band. Only the `bar`
-            // input keeps pi's `userMessageBg` band (decision 2).
+            // colour — the `❯ ` marker and the user's words — with no band.
             user: spec(pi::VIOLET, Modifier::empty(), truecolor),
-            input_bar: text.bg(band),
             // ADR 0035: reasoning is upright now (no italic).
             reasoning: spec(pi::THINKING, Modifier::empty(), truecolor),
             reasoning_off: spec(pi::DIM, Modifier::DIM, truecolor),
@@ -810,12 +790,6 @@ impl Theme {
         let text = spec(pi::TEXT, Modifier::empty(), truecolor);
         let muted = spec(pi::MUTED, Modifier::empty(), truecolor);
         let dim = spec(pi::DIM, Modifier::empty(), truecolor);
-        // The band behind the `bar` input's rows (ADR 0035 V3, kept optional by revision 6):
-        // pi's `userMessageBg`. The user message itself no longer carries a band (ADR 0029
-        // revision 2 decision 2: `user` is a foreground role).
-        let band = spec_bg(pi::USER_BG, Modifier::empty(), truecolor)
-            .bg
-            .expect("a bg");
         Self {
             name: ThemeName::Light,
             reserved: BTreeMap::new(),
@@ -824,10 +798,8 @@ impl Theme {
             // truncation, counters and completion descriptions.
             text,
             // ADR 0029/6: `user` is a foreground role in the accent
-            // colour — the `❯ ` marker and the user's words — with no band. Only the `bar`
-            // input keeps pi's `userMessageBg` band (decision 2).
+            // colour — the `❯ ` marker and the user's words — with no band.
             user: spec(pi::VIOLET, Modifier::empty(), truecolor),
-            input_bar: text.bg(band),
             // ADR 0035: reasoning is upright now (no italic).
             reasoning: spec(pi::THINKING, Modifier::empty(), truecolor),
             reasoning_off: spec(pi::DIM, Modifier::DIM, truecolor),
@@ -929,9 +901,6 @@ impl Theme {
             reasoning_max: style(None, Modifier::BOLD | Modifier::UNDERLINED),
             interrupted: style(None, Modifier::BOLD | Modifier::UNDERLINED),
             user: style(None, Modifier::BOLD),
-            // No color: the band cannot exist, so the input is told apart by its rail alone
-            // (the input text keeps the ordinary level).
-            input_bar: style(None, Modifier::empty()),
             tool_call: style(None, Modifier::REVERSED),
             tool_result: style(None, Modifier::empty()),
             tool_result_error: style(None, Modifier::BOLD | Modifier::UNDERLINED),
@@ -1039,12 +1008,11 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 44] {
+    pub fn styles(&self) -> [Style; 43] {
         [
             self.reasoning,
             self.interrupted,
             self.user,
-            self.input_bar,
             self.tool_call,
             self.tool_result,
             self.tool_result_error,
@@ -1331,21 +1299,13 @@ mod tests {
         assert_ne!(Theme::light().turn_running, Theme::dark().turn_running);
     }
 
-    /// ADR 0035 V3 + ADR 0029: the `bar` input keeps pi's `userMessageBg`
-    /// band on the main text level; the user message no longer carries one, so the `bar` input
-    /// is the only banded block left. `mono` has no color to give it, so the input keeps the
-    /// ordinary level and is told apart by its rail.
+    /// ADR 0035 V3 + ADR 0029: the user message carries no band any more
+    /// (the `user` role is a foreground). `mono` has no color to give.
     #[test]
-    fn the_input_bar_keeps_the_user_band_on_the_main_level() {
+    fn the_user_line_has_no_band() {
         for theme in [Theme::dark(), Theme::light()] {
-            assert!(theme.input_bar.bg.is_some(), "{:?}", theme.name);
-            assert_eq!(theme.input_bar.fg, theme.text.fg, "{:?}", theme.name);
             assert_eq!(theme.user.bg, None, "{:?}", theme.name);
         }
-        let mono = Theme::mono();
-        assert_eq!(mono.input_bar.bg, None);
-        assert_eq!(mono.input_bar.fg, None);
-        assert_eq!(mono.input_bar.add_modifier, Modifier::empty());
     }
 
     #[test]

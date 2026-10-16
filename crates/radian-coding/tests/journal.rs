@@ -32,6 +32,7 @@ impl Model for AskingModel {
         *calls += 1;
         if *calls == 1 {
             Ok(ModelResponse {
+                limits: None,
                 content: Vec::new(),
                 reasoning: Vec::new(),
                 tool_calls: vec![ToolCall {
@@ -53,6 +54,7 @@ impl Model for AskingModel {
             })
         } else {
             Ok(ModelResponse {
+                limits: None,
                 content: vec![ContentPart::text("done")],
                 reasoning: Vec::new(),
                 tool_calls: Vec::new(),

@@ -148,17 +148,13 @@ transcript: ❯ user  ·  assistant prose  ·  ◼/◻ thinking  ·  <fold> tool
 The default input area is `tui.input_style = "lines"` (ADR 0035): a rule
 above and below with a `❯ ` prompt, continuation lines indented two cells. The running status
 sits on the top rule (`── <spinner>  Working · 12s · esc to interrupt ──`; the clock is the
-footer's `elapsed`). `tui.input_style = "bar"` is the omp-style band (ADR 0035 V3): one
-background band per input row (the theme's `input_bar` role), the accent rail `▎` on the left
-(`|` with `glyphs = "ascii"`), no border and no rules, a multi-line input growing the band by
-its rows, and a **fixed one-row status line** directly above the band — blank while idle but
-still occupying its row, `<spinner>  Working · 12s · esc to interrupt` while a turn runs — so
-the band and the transcript never move when a turn starts or finishes. `tui.input_style = "box"`
-is the owner's bordered shape (2026-10-14): **rounded** corners, the `❯` prompt, and the border
-in the theme's accent role (`notice_label` — ADR 0029 reserves accent for labels and
-attention surfaces); the `bar` and `box` styles put the same running status on their status row
-/ border instead of the top rule. It is a real composer in all three (cursor editing,
-multi-line, history).
+footer's `elapsed`). `tui.input_style = "box"` is the thin half frame (ADR 0035
+decision 7, the 2026-10-16 note): an **open** frame shaped like a code block's — a full-width top
+rule while idle, each input row `│ ❯ text` (`│   text` for a continuation), and a three-cell
+`╰──` tail, all in the frame's accent role (`notice_label`). While a turn runs the status sits in
+the top rule where a code block's language label goes (`╭─ <spinner> Working · 12s · esc to
+interrupt ───…`), not bold. `tui.input_style = "bar"` was **removed**: writing it warns once and
+uses `lines`. It is a real composer in both styles (cursor editing, multi-line, history).
 
 The **startup screen** is the leading block of transcript entries: the
 wordmark (three rows at the primary `text` level; below its width it drops to one line,
@@ -196,7 +192,7 @@ bare arrow keys belong to the composer.
 | PageUp / PageDown | scroll the transcript a page |
 | Shift-Up / Shift-Down | scroll the transcript one line |
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
-| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
+| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running `!` command or the running turn; otherwise do nothing — **Esc never quits a session** (quit with two Ctrl-Cs or `/quit`) |
 | Ctrl-C | cancel the running turn; idle with a non-empty input, clear it (into the history); idle with an empty input, arm "press Ctrl-C again to quit" for 2 s (any other key, or the window closing, disarms it; the status bar shows `Press Ctrl-C again to quit`) |
 | Ctrl-P (`toggle_startup`) | fold or unfold the startup information block |
 | Ctrl-N (`menu_next`) | while a completion menu is up, move its highlight down (Ctrl-P is taken, so Ctrl-N is the menu's other key; ) |
@@ -231,7 +227,7 @@ The file is read the same way as the CLI's (`--config`, `RADIAN_CONFIG`,
 schema_version = 1
 [tui]
 theme = "dark"                 # a built-in name, or a theme file name (see below)
-input_style = "lines"          # lines (default) | bar | box
+input_style = "lines"          # lines (default) | box
 mouse = true                   # wheel + transcript selection (default true)
 clipboard = "osc52"            # osc52 (default) | pbcopy (macOS) | off
 
@@ -251,9 +247,10 @@ find_next = ["ctrl-g", "shift-enter"]
 ```
 
 - `input_style`: `lines` (the default: a rule above and below, the `❯` prompt on the first
-  line, ADR 0035), `bar` (the banded input with the accent rail and the
-  fixed status row above it, ADR 0035 V3) or `box` (the owner's rounded box with the `❯`
-  prompt). An unknown value is ignored with a warning and falls back to `lines`.
+  line, ADR 0035) or `box` (the thin half frame — an open frame like a
+  code block's, the `❯` prompt after its `│ ` rail, the running status in the top rule where a
+  code block's language label sits, the 2026-10-16 note). The removed `bar`, and any unknown
+  value, is warned about and falls back to `lines`.
 - `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
   default to on; `false` hides them.
 - `footer` (ADR 0027 C2, revision 3): the status area's rows. `preset` is `deck` (the default,
@@ -354,8 +351,6 @@ from slipping in unchecked.
 | `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▄` | U+2584 | band top padding (ADR 0035) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▀` | U+2580 | band bottom padding (ADR 0035) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -392,7 +387,7 @@ Replaced or dropped in the `unicode` tier (they were not in all six fonts):
 | `㎭` brand | U+33AD | `R` / `󰰠` / `rad` |
 
 Not in the all-six set but kept (they are not tier-gated icons): the `❯` input prompt (the
-owner's choice; `box` style only), the ask record's `◉`/`○` markers (the owner's choice after
+owner's choice; both input styles), the ask record's `◉`/`○` markers (the owner's choice after
 the 2026-10-16 check: `◉` misses SF Mono and `○` misses Source Code Pro — accepted) and text
 arrows (`→`, `•` in the question UI — `•` is in all
 six, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
@@ -509,7 +504,7 @@ with `[tui.colors]`.
 The history is this session's submitted lines (messages and `/…` commands). A resume rebuilds
 it from the journal's user messages. It is not persisted on its own.
 
-The **draft** is: on a clean exit (Esc/quit, SIGTERM/SIGHUP) a non-empty input is written to
+The **draft** is: on a clean exit (the two-press Ctrl-C quit or `/quit`, SIGTERM/SIGHUP) a non-empty input is written to
 `<session-dir>/<session-id>.draft` (0600, atomic temp-file + rename); `--resume` restores it
 once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (owner
 2026-10-14, see the key table), so a Ctrl-C exit saves the *cleared* input; a signal exit
@@ -700,21 +695,14 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   must say the shell description and the startup line are fixed for this session; a new session
   must show the read-only wording. pty automation cannot see the model-facing description, so
   this one is yours (ADR 0009).
-- **the input area's three styles**: the
-  default is `lines` — a rule above and below with the `❯ ` prompt; is it comfortable? Compare
-  `input_style = "bar"` (the banded input with the accent rail and its fixed status row above,
-  ADR 0035 V3) and `input_style = "box"` (the rounded box). For the `bar` band: is the rail
-  clear, does the band reach the right edge, are a multi-line and a CJK line banded on every
-  row, and does the status row (`◜  Working · 12s · esc to interrupt`) leave the band and the
-  transcript still?
-- **the `bar` band's half-cell padding** (ADR 0035; the `bar` input only — the thin
-  user row is a plain `❯ 文本` with no band, ADR 0035): the `bar` input
-  draws one row above (`▄`) and one below (`▀`) the band, in the band's color on the terminal's
-  default background. Is the join **seamless** — no thin gap between the half cells and the
-  banded rows — in Ghostty and in a font-drawn terminal? A half-block glyph is drawn by the
-  font, so a font whose blocks are not exactly half-height shows a seam or a step; record the
-  terminal and font if so. Also check the `ascii` tier has no padding row at all, and that the
-  band's half cells copy as nothing when selected (drag from a padding row into the text).
+- **the input area's two styles** (owner UI review; ADR 0035 and the
+  2026-10-16 note): the default is `lines` — a rule above and below with the `❯ ` prompt; is it
+  comfortable? Compare `input_style = "box"` (the thin half frame). For the `box` frame: does the
+  top rule read as a full-width open frame with no label; does the `│ ` rail line up with a code
+  block's; do a multi-line input, a wrapped line, a CJK line and a narrow terminal keep the rail
+  and the text column; does the running status (`╭─ ◜ Working · 12s · esc to interrupt ───…`) sit
+  where a code block's language label does, look right, and stay **not bold**; does the frame use
+  the same glyph set as the transcript (`╭─`/`│ `/`╰──`, `+-`/`| `/`+--` under `ascii`)?
 - **notice and hint readability**: `/help`'s output and the placeholder must be
   readable on your background. `dark` now uses the terminal's default foreground for notices and
   `Gray` for hints; is that right on your terminal, and is the light palette's hint (dark gray on
@@ -885,23 +873,17 @@ throwaway terminal, not your working one.
    `rad` ascii); ≤ its width → no wordmark. *Look*: **does the brand mark render?** The unicode
    `R` is one column; the nerd mark needs a Nerd Font (a box means it is missing). *Fail*:
    record the font name and what you see.
-3. **Rounded input box and `❯`** (`tui.input_style = "box"`; merge `22b2753`; the prompt and
-   cursor fixes are `pi/ui-r3`). *Steps*: set `input_style = "box"` in `[tui]`, restart; type a
-   multi-line draft (`Ctrl-J`); resize. *Expect*: rounded corners, the `❯` prompt **in `lines`
-   and `box`**, the border in the theme accent (`notice_label`); the cursor sits right after the
-   text (empty: one cell into the prompt; the old byte-length bug put it two cells right); the
-   continuation line aligns under the text; no corner breaks at any width. *Fail*: record the
-   width where a corner/glyph breaks.
-3c. **The `bar` input and its status row** (ADR 0035 V3; the `bar` style — since revision 6
-   decision 9 the default is `lines`, so set `input_style = "bar"`). *Steps*: open `radian`,
-   type a one-line draft, then a `Ctrl-J` multi-line one, then a CJK line;
-   send a message and watch a turn run; resize to 40/80/120. *Expect*: one banded row per input
-   row, the accent `▎` rail on each, the band reaching the right edge (never a highlight that
-   stops at the text); above the band one always-present row — blank when idle, `◜  Working ·
-   12s · esc to interrupt` while a turn runs — and neither the band nor the transcript moves
-   when the turn starts or ends; the cursor after the rail (CJK two cells). *Look*: is the rail
-   the accent, and does the band read against the plain transcript the thin user row leaves?
-   *Fail*: record the width or the font where it reads wrong.
+3. **The input box's thin half frame and `❯`** (`tui.input_style = "box"`; ADR 0035
+   decision 7, the 2026-10-16 note). *Steps*: set `input_style = "box"` in `[tui]`, restart; type
+   a multi-line draft (`Ctrl-J`), then a CJK line; send a message and watch a turn run; resize to
+   40/80/120; set `tui.footer.glyphs = "ascii"` and repeat. *Expect*: an **open** frame like a
+   code block's — a full-width top rule with **no label** while idle, each input row `│ ❯ text`
+   (`│   text` for a continuation), a three-cell `╰──` tail — in the frame's accent
+   (`notice_label`); while a turn runs the status sits in the top rule where a code block's
+   language label goes (`╭─ ◜ Working · 12s · esc to interrupt ───…`), **not bold**; the cursor
+   sits right after the text (empty: one cell into the prompt; the old byte-length bug put it two
+   cells right); the continuation line aligns under the text; the `ascii` tier uses `+-`/`| `/`+--`.
+   *Fail*: record the width where a frame/glyph breaks.
 3b. **Shift+Enter** (`pi/ui-r3`). *Steps*: in Terminal.app, iTerm2/Ghostty (or another
    kitty-protocol terminal) and inside herdr, press `Shift+Enter` in a non-empty draft; then
    `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and
@@ -950,12 +932,13 @@ throwaway terminal, not your working one.
    `· N lines` (the body is not
    silently cut); the thinking block is separated from its neighbour by the container's one
    blank line (not hugged). *Fail*: record the fold state after each press and the config value.
-7. **Mermaid** (ADR 0028 R8; merge `5628737`). *Steps*: ask for a small ` ```mermaid `
-   flowchart; widen then narrow the terminal past the `TooWide` threshold, then widen again.
+7. **Mermaid** (ADR 0042; merge `aedc23f`). *Steps*: ask for a small ` ```mermaid `
+   flowchart, then a `subgraph` one and a 4-participant `sequenceDiagram`; widen then narrow
+   the terminal past the `TooWide` threshold, then widen again.
    *Expect*: wide → a Unicode diagram at the body width; narrow → the **source** plus one dim
-   `mermaid: <reason>` line (never half a diagram); widening re-renders it. *Look*: node/edge
-   colors from the theme (`mermaid_node`/`mermaid_edge`/`mermaid_text`), and `mono`.
-   *Fail*: record the reason line and the widths.
+   `mermaid: needs N columns, have W` line (never half a diagram); widening re-renders it.
+   *Look*: node/edge colors from the theme (`mermaid_node`/`mermaid_edge`/`mermaid_text`), and
+   `mono`. *Fail*: record the reason line and the widths.
 8. **Code blocks** (ADR 0028; merge `0f5a302`). *Steps*: get a long single-line code block,
    then a block with CJK characters.
    *Expect*: code **never wraps**; a line wider than the body ends in `…`; CJK code lines
@@ -1568,24 +1551,27 @@ transcript (the hook appends to the system prompt) and its only transcript trace
 ADR 0037's completion notice); an approval is a modal, not a transcript entry (the call and its
 result are the card). A pending question's result arrives as the `ask_user` card.
 
-## Mermaid blocks (ADR 0028 R8)
+## Mermaid blocks (ADR 0042)
 
 A fenced code block whose info string is `mermaid` (ASCII case-insensitive) and which is
 **closed** is drawn as a Unicode diagram, at the transcript body width, through
-`radian_host::mermaid::render_spans` — the one entry point (ADR 0028): a
-`flowchart`/`graph` by Radian's own layered layout, everything else (and every flowchart that
-layout cannot draw) by the vendored `codex-mermaid`. While the fence is open (streaming) the
-source shows; the diagram appears when the closing fence arrives. `tui.display.mermaid = false`
-(config) renders every code block as source.
+`grok_mermaid::render` — the one entry point (ADR 0042 decision 3), the vendored
+`third_party/grok-mermaid` (grok-build's `mermaid.rs`: flowchart with `subgraph`, sequence,
+state, class and ER diagrams). While the fence is open (streaming) the source shows; the diagram
+appears when the closing fence arrives. `tui.display.mermaid = false` (config) renders every code
+block as source.
 
-A diagram neither renderer can draw (unsupported syntax, their limits, or too narrow) keeps the
-**source** and puts one dim `mermaid: <reason>` line first — never a half diagram. Widening the
+A diagram the renderer cannot draw keeps the **source** and puts one dim
+`mermaid: <reason>` line first — never a half diagram. The reason is
+`needs N columns, have W` when the drawing is wider than the body (ADR 0042 decision 5: it is
+never compressed or turned), and `unsupported syntax` or `too large` otherwise. Widening the
 terminal re-renders: the diagram cache is keyed by `(width, text_len)`, so a `TooWide` failure
 can succeed on a wider screen.
 
-The three diagram roles take their colors from the theme (ADR 0029): `mermaid_node` (pi's
-`accent`), `mermaid_edge` (pi's `dim`) and `mermaid_text` (pi's `text`). `mono` uses modifiers
-only; `[tui.colors]` overrides each like any other role.
+The vendored renderer's five roles collapse onto the theme's three (ADR 0029, ADR 0042
+decision 4): box drawing is `mermaid_node` (pi's `accent`), a connector and its head is
+`mermaid_edge` (pi's `dim`), and every label — a node's, a connector's — is `mermaid_text`
+(pi's `text`). `mono` uses modifiers only; `[tui.colors]` overrides each like any other role.
 
 Selecting a diagram selects its block (the diagram has no source offsets of its own), so a copy
 yields the Mermaid **source** — the text that actually exists. Ctrl-F searches the diagram's
