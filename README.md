@@ -148,22 +148,26 @@ over the screen. `--model` is required even for `--list`.
   --session-id demo
 ```
 
-Resume a session written by either host:
+Resume a session written by either host (the common flags have short forms; `-m`, `-w` and
+`-r` below are `--model`, `--workspace` and `--resume`):
 
 ```sh
 ./target/debug/radian \
   --provider openai-compatible \
-  --model gpt-5 \
+  -m gpt-5 \
   --profile workspace \
-  --workspace "$PWD" \
+  -w "$PWD" \
   --session-dir /tmp/radian-sessions \
-  --resume demo
+  -r demo
 ```
 
 `--list` prints this workspace's sessions and exits without entering the terminal. The TUI's
 per-turn model-call fuse is `--max-model-calls` (default 1000, far above the core's 32).
 Keys, the approval box, the status bar and the context-budget wording are in
 `crates/radian-tui/README.md`.
+
+The common flags in full: `-m`/`--model`, `-w`/`--workspace`, `-r`/`--resume`, `-l`/`--list`
+and `-y`/`--yes` (`-V` is `--version`).
 
 ## Configuration file (ADR 0008)
 
