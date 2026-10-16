@@ -437,6 +437,42 @@ async fn shared_isolation_is_the_lead_workspace_and_safe() {
     fixture.registry.remove("t1", true).await.expect("remove");
 }
 
+/// A sandboxed `git commit` in the task worktree fails (ADR 0030 O3: `.git` is read-only), so a
+/// task's commits go through the host's `git_commit`. Skips without a backend.
+#[tokio::test]
+async fn a_shell_git_commit_fails_in_the_task_worktree() {
+    let fixture = Fixture::new("shell-commit", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let record = fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let worktree = record.worktree.clone().unwrap();
+    std::fs::write(worktree.join("change.txt"), "x\n").unwrap();
+    let policy = record.sandbox_policy.clone().unwrap();
+    let sandbox = Sandbox::from_policy(policy).expect("a sandbox");
+
+    let out = radian_coding::run_user_bash(
+        &worktree,
+        &sandbox,
+        "git add -A && git commit -m from-the-worktree",
+        &agent_core::CancellationToken::new(),
+    )
+    .await
+    .expect("the sandboxed command ran");
+    assert_ne!(
+        out.exit_code,
+        Some(0),
+        "the task worktree's .git is read-only: {}",
+        out.stderr
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+}
+
 /// A `shared` task writes no end-of-task commit: even with the lead's workspace dirty, its
 /// turn end must not commit the user's changes (ADR 0030 O3: no worktree, no end commit).
 #[tokio::test]
