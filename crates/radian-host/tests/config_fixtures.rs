@@ -36,6 +36,7 @@ fn the_reader_matches_the_reference_checker() {
         ("model-retries.toml", "accept"),
         ("skills-extra-paths.toml", "accept"),
         ("skills-builtin.toml", "accept"),
+        ("shell-auto-background.toml", "accept"),
         ("memory-injection.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),
