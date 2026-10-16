@@ -627,6 +627,14 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   default highlight on `cancel`, and do ↑/↓/Enter/Esc feel right? After "remember for this
   project", restart — is the tier applied and is the `(project)` marker readable in the footer
   and the startup summary? pty automation asserts the text, not the feel (ADR 0009).
+- **native `git commit` in the sandbox, and its text** (ADR 0038 slice 4): in a **worktree on
+  `main`** of a real repo, start a general `workspace` session and run a `git commit` through
+  `shell` — the commit must land with native git (`git_commit` is not needed). The `shell` tool
+  description the model sees and the startup line must say git can commit/branch/stash in the
+  sandbox while `.git/config` and `.git/hooks/` stay read-only. After `/access safe` the notice
+  must say the shell description and the startup line are fixed for this session; a new session
+  must show the read-only wording. pty automation cannot see the model-facing description, so
+  this one is yours (ADR 0009).
 - **the input area's three styles**: is the default `bar` band
   comfortable — the rail clear, the band reaching the right edge, multi-line and a CJK line
   banded on every row, and the status row above it (`◜  Working · 12s · esc to interrupt`) not
