@@ -4,9 +4,10 @@
 //! A task agent is an ordinary `open_session` (ADR 0030 O2). What makes it a task agent is
 //! the setup the [`TaskRegistry`] hands it:
 //!
-//! - its own `git worktree` at `<workspace>/.radian-worktrees/<id>` on a fresh `radian/<id>`
-//!   branch (ADR 0030 O3), created host-side, outside the sandbox; or, with `isolation =
-//!   "shared"`, the lead's own workspace forced to the `safe` tier (read-only);
+//! - its own `git worktree` at `~/.radian/worktrees/<repo-key>/<id>` on a fresh `radian/<id>`
+//!   branch (ADR 0030 O3, moved **out of the workspace** by ADR 0039 decision 4), created
+//!   host-side, outside the sandbox, behind a symlink check on every level of the root; or, with
+//!   `isolation = "shared"`, the lead's own workspace forced to the `safe` tier (read-only);
 //! - a `workspace` sandbox rooted at the worktree with the **network off** (ADR 0030 revision
 //!   2 item 2) and `.git` read-only (ADR 0038 decision 5);
 //! - `memory_root = None` (ADR 0030 O8: two sessions writing one memory root would fight over
@@ -34,6 +35,7 @@
 //! the builder returns, so the two hosts and the tests cannot accidentally leave one out.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -44,6 +46,7 @@ use radian_sandbox::{GitAccess, Sandbox, SandboxPolicy};
 use radian_session::{ForkParent, RuntimeEvent, SessionJournal, TurnOutcome};
 
 use crate::git_commit::{Committed, RepoPin, default_allowed_filters};
+use crate::home::{ensure_private_dir, radian_home, worktrees_dir_for};
 use crate::session::{
     ApprovalRouting, HostBindings, LocalSession, SessionError, SessionQueue, SessionSetup,
     open_session,
@@ -153,13 +156,22 @@ impl SpawnRequest {
     }
 }
 
+/// The task agents' worktree root (ADR 0039 decision 4): `<radian-home>/worktrees/<repo-key>`,
+/// plus the radian home the symlink check starts from.
+#[derive(Debug, Clone)]
+struct WorktreeRoot {
+    home: PathBuf,
+    root: PathBuf,
+}
+
 /// The registry a lead holds: it keys live task agents by id and owns their worktrees
 /// (ADR 0030 slice 4).
 pub struct TaskRegistry {
     /// The lead's canonical workspace (the repository the worktrees branch from).
     workspace: PathBuf,
-    /// `<workspace>/.radian-worktrees`.
-    worktree_root: PathBuf,
+    /// The task worktree root, or `None` when the workspace is not a git repository (or there is
+    /// no usable `~/.radian`); a `shared`-only lead can still spawn.
+    worktree_root: Option<WorktreeRoot>,
     /// The lead's session id, recorded as every task's `parent.session_id`.
     lead_session_id: String,
     /// The lead's journal: `TaskSpawned` lands here (ADR 0030 O5).
@@ -181,10 +193,9 @@ impl TaskRegistry {
         builder: TaskBuilder,
     ) -> Self {
         let workspace = workspace.into();
-        // Canonical, so `<workspace>/.radian-worktrees/<id>` matches what git reports back
-        // (macOS `/var` -> `/private/var`).
+        // Canonical, so the worktree paths git reports back match (macOS `/var` -> `/private/var`).
         let workspace = std::fs::canonicalize(&workspace).unwrap_or(workspace);
-        let worktree_root = workspace.join(".radian-worktrees");
+        let worktree_root = task_worktree_root(&workspace);
         Self {
             workspace,
             worktree_root,
@@ -199,6 +210,12 @@ impl TaskRegistry {
     /// The lead's workspace (the repository task worktrees branch from).
     pub fn workspace(&self) -> &Path {
         &self.workspace
+    }
+
+    /// The directory task worktrees live under (ADR 0039 decision 4), or `None` when this lead
+    /// has no git repository to branch from.
+    pub fn worktree_root(&self) -> Option<&Path> {
+        self.worktree_root.as_ref().map(|root| root.root.as_path())
     }
 
     /// The live task, if one has that id.
@@ -244,12 +261,20 @@ impl TaskRegistry {
         // 1. The workspace: a fresh worktree on `radian/<id>`, or the lead's own (shared).
         let (workspace, worktree, branch) = match isolation {
             Isolation::Worktree => {
-                let worktree = self.worktree_root.join(&id);
+                let root = self.worktree_root.as_ref().ok_or_else(|| {
+                    TaskError::new(format!(
+                        "cannot spawn task `{id}` in a worktree: {} is not a git repository, or \
+                         there is no usable ~/.radian",
+                        self.workspace.display()
+                    ))
+                })?;
+                let worktree = root.root.join(&id);
                 let lead = self.workspace.clone();
+                let home = root.home.clone();
                 let branch = format!("radian/{id}");
                 let wt = worktree.clone();
                 let br = branch.clone();
-                tokio::task::spawn_blocking(move || create_worktree(&lead, &wt, &br))
+                tokio::task::spawn_blocking(move || create_worktree(&lead, &home, &wt, &br))
                     .await
                     .map_err(|error| TaskError::new(format!("worktree task failed: {error}")))??;
                 (worktree.clone(), Some(worktree), Some(branch))
@@ -474,14 +499,100 @@ pub fn task_sandbox(lead: &Sandbox, workspace: &Path) -> Result<Sandbox, TaskErr
     Sandbox::from_policy(policy).map_err(|error| TaskError::new(error.to_string()))
 }
 
-/// `git worktree add <worktree> -b <branch>` from the lead's workspace (host-side, ADR 0030
-/// O3). The parent directory is created first: `git worktree add` does not create it.
-fn create_worktree(lead: &Path, worktree: &Path, branch: &str) -> Result<(), TaskError> {
-    if let Some(parent) = worktree.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            TaskError::new(format!("cannot create {}: {error}", parent.display()))
-        })?;
+/// The task worktree root for `workspace` (ADR 0039 decision 4), or `None` when the workspace
+/// is not a git repository or this process has no usable `~/.radian`.
+fn task_worktree_root(workspace: &Path) -> Option<WorktreeRoot> {
+    let home = radian_home()?;
+    let common = git_common_dir(workspace)?;
+    let root = worktrees_dir_for(&home).join(repo_key(&common));
+    Some(WorktreeRoot { home, root })
+}
+
+/// `<repo-key>`: the repository's directory name plus a short hash of its canonical common dir,
+/// so two repositories never share a worktree directory (ADR 0039 decision 4).
+fn repo_key(common: &Path) -> String {
+    let name = common.file_name().and_then(OsStr::to_str).unwrap_or("");
+    // A normal repository's common dir is `<repo>/.git`; the repository's own name is one up.
+    let name = if name == ".git" {
+        common
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(OsStr::to_str)
+            .unwrap_or("")
+    } else {
+        name
+    };
+    let mut sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        sanitized = "repo".to_owned();
     }
+    format!(
+        "{sanitized}-{:012x}",
+        // The low 48 bits: a short, stable key a directory name can carry.
+        fnv1a64(common.as_os_str().as_encoded_bytes()) & 0x0000_ffff_ffff_ffff
+    )
+}
+
+/// FNV-1a over the canonical common dir: a stable, dependency-free hash for the directory name.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// `git rev-parse --git-common-dir` for `workspace`, canonicalized; `None` when it is not a git
+/// repository.
+fn git_common_dir(workspace: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .current_dir(workspace)
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = Path::new(&raw);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace.join(path)
+    };
+    std::fs::canonicalize(absolute).ok()
+}
+
+/// `git worktree add -b <branch> <worktree>` from the lead's workspace (host-side, ADR 0030
+/// O3). The worktree root is opened one level at a time with `O_NOFOLLOW|O_DIRECTORY`
+/// (ADR 0039 decision 4), so a symlink anywhere refuses before git runs.
+fn create_worktree(
+    lead: &Path,
+    home: &Path,
+    worktree: &Path,
+    branch: &str,
+) -> Result<(), TaskError> {
+    let root = worktree.parent().ok_or_else(|| {
+        TaskError::new(format!(
+            "the worktree path {} has no parent directory",
+            worktree.display()
+        ))
+    })?;
+    vet_worktree_root(home, root)?;
+    refuse_existing_worktree(root, worktree)?;
     let path = worktree
         .to_str()
         .ok_or_else(|| TaskError::new("the worktree path is not valid UTF-8"))?;
@@ -497,6 +608,198 @@ fn create_worktree(lead: &Path, worktree: &Path, branch: &str) -> Result<(), Tas
         )));
     }
     Ok(())
+}
+
+/// Creates — and checks — every level of `root` below `home` with an `openat` of
+/// `O_NOFOLLOW|O_DIRECTORY` from a directory fd (ADR 0039 decision 4). A symlink at any level
+/// fails with `ELOOP` and refuses the spawn; a missing level is created owner-only (0700).
+#[cfg(unix)]
+fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
+    use std::ffi::CString;
+    use std::os::unix::io::AsFd;
+
+    ensure_private_dir(home)
+        .map_err(|error| TaskError::new(format!("cannot create {}: {error}", home.display())))?;
+    let relative = root.strip_prefix(home).map_err(|_| {
+        TaskError::new(format!(
+            "the task worktree root {} is not below {}",
+            root.display(),
+            home.display()
+        ))
+    })?;
+    let mut dir = open_dir(home)
+        .map_err(|error| TaskError::new(format!("cannot open {}: {error}", home.display())))?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(TaskError::new(format!(
+                "refusing the task worktree root {}: it is not a plain path",
+                root.display()
+            )));
+        };
+        let name = CString::new(name.as_encoded_bytes())
+            .map_err(|_| TaskError::new("the worktree root path is not valid UTF-8"))?;
+        let next = match open_dir_at(dir.as_fd(), &name) {
+            Ok(next) => next,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                make_dir_at(dir.as_fd(), &name).map_err(|error| {
+                    TaskError::new(format!(
+                        "cannot create a level of {}: {error}",
+                        root.display()
+                    ))
+                })?;
+                open_dir_at(dir.as_fd(), &name).map_err(|error| root_error(root, &error))?
+            }
+            Err(error) => return Err(root_error(root, &error)),
+        };
+        dir = next;
+    }
+    Ok(())
+}
+
+/// The non-Unix fallback: no `openat`, so each level is checked with `symlink_metadata`.
+#[cfg(not(unix))]
+fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
+    ensure_private_dir(root)
+        .map_err(|error| TaskError::new(format!("cannot create {}: {error}", root.display())))?;
+    let relative = root.strip_prefix(home).map_err(|_| {
+        TaskError::new(format!(
+            "the task worktree root {} is not below {}",
+            root.display(),
+            home.display()
+        ))
+    })?;
+    let mut level = home.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(TaskError::new(format!(
+                "refusing the task worktree root {}: it is not a plain path",
+                root.display()
+            )));
+        };
+        level.push(name);
+        if std::fs::symlink_metadata(&level).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(TaskError::new(format!(
+                "refusing the task worktree root {}: {} is a symlink",
+                root.display(),
+                level.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a `worktree` that already exists (ADR 0039 decision 4): an existing symlink there
+/// would let `git worktree add` write through it. Checked from the root's directory fd with
+/// `O_NOFOLLOW`, so only a name that does not exist passes.
+#[cfg(unix)]
+fn refuse_existing_worktree(root: &Path, worktree: &Path) -> Result<(), TaskError> {
+    use std::ffi::CString;
+    use std::os::unix::io::AsFd;
+
+    let name = worktree.file_name().ok_or_else(|| {
+        TaskError::new(format!(
+            "the worktree path {} has no name",
+            worktree.display()
+        ))
+    })?;
+    let name = CString::new(name.as_encoded_bytes())
+        .map_err(|_| TaskError::new("the worktree path is not valid UTF-8"))?;
+    let dir = open_dir(root)
+        .map_err(|error| TaskError::new(format!("cannot open {}: {error}", root.display())))?;
+    match open_dir_at(dir.as_fd(), &name) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(TaskError::new(format!(
+            "refusing to create {}: it already exists",
+            worktree.display()
+        ))),
+        // A symlink (`ELOOP` on Linux, `ENOTDIR` on macOS) and a plain file both land here: it
+        // exists and is not a directory, so git must not touch it.
+        Err(error) => Err(TaskError::new(format!(
+            "refusing to create {}: it is a symlink or not a directory ({error})",
+            worktree.display()
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+fn refuse_existing_worktree(_root: &Path, worktree: &Path) -> Result<(), TaskError> {
+    match std::fs::symlink_metadata(worktree) {
+        Err(_) => Ok(()),
+        Ok(meta) if meta.file_type().is_symlink() => Err(TaskError::new(format!(
+            "refusing to create {}: it is a symlink",
+            worktree.display()
+        ))),
+        Ok(_) => Err(TaskError::new(format!(
+            "refusing to create {}: it already exists",
+            worktree.display()
+        ))),
+    }
+}
+
+/// Opens `path` as a directory, following symlinks. Used only for the radian home, which the
+/// host creates and the sandbox cannot write.
+#[cfg(unix)]
+fn open_dir(path: &Path) -> std::io::Result<std::os::unix::io::OwnedFd> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::OwnedFd;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(path)?;
+    Ok(OwnedFd::from(file))
+}
+
+/// `openat` a child directory with `O_NOFOLLOW|O_DIRECTORY`: a symlink at that name fails with
+/// `ELOOP` (ADR 0039 decision 4).
+#[cfg(unix)]
+fn open_dir_at(
+    parent: std::os::unix::io::BorrowedFd<'_>,
+    name: &std::ffi::CStr,
+) -> std::io::Result<std::os::unix::io::OwnedFd> {
+    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// `mkdirat` a child directory owner-only (0700) (ADR 0013, ADR 0039 decision 4).
+#[cfg(unix)]
+fn make_dir_at(
+    parent: std::os::unix::io::BorrowedFd<'_>,
+    name: &std::ffi::CStr,
+) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let rc = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The error for a level of the worktree root that could not be opened: a symlink (`ELOOP`) or
+/// a non-directory (`ENOTDIR`) is a refusal, anything else is an I/O failure.
+#[cfg(unix)]
+fn root_error(root: &Path, error: &std::io::Error) -> TaskError {
+    match error.raw_os_error() {
+        // `O_DIRECTORY|O_NOFOLLOW` on a symlink is `ELOOP` on Linux and `ENOTDIR` on macOS;
+        // both mean "this level is a symlink (or another non-directory)", which is a refusal.
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => TaskError::new(format!(
+            "refusing the task worktree root {}: a component is a symlink or not a directory",
+            root.display()
+        )),
+        _ => TaskError::new(format!(
+            "cannot open the task worktree root {}: {error}",
+            root.display()
+        )),
+    }
 }
 
 /// `git worktree remove [--force] <worktree>` from the lead's workspace.
@@ -659,5 +962,40 @@ impl radian_runtime::RuntimeEvents for TaskRuntimeEvents {
     fn on_runtime_event(&self, event: &RuntimeEvent) {
         self.inner.on_runtime_event(event);
         self.finisher.on_turn_event(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_repo_key_names_the_repository_and_hashes_the_common_dir() {
+        let key = repo_key(Path::new("/Users/u/Code/my-repo/.git"));
+        assert!(key.starts_with("my-repo-"), "{key}");
+        assert_eq!(key.len(), "my-repo-".len() + 12, "{key}");
+        assert!(
+            key["my-repo-".len()..]
+                .chars()
+                .all(|c| c.is_ascii_hexdigit()),
+            "{key}"
+        );
+        // Stable for the same path, different for another.
+        assert_eq!(key, repo_key(Path::new("/Users/u/Code/my-repo/.git")));
+        assert_ne!(key, repo_key(Path::new("/Users/u/Code/other/.git")));
+        // A bare repository uses its own name; odd characters are folded to `-`.
+        assert!(repo_key(Path::new("/srv/foo bar.git")).starts_with("foo-bar.git-"));
+    }
+
+    #[test]
+    fn the_worktree_root_is_under_the_radian_home_and_not_the_workspace() {
+        let home = Path::new("/home/u/.radian");
+        let root = worktrees_dir_for(home).join(repo_key(Path::new("/work/example/.git")));
+        assert!(root.starts_with(home), "{}", root.display());
+        assert_eq!(
+            root.parent().unwrap(),
+            Path::new("/home/u/.radian/worktrees")
+        );
+        assert!(!root.starts_with("/work/example"));
     }
 }

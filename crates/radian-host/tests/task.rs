@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use agent_core::{NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
@@ -33,6 +33,39 @@ fn scratch(label: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     // Canonical: `/var` -> `/private/var` on macOS, so git's own worktree paths match.
     std::fs::canonicalize(&dir).unwrap()
+}
+
+/// A private `RADIAN_HOME` for this test binary (ADR 0039 decision 4 resolves the task worktree
+/// root through it). `RADIAN_HOME` is process-wide, so it is set once here and never changed;
+/// the real `~/.radian` is never touched. Canonicalized like `scratch`.
+fn isolated_home() -> PathBuf {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("radian-task-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        // SAFETY: `get_or_init` runs this once, and every test in this binary calls
+        // `isolated_home()` before it builds a registry, so no other thread is reading it.
+        unsafe { std::env::set_var("RADIAN_HOME", &dir) };
+        dir
+    })
+    .clone()
+}
+
+/// The Unix mode bits of `path` (`None` off Unix, where there are no such bits).
+fn mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bits = std::fs::metadata(path).ok()?.permissions().mode() & 0o777;
+        Some(bits)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> bool {
@@ -188,6 +221,7 @@ fn builder(session_dir: PathBuf, base_url: String) -> TaskBuilder {
 /// The pieces a test keeps: the lead's dir, its journal, its queue, and the registry.
 struct Fixture {
     scratch: PathBuf,
+    home: PathBuf,
     lead: PathBuf,
     session_dir: PathBuf,
     queue: Arc<SessionQueue>,
@@ -196,6 +230,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(label: &str, base_url: &str) -> Self {
+        let home = isolated_home();
         let scratch = scratch(label);
         let lead = scratch.join("lead");
         std::fs::create_dir_all(&lead).unwrap();
@@ -234,11 +269,20 @@ impl Fixture {
         );
         Self {
             scratch,
+            home,
             lead,
             session_dir,
             queue,
             registry,
         }
+    }
+
+    /// The directory task worktrees live under (ADR 0039 decision 4).
+    fn worktree_root(&self) -> PathBuf {
+        self.registry
+            .worktree_root()
+            .expect("the lead is a git repository")
+            .to_path_buf()
     }
 
     fn task_journal(&self, id: &str) -> Value {
@@ -280,7 +324,7 @@ async fn a_task_opens_in_a_worktree_on_its_branch_with_a_task_parent() {
 
     // It is a git worktree of the lead repo, on its own branch.
     let worktree = record.worktree.clone().expect("a worktree");
-    assert_eq!(worktree, fixture.lead.join(".radian-worktrees/t1"));
+    assert_eq!(worktree, fixture.worktree_root().join("t1"));
     assert_eq!(record.branch.as_deref(), Some("radian/t1"));
     let list = git_out(&fixture.lead, &["worktree", "list", "--porcelain"]);
     assert!(
@@ -965,4 +1009,131 @@ async fn the_turn_end_commits_the_worktree() {
     assert!(worktree.join("made.txt").exists());
 
     fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0039 decision 4: the task worktree root is outside the workspace.
+// ---------------------------------------------------------------------------------------------
+
+/// A task worktree lives under `RADIAN_HOME/worktrees/<repo-key>/`, not inside the lead's
+/// workspace, and the root levels are owner-only (ADR 0039 decision 4).
+#[tokio::test]
+async fn the_task_worktree_is_outside_the_workspace_on_a_per_repository_root() {
+    let fixture = Fixture::new("root", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return; // no sandbox backend here
+    }
+    let record = fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let worktree = record.worktree.clone().expect("a worktree");
+
+    let root = fixture.worktree_root();
+    assert_eq!(worktree, root.join("t1"));
+    assert!(
+        root.starts_with(fixture.home.join("worktrees")),
+        "the root must be under RADIAN_HOME/worktrees: {}",
+        root.display()
+    );
+    assert!(
+        !worktree.starts_with(&fixture.lead),
+        "the worktree must be outside the workspace: {}",
+        worktree.display()
+    );
+    // `<repo-key>` names the repository's directory plus a short hash.
+    let key = root.file_name().unwrap().to_str().unwrap();
+    assert!(key.starts_with("lead-"), "{key}");
+    // The old in-workspace root is not used at all.
+    assert!(!fixture.lead.join(".radian-worktrees").exists());
+    // Every level the host creates is owner-only (0700).
+    if let Some(bits) = mode(&root) {
+        assert_eq!(bits, 0o700, "{}", root.display());
+        assert_eq!(mode(root.parent().unwrap()), Some(0o700));
+    }
+
+    // Git itself knows the worktree, so the task's `git_commit` works from the new location.
+    assert_eq!(
+        git_out(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "radian/t1"
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// The model swaps the old in-workspace `.radian-worktrees` for a symlink pointing outside the
+/// workspace: nothing follows it, because the root is elsewhere now (ADR 0039 decision 4).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_at_the_old_worktree_root_changes_nothing() {
+    let fixture = Fixture::new("old-symlink", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let outside = fixture.scratch.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.lead.join(".radian-worktrees"))
+        .expect("the swapped old root");
+
+    let record = fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+
+    assert_eq!(
+        record.worktree.clone().unwrap(),
+        fixture.worktree_root().join("t1")
+    );
+    assert_eq!(
+        std::fs::read_dir(&outside).unwrap().count(),
+        0,
+        "nothing may be written through the old root's symlink"
+    );
+    assert!(
+        fixture.worktree_root().join("t1").exists(),
+        "the worktree is at the new root"
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// A symlink at the `<repo-key>` level of the new root is refused before git runs (ADR 0039
+/// decision 4). The `worktrees/` level itself is per-process, so it is covered by
+/// `tests/task_root.rs`, which owns its own `RADIAN_HOME`.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_under_the_new_root_is_refused() {
+    let fixture = Fixture::new("new-symlink", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let root = fixture.worktree_root();
+    let outside = fixture.scratch.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    // `<home>/worktrees/<repo-key>` is a symlink pointing outside the radian home.
+    std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&outside, &root).expect("the swapped root");
+
+    let error = match fixture.registry.spawn(SpawnRequest::new("t1")).await {
+        Ok(_) => panic!("a symlink at a root level must be refused"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("symlink"),
+        "the error must name the symlink: {error}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&outside).unwrap().count(),
+        0,
+        "the symlink target stays empty"
+    );
+    assert!(fixture.registry.get("t1").is_none());
+    // Only a symlink check that runs **before** git can keep git from writing through it.
+    let list = git_out(&fixture.lead, &["worktree", "list", "--porcelain"]);
+    assert!(
+        !list.contains("t1"),
+        "git must not know a worktree:\n{list}"
+    );
 }

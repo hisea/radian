@@ -37,6 +37,10 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "h
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# The task worktree root is walked one directory at a time with `openat(O_NOFOLLOW|O_DIRECTORY)`
+# so a symlink at any level is refused (ADR 0039 decision 4); `libc` is the same dependency the
+# sandbox and the file tools already use for `O_NOFOLLOW`.
+libc = "0.2"
 # The pending-request queue (ADR 0023 U7) needs `oneshot`/`watch`, and `Approver::decide`
 # returns a `BoxFuture`.
 futures-util.workspace = true
