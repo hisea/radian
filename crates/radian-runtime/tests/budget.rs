@@ -58,6 +58,7 @@ async fn open_env(
 
 fn used(response: ModelResponse, input: u64) -> ModelResponse {
     ModelResponse {
+        limits: None,
         usage: Some(ModelUsage {
             input: Some(input),
             ..Default::default()

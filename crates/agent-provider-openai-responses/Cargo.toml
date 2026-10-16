@@ -1,0 +1,26 @@
+[package]
+name = "agent-provider-openai-responses"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "OpenAI Responses API model adapter for agent-core (streaming, caller-supplied headers)"
+publish = false
+
+[features]
+# An in-process mock HTTP server for tests, here and in dependent crates.
+testing = ["tokio/net", "tokio/io-util"]
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+# Turns on the `testing` feature for this crate's own integration tests.
+agent-provider-openai-responses = { path = ".", features = ["testing"] }
+agent-core = { path = "../agent-core" }
+agent-provider-contract = { path = "../agent-provider-contract" }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "test-util"] }

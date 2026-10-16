@@ -16,6 +16,7 @@ use radian_session::{EventData, Session, SessionJournal};
 
 fn summary_response(summary: &str) -> ModelResponse {
     ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![ContentPart::text(summary)],
         tool_calls: vec![],
@@ -245,6 +246,7 @@ async fn compact_on_a_small_history_is_nothing_to_compact() {
 
 fn text_response(s: &str) -> ModelResponse {
     ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![ContentPart::text(s)],
         tool_calls: vec![],

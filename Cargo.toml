@@ -4,6 +4,7 @@ members = [
     "crates/agent-core",
     "crates/agent-extensions",
     "crates/agent-provider-openai-compatible",
+    "crates/agent-provider-openai-responses",
     "crates/agent-provider-anthropic",
     "crates/agent-cli",
     "crates/radian-host",

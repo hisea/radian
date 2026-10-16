@@ -17,6 +17,7 @@ use common::{Recorder, Reply, ScriptedModel, overflow, text};
 
 fn summary_reply(summary: &str, input: u64) -> Reply {
     Reply::Respond(ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![ContentPart::text(summary)],
         tool_calls: vec![],
