@@ -955,6 +955,18 @@ the run continues and the panic still exits 101. Tested by
 `pty_panic_path_restores_the_terminal` and
 `pty_an_unwritable_diagnostics_directory_is_only_a_notice`.
 
+## The exit line is written with a bound (2026-10-15, small-fixes-3)
+
+`main` prints the reason line **after** `runtime.shutdown_timeout(2s)`, so the signal task —
+whose watchdog is the only other way a stuck process ends — is already gone. A plain blocking
+`writeln!` to a terminal that has stopped draining (a full pty output buffer, or XOFF) would
+then block the process forever. `print_exit_line` writes on its own short-lived thread and
+`main` waits at most `EXIT_LINE_WAIT` (250 ms): returning ends the process and the blocked
+writer with it, so the line is best-effort — losing it is not a failure to exit. The
+`--exit-line-filler` test hook pads that line so
+`pty_a_full_terminal_cannot_hang_the_exit_line` can fill the pty buffer (with the app frozen
+after its first frame) and prove the bound.
+
 ## Startup order (2026-10-13, dogfooding D1/D2)
 
 Everything that can fail runs **before** the session file is created, so a failed start leaves

@@ -243,6 +243,13 @@ struct Cli {
     /// per-site counters are not even touched (`exit_trace_once` returns on an unset `OnceLock`).
     #[arg(long, hide = true, value_name = "FILE")]
     exit_trace: Option<PathBuf>,
+
+    /// Test hook (`--exit-line-filler <BYTES>`): pad the reason line `main` prints on exit with
+    /// this many filler bytes, so a test can make that write exceed a terminal that has stopped
+    /// draining (a full pty buffer). It proves the exit line is written with a bound instead of
+    /// blocking the process (small-fixes-3). Inert when the flag is absent.
+    #[arg(long, hide = true, value_name = "BYTES")]
+    exit_line_filler: Option<usize>,
 }
 
 /// The subcommands that are not the TUI (ADR 0032). `exec` is today's `agent` command, run
@@ -404,6 +411,9 @@ fn main() -> ExitCode {
     if let Some(path) = &cli.exit_trace {
         let _ = EXIT_TRACE.set(path.clone());
     }
+    if let Some(bytes) = cli.exit_line_filler {
+        let _ = EXIT_LINE_FILLER.set(bytes);
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -507,12 +517,40 @@ impl RunError {
     }
 }
 
-/// Prints the exit reason on the normal screen. `eprintln!` panics when the terminal is
-/// already gone (a closed pty makes the write fail), which would turn a clean exit into 101;
-/// a failure to print the line is not a failure to exit.
+/// How long `main` waits for the exit line to reach stderr before leaving without it. The write
+/// runs on its own short-lived thread (see [`print_exit_line`]); this bound is only reached when
+/// the terminal has stopped draining, so the ordinary exit pays nothing for it.
+const EXIT_LINE_WAIT: Duration = Duration::from_millis(250);
+
+/// The `--exit-line-filler` value (test hook): unset in production, where the exit line is the
+/// reason alone.
+static EXIT_LINE_FILLER: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Prints the exit reason on the normal screen, with a **bounded** wait so a terminal that has
+/// stopped draining cannot hold the process open.
+///
+/// `main` reaches here after `runtime.shutdown_timeout`, so the signal task — whose watchdog is
+/// the only other way a stuck process ends — is already gone. A plain blocking `writeln!` to a
+/// terminal that is not draining (a full pty buffer or XOFF) would then block the process
+/// forever. So the write runs on its own short-lived thread and `main` waits at most
+/// [`EXIT_LINE_WAIT`]: if it has not finished by then, returning ends the process and the
+/// blocked writer with it. The line is best-effort — losing it is not a failure to exit.
+///
+/// `writeln!`, not `eprintln!`: the latter panics when the terminal is already gone (a closed
+/// pty makes the write fail), which would turn a clean exit into 101. A failure to print the
+/// line is not a failure to exit.
 fn print_exit_line(message: &str) {
     use std::io::Write;
-    let _ = writeln!(std::io::stderr(), "radian: {message}");
+    let mut line = format!("radian: {message}");
+    if let Some(filler) = EXIT_LINE_FILLER.get() {
+        line.extend(std::iter::repeat_n('x', *filler));
+    }
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = writeln!(std::io::stderr(), "{line}");
+        let _ = done_tx.send(());
+    });
+    let _ = done_rx.recv_timeout(EXIT_LINE_WAIT);
 }
 
 fn run(
@@ -2201,7 +2239,9 @@ fn read_input(timeout: Duration) -> Input {
             // it re-lays out"). Ask the kernel directly instead: `TIOCGWINSZ` does not read
             // stdin, so it cannot hit the EOF spin guard 1 exists for.
             if let Some((rows, cols)) = size_changed() {
-                return Input::Event(Event::Resize(rows, cols));
+                // crossterm's own order is `(cols, rows)`; the synthetic event must match it so
+                // the input thread's single `Event::Resize` match is correct for both sources.
+                return Input::Event(Event::Resize(cols, rows));
             }
             // Guard 1: do not enter crossterm unless a previous read may have buffered
             // events. Its `poll(0)` reads the fd on an empty buffer and loops on a hung-up
@@ -2290,9 +2330,6 @@ fn terminal_gone(error: &std::io::Error) -> bool {
     false
 }
 
-/// Whether the tty is already hung up, as `poll(2)` sees it right now. A draw failure carries
-/// crossterm's own "failed to write the buffered data" (no errno), so the tty's own state is
-/// the reliable test.
 /// Advances the spinner's clock and returns the new frame when a spinner is visible and the
 /// frame changed since `last` (ADR 0027). The idle tick calls this, so an idle app
 /// still makes no frame and a visible spinner redraws on its interval.
@@ -2312,6 +2349,9 @@ fn spinner_tick(
     Some(frame)
 }
 
+/// Whether the tty is already hung up, as `poll(2)` sees it right now. A draw failure carries
+/// crossterm's own "failed to write the buffered data" (no errno), so the tty's own state is
+/// the reliable test.
 fn terminal_is_gone() -> bool {
     #[cfg(unix)]
     {
