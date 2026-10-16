@@ -434,3 +434,45 @@ Base `f1be5b1`（本片 HEAD）· 就地变异（改 `jobs.rs` 的 `supervise`�
 两个跑完的 `cargo test` 就能堵死所有后续重活。两个新用例在 settle/`job_kill` 之后断言
 `gate.available() == 1`，并让第二条重活命令在 5 s 超时内跑完（变异下断言先失败，不依赖超时）。
 `cancel`、非重活不占槽、等待可取消由上一节的 SC-1/SC-2 钉住。
+## ADR 0037：前台 shell 调用过阈值转后台（2026-10-16，branch `oc/auto-bg`）
+
+Base：本片 HEAD · 就地变异（改 `shell.rs` / `jobs.rs`），变异前把文件复制到
+`.radian/scratch/mut/`，跑完用**不带 `-p`** 的 `cp` 还原并 `cmp` 逐字节确认，结束时
+`git status --short` 干净。每个变异用
+`cargo test -p radian-coding --test jobs --no-fail-fast -- <test>`（会重新编译）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| AB1 | 转后台时重启命令：`kill_tree` 掉前台组，再 `jobs.start` 起一个**新** job（新进程） | `a_long_foreground_command_is_adopted_in_place`（`the adopted process (pid …) must be alive`） | ✅ failed |
+| AB2 | 丢掉转后台前的输出：`StreamSink::promote` 不把已保留的 head+tail 写进 job 的 `.out` | `a_long_foreground_command_is_adopted_in_place`（输出文件里等不到 `before`） | ✅ failed |
+| AB3 | 名额满了仍转：`Jobs::adopt` 的 4 个名额检查关掉 | `four_running_jobs_leave_no_room_and_the_call_is_not_adopted`（`adopted` 不是 `null`） | ✅ failed |
+| AB4 | 转后台后 turn 取消仍杀它：`execute` 转后台后 `tokio::spawn` 一个 watcher，`cancel` 时 SIGKILL 进程组 | `an_adopted_job_survives_the_turn_cancellation` | ✅ failed |
+| AB5 | 超时在转后台时重置：`remaining = explicit_deadline.saturating_sub(elapsed)` → `= explicit_deadline` | `an_adopted_job_is_killed_by_the_original_timeout`（5.0 s，而非 ~3 s） | ✅ failed |
+
+5/5 抓住。AB1 的 pid 断言是「不重启」的钉子：转后台走的是同一个 `Supervised` 的同一个子进程，
+`leader.pid` 不会被覆盖，只写一次；重启变异会覆盖它并杀掉旧 pid，`alive(pid)` 为假。AB2 钉住
+「转后台前的输出不丢」。AB4 是「转后台后属于 job、turn 取消不再杀」这条决定的可观测后果，变异
+正是一个「忘了把 cancel watcher 摘掉」的实现。
+
+**新用例在旧代码上必失败**（本片前没有 `auto_background_after`）：整条路径与
+`Limits.auto_background_after` 在 `025ebfb`（只有 ADR 文本的提交）上不存在，这些用例连字段都
+没有；把阈值设回「永不」（`None`）时 `a_long_foreground_command_is_adopted_in_place`
+在 60 s 前台默认超时下也永远不会返回 job id。语义上，AB1–AB5 的任一变异等价于把这条行为拿掉，
+对应用例即失败（上表）。
+
+### orch-s6b 合并 origin/main（2026-10-16）：转后台的重活命令把 heavy 槽带进 job
+
+`oc/auto-bg` 与 `oc/orch-s6b` 都动 `shell.rs`/`jobs.rs`：前者加了「前台命令过阈值就地转后台」，
+后者加了 heavy 槽门。合并时必须两样都留：转后台的重活命令要把手上的 `HeavyPermit` 经
+`Adopt`/`Jobs::adopt` 传进 job（和 `Jobs::start` 一样），job settle 时再释放。变异就地改
+`crates/radian-coding/src/shell.rs`（adopt 调用处），跑完从 `.radian/scratch/mut/shell.rs.fix2orig`
+还原并 `diff -q` 确认字节一致。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MH-1 | 转后台时不把 heavy permit 带进 job（`.adopt(..., heavy)` 换成 `None`，permit 随前台 `run` 返回即释放） | `an_adopted_foreground_heavy_command_holds_and_releases_its_slot`（转后台后 `gate.available()` 已是 1，断言应为 0） | ✅ failed (rc=101, 4.0s) |
+
+新用例：`an_adopted_foreground_heavy_command_holds_and_releases_its_slot`（`tests/heavy.rs`）——
+前台重活命令（`echo heavy adopt; sleep 600`）过 300 ms 阈值转后台后 `gate.available() == 0`，
+`job_kill` 使其 settle 后 `== 1`。
+

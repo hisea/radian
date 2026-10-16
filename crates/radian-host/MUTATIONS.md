@@ -1120,16 +1120,31 @@ Base：`oc/orch-s6b`（fix 1 之后）。变异就地改 `crates/radian-host/src
 
 | # | 变异的需求 | 变异 | 结果 | 抓住它的测试（rc=101） |
 |---|---|---|---|---|
-| S6B-F2-1 | 正常结束也要写一条 `TaskFinished`（不止失败时） | 回到今天的代码：只在 `error.is_some()` 时调 `write_finished` | ✅ 36.7s | `a_normal_worktree_end_writes_one_finished_after_git_committed`（等 `TaskFinished` 超时 30s 后 panic） |
-| S6B-F2-2 | `TaskFinished` 写在收尾提交**之后** | 在 `spawn_blocking` 收尾提交之前就调一次 `write_finished` | ✅ 9.7s | 同上（提交还被 `CommitGate` 卡住时 lead 日志里已出现 `TaskFinished`，`is_empty()` 断言失败） |
-| S6B-F2-3 | 正常结束后 `remove` 不再写第二条 | 去掉 `write_finished` 的 once-only 守卫，并把 `remove` 的 `if end.is_none()` 改成 `if true` | ✅ 5.2s | `a_second_turn_and_a_later_remove_add_no_finished`（remove 后又写一条 `cancelled`，计数 2） |
+| S6B-F2-1 | 正常结束也要写一条 `TaskFinished`（不止失败时） | 回到今天的代码：只在 `error.is_some()` 时调 `write_finished` | ✅ 41.5s | `a_normal_worktree_end_writes_one_finished_after_git_committed`（等 `TaskFinished` 超时 30s 后 panic） |
+| S6B-F2-2 | `TaskFinished` 写在收尾提交**之后** | 在 `spawn_blocking` 收尾提交之前就调一次 `write_finished` | ✅ 6.5s | 同上（提交还被 `CommitGate` 卡住时 lead 日志里已出现 `TaskFinished`，`is_empty()` 断言失败） |
+| S6B-F2-3 | 正常结束后 `remove` 不再写第二条 | 去掉 `write_finished` 的 once-only 守卫，并把 `remove` 的 `if end.is_none()` 改成 `if true` | ✅ 4.5s | `a_second_turn_and_a_later_remove_add_no_finished`（remove 后又写一条 `cancelled`，计数 2） |
+| S6B-F2-4 | `kill` 在任何 turn 结束前也要写一条 `cancelled` | 删掉 `kill` 里的 `if end.is_none() { write_finished(Cancelled) }` | ✅ 3.9s | `a_task_killed_before_end_writes_one_cancelled_finished`（`kill` 后一条都没有） |
 
-3/3 抓住。F2-3 需两处一起改才可观测：只把 `remove` 的条件改成恒真，once-only 守卫仍会拦下第二条，
-所以真正的不变量在守卫；变异记录两者一起改，如实写明。
+4/4 抓住（F2-1..3 在 fix 提交上跑过一次，合并 origin/main 后连同 `kill` 的 F2-4 重跑，四条都抓住）。F2-3 需两处一起改才可观测：只把 `remove` 的条件改成恒真，once-only 守卫仍会拦下第二条，所以真正的不变量在守卫；变异记录两者一起改，如实写明。
 
 **归一执行的语义**：`schedule_commit` 现在对 worktree 与 `shared` 都跑（`shared`/无仓库只是
-`EndCommit::None`），在收尾提交（含 `GitCommitted` 审计）之后写那一条 `TaskFinished`；`remove`
-在没有 turn 结束（state 仍 `Idle`）时补一条 `cancelled`。`TaskFinisher::finished` 的 `AtomicBool`
+`EndCommit::None`），在收尾提交（含 `GitCommitted` 审计）之后写那一条 `TaskFinished`，并调 host 的
+notifier（ADR 0030 O10，TUI 的 `TaskFinished` 通知行与 task 计数读它）；`remove` 与 `kill` 在没有
+turn 结束（state 仍 `Idle`）时各补一条 `cancelled`。`TaskFinisher::finished` 的 `AtomicBool`
 保证每 task 至多一条；第二个 turn 结束因为 `CommitState != Idle` 直接返回，也不会写第二条
 （ADR 0030 O3：一个 task 一个 turn）。
 
+## ADR 0030 片 6b2：宿主的真任务 builder（2026-10-16）
+
+Base `2f41f69` · 在 worktree 内直接改文件、跑单个测试、再从 `.radian/scratch/mut/` 的副本
+`cp` 还原并 `cmp` 对比；每个变异后 `git status --short` 只剩被测文件，本次跑完为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S6B2-1 | 把 lead 的 live sink 当成任务的 `task_events`（fixture 里 `host(...)` 收到 `lead_seen` 而非 `task_seen`） | ✅ failed | `the_production_builder_builds_an_accepted_session`（任务的 event 没进它自己的 sink：`the task's own sink sees its turn: []`；lead 的 sink 同时会看到任务的 `TurnFinished`） |
+| S6B2-2 | 任务会话挂一个 MCP server（`servers: vec![McpServerConfig::new("mut", "/bin/true")]`） | ✅ failed | `the_production_builder_builds_an_accepted_session`（`registry.spawn` 因 MCP 启动失败而报错）；`a_shared_task_has_no_worktree_and_no_network` 的 `mcp_configured == 0` 同理 |
+
+2/2 抓住。**说明（如实记录）**：S6B2-1 的变异落在测试 fixture 的接线处（builder 拿到的
+sink 就是宿主会传的 sink），因为生产 builder 的 `task_events` 由宿主提供，没有"把 lead 的
+sink 塞进 builder"的单行源码改法；测试断言（任务自己的 sink 收到它自己的 stream、lead 的
+sink 只收到 `TaskSpawned`/`TaskFinished`）在变异下失败。S6B2-2 的变异是源码变异。

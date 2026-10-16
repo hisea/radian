@@ -197,6 +197,7 @@ fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> T
                     price_for: None,
                     protected_branches: Vec::new(),
                     allowed_filters: None,
+                    shell_auto_background: None,
                     servers: Vec::new(),
                     role: None,
                     system_prompt: None,
@@ -797,6 +798,7 @@ async fn open_plain(
             price_for: None,
             protected_branches: Vec::new(),
             allowed_filters: None,
+            shell_auto_background: None,
             servers: Vec::new(),
             role: None,
             system_prompt: None,
@@ -1716,6 +1718,29 @@ async fn a_task_removed_before_end_writes_one_cancelled_finished() {
     assert_eq!(finished.len(), 1, "exactly one on removal");
     assert_eq!(finished[0]["data"]["outcome"], "cancelled");
     assert!(finished[0]["data"]["error"].is_null(), "{}", finished[0]);
+}
+
+/// A task **killed** before any turn ended writes its one `TaskFinished`, `cancelled` (ADR 0030
+/// O5/O12), so a kill does not read as a crash on resume. The worktree is kept.
+#[tokio::test]
+async fn a_task_killed_before_end_writes_one_cancelled_finished() {
+    let fixture = Fixture::new("killed-finished", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let record = fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let worktree = record.worktree.clone().expect("a worktree");
+
+    fixture.registry.kill("t1").await.expect("kill");
+    let finished = task_finished(&fixture, "t1");
+    assert_eq!(finished.len(), 1, "exactly one on kill");
+    assert_eq!(finished[0]["data"]["outcome"], "cancelled");
+    assert!(finished[0]["data"]["error"].is_null(), "{}", finished[0]);
+    assert!(worktree.exists(), "kill keeps the worktree");
 }
 
 /// After a normal end the lead's journal pairs every `TaskSpawned` with a `TaskFinished`, so a

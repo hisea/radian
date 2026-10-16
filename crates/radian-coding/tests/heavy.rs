@@ -13,7 +13,7 @@ use agent_core::{
     CancellationToken, ContentPart, NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession,
 };
 use common::TempDir;
-use radian_coding::{CodingSession, CodingTools, HeavySlots};
+use radian_coding::{CodingSession, CodingTools, HeavySlots, Limits};
 use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
 use serde_json::json;
 
@@ -303,5 +303,59 @@ async fn a_killed_background_heavy_job_releases_its_slot() {
     assert!(
         text_of(&output).contains("echo heavy after-kill"),
         "the second heavy command ran"
+    );
+}
+
+// ---------- the heavy permit of an adopted foreground command (ADR 0037) ----------
+
+/// An adopted foreground heavy command keeps its heavy slot **inside the job** (ADR 0030 O8):
+/// the permit moves into `Jobs::adopt` like it does into `Jobs::start`, so the slot stays taken
+/// until the job settles and is released at that settle. Without the move the foreground `run`
+/// drops the permit the moment it returns at adoption, freeing the slot while the job still runs.
+#[tokio::test]
+async fn an_adopted_foreground_heavy_command_holds_and_releases_its_slot() {
+    let dir = TempDir::new("heavy-adopt");
+    let ws = dir.path().to_path_buf();
+    let gate = HeavySlots::new(1, ["echo heavy"]);
+    let policy = SandboxPolicy::new(SandboxMode::FullAccess, &ws).expect("full-access policy");
+    let sandbox = Sandbox::from_policy(policy).expect("full access needs no backend");
+    let tools = CodingTools::with_sandbox(&ws, sandbox)
+        .expect("matching workspaces")
+        .with_heavy(Arc::clone(&gate))
+        .with_limits(Limits {
+            // A tiny threshold: the foreground heavy command is adopted in place.
+            auto_background_after: Some(Duration::from_millis(300)),
+            ..Limits::default()
+        });
+    let session = tools.open_session().await.expect("open session");
+
+    // The foreground heavy command runs past the threshold and is adopted; its job holds the
+    // only slot from then on.
+    let output = exec(
+        &session,
+        "shell",
+        json!({ "command": "echo heavy adopt; sleep 600" }),
+    )
+    .await
+    .expect("the call is adopted");
+    let structured = output.structured.clone().expect("structured");
+    assert_eq!(structured["adopted"], json!(true), "{structured}");
+    let id = structured["job_id"].as_str().expect("a job id").to_owned();
+    assert_eq!(
+        gate.available(),
+        0,
+        "an adopted heavy job must keep the heavy slot"
+    );
+
+    // Killing the job settles it, and the settle releases the slot.
+    exec(&session, "job_kill", json!({ "job_id": id }))
+        .await
+        .expect("kill the job");
+    let status = wait_for_settle(&session, &id).await;
+    assert!(status.contains("[status: killed]"), "{status}");
+    assert_eq!(
+        gate.available(),
+        1,
+        "a settled adopted heavy job must release its slot"
     );
 }

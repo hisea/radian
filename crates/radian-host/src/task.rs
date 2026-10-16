@@ -166,6 +166,11 @@ pub struct TaskSession {
 pub type TaskBuilder =
     Arc<dyn Fn(&TaskContext<'_>) -> Result<TaskSession, SessionError> + Send + Sync>;
 
+/// A callback the registry calls for each `TaskSpawned`/`TaskFinished` it writes to the lead's
+/// journal, so the host's live view can show a notice line (ADR 0030 O10). Installed by the two
+/// hosts with [`TaskRegistry::with_notifier`]; `None` in tests, so no notice outside a host.
+pub type TaskNotifier = Arc<dyn Fn(&RuntimeEvent) + Send + Sync>;
+
 /// Where a spawn can be interrupted, for tests (ADR 0039 decision 5). Production installs no
 /// hook, so no variant ever fires outside a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,6 +415,9 @@ pub struct TaskRegistry {
     builder: TaskBuilder,
     /// Test seams (ADR 0039 decisions 5 and 7); both are `None` in production.
     seams: TaskSeams,
+    /// The host's notice callback for `TaskSpawned`/`TaskFinished` (ADR 0030 O10); `None` in
+    /// tests. See [`TaskRegistry::with_notifier`].
+    notifier: Option<TaskNotifier>,
     tasks: Mutex<BTreeMap<String, Arc<TaskRecord>>>,
     /// The orchestration limits (ADR 0030 O8): `max_tasks` and `stall_after_secs`.
     limits: OrchestrationLimits,
@@ -478,6 +486,7 @@ impl TaskRegistry {
             pending,
             builder,
             seams: TaskSeams::default(),
+            notifier: None,
             tasks: Mutex::new(BTreeMap::new()),
             limits,
             heavy,
@@ -544,6 +553,21 @@ impl TaskRegistry {
     fn bump_wake(&self) {
         self.wake
             .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    /// Installs the host's notice callback for `TaskSpawned`/`TaskFinished` (ADR 0030 O10). The
+    /// two hosts pass the lead's live runtime-events sink here, so a spawn and a finish become
+    /// notice lines in the lead's transcript; tests pass none.
+    pub fn with_notifier(mut self, notifier: TaskNotifier) -> Self {
+        self.notifier = Some(notifier);
+        self
+    }
+
+    /// Calls the host's notice callback, when one is installed.
+    fn notify(&self, event: &RuntimeEvent) {
+        if let Some(notifier) = &self.notifier {
+            notifier(event);
+        }
     }
 
     /// The lead's workspace (the repository task worktrees branch from).
@@ -1003,14 +1027,13 @@ impl TaskRegistry {
                 Err(error) => {
                     // ADR 0039 decision 5: the `TaskSpawned` this spawn wrote needs a pair.
                     if guard.spawned {
-                        let _ = self
-                            .lead_journal
-                            .append_runtime_event(RuntimeEvent::TaskFinished {
-                                agent_session_id: id.clone(),
-                                outcome: TurnOutcome::Failed,
-                                error: Some(error.to_string()),
-                            })
-                            .await;
+                        let event = RuntimeEvent::TaskFinished {
+                            agent_session_id: id.clone(),
+                            outcome: TurnOutcome::Failed,
+                            error: Some(error.to_string()),
+                        };
+                        let _ = self.lead_journal.append_runtime_event(event.clone()).await;
+                        self.notify(&event);
                     }
                     guard.rollback().await;
                     Err(error)
@@ -1074,16 +1097,20 @@ impl TaskRegistry {
         // 2. The lead's `TaskSpawned`, before the task session exists. `parent.seq` is its seq.
         self.seam(SpawnStage::TaskSpawned)?;
         let start_seq = self.lead_journal.next_seq();
+        let spawned = RuntimeEvent::TaskSpawned {
+            agent_session_id: id.to_owned(),
+            worktree: worktree
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            label: label.clone(),
+        };
         self.lead_journal
-            .append_runtime_event(RuntimeEvent::TaskSpawned {
-                agent_session_id: id.to_owned(),
-                worktree: worktree
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().into_owned()),
-                label: label.clone(),
-            })
+            .append_runtime_event(spawned.clone())
             .await
             .map_err(|error| TaskError::new(format!("cannot write TaskSpawned: {error}")))?;
+        // Tell the host's live view (ADR 0030 O10). After the write, so a host that reacts by
+        // reading the lead's journal sees the record.
+        self.notify(&spawned);
         guard.spawned = true;
         let parent = ForkParent::task(self.lead_session_id.clone(), start_seq);
 
@@ -1154,6 +1181,7 @@ impl TaskRegistry {
             journal: OnceLock::new(),
             runtime: tokio::runtime::Handle::current(),
             gate: self.seams.commit_gate.clone(),
+            notifier: self.notifier.clone(),
             state: Mutex::new(CommitState::Idle),
             done: watch::channel(false).0,
             running: AtomicBool::new(false),
@@ -1299,6 +1327,45 @@ impl TaskRegistry {
             .remove(id);
         self.clear_stall(id);
         // Removing frees a `max_tasks` slot (ADR 0030 O4): wake the FIFO pump.
+        self.bump_wake();
+        self.notify_slot();
+        Ok(())
+    }
+
+    /// Closes a task's session and abandons its pending requests, **keeping** its worktree
+    /// (ADR 0030 O12's `/tasks kill`). Unlike [`TaskRegistry::remove`], nothing is deleted from
+    /// disk: the worktree and its branch stay for the human to inspect.
+    ///
+    /// The session is stopped and its driver joined first, so the task's blocked pending calls
+    /// fail; the queue drops an abandoned entry on its next read. The record leaves the registry,
+    /// so a later `wait_task`/`task_status` sees no such task. A task killed before any turn
+    /// ended writes its one `TaskFinished`, `cancelled` (ADR 0030 O5), so the kill does not read
+    /// as a crash on resume.
+    pub async fn kill(&self, id: &str) -> Result<(), TaskError> {
+        let record = self
+            .get(id)
+            .ok_or_else(|| TaskError::new(format!("no task `{id}`")))?;
+        record.session.stop();
+        let _ = record.session.join().await;
+        // ADR 0039 decision 7: a commit already in flight settles first; ADR 0030 O5: no turn
+        // ended, so the kill is the task's end and writes the one `TaskFinished`, `cancelled`.
+        let end = record.await_end_commit().await;
+        if end.is_none() {
+            record
+                .finisher
+                .write_finished(TurnOutcome::Cancelled, None)
+                .await;
+        }
+        self.tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+        self.observers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+        self.clear_stall(id);
+        // The kill frees a `max_tasks` slot (ADR 0030 O4): wake the FIFO pump.
         self.bump_wake();
         self.notify_slot();
         Ok(())
@@ -1910,6 +1977,8 @@ struct TaskFinisher {
     runtime: tokio::runtime::Handle,
     /// The test gate at the start of the commit (ADR 0039 decision 7); `None` in production.
     gate: Option<CommitGate>,
+    /// The host's notice callback, cloned from the registry (ADR 0030 O10).
+    notifier: Option<TaskNotifier>,
     state: Mutex<CommitState>,
     /// `true` once the commit finished; the record's `await_end_commit` waits on it.
     done: watch::Sender<bool>,
@@ -1938,6 +2007,13 @@ impl TaskFinisher {
 
     fn subscribe_turns(&self) -> watch::Receiver<u64> {
         self.turns.subscribe()
+    }
+
+    /// Calls the host's notice callback, when one is installed (ADR 0030 O10).
+    fn notify(&self, event: &RuntimeEvent) {
+        if let Some(notifier) = &self.notifier {
+            notifier(event);
+        }
     }
 
     fn signal_turn(&self) {
@@ -2057,14 +2133,15 @@ impl TaskFinisher {
         if self.finished.swap(true, Ordering::SeqCst) {
             return; // exactly one `TaskFinished` per task
         }
-        let _ = self
-            .lead_journal
-            .append_runtime_event(RuntimeEvent::TaskFinished {
-                agent_session_id: self.id.clone(),
-                outcome,
-                error,
-            })
-            .await;
+        let event = RuntimeEvent::TaskFinished {
+            agent_session_id: self.id.clone(),
+            outcome,
+            error,
+        };
+        let _ = self.lead_journal.append_runtime_event(event.clone()).await;
+        // ADR 0030 O10: tell the host's live view, so the TUI shows a `TaskFinished` notice (and
+        // its task count drops) for every end, not only a failed end.
+        self.notify(&event);
     }
 
     /// Resolves when the end-of-task commit has finished (ADR 0039 decision 7). `None` when no
