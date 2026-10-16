@@ -912,6 +912,11 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // a usage error before the session file exists (dogfooding D15). `--thinking` left this
     // check in D11: the unified levels ride both wire protocols.
     check_provider_flags(provider, Thinking::Off, cli.max_tokens).map_err(SetupError)?;
+    // ADR 0015: an explicit `--context-window 0` is a usage error, before any session file
+    // exists, and the TUI refuses it the same way. The config's `[model] context_window = 0` is
+    // the config's spelling of "unset" and never reaches this check (the reader maps it to
+    // `None`), so the two readings cannot be confused.
+    radian_host::check_context_window_flag(cli.context_window).map_err(SetupError)?;
     // The endpoint this run would talk to, before the session id (for the local-endpoint check).
     let probe_base_url = if provider_ref.takes_base_url_override() {
         base_url_override.clone()
@@ -1215,8 +1220,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     let mut secrets: Vec<String> = radian_host::resolved_keys();
     secrets.extend(route.headers.iter().map(|(_, value)| value.clone()));
     secrets.retain(|secret| !secret.is_empty());
-    // ADR 0015: a zero window is unset, not an error — `WindowQuery::production` drops it, so a
-    // `--context-window 0` is read exactly like a missing window (the catalog decides).
+    // ADR 0015: the flag's zero was refused as a usage error above, and the config's zero was
+    // mapped to `None` by the reader, so this is a window the user really asked for. The catalog
+    // decides when it is `None`.
     let context_window = cli.context_window.or(config.model.context_window);
     // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
     // failure is not a startup failure: the window is then unknown and the guard stays off.

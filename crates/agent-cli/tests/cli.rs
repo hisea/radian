@@ -3379,16 +3379,15 @@ async fn a_zero_context_window_in_the_config_is_unset_and_the_guard_is_off() {
     assert_eq!(server.requests().len(), 1, "{stderr}");
 }
 
-/// The same rule for the flag, and what "unset" means: `--context-window 0` is not an explicit
-/// window at all, so the catalog (here a written cache) decides — it is not read as an explicit
-/// zero. With the catalog's `C 20000, I 18000` the effective budget is
-/// `B = min(18000, 20000 - 5000) = 15000`, and the startup line names models.dev as the source.
-/// A host that read `0` as an explicit window would take the no-fetch branch instead and report
-/// `B 18000 from --context-window` for a window it never looked up.
+/// ADR 0015: the flag's zero is a **usage error**, not the config's spelling of "unset". This
+/// run gives the catalog a cached window (`C 20000, I 18000`, i.e. `B 15000`), so a host that
+/// read `--context-window 0` as "not given" would start the turn with the catalog's window:
+/// the test fails on the exit code, on the missing refusal and on the request the mock never
+/// should have seen.
 #[tokio::test]
-async fn a_zero_context_window_flag_lets_the_catalog_decide() {
+async fn a_zero_context_window_flag_is_a_usage_error() {
     let (dir, ws) = budget_workspace("budget-zero-flag");
-    // The cache the run reads (`--offline-catalog`), in the shape models.dev serves.
+    // The cache the run would read (`--offline-catalog`), in the shape models.dev serves.
     let home = dir.join("radian");
     let cache = home.join("cache/catalog/models.json");
     std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
@@ -3424,18 +3423,17 @@ async fn a_zero_context_window_flag_lets_the_catalog_decide() {
     )
     .await;
 
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-    assert!(stderr.contains("from models.dev"), "{stderr}");
+    assert_eq!(code, 2, "{stderr}");
     assert!(
-        stderr.contains("B 15000"),
-        "the catalog's window decides: {stderr}"
+        stderr.contains("--context-window must be at least 1 token"),
+        "{stderr}"
     );
-    assert!(
-        !stderr.contains("--context-window must be"),
-        "a zero window is unset, not a usage error: {stderr}"
+    assert!(!stdout.contains("done"), "{stdout}");
+    assert_eq!(
+        server.requests().len(),
+        0,
+        "the turn must not run: {stderr}"
     );
-    assert_eq!(server.requests().len(), 1, "{stderr}");
 }
 
 /// 2: over the input budget `B` the request is **still sent** and the turn completes

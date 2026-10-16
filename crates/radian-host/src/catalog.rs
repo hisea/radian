@@ -275,6 +275,21 @@ pub fn input_budget(
     }
 }
 
+/// Checks the **flag** `--context-window` (ADR 0015).
+///
+/// An explicit `0` is a usage error: the user typed a window that cannot hold any output
+/// reservation, and silently reading it as "not given" would hide the mistake. That is the
+/// flag's rule only — the config's `[model] context_window = 0` is the config's spelling of
+/// "unset", and the reader maps it to `None` before either host sees it. Both hosts call this,
+/// so `radian exec` and the TUI refuse the same command line the same way, before a session
+/// file exists.
+pub fn check_context_window_flag(flag: Option<u64>) -> Result<(), String> {
+    if flag == Some(0) {
+        return Err("--context-window must be at least 1 token".to_string());
+    }
+    Ok(())
+}
+
 /// A one-line warning when the request's output setting is above the catalog's output ceiling
 /// (ADR 0018: the ceiling is checked, not used in `R`).
 pub fn output_ceiling_warning(
@@ -633,7 +648,8 @@ fn human_age(age: Duration) -> String {
 pub struct WindowQuery {
     /// The explicit window (`--context-window` / `[model] context_window`). ADR 0015: a `0`
     /// means unset — not an explicit window at all — so the catalog decides, exactly as if the
-    /// value had not been given ([`WindowQuery::production`] drops it).
+    /// value had not been given ([`WindowQuery::production`] drops it). A host never sends the
+    /// flag's `0` here: [`check_context_window_flag`] refuses it first.
     pub explicit: Option<u64>,
     pub catalog_provider: Option<String>,
     pub base_url: String,
@@ -658,9 +674,10 @@ impl WindowQuery {
         offline: bool,
     ) -> Self {
         Self {
-            // ADR 0015: a zero window is unset, not an explicit window. Dropping it here is
-            // what makes both hosts read `--context-window 0` the same way (and the same as
-            // a missing `[model] context_window`): the catalog decides.
+            // ADR 0015: a zero window is unset, never an explicit window. A host cannot reach
+            // here with one — `check_context_window_flag` refuses the flag's zero and the config
+            // reader maps the key's zero to `None` — so this is the last guard, not the rule:
+            // were a zero to arrive, the catalog decides (B never becomes a zero-token budget).
             explicit: explicit.filter(|tokens| *tokens > 0),
             catalog_provider,
             base_url: base_url.into(),
@@ -988,8 +1005,9 @@ mod tests {
     }
 
     /// ADR 0015 (revision 2026-10-16): a zero window is **unset**, never an explicit window.
-    /// `WindowQuery::production` drops it, so the resolver never takes the explicit branch for
-    /// `--context-window 0`; the same zero never becomes a budget.
+    /// `WindowQuery::production` drops it, so the resolver never takes the explicit branch for a
+    /// zero; the same zero never becomes a budget. The command line's zero is refused earlier,
+    /// by [`check_context_window_flag`].
     #[test]
     fn a_zero_window_is_unset() {
         let zero = WindowQuery::production(Some(0), None, "http://127.0.0.1:1/v1", "m", None, true);
@@ -1002,6 +1020,17 @@ mod tests {
         // The resolver's own rule (ADR 0018: "0 or missing is unknown") already covers C/I.
         assert_eq!(input_budget(Some(0), Some(0), None), Ok(None));
         assert_eq!(input_budget(None, Some(0), None), Ok(None));
+    }
+
+    /// ADR 0015: the flag's zero is a usage error, the config's zero is "unset" (the reader maps
+    /// it to `None` before a host sees it). Every other flag value, and a missing flag, pass.
+    #[test]
+    fn a_zero_context_window_flag_is_refused() {
+        assert_eq!(check_context_window_flag(None), Ok(()));
+        assert_eq!(check_context_window_flag(Some(1)), Ok(()));
+        assert_eq!(check_context_window_flag(Some(200_000)), Ok(()));
+        let error = check_context_window_flag(Some(0)).unwrap_err();
+        assert_eq!(error, "--context-window must be at least 1 token");
     }
 
     #[test]
