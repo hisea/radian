@@ -2416,7 +2416,7 @@ fn terminal_gone(error: &std::io::Error) -> bool {
 /// Advances the spinner's clock and returns the new frame when a spinner is visible and the
 /// frame changed since `last` (ADR 0027/13). The idle tick calls this, so an idle
 /// app still makes no frame and a visible spinner redraws on its interval — the breath's step
-/// (about 117 ms) while it interpolates, the two-colour switch or the rotating frames otherwise.
+/// (about 125 ms) while it interpolates, the two-colour switch or the rotating frames otherwise.
 fn spinner_tick(
     app: &mut App,
     last: &mut Option<radian_tui::spinner::Frame>,
@@ -4278,8 +4278,8 @@ mod tests {
 
     /// ADR 0027 + ADR 0023 U2: the breath redraws **once per step**, and only while a
     /// spinner is visible. The test walks the injected clock in 50 ms wakes — no wall clock — and
-    /// counts the frames the loop's own tick hands out over two breath periods: 24 for an RGB
-    /// theme (12 steps each), 6 for a theme that can only switch (one every 500 ms), none idle.
+    /// counts the frames the loop's own tick hands out over two breath periods: 32 for an RGB
+    /// theme (16 steps each), 8 for a theme that can only switch (one every 500 ms), none idle.
     #[test]
     fn the_breath_redraws_once_per_step_and_only_when_a_spinner_is_visible() {
         /// The frames `spinner_tick` hands the loop while the clock walks two periods in 50 ms
@@ -4307,7 +4307,7 @@ mod tests {
         assert_eq!(
             frames(&mut app),
             usize::from(radian_tui::spinner::PULSE_STEPS) * 2,
-            "one frame per step, 12 steps in every 1.4 s period"
+            "one frame per step, 16 steps in every 2.0 s period"
         );
         assert_eq!(
             wait_for_an_event(&app),
@@ -4318,13 +4318,13 @@ mod tests {
         app.theme = radian_tui::theme::Theme::mono();
         assert_eq!(
             frames(&mut app),
-            6,
-            "a theme that cannot interpolate switches every 500 ms (two colours over 2.8 s)"
+            8,
+            "a theme that cannot interpolate switches every 500 ms (two colours over 4.0 s)"
         );
         assert_eq!(wait_for_an_event(&app), TTY_CHECK_TICK);
         assert_eq!(
             frames(&mut app),
-            6,
+            8,
             "the walk is a pure function of the clock: the same count again, no wall clock"
         );
 

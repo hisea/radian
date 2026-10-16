@@ -61,11 +61,13 @@ impl Kind {
     }
 }
 
-/// One breath of the default pulse (ADR 0027).
-pub const PULSE_PERIOD: Duration = Duration::from_millis(1_400);
+/// One breath of the default pulse (ADR 0027; the owner's 2026-10-16 decision set the
+/// period to 2.0 s).
+pub const PULSE_PERIOD: Duration = Duration::from_millis(2_000);
 /// The colours in one breath (revision 13): the sine below is sampled this many times, so the
-/// breath lands on [`PULSE_STEPS`] distinct values from the dim end to the accent and back.
-pub const PULSE_STEPS: u8 = 12;
+/// breath lands on [`PULSE_STEPS`] distinct values from the dim end to the accent and back. 16
+/// keeps one step at 125 ms.
+pub const PULSE_STEPS: u8 = 16;
 /// Revision 10's two-colour switch, kept for a pulse that cannot interpolate (revision 13
 /// decision 3).
 pub const PULSE_SWITCH: Duration = Duration::from_millis(500);
@@ -77,7 +79,7 @@ pub const PULSE_ACCENT_STEP: u8 = PULSE_STEPS;
 /// The dim end of the breath: the level revision 10 switched to.
 pub const PULSE_DIM_STEP: u8 = 0;
 
-/// One step of the breath ([`PULSE_PERIOD`] over [`PULSE_STEPS`]: ~117 ms).
+/// One step of the breath ([`PULSE_PERIOD`] over [`PULSE_STEPS`]: 125 ms).
 pub fn pulse_step() -> Duration {
     PULSE_PERIOD / u32::from(PULSE_STEPS)
 }
@@ -180,8 +182,9 @@ fn pulse_switch_step(tick: Duration) -> u8 {
     }
 }
 
-/// Which sample of the breath `tick` falls in (`0..PULSE_STEPS`). Nanoseconds, not the whole
-/// milliseconds [`index`] uses: the step is 1.4 s / 12, which is not a whole number of ms.
+/// Which sample of the breath `tick` falls in (`0..PULSE_STEPS`). On nanoseconds, not the whole
+/// milliseconds [`index`] uses: the step ([`PULSE_PERIOD`] / [`PULSE_STEPS`]) is exact, not
+/// rounded to a millisecond.
 fn breath_index(tick: Duration) -> usize {
     let step = pulse_step().as_nanos();
     ((tick.as_nanos() / step) % u128::from(PULSE_STEPS)) as usize
@@ -267,14 +270,14 @@ mod tests {
     /// down — every sample is a step of at most a quarter of the range — and the glyph, position
     /// and width never change.
     #[test]
-    fn the_breath_walks_one_sine_period_in_twelve_steps() {
+    fn the_breath_walks_one_sine_period_in_sixteen_steps() {
         let sample = |index: u32| frame(Kind::Pulse, Glyphs::Unicode, true, pulse_step() * index);
         let levels: Vec<u8> = (0..u32::from(PULSE_STEPS))
             .map(|i| sample(i).step)
             .collect();
         assert_eq!(
             levels,
-            vec![0, 1, 3, 6, 9, 11, 12, 11, 9, 6, 3, 1],
+            vec![0, 1, 2, 5, 8, 11, 14, 15, 16, 15, 14, 11, 8, 5, 2, 1],
             "the sampled sine, dark -> bright -> dark"
         );
         assert_eq!(levels[0], PULSE_DIM_STEP, "sample 0 is the dim end");
@@ -283,9 +286,9 @@ mod tests {
             PULSE_ACCENT_STEP,
             "the middle sample is the accent"
         );
-        // The ADR's two numbers, pinned; everything else derives from them.
-        assert_eq!(PULSE_PERIOD, Duration::from_millis(1_400));
-        assert_eq!(PULSE_STEPS, 12);
+        // The owner's two numbers, pinned; everything else derives from them.
+        assert_eq!(PULSE_PERIOD, Duration::from_millis(2_000));
+        assert_eq!(PULSE_STEPS, 16);
         let (up, down) = levels.split_at(usize::from(PULSE_STEPS) / 2 + 1);
         assert!(
             up.windows(2).all(|pair| pair[0] < pair[1]),
@@ -344,7 +347,7 @@ mod tests {
             frame_interval(Kind::Pulse, Glyphs::Unicode, true),
             pulse_step()
         );
-        // One step is the period over the step count (~117 ms) and covers it once.
+        // One step is the period over the step count (125 ms) and covers it once.
         assert_eq!(pulse_step(), PULSE_PERIOD / u32::from(PULSE_STEPS));
         assert!(pulse_step().as_millis() > 100 && pulse_step().as_millis() < 130);
     }
