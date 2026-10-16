@@ -1375,7 +1375,28 @@ fn run(
         let route_user_headers = user_headers.clone();
         let route_thinking = thinking.clone();
         let task_model: radian_host::TaskModelFactory = std::sync::Arc::new(
-            move |session_id: &str, slot: std::sync::Arc<radian_runtime::ConfigSlot>| {
+            move |session_id: &str,
+                  slot: std::sync::Arc<radian_runtime::ConfigSlot>,
+                  agent: Option<&radian_host::SpawnAgent>| {
+                // ADR 0030 O11: an agent definition's `model` and `thinking` are the task's
+                // route and level. The route's credential is resolved here the same way a
+                // `/model` switch resolves it — never copied into the snapshot.
+                if let Some(route) = agent.and_then(|agent| agent.model.clone()) {
+                    let ctx = radian_host::RouteContext {
+                        providers: providers.clone(),
+                        session_id: session_id.to_owned(),
+                        user_headers: route_user_headers.clone(),
+                        include_usage: None,
+                        max_tokens,
+                        thinking: agent
+                            .and_then(|agent| agent.thinking.clone())
+                            .unwrap_or_else(|| route_thinking.clone()),
+                        thinking_budget,
+                    };
+                    let args = ctx.args_for(&route.provider, &route.model)?;
+                    let initial = build_model(args).map_err(|error| error.to_string())?;
+                    return Ok(radian_host::SwitchableModel::new(initial, route, slot, ctx));
+                }
                 let initial = build_model(ModelArgs {
                     provider,
                     base_url: base_url.clone(),
@@ -1414,6 +1435,7 @@ fn run(
             session_dir: dir.clone(),
             model: task_model,
             route: (provider_name.clone(), model_name.clone()),
+            servers: servers.clone(),
             sandbox: sandbox.clone(),
             sandbox_deny_read: sandbox_deny_read.clone(),
             allow_unix_sockets: allow_unix_sockets.clone(),
