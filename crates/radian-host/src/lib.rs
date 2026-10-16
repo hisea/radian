@@ -137,9 +137,9 @@ pub use lead_tools::{
 };
 pub use mcp::load_mcp_config;
 pub use model::{
-    COMPACTION_THINKING_CURRENT, DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs,
-    Provider, RouteContext, SwitchableModel, Thinking, build_model, check_provider_flags,
-    compaction_settings_for, compaction_settings_for_route, redact_base_url,
+    COMPACTION_THINKING_CURRENT, ChatGptModel, DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET,
+    ModelArgs, Provider, RouteContext, SwitchableModel, Thinking, build_model,
+    check_provider_flags, compaction_settings_for, compaction_settings_for_route, redact_base_url,
     resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref, route_replays_reasoning,
 };
 pub use named::{
