@@ -61,6 +61,10 @@ fn main() {
     println!("cargo:rerun-if-changed={}", grammars.display());
     println!("cargo:rerun-if-changed={}", dump.display());
     println!("cargo:rerun-if-changed={}", digest_file.display());
+    // Without this, the `REGENERATE` run below would do nothing on a tree whose inputs are
+    // unchanged: the `rerun-if-changed` lines above replace cargo's default "rerun when anything
+    // in the package changed" rule, and cargo does not watch the environment on its own.
+    println!("cargo:rerun-if-env-changed={REGENERATE}");
 
     let digest = digest(&grammars);
     if env::var_os(REGENERATE).is_some() {
