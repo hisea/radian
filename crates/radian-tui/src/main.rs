@@ -2113,7 +2113,9 @@ fn read_input(timeout: Duration) -> Input {
             // it re-lays out"). Ask the kernel directly instead: `TIOCGWINSZ` does not read
             // stdin, so it cannot hit the EOF spin guard 1 exists for.
             if let Some((rows, cols)) = size_changed() {
-                return Input::Event(Event::Resize(rows, cols));
+                // crossterm's own order is `(cols, rows)`; the synthetic event must match it so
+                // the input thread's single `Event::Resize` match is correct for both sources.
+                return Input::Event(Event::Resize(cols, rows));
             }
             // Guard 1: do not enter crossterm unless a previous read may have buffered
             // events. Its `poll(0)` reads the fd on an empty buffer and loops on a hung-up
@@ -2202,9 +2204,6 @@ fn terminal_gone(error: &std::io::Error) -> bool {
     false
 }
 
-/// Whether the tty is already hung up, as `poll(2)` sees it right now. A draw failure carries
-/// crossterm's own "failed to write the buffered data" (no errno), so the tty's own state is
-/// the reliable test.
 /// Advances the spinner's clock and returns the new frame when a spinner is visible and the
 /// frame changed since `last` (ADR 0027). The idle tick calls this, so an idle app
 /// still makes no frame and a visible spinner redraws on its interval.
@@ -2224,6 +2223,9 @@ fn spinner_tick(
     Some(frame)
 }
 
+/// Whether the tty is already hung up, as `poll(2)` sees it right now. A draw failure carries
+/// crossterm's own "failed to write the buffered data" (no errno), so the tty's own state is
+/// the reliable test.
 fn terminal_is_gone() -> bool {
     #[cfg(unix)]
     {
