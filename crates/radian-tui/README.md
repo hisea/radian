@@ -281,12 +281,13 @@ find_next = ["ctrl-g", "shift-enter"]
 `git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。`[tui.widgets]`
 的 `above_input`/`below_input` 把同样的条目 id 放到输入框上/下一行。
 
-#### Glyph coverage (ADR 0027)
+#### Glyph coverage (ADR 0027 and 6)
 
 A glyph the font does not have is drawn by a system fallback font with different metrics, so it
 sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
-characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code, Operator
-Mono and Source Code Pro have. The brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under
+characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code and Source
+Code Pro have (ADR 0027: Operator Mono left the reference set, and the tier's tool
+success became `✓`). The brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under
 `ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner's default
 is `pulse` (`⏺`, one cell); the covered optional kind is `quadrant` (`▖▘▝▗`). The arc
 (`◜◝◞◟`), the braille (`⠋⠙⠸⠴`) and `pulse` itself are the **documented exceptions** to this
@@ -299,35 +300,37 @@ not installed is printed as `未查`, never guessed. The unit test
 `footer::tests::unicode_tier_glyphs_are_all_verified_covered` keeps a new unicode-tier glyph
 from slipping in unchecked.
 
-| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Operator Mono | Source Code Pro |
-|---|---|---|---|---|---|---|---|---|---|
-| `R` | U+0052 | brand (unicode) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `@` | U+0040 | host | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `»` | U+00BB | speed | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `*` | U+002A | reasoning | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `#` | U+0023 | session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `^` | U+005E | tokens in | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `v` | U+0076 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `~` `+` `×` | U+007E/2B/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `>` | U+003E | reasoning fold marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▗` | U+2597 | spinner frame 4 (`quadrant`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Source Code Pro |
+|---|---|---|---|---|---|---|---|---|
+| `R` | U+0052 | brand (unicode) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `@` | U+0040 | host | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `»` | U+00BB | speed | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `*` | U+002A | reasoning | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `#` | U+0023 | session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `^` | U+005E | tokens in | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `v` | U+0076 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `~` `✓` `×` | U+007E/2713/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `>` | U+003E | reasoning fold marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▄` | U+2584 | band top padding (ADR 0035) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▀` | U+2580 | band bottom padding (ADR 0035) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▗` | U+2597 | spinner frame 4 (`quadrant`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 Documented exceptions (allowed to fall back; the test keeps them in a separate set):
 
-| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Operator Mono | Source Code Pro |
-|---|---|---|---|---|---|---|---|---|---|
-| `⏺` | U+23FA | spinner default (`pulse`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `◜` `◝` `◞` `◟` | U+25DC…DF | spinner `arc` | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
-| `⠋` `⠙` `⠹` `⠸` `⠼` `⠴` `⠦` `⠧` `⠇` `⠏` | U+280B… | spinner `braille` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Source Code Pro |
+|---|---|---|---|---|---|---|---|---|
+| `⏺` | U+23FA | spinner default (`pulse`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `◜` `◝` `◞` `◟` | U+25DC…DF | spinner `arc` | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ |
+| `⠋` `⠙` `⠹` `⠸` `⠼` `⠴` `⠦` `⠧` `⠇` `⠏` | U+280B… | spinner `braille` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
 
-Replaced or dropped in the `unicode` tier (they were not in all seven fonts):
+Replaced or dropped in the `unicode` tier (they were not in all six fonts):
 
 | was | U+ | now |
 |---|---|---|
@@ -341,14 +344,14 @@ Replaced or dropped in the `unicode` tier (they were not in all seven fonts):
 | `⟲` auto | U+27F2 | `~` |
 | `⠋⠙⠸⠴` spinner | U+280B… | `▖▘▝▗` |
 | `▸` thinking fold | U+25B8 | `>` |
-| `⟳` `✔` `✘` tool status | U+27F3/2714/2718 | `~` `+` `×` |
+| `⟳` `✔` `✘` tool status | U+27F3/2714/2718 | `~` `✓` `×` |
 | `▶` `▼` startup fold | U+25B6/BC | `+` `-` |
 | `㎭` brand | U+33AD | `R` / `󰰠` / `rad` |
 
-Not in the all-seven set but kept (they are not tier-gated icons): the `❯` input prompt (the
+Not in the all-six set but kept (they are not tier-gated icons): the `❯` input prompt (the
 owner's choice; `box` style only) and text arrows (`→`, `•` in the question UI — `•` is in all
-seven, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
-characters (`╭╮╯╰`, `┌┐└┘`, `─│`) are in all seven.
+six, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
+characters (`╭╮╯╰`, `┌┐└┘`, `─│`) are in all six.
 - `theme`: `dark` and `light` are **pi's own palettes**, read
   through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
   brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color
@@ -616,6 +619,13 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   banded on every row, and the status row above it (`◜  Working · 12s · esc to interrupt`) not
   shifting the band or the transcript? Compare `input_style = "lines"` (the rule above and
   below, `> `) and `input_style = "box"`.
+- **the band's half-cell padding** (ADR 0035): the user block and the `bar` input
+  draw one row above (`▄`) and one below (`▀`) the band, in the band's color on the terminal's
+  default background. Is the join **seamless** — no thin gap between the half cells and the
+  banded rows — in Ghostty and in a font-drawn terminal? A half-block glyph is drawn by the
+  font, so a font whose blocks are not exactly half-height shows a seam or a step; record the
+  terminal and font if so. Also check the `ascii` tier has no padding row at all, and that the
+  band's half cells copy as nothing when selected (drag from a padding row into the text).
 - **notice and hint readability**: `/help`'s output and the placeholder must be
   readable on your background. `dark` now uses the terminal's default foreground for notices and
   `Gray` for hints; is that right on your terminal, and is the light palette's hint (dark gray on
@@ -757,20 +767,27 @@ throwaway terminal, not your working one.
    clean shell prompt. *Fail*: record whether the resize disarmed the quit (the `01177c2` fix)
    and whether the exit line is paste-ready.
 5. **Message and tool-card backgrounds, selection on top** (ADR 0028; merges `0f5a302`,
-   `608ce64`, `8456074`). *Steps*: send a message that calls a tool; drag-select across a user
-   message and a tool card; double-click a word, triple-click a message.
-   *Expect*: the user message and each tool card paint a **full-width** background band; the
-   selection highlight is visible **on top of** those bands (not hidden by them); the copied
-   text matches what you selected. *Look*: contrast in `dark`, `light`, `mono`. *Fail*: record
-   which role loses the selection and the theme.
+   `608ce64`, `8456074`; the band pads are ADR 0035). *Steps*: send a message that
+   calls a tool; drag-select across a user message, a padding row and a tool card;
+   double-click a word, triple-click a message.
+   *Expect*: the user message's text row and each tool card paint a **full-width** background
+   band; the user message and the `bar` input additionally draw one `▄` row above and one `▀`
+   row below the band (the half-cell padding, revision 3), the tool cards **not**; the
+   selection highlight is visible **on top of** the bands (not hidden by them); a drag that
+   starts or ends on a padding row copies no padding and does not crash; the copied text
+   matches what you selected. *Look*: contrast in `dark`, `light`, `mono`, and whether the
+   half cells join the band without a seam (see the bullet above). *Fail*: record which role
+   loses the selection, the theme, and (for the pads) the terminal and font.
 6. **Thinking fold `Ctrl-T` and tool output `Ctrl-O`** (ADR 0028 R3/R4; merges `0f5a302`,
    `608ce64`). *Steps*: with a reasoning model (e.g. `--thinking adaptive`), get a reply with
    reasoning; press `Ctrl-T`; then call a tool with long output and press `Ctrl-O` three times.
    *Expect*: `Ctrl-T` toggles reasoning between collapsed and expanded (default collapsed;
    `tui.display.reasoning` sets the start); `Ctrl-O` cycles tool output
    `errors → expanded → collapsed → errors` (default `errors`; `crates/radian-tui/src/app.rs`, `ToggleToolOutput`); the truncated body shows the `[N more
-   lines]` marker rather than silently cutting. *Fail*: record the fold state after each press
-   and the config value.
+   lines]` marker rather than silently cutting; the folded thinking line **hugs** the reply or
+   the tool card below it with no blank line between, while it is still separated from the
+   block above by one line (ADR 0035; an expanded thinking block hugs the
+   same way). *Fail*: record the fold state after each press and the config value.
 7. **Mermaid** (ADR 0028 R8; merge `5628737`). *Steps*: ask for a small ` ```mermaid `
    flowchart; widen then narrow the terminal past the `TooWide` threshold, then widen again.
    *Expect*: wide → a Unicode diagram at the body width; narrow → the **source** plus one dim

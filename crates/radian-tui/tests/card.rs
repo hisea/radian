@@ -64,7 +64,19 @@ fn screen(terminal: &Terminal<TestBackend>) -> String {
 
 /// A shell call, with its result if `result` is `Some`.
 fn shell_app(result: Option<ToolResult>) -> App {
+    shell_app_glyphs(None, result)
+}
+
+/// [`shell_app`] under a glyph tier chosen **before** the messages are pushed, so the status
+/// glyph baked into the entry text is that tier's (the tier is read at push time).
+fn shell_app_glyphs(glyphs: Option<&str>, result: Option<ToolResult>) -> App {
     let mut app = App::new("m", "s");
+    if let Some(glyphs) = glyphs {
+        app.apply_footer(&radian_host::config::TuiFooterConfig {
+            glyphs: Some(glyphs.to_string()),
+            ..Default::default()
+        });
+    }
     app.push_message(&Message::Assistant {
         content: vec![],
         reasoning: vec![],
@@ -156,7 +168,7 @@ fn a_failed_call_labels_its_section_error() {
         error_code: None,
     }));
     let failed = status(&app)[2];
-    let terminal = render(&mut app, 80, 12);
+    let terminal = render(&mut app, 80, 20);
     let text = screen(&terminal);
     assert!(
         text.contains(&format!("{failed} shell: make test")),
@@ -169,10 +181,10 @@ fn a_failed_call_labels_its_section_error() {
     // (ADR 0035 V3), so find its top and bottom borders instead of hardcoding rows.
     let buffer = terminal.backend().buffer();
     let symbol = |y: u16| buffer.cell((0, y)).map(|c| c.symbol().to_string());
-    let top = (0..12)
+    let top = (0..20)
         .find(|&y| symbol(y).as_deref() == Some("┌"))
         .expect("top border");
-    let bottom = (0..12)
+    let bottom = (0..20)
         .rev()
         .find(|&y| symbol(y).as_deref() == Some("└"))
         .expect("bottom border");
@@ -384,13 +396,10 @@ fn the_meta_writes_only_the_data_that_exists() {
 
 #[test]
 fn the_ascii_glyph_set_draws_ascii_borders_and_brackets() {
-    let mut app = shell_app(Some(ok_result("done")));
-    app.apply_footer(&radian_host::config::TuiFooterConfig {
-        glyphs: Some("ascii".into()),
-        ..Default::default()
-    });
-    let terminal = render(&mut app, 60, 12);
-    let lines = rows(&terminal, 60, 12);
+    // The glyph tier is chosen before the messages so the baked status glyph is ascii too.
+    let mut app = shell_app_glyphs(Some("ascii"), Some(ok_result("done")));
+    let terminal = render(&mut app, 60, 16);
+    let lines = rows(&terminal, 60, 16);
     // The card's own rows (the footer draws its own separators, not this assertion's).
     let card: Vec<&String> = lines
         .iter()
