@@ -1325,9 +1325,18 @@ pub async fn open_session(
         // `TaskFinished` it writes, so the TUI shows a notice line and the CLI one stderr line.
         // The sink is the host's own runtime-events handler (the same one the driver calls).
         let runtime_events = Arc::clone(&runtime_events);
+        let notifier_events = Arc::clone(&runtime_events);
         let notifier: crate::task::TaskNotifier =
             Arc::new(move |event: &radian_session::RuntimeEvent| {
-                runtime_events.on_runtime_event(event);
+                notifier_events.on_runtime_event(event);
+            });
+        // ADR 0030 O7 / slice 9: the registry's hook points (`task_spawned`, `task_finished`,
+        // `stalled`) go through the same control-wrapped sink, so a subscriber sees them with
+        // their stable hook names.
+        let hook_events = Arc::clone(&runtime_events);
+        let hook_notifier: crate::task::HookNotifier =
+            Arc::new(move |name: &str, data: &serde_json::Value| {
+                hook_events.on_hook_event(name, data);
             });
         Some(Arc::new(
             crate::task::TaskRegistry::new(
@@ -1337,7 +1346,8 @@ pub async fn open_session(
                 Arc::clone(&queue),
                 builder,
             )
-            .with_notifier(notifier),
+            .with_notifier(notifier)
+            .with_hook_notifier(hook_notifier),
         ))
     } else {
         None

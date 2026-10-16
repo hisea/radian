@@ -64,6 +64,7 @@ use crate::agents::{SpawnAgent, SpawnOverrides, resolve as resolve_agent};
 use crate::git_commit::{Committed, RepoPin, default_allowed_filters};
 use crate::home::{ensure_private_dir, radian_home, worktrees_dir_for};
 use crate::observer::{JournalObserver, SessionObserver};
+use crate::orchestration::{self, Orchestration, VerifyResult, hook};
 use crate::session::{
     ApprovalRouting, HostBindings, LocalSession, SessionError, SessionQueue, SessionSetup,
     open_session,
@@ -177,6 +178,11 @@ pub type TaskBuilder =
 /// hosts with [`TaskRegistry::with_notifier`]; `None` in tests, so no notice outside a host.
 pub type TaskNotifier = Arc<dyn Fn(&RuntimeEvent) + Send + Sync>;
 
+/// A callback the registry calls for each ADR 0030 O7 hook point (ADR 0030 slice 9), so the
+/// control port can fan the stable hook event (`task_spawned`, `task_finished`, `stalled`) out to
+/// subscribers. Installed with [`TaskRegistry::with_hook_notifier`]; `None` in tests.
+pub type HookNotifier = Arc<dyn Fn(&str, &serde_json::Value) + Send + Sync>;
+
 /// Where a spawn can be interrupted, for tests (ADR 0039 decision 5). Production installs no
 /// hook, so no variant ever fires outside a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +253,10 @@ pub struct TaskRecord {
     /// The sandbox policy the task's tools run under (ADR 0030 O3): a `workspace` policy with
     /// the network off and `.git` read-only, or `None` for a host with no sandbox.
     pub sandbox_policy: Option<SandboxPolicy>,
+    /// The name of the edge policy command this task's approver was given (ADR 0030 O2 layer 2,
+    /// slice 9), or `None` when no policy is configured. Read from the orchestration snapshot,
+    /// never from a model argument.
+    pub policy: Option<String>,
     /// When the task started, the reference for the stall check before it has an event or a
     /// write (ADR 0030 R5).
     pub started_at: DateTime<Utc>,
@@ -260,6 +270,13 @@ impl TaskRecord {
     /// has ended, so no commit was ever scheduled.
     pub async fn await_end_commit(&self) -> Option<EndCommit> {
         self.finisher.await_end_commit().await
+    }
+
+    /// The `verify` results the runtime filled after the end-of-task commit (ADR 0030 R2), or
+    /// `None` before the task ends. Empty when the task configured no `verify` commands, or for a
+    /// `shared` task (which runs no verify, ADR 0030 O3).
+    pub fn verify_results(&self) -> Option<Vec<VerifyResult>> {
+        self.finisher.verify_results()
     }
 
     /// Whether the task's turn is running right now (ADR 0030 slice 6's `wait_task`): `true`
@@ -458,6 +475,13 @@ pub struct TaskRegistry {
     /// The host's notice callback for `TaskSpawned`/`TaskFinished` (ADR 0030 O10); `None` in
     /// tests. See [`TaskRegistry::with_notifier`].
     notifier: Option<TaskNotifier>,
+    /// The host's hook-point callback (ADR 0030 O7, slice 9); `None` in tests. See
+    /// [`TaskRegistry::with_hook_notifier`].
+    hook_notifier: Option<HookNotifier>,
+    /// The resolved orchestration snapshot (ADR 0030 slice 9): the O8 limits, the `verify`
+    /// commands, the edge `policy` command, and the spawn defaults. Resolved once, from the LEAD's
+    /// workspace (`orchestration::process` or [`TaskRegistry::with_orchestration`]).
+    orchestration: Orchestration,
     tasks: Mutex<BTreeMap<String, Arc<TaskRecord>>>,
     /// The orchestration limits (ADR 0030 O8): `max_tasks` and `stall_after_secs`.
     limits: OrchestrationLimits,
@@ -511,7 +535,10 @@ impl TaskRegistry {
         let workspace = std::fs::canonicalize(&workspace).unwrap_or(workspace);
         let worktree_root = task_worktree_root(&workspace);
         let pending = TaskPendingQueue::new(Some(Arc::clone(&lead_queue)));
-        let limits = OrchestrationLimits::default();
+        // ADR 0030 slice 9: the orchestration snapshot is resolved once (from the LEAD's
+        // workspace) and installed process-wide; `with_orchestration` overrides it for a test.
+        let orchestration = orchestration::process();
+        let limits = orchestration.limits.clone();
         // Install the process gate from these limits (ADR 0030 O8). First configuration wins:
         // the process reads its orchestration config once (ADR 0030 slice 9).
         HeavySlots::set_process(limits.heavy_slots, limits.heavy_patterns.clone());
@@ -527,6 +554,8 @@ impl TaskRegistry {
             builder,
             seams: TaskSeams::default(),
             notifier: None,
+            hook_notifier: None,
+            orchestration,
             tasks: Mutex::new(BTreeMap::new()),
             limits,
             heavy,
@@ -556,8 +585,34 @@ impl TaskRegistry {
     pub fn with_limits(mut self, limits: OrchestrationLimits) -> Self {
         HeavySlots::set_process(limits.heavy_slots, limits.heavy_patterns.clone());
         self.heavy = HeavySlots::process();
-        self.limits = limits;
+        self.limits = limits.clone();
+        self.orchestration.limits = limits;
         self
+    }
+
+    /// Installs a resolved orchestration snapshot (ADR 0030 slice 9): the O8 limits **and** the
+    /// `verify` commands, the edge `policy` command and the spawn defaults. This is the test seam;
+    /// production reads the snapshot from [`orchestration::process`], installed once by the host.
+    pub fn with_orchestration(mut self, orchestration: Orchestration) -> Self {
+        HeavySlots::set_process(
+            orchestration.limits.heavy_slots,
+            orchestration.limits.heavy_patterns.clone(),
+        );
+        self.heavy = HeavySlots::process();
+        self.limits = orchestration.limits.clone();
+        self.orchestration = orchestration;
+        self
+    }
+
+    /// Installs the process-level heavy gate directly (a test seam for the verify runner).
+    pub fn with_heavy(mut self, heavy: Arc<HeavySlots>) -> Self {
+        self.heavy = heavy;
+        self
+    }
+
+    /// The resolved orchestration snapshot this registry uses (ADR 0030 slice 9).
+    pub fn orchestration(&self) -> &Orchestration {
+        &self.orchestration
     }
 
     /// Installs a test clock (ADR 0030 R5 uses time; a test never sleeps 600 s). With an
@@ -603,10 +658,47 @@ impl TaskRegistry {
         self
     }
 
-    /// Calls the host's notice callback, when one is installed.
+    /// Installs the hook-point callback (ADR 0030 O7, slice 9): the control port fans
+    /// `task_spawned`/`task_finished`/`stalled` out to subscribers. `None` in tests.
+    pub fn with_hook_notifier(mut self, notifier: HookNotifier) -> Self {
+        self.hook_notifier = Some(notifier);
+        self
+    }
+
+    /// Calls the host's notice callback, when one is installed, and emits the ADR 0030 O7 hook
+    /// point for the two lifecycle events.
     fn notify(&self, event: &RuntimeEvent) {
+        match event {
+            RuntimeEvent::TaskSpawned {
+                agent_session_id,
+                worktree,
+                label,
+            } => self.hook(
+                hook::TASK_SPAWNED,
+                &hook::task_spawned(agent_session_id, worktree.as_deref(), label.as_deref()),
+            ),
+            RuntimeEvent::TaskFinished {
+                agent_session_id,
+                outcome,
+                error,
+            } => {
+                let word = outcome_word(outcome);
+                self.hook(
+                    hook::TASK_FINISHED,
+                    &hook::task_finished(agent_session_id, word, error.as_deref()),
+                );
+            }
+            _ => {}
+        }
         if let Some(notifier) = &self.notifier {
             notifier(event);
+        }
+    }
+
+    /// Emits one hook point to the installed hook callback, when there is one (ADR 0030 O7).
+    fn hook(&self, name: &str, data: &serde_json::Value) {
+        if let Some(hook) = &self.hook_notifier {
+            hook(name, data);
         }
     }
 
@@ -779,7 +871,7 @@ impl TaskRegistry {
             // call, and carry it through the queue. A queued task must not re-read the file (or
             // re-resolve against a later edit) when a slot frees; and a bad definition is the
             // caller's error now, not a queued failure.
-            let resolved = resolve_task(&request)?;
+            let resolved = resolve_task(&request, &self.orchestration)?;
             if self.live_count() < self.limits.max_tasks {
                 let record = self.spawn_resolved(request, resolved).await?;
                 self.bump_wake();
@@ -956,9 +1048,10 @@ impl TaskRegistry {
             if stalled {
                 if !self.stall_active(&record.id) {
                     self.mark_stall(&record.id);
+                    let idle_secs = idle.num_seconds().max(0) as u64;
                     let notice = StallNotice {
                         task_id: record.id.clone(),
-                        idle_secs: idle.num_seconds().max(0) as u64,
+                        idle_secs,
                     };
                     self.stalls
                         .lock()
@@ -966,6 +1059,8 @@ impl TaskRegistry {
                         .push_back(notice);
                     self.stall_version
                         .send_modify(|version| *version = version.wrapping_add(1));
+                    // ADR 0030 O7/O8: `stalled` is a control-port hook point too.
+                    self.hook(hook::STALLED, &hook::stalled(&record.id, idle_secs));
                     fired += 1;
                 }
             } else {
@@ -1038,7 +1133,7 @@ impl TaskRegistry {
         request: SpawnRequest,
     ) -> futures_util::future::BoxFuture<'_, Result<Arc<TaskRecord>, TaskError>> {
         Box::pin(async move {
-            let resolved = resolve_task(&request)?;
+            let resolved = resolve_task(&request, &self.orchestration)?;
             self.spawn_resolved(request, resolved).await
         })
     }
@@ -1073,6 +1168,11 @@ impl TaskRegistry {
                 isolation,
                 approval,
             } = resolved;
+            // ADR 0030 O2 layer 2 / revision 7 item 3: the edge policy command comes only from
+            // the user config or a trusted project config, never a model argument; the registry
+            // fills the snapshot's policy when the request has none. `spawn_task` always passes
+            // `None`, so the model cannot supply one.
+            let policy = policy.or_else(|| self.orchestration.policy.clone());
 
             // The guard owns everything the spawn has built so far; it is disarmed only once the
             // record is in the registry, so no failure below can leave a worktree or a driver.
@@ -1227,6 +1327,7 @@ impl TaskRegistry {
 
         // The task's asks and questions go to the task-side pending queue, not the human's; the
         // task is committed when its turn ends (ADR 0030 slice 5).
+        let policy_name = policy.as_ref().map(|policy| policy.name.clone());
         let task_approver = Arc::new(TaskApprover::new(
             Arc::clone(&self.pending),
             id.to_owned(),
@@ -1243,6 +1344,12 @@ impl TaskRegistry {
         // ADR 0030 R9: a task agent's questions go to the lead, so `ask_user` is
         // advertised for the task even when the lead's own host did not advertise it to itself.
         bindings.ask_user = true;
+        // The sandbox policy the task's tools will run under (kept for the record and for the
+        // verify runner): read it before `open_session` consumes the setup.
+        let sandbox_policy = setup
+            .sandbox
+            .as_ref()
+            .map(|sandbox| sandbox.policy().clone());
         let finisher = Arc::new(TaskFinisher {
             id: id.to_owned(),
             lead_journal: Arc::clone(&self.lead_journal),
@@ -1263,6 +1370,12 @@ impl TaskRegistry {
             // ADR 0030 O8: a turn end frees a `max_tasks` slot, so wake the FIFO pump.
             notify: Arc::clone(&self.pump),
             finished: AtomicBool::new(false),
+            // ADR 0030 slice 9: the verify runner's inputs and results.
+            verify: self.orchestration.verify.clone(),
+            sandbox_policy: sandbox_policy.clone(),
+            heavy: Arc::clone(&self.heavy),
+            verify_results: Mutex::new(None),
+            hook_notifier: self.hook_notifier.clone(),
         });
         let inner = Arc::clone(&bindings.runtime_events);
         bindings.runtime_events = Arc::new(TaskRuntimeEvents {
@@ -1271,12 +1384,7 @@ impl TaskRegistry {
             wake: self.wake.clone(),
         });
 
-        // The sandbox policy the task's tools will run under (kept for the record): read it
-        // before `open_session` consumes the setup.
-        let sandbox_policy = setup
-            .sandbox
-            .as_ref()
-            .map(|sandbox| sandbox.policy().clone());
+        // The sandbox policy the task's tools run under was captured before the finisher.
         let session = Arc::new(
             open_session(setup, bindings)
                 .await
@@ -1322,6 +1430,7 @@ impl TaskRegistry {
             start_seq,
             start_commit,
             sandbox_policy,
+            policy: policy_name,
             started_at: Utc::now(),
             finisher,
         });
@@ -1687,12 +1796,18 @@ pub fn task_sandbox(lead: &Sandbox, workspace: &Path) -> Result<Sandbox, TaskErr
 }
 
 /// Resolves and snapshots the agent definition for one `spawn_task` call (ADR 0030 O11, revision
-/// 2 item 4). The spawn arguments override the definition's fields (O4), and a profile that would
-/// widen the task floor is refused here, before the worktree is created. `submit` calls this
-/// **before** queueing, so a queued task starts from this snapshot and never re-reads the file.
-fn resolve_task(request: &SpawnRequest) -> Result<ResolvedAgent, TaskError> {
+/// 2 item 4). The spawn arguments override the definition's fields, which override the
+/// orchestration defaults (O4/O7); the project-level definitions come from the LEAD's workspace
+/// (`orchestration.project_agents`, ADR 0031 T1) and never from the task's own worktree. A profile
+/// that would widen the task floor is refused here, before the worktree is created. `submit` calls
+/// this **before** queueing, so a queued task starts from this snapshot and never re-reads the file.
+fn resolve_task(
+    request: &SpawnRequest,
+    orchestration: &Orchestration,
+) -> Result<ResolvedAgent, TaskError> {
     let resolved = resolve_agent(
         radian_home().as_deref(),
+        orchestration.project_agents.as_deref(),
         &SpawnOverrides {
             agent: request.agent.as_deref(),
             isolation: request.isolation,
@@ -1700,6 +1815,7 @@ fn resolve_task(request: &SpawnRequest) -> Result<ResolvedAgent, TaskError> {
             profile: request.profile.as_deref(),
             approval: request.approval,
         },
+        &orchestration.defaults,
     )
     .map_err(|error| TaskError::new(format!("cannot resolve the agent definition: {error}")))?;
     let isolation = resolved.isolation.unwrap_or_default();
@@ -2193,6 +2309,18 @@ struct TaskFinisher {
     /// Set by the first end (a turn end or a removal), so the task writes exactly one
     /// `TaskFinished` (ADR 0030 O5): a second turn end or a later removal writes nothing.
     finished: AtomicBool,
+    /// The `verify` commands from the orchestration snapshot (ADR 0030 slice 9); empty means no
+    /// verify runs.
+    verify: Vec<String>,
+    /// The task's sandbox policy; the verify runner builds a sandbox from it. `None` (a `shared`
+    /// task) means no verify.
+    sandbox_policy: Option<SandboxPolicy>,
+    /// The process heavy gate the verify commands queue on (ADR 0030 O8).
+    heavy: Arc<HeavySlots>,
+    /// The verify results, once they have run (ADR 0030 R2).
+    verify_results: Mutex<Option<Vec<VerifyResult>>>,
+    /// The host's hook-point callback (ADR 0030 O7), cloned from the registry.
+    hook_notifier: Option<HookNotifier>,
 }
 
 impl TaskFinisher {
@@ -2208,11 +2336,32 @@ impl TaskFinisher {
         self.turns.subscribe()
     }
 
-    /// Calls the host's notice callback, when one is installed (ADR 0030 O10).
+    /// Calls the host's notice callback, when one is installed (ADR 0030 O10), and emits the
+    /// `task_finished` hook point (ADR 0030 O7) for the task's one end.
     fn notify(&self, event: &RuntimeEvent) {
+        if let RuntimeEvent::TaskFinished {
+            agent_session_id,
+            outcome,
+            error,
+        } = event
+            && let Some(hook) = &self.hook_notifier
+        {
+            hook(
+                hook::TASK_FINISHED,
+                &hook::task_finished(agent_session_id, outcome_word(outcome), error.as_deref()),
+            );
+        }
         if let Some(notifier) = &self.notifier {
             notifier(event);
         }
+    }
+
+    /// The verify results, once they have run (ADR 0030 R2).
+    fn verify_results(&self) -> Option<Vec<VerifyResult>> {
+        self.verify_results
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn signal_turn(&self) {
@@ -2266,6 +2415,11 @@ impl TaskFinisher {
         let filters = self.filters.clone();
         let journal = self.journal.get().cloned();
         let gate = self.gate.clone();
+        // ADR 0030 slice 9: the verify runner's inputs.
+        let verify_commands = self.verify.clone();
+        let verify_policy = self.sandbox_policy.clone();
+        let verify_worktree = self.worktree.clone();
+        let verify_heavy = Arc::clone(&self.heavy);
         let this = Arc::clone(self);
         self.runtime.spawn(async move {
             let end = match (worktree, pin) {
@@ -2311,6 +2465,21 @@ impl TaskFinisher {
                 // end-of-task commit.
                 _ => EndCommit::None,
             };
+            // ADR 0030 O7/R2 / slice 9: after the end-of-task commit, run each `verify` command in
+            // the task's own sandbox (network off, root = worktree), through the heavy gate. A
+            // `shared` task has no worktree and no sandbox, so it runs no verify. The results are
+            // stored before `Done`, so a waiter (and `remove_task`) sees the task's true end.
+            if let (Some(worktree), Some(policy)) = (verify_worktree, verify_policy)
+                && !verify_commands.is_empty()
+            {
+                let results =
+                    orchestration::run_verify(&verify_commands, &policy, &worktree, &verify_heavy)
+                        .await;
+                *this
+                    .verify_results
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(results);
+            }
             // ADR 0030 O5 / ADR 0039 decision 7: the one `TaskFinished`, written after the
             // commit (and after the `GitCommitted` audit) so the record follows the commit. Its
             // `error` is the commit's failure, when the commit failed.

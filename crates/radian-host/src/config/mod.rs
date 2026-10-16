@@ -111,6 +111,12 @@ pub enum ConfigError {
         name: String,
         reason: String,
     },
+    /// `[orchestration]` (ADR 0030 slice 9): a wrong-typed key. Refused (the ADR 0008 discipline:
+    /// a bad value is never guessed at); an unknown key is only a warning.
+    Orchestration {
+        path: PathBuf,
+        message: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -179,6 +185,9 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::InvalidProviderName { path, name, reason } => {
                 write!(f, "{}: providers.{name}: {reason}", path.display())
+            }
+            ConfigError::Orchestration { path, message } => {
+                write!(f, "{}: {message}", path.display())
             }
         }
     }
@@ -581,6 +590,10 @@ pub struct Config {
     pub git: GitConfig,
     /// `[shell]` (ADR 0037): the shell tool's limits.
     pub shell: ShellConfig,
+    /// `[orchestration]` (ADR 0030 slice 9): the user-level orchestration config. A project-level
+    /// `<workspace>/.radian/orchestration.toml` overrides it key by key when the workspace is
+    /// trusted (ADR 0031).
+    pub orchestration: crate::orchestration::OrchestrationConfig,
     pub tui: TuiConfig,
     /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
     /// resolve them through `radian_host::provider::resolve_provider`.
@@ -690,6 +703,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "memory" => parse_memory(value, path, &mut config)?,
             "git" => parse_git(value, &mut config)?,
             "shell" => parse_shell(value, &mut config)?,
+            "orchestration" => parse_orchestration(value, path, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
             "providers" => parse_providers(value, path, &mut config)?,
             // Known by the ADR, not wired in this slice: the hosts take MCP servers from
@@ -1067,6 +1081,24 @@ fn parse_shell(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
         }
     }
     Ok(())
+}
+
+/// Parses `[orchestration]` (ADR 0030 slice 9, O7/O8). The keys are shared with the project-level
+/// `<workspace>/.radian/orchestration.toml` (see [`crate::orchestration`]). A wrong-typed key is
+/// refused (never guessed at); an unknown key is skipped and named on the startup line (the
+/// preferences rule).
+fn parse_orchestration(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    match crate::orchestration::OrchestrationConfig::from_table(value) {
+        Ok(parsed) => {
+            config.skipped.extend(parsed.skipped.iter().cloned());
+            config.orchestration = parsed;
+            Ok(())
+        }
+        Err(message) => Err(ConfigError::Orchestration {
+            path: path.to_path_buf(),
+            message,
+        }),
+    }
 }
 
 fn parse_memory(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {

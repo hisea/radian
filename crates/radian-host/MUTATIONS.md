@@ -1361,3 +1361,24 @@ permission allow 名单）全部删除；`radian-tui` 改为直接依赖 vendore
 
 新渲染器的四个变异记在 `crates/radian-tui/MUTATIONS.md` 的「ADR 0042」一节；上游文件的保真度
 （决定 2）由 `third_party/grok-mermaid/tests/pristine.rs` 自己查。
+## ADR 0030 片 9：项目编排配置、信任门、快照、沙箱 verify（2026-10-16）
+
+Base `11a25d9` · worktree 内就地改 `src/orchestration.rs` / `src/task.rs`，每个变异从内存里的
+原始字节还原并用 `==` 断言逐字节相同（脚本 `.radian/scratch/mutate-s9.py`，跑完 `git status`
+为空）；每个变异跑单条测试 `cargo test -p radian-host --no-fail-fast <测试>`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| MUT9-1 | `load_project` 无视 `trusted`（`if !trusted` → `if false`）：未信任的工作区也读项目文件 | ✅ failed | `an_untrusted_workspace_reads_no_project_config_and_no_policy`（未信任时 `policy`/`verify` 非空）；集成 `the_edge_policy_comes_from_a_trusted_project_config_only` 的未信任一半同理 |
+| MUT9-2 | verify 不走沙箱（把 `sandbox.command_str("/bin/sh", …)` 换成裸 `std::process::Command`） | ✅ failed | `verify_runs_in_the_task_sandbox`（禁读目录里的 `cat` 成功了，`exit_code == Some(0)`） |
+| MUT9-3 | verify 从 **task 自己的 worktree** 读（`self.orchestration.verify` → `load_project(worktree, true)`） | ✅ failed | `a_tasks_own_dot_radian_and_a_later_edit_do_not_change_the_running_task`（命令是 `echo task` 而不是 `echo lead`） |
+| MUT9-4 | 快照在 spawn 时重读 lead 工作区（`self.orchestration.verify` → `load_project(&self.workspace, true)`） | ✅ failed | 同上（spawn 后写进 lead 的 `echo changed` 生效了） |
+| MUT9-5 | 策略命令不从快照填（`policy.or_else(|| …)` → `let policy = policy;`） | ✅ failed | `the_edge_policy_comes_from_a_trusted_project_config_only`（受信任时 `record.policy` 仍是 `None`） |
+| MUT9-6 | named 路径不再读 lead 快照的项目 agent 目录（`src/named.rs` 的 `self.orchestration.project_agents.as_deref()` → `None`，合并 origin/main 后补） | ✅ failed | `a_named_agent_reads_the_leads_project_definition_snapshot`（named agent 落到用户级 `writer` 的 worktree 隔离，`outcome.worktree` 变成 `Some`，断言 `None` 失败） |
+
+5/5 抓住。MUT9-1 同时钉住「未信任时 verify 与 policy 都不读」这一条门的两个面（同一个
+`if !trusted` 早退）。MUT9-3 与 MUT9-4 都用同一条快照测试，但变异点不同：一个从 task 的
+worktree 读，一个在 spawn 时重读 lead 的文件。合并 origin/main（切片 7b 的 named agent）后
+补了 MUT9-6：named agent 的定义也读 lead 工作区的快照（ADR 0030 O7 rev 2 item 4），同一条
+测试就地变异 `src/named.rs` 验证，改完从 `.radian/scratch/named.rs.bak` 的副本 `cp` 还原并用
+`cmp` 断言逐字节相同。

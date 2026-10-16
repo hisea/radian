@@ -40,6 +40,7 @@ fn the_reader_matches_the_reference_checker() {
         ("memory-injection.toml", "accept"),
         ("integrations-herdr.toml", "accept"),
         ("control.toml", "accept"),
+        ("orchestration.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),
         ("schema-version-lower.toml", "reject"),
@@ -227,6 +228,41 @@ fn the_memory_injection_keys_are_read_and_the_rest_is_reported() {
         "{:?}",
         config.skipped
     );
+}
+
+/// The `orchestration.toml` fixture (ADR 0030 slice 9): `[orchestration]` carries the user-level
+/// orchestration config; the project-level file overrides it key by key.
+#[test]
+fn the_orchestration_fixture_carries_every_key() {
+    let (path, text) = fixture("orchestration.toml");
+    let config = config::parse(&path, &text).unwrap();
+    let orchestration = &config.orchestration;
+    assert_eq!(orchestration.max_tasks, Some(4));
+    assert_eq!(orchestration.isolation.as_deref(), Some("worktree"));
+    assert_eq!(orchestration.model.as_deref(), Some("opencode-go/glm-5.7"));
+    assert_eq!(orchestration.profile.as_deref(), Some("workspace"));
+    assert_eq!(
+        orchestration.worktree_root.as_deref(),
+        Some("/work/example/.radian-worktrees")
+    );
+    assert_eq!(
+        orchestration.verify.as_deref(),
+        Some(
+            [
+                "cargo fmt --all -- --check".to_owned(),
+                "cargo test --workspace --locked".to_owned()
+            ]
+            .as_slice()
+        )
+    );
+    assert_eq!(
+        orchestration.policy.as_deref(),
+        Some("/work/example/.radian/policy.sh")
+    );
+    assert_eq!(orchestration.heavy_slots, Some(2));
+    assert_eq!(orchestration.stall_after_secs, Some(600));
+    assert_eq!(orchestration.merge_needs_human, Some(true));
+    assert!(config.skipped.is_empty(), "{:?}", config.skipped);
 }
 
 /// The minimal fixture carries the known `tui.mouse` preference (`false`): the reader keeps
