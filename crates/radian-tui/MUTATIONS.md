@@ -1674,6 +1674,11 @@ Base：本片 HEAD（`dogfood/thin-tools`）· 就地变异，脚本仍是 `.rad
 
 3/3 抓住，无等价变异。同一次复跑里 slice ① 的 T1-M1..M5 仍然全部抓住（字形改了不影响它们的判据）。
 
+**方法记录（踩到过，值得记）**：还原变异时用 `shutil.copy2` 会把**副本的旧 mtime** 一起写回，于是还原后的源文件看起来比 cargo 用变异版编译出的产物更旧——cargo 判定「新鲜」，**变异留在构建缓存里**，
+后续的测试跑的是变异代码（这一次的表现是 `card::the_fold_modes…` 与两条 render 折叠用例在源码与 HEAD
+逐字节相同的情况下失败）。`mutate.py` 现在用 `copyfile` + `os.utime(dst, None)` 落回当前时间，并且每次
+变异结束都重跑一遍整包测试确认回到绿；也可以 `touch` 相关源文件或 `cargo clean -p radian-tui` 来强制重建。
+
 覆盖检查的三处同步：`scripts/check-glyph-coverage.py` 的 `GLYPHS`、`footer.rs` 的
 `unicode_tier_glyphs_are_all_verified_covered` 的 `VERIFIED_COVERED`、以及 README 里那张脚本输出的表。
 `▼ ▶ • ╭ ╰` 加入，`›` 移出（没有任何一行再画它）；`× ✓ │` 本来就在表里。用 venv 里的 `fonttools 4.67.0`
