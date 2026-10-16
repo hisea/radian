@@ -83,8 +83,15 @@ pub struct SendOutcome {
     pub queued: bool,
     /// The token to hand to [`NamedRecord::await_turn_end`] (or `wait_agent`'s `since`): the
     /// send's own turn is the first turn whose end moves [`NamedRecord::turn_generation`] above
-    /// this value, so a caller that waits on it never misses a turn that ended in between. It is
-    /// the generation at the enqueue.
+    /// this value, so a caller that waits on it never misses a turn that ended in between, and
+    /// never settles on the reply of the turn it was queued behind.
+    ///
+    /// It is the generation at the enqueue **plus one when the send was queued** (ADR 0030 O12
+    /// review fix 2): the input always goes to the `next_turn` lane, so it runs as the first turn
+    /// after any turn that is running at the enqueue. While the agent is idle our turn is the
+    /// next to end, and the generation now (`G`) is the token; while it is busy the running turn
+    /// ends first (`G + 1`), so a token of `G` alone would let a wait return that turn's reply in
+    /// the idle moment before ours starts — the common busy case.
     pub turn: u64,
     pub worktree: Option<PathBuf>,
     /// Warnings that did not fail the send (ADR 0030 O11/O3): a `skills` name discovery did not
@@ -307,6 +314,9 @@ impl NamedRegistry {
     /// the current turn (ADR 0011 L1). `source` is recorded and applied to the turn: reset when
     /// the agent is idle, lowered only when it is busy (ADR 0012 decision 5).
     ///
+    /// The returned [`SendOutcome::turn`] is the token to wait past, read from the same "busy"
+    /// the enqueue sees: `G` when idle, `G + 1` when the input was queued behind a running turn.
+    ///
     /// The future is **boxed** (a type-erased `BoxFuture`): a first send calls `open_session`,
     /// and a lead tool that calls `open_session` would otherwise recurse in the async `Send`
     /// inference (open_session's driver runs the tools, one of which is `send_agent`). Exactly
@@ -325,11 +335,18 @@ impl NamedRegistry {
                 ))
             })?;
             let (record, created) = self.get_or_create(name).await?;
-            // The token is the turn generation at the enqueue: the send's own turn is the first
-            // turn whose end moves the generation above it, so a wait on it never misses a turn
-            // that ended before the wait started.
+            // Read "running" and the turn generation together, immediately before the enqueue, so
+            // the "busy" answer describes the turn boundary the input lands on: the input always
+            // goes to the `next_turn` lane, so it runs as the first turn after any turn that is
+            // running at this moment.
             let generation = record.turn_generation();
             let queued = record.running();
+            // The token is the generation our input's turn must **end past** (ADR 0030 O12
+            // review fix 2). Idle: our turn is the next to end, so the generation now (`G`)
+            // suffices. Busy: the running turn ends first (`G + 1`), so a token of `G` alone
+            // would let a wait settle on **that** turn's reply in the idle moment before ours
+            // starts — the common busy case. Hence `G + 1` whenever the send is queued.
+            let turn = generation + u64::from(queued);
             // The turn's source: the input that starts a turn resets it; a mid-turn one only
             // lowers (ADR 0012 decision 5). This mirrors the CLI host's `set_turn_source`.
             if queued {
@@ -350,7 +367,7 @@ impl NamedRegistry {
                 session_id: record.session.id().as_str().to_owned(),
                 created,
                 queued,
-                turn: generation,
+                turn,
                 worktree: record.worktree.clone(),
                 warnings: record.warnings.clone(),
             })

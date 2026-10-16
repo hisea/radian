@@ -805,15 +805,19 @@ async fn wait_agent_with_the_since_token_sees_a_turn_that_already_ended() {
     let _ = record.session.join().await;
 }
 
-/// ADR 0030 O12 (review fix 1): a send queued behind a running turn still resolves through
-/// `wait_agent` with its token — the wait returns the sent turn's reply, not the one it was
-/// queued behind.
+/// ADR 0030 O12 (review fix 2): a send queued behind a running turn — the common busy case — must
+/// wait until **its own** turn ends, not the turn it was queued behind. The token is the
+/// generation one past the running turn (`G + 1`): with the running turn's generation (`G`) the
+/// wait would settle on that turn's reply in the idle moment before the queued turn starts. Both
+/// turns are held by a human approval (a gate the test releases, no sleep), so the wait is polled
+/// while the queued turn is still running and must not return the first turn's text.
 #[tokio::test]
-async fn wait_agent_after_a_busy_send_waits_for_the_sent_turn() {
+async fn a_queued_send_waits_past_the_running_turn() {
     let server = MockServer::start(vec![
-        tool_reply("call_1", "shell", r#"{"command":"echo hi"}"#),
+        tool_reply("call_1", "shell", r#"{"command":"echo one"}"#),
         text_reply("one"),
-        paused_text_reply("two", Duration::from_secs(2)),
+        tool_reply("call_2", "shell", r#"{"command":"echo two"}"#),
+        text_reply("two"),
     ])
     .await;
     let fixture = Fixture::new("tools-busy-since", &server.base_url);
@@ -828,34 +832,63 @@ async fn wait_agent_after_a_busy_send_waits_for_the_sent_turn() {
         .await
         .expect("send one");
     let record = fixture.registry.get("writer").expect("record");
-    let pending = wait_pending(&fixture.queue).await;
+    let first = wait_pending(&fixture.queue).await;
     wait_running(&record).await;
 
-    // Turn 2: sent while busy, so it goes to the `next_turn` lane behind the running turn.
+    // Turn 2 is sent while turn 1 runs, so it goes to the `next_turn` lane behind it. Its token
+    // is the generation at the enqueue **plus one**: the running turn ends first.
+    let generation = record.turn_generation();
+    let second = fixture
+        .registry
+        .send("writer", "two", InputSource::User)
+        .await
+        .expect("send two");
+    assert!(second.queued, "the busy agent queues the input");
+    assert_eq!(
+        second.turn,
+        generation + 1,
+        "the token waits past the running turn (G + 1), not at the enqueue (G)"
+    );
+
+    // Release turn 1. Turn 2 starts and is itself held on its shell ask, so the wait below is
+    // polled while turn 2 runs: it must not settle for turn 1's "one".
+    fixture
+        .queue
+        .answer(
+            first.request_id,
+            radian_host::PendingResponse::Approval(radian_permissions::ApprovalOutcome::AllowOnce),
+        )
+        .expect("answer turn 1");
+    let pending = wait_pending(&fixture.queue).await;
+    assert!(
+        record.running(),
+        "turn 2 is still running when the wait is polled"
+    );
     let out = run_tool(
         &session,
-        "send_agent",
-        json!({"name": "writer", "brief": "two"}),
+        "wait_agent",
+        json!({"name": "writer", "since": second.turn, "timeout_secs": 0.1}),
     )
     .await
-    .expect("send_agent");
-    let value = structured(&out);
-    assert_eq!(value["queued"], true, "{value}");
-    let since = value["since"].as_u64().expect("a token");
+    .expect("wait_agent");
+    assert_eq!(
+        structured(&out)["event"],
+        "still_running",
+        "the wait must not settle for the running turn's reply"
+    );
 
-    // Release turn 1. Turn 2's reply is paused, so it is still running when the wait is polled:
-    // the wait must not settle for turn 1's "one".
+    // Release turn 2: the wait with the busy token now returns turn 2's reply, never turn 1's.
     fixture
         .queue
         .answer(
             pending.request_id,
             radian_host::PendingResponse::Approval(radian_permissions::ApprovalOutcome::AllowOnce),
         )
-        .expect("answer");
+        .expect("answer turn 2");
     let out = run_tool(
         &session,
         "wait_agent",
-        json!({"name": "writer", "since": since, "timeout_secs": 20}),
+        json!({"name": "writer", "since": second.turn, "timeout_secs": 20}),
     )
     .await
     .expect("wait_agent");
@@ -863,7 +896,7 @@ async fn wait_agent_after_a_busy_send_waits_for_the_sent_turn() {
     assert_eq!(value["event"], "finished", "{value}");
     assert_eq!(
         value["summary"], "two",
-        "the wait returns the sent turn's reply, not the one it was queued behind"
+        "the wait returns the queued send's reply, not the turn it was queued behind"
     );
     fixture.registry.close_all();
     let _ = record.session.join().await;
@@ -878,23 +911,6 @@ fn text_reply(text: &str) -> Reply {
         chunk(json!({"role": "assistant", "content": text}), None),
         chunk(json!({}), Some("stop")),
     ])
-}
-
-/// A text reply that pauses between stream pieces, so the turn stays running for a known window
-/// (used to test a wait that must not return the previous turn's reply).
-fn paused_text_reply(text: &str, pause: Duration) -> Reply {
-    Reply::Sse {
-        pieces: vec![
-            format!(
-                "data: {}\n\n",
-                chunk(json!({"role": "assistant", "content": text}), None)
-            )
-            .into_bytes(),
-            format!("data: {}\n\n", chunk(json!({}), Some("stop"))).into_bytes(),
-            b"data: [DONE]\n\n".to_vec(),
-        ],
-        pause,
-    }
 }
 
 fn tool_reply(id: &str, name: &str, arguments: &str) -> Reply {

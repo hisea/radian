@@ -1291,13 +1291,45 @@ agent 不该能提交到 lead 的分支（ADR 0030 O3）。每条变异就地改
 **说明（如实记录）**：
 - RF1-1 的 token 是**入队时的 turn generation**（`SendOutcome.turn`）。`wait_agent` 带 `since` 时
   等 `turn_generation() > since && !running`，所以「调用前 turn 已结束」立刻返回；不带 `since`
-  时从调用时刻等下一个 turn 结束（今天的行为，写进工具描述）。`wait_agent_after_a_busy_send_waits_for_the_sent_turn`
-  覆盖 busy 入队的情形，但它**区分不出** `turn + 1` 与 `turn` 两种 token（turn 1 结束到 turn 2
-  开始之间驱动几乎不空转，`!running` 的窗口观测不到）；所以 token 就用入队时的 generation，和
-  修复说明一致，不声称 busy 的额外修正。
+  时从调用时刻等下一个 turn 结束（今天的行为，写进工具描述）。fix 1 时覆盖 busy 入队的
+  `wait_agent_after_a_busy_send_waits_for_the_sent_turn` **区分不出** `turn + 1` 与 `turn` 两种
+  token（turn 1 结束到 turn 2 开始之间驱动几乎不空转，`!running` 的窗口观测不到），所以当时 token
+  就用入队时的 generation、不声称 busy 的额外修正；**fix 2 改正了这一点**，见下节，那条测试也已
+  换成 `a_queued_send_waits_past_the_running_turn`。
 - RF1-2/RF1-3 是「不挂载」而非「权限拒绝」（ADR 0030 O11 的物理卸载；这也是为什么直接调用是
   `unknown_tool`——`agent-core` 的 preflight 在权限 hook 之前就按已挂载的 spec 列表拒绝）。
 - RF1-4 的 `commit` 多了一个 `require_branch` 形参，`GitCommitTools` 默认 `false`：交互会话不受
   影响；`open_session` 对「只有自己分支」的会话在没有分支时**根本不构造**这个工具，`commit` 里
   的检查是「万一到达」的兜底。
+
+## orch-s7b review fix 2（2026-10-16）：busy 入队的 token 必须越过正在跑的 turn
+
+基 `8985c36`（fix 1 已接受）。fix 1 的 token 是入队时的 generation（`G`）；busy 入队时会在「正在
+跑的 turn 刚结束、排在后面的输入还没起自己的 turn」的窗口里命中 `turn_generation() > G && !running`，
+返回**上一个** turn 的文本，而不是这次 send 的回复。改为：idle 用 `G`（我们的 turn 是下一个结束的），
+busy 用 `G + 1`（正在跑的 turn 先结束一次）。变异就地改 `crates/radian-host/src/named.rs` 的
+`let turn = generation + u64::from(queued);`，跑完从 `.radian/scratch/orig2/named.rs` 的副本 `cp`
+还原并 `cmp` 确认逐字节一致；`git status --short` 结束时只剩源码与测试改动。跑法（`timeout` 包裹，
+`--no-fail-fast`）：
+
+```sh
+cargo test -p radian-host --test named --locked --no-fail-fast -- a_queued_send_waits_past_the_running_turn
+```
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| RF2-1 | busy 入队的 token 仍用入队时的 generation（`let turn = generation;`，去掉 `+ u64::from(queued)`） | ✅ failed（left 0, right 1） | `a_queued_send_waits_past_the_running_turn`（断言 busy 的 `SendOutcome.turn == G + 1`） |
+
+1/1 抓住。
+
+**为什么确定性抓住的是 token 本身，而不是「wait 返回谁」（如实记录）**：busy 的旧 token 只在
+「正在跑的 turn 结束」与「排队的 turn 开始」之间那个瞬间出错，而驱动在这两步之间**不 await**
+（`claim_control`/`claim_next_turn` 无竞争时立即返回，`append_runtime_event` 同步落盘；见
+`radian-runtime/src/driver.rs` 的 `run_loop`），单线程 `#[tokio::test]` 里等待方只能在驱动 yield
+（turn 2 的模型网络调用）时被轮询，此时 `turn_running` 已为 true，`!running()` 的窗口观测不到。
+所以纯行为断言（wait 返回排队的 turn 的回复、不是上一个 turn 的）在两种 token 下都绿；能确定性
+区分两者的可观察量就是 `SendOutcome.turn`（`send_agent` 结构化输出里的 `since`，也是工具描述里的
+契约）。`a_queued_send_waits_past_the_running_turn` 两者都写：先断言 `turn == G + 1`（变异在此失败），
+再在两个 turn 各由一个**人工审批闸门**扣住（无 sleep）的情况下断言 wait 在 turn 2 运行期间返回
+`still_running`、释放 turn 2 后返回 turn 2 的回复「two」（从不是 turn 1 的「one」）。
 
