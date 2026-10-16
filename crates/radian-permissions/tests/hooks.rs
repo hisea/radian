@@ -501,3 +501,37 @@ fn approval_policy_names_round_trip() {
     assert_eq!(ApprovalPolicy::parse("yolo"), None);
     assert_eq!(ApprovalPolicy::parse(""), None);
 }
+
+/// ADR 0030 O2 revision 2 / ADR 0006 §5.9: `runtime_event` threads the optional policy name
+/// through to the session event, and leaves it unset when no policy command decided.
+#[test]
+fn runtime_event_threads_the_optional_policy_name() {
+    let with_policy = PermissionResolved {
+        request_id: "req-1".into(),
+        call_id: "call-1".into(),
+        decision: ResolvedDecision::Allow,
+        approver: AuditApprover::Policy,
+        reason: Some("allowed by the policy command".into()),
+        policy: Some("safe-writes".into()),
+    };
+    match runtime_event(&with_policy) {
+        radian_session::RuntimeEvent::PermissionResolved {
+            approver, policy, ..
+        } => {
+            assert_eq!(approver, radian_session::PermissionApprover::Policy);
+            assert_eq!(policy.as_deref(), Some("safe-writes"));
+        }
+        other => panic!("expected PermissionResolved, got {other:?}"),
+    }
+
+    let without = PermissionResolved {
+        policy: None,
+        ..with_policy
+    };
+    match runtime_event(&without) {
+        radian_session::RuntimeEvent::PermissionResolved { policy, .. } => {
+            assert!(policy.is_none(), "no policy command named a policy");
+        }
+        other => panic!("expected PermissionResolved, got {other:?}"),
+    }
+}
