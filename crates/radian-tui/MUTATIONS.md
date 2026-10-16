@@ -1510,6 +1510,15 @@ Base `d8e4c28`（worktree `.radian-worktrees/build-script`，分支 `dogfood/sta
 对应的修复（Esc 在 `2b55c50` 与今天都是 `cancel_or_quit_now()`，那条报告复现不出来），它证明这条回归
 测试不是空转：把 Esc 的空输入分支改回「什么都不做」，它立刻失败。
 
+**S1-M3（修一个自己造的回归）**：`start_tool` 最初带一次 `running_tools.iter().any(...)` 去重扫描，
+在 20 000 个 fact 的洪水下是二次的。变异把它加回来（`if !...any(...) { push }`），
+`cargo test -p radian-tui --test pty pty_a_flooding_producer_still_draws_and_answers_keys`
+连跑 5 次：带扫描 **2 次失败**（load 166–178：一次 `the key was not handled`，一次
+`the flood starved the draw: 92 frames in 2 s`），去掉扫描 **5 次全过**（load 194–251）。同一条 pty
+测试也是先抓住这个回归的那一个：合入 `origin/main` 后的整套 `radian-tui` 测试里正是它红。
+去重本身不是必需的：每个 call 的 `ToolStarted` 只有一次，而 `finish_tool` 的 `retain` 会删掉该 id 的
+**每一条**，所以重复的 start 也留不下残渣。
+
 ## ask-box：transcript 的 Ask 块、面板标题、待答一行、标记与两个按键（ADR 0024，2026-10-15）
 
 Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个变异就地改完后跑

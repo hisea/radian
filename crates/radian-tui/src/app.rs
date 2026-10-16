@@ -1469,12 +1469,14 @@ pub struct App {
 
 impl SessionView {
     /// Records a call that started (`AgentEvent::ToolStarted`). The note names it: the last
-    /// call to start is the one a user watching the footer most likely wants named.
+    /// call to start is the one a user watching the footer most likely wants named. O(1) and
+    /// without a uniqueness scan: the only writer is the core's one `ToolStarted` per call, and
+    /// [`SessionView::finish_tool`] removes *every* entry of the id it is given, so a repeated
+    /// start could not leave a piece behind. (A scan would make a flood of facts quadratic —
+    /// `--flood-facts` sends 20 000 — and starve the loop's draw fairness.)
     pub(crate) fn start_tool(&mut self, call_id: &str, name: &str) {
-        if !self.running_tools.iter().any(|(id, _)| id == call_id) {
-            self.running_tools
-                .push((call_id.to_owned(), name.to_owned()));
-        }
+        self.running_tools
+            .push((call_id.to_owned(), name.to_owned()));
         self.note_for_running_tools();
     }
 
