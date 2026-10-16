@@ -94,6 +94,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-provider-openai-responses"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "agent-provider-contract",
+ "agent-provider-openai-responses",
+ "reqwest",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
