@@ -867,6 +867,10 @@ pty 既不回 kitty flags 也不回 device-attributes，于是付满 **2 s**（`
 ——一份含「已提交压缩替换 + 文件末尾未提交替换」的 fixture，直接断言 host 的初始
 `history` 与 `Session::open(path).history()` 逐条相等（未提交段被丢弃、已提交段保留）。
 
+**合并 origin/main（`39c67ad`）后**同法复测（同负载区间）：50k `line-counts` 52 / 97 / 52 ms、
+`entries-built` 增量 27 / 25 / 17 ms、`first-frame-done` 2731 / 3249 / 2990 ms，与本表一致；全套
+Verify（含 1.88）已在该合并树上重跑。
+
 **本片没做**：`open_session`（~0.6–1.8 s，parse-once + replay + recover 建 records）没有动；
 `terminal-ready` 里的 2 s pty 查询是探针环境的假象，真实终端不付；100k 条、真实 provider 首
 token 未测。
