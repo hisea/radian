@@ -1556,3 +1556,23 @@ Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个�
 12/12 抓住。ASK2 的两个变异在同一条用例里：待答一行、答完同一条目成块且只有一个块。ASK4-M1/M3 是
 owner 反馈的两个按键问题的回归钉：←/→ 切题（无字段时）与底边提示跟随聚焦状态。`check-glyph-coverage.py`
 的结果（☐/☑ 缺 SF Mono / JetBrains Mono Nerd / Cascadia Code）写在 ADR 0024 的「实施补充」里。
+
+## thin ⑥：用户行、默认输入框、压缩线（ADR 0035/9、ADR 0028，2026-10-16）
+
+Base：本片 HEAD（`oc/thin-user`）· 就地变异，每个变异后从 `.radian/scratch/render.rs.orig` /
+`blocks.rs.orig` 还原并用 `cmp` 确认逐字节相同。`--no-fail-fast`。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| U6-M1 | 用户行仍带底色（`render.rs::body_style` 的 User 加回背景） | 用户行是前景角色、无底色 | `render::the_user_row_is_a_chevron_and_the_words_with_no_band`、`render::the_user_row_has_no_band_at_80_and_120`、`render::a_selection_draws_the_selection_role_on_its_cells`、`render::the_mono_selection_is_reversed_not_colored`（4 条 FAILED） |
+| U6-M2 | 用户行又加回上下半格留白行 | 用户行只有文字，块间距由容器给 | `blocks::a_user_block_has_no_padding_rows_at_any_glyph_tier`、`blocks::a_blank_edge_line_is_stripped`、`blocks::md_line_count_matches_the_layout`、`render::the_user_row_is_a_chevron_and_the_words_with_no_band`、`render::the_block_layout_snapshot`、`render::thinking_has_one_blank_line_on_both_sides` 等（lib 5 + render 7 条 FAILED） |
+| U6-M3 | 默认输入框回到 `bar`（`InputStyle` 的 `#[default]` 移回 Bar） | 默认是 `lines` | `config::the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines`、`render::the_default_input_style_is_lines`、`render::the_user_row_has_no_band_at_80_and_120`（config 1 + render 2 条 FAILED） |
+| U6-M4 | 压缩线又退回第 3 列（folded 行前加两格） | 压缩线从第 1 列起 | `render::the_compaction_line_starts_at_column_one_in_the_frame_role`、`render::the_block_layout_snapshot`（2 条 FAILED） |
+
+4/4 抓住，无等价变异。行数一致性（`blocks.rs::line_count` 的 User 分支）由
+`blocks::md_line_count_matches_the_layout` 与窗口/选择测试在改前改后都通过来保证。
+`block_gap` 去掉了「用户块靠自己的 pad 分隔」的旧特例（thin 用户行没有 pad，改由容器的 1 行空白
+分隔，与原型 `render-prototype.py` 一致），由 `blocks::the_container_gap_is_one_line_except_within_a_block`
+与 `render::thinking_has_one_blank_line_on_both_sides` 钉住。`apply_selection` 顺带修正：选中段保留它
+来自的 span 的前景色（原先最后一段回退到 `Style::default()`，会把选区尾部的前景色抹掉），由
+`render::a_selection_draws_the_selection_role_on_its_cells` 的「文字保留自己的前景色」断言钉住。

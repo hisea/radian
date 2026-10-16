@@ -4782,7 +4782,7 @@ async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
         110,
     );
     assert!(
-        pty.wait_for_screen("> hello parent config", 10),
+        pty.wait_for_screen("❯ hello parent config", 10),
         "the first transcript row is corrupted:\n{}",
         pty.screen()
     );
@@ -7510,7 +7510,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("▌ /memory ", 10),
+        pty.wait_for_screen("❯ /memory ", 10),
         "Tab did not complete the command name:\n{}",
         pty.screen()
     );
@@ -7523,7 +7523,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("▌ /memory forget", 10),
+        pty.wait_for_screen("❯ /memory forget", 10),
         "Tab did not complete the subcommand:\n{}",
         pty.screen()
     );
@@ -7875,21 +7875,23 @@ async fn pty_a_theme_file_colors_the_user_line() {
     pty.send(b"COLOR-PROBE\r");
     assert!(pty.wait_for_screen("REPLY-DONE", 15), "{}", pty.screen());
 
-    // The user entry's `> ` marker carries the theme's `user` style (the body text is the
-    // terminal default by design), so check the marker cell: three columns before the probe.
+    // The user entry's `❯ ` marker carries the theme's `user` style (the body text is the
+    // terminal default by design), so check the marker cell: two columns before the probe.
     // The kanagawa fixture's `userMessageText` is `vars.fg = #DCD7BA`.
     let expected = vt100::Color::Rgb(0xDC, 0xD7, 0xBA);
     let screen = pty.parser.screen();
     let mut matched = 0;
     for (row, text) in screen.rows(0, 110).enumerate() {
-        for col in text.match_indices("COLOR-PROBE").map(|(i, _)| i) {
+        for at in text.match_indices("COLOR-PROBE").map(|(i, _)| i) {
             // The input line echoes the probe without a marker; only the transcript entry
-            // has "> " before it.
-            let Some(marker_col) = (col as u16).checked_sub(2) else {
+            // has "❯ " before it. `at` is a **byte** offset (`❯` is three bytes), so the
+            // marker's display column is the width of the prefix minus the two marker cells.
+            let prefix_width = unicode_width::UnicodeWidthStr::width(&text[..at]) as u16;
+            let Some(marker_col) = prefix_width.checked_sub(2) else {
                 continue;
             };
             if let Some(cell) = screen.cell(row as u16, marker_col) {
-                assert_eq!(cell.contents(), ">", "expected the user marker");
+                assert_eq!(cell.contents(), "❯", "expected the user marker");
                 assert_eq!(
                     cell.fgcolor(),
                     expected,
@@ -8481,8 +8483,11 @@ fn find_on_screen(pty: &mut Pty, needle: &str) -> Option<(u16, u16)> {
         for col in 0..cols {
             line.push_str(screen.cell(row, col).map(|c| c.contents()).unwrap_or(" "));
         }
-        if let Some(col) = line.find(needle) {
-            return Some((row, col as u16));
+        if let Some(at) = line.find(needle) {
+            // `at` is a byte offset; the mouse reports display columns, so convert (a `❯ ` or
+            // a CJK prefix makes the two differ).
+            let col = unicode_width::UnicodeWidthStr::width(&line[..at]) as u16;
+            return Some((row, col));
         }
     }
     None

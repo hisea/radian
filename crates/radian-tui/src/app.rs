@@ -1434,7 +1434,7 @@ pub struct App {
     pub spinner_kind: crate::spinner::Kind,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
     pub keymap: Keymap,
-    /// How the input area is drawn (config `tui.input_style`), defaulting to `bar`.
+    /// How the input area is drawn (config `tui.input_style`), defaulting to `lines`.
     pub input_style: InputStyle,
     /// The startup phase (ADR 0023 U4): [`Startup::Picking`] while the pre-session `--pick`
     /// overlay is the whole point of the loop, [`Startup::Session`] otherwise.
