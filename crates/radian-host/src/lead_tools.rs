@@ -889,6 +889,12 @@ impl LeadSession {
             Some(EndCommit::Failed(message)) => Some(message.clone()),
             _ => None,
         };
+        // ADR 0030 R2 / slice 9: the runtime's verify facts, in their own field, separate from
+        // the model's `summary`.
+        let verify = record
+            .verify_results()
+            .map(|results| serde_json::to_value(results).unwrap_or(Value::Null))
+            .unwrap_or(Value::Null);
         let mut structured = json!({
             "task": record.id,
             "event": "finished",
@@ -903,6 +909,7 @@ impl LeadSession {
             "summary_truncated": summary_truncated,
             "status": status,
             "status_truncated": status_truncated,
+            "verify": verify,
         });
         if let Some(error) = end_error {
             structured["end_commit_error"] = Value::String(error);
@@ -1017,6 +1024,11 @@ fn observed_status(record: &Arc<TaskRecord>) -> Value {
         Some(text) if !text.is_empty() => bounded_field(&text, TASK_DETAIL_LIMIT_CHARS),
         _ => (Value::Null, false),
     };
+    // ADR 0030 R2 / slice 9: the verify facts, in their own field.
+    let verify = record
+        .verify_results()
+        .map(|results| serde_json::to_value(results).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
     json!({
         "task": record.id,
         "state": observed.state,
@@ -1033,6 +1045,7 @@ fn observed_status(record: &Arc<TaskRecord>) -> Value {
         "label": record.label,
         "diff_stat": diff_stat,
         "diff_stat_truncated": diff_truncated,
+        "verify": verify,
     })
 }
 

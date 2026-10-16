@@ -36,6 +36,7 @@ mod mermaid_layout;
 mod model;
 pub mod observer;
 pub mod opencode_go;
+pub mod orchestration;
 mod output;
 pub mod pending;
 pub mod projection;
@@ -53,8 +54,9 @@ pub mod trust;
 mod workspace;
 
 pub use agents::{
-    AgentDef, AgentError, AgentSource, SpawnAgent, SpawnOverrides, builtin_def, load as load_agent,
-    parse_file as parse_agent_file, parse_model_route, parse_tier, resolve as resolve_agent,
+    AgentDef, AgentError, AgentSource, SpawnAgent, SpawnDefaults, SpawnOverrides, builtin_def,
+    load as load_agent, parse_file as parse_agent_file, parse_model_route, parse_tier,
+    resolve as resolve_agent,
 };
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
@@ -138,6 +140,10 @@ pub use opencode_go::{
     DEFAULT_PERIOD as OPENCODE_GO_DEFAULT_PERIOD, MAX_PERIOD as OPENCODE_GO_MAX_PERIOD,
     MIN_PERIOD as OPENCODE_GO_MIN_PERIOD, OpencodeGoUsage, USAGE_URL as OPENCODE_GO_USAGE_URL,
     clamp_period as clamp_opencode_go_period,
+};
+pub use orchestration::{
+    Orchestration, OrchestrationConfig, VERIFY_TAIL_CHARS, VERIFY_TIMEOUT, VerifyResult, hook,
+    run_verify,
 };
 pub use output::{StdoutError, write_line, write_stdout};
 pub use pending::{

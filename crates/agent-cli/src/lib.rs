@@ -804,6 +804,9 @@ struct Setup {
     /// `[control] enabled` (ADR 0030 O6, slice 8): whether this process binds its control
     /// socket at `$RADIAN_HOME/run/<pid>.sock`.
     control_enabled: bool,
+    /// `[orchestration]` (ADR 0030 slice 9): the user-level orchestration config, merged with a
+    /// trusted project file before the session opens.
+    orchestration: radian_host::OrchestrationConfig,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -1310,6 +1313,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         memory_injection: config.memory.injection(),
         shell_auto_background: config.shell.auto_background_after(),
         control_enabled: config.control.enabled,
+        orchestration: config.orchestration.clone(),
         allow_unix_sockets: {
             let (paths, warnings) = radian_host::resolve_allow_unix_sockets(
                 &config.sandbox.allow_unix_sockets,
@@ -1748,6 +1752,23 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         eprintln!("{}", radian_host::trust::untrusted_notice(&workspace_path));
     }
     eprintln!("{}", radian_host::trust::status_line(&trust_setup));
+
+    // ADR 0030 slice 9: resolve the orchestration snapshot from the LEAD's workspace (the user
+    // `[orchestration]` merged with the trusted project `.radian/orchestration.toml`) and install
+    // it process-wide, before any session opens. The startup lines list the commands that will run
+    // (ADR 0030 O7); a project file is read only when the workspace is trusted (ADR 0031).
+    let (orchestration, orchestration_warnings) = radian_host::orchestration::resolve(
+        &workspace_path,
+        trust_setup.resolved.decision.as_bool(),
+        &setup.orchestration,
+    );
+    for warning in &orchestration_warnings {
+        eprintln!("[orchestration] {warning}");
+    }
+    for line in orchestration.startup_lines() {
+        eprintln!("{line}");
+    }
+    radian_host::orchestration::set_process(orchestration);
 
     // ADR 0030 slice 6b2: the production task builder, so a headless lead (`radian exec`) can
     // spawn real task sessions. A task mounts no MCP servers (ADR 0030 O8) and inherits the

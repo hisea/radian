@@ -45,6 +45,7 @@ EXPECT = {
     "sandbox-unix-sockets.toml": dict(outcome="accept"),
     "integrations-herdr.toml": dict(outcome="accept"),
     "control.toml": dict(outcome="accept"),
+    "orchestration.toml": dict(outcome="accept"),
     "api-key-removed.toml": dict(outcome="reject"),
     "plaintext-secret.toml": dict(outcome="reject"),
     "heuristic-secret.toml": dict(outcome="reject"),

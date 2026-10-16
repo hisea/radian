@@ -35,7 +35,7 @@ pub fn builtin_role(name: &str) -> Option<&'static str> {
 /// file warns and falls back to the built-in: a bad definition must not take the session down.
 pub fn role_prompt(name: Option<&str>, radian_home: Option<&Path>) -> String {
     let name = name.unwrap_or("default");
-    match crate::agents::load(name, radian_home) {
+    match crate::agents::load(name, radian_home, None) {
         Ok(def) => def.body,
         Err(error) => {
             eprintln!("radian: {error}");

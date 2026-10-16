@@ -338,30 +338,48 @@ pub fn builtin_def(name: &str) -> Option<AgentDef> {
     })
 }
 
-/// Loads the definition `name`: the user-level file `~/.radian/agents/<name>.md` when it exists,
-/// otherwise the built-in of the same name. An unknown name with no file is an error (an
-/// explicit `agent` must name something real).
-pub fn load(name: &str, radian_home: Option<&Path>) -> Result<AgentDef, AgentError> {
+/// Loads the definition `name`. `project` is the **lead's** `<workspace>/.radian/agents` when the
+/// workspace is trusted (ADR 0030 O11 / ADR 0031 T1); a project file of that name wins over the
+/// user-level file, which wins over the built-in. A task never passes its own worktree here — the
+/// registry snapshots the lead's directory (ADR 0030 O7 rev 2 item 4). An unknown name with no
+/// file and no built-in is an error (an explicit `agent` must name something real).
+pub fn load(
+    name: &str,
+    radian_home: Option<&Path>,
+    project: Option<&Path>,
+) -> Result<AgentDef, AgentError> {
+    // Project first: the project customises the same name for its own runs.
+    if let Some(dir) = project {
+        let path = dir.join(format!("{name}.md"));
+        if path.is_file() {
+            return load_file(&path, name);
+        }
+    }
     if let Some(home) = radian_home {
         let path = home.join("agents").join(format!("{name}.md"));
         if path.is_file() {
-            let mut def = parse_file(&path)?;
-            // Unknown frontmatter keys are ignored, with a warning (ADR 0030 O11).
-            for warning in def.warnings() {
-                eprintln!("radian: {warning}");
-            }
-            // A file that is only frontmatter has no body; fall back to the built-in body of the
-            // same name when there is one, so an override cannot accidentally blank layer 1.
-            if def.body.trim().is_empty()
-                && let Some(builtin) = crate::prompt::builtin_role(name)
-            {
-                def.body = builtin.to_owned();
-            }
-            return Ok(def);
+            return load_file(&path, name);
         }
     }
     builtin_def(name)
         .ok_or_else(|| AgentError::new(None, None, format!("no agent definition `{name}`")))
+}
+
+/// Parses one definition file and applies the "frontmatter-only file keeps the built-in body" rule.
+fn load_file(path: &Path, name: &str) -> Result<AgentDef, AgentError> {
+    let mut def = parse_file(path)?;
+    // Unknown frontmatter keys are ignored, with a warning (ADR 0030 O11).
+    for warning in def.warnings() {
+        eprintln!("radian: {warning}");
+    }
+    // A file that is only frontmatter has no body; fall back to the built-in body of the same
+    // name when there is one, so an override cannot accidentally blank layer 1.
+    if def.body.trim().is_empty()
+        && let Some(builtin) = crate::prompt::builtin_role(name)
+    {
+        def.body = builtin.to_owned();
+    }
+    Ok(def)
 }
 
 /// Splits a `provider/model` route (the same shape `/model` accepts, ADR 0026).
@@ -505,16 +523,67 @@ pub struct SpawnAgent {
     pub unknown_fields: Vec<String>,
 }
 
-/// Resolves the definition for a task from the user-level dir (see the module doc: the project
-/// level is not read in this slice). The spawn arguments override the definition's fields
-/// (ADR 0030 O4).
+/// The `[orchestration]`-level spawn defaults (ADR 0030 O7): the lowest precedence, below the
+/// spawn arguments and the agent definition. Resolved once, from the lead's workspace.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpawnDefaults {
+    pub isolation: Option<Isolation>,
+    /// A `provider/model` route as written; parsed when it is used.
+    pub model: Option<String>,
+    pub profile: Option<Preset>,
+}
+
+impl SpawnDefaults {
+    /// Parses the raw config strings, pushing a warning and dropping a value this build cannot
+    /// use (a bad isolation, or a `full` profile that would widen the task floor).
+    pub fn from_raw(
+        isolation: Option<&str>,
+        model: Option<&str>,
+        profile: Option<&str>,
+        warnings: &mut Vec<String>,
+    ) -> Self {
+        let isolation = isolation.and_then(|raw| match parse_isolation(raw) {
+            Ok(isolation) => Some(isolation),
+            Err(error) => {
+                warnings.push(format!("orchestration.isolation: {}", error.message));
+                None
+            }
+        });
+        let profile = profile.and_then(|raw| match parse_tier(raw) {
+            Ok(Preset::FullAccess) => {
+                warnings.push(
+                    "orchestration.profile: a task may only narrow the `workspace` tier; \
+                     `full` is refused"
+                        .to_owned(),
+                );
+                None
+            }
+            Ok(profile) => Some(profile),
+            Err(error) => {
+                warnings.push(format!("orchestration.profile: {}", error.message));
+                None
+            }
+        });
+        Self {
+            isolation,
+            model: model.map(str::to_owned),
+            profile,
+        }
+    }
+}
+
+/// Resolves the definition for a task (ADR 0030 O11). `project` is the lead's trusted
+/// `<workspace>/.radian/agents`, or `None` (ADR 0031 T1). The spawn arguments override the
+/// definition's fields, which override `defaults` (ADR 0030 O7's orchestration defaults).
 pub fn resolve(
     radian_home: Option<&Path>,
+    project: Option<&Path>,
     overrides: &SpawnOverrides<'_>,
+    defaults: &SpawnDefaults,
 ) -> Result<SpawnAgent, AgentError> {
     let def = match overrides.agent {
-        Some(name) => load(name, radian_home)?,
-        None => load("task", radian_home)?,
+        Some(name) => load(name, radian_home, project)?,
+        None => load("task", radian_home, project)?,
     };
     let def_path = def.path();
 
@@ -522,19 +591,22 @@ pub fn resolve(
         Some(raw) => Some(parse_model_route(raw)?),
         None => match def.model.as_deref() {
             Some(raw) => Some(parse_model_route(raw).map_err(|e| e.or_path(def_path))?),
-            None => None,
+            None => match defaults.model.as_deref() {
+                Some(raw) => Some(parse_model_route(raw)?),
+                None => None,
+            },
         },
     };
     let profile = match overrides.profile {
         Some(raw) => Some(parse_tier(raw)?),
         None => match def.profile.as_deref() {
             Some(raw) => Some(parse_tier(raw).map_err(|e| e.or_path(def_path))?),
-            None => None,
+            None => defaults.profile,
         },
     };
     // A task can only be narrower than the registry's `workspace` floor (ADR 0030 O3). A file or
     // argument that widens is refused, not clamped: silently weakening the task boundary would
-    // defeat the point of the floor.
+    // defeat the point of the floor. (`SpawnDefaults::from_raw` already dropped a `full` default.)
     if profile == Some(Preset::FullAccess) {
         return Err(AgentError::new(
             def_path,
@@ -544,11 +616,15 @@ pub fn resolve(
     }
     let isolation = match overrides.isolation {
         Some(isolation) => Some(isolation),
-        None => def
+        None => match def
             .isolation
             .as_deref()
             .map(|raw| parse_isolation(raw).map_err(|e| e.or_path(def_path)))
-            .transpose()?,
+            .transpose()?
+        {
+            Some(isolation) => Some(isolation),
+            None => defaults.isolation,
+        },
     };
     let approval = match overrides.approval {
         Some(approval) => Some(approval),
@@ -722,13 +798,13 @@ mod tests {
     fn a_user_file_overrides_the_builtin_body() {
         let home = scratch("override");
         write(&home, "task.md", "---\nname: task\n---\nMY TASK\n");
-        let def = load("task", Some(&home)).unwrap();
+        let def = load("task", Some(&home), None).unwrap();
         assert_eq!(def.body, "MY TASK\n");
         // A name with neither a file nor a built-in is an error.
-        assert!(load("nope", Some(&home)).is_err());
+        assert!(load("nope", Some(&home), None).is_err());
         // A name with only a built-in falls back to it.
         assert_eq!(
-            load("default", Some(&home)).unwrap().body,
+            load("default", Some(&home), None).unwrap().body,
             crate::prompt::DEFAULT_ROLE
         );
     }
@@ -745,7 +821,7 @@ mod tests {
             agent: Some("writer"),
             ..SpawnOverrides::default()
         };
-        let agent = resolve(Some(&home), &overrides).unwrap();
+        let agent = resolve(Some(&home), None, &overrides, &SpawnDefaults::default()).unwrap();
         assert_eq!(agent.name, "writer");
         assert_eq!(agent.body, "BODY\n");
         assert_eq!(agent.model, Some(ModelRoute::new("p", "one")));
@@ -762,7 +838,7 @@ mod tests {
             isolation: Some(Isolation::Worktree),
             ..SpawnOverrides::default()
         };
-        let agent = resolve(Some(&home), &overrides).unwrap();
+        let agent = resolve(Some(&home), None, &overrides, &SpawnDefaults::default()).unwrap();
         assert_eq!(agent.model, Some(ModelRoute::new("q", "two")));
         assert_eq!(agent.profile, Some(Preset::WorkspaceWrite));
         assert_eq!(agent.isolation, Some(Isolation::Worktree));
@@ -771,7 +847,13 @@ mod tests {
     #[test]
     fn resolve_defaults_to_the_task_role() {
         let home = scratch("default");
-        let agent = resolve(Some(&home), &SpawnOverrides::default()).unwrap();
+        let agent = resolve(
+            Some(&home),
+            None,
+            &SpawnOverrides::default(),
+            &SpawnDefaults::default(),
+        )
+        .unwrap();
         assert_eq!(agent.name, "task");
         assert_eq!(agent.body, crate::prompt::TASK_ROLE);
         assert!(!agent.spawn_ignored);
@@ -785,12 +867,12 @@ mod tests {
             agent: Some("x"),
             ..SpawnOverrides::default()
         };
-        assert!(resolve(Some(&home), &overrides).is_err());
+        assert!(resolve(Some(&home), None, &overrides, &SpawnDefaults::default()).is_err());
         // And the spawn argument cannot widen either.
         let overrides = SpawnOverrides {
             profile: Some("full"),
             ..SpawnOverrides::default()
         };
-        assert!(resolve(Some(&home), &overrides).is_err());
+        assert!(resolve(Some(&home), None, &overrides, &SpawnDefaults::default()).is_err());
     }
 }
