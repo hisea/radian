@@ -783,6 +783,12 @@ struct Setup {
     profile: profile::ProfileArg,
     /// The resolved approval policy and its startup record (ADR 0026 D9).
     approval: radian_host::StartupApproval,
+    /// `[git]` (ADR 0030 R10 and revision 4): the branches `git_commit` refuses besides
+    /// `main`/`master`, and the filter drivers it may run. Carried whole so the session setup
+    /// reads exactly what the TUI's session reads (`config.git`), not a weaker default: under
+    /// `radian exec` a dropped section would let `git_commit` commit on a configured protected
+    /// branch and silently apply the default allow-list (ADR 0032).
+    git: radian_host::config::GitConfig,
     /// The config file actually read, for the `[config]` startup line.
     config_path: Option<PathBuf>,
     /// Known-but-unwired and unknown config keys, named (never their values) at startup.
@@ -1298,6 +1304,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         model_name,
         profile,
         approval: startup_approval,
+        git: config.git.clone(),
         config_path: config.source.clone(),
         config_skipped: config.skipped.clone(),
         skills_extra_paths: radian_host::config::resolve_extra_paths(
@@ -1771,8 +1778,10 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         },
         turn_timeout: setup.turn_timeout_secs.map(Duration::from_secs),
         wording: radian_host::CLI_WORDING,
-        protected_branches: Vec::new(),
-        allowed_filters: None,
+        // ADR 0030 R10 / revision 4, ADR 0032: the task builder carries the same `[git]` the
+        // lead's session does, from the config this host read.
+        protected_branches: setup.git.protected_branches.clone(),
+        allowed_filters: Some(setup.git.allowed_filters()),
         shell_auto_background: setup.shell_auto_background,
         skills_extra_paths: setup.skills_extra_paths.clone(),
         skills_builtin: setup.skills_builtin,
@@ -1799,8 +1808,10 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             config_queue: setup.config_queue,
             budget_for: Some(setup.budget_for),
             price_for: setup.price_for,
-            protected_branches: Vec::new(),
-            allowed_filters: None,
+            // ADR 0030 R10 / revision 4: resolved from the config exactly like the TUI's
+            // session, so `radian exec` is not a weaker path (ADR 0032).
+            protected_branches: setup.git.protected_branches.clone(),
+            allowed_filters: Some(setup.git.allowed_filters()),
             shell_auto_background: setup.shell_auto_background,
             servers: setup.servers,
             // ADR 0036: a CLI session uses the `default` role.
