@@ -1,0 +1,28 @@
+# Vendored from xai-org/grok-build, commit 4827113 (2026-09-15),
+# file crates/codegen/xai-grok-markdown/src/mermaid.rs. src/mermaid.rs differs from upstream
+# only in the two documented edits (the `use` shim, and the visibility of the items
+# `src/lib.rs` reuses); see RADIAN-CHANGES.md. Radian's own entry point is src/lib.rs and the
+# shim is src/text.rs.
+[package]
+name = "grok-mermaid"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+
+[lib]
+name = "grok_mermaid"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+# The vendored file's only remaining dependency (ADR 0042 decision 2: no ratatui; the two
+# `ratatui::…` `use` lines become `crate::text`).
+unicode-width = "0.2"
+
+# The vendored file (and its 145 tests) must stay byte-identical to upstream apart from the two
+# recorded `use`/visibility edits, so a lint the upstream code trips is allowed here rather than
+# "fixed". `question_mark`: one `else if let … { value? } else { return None }` at
+# src/mermaid.rs:3561 that clippy's newer `question_mark` prefers as `let … ?`.
+[lints.clippy]
+question_mark = "allow"

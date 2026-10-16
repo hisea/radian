@@ -35,10 +35,6 @@ nothing, so it never prompts. It still goes through the ordinary hook path, and 
 data — it grants no permission for the tool calls the model makes afterwards.
 (`ask_user_is_allowed_in_every_tier` in `src/profile.rs`.)
 
-`mermaid_check` (ADR 0028 R8 / ADR 0025) is `allow` in **all three** tiers: it
-renders text with the bounded Mermaid renderer and reads no file or network, so it never
-prompts. (`mermaid_check_is_allowed_in_every_tier` in `src/profile.rs`.)
-
 `skill` (ADR 0025 S3) is `allow` in **all three** tiers for the same reason: it only reads a
 `SKILL.md` that discovery already accepted, so **a skill is not a permission** — reading one
 grants nothing. (`skill_is_allowed_in_every_tier` in `src/profile.rs`.)

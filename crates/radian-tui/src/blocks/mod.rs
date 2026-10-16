@@ -505,8 +505,9 @@ impl BodyLine {
     }
 }
 
-/// A diagram piece's semantic role (ADR 0028 R8): the vendor's `Node`/`Edge`/`Text`, mapped
-/// so `radian-tui` does not expose the dependency's type in its own API.
+/// A diagram piece's semantic role (ADR 0042 decision 4): the vendored renderer's five roles
+/// collapse to these three, so `radian-tui` does not expose the dependency's type in its own API
+/// and the theme keeps its three mermaid roles (ADR 0029).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagramRole {
     Node,

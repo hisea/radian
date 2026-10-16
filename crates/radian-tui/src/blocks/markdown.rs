@@ -12,33 +12,45 @@ pub(crate) enum DiagramOutcome {
     Failed(String),
 }
 
-/// Renders `source` at `width` (ADR 0028 R8): a pure function of the two, so the cache key is
-/// exactly that pair. No partial diagram: the renderer either returns every line or an error.
-/// `radian_host::mermaid::render_spans` is the one entry point (revision 6): Radian's own
-/// layered flowchart layout first, the vendored renderer for everything else.
+/// Renders `source` at `width` (ADR 0042): a pure function of the two, so the cache key is
+/// exactly that pair. No partial diagram: the renderer either returns every line or a reason.
+/// `grok_mermaid::render` is the one entry point (the vendored grok-build renderer); a failure
+/// keeps the source and names the reason.
 pub(crate) fn diagram_for(source: &str, width: usize) -> DiagramOutcome {
     let t = std::time::Instant::now();
-    let rendered = radian_host::mermaid::render_spans(source, width);
+    let rendered = grok_mermaid::render(source, Some(width));
     radian_session::trace::took("first-frame/mermaid", t);
     match rendered {
-        Ok(lines) => DiagramOutcome::Rendered(
-            lines
+        Ok(art) => DiagramOutcome::Rendered(
+            art.lines
                 .into_iter()
                 .map(|line| {
                     line.into_iter()
-                        .map(|span| {
-                            let role = match span.role {
-                                codex_mermaid::Role::Node => DiagramRole::Node,
-                                codex_mermaid::Role::Edge => DiagramRole::Edge,
-                                codex_mermaid::Role::Text => DiagramRole::Text,
+                        .map(|(role, text)| {
+                            // The vendored renderer's five roles collapse to three (ADR 0042
+                            // decision 4); a run with no role (leading spaces) is plain text.
+                            let role = match role {
+                                Some(grok_mermaid::Role::Node) => DiagramRole::Node,
+                                Some(grok_mermaid::Role::Edge) => DiagramRole::Edge,
+                                Some(grok_mermaid::Role::Text) | None => DiagramRole::Text,
                             };
-                            (span.text, role)
+                            (text, role)
                         })
                         .collect()
                 })
                 .collect(),
         ),
-        Err(error) => DiagramOutcome::Failed(error.to_string()),
+        Err(reason) => DiagramOutcome::Failed(reason_line(reason, width)),
+    }
+}
+
+/// The failure line's reason (ADR 0042 decision 4) — the caller prefixes `mermaid: `. A drawing
+/// that is merely too wide says so honestly; everything else is named.
+fn reason_line(reason: grok_mermaid::Reason, width: usize) -> String {
+    match reason {
+        grok_mermaid::Reason::TooWide { needed } => format!("needs {needed} columns, have {width}"),
+        grok_mermaid::Reason::Unsupported => "unsupported syntax".to_string(),
+        grok_mermaid::Reason::TooLarge => "too large".to_string(),
     }
 }
 

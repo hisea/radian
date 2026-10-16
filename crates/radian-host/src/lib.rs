@@ -31,8 +31,6 @@ pub mod lead_tools;
 pub mod login;
 mod mcp;
 pub mod memory;
-pub mod mermaid;
-mod mermaid_layout;
 mod model;
 pub mod named;
 pub mod observer;
@@ -130,7 +128,6 @@ pub use lead_tools::{
     TASK_SUMMARY_LIMIT_CHARS, run as run_lead_tool,
 };
 pub use mcp::load_mcp_config;
-pub use mermaid::{MermaidCheckSession, MermaidCheckTools, check};
 pub use model::{
     COMPACTION_THINKING_CURRENT, DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs,
     Provider, RouteContext, SwitchableModel, Thinking, build_model, check_provider_flags,
