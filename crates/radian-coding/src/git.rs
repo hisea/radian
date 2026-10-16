@@ -4,6 +4,7 @@ use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::args;
 use crate::fail;
 use crate::provider::Limits;
 use crate::workspace::WorkspaceRoot;
@@ -29,22 +30,26 @@ pub(crate) fn diff_spec() -> ToolSpec {
         description: "Run `git diff` (optionally `--cached`) in the workspace for the whole \
                       tree or one workspace-relative path (read-only)."
             .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "staged": {
-                    "type": "boolean",
-                    "description": "Diff the index against HEAD instead of the worktree."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Workspace-relative path to limit the diff to."
-                }
-            },
-            "additionalProperties": false
-        }),
+        input_schema: diff_schema(),
         concurrency: ToolConcurrency::Shared,
     }
+}
+
+pub(crate) fn diff_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "staged": {
+                "type": "boolean",
+                "description": "Diff the index against HEAD instead of the worktree."
+            },
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative path to limit the diff to."
+            }
+        },
+        "additionalProperties": false
+    })
 }
 
 #[derive(Deserialize, Default)]
@@ -80,8 +85,7 @@ pub(crate) async fn diff(
     limits: &Limits,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: DiffArgs = serde_json::from_value(arguments.clone())
-        .map_err(|e| fail("invalid_arguments", e.to_string()))?;
+    let args: DiffArgs = args::parse("git_diff", &diff_schema(), arguments)?;
     let mut argv: Vec<String> = vec!["diff".into(), "--no-color".into()];
     if args.staged.unwrap_or(false) {
         argv.push("--cached".into());

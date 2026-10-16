@@ -201,14 +201,46 @@ fn spawn_direct_keeping_slave(
 
 const BIN: &str = env!("CARGO_BIN_EXE_radian");
 
-/// The pty tests spawn real processes and mock servers; run them one at a time so the
-/// whole workspace staying busy cannot make one of them flake.
-static PTY_LOCK: Mutex<()> = Mutex::new(());
+/// The pty tests spawn real processes and mock servers. Running all of them at once makes
+/// them flake on a busy machine, and running them one at a time made this binary about 140 s
+/// of the workspace test run (2026-10-15). A small counting gate allows a few at once:
+/// `RADIAN_PTY_PARALLEL` (default 3, minimum 1) sets how many.
+static PTY_SLOTS: Mutex<usize> = Mutex::new(0);
+static PTY_FREED: std::sync::Condvar = std::sync::Condvar::new();
 
-fn pty_guard() -> std::sync::MutexGuard<'static, ()> {
-    PTY_LOCK
+fn pty_parallelism() -> usize {
+    std::env::var("RADIAN_PTY_PARALLEL")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(3)
+        .max(1)
+}
+
+/// One running pty test; the slot is given back on drop (a panicking test included).
+struct PtySlot;
+
+impl Drop for PtySlot {
+    fn drop(&mut self) {
+        let mut busy = PTY_SLOTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *busy -= 1;
+        PTY_FREED.notify_one();
+    }
+}
+
+fn pty_guard() -> PtySlot {
+    let limit = pty_parallelism();
+    let mut busy = PTY_SLOTS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while *busy >= limit {
+        busy = PTY_FREED
+            .wait(busy)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    *busy += 1;
+    PtySlot
 }
 
 struct Pty {
