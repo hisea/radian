@@ -1136,6 +1136,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "grok-mermaid"
+version = "0.0.0"
+dependencies = [
+ "unicode-width",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
