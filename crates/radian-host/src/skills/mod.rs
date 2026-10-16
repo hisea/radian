@@ -24,7 +24,9 @@ pub const SKILL_FILE_NAME: &str = "SKILL.md";
 pub const SECTION_BUDGET_TOKENS: u64 = 1000;
 
 /// Directories discovery never descends into (the same names `mention` ignores; ADR 0025 S1).
-pub const IGNORED_DIRS: &[&str] = &[".git", ".radian-sandbox"];
+/// `.radian-worktrees/` holds one full worktree per task agent (ADR 0030 O3), so descending
+/// into it would discover every skill once per task.
+pub const IGNORED_DIRS: &[&str] = &[".git", ".radian-sandbox", ".radian-worktrees"];
 
 /// The longest `name` (Agent Skills spec, via pi; ADR 0025 S1).
 pub const MAX_NAME_CHARS: usize = 64;
@@ -513,11 +515,19 @@ resolved from the skill's own directory.\n";
 /// directory as the base for relative paths, and `args` appended verbatim (pi's
 /// `_expandSkillCommand`). Reads the file; the caller has already found `skill` in the
 /// discovered table.
+/// Reads a skill body with `O_NOFOLLOW` on the leaf (ADR 0039): a `SKILL.md` that became a
+/// symlink after discovery is refused instead of followed.
+pub(crate) fn read_skill_body(path: &std::path::Path) -> std::io::Result<String> {
+    let bytes = radian_coding::safe_fs::read_nofollow(path)?;
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 pub fn expand(skill: &Skill, args: &str) -> Result<String, String> {
     // A built-in skill's body is embedded; only a filesystem skill is read (ADR 0025).
     let text = match skill.body {
         Some(body) => body.to_owned(),
-        None => std::fs::read_to_string(&skill.path).map_err(|error| {
+        None => read_skill_body(&skill.path).map_err(|error| {
             format!(
                 "skill `{}` cannot be read ({}): {error}",
                 skill.name,

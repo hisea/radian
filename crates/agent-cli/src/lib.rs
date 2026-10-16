@@ -1637,6 +1637,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             access_builder: None,
             // The line host has no `/mode`; its session is not a task agent either.
             task_agent: false,
+            parent: None,
+            allowed_branch: None,
             memory_root,
             skills_extra_paths: setup.skills_extra_paths,
             skills_builtin: setup.skills_builtin,
@@ -1659,6 +1661,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         },
         radian_host::HostBindings {
             approvals: radian_host::ApprovalRouting::Direct(approver),
+            shared_queue: None,
             ask_user: false,
             audit,
             events: Arc::clone(&ui) as Arc<dyn EventSink>,
@@ -2340,14 +2343,22 @@ impl EventSink for Ui {
                 tokens_before,
                 tokens_after,
                 below_target,
+                deterministic,
+                dropped,
                 ..
             } => {
-                let note = if below_target {
-                    " (below target; no further compaction this turn)"
+                // ADR 0018, decision 3: a deterministic fallback says so and names
+                // the messages it dropped; a model summary keeps the token line.
+                if deterministic {
+                    eprintln!("[compaction] compacted without a summary ({dropped} dropped)");
                 } else {
-                    ""
-                };
-                eprintln!("[compaction] {tokens_before} tokens → {tokens_after} tokens{note}");
+                    let note = if below_target {
+                        " (below target; no further compaction this turn)"
+                    } else {
+                        ""
+                    };
+                    eprintln!("[compaction] {tokens_before} tokens → {tokens_after} tokens{note}");
+                }
             }
             AgentEvent::CompactionFailed { reason } => {
                 eprintln!("[compaction] failed: {reason}");

@@ -285,3 +285,23 @@ Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 变异就地改完�
 | # | 变异（行为） | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | SD-1 | 删掉描述里的 `Read files with read and list, and search with grep and glob … while shell runs alone`（回到只提 "Use `shell` to run programs"） | `the_shell_description_points_file_reading_and_searching_at_the_read_only_tools`（三段关键句都断言） | ✅ |
+
+## ADR 0039 decision 2: fd-relative file tools (2026-10-16, branch `sec/fd-file-tools`)
+
+Base: `d1b1dbe` · worktree `.radian-worktrees/sec-fs` · every mutation run with
+`cargo test -p radian-coding --no-fail-fast`; `git checkout -- crates/radian-coding/src` after
+each; `git status --short` empty at the end. The three mutations the brief asked for, plus two.
+
+| # | Requirement mutated | Mutation | Result |
+|---|---|---|---|
+| M-A | every parent component opened with `O_NOFOLLOW` | drop `O_NOFOLLOW` from the directory-level `openat` flags in `safe_fs::walk_dirs` | ✅ caught by 10 tests: `every_file_tool_refuses_a_parent_symlink_to_outside_and_touches_nothing_there`, `every_file_tool_refuses_a_parent_symlink_inside_and_names_the_target`, `read_cannot_reach_outside_when_the_parent_is_swapped_after_the_check`, `write_and_patch_cannot_reach_outside_when_the_parent_is_swapped_after_the_check`, `list_glob_and_grep_cannot_reach_outside_when_the_base_is_swapped_after_the_check`, `a_symlinked_parent_directory_escape_is_refused`, `write_through_a_symlinked_parent_creates_nothing_outside`, `write_into_an_outside_symlinked_directory_is_refused`, `a_path_through_a_symlink_outside_is_refused`, `cwd_escapes_are_refused` |
+| M-B | no tool re-opens by path after the fd walk | in `read`, after `open_read`, drop the fd and `File::open(root.join(path))` instead | ✅ caught (`read_and_write_use_the_fd_they_opened_even_if_the_parent_is_swapped_afterwards`: the `after_open_hook` seam swaps the parent for a link to the outside sentinel after the open; the mutant reads `SENTINEL-CONTENT`, the real code reads `INSIDE` from the fd). The resolve-hook swap tests do **not** catch this one: they swap before the walk, so the walk itself refuses — which is why the after-open seam exists |
+| M-C | the walk never follows a link | classify entries with a following `fstatat(…, 0)` **and** open children / files without `O_NOFOLLOW` | ✅ caught by 15 tests, including `the_walk_skips_linked_directories_and_files_but_keeps_ignore_rules` and `a_symlink_out_of_the_workspace_is_never_followed` |
+| M-C1 | (single site) classify entries with a following `fstatat` only | | ✅ caught by 10 tests — not an equivalent mutation: the same `fstatat` is what `map_open_error` uses to tell a link from a missing directory, so the error codes change too |
+| M-D | an inside link names its target | make both lexical/realpath classifications return `None` | ✅ caught (`every_file_tool_refuses_a_parent_symlink_inside_and_names_the_target`, `an_absolute_inside_link_target_is_named_relative_to_the_workspace`, `write_refuses_a_symlink_even_inside_the_workspace`, `write_refuses_a_dangling_symlink`) |
+
+What changed for the older rows above: **M7 (`O_NOFOLLOW` on the write open) is now a behaviour
+change** — the walk refuses a link before any open, and the after-open seam shows the fd is
+what gets written — so the "defence in depth, untestable" note no longer applies. The
+parent-directory window the earlier record called "not mitigated at all" is the one M-A/M-B
+cover.

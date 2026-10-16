@@ -298,6 +298,23 @@ pub(crate) enum CompactionStep {
     Cancelled(CancelReason),
 }
 
+/// The result of trying to get a model summary (ADR 0018, decision 3).
+enum SummarizeOutcome {
+    /// A usable model summary.
+    Model(String),
+    /// The summary path failed; an automatic path may still fall back to the deterministic
+    /// compaction. A manual `/compact` never sees this (it reports the error instead).
+    Fallback,
+    /// The turn was cancelled while summarizing.
+    Cancelled(CancelReason),
+}
+
+/// The measured request for a rebuilt (compacted) view.
+enum Measured {
+    Size(RequestSize),
+    Cancelled(CancelReason),
+}
+
 /// The inputs one compaction run needs. Bundled so the shared routine keeps a small signature.
 struct CompactionRun<'a> {
     interrupt: &'a Interrupt,
@@ -471,6 +488,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         let revision = self.transcript_revision + 1;
         let source_revision = self.transcript_revision;
         let source_len = self.transcript.len();
+        // ADR 0018, decision 3: only the automatic paths (proactive and overflow)
+        // fall back to the deterministic compaction when the summary fails. A manual `/compact`
+        // reports the error and commits nothing.
+        let deterministic_allowed = !matches!(trigger, CompactionTrigger::Manual);
 
         // ADR 0018: the user's words are carried verbatim, and the plan reserves
         // the space they will take. A compaction summary is always the first message of a
@@ -515,21 +536,214 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         } else {
             transcript[..plan.first_kept].to_vec()
         };
+
+        // The model summary first. When it fails on an automatic path the caller falls through
+        // to the deterministic fallback below (ADR 0018, decision 3).
+        let model_summary = match self
+            .summarize(
+                interrupt,
+                &settings,
+                summary_budget,
+                previous_summary.as_deref(),
+                &to_summarize,
+                instructions.as_deref(),
+                revision,
+                events,
+                deterministic_allowed,
+            )
+            .await?
+        {
+            SummarizeOutcome::Model(summary) => Some(summary),
+            SummarizeOutcome::Fallback => None,
+            SummarizeOutcome::Cancelled(reason) => {
+                return Ok(CompactionStep::Cancelled(reason));
+            }
+        };
+
+        if let Some(summary) = model_summary {
+            let history = self.compacted_view(
+                &summary,
+                &user_messages,
+                &transcript[plan.first_kept..],
+                events,
+            )?;
+            let size_after = match self
+                .rebuild_and_measure(request, &history, hcx, interrupt, events)
+                .await?
+            {
+                Measured::Cancelled(reason) => return Ok(CompactionStep::Cancelled(reason)),
+                Measured::Size(size) => size,
+            };
+            let tokens_after = self.tokens_of(size_after);
+            if self.gain_ok(gain, tokens_before, tokens_after) {
+                return self
+                    .finish_compaction(
+                        history,
+                        summary,
+                        false,
+                        0,
+                        plan.first_kept,
+                        tokens_before,
+                        tokens_after,
+                        size_after,
+                        gain,
+                        source_revision,
+                        source_len,
+                        revision,
+                        events,
+                    )
+                    .await;
+            }
+            // The model summary did not reach the target (`Insufficient`). An automatic path
+            // still tries the deterministic fallback; a manual `/compact` reports the error.
+            if !deterministic_allowed {
+                let target = self.gain_target(gain, tokens_before);
+                events.emit(AgentEvent::CompactionFailed {
+                    reason: format!(
+                        "not enough gain: {tokens_before} -> {tokens_after} tokens, target {target}"
+                    ),
+                });
+                return Err(CompactionFailure::Compaction(
+                    CompactionError::Insufficient {
+                        before: tokens_before,
+                        after: tokens_after,
+                        target,
+                    },
+                ));
+            }
+        }
+
+        // The deterministic fallback (ADR 0018, decision 3): no model call. From the
+        // plan's kept suffix, cut every over-long tool result, then drop the oldest atomic unit
+        // until the request reaches the target; the newest unit always stays.
+        let units = match compaction::units(&transcript) {
+            Ok(units) => units,
+            Err(error) => {
+                events.emit(AgentEvent::CompactionFailed {
+                    reason: error.to_string(),
+                });
+                return Err(CompactionFailure::Compaction(
+                    CompactionError::InvalidSummary(error.to_string()),
+                ));
+            }
+        };
+        let planned = units
+            .iter()
+            .position(|unit| unit.start == plan.first_kept)
+            .expect("the plan's cut is a unit boundary");
+        let newest = units.len() - 1;
+        let has_summary = previous_summary.is_some();
+        let mut last_tokens = tokens_before;
+        for drop in 0..=(newest - planned) {
+            let first_kept = units[planned + drop].start;
+            let mut kept = transcript[first_kept..].to_vec();
+            let truncated = compaction::truncate_kept_tool_results(&mut kept);
+            // The user messages of every drop join the verbatim list (ADR 0018),
+            // re-budgeted exactly as a model-summary compaction would.
+            let dropped_user_messages = if has_summary {
+                &transcript[1..first_kept]
+            } else {
+                &transcript[..first_kept]
+            };
+            let (user_messages, carried) = compaction::select_user_messages_tracked(
+                &previous_user_messages,
+                dropped_user_messages,
+                summary_budget,
+            );
+            // ADR 0018, decision 3: `N` is the number of transcript messages that are
+            // **not** in the new view, not just the ones dropped beyond the plan's cut. The whole
+            // removed prefix counts, minus the previous summary message (replaced by the new
+            // summary) and minus the user messages the verbatim list still carries.
+            let start = if has_summary { 1 } else { 0 };
+            let dropped = first_kept - start - carried;
+            let summary =
+                compaction::deterministic_summary(previous_summary.as_deref(), dropped, truncated);
+            let history = self.compacted_view(&summary, &user_messages, &kept, events)?;
+            let size_after = match self
+                .rebuild_and_measure(request, &history, hcx, interrupt, events)
+                .await?
+            {
+                Measured::Cancelled(reason) => return Ok(CompactionStep::Cancelled(reason)),
+                Measured::Size(size) => size,
+            };
+            let tokens_after = self.tokens_of(size_after);
+            last_tokens = tokens_after;
+            if self.gain_ok(gain, tokens_before, tokens_after) {
+                return self
+                    .finish_compaction(
+                        history,
+                        summary,
+                        true,
+                        dropped as u64,
+                        first_kept,
+                        tokens_before,
+                        tokens_after,
+                        size_after,
+                        gain,
+                        source_revision,
+                        source_len,
+                        revision,
+                        events,
+                    )
+                    .await;
+            }
+        }
+
+        // Even the newest atomic unit plus the summary does not reach the target. The ADR says
+        // this is `NothingFits`; only a budget target can instead fail the "strictly smaller"
+        // half of its own rule, which is `Insufficient`.
+        let target = self.gain_target(gain, tokens_before);
+        events.emit(AgentEvent::CompactionFailed {
+            reason: format!(
+                "nothing fits the target after compaction: {tokens_before} -> {last_tokens} \
+                 tokens, target {target}"
+            ),
+        });
+        let error = match gain {
+            Gain::Budget { input_budget } if last_tokens <= input_budget => {
+                CompactionError::Insufficient {
+                    before: tokens_before,
+                    after: last_tokens,
+                    target,
+                }
+            }
+            _ => CompactionError::NothingFits,
+        };
+        Err(CompactionFailure::Compaction(error))
+    }
+
+    /// Asks the current model for a summary (ADR 0018 §摘要), with one controlled retry that
+    /// depends on why the first answer was invalid (dogfood7): an over-long answer gets a
+    /// **shortening** request carrying only that answer (not the conversation again), while an
+    /// empty answer resends the original request.
+    ///
+    /// On an automatic path (`deterministic_allowed`) a failure is returned as
+    /// [`SummarizeOutcome::Fallback`] so the caller can run the deterministic fallback; a manual
+    /// `/compact` gets the error instead (ADR 0018, decision 3). The summary call's
+    /// real usage is recorded and emitted per attempt, whether or not the compaction commits
+    /// (ADR 0018 §计费, revision 3).
+    #[allow(clippy::too_many_arguments)]
+    async fn summarize(
+        &mut self,
+        interrupt: &Interrupt,
+        settings: &Value,
+        summary_budget: Option<u64>,
+        previous_summary: Option<&str>,
+        to_summarize: &[Message],
+        instructions: Option<&str>,
+        revision: u64,
+        events: &dyn EventSink,
+        deterministic_allowed: bool,
+    ) -> Result<SummarizeOutcome, CompactionFailure> {
         // The summary ceiling scales with the window; no window
         // falls back to the fixed default.
         let summary_max = summary_budget
             .map(compaction::summary_max_tokens)
             .unwrap_or(compaction::DEFAULT_SUMMARY_MAX_TOKENS);
-
-        let mut summary = None;
-        // The first call summarizes the conversation. The one controlled retry (ADR 0018)
-        // depends on why the first answer was invalid (dogfood7): an over-long answer gets a
-        // **shortening** request that carries only that answer (not the conversation again),
-        // while an empty answer just resends the original request.
         let mut summary_request = compaction::summary_request(
-            previous_summary.as_deref(),
-            &to_summarize,
-            instructions.as_deref(),
+            previous_summary,
+            to_summarize,
+            instructions,
             summary_max,
             settings.clone(),
         );
@@ -545,8 +759,11 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             )
             .await
             {
-                Raced::Interrupted(reason) => return Ok(CompactionStep::Cancelled(reason)),
+                Raced::Interrupted(reason) => return Ok(SummarizeOutcome::Cancelled(reason)),
                 Raced::Done(Err(error)) => {
+                    if deterministic_allowed {
+                        return Ok(SummarizeOutcome::Fallback);
+                    }
                     events.emit(AgentEvent::CompactionFailed {
                         reason: error.to_string(),
                     });
@@ -583,10 +800,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             }
             let text = text_of(&response.content);
             match compaction::check_summary(&text, summary_max) {
-                Ok(checked) => {
-                    summary = Some(checked);
-                    break;
-                }
+                Ok(checked) => return Ok(SummarizeOutcome::Model(checked)),
                 Err(error) if attempt == 0 => {
                     summary_request = match error {
                         compaction::SummaryError::TooLong { .. } => compaction::shorten_request(
@@ -596,15 +810,18 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                         ),
                         // Empty (and the only other variant) resends the original request.
                         compaction::SummaryError::Empty => compaction::summary_request(
-                            previous_summary.as_deref(),
-                            &to_summarize,
-                            instructions.as_deref(),
+                            previous_summary,
+                            to_summarize,
+                            instructions,
                             summary_max,
                             settings.clone(),
                         ),
                     };
                 }
                 Err(error) => {
+                    if deterministic_allowed {
+                        return Ok(SummarizeOutcome::Fallback);
+                    }
                     events.emit(AgentEvent::CompactionFailed {
                         reason: error.to_string(),
                     });
@@ -614,33 +831,48 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                 }
             }
         }
-        let summary = summary.expect("the loop sets it or returns");
+        unreachable!("the loop returns on both attempts")
+    }
 
-        let new_history = match compaction::compacted_history(
-            &summary,
-            &user_messages,
-            &transcript[plan.first_kept..],
-        ) {
-            Ok(history) => history,
+    /// Builds the compacted history (`summary + kept`) or reports the `InvalidSummary` when it
+    /// would break `validate_history`. Never committed on error.
+    fn compacted_view(
+        &self,
+        summary: &str,
+        user_messages: &[compaction::RetainedUserMessage],
+        kept: &[Message],
+        events: &dyn EventSink,
+    ) -> Result<Vec<Message>, CompactionFailure> {
+        match compaction::compacted_history(summary, user_messages, kept) {
+            Ok(history) => Ok(history),
             Err(error) => {
                 events.emit(AgentEvent::CompactionFailed {
                     reason: error.to_string(),
                 });
-                return Err(CompactionFailure::Compaction(
+                Err(CompactionFailure::Compaction(
                     CompactionError::InvalidSummary(error.to_string()),
-                ));
+                ))
             }
-        };
+        }
+    }
 
-        // Rebuild the request for the compacted view and, for the automatic paths, re-run the
-        // hook (ADR 0018), so `T_after` describes exactly what would be sent.
+    /// Rebuilds `request` for the compacted view and, for the automatic paths, runs the
+    /// `before_model_call` hook, so `T_after` describes exactly what would be sent (ADR 0018).
+    async fn rebuild_and_measure(
+        &mut self,
+        request: &mut ModelRequest,
+        history: &[Message],
+        hcx: Option<&HookContext>,
+        interrupt: &Interrupt,
+        events: &dyn EventSink,
+    ) -> Result<Measured, CompactionFailure> {
         request.system_prompt = self.agent.config.system_prompt.clone();
-        request.messages = new_history.clone();
+        request.messages = history.to_vec();
         request.tools = self.registry.specs().to_vec();
         request.settings = self.agent.config.model_settings.clone();
         if let Some(hcx) = hcx {
             match race(interrupt, self.agent.hooks.before_model_call(hcx, request)).await {
-                Raced::Interrupted(reason) => return Ok(CompactionStep::Cancelled(reason)),
+                Raced::Interrupted(reason) => return Ok(Measured::Cancelled(reason)),
                 Raced::Done(Err(error)) => {
                     events.emit(AgentEvent::CompactionFailed {
                         reason: error.to_string(),
@@ -658,41 +890,63 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             .config
             .context_budget
             .is_some_and(|config| config.count_reasoning);
-        let size_after = budget::request_size_with(request, count_reasoning);
+        Ok(Measured::Size(budget::request_size_with(
+            request,
+            count_reasoning,
+        )))
+    }
 
+    /// The tokens of a measured request under the session's own ruler.
+    fn tokens_of(&self, size: RequestSize) -> u64 {
         let bytes_per_token = self
             .agent
             .config
             .context_budget
             .map(|config| config.bytes_per_token)
             .unwrap_or(crate::budget::DEFAULT_BYTES_PER_TOKEN);
-        let tokens_after = size_after.tokens(bytes_per_token);
-        let enough = match gain {
+        size.tokens(bytes_per_token)
+    }
+
+    /// The gain rule a compaction must satisfy (ADR 0018).
+    fn gain_ok(&self, gain: Gain, tokens_before: u64, tokens_after: u64) -> bool {
+        match gain {
             Gain::Budget { input_budget } => {
                 tokens_after < tokens_before && tokens_after <= input_budget
             }
             Gain::Half { reference } => tokens_after.saturating_mul(2) <= reference,
             Gain::Any => tokens_after < tokens_before,
-        };
-        if !enough {
-            let target = match gain {
-                Gain::Budget { input_budget } => input_budget,
-                Gain::Half { reference } => reference / 2,
-                Gain::Any => tokens_before,
-            };
-            events.emit(AgentEvent::CompactionFailed {
-                reason: format!(
-                    "not enough gain: {tokens_before} -> {tokens_after} tokens, target {target}"
-                ),
-            });
-            return Err(CompactionFailure::Compaction(
-                CompactionError::Insufficient {
-                    before: tokens_before,
-                    after: tokens_after,
-                    target,
-                },
-            ));
         }
+    }
+
+    /// The ceiling the gain rule measures against, for error text.
+    fn gain_target(&self, gain: Gain, tokens_before: u64) -> u64 {
+        match gain {
+            Gain::Budget { input_budget } => input_budget,
+            Gain::Half { reference } => reference / 2,
+            Gain::Any => tokens_before,
+        }
+    }
+
+    /// The shared commit: the source-view check, the `ContextCompacted` candidate, the
+    /// replacement through `replace_transcript`, and the `CompactionFinished` event (ADR 0018
+    /// §持久化与并发, ADR 0019). The gain rule has already passed.
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_compaction(
+        &mut self,
+        history: Vec<Message>,
+        summary: String,
+        deterministic: bool,
+        dropped: u64,
+        first_kept: usize,
+        tokens_before: u64,
+        tokens_after: u64,
+        size_after: RequestSize,
+        gain: Gain,
+        source_revision: u64,
+        source_len: usize,
+        revision: u64,
+        events: &dyn EventSink,
+    ) -> Result<CompactionStep, CompactionFailure> {
         // `T_after <= B` but over the 75% target: commit and stop auto-compacting this turn.
         let below_target = matches!(
             gain,
@@ -724,11 +978,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                     source_revision,
                     source_len,
                     summary: summary.clone(),
-                    first_kept: plan.first_kept,
+                    first_kept,
                     tokens_before,
                     tokens_after,
                     below_target,
                     model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
+                    deterministic,
                 })
                 .await
         {
@@ -736,8 +991,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             return Err(CompactionFailure::Journal(error));
         }
 
-        let first_kept = plan.first_kept;
-        if let Err(error) = self.replace_transcript(new_history, revision, events).await {
+        if let Err(error) = self.replace_transcript(history, revision, events).await {
             let failure = match error {
                 crate::agent::ReplaceError::Journal(error) => CompactionFailure::Journal(error),
                 other => CompactionFailure::Compaction(CompactionError::InvalidSummary(
@@ -755,6 +1009,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             tokens_before,
             tokens_after,
             below_target,
+            deterministic,
+            dropped,
         });
         Ok(CompactionStep::Applied {
             revision,

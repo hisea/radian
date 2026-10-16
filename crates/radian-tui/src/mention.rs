@@ -47,7 +47,8 @@ const TRAILING_PUNCTUATION: &[char] = &[
 ];
 
 /// Entries never offered by completion (nor, in practice, attached: they are directories).
-const ALWAYS_HIDDEN: &[&str] = &[".git", ".radian-sandbox"];
+/// `.radian-worktrees/` is the task agents' worktree root (ADR 0030 O3).
+const ALWAYS_HIDDEN: &[&str] = &[".git", ".radian-sandbox", ".radian-worktrees"];
 
 /// One attached file: its workspace-relative path and its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +159,9 @@ pub struct Completion {
 /// exists but cannot be attached; the caller must keep the input and not send.
 pub fn expand(text: &str, workspace: &Path) -> Result<Expansion, ExpandError> {
     let root = std::fs::canonicalize(workspace).ok();
+    let root_dir = root
+        .as_deref()
+        .and_then(|root| radian_coding::safe_fs::RootDir::open(root).ok());
     let mut attachments: Vec<Attachment> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut rejections: Vec<Rejection> = Vec::new();
@@ -186,12 +190,30 @@ pub fn expand(text: &str, workspace: &Path) -> Result<Expansion, ExpandError> {
                     });
                     continue;
                 }
-                let bytes = match std::fs::read(&path) {
+                // ADR 0039 decision 2: the file is opened through the workspace root's
+                // directory fd (`openat(O_NOFOLLOW)` per component), never by the path
+                // string the resolve step checked; a symlink anywhere in it is a rejection.
+                let bytes = match root_dir
+                    .as_ref()
+                    .ok_or_else(|| "the workspace root cannot be opened".to_string())
+                    .and_then(|root_dir| {
+                        let rel: PathBuf =
+                            radian_coding::safe_fs::components(Path::new(&candidate))
+                                .map(|parts| parts.iter().collect())
+                                .map_err(|error| error.to_string())?;
+                        let file = root_dir
+                            .file(&rel, radian_coding::safe_fs::OpenMode::Read)
+                            .map_err(|error| error.to_string())?;
+                        let mut bytes = Vec::new();
+                        std::io::Read::read_to_end(&mut &file, &mut bytes)
+                            .map_err(|error| error.to_string())?;
+                        Ok(bytes)
+                    }) {
                     Ok(bytes) => bytes,
-                    Err(error) => {
+                    Err(reason) => {
                         rejections.push(Rejection {
                             path: candidate,
-                            reason: error.to_string(),
+                            reason,
                         });
                         continue;
                     }

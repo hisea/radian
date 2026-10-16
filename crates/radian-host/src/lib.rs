@@ -41,6 +41,7 @@ pub mod session;
 mod session_id;
 pub mod sessions;
 pub mod skills;
+pub mod task;
 mod tools;
 pub mod trust;
 mod workspace;
@@ -157,6 +158,10 @@ pub use skills::{
     BUILTIN, Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillSource, SkillsHooks,
     completion_candidates, discover, discover_with_extras, expand, has_skill_file, notices,
     prompt_section,
+};
+pub use task::{
+    Isolation, SpawnRequest, TaskBuilder, TaskContext, TaskError, TaskRecord, TaskRegistry,
+    TaskSession, end_of_task_commit, task_sandbox,
 };
 pub use tools::{HostSession, HostTools, merge_tool_specs};
 pub use workspace::resolve_workspace;

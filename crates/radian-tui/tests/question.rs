@@ -435,8 +435,9 @@ fn render(app: &mut App, width: u16, height: u16) -> String {
     out
 }
 
-/// The panel: a titled box, a tab row (`header` + `Submit`), the options with `❯`/`☐`/`☑`, a
-/// `↳` description, and the context-dependent key hints in the bottom border.
+/// The panel: a titled box, a tab row (`header` + `Submit`), the options with `❯`/`○`/`◉`
+/// (ADR 0028), a `↳` description, and the context-dependent key hints in
+/// the bottom border.
 #[test]
 fn the_panel_shows_the_tabs_the_options_and_the_hints() {
     let mut app = App::new("m", "s");
@@ -455,7 +456,7 @@ fn the_panel_shows_the_tabs_the_options_and_the_hints() {
     assert!(text.contains("Ask"), "{text}");
     assert!(text.contains("Pick"), "{text}");
     assert!(text.contains("Submit"), "{text}");
-    assert!(text.contains("❯ ☐ A (Recommended)"), "{text}");
+    assert!(text.contains("❯ ○ A (Recommended)"), "{text}");
     assert!(text.contains("↳ the second"), "{text}");
     assert!(text.contains("Other (type your own)"), "{text}");
     assert!(
@@ -476,7 +477,7 @@ fn the_panel_shows_the_tabs_the_options_and_the_hints() {
     show(&mut multi, vec![q]);
     let text = render(&mut multi, 80, 16);
     assert!(text.contains("space toggle"), "{text}");
-    assert!(text.contains("☐ Safe"), "{text}");
+    assert!(text.contains("○ Safe"), "{text}");
 }
 
 /// `n` opens a note for the current question; the note reaches the answer (R3/R4).

@@ -77,39 +77,31 @@ pub(crate) async fn run(
         None => limits.default_list_entries,
     };
 
-    // `resolve_existing` canonicalizes, so a symlinked directory that escapes is refused.
-    let dir = root.resolve_existing(requested)?;
-    let metadata = std::fs::metadata(&dir).map_err(|e| io_failure(requested, e))?;
-    if !metadata.is_dir() {
-        return Err(fail(
-            "not_a_directory",
-            format!("`{requested}` is not a directory"),
-        ));
-    }
-
+    // ADR 0039 decision 2: the directory is opened through the root's directory fd (every
+    // component `O_NOFOLLOW | O_DIRECTORY`) and listed through that fd; each entry's kind
+    // comes from `fstatat(AT_SYMLINK_NOFOLLOW)`, so a link is shown and never followed.
+    let dir = root.open_dir(requested)?;
+    let listed = crate::safe_fs::read_dir(&dir).map_err(|e| io_failure(requested, e))?;
     let mut entries: Vec<Entry> = Vec::new();
-    let read_dir = std::fs::read_dir(&dir).map_err(|e| io_failure(requested, e))?;
-    for entry in read_dir {
-        let entry = entry.map_err(|e| io_failure(requested, e))?;
-        // symlink_metadata: never follow the entry, so listing does not touch the target.
-        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
-            continue; // raced away between readdir and stat
-        };
-        let kind = if meta.file_type().is_symlink() {
-            "symlink"
-        } else if meta.is_dir() {
-            "dir"
-        } else if meta.is_file() {
-            "file"
-        } else {
-            "other"
+    for entry in listed {
+        // ADR 0030 O3: the task agents' worktrees live under `.radian-worktrees/`, one full
+        // checkout each. `list` omits the entry the same way `glob`/`grep` prune its subtree.
+        if entry.name == std::ffi::OsStr::new(crate::search::RADIAN_WORKTREES) {
+            continue;
+        }
+        let kind = match entry.kind {
+            crate::safe_fs::EntryKind::Symlink => "symlink",
+            crate::safe_fs::EntryKind::Dir => "dir",
+            crate::safe_fs::EntryKind::File => "file",
+            crate::safe_fs::EntryKind::Other => "other",
         };
         entries.push(Entry {
-            name: entry.file_name().to_string_lossy().into_owned(),
+            name: entry.name.to_string_lossy().into_owned(),
             kind,
-            size: meta.len(),
+            size: entry.size,
         });
     }
+    // `read_dir` sorts by name already; keep the explicit sort so the order is a contract here.
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let total = entries.len();
     let truncated = total > cap;
