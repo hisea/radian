@@ -508,23 +508,6 @@ impl BodyLine {
         }
     }
 
-    fn pad(half: Pad, end: usize) -> Self {
-        Self {
-            chars: Vec::new(),
-            end,
-            text: String::new(),
-            code: false,
-            pad: half,
-            frame: Frame::None,
-            role: tools::LineRole::Normal,
-            hint: false,
-            diagram: None,
-            reason: false,
-            md: None,
-            syntax: None,
-        }
-    }
-
     /// A diagram line: every cell maps to the block's start (the diagram has no source
     /// offsets of its own), so selecting it selects the block — a copy yields the Mermaid
     /// source, the content that actually exists in the text.
@@ -767,9 +750,10 @@ fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
 ///
 /// * a tool call and **its own** result (matched by call id, rule 4) - the result hugs its
 ///   call, with no gap in between;
-/// * either side is a user block: its pad row is the separation already (painted in a theme
-///   with a user background, blank in one without - the shape is the same either way);
 /// * the startup block: one block built from several entries (see [`is_startup_block`]).
+///
+/// A user row is an ordinary block now (ADR 0035: no padding rows used to be its
+/// separation), so it gets the container's one blank line on both sides like every other block.
 ///
 /// Otherwise exactly one line -- the thinking channel included: ADR 0035 replaced
 /// revision 3's "the folded one-liner hugs the block it introduces" with one blank line on both
@@ -787,9 +771,6 @@ pub fn block_gap(prev: Option<&Entry>, next: &Entry) -> usize {
     // The startup block is **one** block built from several entries (the wordmark, the folded
     // line or the full lines, the safety lines that never fold, the Tip): no gaps inside it.
     if is_startup_block(prev.kind) && is_startup_block(next.kind) {
-        return 0;
-    }
-    if prev.kind == EntryKind::User || next.kind == EntryKind::User {
         return 0;
     }
     1
@@ -882,9 +863,8 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     }
     match entry.kind {
         EntryKind::User => {
-            // The text plus the band's two half-cell padding rows (none under `ascii`).
-            let pad = if banded_pad(modes.glyphs) { 2 } else { 0 };
-            crate::render::wrap_line_count(&text, body_width) + pad
+            // The thin user row (ADR 0035): just the wrapped text, no padding rows.
+            crate::render::wrap_line_count(&text, body_width)
         }
         EntryKind::Assistant => {
             let mut diagram_index = 0;
@@ -1173,18 +1153,10 @@ fn layout_unstripped(
             }]
         }
         (EntryKind::User, _) => {
-            // ADR 0035: the user band gains a half cell above and below, replacing
-            // the full-row padding. The `ascii` glyph tier has no half-block glyph, so it gets
-            // no padding row at all (decision 4).
-            let mut lines = Vec::new();
-            if banded_pad(modes.glyphs) {
-                lines.push(BodyLine::pad(Pad::Top, 0));
-            }
-            lines.extend(prose_lines(&text, body_width));
-            if banded_pad(modes.glyphs) {
-                lines.push(BodyLine::pad(Pad::Bottom, text.len()));
-            }
-            lines
+            // The thin user row (ADR 0035/3): `❯ 文本`, no background,
+            // no half-cell padding and no rail. Just the wrapped text; the marker column is
+            // drawn, not part of the body.
+            prose_lines(&text, body_width)
         }
         (EntryKind::Assistant, _) => {
             let mut lines = Vec::new();
@@ -2123,18 +2095,9 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
             vec![placeholder(entry, crate::spinner::Frame::default())]
         }
         (EntryKind::User, _) => {
-            // The band's two half-cell pad rows are empty text: they occupy rows and never
-            // match a query. The `ascii` tier has none (decision 4).
-            let pad = banded_pad(modes.glyphs);
-            let mut lines = Vec::new();
-            if pad {
-                lines.push(String::new());
-            }
-            lines.extend(crate::render::wrap(&text, body_width));
-            if pad {
-                lines.push(String::new());
-            }
-            lines
+            // The thin user row (ADR 0035): just the wrapped text, no padding rows
+            // (they were empty text that occupied rows without matching a query).
+            crate::render::wrap(&text, body_width)
         }
         (EntryKind::Assistant, _) => {
             let mut lines = Vec::new();
@@ -3426,8 +3389,8 @@ mod tests {
     /// count exactly, or the total (and the scroll position) would drift. The window-vs-full
     /// test in `tests/virtual.rs` covers the entry path; this one pins the mirrored count
     /// function against `md_lines` directly, across every block shape, width and glyph tier.
-    /// ADR 0035 adds a **banded user block** (two half-cell rows under
-    /// `unicode`/`nerd`, none under `ascii`), which the entry-level `line_count` must know.
+    /// The user row is the thin one now (ADR 0035: no padding rows), so its count
+    /// is the wrapped text at every tier — the entry-level `line_count` must agree.
     #[test]
     fn md_line_count_matches_the_layout() {
         for glyphs in [
@@ -3445,20 +3408,20 @@ mod tests {
                 }
             }
         }
-        // The banded user block: the entry-level counter (what the measure pass runs) equals
-        // the layout, pad rows included, under every tier.
+        // The thin user row: the entry-level counter (what the measure pass runs) equals the
+        // layout under every tier, with no padding rows.
         for glyphs in [
             crate::footer::Glyphs::Unicode,
             crate::footer::Glyphs::Nerd,
             crate::footer::Glyphs::Ascii,
         ] {
             let modes = DisplayModes { glyphs, ..EXPANDED };
-            let entry = Entry::new(EntryKind::User, "a banded user block that wraps a little");
+            let entry = Entry::new(EntryKind::User, "a thin user row that wraps a little");
             for width in [8usize, 12, 30, 80] {
                 assert_eq!(
                     line_count(&entry, modes, width),
                     layout(&entry, &[], modes, width).len(),
-                    "user band width {width} glyphs {glyphs:?}"
+                    "user row width {width} glyphs {glyphs:?}"
                 );
             }
         }
@@ -3608,8 +3571,10 @@ mod tests {
 
         assert_eq!(block_gap(None, &assistant), 0, "the first entry has no gap");
         assert_eq!(block_gap(Some(&assistant), &notice), 1, "ordinary blocks");
-        assert_eq!(block_gap(Some(&assistant), &user), 0, "a user block's pad");
-        assert_eq!(block_gap(Some(&user), &assistant), 0, "the same pad");
+        // The thin user row is an ordinary block (ADR 0035): the container's one
+        // blank line above and below it, no padding rows.
+        assert_eq!(block_gap(Some(&assistant), &user), 1, "above a user row");
+        assert_eq!(block_gap(Some(&user), &assistant), 1, "below a user row");
         // ADR 0035: thinking keeps the container's one blank line below it, next to
         // the reply and next to a tool call.
         assert_eq!(
@@ -3644,7 +3609,7 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_edge_line_is_stripped_and_a_pad_is_kept() {
+    fn a_blank_edge_line_is_stripped() {
         // A text-derived blank line at either edge is the container's job.
         let mut text = Entry::new(EntryKind::Assistant, "\nhello\n\n");
         assert_eq!(
@@ -3656,12 +3621,14 @@ mod tests {
             body_text_lines(&text, EXPANDED, 20),
             vec!["hello".to_string()]
         );
-        // A user block's pad rows are its shape: they stay.
+        // The thin user row (ADR 0035) has no padding rows either: the blank edge
+        // lines are stripped the same way, leaving just the text.
         text.kind = EntryKind::User;
-        text.text = "hi".to_string();
+        text.text = "\nhi\n\n".to_string();
         let lines = layout(&text, &[], EXPANDED, 20);
-        assert_eq!(lines.len(), 3);
-        assert!(lines[0].pad.is_pad() && lines[2].pad.is_pad());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].text, "hi");
+        assert!(!lines[0].pad.is_pad());
     }
 
     #[test]
@@ -3814,28 +3781,22 @@ mod tests {
     }
 
     #[test]
-    fn a_user_block_gets_padding_rows_and_they_map_to_gaps() {
+    fn a_user_block_has_no_padding_rows_at_any_glyph_tier() {
+        // ADR 0035/3: the user row is `❯ 文本` with no background and
+        // no half-cell padding — the block is just the text under every tier.
         let entry = Entry::new(EntryKind::User, "hello");
-        let lines = layout(&entry, &[], EXPANDED, 30);
-        assert_eq!(lines.len(), 3);
-        // ADR 0035: the pads are half cells, above and below.
-        assert_eq!(lines[0].pad, Pad::Top);
-        assert_eq!(lines[2].pad, Pad::Bottom);
-        assert!(lines[0].chars.is_empty());
-        assert_eq!(lines[0].end, 0, "the top pad is the gap before the text");
-        assert_eq!(lines[2].end, 5, "the bottom pad reaches the text's end");
-        assert_eq!(lines[1].text, "hello");
-        // The `ascii` tier has no half-block glyph, so it gets no padding row: the block is
-        // just the text (decision 4).
-        let ascii = DisplayModes {
-            glyphs: crate::footer::Glyphs::Ascii,
-            ..EXPANDED
-        };
-        let lines = layout(&entry, &[], ascii, 30);
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert_eq!(lines[0].text, "hello");
-        assert_eq!(line_count(&entry, ascii, 30), 1);
-        assert_eq!(line_count(&entry, EXPANDED, 30), 3);
+        for glyphs in [
+            crate::footer::Glyphs::Unicode,
+            crate::footer::Glyphs::Nerd,
+            crate::footer::Glyphs::Ascii,
+        ] {
+            let modes = DisplayModes { glyphs, ..EXPANDED };
+            let lines = layout(&entry, &[], modes, 30);
+            assert_eq!(lines.len(), 1, "{glyphs:?}: {lines:?}");
+            assert_eq!(lines[0].text, "hello");
+            assert!(!lines[0].pad.is_pad(), "{glyphs:?}");
+            assert_eq!(line_count(&entry, modes, 30), 1, "{glyphs:?}");
+        }
     }
 
     #[test]

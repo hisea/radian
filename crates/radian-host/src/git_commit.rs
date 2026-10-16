@@ -21,8 +21,10 @@
 //!   commands are unset or a `git-lfs` command. Anything else refuses and stages nothing.
 //! - `paths` must resolve inside the workspace (the file tools' own boundary: absolute paths,
 //!   `..` and symlinks out are refused).
-//! - It refuses `main`/`master`, a configured protected branch, a detached HEAD, and — when a
-//!   session is restricted to one branch (`radian/<id>`) — any other branch.
+//! - It refuses a detached HEAD and a configured protected branch on every session. On top of
+//!   that, `main`/`master` are refused **only for a task agent** (ADR 0038 decision 4): a task
+//!   session sets [`GitCommitTools::with_refuse_main`] and is further limited to `radian/<id>`,
+//!   while the interactive `general`/`lead` session may commit on `main`.
 //! - It only adds and commits: no push, no branch, no amend, no rebase.
 
 use std::path::{Path, PathBuf};
@@ -171,6 +173,10 @@ pub struct GitCommitTools {
     journal: Arc<SessionJournal>,
     /// When set, only this branch may be committed to (a task agent's `radian/<id>`).
     allowed_branch: Option<String>,
+    /// Whether `main`/`master` are refused (ADR 0038 decision 4). `true` for a task agent (the
+    /// narrow default); `false` for the interactive `general`/`lead` sessions, which may commit
+    /// on `main`. A configured protected branch and a detached HEAD are always refused.
+    refuse_main: bool,
     /// Branch names that are refused besides `main`/`master` (`[git] protected_branches`).
     protected_branches: Vec<String>,
     /// The filter drivers `git add` may run (`[git] allowed_filters`, ADR 0030).
@@ -187,6 +193,7 @@ impl GitCommitTools {
             workspace: workspace.into(),
             journal,
             allowed_branch: None,
+            refuse_main: true,
             protected_branches: Vec::new(),
             allowed_filters: default_allowed_filters(),
             pin,
@@ -197,6 +204,15 @@ impl GitCommitTools {
     /// interactive session passes `None`).
     pub fn with_allowed_branch(mut self, branch: Option<String>) -> Self {
         self.allowed_branch = branch;
+        self
+    }
+
+    /// Whether `main`/`master` are refused (ADR 0038 decision 4). The default is `true` (a task
+    /// agent's narrow rule); the interactive `general`/`lead` session calls `with_refuse_main(false)`
+    /// so it can commit on `main`. A configured protected branch and a detached HEAD are refused
+    /// either way.
+    pub fn with_refuse_main(mut self, refuse: bool) -> Self {
+        self.refuse_main = refuse;
         self
     }
 
@@ -260,6 +276,7 @@ pub async fn run(tools: &GitCommitTools, call: &ToolCall) -> Result<ToolOutput, 
     let allowed = tools.allowed_branch.clone();
     let protected = tools.protected_branches.clone();
     let allowed_filters = tools.allowed_filters.clone();
+    let refuse_main = tools.refuse_main;
     let message = args.message;
     let paths = args.paths.unwrap_or_default();
     let committed = tokio::task::spawn_blocking(move || {
@@ -271,6 +288,7 @@ pub async fn run(tools: &GitCommitTools, call: &ToolCall) -> Result<ToolOutput, 
             allowed.as_deref(),
             &protected,
             &allowed_filters,
+            refuse_main,
         )
     })
     .await
@@ -308,8 +326,28 @@ pub async fn run(tools: &GitCommitTools, call: &ToolCall) -> Result<ToolOutput, 
     })
 }
 
+/// Whether `git status --porcelain` reports any change in `workspace` under the pinned
+/// repository. Used by the end-of-task commit (ADR 0030: no changes, no commit) and
+/// by `remove_task` (refuse to remove a worktree with uncommitted changes). `pin.still` is
+/// checked first, like every other call.
+pub fn dirty(workspace: &Path, pin: &RepoPin) -> Result<bool, ToolFailure> {
+    if !pin.still(workspace) {
+        return Err(fail(
+            "repository_changed",
+            "the repository changed since the session opened; refusing to read its status",
+        ));
+    }
+    let status = git(workspace, pin, &["status", "--porcelain"])?;
+    Ok(!status.is_empty())
+}
+
 /// The blocking part: branch checks, the path boundary, `git add` and `git commit`. Public so
 /// the integration tests exercise the exact code the tool runs.
+///
+/// `refuse_main` is the ADR 0038 decision 4 switch: `true` for a task agent (which also carries
+/// an `allowed_branch`), `false` for the interactive `general`/`lead` session. A config-protected
+/// branch and a detached HEAD are refused regardless.
+#[allow(clippy::too_many_arguments)] // one branch rule per argument; a rules struct hides them
 pub fn commit(
     workspace: &Path,
     pin: &RepoPin,
@@ -318,6 +356,7 @@ pub fn commit(
     allowed_branch: Option<&str>,
     protected: &[String],
     allowed_filters: &[String],
+    refuse_main: bool,
 ) -> Result<Committed, ToolFailure> {
     // The repository must still be the one pinned at session open: a `.git/` the model created
     // in the workspace (when there was none, or when the real one is above it) would otherwise
@@ -335,7 +374,11 @@ pub fn commit(
             "HEAD is detached; check out a branch before committing",
         ));
     }
-    if branch == "main" || branch == "master" || protected.iter().any(|name| name == &branch) {
+    // `main`/`master` are refused only for a task agent (ADR 0038 decision 4); a configured
+    // protected branch is refused for every session.
+    if (refuse_main && matches!(branch.as_str(), "main" | "master"))
+        || protected.iter().any(|name| name == &branch)
+    {
         return Err(fail(
             "protected_branch",
             format!(
@@ -733,6 +776,7 @@ mod tests {
             None,
             &[],
             &default_allowed_filters(),
+            true,
         )
         .expect_err("a .radian path must be refused");
         assert_eq!(error.code, "radian_path", "{error:?}");
@@ -746,6 +790,7 @@ mod tests {
             None,
             &[],
             &default_allowed_filters(),
+            true,
         );
         assert!(committed.is_ok(), "{committed:?}");
         let _ = std::fs::remove_dir_all(&dir);

@@ -28,7 +28,7 @@ use radian_runtime::{
     ModelRoute, RuntimeEvents,
 };
 use radian_sandbox::{Sandbox, SandboxSlot};
-use radian_session::{SessionCreatedData, SessionJournal};
+use radian_session::{ForkParent, SessionCreatedData, SessionJournal};
 
 use crate::cost::RoutePrice;
 use crate::describe::{Wording, describe, sandbox_word};
@@ -383,9 +383,17 @@ pub struct SessionSetup {
     /// for a host that has no `/access` command (the CLI): a switch is then refused.
     pub access_builder: Option<AccessBuilder>,
     /// `true` when this session is a **task agent** (ADR 0030 O2: opened by a lead's
-    /// `spawn_task`, one brief per session). Nothing sets it yet; the orchestration slice will.
-    /// It is the flag `/mode` is refused behind: a task agent's role comes from its brief.
+    /// `spawn_task`, one brief per session). `radian-host`'s `TaskRegistry` sets it; it is the
+    /// flag `/mode` is refused behind (a task agent's role comes from its brief), and it is the
+    /// flag that makes `git_commit` refuse `main`/`master` (ADR 0038 decision 4).
     pub task_agent: bool,
+    /// The `SessionCreated.parent` a derived session records (ADR 0022's fork, ADR 0030 O2's
+    /// task agent). `None` for an ordinary session. A `relation: "task"` parent names the lead
+    /// and its `TaskSpawned` seq; a fork's names its parent and fork point.
+    pub parent: Option<ForkParent>,
+    /// When set, `git_commit` may only commit to this branch (a task agent's `radian/<id>`,
+    /// ADR 0030 O3). `None` for a session with no branch restriction.
+    pub allowed_branch: Option<String>,
     /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
     pub memory_root: Option<PathBuf>,
     /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
@@ -434,6 +442,10 @@ pub enum ApprovalRouting {
 pub struct HostBindings {
     /// How approvals are answered (ADR 0023 U7).
     pub approvals: ApprovalRouting,
+    /// A queue to share with another session (ADR 0030 O2): a task agent routes its approvals
+    /// and questions to the **lead's** queue, tagged with its own session id as the origin, so
+    /// the human sees one arrival order. `None` means the session creates its own queue.
+    pub shared_queue: Option<Arc<SessionQueue>>,
     /// `true` to advertise `ask_user` and route questions through the queue (a host with an
     /// interactive user, ADR 0024 Q5); `false` for a host with nobody to ask.
     pub ask_user: bool,
@@ -1051,6 +1063,7 @@ pub async fn open_session(
     let t0 = std::time::Instant::now();
     let HostBindings {
         approvals,
+        shared_queue,
         ask_user,
         audit,
         events,
@@ -1081,6 +1094,8 @@ pub async fn open_session(
         profile,
         access_builder,
         task_agent,
+        parent,
+        allowed_branch,
         memory_root,
         skills_extra_paths,
         skills_builtin,
@@ -1102,8 +1117,9 @@ pub async fn open_session(
     } = setup;
 
     // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
-    // tools and the hooks, because both route through it.
-    let queue: Arc<SessionQueue> = Arc::new(PendingQueue::new());
+    // tools and the hooks, because both route through it. A task agent is handed the lead's
+    // queue (ADR 0030 O2), so its approvals and questions arrive in one order with the lead's.
+    let queue: Arc<SessionQueue> = shared_queue.unwrap_or_else(|| Arc::new(PendingQueue::new()));
     let origin = session_id.as_str().to_string();
 
     // ADR 0036 C2: read the project context files once, here. They are workspace input, so
@@ -1190,6 +1206,7 @@ pub async fn open_session(
                 &session_dir,
                 &workspace,
                 &config_snapshot,
+                parent.as_ref(),
                 &journal_path,
             )?,
             None,
@@ -1262,6 +1279,8 @@ pub async fn open_session(
     // git repository does not mount `git_commit` at all.
     let git_commit = crate::git_commit::RepoPin::resolve(&workspace).map(|pin| {
         crate::git_commit::GitCommitTools::new(workspace.clone(), Arc::clone(&journal), pin)
+            .with_allowed_branch(allowed_branch)
+            .with_refuse_main(task_agent)
             .with_protected_branches(protected_branches)
             .with_allowed_filters(
                 allowed_filters.unwrap_or_else(crate::git_commit::default_allowed_filters),
@@ -1568,12 +1587,15 @@ fn trust_event(change: &trust::ProjectTrustChanged) -> radian_session::RuntimeEv
 }
 
 /// Creates or resumes the session file. The caller has already validated everything that can
-/// fail, so this only reports the file's own state.
+/// fail, so this only reports the file's own state. `parent` is the derived-session lineage
+/// (ADR 0022's fork or ADR 0030 O2's task agent): `Some` writes `SessionCreated.parent` with
+/// its `relation`, `None` writes an ordinary session.
 fn open_journal(
     session_id: &SessionId,
     dir: &Path,
     workspace: &Path,
     config_snapshot: &serde_json::Value,
+    parent: Option<&ForkParent>,
     path: &Path,
 ) -> Result<Arc<SessionJournal>, SessionError> {
     crate::ensure_private_dir(dir).map_err(|error| {
@@ -1581,7 +1603,14 @@ fn open_journal(
     })?;
     // The snapshot is a model route reference only: never the key, a header value or a base
     // URL that could carry credentials (ADR 0008 §4, ADR 0013).
-    let created = SessionCreatedData::new(workspace.to_string_lossy(), config_snapshot.clone());
+    let created = match parent {
+        Some(parent) => SessionCreatedData {
+            workspace: workspace.to_string_lossy().into_owned(),
+            config_snapshot: config_snapshot.clone(),
+            parent: Some(parent.clone()),
+        },
+        None => SessionCreatedData::new(workspace.to_string_lossy(), config_snapshot.clone()),
+    };
     match SessionJournal::create(path, session_id.as_str(), created) {
         Ok(journal) => Ok(Arc::new(journal)),
         Err(radian_session::WriteError::NotEmpty { .. }) => Err(SessionError::Message(format!(

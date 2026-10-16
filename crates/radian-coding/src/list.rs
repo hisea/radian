@@ -91,6 +91,11 @@ pub(crate) async fn run(
     let read_dir = std::fs::read_dir(&dir).map_err(|e| io_failure(requested, e))?;
     for entry in read_dir {
         let entry = entry.map_err(|e| io_failure(requested, e))?;
+        // ADR 0030 O3: the task agents' worktrees live under `.radian-worktrees/`, one full
+        // checkout each. `list` omits the entry the same way `glob`/`grep` prune its subtree.
+        if entry.file_name() == std::ffi::OsStr::new(crate::search::RADIAN_WORKTREES) {
+            continue;
+        }
         // symlink_metadata: never follow the entry, so listing does not touch the target.
         let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
             continue; // raced away between readdir and stat

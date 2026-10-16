@@ -279,6 +279,25 @@ async fn list_reports_entries_sorted_with_kinds() {
     assert_eq!(info["truncated"], false);
 }
 
+/// ADR 0030 O3: `list` omits the task agents' worktree root (one full checkout per task).
+#[tokio::test]
+async fn list_omits_the_radian_worktrees_directory() {
+    let dir = TempDir::new("list-worktrees");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(root.join(".radian-worktrees/t1")).unwrap();
+    std::fs::write(root.join(".radian-worktrees/t1/f.txt"), "x").unwrap();
+    std::fs::write(root.join("kept.txt"), "k").unwrap();
+    let tools = tools(&root);
+
+    let output = call(&tools, "list", json!({})).await.unwrap();
+    let body = text(&output);
+    let names: Vec<&str> = body
+        .lines()
+        .map(|line| line.rsplit('\t').next().unwrap())
+        .collect();
+    assert_eq!(names, ["kept.txt"], "{body}");
+}
+
 #[tokio::test]
 async fn list_truncates_at_max_entries() {
     let dir = TempDir::new("list-cap");

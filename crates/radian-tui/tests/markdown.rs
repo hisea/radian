@@ -105,7 +105,10 @@ fn the_block_kinds_and_inline_roles_render() {
     assert_eq!(link.fg, app.theme.md_link.fg);
     assert_eq!(code.fg, app.theme.md_code.fg);
     assert_eq!(bullet.fg, app.theme.md_list_bullet.fg);
-    assert_ne!(heading.fg, link.fg, "roles differ");
+    // ADR 0035: `md_heading` is the accent now, so a heading and a link
+    // share a foreground (they differ by weight); the code role is a different hue.
+    assert_eq!(heading.fg, link.fg, "heading and link are both the accent");
+    assert_ne!(heading.fg, code.fg, "the code role is a different hue");
 }
 
 /// A table draws borders when it fits, wraps a cell that does not, and falls back to the raw
@@ -487,11 +490,15 @@ fn a_user_message_shows_markup_literally() {
     assert!(text.contains("# heading"), "the hash stays: {text}");
     assert!(text.contains("`code`"), "the backticks stay: {text}");
     assert!(!text.contains("•"), "no list bullet: {text}");
-    // The user role: the message carries the user background band (the marker carries the
-    // user foreground), not a `md*` role.
+    // The user role: the message carries the user foreground (the marker carries the same);
+    // ADR 0029 made `user` a foreground role, so there is no band now.
     let bold = style_of(&terminal, "**bold**").expect("the bold line");
-    assert_eq!(bold.bg, app.theme.user.bg, "the user band: {bold:?}");
-    let marker = style_of(&terminal, "> ").expect("the user marker");
+    assert_eq!(
+        bold.bg,
+        Some(ratatui::style::Color::Reset),
+        "the user block has no band: {bold:?}"
+    );
+    let marker = style_of(&terminal, "❯ ").expect("the user marker");
     assert_eq!(marker.fg, app.theme.user.fg, "the user role: {marker:?}");
     assert_ne!(
         bold.bg, app.theme.md_code.bg,

@@ -122,8 +122,8 @@ impl ThemeName {
     }
 }
 
-/// The 37 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
-/// snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
+/// The 70 roles a [`Theme`] styles (ADR 0009, ADR 0023, ADR 0029). The config keys
+/// are the snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Reasoning,
@@ -164,6 +164,22 @@ pub enum Role {
     Find,
     /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
     Auto,
+    /// The thin transcript's structural lines (ADR 0029 and 6): the
+    /// `│ `/`╭─`/`╰──` rules, the `• `/`●` markers, table rules and the compaction rule. The
+    /// weak level, the same value as `dim`.
+    Frame,
+    /// A tool block's head line's tool name (ADR 0029); the same value as
+    /// `syntax_keyword`.
+    ToolName,
+    /// A diff line's gutter line number (ADR 0029). The weak level.
+    DiffLineNumber,
+    /// A tool head's `✓` and an orchestration panel's `✓`/`●` (ADR 0029).
+    /// pi's `success`.
+    StatusOk,
+    /// A tool head's warning marker (ADR 0029). pi's `warning`.
+    StatusWarn,
+    /// A tool head's `✗` (ADR 0029). pi's `error`.
+    StatusError,
     Selection,
     ToolPendingBg,
     ToolSuccessBg,
@@ -207,7 +223,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 64] = [
+    pub const ALL: [Role; 70] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
@@ -239,6 +255,12 @@ impl Role {
         Role::Completion,
         Role::Find,
         Role::Auto,
+        Role::Frame,
+        Role::ToolName,
+        Role::DiffLineNumber,
+        Role::StatusOk,
+        Role::StatusWarn,
+        Role::StatusError,
         Role::Selection,
         Role::ToolPendingBg,
         Role::ToolSuccessBg,
@@ -308,6 +330,12 @@ impl Role {
             Role::Completion => "completion",
             Role::Find => "find",
             Role::Auto => "auto",
+            Role::Frame => "frame",
+            Role::ToolName => "tool_name",
+            Role::DiffLineNumber => "diff_line_number",
+            Role::StatusOk => "status_ok",
+            Role::StatusWarn => "status_warn",
+            Role::StatusError => "status_error",
             Role::Selection => "selection",
             Role::ToolPendingBg => "tool_pending_bg",
             Role::ToolSuccessBg => "tool_success_bg",
@@ -383,6 +411,12 @@ impl Role {
             Role::Completion => &mut theme.completion,
             Role::Find => &mut theme.find,
             Role::Auto => &mut theme.auto,
+            Role::Frame => &mut theme.frame,
+            Role::ToolName => &mut theme.tool_name,
+            Role::DiffLineNumber => &mut theme.diff_line_number,
+            Role::StatusOk => &mut theme.status_ok,
+            Role::StatusWarn => &mut theme.status_warn,
+            Role::StatusError => &mut theme.status_error,
             Role::Selection => &mut theme.selection,
             Role::ToolPendingBg => &mut theme.tool_pending_bg,
             Role::ToolSuccessBg => &mut theme.tool_success_bg,
@@ -466,6 +500,19 @@ pub struct Theme {
     pub find: Style,
     /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
     pub auto: Style,
+    /// The thin transcript's structural lines (ADR 0029): the open frames' `│ ` /
+    /// `╭─` / `╰──`, the `• `/`●` markers, table rules and the compaction rule. The weak level.
+    pub frame: Style,
+    /// A tool block's head line's tool name (ADR 0029).
+    pub tool_name: Style,
+    /// A diff line's gutter line number (ADR 0029). The weak level.
+    pub diff_line_number: Style,
+    /// A tool head's `✓` (and an orchestration panel's `✓`/`●`), ADR 0029.
+    pub status_ok: Style,
+    /// A tool head's warning marker, ADR 0029.
+    pub status_warn: Style,
+    /// A tool head's `✗`, ADR 0029.
+    pub status_error: Style,
     /// A transcript selection (mouse drag). pi's role map: `selectedBg`.
     pub selection: Style,
     /// A tool card's background by state (running / success / failure). pi's role map:
@@ -648,8 +695,9 @@ impl Theme {
         let text = spec(pi::TEXT, Modifier::empty(), truecolor);
         let muted = spec(pi::MUTED, Modifier::empty(), truecolor);
         let dim = spec(pi::DIM, Modifier::empty(), truecolor);
-        // The band behind a user message block and the `bar` input's rows (ADR 0035 V3): omp's
-        // composer fill is the user message's own background, so the two read as one surface.
+        // The band behind the `bar` input's rows (ADR 0035 V3, kept optional by revision 6):
+        // pi's `userMessageBg`. The user message itself no longer carries a band (ADR 0029
+        // revision 2 decision 2: `user` is a foreground role).
         let band = spec_bg(pi::USER_BG, Modifier::empty(), truecolor)
             .bg
             .expect("a bg");
@@ -660,9 +708,13 @@ impl Theme {
             // titles; secondary = tool output, notices and thinking; weak = hints,
             // truncation, counters and completion descriptions.
             text,
-            user: text.bg(band),
+            // ADR 0029/6: `user` is a foreground role in the accent
+            // colour — the `❯ ` marker and the user's words — with no band. Only the `bar`
+            // input keeps pi's `userMessageBg` band (decision 2).
+            user: spec(pi::VIOLET, Modifier::empty(), truecolor),
             input_bar: text.bg(band),
-            reasoning: spec(pi::THINKING, Modifier::ITALIC, truecolor),
+            // ADR 0035: reasoning is upright now (no italic).
+            reasoning: spec(pi::THINKING, Modifier::empty(), truecolor),
             reasoning_off: spec(pi::DIM, Modifier::DIM, truecolor),
             reasoning_minimal: spec(pi::MUTED, Modifier::empty(), truecolor),
             reasoning_low: spec(pi::THINKING, Modifier::empty(), truecolor),
@@ -683,7 +735,9 @@ impl Theme {
             mermaid_edge: dim,
             mermaid_text: text,
             // Markdown (ADR 0028 R2): pi's `md*` roles.
-            md_heading: spec(pi::TEXT, Modifier::BOLD, truecolor),
+            // ADR 0035: the heading text is the accent, bold (the `#`
+            // mark is gone; `md_heading_mark` is kept for the transition).
+            md_heading: spec(pi::VIOLET, Modifier::BOLD, truecolor),
             md_heading_mark: dim,
             md_link: spec(pi::VIOLET, Modifier::UNDERLINED, truecolor),
             md_link_url: muted,
@@ -721,12 +775,22 @@ impl Theme {
             // ADR 0026 D9: the status bar's AUTO marker, reversed so it reads at a glance
             // as "this session behaves differently"; the warning hue underneath.
             auto: spec(pi::YELLOW, Modifier::REVERSED, truecolor),
-            // The unified-diff lines: pi's own toolDiff* roles; the hunk/file-header marker
-            // takes the accent (pi has no role for it).
+            // ADR 0029: frame = the dim level; tool_name = the keyword
+            // colour; diff_line_number = dim; the status markers reuse the turn/notice/error
+            // colours.
+            frame: dim,
+            tool_name: spec(pi::BLUE, Modifier::empty(), truecolor),
+            diff_line_number: dim,
+            status_ok: spec(pi::GREEN, Modifier::empty(), truecolor),
+            status_warn: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            status_error: spec(pi::RED, Modifier::empty(), truecolor),
+            // The unified-diff lines: pi's own toolDiff* roles.
             diff_added: spec(pi::GREEN, Modifier::empty(), truecolor),
             diff_removed: spec(pi::RED, Modifier::empty(), truecolor),
             diff_context: muted,
-            diff_hunk: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            // ADR 0029/6: `diff_hunk` steps down to the weak level (the
+            // thin design draws `@@`/file headers with `frame`).
+            diff_hunk: dim,
             selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
             tool_pending_bg: spec_bg(pi::TOOL_PENDING_BG, Modifier::empty(), truecolor),
             tool_success_bg: spec_bg(pi::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
@@ -740,8 +804,9 @@ impl Theme {
         let text = spec(pi::TEXT, Modifier::empty(), truecolor);
         let muted = spec(pi::MUTED, Modifier::empty(), truecolor);
         let dim = spec(pi::DIM, Modifier::empty(), truecolor);
-        // The band behind a user message block and the `bar` input's rows (ADR 0035 V3): omp's
-        // composer fill is the user message's own background, so the two read as one surface.
+        // The band behind the `bar` input's rows (ADR 0035 V3, kept optional by revision 6):
+        // pi's `userMessageBg`. The user message itself no longer carries a band (ADR 0029
+        // revision 2 decision 2: `user` is a foreground role).
         let band = spec_bg(pi::USER_BG, Modifier::empty(), truecolor)
             .bg
             .expect("a bg");
@@ -752,9 +817,13 @@ impl Theme {
             // titles; secondary = tool output, notices and thinking; weak = hints,
             // truncation, counters and completion descriptions.
             text,
-            user: text.bg(band),
+            // ADR 0029/6: `user` is a foreground role in the accent
+            // colour — the `❯ ` marker and the user's words — with no band. Only the `bar`
+            // input keeps pi's `userMessageBg` band (decision 2).
+            user: spec(pi::VIOLET, Modifier::empty(), truecolor),
             input_bar: text.bg(band),
-            reasoning: spec(pi::THINKING, Modifier::ITALIC, truecolor),
+            // ADR 0035: reasoning is upright now (no italic).
+            reasoning: spec(pi::THINKING, Modifier::empty(), truecolor),
             reasoning_off: spec(pi::DIM, Modifier::DIM, truecolor),
             reasoning_minimal: spec(pi::MUTED, Modifier::empty(), truecolor),
             reasoning_low: spec(pi::THINKING, Modifier::empty(), truecolor),
@@ -775,7 +844,9 @@ impl Theme {
             mermaid_edge: dim,
             mermaid_text: text,
             // Markdown (ADR 0028 R2): pi's `md*` roles.
-            md_heading: spec(pi::TEXT, Modifier::BOLD, truecolor),
+            // ADR 0035: the heading text is the accent, bold (the `#`
+            // mark is gone; `md_heading_mark` is kept for the transition).
+            md_heading: spec(pi::VIOLET, Modifier::BOLD, truecolor),
             md_heading_mark: dim,
             md_link: spec(pi::VIOLET, Modifier::UNDERLINED, truecolor),
             md_link_url: muted,
@@ -813,12 +884,22 @@ impl Theme {
             // ADR 0026 D9: the status bar's AUTO marker, reversed so it reads at a glance
             // as "this session behaves differently"; the warning hue underneath.
             auto: spec(pi::YELLOW, Modifier::REVERSED, truecolor),
-            // The unified-diff lines: pi's own toolDiff* roles; the hunk/file-header marker
-            // takes the accent (pi has no role for it).
+            // ADR 0029: frame = the dim level; tool_name = the keyword
+            // colour; diff_line_number = dim; the status markers reuse the turn/notice/error
+            // colours.
+            frame: dim,
+            tool_name: spec(pi::BLUE, Modifier::empty(), truecolor),
+            diff_line_number: dim,
+            status_ok: spec(pi::GREEN, Modifier::empty(), truecolor),
+            status_warn: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            status_error: spec(pi::RED, Modifier::empty(), truecolor),
+            // The unified-diff lines: pi's own toolDiff* roles.
             diff_added: spec(pi::GREEN, Modifier::empty(), truecolor),
             diff_removed: spec(pi::RED, Modifier::empty(), truecolor),
             diff_context: muted,
-            diff_hunk: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            // ADR 0029/6: `diff_hunk` steps down to the weak level (the
+            // thin design draws `@@`/file headers with `frame`).
+            diff_hunk: dim,
             selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
             tool_pending_bg: spec_bg(pi::TOOL_PENDING_BG, Modifier::empty(), truecolor),
             tool_success_bg: spec_bg(pi::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
@@ -831,7 +912,8 @@ impl Theme {
         Self {
             name: ThemeName::Mono,
             reserved: BTreeMap::new(),
-            reasoning: style(None, Modifier::ITALIC | Modifier::DIM),
+            // ADR 0035: reasoning is upright now.
+            reasoning: style(None, Modifier::DIM),
             reasoning_off: style(None, Modifier::DIM),
             reasoning_minimal: style(None, Modifier::DIM),
             reasoning_low: style(None, Modifier::empty()),
@@ -865,6 +947,14 @@ impl Theme {
             find: style(None, Modifier::BOLD),
             // ADR 0026 D9: the mono theme has no color, so `AUTO` stands out by reversal.
             auto: style(None, Modifier::REVERSED),
+            // ADR 0029, in modifiers: frame and the diff gutter are dim,
+            // tool_name plain, the status markers borrow turn_idle/note/tool_result_error.
+            frame: style(None, Modifier::DIM),
+            tool_name: style(None, Modifier::empty()),
+            diff_line_number: style(None, Modifier::DIM),
+            status_ok: style(None, Modifier::empty()),
+            status_warn: style(None, Modifier::BOLD),
+            status_error: style(None, Modifier::BOLD | Modifier::UNDERLINED),
             // No color at all: a selection is the reversed video, as the terminal itself
             // would draw it, and the tool states are told apart by modifiers.
             selection: style(None, Modifier::REVERSED),
@@ -943,7 +1033,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 38] {
+    pub fn styles(&self) -> [Style; 44] {
         [
             self.reasoning,
             self.interrupted,
@@ -976,6 +1066,12 @@ impl Theme {
             self.notice_body,
             self.text,
             self.auto,
+            self.frame,
+            self.tool_name,
+            self.diff_line_number,
+            self.status_ok,
+            self.status_warn,
+            self.status_error,
             self.diff_added,
             self.diff_removed,
             self.diff_context,
@@ -1137,8 +1233,9 @@ mod tests {
         );
         assert_eq!(dark.hint.fg, Some(Color::Rgb(126, 136, 142)), "dim 56%");
         // The main level is what answers and tool titles use; the secondary is the tool
-        // output; the weak level is hints, truncation and completion.
-        assert_eq!(dark.user.fg, dark.text.fg);
+        // output; the weak level is hints, truncation and completion. ADR 0029:
+        // `user` is the accent foreground now, not the main text level.
+        assert_eq!(dark.user.fg, dark.model.fg);
         assert_eq!(dark.tool_call.fg, dark.text.fg);
         assert_eq!(dark.notice.fg, dark.text.fg);
         assert_eq!(dark.tool_result.fg, dark.notice_body.fg);
@@ -1146,7 +1243,8 @@ mod tests {
         assert_eq!(dark.completion.fg, dark.hint.fg);
         // The thinking channel is pi's `thinkingText`, between the secondary and weak levels.
         assert_eq!(dark.reasoning.fg, Some(Color::Rgb(150, 160, 164)));
-        assert!(dark.reasoning.add_modifier.contains(Modifier::ITALIC));
+        // ADR 0029: reasoning is upright now, not italic.
+        assert!(!dark.reasoning.add_modifier.contains(Modifier::ITALIC));
         // The semantic colors are pi's 67%-level hues: each role takes a named pi color,
         // and none of them is a text level (they are told apart by hue, not brightness).
         for (name, style, source) in [
@@ -1227,14 +1325,16 @@ mod tests {
         assert_ne!(Theme::light().turn_running, Theme::dark().turn_running);
     }
 
-    /// ADR 0035 V3: the `bar` input's band is the user message's own band on the main text
-    /// level (omp's composer fill is `userMessageBg`); `mono` has no color to give it, so the
-    /// input keeps the ordinary level and is told apart by its rail.
+    /// ADR 0035 V3 + ADR 0029: the `bar` input keeps pi's `userMessageBg`
+    /// band on the main text level; the user message no longer carries one, so the `bar` input
+    /// is the only banded block left. `mono` has no color to give it, so the input keeps the
+    /// ordinary level and is told apart by its rail.
     #[test]
-    fn the_input_bar_band_is_the_user_band_on_the_main_level() {
+    fn the_input_bar_keeps_the_user_band_on_the_main_level() {
         for theme in [Theme::dark(), Theme::light()] {
-            assert_eq!(theme.input_bar.bg, theme.user.bg, "{:?}", theme.name);
+            assert!(theme.input_bar.bg.is_some(), "{:?}", theme.name);
             assert_eq!(theme.input_bar.fg, theme.text.fg, "{:?}", theme.name);
+            assert_eq!(theme.user.bg, None, "{:?}", theme.name);
         }
         let mono = Theme::mono();
         assert_eq!(mono.input_bar.bg, None);
@@ -1250,5 +1350,96 @@ mod tests {
             Theme::resolve(Some(ThemeName::Light), false).name,
             ThemeName::Light
         );
+    }
+
+    /// ADR 0029: the thin redesign's new roles exist and parse from their
+    /// snake_case names (`[tui.colors]` and the theme format use the same set).
+    #[test]
+    fn the_thin_roles_parse_from_their_config_names() {
+        for role in [
+            Role::Frame,
+            Role::ToolName,
+            Role::DiffLineNumber,
+            Role::StatusOk,
+            Role::StatusWarn,
+            Role::StatusError,
+        ] {
+            assert_eq!(Role::parse(role.as_str()), Some(role), "{role:?}");
+        }
+    }
+
+    /// ADR 0029 and 6: one assertion per role whose built-in value
+    /// changed, on both built-ins. `frame`/`diff_line_number`/`diff_hunk` are the dim level;
+    /// `tool_name` is the keyword colour; the status markers reuse the turn/notice/error
+    /// colours; `user` is a foreground role in the accent colour; `md_heading` is the accent
+    /// bold; `reasoning` is no longer italic.
+    #[test]
+    fn the_thin_roles_and_the_changed_builtin_values() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let dim = theme.hint.fg;
+            let accent = theme.model.fg;
+            assert_eq!(
+                theme.frame.fg, dim,
+                "{:?}: frame is the dim level",
+                theme.name
+            );
+            assert_eq!(
+                theme.diff_line_number.fg, dim,
+                "{:?}: diff_line_number is dim",
+                theme.name
+            );
+            assert_eq!(
+                theme.diff_hunk.fg, dim,
+                "{:?}: diff_hunk is dim",
+                theme.name
+            );
+            assert_eq!(
+                theme.tool_name.fg, theme.syntax_keyword.fg,
+                "{:?}: tool_name is the keyword colour",
+                theme.name
+            );
+            assert_eq!(
+                theme.status_ok, theme.turn_idle,
+                "{:?}: status_ok",
+                theme.name
+            );
+            assert_eq!(
+                theme.status_warn, theme.note,
+                "{:?}: status_warn",
+                theme.name
+            );
+            assert_eq!(
+                theme.status_error, theme.tool_result_error,
+                "{:?}: status_error",
+                theme.name
+            );
+            assert_eq!(
+                theme.user.fg, accent,
+                "{:?}: user is the accent foreground",
+                theme.name
+            );
+            assert_eq!(
+                theme.user.bg, None,
+                "{:?}: user has no background",
+                theme.name
+            );
+            assert_eq!(
+                theme.md_heading.fg, accent,
+                "{:?}: md_heading is the accent",
+                theme.name
+            );
+            assert!(
+                theme.md_heading.add_modifier.contains(Modifier::BOLD),
+                "{:?}: md_heading is bold",
+                theme.name
+            );
+            assert!(
+                !theme.reasoning.add_modifier.contains(Modifier::ITALIC),
+                "{:?}: reasoning is not italic",
+                theme.name
+            );
+        }
+        let mono = Theme::mono();
+        assert_eq!(mono.user.bg, None, "user has no background in mono either");
     }
 }
