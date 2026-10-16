@@ -30,7 +30,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 30] = [
+pub(crate) const KNOWN_EVENTS: [&str; 31] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -61,6 +61,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 30] = [
     "BackgroundJobSettled",
     "TaskSpawned",
     "TaskFinished",
+    "NamedAgentStarted",
 ];
 
 /// The parsed body of one known event. Events this slice does not interpret (for example
@@ -225,6 +226,13 @@ pub enum EventData {
         agent_session_id: String,
         outcome: TurnOutcome,
         error: Option<String>,
+    },
+    /// A named agent (ADR 0030 O12) was created from its definition on first use. Typed for an
+    /// exact round trip; audit only, never a transcript record.
+    NamedAgentStarted {
+        name: String,
+        agent_session_id: String,
+        worktree: Option<String>,
     },
     /// A background `shell` job started (ADR 0037 decision 5). Typed for an exact round trip;
     /// audit only, never a transcript record. A start with no settle after a crash is how the
@@ -740,6 +748,14 @@ impl LineScanner {
                     error: d.error,
                 }
             }
+            "NamedAgentStarted" => {
+                let d: NamedAgentStartedData = data_of(raw, self.lineno, path)?;
+                EventData::NamedAgentStarted {
+                    name: d.name,
+                    agent_session_id: d.agent_session_id,
+                    worktree: d.worktree,
+                }
+            }
             "BackgroundJobStarted" => {
                 let d: BackgroundJobStartedData = data_of(raw, self.lineno, path)?;
                 EventData::BackgroundJobStarted {
@@ -1090,6 +1106,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::GitCommitted { .. }
         | EventData::TaskSpawned { .. }
         | EventData::TaskFinished { .. }
+        | EventData::NamedAgentStarted { .. }
         | EventData::BackgroundJobStarted { .. }
         | EventData::BackgroundJobSettled { .. }
         | EventData::Other(_) => None,
@@ -1312,6 +1329,14 @@ struct TaskFinishedData {
     outcome: TurnOutcome,
     #[serde(default)]
     error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NamedAgentStartedData {
+    name: String,
+    agent_session_id: String,
+    #[serde(default)]
+    worktree: Option<String>,
 }
 
 #[derive(Deserialize)]

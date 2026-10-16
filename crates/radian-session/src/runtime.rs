@@ -247,6 +247,17 @@ pub enum RuntimeEvent {
         outcome: TurnOutcome,
         error: Option<String>,
     },
+    /// A **named agent** (ADR 0030 O12) was created from its definition on first use. Audit
+    /// only: `critical = false`. Unlike `TaskSpawned`, a `NamedAgentStarted` with no matching
+    /// "finished" after a crash is **not** `unknown_after_crash`: a named agent is a long
+    /// session the human commands, and it is resumable by its session id (O12). `name` is the
+    /// definition name the human and the lead use; `agent_session_id` is the session created.
+    NamedAgentStarted {
+        name: String,
+        agent_session_id: String,
+        /// The named agent's worktree, when it has one (`isolation = "shared"` has none).
+        worktree: Option<String>,
+    },
     /// A background `shell` job started (ADR 0037 decision 5). Audit only: `critical =
     /// false`. The start/settle pair is how a resume learns a job existed; a start with no
     /// settle after a crash is reported once as unknown and never re-run.
@@ -290,6 +301,7 @@ impl RuntimeEvent {
             RuntimeEvent::GitCommitted { .. } => "GitCommitted",
             RuntimeEvent::TaskSpawned { .. } => "TaskSpawned",
             RuntimeEvent::TaskFinished { .. } => "TaskFinished",
+            RuntimeEvent::NamedAgentStarted { .. } => "NamedAgentStarted",
             RuntimeEvent::BackgroundJobStarted { .. } => "BackgroundJobStarted",
             RuntimeEvent::BackgroundJobSettled { .. } => "BackgroundJobSettled",
         }
@@ -316,6 +328,7 @@ impl RuntimeEvent {
             | RuntimeEvent::GitCommitted { .. }
             | RuntimeEvent::TaskSpawned { .. }
             | RuntimeEvent::TaskFinished { .. }
+            | RuntimeEvent::NamedAgentStarted { .. }
             | RuntimeEvent::BackgroundJobStarted { .. }
             | RuntimeEvent::BackgroundJobSettled { .. } => false,
         }
@@ -477,6 +490,14 @@ pub(crate) struct TaskFinishedData<'a> {
 }
 
 #[derive(Serialize)]
+pub(crate) struct NamedAgentStartedData<'a> {
+    pub name: &'a str,
+    pub agent_session_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<&'a str>,
+}
+
+#[derive(Serialize)]
 pub(crate) struct BackgroundJobStartedData<'a> {
     pub job_id: &'a str,
     pub command: &'a str,
@@ -510,6 +531,7 @@ pub(crate) enum RuntimeData<'a> {
     GitCommitted(GitCommittedData<'a>),
     TaskSpawned(TaskSpawnedData<'a>),
     TaskFinished(TaskFinishedData<'a>),
+    NamedAgentStarted(NamedAgentStartedData<'a>),
     BackgroundJobStarted(BackgroundJobStartedData<'a>),
     BackgroundJobSettled(BackgroundJobSettledData<'a>),
 }
@@ -534,6 +556,7 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::GitCommitted(d) => d.serialize(serializer),
             RuntimeData::TaskSpawned(d) => d.serialize(serializer),
             RuntimeData::TaskFinished(d) => d.serialize(serializer),
+            RuntimeData::NamedAgentStarted(d) => d.serialize(serializer),
             RuntimeData::BackgroundJobStarted(d) => d.serialize(serializer),
             RuntimeData::BackgroundJobSettled(d) => d.serialize(serializer),
         }
@@ -678,6 +701,15 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             agent_session_id,
             outcome: *outcome,
             error: error.as_deref(),
+        }),
+        RuntimeEvent::NamedAgentStarted {
+            name,
+            agent_session_id,
+            worktree,
+        } => RuntimeData::NamedAgentStarted(NamedAgentStartedData {
+            name,
+            agent_session_id,
+            worktree: worktree.as_deref(),
         }),
         RuntimeEvent::BackgroundJobStarted {
             job_id,
