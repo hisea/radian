@@ -1537,6 +1537,10 @@ fn enforce_task_setup(
     setup.parent = Some(parent);
     setup.allowed_branch = branch;
     setup.task_agent = true;
+    // ADR 0030 O3: a task commits only to its own branch. A `shared` task has none, so it does
+    // not mount `git_commit` (and the tool would refuse if it reached it); a worktree task gets
+    // its `radian/<id>` and the tool is limited to it.
+    setup.git_commit_requires_branch = true;
     // ADR 0030 O8: a task agent does not open memory (its single-writer lock).
     setup.memory_root = None;
     // ADR 0036 / ADR 0030 O11: layer 1 is the definition's body. The registry
@@ -2130,7 +2134,8 @@ pub fn end_of_task_commit(
     }
     let message = format!("radian: end of task {id} ({})", outcome_word(outcome));
     // `refuse_main = true`: a task agent's rule (ADR 0038 decision 4); with `allowed_branch`
-    // it is also limited to its own branch.
+    // it is also limited to its own branch. `require_branch = true`: a task with no branch of
+    // its own (a `shared` task) never reaches here, but the tool refuses if it does.
     crate::git_commit::commit(
         worktree,
         pin,
@@ -2139,6 +2144,7 @@ pub fn end_of_task_commit(
         allowed_branch,
         protected,
         filters,
+        true,
         true,
     )
     .map(Some)

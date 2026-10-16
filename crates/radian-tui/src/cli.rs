@@ -1518,6 +1518,7 @@ fn run(
                 task_agent: false,
                 parent: None,
                 allowed_branch: None,
+                git_commit_requires_branch: false,
                 memory_root,
                 skills_extra_paths: radian_host::config::resolve_extra_paths(
                     &config.skills.extra_paths,

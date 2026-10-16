@@ -52,6 +52,14 @@ fn isolated_home() -> PathBuf {
             ("writer", "---\nname: writer\n---\nYou write.\n"),
             ("chief", "---\nname: chief\nspawn: true\n---\nCHIEF\n"),
             ("plain", "---\nname: plain\nspawn: false\n---\nPLAIN\n"),
+            (
+                "shared_writer",
+                "---\nname: shared_writer\nisolation: shared\n---\nSHARED\n",
+            ),
+            (
+                "shared_git",
+                "---\nname: shared_git\nisolation: shared\ntools: [read, git_commit]\n---\nSHARED GIT\n",
+            ),
         ] {
             std::fs::write(agents.join(format!("{name}.md")), text).unwrap();
         }
@@ -159,6 +167,7 @@ fn builder(session_dir: PathBuf, base_url: String) -> NamedBuilder {
                     task_agent: false,
                     parent: None,
                     allowed_branch: None,
+                    git_commit_requires_branch: false,
                     // Deliberately non-`None`: `enforce_named_setup` must clear it (ADR 0030 O8),
                     // so this line is what the "no memory" test pins.
                     memory_root: Some(session_dir.join("memory")),
@@ -500,6 +509,89 @@ async fn closing_the_lead_closes_the_sessions_and_keeps_the_worktrees() {
     let _ = std::fs::remove_dir_all(&worktree);
 }
 
+/// ADR 0030 O3 (review fix 2): a `shared` named agent runs in the human's workspace and has no
+/// branch of its own, so `git_commit` is not mounted; a call to it is an unknown tool.
+#[tokio::test]
+async fn a_shared_named_agent_does_not_mount_git_commit() {
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "git_commit", r#"{"message":"x"}"#),
+        text_reply("done"),
+    ])
+    .await;
+    let fixture = Fixture::new("shared-commit", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    fixture
+        .registry
+        .send("shared_writer", "hi", InputSource::User)
+        .await
+        .expect("send");
+    let record = fixture.registry.get("shared_writer").expect("record");
+    // Wait only for the first model request first: its tool list is what the model was offered.
+    wait_requests(&server, 1).await;
+    let requests = server.requests();
+    // The model was never offered `git_commit` (the request is the whole mounted tool list).
+    let tools = requests[0].json()["tools"].clone();
+    let names = tools.to_string();
+    assert!(
+        !names.contains("git_commit"),
+        "a shared named agent must not be offered git_commit: {tools}"
+    );
+    // The tool list is real: the other built-ins are there, so the assertion above is not vacuous.
+    assert!(
+        names.contains("read") && names.contains("shell"),
+        "the mounted built-ins are offered: {tools}"
+    );
+    // Two model requests: the scripted `git_commit` call, then the model's reply to its result.
+    wait_requests(&server, 2).await;
+    let second = server.requests()[1].json().to_string();
+    // Calling it anyway is an unknown tool (the model's next request carries that result).
+    assert!(
+        second.contains("There is no tool named `git_commit`"),
+        "a git_commit call is an unknown tool: {second}"
+    );
+
+    fixture.registry.close_all();
+    let _ = record.session.join().await;
+}
+
+/// ADR 0030 O3/O11 (review fix 2): a `shared` definition that lists `git_commit` in `tools` is
+/// warned about in the send result — the tool is not mounted, so the list silently loses it.
+#[tokio::test]
+async fn a_shared_send_warns_about_a_git_commit_the_definition_listed() {
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let fixture = Fixture::new("shared-git-warn", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let session = fixture.lead_session().await;
+    let out = run_tool(
+        &session,
+        "send_agent",
+        json!({"name": "shared_git", "brief": "do it"}),
+    )
+    .await
+    .expect("send_agent");
+    let value = structured(&out);
+    let warnings = value["warnings"].to_string();
+    assert!(
+        warnings.contains("git_commit") && warnings.contains("shared"),
+        "the send result must warn that git_commit is not mounted: {value}"
+    );
+    let record = fixture.registry.get("shared_git").expect("record");
+    assert!(
+        record
+            .warnings
+            .iter()
+            .any(|w| w.contains("git_commit") && w.contains("shared")),
+        "{:?}",
+        record.warnings
+    );
+    fixture.registry.close_all();
+    let _ = record.session.join().await;
+}
+
 // ---------------------------------------------------------------------------
 // Group B: the source rule
 // ---------------------------------------------------------------------------
@@ -677,6 +769,106 @@ async fn wait_agent_times_out() {
     let _ = record.session.join().await;
 }
 
+/// ADR 0030 O12 (review fix 1): a turn that ends **before** `wait_agent` is called is not
+/// missed. `send_agent` returns a `since` token and `wait_agent` with it returns at once.
+#[tokio::test]
+async fn wait_agent_with_the_since_token_sees_a_turn_that_already_ended() {
+    let server = MockServer::start(vec![text_reply("the reply")]).await;
+    let fixture = Fixture::new("tools-since", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let session = fixture.lead_session().await;
+    let out = run_tool(
+        &session,
+        "send_agent",
+        json!({"name": "writer", "brief": "do it"}),
+    )
+    .await
+    .expect("send_agent");
+    let since = structured(&out)["since"].as_u64().expect("a since token");
+    let record = fixture.registry.get("writer").expect("record");
+    // Let the (mock) turn finish before the wait: the old wait then looked for a turn that never
+    // came and timed out with `still_running`.
+    wait_turn_end(&record, &server, 1).await;
+    let out = run_tool(
+        &session,
+        "wait_agent",
+        json!({"name": "writer", "since": since, "timeout_secs": 5}),
+    )
+    .await
+    .expect("wait_agent");
+    let value = structured(&out);
+    assert_eq!(value["event"], "finished", "{value}");
+    assert_eq!(value["summary"], "the reply");
+    fixture.registry.close_all();
+    let _ = record.session.join().await;
+}
+
+/// ADR 0030 O12 (review fix 1): a send queued behind a running turn still resolves through
+/// `wait_agent` with its token — the wait returns the sent turn's reply, not the one it was
+/// queued behind.
+#[tokio::test]
+async fn wait_agent_after_a_busy_send_waits_for_the_sent_turn() {
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "shell", r#"{"command":"echo hi"}"#),
+        text_reply("one"),
+        paused_text_reply("two", Duration::from_secs(2)),
+    ])
+    .await;
+    let fixture = Fixture::new("tools-busy-since", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let session = fixture.lead_session().await;
+    // Turn 1: a `User` send whose shell ask blocks on the human queue, so the agent is busy.
+    fixture
+        .registry
+        .send("writer", "one", InputSource::User)
+        .await
+        .expect("send one");
+    let record = fixture.registry.get("writer").expect("record");
+    let pending = wait_pending(&fixture.queue).await;
+    wait_running(&record).await;
+
+    // Turn 2: sent while busy, so it goes to the `next_turn` lane behind the running turn.
+    let out = run_tool(
+        &session,
+        "send_agent",
+        json!({"name": "writer", "brief": "two"}),
+    )
+    .await
+    .expect("send_agent");
+    let value = structured(&out);
+    assert_eq!(value["queued"], true, "{value}");
+    let since = value["since"].as_u64().expect("a token");
+
+    // Release turn 1. Turn 2's reply is paused, so it is still running when the wait is polled:
+    // the wait must not settle for turn 1's "one".
+    fixture
+        .queue
+        .answer(
+            pending.request_id,
+            radian_host::PendingResponse::Approval(radian_permissions::ApprovalOutcome::AllowOnce),
+        )
+        .expect("answer");
+    let out = run_tool(
+        &session,
+        "wait_agent",
+        json!({"name": "writer", "since": since, "timeout_secs": 20}),
+    )
+    .await
+    .expect("wait_agent");
+    let value = structured(&out);
+    assert_eq!(value["event"], "finished", "{value}");
+    assert_eq!(
+        value["summary"], "two",
+        "the wait returns the sent turn's reply, not the one it was queued behind"
+    );
+    fixture.registry.close_all();
+    let _ = record.session.join().await;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -686,6 +878,23 @@ fn text_reply(text: &str) -> Reply {
         chunk(json!({"role": "assistant", "content": text}), None),
         chunk(json!({}), Some("stop")),
     ])
+}
+
+/// A text reply that pauses between stream pieces, so the turn stays running for a known window
+/// (used to test a wait that must not return the previous turn's reply).
+fn paused_text_reply(text: &str, pause: Duration) -> Reply {
+    Reply::Sse {
+        pieces: vec![
+            format!(
+                "data: {}\n\n",
+                chunk(json!({"role": "assistant", "content": text}), None)
+            )
+            .into_bytes(),
+            format!("data: {}\n\n", chunk(json!({}), Some("stop"))).into_bytes(),
+            b"data: [DONE]\n\n".to_vec(),
+        ],
+        pause,
+    }
 }
 
 fn tool_reply(id: &str, name: &str, arguments: &str) -> Reply {
@@ -720,6 +929,18 @@ async fn run_tool(
 
 fn structured(output: &agent_core::ToolOutput) -> Value {
     output.structured.clone().expect("structured output")
+}
+
+/// Waits until the mock server has seen at least `want` model requests.
+async fn wait_requests(server: &MockServer, want: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while server.requests().len() < want {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the model did not make {want} request(s)"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// Waits until the lead queue has a request, then returns it.

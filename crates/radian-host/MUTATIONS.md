@@ -1271,3 +1271,33 @@ cargo test -p radian-tui --test send --no-fail-fast -- <下面的测试名>
   试跑**：`/send` 的真实入队来源没有 pty 覆盖，属本条已知缺口。
 - S7B-4 的测试 builder 必须传 `memory_root = Some(...)`，否则 enforcer 的那行不是承重的，变异不会
   变红；这一点写进测试注释。
+
+## orch-s7b review fix 1（2026-10-16）
+
+基 `5dbb2ae`（slice 7b 已合入），新提交记录两处：`wait_agent` 漏掉已结束的 turn；`shared`
+agent 不该能提交到 lead 的分支（ADR 0030 O3）。每条变异就地改、跑单测、再从
+`.radian/scratch/orig/` 的副本 `cp` 还原并 `cmp` 确认；跑完 `git status --short` 只剩源码改动。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| RF1-1 | `lead_tools.rs` 的 `wait_agent` 忽略 `since`（`let start = record.turn_generation();`，不再取 `args.since`） | ✅ failed（5.7s，`still_running`） | `wait_agent_with_the_since_token_sees_a_turn_that_already_ended`（token 指向的 turn 已结束，忽略后等一个永不到来的 turn） |
+| RF1-2 | `named.rs` 的 `enforce_named_setup` 不设 `git_commit_requires_branch`（`shared` named agent 重新挂 `git_commit`） | ✅ failed | `a_shared_named_agent_does_not_mount_git_commit`（模型收到的 tool 列表里出现 `git_commit`） |
+| RF1-3 | `task.rs` 的 `enforce_task_setup` 不设 `git_commit_requires_branch`（`shared` task 重新挂 `git_commit`） | ✅ failed | `a_shared_task_does_not_mount_git_commit`（`safe` 工具列表里出现 `git_commit`） |
+| RF1-4 | `git_commit.rs` 的 `commit` 去掉「无自己的分支即拒绝」（`require_branch && allowed_branch.is_none()` 块） | ✅ failed | `a_session_with_no_branch_of_its_own_cannot_commit`（期望 `no_branch`，得到一次提交） |
+| RF1-5 | `named.rs` 的 `create` 去掉 `shared` 定义列出 `git_commit` 的警告 | ✅ failed | `a_shared_send_warns_about_a_git_commit_the_definition_listed`（`warnings` 为空） |
+
+5/5 抓住。
+
+**说明（如实记录）**：
+- RF1-1 的 token 是**入队时的 turn generation**（`SendOutcome.turn`）。`wait_agent` 带 `since` 时
+  等 `turn_generation() > since && !running`，所以「调用前 turn 已结束」立刻返回；不带 `since`
+  时从调用时刻等下一个 turn 结束（今天的行为，写进工具描述）。`wait_agent_after_a_busy_send_waits_for_the_sent_turn`
+  覆盖 busy 入队的情形，但它**区分不出** `turn + 1` 与 `turn` 两种 token（turn 1 结束到 turn 2
+  开始之间驱动几乎不空转，`!running` 的窗口观测不到）；所以 token 就用入队时的 generation，和
+  修复说明一致，不声称 busy 的额外修正。
+- RF1-2/RF1-3 是「不挂载」而非「权限拒绝」（ADR 0030 O11 的物理卸载；这也是为什么直接调用是
+  `unknown_tool`——`agent-core` 的 preflight 在权限 hook 之前就按已挂载的 spec 列表拒绝）。
+- RF1-4 的 `commit` 多了一个 `require_branch` 形参，`GitCommitTools` 默认 `false`：交互会话不受
+  影响；`open_session` 对「只有自己分支」的会话在没有分支时**根本不构造**这个工具，`commit` 里
+  的检查是「万一到达」的兜底。
+

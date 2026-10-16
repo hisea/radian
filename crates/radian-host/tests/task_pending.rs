@@ -548,6 +548,7 @@ fn builder(session_dir: std::path::PathBuf, base_url: String) -> TaskBuilder {
                     task_agent: false,
                     parent: None,
                     allowed_branch: None,
+                    git_commit_requires_branch: false,
                     memory_root: None,
                     skills_extra_paths: Vec::new(),
                     skills_builtin: true,

@@ -23,6 +23,10 @@
 //!   is a lead and mounts the lead tools (the host's builder passes its task builder back); one
 //!   without it mounts none. The depth limit 2 stays **task-only**: a task ignores its own
 //!   `spawn: true`, a named agent does not.
+//! - **Commits stay on its own branch** (O3): a worktree named agent mounts `git_commit` limited
+//!   to `radian/agent/<name>`; a `shared` one has no branch of its own, so it does not mount
+//!   `git_commit` at all — it can never commit onto the human's checked-out branch, and a
+//!   definition that lists `git_commit` is warned about in the send result.
 //!
 //! **`max_tasks` does not count named agents.** `max_tasks` is the process-wide cap on **task**
 //! agents (O8/O13); a named agent is an O12 long session, not a task, and this registry never
@@ -67,8 +71,8 @@ impl NamedError {
 
 /// What one `send` did (ADR 0030 O4/O12): the name, the session it went to, whether this call
 /// **created** the session (first use) or reused it, whether the input was **queued** behind a
-/// running turn (the `next_turn` lane), and the turn generation at the moment of the send (so a
-/// caller can wait for that turn to settle).
+/// running turn (the `next_turn` lane), and a **token** (the turn generation to wait past) so a
+/// caller can wait for exactly this send's turn to settle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendOutcome {
     pub name: String,
@@ -77,9 +81,15 @@ pub struct SendOutcome {
     pub created: bool,
     /// `true` when the agent was running and the input went to its `next_turn` lane.
     pub queued: bool,
-    /// The turn generation before the enqueue; [`NamedRecord::await_turn_end`] takes it.
+    /// The token to hand to [`NamedRecord::await_turn_end`] (or `wait_agent`'s `since`): the
+    /// send's own turn is the first turn whose end moves [`NamedRecord::turn_generation`] above
+    /// this value, so a caller that waits on it never misses a turn that ended in between. It is
+    /// the generation at the enqueue.
     pub turn: u64,
     pub worktree: Option<PathBuf>,
+    /// Warnings that did not fail the send (ADR 0030 O11/O3): a `skills` name discovery did not
+    /// find, or `git_commit` in a `shared` agent's `tools` list (it is not mounted).
+    pub warnings: Vec<String>,
 }
 
 /// What the [`NamedBuilder`] is told about the named agent it is building a session for. The
@@ -123,7 +133,8 @@ pub struct NamedRecord {
     pub branch: Option<String>,
     /// The snapshotted definition (never re-read while the session lives).
     pub agent: NamedAgent,
-    /// Skill names the definition named but discovery did not find (never a failure).
+    /// Skill names the definition named but discovery did not find, plus a `git_commit` a
+    /// `shared` definition listed (never mounted). Never a failure (ADR 0030 O11/O3).
     pub warnings: Vec<String>,
     /// The turn tracking shared with the runtime-events wrapper.
     turns: Arc<NamedTurns>,
@@ -160,11 +171,13 @@ impl NamedRecord {
         last_assistant_text(self.session.journal_path())
     }
 
-    /// Waits until the turn generation has moved past `start` and the agent is idle again, then
-    /// returns the last committed assistant text. Used for the TUI's completion notice.
+    /// Waits until the turn generation has moved above `start` and the agent is idle again, then
+    /// returns the last committed assistant text. Takes the token a [`SendOutcome`] carries, so
+    /// a turn that ended before the wait started still satisfies it. Used for the TUI's
+    /// completion notice and the lead's `wait_agent`.
     pub async fn await_turn_end(&self, start: u64) -> Option<String> {
         let mut turns = self.subscribe_turns();
-        while !(self.turn_generation() != start && !self.running()) {
+        while !(self.turn_generation() > start && !self.running()) {
             if turns.changed().await.is_err() {
                 return None;
             }
@@ -312,8 +325,11 @@ impl NamedRegistry {
                 ))
             })?;
             let (record, created) = self.get_or_create(name).await?;
+            // The token is the turn generation at the enqueue: the send's own turn is the first
+            // turn whose end moves the generation above it, so a wait on it never misses a turn
+            // that ended before the wait started.
+            let generation = record.turn_generation();
             let queued = record.running();
-            let turn = record.turn_generation();
             // The turn's source: the input that starts a turn resets it; a mid-turn one only
             // lowers (ADR 0012 decision 5). This mirrors the CLI host's `set_turn_source`.
             if queued {
@@ -334,8 +350,9 @@ impl NamedRegistry {
                 session_id: record.session.id().as_str().to_owned(),
                 created,
                 queued,
-                turn,
+                turn: generation,
                 worktree: record.worktree.clone(),
+                warnings: record.warnings.clone(),
             })
         })
     }
@@ -460,10 +477,24 @@ impl NamedRegistry {
         };
 
         // ADR 0030 O11: a `skills` name discovery did not find is a warning, never a failure.
-        let warnings = match &agent.skills {
+        let mut warnings = match &agent.skills {
             Some(allow) => crate::skills::missing(session.skills(), allow),
             None => Vec::new(),
         };
+        // ADR 0030 O3: a `shared` agent has no branch of its own, so `git_commit` is not
+        // mounted. A definition that lists it is told so, rather than silently losing the tool.
+        if isolation == Isolation::Shared
+            && agent
+                .tools
+                .as_deref()
+                .is_some_and(|tools| tools.iter().any(|name| name == "git_commit"))
+        {
+            warnings.push(
+                "`git_commit` is not mounted: a `shared` agent has no branch of its own \
+                 (ADR 0030 O3)"
+                    .to_owned(),
+            );
+        }
 
         // ADR 0030 O12: record the creation in the lead's journal so a resume can name it. After
         // the session exists, so a recorded agent is one that really opened.
@@ -501,6 +532,10 @@ fn enforce_named_setup(
     setup.coding_root = Some(workspace.to_path_buf());
     setup.parent = None;
     setup.allowed_branch = branch;
+    // ADR 0030 O3: an agent commits only to its own branch. A worktree named agent has
+    // `radian/agent/<name>`; a `shared` one has none, so it does not mount `git_commit` (and the
+    // tool refuses if it reached it), which is what keeps it off the human's checked-out branch.
+    setup.git_commit_requires_branch = true;
     // A named agent is not a task agent: `/mode` is allowed and `git_commit` does not refuse
     // `main` by the task rule (ADR 0038 decision 4).
     setup.task_agent = false;

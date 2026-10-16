@@ -1790,6 +1790,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             task_agent: false,
             parent: None,
             allowed_branch: None,
+            git_commit_requires_branch: false,
             memory_root,
             skills_extra_paths: setup.skills_extra_paths,
             skills_builtin: setup.skills_builtin,

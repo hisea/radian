@@ -202,9 +202,10 @@ pub fn specs() -> Vec<ToolSpec> {
             name: "send_agent".into(),
             description: "Send a task to a named agent (a long session the human commands), \
                           creating it from its definition on first use and reusing it after. \
-                          Returns at once with the name and whether it was created or reused; \
-                          read the reply with `wait_agent`. The input is `Subagent`, so it \
-                          cannot borrow your permissions."
+                          Returns at once with the name, whether it was created or reused, and a \
+                          `since` token; read the reply with `wait_agent` and pass that token as \
+                          `since` so a turn that already ended is not missed. The input is \
+                          `Subagent`, so it cannot borrow your permissions."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -239,8 +240,12 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "wait_agent".into(),
-            description: "Block until named agent `name` finishes its turn, then return the \
-                          last committed assistant text (bounded). A timeout returns \
+            description: "Block until named agent `name` finishes a turn, then return the \
+                          last committed assistant text (bounded). Pass the `since` token a \
+                          `send_agent` returned: the wait then returns as soon as the turn \
+                          that send started has ended — immediately if it already has, so a \
+                          fast turn is never missed. Without `since`, it waits for the next \
+                          turn to end from the moment it is called. A timeout returns \
                           `still_running` and never cancels the agent."
                 .into(),
             input_schema: wait_agent_schema(),
@@ -416,6 +421,13 @@ fn wait_agent_schema() -> Value {
         "type": "object",
         "properties": {
             "name": { "type": "string", "description": "The named agent to wait for." },
+            "since": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "The token a `send_agent` returned. The wait returns as soon as \
+                                the turn that send started has ended; with no `since` it waits \
+                                for the next turn to end from now."
+            },
             "timeout_secs": {
                 "type": "number",
                 "minimum": 0,
@@ -558,6 +570,9 @@ struct SendAgentArgs {
 #[serde(deny_unknown_fields)]
 struct WaitAgentArgs {
     name: String,
+    /// The token a `send_agent` returned; the wait returns as soon as that send's turn has
+    /// ended (`None` waits for the next turn end from the call).
+    since: Option<u64>,
     timeout_secs: Option<f64>,
 }
 
@@ -837,17 +852,25 @@ impl LeadSession {
             (false, true) => "reused, queued behind its current turn",
             (false, false) => "reused",
         };
+        let mut text = format!(
+            "sent to named agent `{}` ({state}); read the reply with `wait_agent` `since: {}`",
+            outcome.name, outcome.turn
+        );
+        for warning in &outcome.warnings {
+            text.push_str(&format!("\nwarning: {warning}"));
+        }
         Ok(ToolOutput {
-            content: vec![agent_core::ContentPart::text(format!(
-                "sent to named agent `{}` ({state}); read the reply with `wait_agent`",
-                outcome.name
-            ))],
+            content: vec![agent_core::ContentPart::text(text)],
             structured: Some(json!({
                 "agent": outcome.name,
                 "session_id": outcome.session_id,
                 "created": outcome.created,
                 "queued": outcome.queued,
+                // The token to pass back as `wait_agent`'s `since`, so a turn that ends before
+                // the wait starts is still seen (ADR 0030 O4/O12).
+                "since": outcome.turn,
                 "worktree": outcome.worktree.as_ref().map(|p| p.display().to_string()),
+                "warnings": outcome.warnings,
             })),
         })
     }
@@ -870,12 +893,14 @@ impl LeadSession {
             .ok_or_else(|| fail("no_such_agent", format!("no named agent `{}`", args.name)))?;
         let (timeout, timeout_secs) = wait_timeout(args.timeout_secs)?;
         let deadline = Instant::now() + timeout;
-        // The turn generation at the start of this wait: a turn that ends from here on (or a turn
-        // that starts and ends) advances it, so this returns the reply to the send just made.
-        let start = record.turn_generation();
+        // With `since` (the token a `send_agent` returned), wait for the generation to move
+        // **above** it: the send's own turn is the first one whose end does. This returns at
+        // once when that turn already ended, so a fast turn is never missed. Without `since`,
+        // keep today's behaviour: wait for the next turn end from the call.
+        let start = args.since.unwrap_or_else(|| record.turn_generation());
         let mut turns = record.subscribe_turns();
         loop {
-            if record.turn_generation() != start && !record.running() {
+            if record.turn_generation() > start && !record.running() {
                 return Ok(agent_finished(&record));
             }
             tokio::select! {

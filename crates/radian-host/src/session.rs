@@ -398,6 +398,14 @@ pub struct SessionSetup {
     /// When set, `git_commit` may only commit to this branch (a task agent's `radian/<id>`,
     /// ADR 0030 O3). `None` for a session with no branch restriction.
     pub allowed_branch: Option<String>,
+    /// Whether `git_commit` commits only to this session's **own** branch (ADR 0030 O3).
+    /// `true` for every agent the orchestration opens (a task agent, a named agent): when the
+    /// session has a branch (a worktree's `radian/...`) the tool is mounted and restricted to
+    /// it; when it has none (an `isolation = "shared"` agent, which runs in the human's own
+    /// workspace) the tool is **not mounted at all** — a shared agent must not be able to
+    /// commit onto whatever branch the human has checked out. `false` for the human's own
+    /// interactive `general`/`lead` session, which may commit on its checked-out branch.
+    pub git_commit_requires_branch: bool,
     /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
     pub memory_root: Option<PathBuf>,
     /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
@@ -1155,6 +1163,7 @@ pub async fn open_session(
         task_agent,
         parent,
         allowed_branch,
+        git_commit_requires_branch,
         memory_root,
         skills_extra_paths,
         skills_builtin,
@@ -1423,16 +1432,23 @@ pub async fn open_session(
     let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
     // ADR 0030 R10: pin the repository now, before the model runs. A workspace that is not a
-    // git repository does not mount `git_commit` at all.
-    let git_commit = crate::git_commit::RepoPin::resolve(&workspace).map(|pin| {
-        crate::git_commit::GitCommitTools::new(workspace.clone(), Arc::clone(&journal), pin)
-            .with_allowed_branch(allowed_branch)
-            .with_refuse_main(task_agent)
-            .with_protected_branches(protected_branches)
-            .with_allowed_filters(
-                allowed_filters.unwrap_or_else(crate::git_commit::default_allowed_filters),
-            )
-    });
+    // git repository does not mount `git_commit` at all. ADR 0030 O3: an agent that may commit
+    // only to its own branch does not mount `git_commit` when it has none (a `shared` agent in
+    // the human's workspace); the human's own interactive session (`false`) always mounts it.
+    let git_commit = if git_commit_requires_branch && allowed_branch.is_none() {
+        None
+    } else {
+        crate::git_commit::RepoPin::resolve(&workspace).map(|pin| {
+            crate::git_commit::GitCommitTools::new(workspace.clone(), Arc::clone(&journal), pin)
+                .with_allowed_branch(allowed_branch)
+                .with_require_branch(git_commit_requires_branch)
+                .with_refuse_main(task_agent)
+                .with_protected_branches(protected_branches)
+                .with_allowed_filters(
+                    allowed_filters.unwrap_or_else(crate::git_commit::default_allowed_filters),
+                )
+        })
+    };
     let mut tools =
         HostTools::new(coding, memory_tools, mcp.clone(), git_commit).with_tool_allow(tools_allow);
     let ask_registered = ask.is_some();
