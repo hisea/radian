@@ -1517,3 +1517,20 @@ Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个�
 12/12 抓住。ASK2 的两个变异在同一条用例里：待答一行、答完同一条目成块且只有一个块。ASK4-M1/M3 是
 owner 反馈的两个按键问题的回归钉：←/→ 切题（无字段时）与底边提示跟随聚焦状态。`check-glyph-coverage.py`
 的结果（☐/☑ 缺 SF Mono / JetBrains Mono Nerd / Cascadia Code）写在 ADR 0024 的「实施补充」里。
+
+## thin-ask：问答记录改开口框、标记改圆圈（ADR 0028，2026-10-16）
+
+Base `origin/main` `28f4703`（worktree `.radian-worktrees/thin-ask`）。每个变异就地改完跑
+`cargo test -p radian-tui --lib --no-fail-fast -- <名字>` 与 `--test render ...`，再从
+`.radian/scratch/blocks.rs.new` 写回并 `cmp -s` 逐字节相同。测试先改到新期望、对未改的实现跑过一遍，
+12 条全 FAILED（4 lib + 7 render + 1 question），再动实现。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ASK5-M1 | 开口框又封口（`ask_top` 的延伸段末尾加回 `╮`） | `blocks::tests::the_open_frame_rows_sit_in_the_marker_column`、`blocks::tests::the_ask_bottom_is_the_three_cell_tail` | ✅ |
+| ASK5-M2 | 多选改回 `☐`/`☑`（`AskGlyphs` 的 `multi_on`/`multi_off`） | `blocks::tests::the_ask_glyphs_use_one_circle_pair`、`render::the_ask_panel_uses_one_circle_pair_for_single_multi_and_other` | ✅ |
+| ASK5-M3 | 选项标记又加粗（`ask_body` 的 `{mark} ` 前缀改 `MdStyle::Accent`） | `render::the_transcript_ask_marker_is_never_bold` | ✅ |
+| ASK5-M4 | 正文从第 2 列起（`ask_body` 的 `│ ` 去掉标记后的空格） | `blocks::tests::the_open_frame_rows_sit_in_the_marker_column`、`render::a_declined_ask_shows_the_status_inside_the_block` | ✅ |
+
+4/4 抓住。面板的「标记不加粗」仍由既有的 `the_ask_panel_marker_is_never_bold` 钉住（ASK3-M1）；
+本片把 `AskGlyphs` 的单选/多选/Other 从 `☐`/`☑` 改成 `○`/`◉` 后，这条用例找的格子也从 `☑` 改成 `◉`。
