@@ -474,8 +474,7 @@ async fn a_timeout_returns_still_running_and_keeps_the_task() {
     fixture.registry.remove("t1", true).await.expect("remove");
 }
 
-/// A negative (or otherwise unrepresentable) `timeout_secs` is a bad-arguments failure, on both
-/// waits.
+/// A negative `timeout_secs` is a bad-arguments failure, on both waits.
 #[tokio::test]
 async fn a_bad_timeout_is_refused() {
     let fixture = Fixture::new("bad-timeout", "http://127.0.0.1:1/v1");
@@ -485,24 +484,101 @@ async fn a_bad_timeout_is_refused() {
         .spawn(SpawnRequest::new("t1"))
         .await
         .expect("spawn");
-    for arguments in [
+    let error = run_tool(
+        &session,
+        "wait_task",
         json!({"id": "t1", "timeout_secs": -1.0}),
-        json!({"id": "t1", "timeout_secs": 1e300}),
-    ] {
-        let error = run_tool(&session, "wait_task", arguments)
-            .await
-            .expect_err("a bad timeout must be refused");
-        assert_eq!(error.code, "invalid_arguments", "{error:?}");
-    }
+    )
+    .await
+    .expect_err("a negative timeout must be refused");
+    assert_eq!(error.code, "invalid_arguments", "{error:?}");
     let error = run_tool(
         &session,
         "wait_any",
         json!({"ids": ["t1"], "timeout_secs": -1.0}),
     )
     .await
-    .expect_err("a bad timeout must be refused");
+    .expect_err("a negative timeout must be refused");
     assert_eq!(error.code, "invalid_arguments", "{error:?}");
     fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// A huge `timeout_secs` must not panic the host: the deadline is clamped to 24 hours, so the
+/// wait still ends when the task finishes (and still respects cancellation while waiting).
+#[tokio::test]
+async fn a_huge_timeout_is_clamped_and_does_not_panic() {
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+    let fixture = Fixture::new("huge-timeout", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let session = fixture.lead_session().await;
+
+    // `wait_task` with a value that would overflow `Instant` on the old code.
+    let mut request = SpawnRequest::new("t1");
+    request.brief = Some("do it".into());
+    fixture.registry.spawn(request).await.expect("spawn");
+    let output = run_tool(
+        &session,
+        "wait_task",
+        json!({"id": "t1", "timeout_secs": 1e19}),
+    )
+    .await
+    .expect("wait");
+    assert_eq!(structured(&output)["event"], "finished");
+
+    // `wait_any` too.
+    let mut request = SpawnRequest::new("t2");
+    request.brief = Some("do it".into());
+    fixture.registry.spawn(request).await.expect("spawn");
+    let output = run_tool(
+        &session,
+        "wait_any",
+        json!({"ids": ["t1", "t2"], "timeout_secs": 1e19}),
+    )
+    .await
+    .expect("wait");
+    assert_eq!(structured(&output)["event"], "finished");
+
+    // A task that never finishes: the huge-timeout wait keeps waiting and still respects the
+    // turn's cancellation.
+    fixture
+        .registry
+        .spawn(SpawnRequest::new("t3"))
+        .await
+        .expect("spawn");
+    let session = Arc::new(session);
+    let token = CancellationToken::new();
+    let cancel = token.clone();
+    let handle = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            let sink = NoopSink;
+            let cx = ToolContext {
+                cancellation: token,
+                events: &sink,
+                index: 0,
+            };
+            let call = ToolCall {
+                id: "call-huge".into(),
+                name: "wait_task".into(),
+                arguments: json!({"id": "t3", "timeout_secs": 1e19}),
+            };
+            run_lead_tool(&session, &call, cx).await
+        }
+    });
+    tokio::task::yield_now().await;
+    cancel.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("the wait must end on cancellation")
+        .unwrap()
+        .expect_err("cancelled");
+    assert_eq!(error.code, "cancelled", "{error:?}");
+
+    fixture.registry.remove("t1", true).await.ok();
+    fixture.registry.remove("t2", true).await.ok();
+    fixture.registry.remove("t3", true).await.ok();
 }
 
 /// `wait_any` requires a non-empty `ids` and every id must exist before it waits.

@@ -60,13 +60,25 @@ pub const DEFAULT_WAIT_TIMEOUT_SECS: f64 = 600.0;
 /// Parses a `timeout_secs` argument (ADR 0030 O4: seconds, fractions allowed) into a duration.
 /// A negative, non-finite or unrepresentable value is an `invalid_arguments` failure. There is no
 /// artificial upper bound; the only limit is how large a `Duration` can be.
-fn wait_timeout(secs: Option<f64>) -> Result<Duration, ToolFailure> {
+/// The longest a lead wait may block (24 hours). A model-supplied `timeout_secs` is clamped to
+/// this, so `Instant::now() + timeout` can never overflow — a huge value (e.g. `1e15`) would
+/// otherwise panic the host, and a model argument must never panic the host. The `still_running`
+/// result reports the clamped value.
+pub const MAX_WAIT_TIMEOUT_SECS: f64 = 24.0 * 60.0 * 60.0;
+
+/// Parses a `timeout_secs` argument (ADR 0030 O4: seconds, fractions allowed) into a duration,
+/// clamped to [`MAX_WAIT_TIMEOUT_SECS`]. Returns the duration and the effective (clamped) seconds,
+/// which is what a `still_running` result reports. A negative or non-finite value is an
+/// `invalid_arguments` failure.
+fn wait_timeout(secs: Option<f64>) -> Result<(Duration, f64), ToolFailure> {
     let secs = secs.unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS);
-    Duration::try_from_secs_f64(secs).map_err(|_| {
-        invalid(format!(
+    if !secs.is_finite() || secs < 0.0 {
+        return Err(invalid(format!(
             "`timeout_secs` must be a finite, non-negative number of seconds, not {secs}"
-        ))
-    })
+        )));
+    }
+    let secs = secs.min(MAX_WAIT_TIMEOUT_SECS);
+    Ok((Duration::from_secs_f64(secs), secs))
 }
 
 /// The lead tool names, in the order the provider advertises them. The host adds these to the
@@ -317,7 +329,7 @@ fn wait_task_schema() -> Value {
                 "type": "number",
                 "minimum": 0,
                 "description": "How long to wait, in seconds (fractions allowed). Defaults to \
-                                600 (10 minutes)."
+                                600 (10 minutes); clamped to 24 hours."
             }
         },
         "required": ["id"],
@@ -340,7 +352,7 @@ fn wait_any_schema() -> Value {
                 "type": "number",
                 "minimum": 0,
                 "description": "How long to wait, in seconds (fractions allowed). Defaults to \
-                                600 (10 minutes)."
+                                600 (10 minutes); clamped to 24 hours."
             }
         },
         "required": ["ids"],
@@ -558,8 +570,7 @@ impl LeadSession {
             .registry
             .get(&args.id)
             .ok_or_else(|| fail("no_such_task", format!("no task `{}`", args.id)))?;
-        let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS);
-        let timeout = wait_timeout(args.timeout_secs)?;
+        let (timeout, timeout_secs) = wait_timeout(args.timeout_secs)?;
         let deadline = Instant::now() + timeout;
         // Subscribe before the first check: an event raised between the check and the wait is
         // never lost (the watch version advanced after the receiver captured it).
@@ -595,8 +606,7 @@ impl LeadSession {
         if args.ids.is_empty() {
             return Err(invalid("`ids` must not be empty"));
         }
-        let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS);
-        let timeout = wait_timeout(args.timeout_secs)?;
+        let (timeout, timeout_secs) = wait_timeout(args.timeout_secs)?;
         let deadline = Instant::now() + timeout;
         // Every id must exist before the wait starts (ADR 0030 O4): an unknown id is a failure,
         // not a silent skip. Duplicates are fine; the watch set is deduped.
@@ -1073,5 +1083,18 @@ mod tests {
         let (text, truncated) = bounded_field(&long, TASK_SUMMARY_LIMIT_CHARS);
         assert!(truncated);
         assert!(text.as_str().unwrap().contains("[truncated]"));
+    }
+
+    #[test]
+    fn a_huge_timeout_is_clamped_to_a_day() {
+        let (duration, secs) = wait_timeout(Some(1e15)).expect("finite");
+        assert_eq!(secs, MAX_WAIT_TIMEOUT_SECS);
+        assert_eq!(duration, Duration::from_secs(86_400));
+        // The default and a fraction are not perturbed.
+        let (duration, secs) = wait_timeout(None).expect("the default");
+        assert_eq!(secs, DEFAULT_WAIT_TIMEOUT_SECS);
+        assert_eq!(duration, Duration::from_secs(600));
+        let (_, secs) = wait_timeout(Some(0.02)).expect("a fraction");
+        assert_eq!(secs, 0.02);
     }
 }

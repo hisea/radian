@@ -1076,3 +1076,16 @@ inbox」与「lead 的回合来源被任务事件降低」在 part a 里**不可
 | S6A-10 | `wait_any` 去掉 ids 过滤（`self.registry.pending_next_in(&args.ids)` 换回 `self.registry.pending_next()`，取队首任意任务） | ✅ failed | `wait_any_ignores_a_task_not_in_ids`（不属于 ids 的 t2 的提问被 t1 的等待取走，等待不再超时） |
 
 1/1 抓住。跑法：把 `wait_any` 里那一行换成 `pending_next()`，`cargo test -p radian-host --test lead_tools wait_any_ignores_a_task_not_in_ids`。
+
+### orch-s6a review fix 2（2026-10-16）：`timeout_secs` 上限（`Instant` 溢出）
+
+`wait_timeout` 把 `timeout_secs` 夹到 24 小时（`MAX_WAIT_TIMEOUT_SECS`），所以 `Instant::now() + timeout`
+不会溢出；`still_running` 报的是夹取后的值。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S6A-11 | 去掉夹取（`let secs = secs.min(MAX_WAIT_TIMEOUT_SECS);` 换成 `let secs = secs;`） | ✅ failed | `a_huge_timeout_is_clamped_and_does_not_panic`（旧代码在 `tokio::time::Instant` 上 panic：`overflow when adding duration to instant`）；单元测试 `a_huge_timeout_is_clamped_to_a_day` 也失败（`1e15` 未被夹到 `86400`） |
+
+**平台说明（如实记录）**：reviewer 给的例子是 `1e15`，但 macOS 上 `Instant` 用 `i64` 秒存，`1e15` 秒加得下、不 panic
+（集成测试在变异下仍通过）。真正 panic 的是 `1e19`（`i64` 秒溢出、但仍是合法 `Duration`），所以测试用
+`1e19`；夹取去掉后集成测试确实 panic。单元测试与平台无关，两种值下都抓住夹取被去掉。
