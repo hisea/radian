@@ -182,6 +182,7 @@ async fn open(
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
+            task_builder: None,
         },
     )
     .await

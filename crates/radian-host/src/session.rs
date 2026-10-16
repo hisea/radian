@@ -475,6 +475,11 @@ pub struct HostBindings {
     /// write registered, and how to join it to a previous one). The CLI prints it to stderr
     /// and the TUI shows it as a notice.
     pub memory_notice_line: Arc<dyn Fn(&str) + Send + Sync>,
+    /// Builds the host-specific parts of a **task** session (ADR 0030 slice 6). `Some` mounts
+    /// the lead's task tools from the start for an interactive (non-task) session, behind the
+    /// `/mode` gate (ADR 0038 decision 1); `None` mounts none. A task session never mounts them
+    /// (depth limit 2), whatever its builder returns.
+    pub task_builder: Option<crate::task::TaskBuilder>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).
@@ -539,6 +544,8 @@ pub struct LocalSession {
     access_builder: Option<AccessBuilder>,
     /// Whether this session is a task agent (ADR 0030 O2): `set_mode` refuses then.
     task_agent: bool,
+    /// The lead's task registry (ADR 0030 slice 6), or `None` for a session with no lead tools.
+    lead: Option<Arc<crate::task::TaskRegistry>>,
     /// Whether layer 1 is fixed for the session (`--system` or an explicit role): `set_mode`
     /// refuses then.
     role_fixed: bool,
@@ -599,6 +606,13 @@ impl LocalSession {
     /// it; `/jobs` uses the facade's `jobs()`/`kill_job()` instead.
     pub fn jobs_registry(&self) -> Option<Arc<radian_coding::Jobs>> {
         self.jobs.clone()
+    }
+
+    /// The lead's task registry (ADR 0030 slice 6), or `None` for a session with no lead tools
+    /// (a task agent, or a host that supplied no task builder). The lead's tools are the model's
+    /// interface to it; this is for the host (the TUI's task count, `/tasks`).
+    pub fn lead_tasks(&self) -> Option<&Arc<crate::task::TaskRegistry>> {
+        self.lead.as_ref()
     }
 
     pub fn projection(&self) -> &Arc<SessionProjection> {
@@ -1080,6 +1094,7 @@ pub async fn open_session(
         before_driver,
         memory_warning,
         memory_notice_line,
+        task_builder,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -1250,10 +1265,36 @@ pub async fn open_session(
     }
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
+    // The lead's task registry (ADR 0030 slice 6): built here because it needs the session's
+    // journal (its `TaskSpawned`/`TaskFinished` land there) and the shared pending queue. A task
+    // agent never builds one.
+    let lead_mounted = !task_agent && task_builder.is_some();
+    let lead_registry = if lead_mounted {
+        let builder = task_builder.expect("lead_mounted implies a task builder");
+        Some(Arc::new(crate::task::TaskRegistry::new(
+            workspace.clone(),
+            session_id.as_str(),
+            Arc::clone(&journal),
+            Arc::clone(&queue),
+            builder,
+        )))
+    } else {
+        None
+    };
+
     // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line
     // prompt answers them directly. A task agent routes to its own task approver (ADR 0030
     // slice 5), which is the one case a non-human turn may reach the approver.
     let task_routing = matches!(&approvals, ApprovalRouting::Task { .. });
+    // ADR 0030 slice 6: an interactive session whose host supplied a task builder mounts the
+    // lead tools **from the start** (ADR 0030 item 5); a task agent never does
+    // (depth limit 2). The profile allows the tool names and the mode gate refuses them
+    // outside `lead`, so `/mode` never adds or removes a tool (ADR 0038 decision 1).
+    let profile = if lead_mounted {
+        profile.with_allowed_tools(&crate::lead_tools::LEAD_TOOL_NAMES)
+    } else {
+        profile
+    };
     let approver: Arc<dyn Approver> = match approvals {
         ApprovalRouting::Queued => {
             Arc::new(QueuedApprover::new(Arc::clone(&queue), origin.clone()))
@@ -1315,6 +1356,13 @@ pub async fn open_session(
     }
     if !shared_skills.is_empty() {
         tools = tools.with_skills(SkillTools::new(Arc::clone(&shared_skills)));
+    }
+    // ADR 0030 slice 6: mount the lead tools from the start and gate them on the mode. The tools
+    // stay in the model's list in every mode (`/mode` never adds or removes one, revision 5 item
+    // 5); the gate turns a call into a "switch with /mode lead" refusal in `general`.
+    if let Some(registry) = &lead_registry {
+        tools = tools.with_lead(crate::lead_tools::LeadTools::new(Arc::clone(registry)));
+        hooks.set_tool_gate(Some(lead_mode_gate(Arc::clone(&config_slot))));
     }
     // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> lists
     // the tools this host actually mounted and the tier/sandbox facts; 1 <role> is the role
@@ -1560,6 +1608,7 @@ pub async fn open_session(
         sandbox_slot,
         access_builder,
         task_agent,
+        lead: lead_registry,
         role_fixed,
         facts_hooks,
         projection,
@@ -1579,6 +1628,23 @@ pub async fn open_session(
         facts,
         config_snapshot,
         history: recovered_history,
+    })
+}
+
+/// The gate that keeps the lead tools behind `lead` mode (ADR 0030 slice 6, ADR 0038 decision
+/// 1): a call to one of them is denied unless the session's mode is `lead`. The mode comes from
+/// the driver's config slot, which `/mode` only moves at a **turn boundary**, so the switch
+/// takes effect on the next turn and never mid-turn. Deny-only: no rule, grant or approver can
+/// widen it.
+fn lead_mode_gate(slot: Arc<radian_runtime::ConfigSlot>) -> radian_permissions::ToolGate {
+    Arc::new(move |tool: &str| {
+        if crate::lead_tools::LEAD_TOOL_NAMES.contains(&tool)
+            && crate::prompt::Mode::of(&slot.value()) != crate::prompt::Mode::Lead
+        {
+            Some("the lead tools are off outside lead mode: switch with /mode lead".to_owned())
+        } else {
+            None
+        }
     })
 }
 

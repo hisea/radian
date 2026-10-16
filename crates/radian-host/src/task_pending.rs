@@ -246,10 +246,24 @@ impl TaskPendingQueue {
     /// (ADR 0030). Returns `None` when nothing is waiting. Entries whose
     /// waiting end is gone are dropped first, so a cancelled task's event never blocks the lead.
     pub fn next(&self) -> Option<TaskPendingView> {
+        self.take(None)
+    }
+
+    /// [`TaskPendingQueue::next`] restricted to one task (ADR 0030 slice 6's `wait_task { id }`):
+    /// the first event that task raised, untouched by another task's earlier event.
+    pub fn next_for(&self, task_id: &str) -> Option<TaskPendingView> {
+        self.take(Some(task_id))
+    }
+
+    /// The shared body of [`TaskPendingQueue::next`]/[`TaskPendingQueue::next_for`].
+    fn take(&self, task_id: Option<&str>) -> Option<TaskPendingView> {
         let view = {
             let mut state = self.lock();
             retain_open(&mut state);
-            let position = state.entries.iter().position(|entry| !entry.taken)?;
+            let position = state
+                .entries
+                .iter()
+                .position(|entry| !entry.taken && task_id.is_none_or(|id| entry.task_id == id))?;
             let entry = &mut state.entries[position];
             entry.taken = true;
             TaskPendingView {

@@ -569,3 +569,58 @@ async fn switching_the_profile_changes_the_next_decision() {
         ToolDecision::Allow
     ));
 }
+
+// ---------- ADR 0030 slice 6: the deny-only tool-name gate ----------
+
+/// The gate denies a name before the rules run, so an `allow` rule (the lead tools get one via
+/// `with_allowed_tools`) cannot widen it, and the approver is never consulted. Clearing the gate
+/// lets the allow rule answer — the "/mode lead" path.
+#[tokio::test]
+async fn the_tool_gate_denies_before_the_rules_and_the_approver() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = TempDir::new("tool-gate");
+    let lead = Arc::new(AtomicBool::new(false));
+    let approver = ScriptedApprover::scripted(Vec::new());
+    let audit = Arc::new(RecordingAudit::default());
+    let hooks = Arc::new(PermissionHooks::new(
+        Profile::workspace_write(dir.path())
+            .unwrap()
+            .with_allowed_tools(&["spawn_task"]),
+        Some(Arc::clone(&approver) as Arc<dyn Approver>),
+        Arc::clone(&audit) as Arc<dyn radian_permissions::AuditSink>,
+    ));
+    let gate_flag = Arc::clone(&lead);
+    hooks.set_tool_gate(Some(Arc::new(move |tool: &str| {
+        (tool == "spawn_task" && !gate_flag.load(Ordering::SeqCst))
+            .then(|| "the lead tools are off in general mode: switch with /mode lead".to_owned())
+    })));
+    hooks.set_turn_source(Some(InputSource::User));
+    let cx = ctx();
+    let spawn = call("spawn_task", json!({"brief": "do it"}));
+
+    let decision = decide(&hooks, &cx, &spawn).await.unwrap();
+    let ToolDecision::Deny { reason } = decision else {
+        panic!("general mode must deny spawn_task, got {decision:?}");
+    };
+    assert!(reason.contains("/mode lead"), "{reason}");
+    assert_eq!(
+        approver.calls(),
+        0,
+        "the gate must not consult the approver"
+    );
+
+    // Lead: the gate passes and the allow rule answers, with no prompt.
+    lead.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        decide(&hooks, &cx, &spawn).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(approver.calls(), 0);
+
+    // Both decisions are audited, as policy denials/allowances.
+    let events = audit.events();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events[0].decision, ResolvedDecision::Deny);
+    assert_eq!(events[1].decision, ResolvedDecision::Allow);
+}
