@@ -318,3 +318,20 @@ SJ5 要在 1000 次瞬时 job 里跑出一次线程调度倒序：`Started` 与 
 spawn supervisor 之后还要 insert 并 `send`，所以 supervisor 偶尔先跑完。本机在第 117 次复现。修好后
 supervisor 在 `Started` 之后才 spawn，倒序在构造上不可能；测试仍保留 1000 次以防回归（不依赖时间）。
 `JobNotifier::spawn` 的订阅顺序（SJ6）在 `radian-host/MUTATIONS.md`。
+
+## review fix 1：`job_output` 读完整输出文件（ADR 0039 决定 1 复核，2026-10-16）
+
+工作树 `oc/sec-jobs` · 变异就地改 `jobs.rs` 的 `FileMode::Tail` 分支，跑完从
+`.radian/scratch/mut/jobs.fix1.orig.rs` 还原并 `diff -q` 确认，`git status --short` 干净。
+新测试 `cargo test -p radian-coding --test job_output_file`。
+
+新增的 `job_output_file` 三个用例在**修复前**必失败：`tail_lines`/`from_line`/`max_lines`/
+`pattern` 不是旧 schema 的属性，`args::parse` 直接报 `unknown argument`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SJ7 | `job_output` 的 `tail_lines` 只从 64 KiB ring 取最后几行（不读文件） | `job_output_file::the_file_arguments_read_the_full_output_not_the_ring`（`tail_lines: 100000` 的第一行变成 ring 窗口的 `190638`，而不是文件第 `100001` 行） | ✅ failed |
+
+SJ7 说明「tail 从 ring 也能取到小的尾巴」不足以证明读文件：只有尾巴大于 ring 的窗口时才区分得开，
+所以用例用 `tail_lines: 100000` 钉住起点行号。`from_line: 1, max_lines: 3` 与
+`pattern: ^1234$` 另从 ring 已丢弃的部分各钉一次读文件。

@@ -301,7 +301,7 @@ impl ToolSession for CodingSession {
                     "`shell` needs a sandbox and this session has none",
                 )),
             },
-            "job_output" => jobs::run_output(&self.jobs, &call.arguments, &cx).await,
+            "job_output" => jobs::run_output(&self.jobs, &self.limits, &call.arguments, &cx).await,
             "job_list" => jobs::run_list(&self.jobs),
             "job_kill" => jobs::run_kill(&self.jobs, &call.arguments),
             other => Err(fail(

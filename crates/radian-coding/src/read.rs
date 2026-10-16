@@ -402,7 +402,7 @@ fn read_line_capped<R: BufRead>(
 /// Consumes up to `lines` complete lines, storing nothing: only newlines are counted. Constant
 /// memory, so skipping to a line in a file whose lines are enormous stays cheap in memory (the
 /// time is still O(bytes scanned), which the caller chose by asking for that offset).
-fn skip_lines<R: BufRead>(reader: &mut R, lines: i64) -> std::io::Result<i64> {
+pub(crate) fn skip_lines<R: BufRead>(reader: &mut R, lines: i64) -> std::io::Result<i64> {
     let mut count = 0i64;
     while count < lines {
         let (take, has_newline, at_eof) = {

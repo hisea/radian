@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,6 +43,7 @@ use serde_json::json;
 
 use crate::args;
 use crate::fail;
+use crate::provider::Limits;
 use crate::shell::{lock_bool, sandboxed_command, signal_group, wait_for_exit_without_reaping};
 
 /// How many background jobs may run at once in one session (ADR 0037 decision 7). A job costs
@@ -139,6 +140,9 @@ struct JobCell {
     ring: Ring,
     /// The model's read cursor: an absolute byte offset into everything the job produced.
     read_offset: u64,
+    /// The registry-computed output file (ADR 0039 decision 1). `job_output`'s file arguments
+    /// read this path; it is never built from a model-supplied string.
+    output: PathBuf,
     /// The process group id (the leader's pid).
     pgid: u32,
     /// How many `job_output wait=true` calls are blocked on this job right now. A settle with
@@ -303,6 +307,7 @@ impl Jobs {
             termination: None,
             ring: Ring::default(),
             read_offset: 0,
+            output: output.clone(),
             pgid: pid,
             reaped: Arc::new(Mutex::new(false)),
             waiters: 0,
@@ -828,13 +833,35 @@ pub(crate) fn output_schema() -> serde_json::Value {
             "wait": {
                 "type": "boolean",
                 "description": "Block until the job ends (or timeout_ms elapses). Default \
-                                false: return the output so far at once."
+                                false: return the output so far at once. Ignored by the file \
+                                arguments below."
             },
             "timeout_ms": {
                 "type": "integer",
                 "minimum": 1,
                 "description": "How long `wait` may block, in milliseconds (default 30000, \
                                 maximum 600000). On timeout the job keeps running."
+            },
+            "from_line": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "1-based line of the job's **full output file** to start at. \
+                                Use with max_lines to page past what the ring kept."
+            },
+            "max_lines": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum full-file lines to return from from_line."
+            },
+            "tail_lines": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Return the last N lines of the full output file."
+            },
+            "pattern": {
+                "type": "string",
+                "description": "Return only full-file lines matching this Rust regex (same \
+                                convention as `grep`), numbered and capped."
             }
         },
         "required": ["job_id"],
@@ -850,9 +877,13 @@ pub(crate) fn output_spec() -> ToolSpec {
                       signal n / killed / timed out). Do not sleep or poll: pass `wait: true` \
                       to block until the job ends (or `timeout_ms` elapses; the default is \
                       30000, the maximum 600000). A wait timeout returns `[status: running]` \
-                      and does **not** kill the job. This is the only way to read a background \
-                      job's output: its file is outside the workspace and not readable from \
-                      inside the sandbox, so `job_output` is what delivers it."
+                      and does **not** kill the job. The job's output file is outside the \
+                      workspace and not readable from inside the sandbox, so this tool is the \
+                      only way to read it. The incremental read above is a bounded ring; when \
+                      it has dropped bytes, read the full file by line with `tail_lines` (the \
+                      last N), `from_line`/`max_lines` (a range, numbered like `read`), or \
+                      `pattern` (only matching lines). The file result names the file's total \
+                      line count and whether more remains, so you can page."
             .into(),
         input_schema: output_schema(),
         concurrency: ToolConcurrency::Shared,
@@ -914,14 +945,107 @@ struct OutputArgs {
     job_id: String,
     wait: Option<bool>,
     timeout_ms: Option<u64>,
+    /// 1-based line of the full output file to start at.
+    from_line: Option<u64>,
+    /// Maximum full-file lines to return from `from_line`.
+    max_lines: Option<u64>,
+    /// The last N lines of the full output file.
+    tail_lines: Option<u64>,
+    /// Only full-file lines matching this Rust regex.
+    pattern: Option<String>,
+}
+
+/// Which part of the **full** output file a `job_output` call asks for (ADR 0039 decision 1: the
+/// model reads the whole output through this tool). The three modes are mutually exclusive;
+/// `None` is the unchanged incremental ring read.
+enum FileMode {
+    Range {
+        from_line: u64,
+        max_lines: Option<u64>,
+    },
+    Tail {
+        lines: u64,
+    },
+    Pattern {
+        source: String,
+        regex: regex::Regex,
+    },
+}
+
+impl FileMode {
+    /// The file mode the arguments request, or `None` for the ring behaviour. `wait`/`timeout_ms`
+    /// do not apply to a file mode: it reads the file as it stands right now.
+    fn from_args(args: &OutputArgs, raw: &serde_json::Value) -> Result<Option<Self>, ToolFailure> {
+        let requested = [
+            args.pattern.is_some(),
+            args.tail_lines.is_some(),
+            args.from_line.is_some() || args.max_lines.is_some(),
+        ]
+        .into_iter()
+        .filter(|wanted| *wanted)
+        .count();
+        if requested == 0 {
+            return Ok(None);
+        }
+        if requested > 1 {
+            return Err(args::invalid(
+                "job_output",
+                raw,
+                ["use only one of `pattern`, `tail_lines`, or `from_line`/`max_lines`"],
+            ));
+        }
+        if let Some(lines) = args.tail_lines {
+            if lines < 1 {
+                return Err(args::invalid(
+                    "job_output",
+                    raw,
+                    ["`tail_lines` must be at least 1"],
+                ));
+            }
+            return Ok(Some(FileMode::Tail { lines }));
+        }
+        if let Some(source) = &args.pattern {
+            let regex = regex::Regex::new(source)
+                .map_err(|error| fail("invalid_regex", format!("`{source}`: {error}")))?;
+            return Ok(Some(FileMode::Pattern {
+                source: source.clone(),
+                regex,
+            }));
+        }
+        let from_line = args.from_line.unwrap_or(1);
+        if from_line < 1 {
+            return Err(args::invalid(
+                "job_output",
+                raw,
+                ["`from_line` must be at least 1"],
+            ));
+        }
+        if let Some(lines) = args.max_lines
+            && lines < 1
+        {
+            return Err(args::invalid(
+                "job_output",
+                raw,
+                ["`max_lines` must be at least 1"],
+            ));
+        }
+        Ok(Some(FileMode::Range {
+            from_line,
+            max_lines: args.max_lines,
+        }))
+    }
 }
 
 pub(crate) async fn run_output(
     jobs: &Jobs,
+    limits: &Limits,
     arguments: &serde_json::Value,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
     let args: OutputArgs = args::parse("job_output", &output_schema(), arguments)?;
+    if let Some(mode) = FileMode::from_args(&args, arguments)? {
+        return read_output_file(jobs, &args.job_id, mode, limits);
+    }
     let timeout = Duration::from_millis(
         args.timeout_ms
             .unwrap_or(DEFAULT_WAIT_MS)
@@ -947,7 +1071,8 @@ pub(crate) async fn run_output(
     }
     if result.dropped > 0 {
         text.push_str(&format!(
-            "[{} bytes dropped before this read; only the most recent output is available]\n",
+            "[{} bytes dropped before this read; page the full file with tail_lines, \
+             from_line/max_lines or pattern]\n",
             result.dropped
         ));
     }
@@ -973,6 +1098,282 @@ pub(crate) async fn run_output(
             "dropped_bytes": result.dropped,
         })),
     })
+}
+
+// ---------- reading the full output file ----------
+
+/// The most a single file line contributes before it is marked `[truncated]` (grep's cap).
+const JOB_LINE_BYTES: usize = crate::grep::MAX_LINE_BYTES;
+
+/// Opens a job's output file for reading. The path comes from the registry cell, never a
+/// model-supplied string; `O_NOFOLLOW` refuses a symlink at the final component. That is
+/// defence in depth — the host created the file itself with `O_EXCL` in a directory the model
+/// cannot write — but it keeps the read path on the same rule as the write path.
+fn open_job_output_read(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+/// The number of lines in `path` as the read tool numbers them: a trailing newline does not add
+/// an empty final line, and a non-empty file with no final newline has one more line.
+fn count_output_lines(path: &Path) -> std::io::Result<u64> {
+    let mut reader = BufReader::new(open_job_output_read(path)?);
+    let mut count = 0u64;
+    let mut any = false;
+    let mut last_was_newline = true;
+    let mut buf = [0u8; 64 << 10];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        any = true;
+        for &byte in &buf[..n] {
+            if byte == b'\n' {
+                count += 1;
+                last_was_newline = true;
+            } else {
+                last_was_newline = false;
+            }
+        }
+    }
+    if any && !last_was_newline {
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// A line range of the full output file, already numbered `N: `.
+struct RangeRead {
+    content: String,
+    start_line: u64,
+    end_line: u64,
+    returned: u64,
+    next_line: Option<u64>,
+}
+
+/// Reads at most `max_lines` numbered lines from `from_line`, bounded by `budget` bytes. The
+/// skip is constant memory; each line is capped at [`JOB_LINE_BYTES`].
+fn read_output_range(
+    path: &Path,
+    from_line: u64,
+    max_lines: Option<u64>,
+    budget: usize,
+) -> std::io::Result<RangeRead> {
+    let mut reader = BufReader::new(open_job_output_read(path)?);
+    crate::read::skip_lines(&mut reader, (from_line - 1) as i64)?;
+    let mut content = String::new();
+    let mut line: Vec<u8> = Vec::new();
+    let mut lineno = from_line;
+    let mut returned = 0u64;
+    let mut next_line = None;
+    loop {
+        if let Some(max) = max_lines
+            && returned >= max
+        {
+            next_line = Some(lineno);
+            break;
+        }
+        let truncated = match crate::grep::read_line_capped(&mut reader, &mut line, JOB_LINE_BYTES)?
+        {
+            crate::grep::LineRead::Eof => break,
+            crate::grep::LineRead::Complete => false,
+            crate::grep::LineRead::TooLong => true,
+        };
+        let text = crate::grep::strip_line_end(&line);
+        let entry = if truncated {
+            format!("{lineno}: {text}[truncated]\n")
+        } else {
+            format!("{lineno}: {text}\n")
+        };
+        if content.len() + entry.len() > budget {
+            next_line = Some(lineno);
+            break;
+        }
+        content.push_str(&entry);
+        returned += 1;
+        lineno += 1;
+    }
+    Ok(RangeRead {
+        content,
+        start_line: from_line,
+        end_line: if returned == 0 {
+            from_line.saturating_sub(1)
+        } else {
+            lineno - 1
+        },
+        returned,
+        next_line,
+    })
+}
+
+/// Matching lines of the full output file, already numbered `N: `.
+struct PatternRead {
+    content: String,
+    total_lines: u64,
+    matches: u64,
+    cut: bool,
+}
+
+/// Scans the whole file for `regex`, numbering the matching lines, capped at `cap` matches and
+/// `budget` bytes. The scan continues to end of file so the result can name the total line
+/// count and the model can page with `from_line`/`tail_lines`.
+fn pattern_output(
+    path: &Path,
+    regex: &regex::Regex,
+    budget: usize,
+    cap: usize,
+) -> std::io::Result<PatternRead> {
+    let mut reader = BufReader::new(open_job_output_read(path)?);
+    let mut content = String::new();
+    let mut line: Vec<u8> = Vec::new();
+    let mut lineno = 1u64;
+    let mut matches = 0u64;
+    let mut cut = false;
+    loop {
+        let truncated = match crate::grep::read_line_capped(&mut reader, &mut line, JOB_LINE_BYTES)?
+        {
+            crate::grep::LineRead::Eof => break,
+            crate::grep::LineRead::Complete => false,
+            crate::grep::LineRead::TooLong => true,
+        };
+        let text = crate::grep::strip_line_end(&line);
+        if regex.is_match(&text) && !cut {
+            if matches >= cap as u64 {
+                cut = true;
+            } else {
+                let entry = if truncated {
+                    format!("{lineno}: {text}[truncated]\n")
+                } else {
+                    format!("{lineno}: {text}\n")
+                };
+                if content.len() + entry.len() > budget {
+                    cut = true;
+                } else {
+                    content.push_str(&entry);
+                    matches += 1;
+                }
+            }
+        }
+        lineno += 1;
+    }
+    Ok(PatternRead {
+        content,
+        total_lines: lineno - 1,
+        matches,
+        cut,
+    })
+}
+
+/// The read of a job's own output file failed. The path is not shown to the model.
+fn read_failure(error: &std::io::Error) -> ToolFailure {
+    fail(
+        "jobs_output",
+        format!("could not read the job's output file: {error}"),
+    )
+}
+
+fn read_output_file(
+    jobs: &Jobs,
+    id: &str,
+    mode: FileMode,
+    limits: &Limits,
+) -> Result<ToolOutput, ToolFailure> {
+    // The id must be a real registry key; a path-like id is an unknown job, never a path.
+    let cell = jobs.get(id)?;
+    let path = lock(&cell).output.clone();
+    let budget = limits.default_read_bytes;
+    match mode {
+        FileMode::Range {
+            from_line,
+            max_lines,
+        } => {
+            let total = count_output_lines(&path).map_err(|e| read_failure(&e))?;
+            let range = read_output_range(&path, from_line, max_lines, budget)
+                .map_err(|e| read_failure(&e))?;
+            Ok(render_range(id, "range", range, total))
+        }
+        FileMode::Tail { lines } => {
+            let total = count_output_lines(&path).map_err(|e| read_failure(&e))?;
+            // 1-based: the last `lines` lines are `total - lines + 1 ..= total`.
+            let start = total.saturating_sub(lines) + 1;
+            let range = read_output_range(&path, start, Some(lines), budget)
+                .map_err(|e| read_failure(&e))?;
+            Ok(render_range(id, "tail", range, total))
+        }
+        FileMode::Pattern { source, regex } => {
+            let scan = pattern_output(&path, &regex, budget, limits.default_grep_matches)
+                .map_err(|e| read_failure(&e))?;
+            Ok(render_pattern(id, &source, scan))
+        }
+    }
+}
+
+fn render_range(id: &str, mode: &str, range: RangeRead, total: u64) -> ToolOutput {
+    let mut text = range.content.clone();
+    if range.returned == 0 {
+        text.push_str(&format!(
+            "[no lines in that range of the output file ({total} lines total)]\n"
+        ));
+    } else {
+        text.push_str(&format!(
+            "[output file: {total} lines; showing lines {}-{}]\n",
+            range.start_line, range.end_line
+        ));
+        match range.next_line {
+            Some(next) => text.push_str(&format!(
+                "[more remains: call job_output with from_line={next}]\n"
+            )),
+            None => text.push_str("[end of output file]\n"),
+        }
+    }
+    let structured = json!({
+        "job_id": id,
+        "source": "file",
+        "mode": mode,
+        "total_lines": total,
+        "start_line": range.start_line,
+        "end_line": range.end_line,
+        "returned": range.returned,
+        "next_line": range.next_line,
+        "truncated": range.next_line.is_some(),
+    });
+    ToolOutput {
+        content: vec![ContentPart::text(text)],
+        structured: Some(structured),
+    }
+}
+
+fn render_pattern(id: &str, source: &str, scan: PatternRead) -> ToolOutput {
+    let mut text = scan.content.clone();
+    if scan.matches == 0 {
+        text.push_str(&format!("[no matches for `{source}`]\n"));
+    }
+    text.push_str(&format!(
+        "[output file: {} lines; {} matching line(s) for `{source}`{}]\n",
+        scan.total_lines,
+        scan.matches,
+        if scan.cut { "; more were cut" } else { "" }
+    ));
+    let structured = json!({
+        "job_id": id,
+        "source": "file",
+        "mode": "pattern",
+        "pattern": source,
+        "total_lines": scan.total_lines,
+        "matches": scan.matches,
+        "truncated": scan.cut,
+    });
+    ToolOutput {
+        content: vec![ContentPart::text(text)],
+        structured: Some(structured),
+    }
 }
 
 pub(crate) fn run_list(jobs: &Jobs) -> Result<ToolOutput, ToolFailure> {

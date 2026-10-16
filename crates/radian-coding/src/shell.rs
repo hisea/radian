@@ -93,8 +93,10 @@ pub(crate) fn schema() -> serde_json::Value {
                                 its output goes outside the workspace and is not readable \
                                 from inside the sandbox. Read it with `job_output` (pass \
                                 `wait: true` to wait for the end), list jobs with \
-                                `job_list`, stop one with `job_kill`. No default timeout. \
-                                Do not sleep or poll."
+                                `job_list`, stop one with `job_kill`. `job_output` returns \
+                                a bounded incremental ring; use `job_output` with \
+                                `tail_lines` / `pattern` / `from_line` to see more than the \
+                                last 64 KiB. No default timeout. Do not sleep or poll."
             }
         },
         "required": ["command"],
@@ -156,7 +158,9 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
              true`, which has no default timeout. Use `cwd` (workspace-relative) to run \
              somewhere other than the workspace root. Set `background: true` for a command \
              that outlives the foreground timeout: it returns at once with a job id, and the \
-             three `job_*` tools read, list and stop it. Background jobs \
+             three `job_*` tools read, list and stop it. `job_output` is a bounded \
+             incremental ring; use `job_output` with `tail_lines` / `pattern` / `from_line` to \
+             see more than the last 64 KiB. Background jobs \
              have no default timeout. Do not sleep or poll; use `job_output` with `wait: \
              true` to wait for the end."
         ),
@@ -307,6 +311,8 @@ fn start_background(
          its output is {output}\n\
          read it with `job_output` (pass `wait: true` to wait for the end); `job_list` lists \
          this session's jobs; `job_kill` stops one.\n\
+         `job_output` is a bounded incremental ring; use `job_output` with `tail_lines`, \
+         `pattern` or `from_line`/`max_lines` to see the whole file.\n\
          Do not sleep or poll: use `job_output` with `wait: true` to wait for the end.\n",
         id = info.id,
         output = info.output,
