@@ -127,6 +127,28 @@ async fn the_dot_git_directory_is_skipped_by_both_tools() {
     assert_eq!(text(&out), "kept.txt:1:needle\n");
 }
 
+/// ADR 0030 O3: `.radian-worktrees/` (one full worktree per task agent) is pruned **structurally**,
+/// not by a `.gitignore` coincidence: even with no ignore file, the walk never descends into it.
+#[tokio::test]
+async fn the_radian_worktrees_directory_is_skipped_by_both_tools() {
+    let dir = TempDir::new("search-worktrees");
+    let root = dir.file("ws");
+    // No `.gitignore` at all: the skip must not depend on one.
+    dir.write("ws/.radian-worktrees/t1/leak.txt", "needle");
+    dir.write("ws/kept.txt", "needle");
+    let tools = tools(&root);
+
+    let out = call(&tools, "glob", json!({"pattern": "**/*.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(text(&out), "kept.txt\n");
+
+    let out = call(&tools, "grep", json!({"pattern": "needle"}))
+        .await
+        .unwrap();
+    assert_eq!(text(&out), "kept.txt:1:needle\n");
+}
+
 /// A symlink out of the workspace is never followed: the linked file is not a match and the
 /// linked directory is not descended, so its contents are never read.
 #[tokio::test]

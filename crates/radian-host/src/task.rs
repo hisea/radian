@@ -110,7 +110,8 @@ pub struct TaskSession {
 }
 
 /// Builds the host-specific parts of a task session. Called once per [`TaskRegistry::spawn`].
-pub type TaskBuilder = Arc<dyn Fn(&TaskContext<'_>) -> Result<TaskSession, SessionError> + Send + Sync>;
+pub type TaskBuilder =
+    Arc<dyn Fn(&TaskContext<'_>) -> Result<TaskSession, SessionError> + Send + Sync>;
 
 /// One live task agent: its session and the facts the lead needs about it (ADR 0030 O2/O3).
 pub struct TaskRecord {
@@ -180,6 +181,9 @@ impl TaskRegistry {
         builder: TaskBuilder,
     ) -> Self {
         let workspace = workspace.into();
+        // Canonical, so `<workspace>/.radian-worktrees/<id>` matches what git reports back
+        // (macOS `/var` -> `/private/var`).
+        let workspace = std::fs::canonicalize(&workspace).unwrap_or(workspace);
         let worktree_root = workspace.join(".radian-worktrees");
         Self {
             workspace,
@@ -199,7 +203,11 @@ impl TaskRegistry {
 
     /// The live task, if one has that id.
     pub fn get(&self, id: &str) -> Option<Arc<TaskRecord>> {
-        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
+        self.tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
     }
 
     /// The live task ids, in order.
@@ -224,8 +232,11 @@ impl TaskRegistry {
             label,
             brief,
         } = request;
-        validate_session_id(&id)
-            .map_err(|_| TaskError::new(format!("invalid task id {id:?}: [A-Za-z0-9._-], 1-128 chars")))?;
+        validate_session_id(&id).map_err(|_| {
+            TaskError::new(format!(
+                "invalid task id {id:?}: [A-Za-z0-9._-], 1-128 chars"
+            ))
+        })?;
         if self.get(&id).is_some() {
             return Err(TaskError::new(format!("task `{id}` already exists")));
         }
@@ -270,7 +281,10 @@ impl TaskRegistry {
             parent: &parent,
         })
         .map_err(|error| TaskError::new(error.to_string()))?;
-        let TaskSession { mut setup, mut bindings } = parts;
+        let TaskSession {
+            mut setup,
+            mut bindings,
+        } = parts;
         let protected = setup.protected_branches.clone();
         let filters = setup
             .allowed_filters
@@ -300,11 +314,17 @@ impl TaskRegistry {
             committed: AtomicBool::new(false),
         });
         let inner = Arc::clone(&bindings.runtime_events);
-        bindings.runtime_events = Arc::new(TaskRuntimeEvents { inner, finisher: Arc::clone(&finisher) });
+        bindings.runtime_events = Arc::new(TaskRuntimeEvents {
+            inner,
+            finisher: Arc::clone(&finisher),
+        });
 
         // The sandbox policy the task's tools will run under (kept for the record): read it
         // before `open_session` consumes the setup.
-        let sandbox_policy = setup.sandbox.as_ref().map(|sandbox| sandbox.policy().clone());
+        let sandbox_policy = setup
+            .sandbox
+            .as_ref()
+            .map(|sandbox| sandbox.policy().clone());
         let session = match open_session(setup, bindings).await {
             Ok(session) => Arc::new(session),
             Err(error) => {
@@ -312,7 +332,8 @@ impl TaskRegistry {
                 if let Some(worktree) = &worktree {
                     let lead = self.workspace.clone();
                     let wt = worktree.clone();
-                    let _ = tokio::task::spawn_blocking(move || remove_worktree(&lead, &wt, true)).await;
+                    let _ = tokio::task::spawn_blocking(move || remove_worktree(&lead, &wt, true))
+                        .await;
                 }
                 return Err(TaskError::new(error.to_string()));
             }
@@ -405,8 +426,8 @@ fn enforce_task_setup(
             // branch, so no end commit either.
             setup.tier = Preset::Safe;
             setup.sandbox = None;
-            setup.profile = Profile::safe(workspace)
-                .map_err(|error| TaskError::new(error.to_string()))?;
+            setup.profile =
+                Profile::safe(workspace).map_err(|error| TaskError::new(error.to_string()))?;
             setup.access_builder = None;
         }
         Isolation::Worktree => {
@@ -457,8 +478,9 @@ pub fn task_sandbox(lead: &Sandbox, workspace: &Path) -> Result<Sandbox, TaskErr
 /// O3). The parent directory is created first: `git worktree add` does not create it.
 fn create_worktree(lead: &Path, worktree: &Path, branch: &str) -> Result<(), TaskError> {
     if let Some(parent) = worktree.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| TaskError::new(format!("cannot create {}: {error}", parent.display())))?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            TaskError::new(format!("cannot create {}: {error}", parent.display()))
+        })?;
     }
     let path = worktree
         .to_str()
@@ -546,8 +568,17 @@ pub fn end_of_task_commit(
     let message = format!("radian: end of task {id} ({})", outcome_word(outcome));
     // `refuse_main = true`: a task agent's rule (ADR 0038 decision 4); with `allowed_branch`
     // it is also limited to its own branch.
-    crate::git_commit::commit(worktree, pin, &message, &[], allowed_branch, protected, filters, true)
-        .map(Some)
+    crate::git_commit::commit(
+        worktree,
+        pin,
+        &message,
+        &[],
+        allowed_branch,
+        protected,
+        filters,
+        true,
+    )
+    .map(Some)
 }
 
 /// The per-task end-of-task commit, invoked on a turn boundary. It needs no `LocalSession`

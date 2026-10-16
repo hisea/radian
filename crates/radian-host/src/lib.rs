@@ -150,10 +150,6 @@ pub use session::{
     SessionId, SessionQueue, SessionSetup, UserBashRecord, open_session, resumed_access,
     resumed_model_route,
 };
-pub use task::{
-    Isolation, SpawnRequest, TaskBuilder, TaskContext, TaskError, TaskRecord, TaskRegistry,
-    TaskSession, end_of_task_commit, task_sandbox,
-};
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{
     ExportSettings, Format, SEARCH_LIMIT, SUMMARY_MAX_CHARS, SearchRow, SessionRow,
@@ -162,6 +158,10 @@ pub use skills::{
     BUILTIN, Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillSource, SkillsHooks,
     completion_candidates, discover, discover_with_extras, expand, has_skill_file, notices,
     prompt_section,
+};
+pub use task::{
+    Isolation, SpawnRequest, TaskBuilder, TaskContext, TaskError, TaskRecord, TaskRegistry,
+    TaskSession, end_of_task_commit, task_sandbox,
 };
 pub use tools::{HostSession, HostTools, merge_tool_specs};
 pub use workspace::resolve_workspace;

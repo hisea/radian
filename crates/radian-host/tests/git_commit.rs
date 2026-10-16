@@ -113,16 +113,7 @@ fn commit_with_filters(
     allowed_filters: &[String],
 ) -> Result<Committed, agent_core::ToolFailure> {
     let pin = RepoPin::resolve(dir).expect("a git repository");
-    commit(
-        dir,
-        &pin,
-        message,
-        paths,
-        None,
-        &[],
-        allowed_filters,
-        true,
-    )
+    commit(dir, &pin, message, paths, None, &[], allowed_filters, true)
 }
 
 fn write_executable(path: &Path, body: &str) {
