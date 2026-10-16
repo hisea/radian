@@ -1610,3 +1610,29 @@ Base：本片 HEAD（`oc/thin-user`）· 就地变异，每个变异后从 `.rad
 与 `render::thinking_has_one_blank_line_on_both_sides` 钉住。`apply_selection` 顺带修正：选中段保留它
 来自的 span 的前景色（原先最后一段回退到 `Style::default()`，会把选区尾部的前景色抹掉），由
 `render::a_selection_draws_the_selection_role_on_its_cells` 的「文字保留自己的前景色」断言钉住。
+
+## thin ②：thinking 的头行、时长、单色 Markdown 正文、折叠行（ADR 0028，2026-10-16）
+
+Base：本片 HEAD（`oc/thin-think`）· 就地变异，每个变异先把文件复制到 `.radian/scratch/mut.orig`，
+用 `python3` 打补丁（带 `assert old in s`），跑命名的测试，再从副本写回并用 `cmp` 确认逐字节相同
+（脚本 `.radian/scratch/mutate-think.sh`，不提交）。`--no-fail-fast`。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| TH1 | 正文不斜体 | `render.rs::body_style` 的 Reasoning 加回 `ITALIC` | `thinking::the_thinking_body_is_single_colour_markdown` | ✅ |
+| TH2 | 正文按 Markdown 排版 | `blocks.rs::reasoning_body_lines` 的 Paragraph 分支改回 `prose_lines`（`**`/反引号露出） | 同上（断言屏幕无 `**`、无反引号） | ✅ |
+| TH3 | 正文只有一个 reasoning 颜色 | `render.rs::body_spans` 去掉 reasoning 分支（走 Assistant 的 MdStyle 映射） | `thinking::every_thinking_body_cell_is_the_reasoning_colour` | ✅ |
+| TH4 | 折叠行带行数 | `blocks.rs::placeholder` 的 resumed 分支改成只写 `thinking` | `thinking::the_folded_thinking_is_one_line_with_the_line_count` | ✅ |
+| TH5 | resume 的条目没有时长 | `app.rs::push_message` 无条件给提交的 reasoning 条目写 `self.now` / `self.now` | `thinking::the_duration_is_shown_for_a_live_entry_and_absent_for_a_resumed_one` | ✅ |
+
+5/5 抓住，无等价变异。
+
+**诚实补充（TH1 的第一轮没抓住）**：第一次的变异改的是 `reasoning_md_style` 的兜底分支
+（`_ => base.add_modifier(ITALIC)`），只让 code/link 那些 piece 斜体，而测试断言的 `bold` 词走
+`Bold` 分支，所以测试仍绿；改成变异 `body_style`（整个 body 的基样式）后立刻抓住，因为 `**bold**`
+的基色也变斜体。这说明「正文仍斜体」这条需求针对的是**整个正文的基样式**，不是某一种 piece。
+
+另外，`blocks.rs::strip_edge_blanks` 的空白判据从 `chars.is_empty()` 改成 `text.is_empty()`：新增的
+`▾ thinking · …` 头行是合成行（没有源字符）但**画了文字**，旧判据把它当空白边缘行删掉，整个头行消失。
+只有这一种形状受影响，由 `thinking::the_expanded_thinking_has_a_header_and_a_rail` 与
+`blocks::reasoning_modes_change_the_line_count` 钉住。
