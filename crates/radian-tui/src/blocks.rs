@@ -2228,14 +2228,7 @@ fn reasoning_body_lines(
                 // bottom line when the block is closed. `highlight = None`: the thinking body
                 // is never syntax-highlighted (ADR 0028).
                 lines.push(code_frame_top(lang, *start, width, &md_glyphs));
-                lines.extend(code_lines(
-                    source,
-                    *start,
-                    *closed,
-                    width,
-                    &md_glyphs,
-                    None,
-                ));
+                lines.extend(code_lines(source, *start, *closed, width, &md_glyphs, None));
                 if *closed && source.lines().count() > 1 {
                     lines.push(code_frame_bottom(*start, &md_glyphs));
                 }
