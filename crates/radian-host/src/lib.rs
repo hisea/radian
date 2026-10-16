@@ -41,6 +41,7 @@ pub mod session;
 mod session_id;
 pub mod sessions;
 pub mod skills;
+pub mod task;
 mod tools;
 pub mod trust;
 mod workspace;
@@ -148,6 +149,10 @@ pub use session::{
     LocalSession, SessionCapability, SessionCommand, SessionError, SessionFacade, SessionFacts,
     SessionId, SessionQueue, SessionSetup, UserBashRecord, open_session, resumed_access,
     resumed_model_route,
+};
+pub use task::{
+    Isolation, SpawnRequest, TaskBuilder, TaskContext, TaskError, TaskRecord, TaskRegistry,
+    TaskSession, end_of_task_commit, task_sandbox,
 };
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{

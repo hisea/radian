@@ -1321,6 +1321,8 @@ fn run(
                 // The interactive session is the human's named `main` agent, not a task agent
                 // (ADR 0030 O13), so `/mode` is allowed.
                 task_agent: false,
+                parent: None,
+                allowed_branch: None,
                 memory_root,
                 skills_extra_paths: radian_host::config::resolve_extra_paths(
                     &config.skills.extra_paths,
@@ -1346,6 +1348,7 @@ fn run(
             },
             radian_host::HostBindings {
                 approvals,
+                shared_queue: None,
                 ask_user: true,
                 audit,
                 events: live,

@@ -122,6 +122,8 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             profile: Profile::safe(&workspace).unwrap(),
             access_builder: Some(switchable_builder(workspace.clone())),
             task_agent: false,
+            parent: None,
+            allowed_branch: None,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
@@ -137,6 +139,7 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
         },
         HostBindings {
             approvals: radian_host::ApprovalRouting::Direct(Arc::new(NoopApprover)),
+            shared_queue: None,
             audit: Arc::new(|_journal| {
                 Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
             }),
@@ -255,6 +258,8 @@ async fn a_session_without_a_builder_refuses_set_access() {
             profile: Profile::safe(&workspace).unwrap(),
             access_builder: None,
             task_agent: false,
+            parent: None,
+            allowed_branch: None,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
@@ -270,6 +275,7 @@ async fn a_session_without_a_builder_refuses_set_access() {
         },
         HostBindings {
             approvals: radian_host::ApprovalRouting::Direct(Arc::new(NoopApprover)),
+            shared_queue: None,
             audit: Arc::new(|_journal| {
                 Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
             }),

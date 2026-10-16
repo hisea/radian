@@ -71,12 +71,26 @@ fn change(dir: &Path) {
 }
 
 /// Resolves the pin the way `open_session` does, then commits — the exact path the tool runs.
+/// `refuse_main = true`: the task-agent rule (the original behavior these tests pinned).
 fn commit_in(
     dir: &Path,
     message: &str,
     paths: &[String],
     allowed: Option<&str>,
     protected: &[String],
+) -> Result<Committed, agent_core::ToolFailure> {
+    commit_in_as(dir, message, paths, allowed, protected, true)
+}
+
+/// [`commit_in`] with the ADR 0038 decision 4 switch explicit: `refuse_main = false` is the
+/// interactive `general`/`lead` session, which may commit on `main`.
+fn commit_in_as(
+    dir: &Path,
+    message: &str,
+    paths: &[String],
+    allowed: Option<&str>,
+    protected: &[String],
+    refuse_main: bool,
 ) -> Result<Committed, agent_core::ToolFailure> {
     let pin = RepoPin::resolve(dir).expect("a git repository");
     commit(
@@ -87,6 +101,7 @@ fn commit_in(
         allowed,
         protected,
         &radian_host::git_commit::default_allowed_filters(),
+        refuse_main,
     )
 }
 
@@ -98,7 +113,16 @@ fn commit_with_filters(
     allowed_filters: &[String],
 ) -> Result<Committed, agent_core::ToolFailure> {
     let pin = RepoPin::resolve(dir).expect("a git repository");
-    commit(dir, &pin, message, paths, None, &[], allowed_filters)
+    commit(
+        dir,
+        &pin,
+        message,
+        paths,
+        None,
+        &[],
+        allowed_filters,
+        true,
+    )
 }
 
 fn write_executable(path: &Path, body: &str) {
@@ -204,6 +228,121 @@ fn branch_rules_are_enforced() {
     assert_eq!(
         commit_in(&dir, "m", &[], None, &[]).unwrap_err().code,
         "detached_head"
+    );
+}
+
+/// ADR 0038 decision 4: a `general`/`lead` session may commit on `main`/`master`; a configured
+/// protected branch and a detached HEAD are still refused.
+#[test]
+fn a_general_session_may_commit_on_main() {
+    let dir = temp("general-main");
+    assert!(git(&dir, &["init", "-q", "-b", "main"]));
+    assert!(git(
+        &dir,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]
+    ));
+    change(&dir);
+    let committed = commit_in_as(&dir, "on main", &[], None, &[], false).expect("main is allowed");
+    assert_eq!(committed.branch, "main");
+    assert_eq!(committed.files, 1);
+
+    // `master` too.
+    let master = temp("general-master");
+    assert!(git(&master, &["init", "-q", "-b", "master"]));
+    assert!(git(
+        &master,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]
+    ));
+    change(&master);
+    assert_eq!(
+        commit_in_as(&master, "on master", &[], None, &[], false)
+            .expect("master is allowed")
+            .branch,
+        "master"
+    );
+
+    // A configured protected branch is refused for a general session too.
+    assert_eq!(
+        commit_in_as(&dir, "m", &[], None, &["main".to_string()], false)
+            .unwrap_err()
+            .code,
+        "protected_branch"
+    );
+    // A detached HEAD is refused for a general session too.
+    assert!(git(&dir, &["checkout", "-q", "--detach"]));
+    assert_eq!(
+        commit_in_as(&dir, "m", &[], None, &[], false)
+            .unwrap_err()
+            .code,
+        "detached_head"
+    );
+}
+
+/// ADR 0038 decision 4 / ADR 0030 O3: a task session keeps the `main`/`master` refusal and is
+/// limited to its own `radian/<id>` branch.
+#[test]
+fn a_task_agent_is_refused_on_main_and_on_any_other_branch() {
+    let dir = temp("task-branches");
+    assert!(git(&dir, &["init", "-q", "-b", "main"]));
+    assert!(git(
+        &dir,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]
+    ));
+    change(&dir);
+    // A task agent on `main` is refused even with `allowed_branch = radian/t1`.
+    assert_eq!(
+        commit_in_as(&dir, "m", &[], Some("radian/t1"), &[], true)
+            .unwrap_err()
+            .code,
+        "protected_branch"
+    );
+    // On its own branch it succeeds.
+    assert!(git(&dir, &["checkout", "-q", "-b", "radian/t1"]));
+    change(&dir);
+    assert_eq!(
+        commit_in_as(&dir, "m", &[], Some("radian/t1"), &[], true)
+            .expect("the task's own branch")
+            .branch,
+        "radian/t1"
+    );
+    // On any other branch it is refused with `wrong_branch`.
+    assert!(git(&dir, &["checkout", "-q", "-b", "other"]));
+    change(&dir);
+    assert_eq!(
+        commit_in_as(&dir, "m", &[], Some("radian/t1"), &[], true)
+            .unwrap_err()
+            .code,
+        "wrong_branch"
     );
 }
 
@@ -360,6 +499,7 @@ fn a_git_dir_created_in_a_subdirectory_workspace_is_refused() {
         None,
         &[],
         &radian_host::git_commit::default_allowed_filters(),
+        true,
     )
     .unwrap_err();
     assert_eq!(error.code, "repository_changed", "{error:?}");
