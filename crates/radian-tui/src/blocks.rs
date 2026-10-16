@@ -350,7 +350,9 @@ impl HeadMarker {
 /// * otherwise it is a one-liner (a running call, an empty or cancelled result) →
 ///   [`HeadMarker::Dot`] (`•`).
 pub fn head_marker(entry: &Entry, modes: DisplayModes, body_follows: bool) -> HeadMarker {
-    if body_follows {
+    // A multi-line command fully expanded draws its own `│ ` rows under the head (ADR 0035's
+    // 2026-10-16 "多行命令" note), so the head is open even while the paired result is absent.
+    if body_follows || call_body_rows(entry, modes) {
         return HeadMarker::Open;
     }
     let card = entry.tool.as_deref();
@@ -969,10 +971,10 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                 })
                 .sum()
         }
-        // The head line, never wrapped - unless a shell command carries its own newlines (ADR
-        // 0028 revision 5 decision 1: a multi-line command wraps, one continuation row per
-        // line). The meta and the status glyph are part of the head's own row.
-        EntryKind::ToolCall => text.lines().count().max(1),
+        // The head: the command's first line (wrapped, its continuation rows `│ `) plus, when
+        // the block is fully expanded, the command's other lines (ADR 0035's 2026-10-16
+        // "多行命令" note). The meta and the status glyph ride on the first row.
+        EntryKind::ToolCall => head_line_count(entry, &text, body_width, modes),
         EntryKind::ToolResult => {
             let card = entry.tool.as_deref();
             let plan = tool_plan(card, &text, entry.is_error, modes, entry.fold_override);
@@ -1705,20 +1707,88 @@ fn ask_bottom(g: &AskGlyphs) -> Vec<(String, MdStyle)> {
     )]
 }
 
-/// The head row(s) of a tool block (ADR 0028):
-/// `• <tool name> <title> · <meta> <status>`. The entry's text is the `<name> <title>` part
-/// (the call entry's text, set at push time from the same function) so those characters copy;
-/// the name's own style, the meta and the status glyph are synthesized cells (no source).
+/// The head row(s) of a tool block (ADR 0028, ADR 0035's 2026-10-16
+/// "多行命令" note, the owner's option A): `• <tool name> <title> · <meta> <status>`. The
+/// entry's text is the `<name> <title>` part (the call entry's text, set at push time from the
+/// same function) so those characters copy; the name's own style, the meta, the status glyph,
+/// the `… (+N lines)` note and the `│ ` markers are synthesized cells (no source).
 ///
-/// One row per line of the entry's text: a multi-line `shell` command wraps with its
-/// continuation rows from the body column. The meta and the status sit at the **end** of the
-/// head (the last row).
+/// The **fold marker is on the first row only**. A multi-line `shell` command follows its
+/// block: the first row carries the command's first line, the note and the meta; while the
+/// block is not fully expanded the command's other lines are hidden behind `… (+N lines)` (N
+/// is the command's remaining lines, never the output's); when it is fully expanded they
+/// follow as `│ ` body rows, before the paired result's output. A command line wider than the
+/// row wraps, its continuation rows `│ `-railed too - never a second fold marker. The meta and
+/// the status glyph always sit at the end of the **first** row.
 fn head_rows(entry: &Entry, text: &str, width: usize, modes: DisplayModes) -> Vec<BodyLine> {
     let card = entry.tool.as_deref();
     let name = card.map(|card| card.name.as_str()).unwrap_or("");
+    let meta = head_meta(entry, modes);
+    // The name is the head text's own first word (`call_text` puts it there), so its cells keep
+    // their source offsets and the whole head copies.
+    let named = !name.is_empty() && text.starts_with(name);
+    let lines: Vec<&str> = if text.is_empty() {
+        vec![""]
+    } else {
+        text.lines().collect()
+    };
+    let last = lines.len() - 1;
+    let expanded = call_body_expanded(entry, modes);
+    let tail = head_tail(entry, modes, &meta, last, expanded);
+    let mut offset = 0usize;
+    let mut rows = styled_head_rows(
+        head_line_cells(lines[0], offset, named, name.len()),
+        tail,
+        offset + lines[0].len(),
+        width,
+    );
+    offset += lines[0].len() + 1;
+    // The command's other lines: `│ ` body rows when the block is fully expanded, hidden
+    // behind the head's `… (+N lines)` note otherwise.
+    if expanded {
+        for line in &lines[1..] {
+            rows.extend(styled_body_rows(
+                head_line_cells(line, offset, false, 0),
+                offset + line.len(),
+                width,
+            ));
+            offset += line.len() + 1;
+        }
+    }
+    rows
+}
+
+/// Whether a tool call's command shows its own remaining lines as `│ ` body rows (ADR 0035's
+/// 2026-10-16 "多行命令" note): the block is fully expanded and the command has more than one
+/// line. The fold is `tool_plan`'s, so the head and the paired result never disagree - an
+/// error's body is never hidden, in any mode.
+fn call_body_expanded(entry: &Entry, modes: DisplayModes) -> bool {
+    let fold = if entry
+        .fold_override
+        .unwrap_or(modes.tools.fold == tools::ToolFold::Expanded)
+    {
+        tools::ToolFold::Expanded
+    } else {
+        modes.tools.fold
+    };
+    entry.result == Some(true) || fold == tools::ToolFold::Expanded
+}
+
+/// Whether a tool call's head draws `│ ` rows of its own (its fully expanded multi-line
+/// command). The renderer ORs it with the paired result's body to pick the head's fold marker:
+/// a running call in `expanded` mode already draws its command's lines.
+pub fn call_body_rows(entry: &Entry, modes: DisplayModes) -> bool {
+    entry.kind == EntryKind::ToolCall
+        && call_body_expanded(entry, modes)
+        && entry.text.lines().count() > 1
+}
+
+/// The head's meta (ADR 0028): the card's own fields plus, under
+/// `collapsed`, the count of the body rows the fold hid (the paired result's, which only its
+/// own entry lays out: `ToolCard::result_lines`).
+fn head_meta(entry: &Entry, modes: DisplayModes) -> String {
+    let card = entry.tool.as_deref();
     let mut meta = card_meta(entry).unwrap_or_default();
-    // `collapsed` hides the whole body, so the head says how many rows it hid (the count is
-    // the paired result's, which only its own entry lays out: `ToolCard::result_lines`).
     if modes.tools.fold == tools::ToolFold::Collapsed
         && entry.fold_override != Some(true)
         && let Some(lines) = card.and_then(|card| card.result_lines)
@@ -1729,58 +1799,57 @@ fn head_rows(entry: &Entry, text: &str, width: usize, modes: DisplayModes) -> Ve
         }
         meta.push_str(&format!("{lines} lines"));
     }
-    let status = head_status(entry, card);
-    let (ok, failed) = status_marks(modes.glyphs);
-    // The name is the head text's own first word (`call_text` puts it there), so its cells keep
-    // their source offsets and the whole head copies.
-    let named = !name.is_empty() && text.starts_with(name);
-    let lines: Vec<&str> = if text.is_empty() {
-        vec![""]
-    } else {
-        text.lines().collect()
+    meta
+}
+
+/// The head's trailing cells (ADR 0035's 2026-10-16 "多行命令" note): the `… (+N lines)` note
+/// (while the command's other lines are hidden), the ` · <meta>` and the status glyph. Every
+/// cell is synthesized - none of it copies or anchors a selection - and the whole tail rides on
+/// the head's **first** row, after the command's first line.
+fn head_tail(
+    entry: &Entry,
+    modes: DisplayModes,
+    meta: &str,
+    last: usize,
+    expanded: bool,
+) -> Vec<HeadCell> {
+    let mut tail: Vec<HeadCell> = Vec::new();
+    if !expanded && last > 0 {
+        for ch in format!(" … (+{last} lines)").chars() {
+            tail.push((ch, MdStyle::Dim, None));
+        }
+    }
+    if !meta.is_empty() {
+        for ch in format!(" · {meta}").chars() {
+            tail.push((ch, MdStyle::Dim, None));
+        }
+    }
+    let glyph = match head_status(entry, entry.tool.as_deref()) {
+        HeadStatus::Ok => Some((status_marks(modes.glyphs).0, MdStyle::StatusOk)),
+        HeadStatus::Error => Some((status_marks(modes.glyphs).1, MdStyle::StatusError)),
+        HeadStatus::Running => Some((running_glyph(modes.glyphs), MdStyle::StatusRunning)),
+        HeadStatus::None => None,
     };
-    let last = lines.len() - 1;
-    let mut rows = Vec::with_capacity(lines.len());
-    let mut offset = 0usize;
-    for (index, line) in lines.iter().enumerate() {
-        let mut cells: Vec<(char, MdStyle, Option<usize>)> = Vec::new();
-        for (at, ch) in line.char_indices() {
-            let style = if index == 0 && named && at < name.len() {
+    if let Some((glyph, style)) = glyph {
+        tail.push((' ', MdStyle::Plain, None));
+        tail.push((glyph, style, None));
+    }
+    tail
+}
+
+/// One command line's cells: its chars, the tool name's own style on the head's first line, and
+/// each char's source offset (`offset` is the line's byte offset in the entry's text).
+fn head_line_cells(line: &str, offset: usize, named: bool, name_len: usize) -> Vec<HeadCell> {
+    line.char_indices()
+        .map(|(at, ch)| {
+            let style = if named && at < name_len {
                 MdStyle::ToolName
             } else {
                 MdStyle::Plain
             };
-            cells.push((ch, style, Some(offset + at)));
-        }
-        // The tail — the meta and the status glyph — is never truncated away: the title is.
-        let mut tail: Vec<(char, MdStyle, Option<usize>)> = Vec::new();
-        if index == last {
-            if !meta.is_empty() {
-                for ch in format!(" · {meta}").chars() {
-                    tail.push((ch, MdStyle::Dim, None));
-                }
-            }
-            let glyph = match status {
-                HeadStatus::Ok => Some((ok, MdStyle::StatusOk)),
-                HeadStatus::Error => Some((failed, MdStyle::StatusError)),
-                HeadStatus::Running => Some((running_glyph(modes.glyphs), MdStyle::StatusRunning)),
-                HeadStatus::None => None,
-            };
-            if let Some((glyph, style)) = glyph {
-                tail.push((' ', MdStyle::Plain, None));
-                tail.push((glyph, style, None));
-            }
-        }
-        rows.push(styled_row(
-            cells,
-            tail,
-            offset + line.len(),
-            width,
-            Frame::Head,
-        ));
-        offset += line.len() + 1;
-    }
-    rows
+            (ch, style, Some(offset + at))
+        })
+        .collect()
 }
 
 /// A tool call's state as the head's end shows it (ADR 0028).
@@ -1892,6 +1961,138 @@ fn styled_row(
     row
 }
 
+/// One head row's cell: its character, its render role, and its source offset (`None` when the
+/// renderer synthesized it - the `… (+N lines)` note, the meta, the status glyph).
+type HeadCell = (char, MdStyle, Option<usize>);
+
+/// A wrapped head row: its cells, and the byte offset its line ends at (the selection mapping's
+/// view).
+type HeadChunk = (Vec<HeadCell>, usize);
+
+/// The head's first row and its wrapped continuation rows (ADR 0035's 2026-10-16 "多行命令"
+/// note): `tail` (the note, the meta and the status) rides on the **first** row, which is
+/// therefore `width - tail_width` wide; a wrapped continuation is a `│ ` body row.
+fn styled_head_rows(
+    cells: Vec<HeadCell>,
+    tail: Vec<HeadCell>,
+    end: usize,
+    width: usize,
+) -> Vec<BodyLine> {
+    let tail_width: usize = tail.iter().map(|(ch, _, _)| cell_width(*ch)).sum();
+    let first_width = width.saturating_sub(tail_width).max(1);
+    wrap_cells(cells, first_width, width, end)
+        .into_iter()
+        .enumerate()
+        .map(|(index, (chunk, chunk_end))| {
+            if index == 0 {
+                styled_row(chunk, tail.clone(), chunk_end, width, Frame::Head)
+            } else {
+                styled_row(chunk, Vec::new(), chunk_end, width, Frame::Body)
+            }
+        })
+        .collect()
+}
+
+/// One command line's `│ ` body rows (ADR 0035's 2026-10-16 "多行命令" note): the line, wrapped
+/// at `width`, each row a `Frame::Body` so the renderer rails it.
+fn styled_body_rows(cells: Vec<HeadCell>, end: usize, width: usize) -> Vec<BodyLine> {
+    wrap_cells(cells, width, width, end)
+        .into_iter()
+        .map(|(chunk, chunk_end)| styled_row(chunk, Vec::new(), chunk_end, width, Frame::Body))
+        .collect()
+}
+
+/// The display width of one head cell: a tab expands to four cells (ADR 0028 R9).
+fn cell_width(ch: char) -> usize {
+    if ch == '\t' {
+        4
+    } else {
+        UnicodeWidthChar::width(ch).unwrap_or(0)
+    }
+}
+
+/// How many rows a head line wraps to: the first row is `first_width` cells wide (it also
+/// carries the meta and the status, which never truncate), every later row `width`. The mirror
+/// of [`wrap_cells`], so the measure pass counts exactly what the layout draws.
+fn wrap_count(line: &str, first_width: usize, width: usize) -> usize {
+    let mut rows = 1usize;
+    let mut used = 0usize;
+    let mut limit = first_width.max(1);
+    for ch in line.chars() {
+        let w = cell_width(ch);
+        if used + w > limit && used > 0 {
+            rows += 1;
+            used = 0;
+            limit = width.max(1);
+        }
+        used += w;
+    }
+    rows
+}
+
+/// Splits a head line's cells into rows at `width` display cells, breaking at character
+/// boundaries and keeping every character (spaces included, unlike prose). The first row is
+/// `first_width` cells wide; every later row `width`. Each row keeps its own end offset, so the
+/// selection mapping anchors a click past a wrapped row at the next character.
+fn wrap_cells(
+    cells: Vec<HeadCell>,
+    first_width: usize,
+    width: usize,
+    end: usize,
+) -> Vec<HeadChunk> {
+    let mut rows: Vec<HeadChunk> = Vec::new();
+    let mut current: Vec<HeadCell> = Vec::new();
+    let mut used = 0usize;
+    let mut limit = first_width.max(1);
+    let mut chunk_end = end;
+    for (ch, style, offset) in cells {
+        let w = cell_width(ch);
+        if used + w > limit && !current.is_empty() {
+            rows.push((std::mem::take(&mut current), chunk_end));
+            used = 0;
+            limit = width.max(1);
+            chunk_end = end;
+        }
+        if let Some(at) = offset {
+            chunk_end = at + ch.len_utf8();
+        }
+        if ch == '\t' {
+            for _ in 0..4 {
+                current.push((' ', style, offset));
+            }
+        } else {
+            current.push((ch, style, offset));
+        }
+        used += w;
+    }
+    rows.push((current, chunk_end));
+    rows
+}
+
+/// How many rows [`head_rows`] lays a tool call's head out to: the mirror the measure pass
+/// counts with, so the virtualized geometry and the drawing cannot disagree.
+fn head_line_count(entry: &Entry, text: &str, width: usize, modes: DisplayModes) -> usize {
+    let meta = head_meta(entry, modes);
+    let last = text.lines().count().saturating_sub(1);
+    let expanded = call_body_expanded(entry, modes);
+    let tail = head_tail(entry, modes, &meta, last, expanded);
+    let tail_width: usize = tail.iter().map(|(ch, _, _)| cell_width(*ch)).sum();
+    let first_width = width.saturating_sub(tail_width).max(1);
+    let mut count = 0usize;
+    let mut first = true;
+    for line in text.lines() {
+        if first {
+            count += wrap_count(line, first_width, width);
+            first = false;
+        } else if expanded {
+            count += wrap_count(line, width, width);
+        } else {
+            break;
+        }
+    }
+    count.max(1)
+}
+
 /// The head's meta (ADR 0028): weak, ` · `-separated, only the data that
 /// exists. The fields are [`tools::meta_parts`]; `cancelled` is here because the entry's own
 /// error code is the paired result's.
@@ -1914,6 +2115,13 @@ fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> V
             tools::BodyLine::Text { source, role } => {
                 let slice = text.get(source.clone()).unwrap_or("");
                 for mut laid in prose_lines(slice, body_width) {
+                    // `prose_lines` maps offsets within the slice; lift them onto the entry's
+                    // own text, so a selection anchors at (and copies) the result's real
+                    // characters rather than the slice's first line.
+                    for offset in laid.chars.iter_mut().flatten() {
+                        *offset += source.start;
+                    }
+                    laid.end += source.start;
                     laid.role = *role;
                     laid.frame = Frame::Body;
                     out.push(laid);

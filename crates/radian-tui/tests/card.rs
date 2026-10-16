@@ -783,3 +783,209 @@ fn a_copy_of_a_block_has_no_marker_meta_or_status() {
         "the meta never copies: {copied:?}"
     );
 }
+
+/// A 40-line heredoc command: `python3 - <<'PY'`, 38 body lines, then `PY` (line 0 plus 39
+/// more, so the note reads `… (+39 lines)`).
+fn heredoc_command() -> String {
+    let mut command = String::from("python3 - <<'PY'\n");
+    for i in 1..=38 {
+        command.push_str(&format!("print({i})\n"));
+    }
+    command.push_str("PY");
+    command
+}
+
+/// The heredoc call, with its result if `result` is `Some`, on the given fold.
+fn heredoc_app(fold: ToolFold, result: Option<&str>) -> App {
+    let command = heredoc_command();
+    let mut app = App::new("m", "s");
+    app.tool_display = ToolDisplay {
+        fold,
+        preview_lines: 2,
+    };
+    app.push_message(&Message::Assistant {
+        content: vec![],
+        reasoning: vec![],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: json!({"command": command}),
+        }],
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    });
+    if let Some(text) = result {
+        app.push_message(&Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text(text)],
+                structured: Some(json!({"command": command, "exit_code": 0})),
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        });
+    }
+    app
+}
+
+/// ADR 0035's 2026-10-16 "多行命令" note, the owner's option A: a multi-line command follows its
+/// block. The fold marker is on the **first** row only; the command's first line, the
+/// `… (+N lines)` note (N the command's remaining lines, never the output's) and the meta are on
+/// it; the command's other lines are hidden until the block is fully expanded, then they are
+/// `│ ` body rows, before the output.
+#[test]
+fn a_multiline_command_folds_with_its_block() {
+    // Folded (`collapsed`): the head only, the note and the result's hidden count.
+    let mut app = heredoc_app(ToolFold::Collapsed, Some("one\ntwo"));
+    let lines = rows(&render(&mut app, 80, 20), 80, 20);
+    let block = block_rows(&lines);
+    assert_eq!(
+        block,
+        vec![&"◼ shell $ python3 - <<'PY' … (+39 lines) · exit 0 · 2 lines ✓".to_string()],
+        "the folded head: the note and the hidden output count"
+    );
+
+    // Preview (`errors`): the head with the note, then the output's preview rows only.
+    let mut app = heredoc_app(ToolFold::Errors, Some("one\ntwo"));
+    let lines = rows(&render(&mut app, 80, 20), 80, 20);
+    let block = block_rows(&lines);
+    assert_eq!(
+        block,
+        vec![
+            &"◻ shell $ python3 - <<'PY' … (+39 lines) · exit 0 ✓".to_string(),
+            &"│ one".to_string(),
+            &"│ two".to_string(),
+        ],
+        "the preview head"
+    );
+
+    // Fully expanded (`Ctrl-O`): no note, the command's 39 lines under `│ `, then the output.
+    let mut app = heredoc_app(ToolFold::Expanded, Some("one\ntwo"));
+    let lines = rows(&render(&mut app, 80, 50), 80, 50);
+    let block = block_rows(&lines);
+    assert_eq!(
+        block[0], "◻ shell $ python3 - <<'PY' · exit 0 ✓",
+        "{block:?}"
+    );
+    assert!(!block[0].contains('…'), "no note when expanded: {block:?}");
+    assert_eq!(
+        block.len(),
+        1 + 39 + 2,
+        "the head, 39 command rows, 2 output rows"
+    );
+    assert_eq!(block[1], "│ print(1)", "{block:?}");
+    assert_eq!(block[39], "│ PY", "{block:?}");
+    assert_eq!(block[40], "│ one", "{block:?}");
+    assert_eq!(block[41], "│ two", "{block:?}");
+    // The fold marker is on the first row only.
+    assert_eq!(
+        block.iter().filter(|row| is_head_row(row)).count(),
+        1,
+        "one head row: {block:?}"
+    );
+}
+
+/// A command on one line wider than the row wraps; every continuation row is a `│ ` body row,
+/// never a second fold marker (ADR 0035's 2026-10-16 "多行命令" note).
+#[test]
+fn a_long_single_line_command_wraps_with_rail_continuations() {
+    let long = "cargo test --workspace --locked --no-fail-fast -- --nocapture --ignored --exact";
+    let mut app = App::new("m", "s");
+    app.push_message(&Message::Assistant {
+        content: vec![],
+        reasoning: vec![],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: json!({"command": long}),
+        }],
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    });
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("done")],
+            structured: Some(json!({"command": long, "exit_code": 0})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    let lines = rows(&render(&mut app, 40, 20), 40, 20);
+    let block = block_rows(&lines);
+    assert!(block[0].starts_with("◻ shell $ cargo test"), "{block:?}");
+    assert!(block[0].contains("exit 0"), "the meta on row 1: {block:?}");
+    assert_eq!(
+        block.iter().filter(|row| is_head_row(row)).count(),
+        1,
+        "one head row: {block:?}"
+    );
+    assert!(block.len() > 2, "the command wrapped: {block:?}");
+    assert!(
+        block[1..].iter().all(|row| row.starts_with("│ ")),
+        "every continuation is a rail row: {block:?}"
+    );
+    // The rails stripped, the continuation rows are the command's own tail.
+    let joined: String = block[1..]
+        .iter()
+        .map(|row| row.trim_start_matches("│ "))
+        .collect();
+    assert!(
+        joined.contains("--nocapture"),
+        "the wrapped tail: {joined:?}"
+    );
+}
+
+/// Copying a fully expanded multi-line block yields the command's own lines and the output —
+/// no marker, no `│ `, no `… (+N lines)` note (synthesized cells are never copied).
+#[test]
+fn a_copy_of_a_multiline_command_has_no_marker_rail_or_note() {
+    let mut app = heredoc_app(ToolFold::Expanded, Some("one\ntwo"));
+    app.set_viewport(60, 60);
+    app.set_transcript_width(80);
+    let terminal = render(&mut app, 80, 60);
+    let lines = rows(&terminal, 80, 60);
+    let head = lines
+        .iter()
+        .position(|line| is_head_row(line))
+        .expect("the head row") as u16;
+    let last = lines
+        .iter()
+        .rposition(|line| line.starts_with("│ "))
+        .expect("a body row") as u16;
+    let _ = app.update(Input::MouseDown { row: head, col: 0 });
+    let _ = app.update(Input::MouseDrag { row: last, col: 60 });
+    let result = app.update(Input::MouseUp { row: last, col: 60 });
+    let copied = result
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Copy { text } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("a copy effect");
+    // The command's own lines and the output copy.
+    assert!(copied.contains("print(1)"), "{copied:?}");
+    assert!(copied.contains("print(38)"), "{copied:?}");
+    assert!(copied.contains("PY"), "{copied:?}");
+    assert!(
+        copied.contains("one") && copied.contains("two"),
+        "{copied:?}"
+    );
+    // The marker, the rail, the note and the meta are synthesized: none of them copies.
+    for glyph in ['◼', '◻', '•', '│', '…'] {
+        assert!(!copied.contains(glyph), "{glyph:?} in {copied:?}");
+    }
+    assert!(
+        !copied.contains("exit 0"),
+        "the meta never copies: {copied:?}"
+    );
+    assert!(
+        !copied.contains("(+39 lines)"),
+        "the note never copies: {copied:?}"
+    );
+}
