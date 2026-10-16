@@ -393,6 +393,9 @@ fn a_diagram_the_layout_refuses_is_the_vendored_render_byte_for_byte() {
         "flowchart TD\n    A[one] <--> B[two]\n",
         // Two edges of one gap that would cross: one row cannot tell a crossing from a join.
         "flowchart TD\n    A[one] & B[two] & C[three] & D[four]\n    A --> D\n    C --> B\n",
+        // A back edge that would have to cross the box beside its target: the run cannot reach
+        // the target's side without going through `two`.
+        "flowchart TD\n    A[one] & B[two]\n    A --> C[three]\n    C --> A\n",
         // A labelled edge that skips a layer has no home beside a channel.
         "flowchart TD\n    A[one] --> B[two] --> C[three]\n    A -->|skip| C\n",
         // Wide for this width.
@@ -504,9 +507,11 @@ fn accepts_the_same_samples_as_the_vendored_renderer() {
 }
 
 /// The published output keeps ADR 0028 R8's contract: only the three roles the theme knows, and
-/// never an escape sequence.
+/// never an escape sequence — used the way the transcript's theme expects (a box's border is a
+/// node, an edge's label belongs to its edge, a node's label is plain text).
 #[test]
 fn the_layout_emits_only_the_three_roles() {
+    use codex_mermaid::Role;
     for source in [CHAIN, DIAMOND, BACK, LR_CHAIN] {
         let lines = render_spans(source, 80).expect("this layout draws the diagram");
         assert!(!lines.is_empty());
@@ -516,20 +521,23 @@ fn the_layout_emits_only_the_three_roles() {
                 "ANSI escape in {:?}",
                 span.text
             );
+            assert!(
+                matches!(span.role, Role::Node | Role::Edge | Role::Text),
+                "unknown role {:?}",
+                span.role
+            );
         }
-        assert!(
-            lines
-                .iter()
-                .flatten()
-                .any(|span| span.role == codex_mermaid::Role::Node),
-            "{source:?} draws boxes"
-        );
-        assert!(
-            lines
-                .iter()
-                .flatten()
-                .any(|span| span.role == codex_mermaid::Role::Edge),
-            "{source:?} draws edges"
-        );
     }
+    let lines = render_spans(CHAIN, 80).expect("this layout draws the diagram");
+    let role_of = |needle: &str| {
+        lines
+            .iter()
+            .flatten()
+            .find(|span| span.text.contains(needle))
+            .unwrap_or_else(|| panic!("no span carries {needle:?}"))
+            .role
+    };
+    assert_eq!(role_of("User input"), Role::Text, "a node's label");
+    assert_eq!(role_of("yes"), Role::Edge, "an edge's label");
+    assert_eq!(role_of("┌"), Role::Node, "a box's border");
 }

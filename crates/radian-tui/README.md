@@ -1544,12 +1544,14 @@ result are the card). A pending question's result arrives as the `ask_user` card
 ## Mermaid blocks (ADR 0028 R8)
 
 A fenced code block whose info string is `mermaid` (ASCII case-insensitive) and which is
-**closed** is drawn as a Unicode diagram with the vendored `codex-mermaid` (R8), at the
-transcript body width. While the fence is open (streaming) the source shows; the diagram
-appears when the closing fence arrives. `tui.display.mermaid = false` (config) renders every
-code block as source.
+**closed** is drawn as a Unicode diagram, at the transcript body width, through
+`radian_host::mermaid::render_spans` — the one entry point (ADR 0028): a
+`flowchart`/`graph` by Radian's own layered layout, everything else (and every flowchart that
+layout cannot draw) by the vendored `codex-mermaid`. While the fence is open (streaming) the
+source shows; the diagram appears when the closing fence arrives. `tui.display.mermaid = false`
+(config) renders every code block as source.
 
-A diagram the vendor cannot render (unsupported syntax, its limits, or too narrow) keeps the
+A diagram neither renderer can draw (unsupported syntax, their limits, or too narrow) keeps the
 **source** and puts one dim `mermaid: <reason>` line first — never a half diagram. Widening the
 terminal re-renders: the diagram cache is keyed by `(width, text_len)`, so a `TooWide` failure
 can succeed on a wider screen.
