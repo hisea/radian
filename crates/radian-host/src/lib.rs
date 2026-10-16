@@ -43,6 +43,7 @@ mod session_id;
 pub mod sessions;
 pub mod skills;
 pub mod task;
+pub mod task_host;
 pub mod task_pending;
 mod tools;
 pub mod trust;
@@ -168,9 +169,10 @@ pub use skills::{
 };
 pub use task::{
     CommitGate, EndCommit, Isolation, SpawnHook, SpawnRequest, SpawnStage, TaskBuilder,
-    TaskContext, TaskError, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
-    task_sandbox,
+    TaskContext, TaskError, TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession,
+    end_of_task_commit, task_sandbox,
 };
+pub use task_host::{TaskHost, TaskModelFactory, task_builder};
 pub use task_pending::{
     DEFAULT_PENDING_TIMEOUT, DEFAULT_POLICY_TIMEOUT, PolicyCommand, TaskApprover,
     TaskPendingContent, TaskPendingError, TaskPendingKind, TaskPendingQueue, TaskPendingView,
