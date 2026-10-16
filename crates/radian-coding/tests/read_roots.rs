@@ -262,6 +262,11 @@ async fn an_unrelated_absolute_path_is_refused_and_the_message_names_both_roots(
         .unwrap_err();
     assert_eq!(failure.code, "path_outside_workspace", "{failure:?}");
     assert!(
+        failure.message.contains("absolute path") && failure.message.contains("/etc/passwd"),
+        "the refusal still names the path kind and the path: {}",
+        failure.message
+    );
+    assert!(
         failure.message.contains("$CARGO_HOME/registry/src"),
         "{}",
         failure.message

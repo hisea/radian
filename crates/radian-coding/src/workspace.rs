@@ -456,12 +456,18 @@ impl WorkspaceRoot {
 }
 
 /// Where a read tool's path came from, for the message that refuses an absolute/`~` path under
-/// no readable root (ADR 0039).
+/// no readable root (ADR 0039). It keeps naming the path kind, as the
+/// workspace-only refusal did, and lists the two readable roots.
 fn outside_read_failure(user: &str) -> ToolFailure {
+    let kind = if user.starts_with('~') {
+        "a `~` path"
+    } else {
+        "an absolute path"
+    };
     fail(
         CODE_OUTSIDE,
         format!(
-            "`{user}` is outside the workspace. The file tools also read {}",
+            "`{user}` is {kind} outside the workspace; the file tools also read, read-only, {}",
             crate::read_roots::READ_ROOTS_DESCRIPTION
         ),
     )
