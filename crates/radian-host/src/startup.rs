@@ -155,9 +155,10 @@ pub fn is_local_base_url(base_url: &str) -> bool {
 
 /// The session settings both hosts read from the **config file** the same way (ADR 0032 slice 5).
 ///
-/// They were written out four times: once per host for the lead's session and once per host for
-/// the task builder's [`crate::TaskHost`]. The defaults stay where they are documented (the
-/// config reader and the ADRs); this only stops the four copies from drifting apart.
+/// The resolution used to be written out three times — the CLI's `setup`, the TUI's lead session
+/// and the TUI's task builder — with the CLI's task builder reusing whatever the lead had
+/// resolved, so the four call sites could disagree. The defaults stay where they are documented
+/// (the config reader and the ADRs); this only stops the copies from drifting apart.
 #[derive(Clone)]
 pub struct SessionSettings {
     /// `[model] retries` (ADR 0017): how many times a transient model failure is
@@ -239,14 +240,15 @@ impl SessionSettings {
     }
 }
 
-/// Everything a **lead** session needs that the registry does not decide (ADR 0032 slice 5),
-/// and the one place the two hosts build it: the CLI (`radian exec`) and the TUI each fill this
-/// and call [`LeadSetup::setup`], and the task builder fills it too where a task's setup is the
-/// same shape.
+/// Everything a session a host opens itself needs (ADR 0032 slice 5), and the one place the two
+/// hosts build it: `radian exec` and the TUI each fill this and call [`LeadSetup::setup`], and
+/// the task builder fills it too — the fields a task does not decide are the same defaults, and
+/// the registry overwrites the ones a task owns.
 ///
 /// The fields are the [`SessionSetup`] fields a host really decides (see each one's doc there);
-/// the ones that are the same for every lead session — the empty config queue, no role, no agent
-/// definition's allow-lists, `/mode` allowed — are set by [`LeadSetup::setup`] and cannot drift.
+/// the ones that are the same for every host-opened session — the empty config queue, no role, no
+/// agent definition's allow-lists, not a task agent, `/mode` allowed — are set by
+/// [`LeadSetup::setup`] and cannot drift.
 pub struct LeadSetup {
     /// The settings both hosts resolve from the config the same way (see [`SessionSettings`]),
     /// and the same value the task builder is built from.
@@ -288,7 +290,8 @@ pub struct LeadSetup {
 }
 
 impl LeadSetup {
-    /// The [`SessionSetup`] for a lead session, with the fields every host agrees on filled in.
+    /// The [`SessionSetup`] for a session a host opens itself, with the fields every host agrees
+    /// on filled in.
     pub fn setup(self) -> SessionSetup {
         let settings = self.settings;
         SessionSetup {
@@ -307,9 +310,10 @@ impl LeadSetup {
             allowed_filters: self.allowed_filters,
             shell_auto_background: settings.shell_auto_background,
             servers: self.servers,
-            // A lead session is neither an agent definition (ADR 0030 O11: no role, no built-in
-            // tool allow-list and no skills allow-list) nor a task agent (O13): `/mode` is
-            // allowed and `git_commit` is not restricted to one branch.
+            // A host-opened session is neither an agent definition (ADR 0030 O11: no role, no
+            // built-in tool allow-list and no skills allow-list) nor a task agent (O13): `/mode`
+            // is allowed and `git_commit` is not restricted to one branch. The task builder
+            // starts from these defaults as well; the registry overwrites the ones a task owns.
             role: None,
             system_prompt: self.system_prompt,
             context_budget: self.context_budget,

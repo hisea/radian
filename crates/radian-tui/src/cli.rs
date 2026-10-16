@@ -1451,7 +1451,7 @@ fn run(
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
     // first thing that creates durable state. ADR 0032 slice 5: `LeadSetup::setup` fills what
-    // every lead session shares; what the TUI decides itself is written here.
+    // every host-opened session shares; what the TUI decides itself is written here.
     let mut session = runtime
         .block_on(radian_host::open_session(
             radian_host::LeadSetup {

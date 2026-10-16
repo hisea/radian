@@ -1667,8 +1667,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     });
 
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
-    // with its own bindings. ADR 0032 slice 5: `LeadSetup::setup` fills what every lead session
-    // shares; what this host decides itself is written here.
+    // with its own bindings. ADR 0032 slice 5: `LeadSetup::setup` fills what every host-opened
+    // session shares; what this host decides itself is written here.
     // The budget startup line below reads this after the settings are handed over.
     let auto_compact = setup.settings.auto_compact;
     let resume_session = cli.resume.is_some();
