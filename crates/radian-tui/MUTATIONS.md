@@ -1962,3 +1962,19 @@ covers the host side (the spelling is carried, not skipped).
 **Piece 2 dropped.** The task's fourth mutation ("the configured separator ignored with a preset")
 belonged to the `[tui.footer]` separator bug, which the owner dropped ("the owner is redesigning the
 footer") before any code was written; no commit or mutation for it exists.
+
+## ADR 0042: 渲染器换成 grok-build 的 `mermaid.rs`（2026-10-16）
+
+Base `aedc23f`。变异在 worktree 内直接改，改前把每个文件复制到 `.radian/scratch/mut/`，改后
+`cp` 还原并 `cmp` 一致（`git status --short` 变异后只剩被测文件，跑完为空）。命令：
+`timeout 600 cargo test -p radian-tui --test mermaid --no-fail-fast`（M4 换成
+`cargo test -p grok-mermaid --test pristine`）。
+
+| # | Requirement mutated | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| M1 | 决定 4：边映射到 `mermaid_edge` | `blocks/markdown.rs`: `Some(grok_mermaid::Role::Edge) => DiagramRole::Edge` → `DiagramRole::Text` | `the_diagram_roles_come_from_the_theme` | ✅ 1 failed |
+| M2 | 决定 3：太宽返回 `TooWide`，**不**走上游 `fallback()`（不出现「open the image」） | `third_party/grok-mermaid/src/lib.rs`: `Oversize::Width` 分支换成 `mermaid::render(...)` 的 fallback 框并 `Ok` | `the_two_wide_samples_report_the_columns_they_need`、`a_too_wide_sample_names_the_columns_in_the_transcript`、`a_diagram_that_does_not_fit_keeps_the_source_and_names_the_reason`、`a_width_change_recounts_and_redraws` | ✅ 4 failed |
+| M3 | 决定 3：`needed` = `max_width = None` 再渲一次的最宽 plain 行 | `lib.rs`: `needed: Art::from_mermaid(art).width` → `needed: 0` | `the_two_wide_samples_report_the_columns_they_need`、`a_too_wide_sample_names_the_columns_in_the_transcript` | ✅ 2 failed |
+| M4 | 决定 2：`src/mermaid.rs` 只有 `use` 行与可见性两类有记录的改动 | `src/mermaid.rs`: 上游一行 `const MAX_LABEL: usize = 28;` → `27` | `third_party/grok-mermaid` `tests/pristine.rs::the_two_edits_are_the_only_difference_from_upstream` | ✅ 1 failed |
+
+4 条变异，4 条抓住。M4 在 vendored crate 里跑（本 crate 的 `mermaid.rs` 快照测试看不见上游 diff）。

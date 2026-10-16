@@ -590,6 +590,11 @@ text_len)` 不重渲）。
 **二进制体积**：`cargo build --release -p radian-tui --bin radian`，接入前 23,993,056 字节，
 接入后 **24,169,680 字节**（+176,624，+0.74%）。
 
+**渲染器已换（ADR 0042，2026-10-16）**：上面的数字与体积是 `codex-mermaid` + 修订 6 布局那一版的，
+此后渲染器换成 vendored 的 `third_party/grok-mermaid`（grok-build 的 `mermaid.rs`：Sugiyama 布局，
+多支持 subgraph / 4 参与者时序图）。接入点仍在 `blocks.rs` 的 `(source, width)` 缓存里，失败仍是
+源码 + 一行原因，所以这里的结论（接入不退化每帧路径）不变；**具体数字与体积要按新渲染器另测**。
+
 ## 工具卡片（ADR 0028 第 2 片 a · R4/R7 门槛）
 
 工具卡片（数据、按名注册的渲染器、`tui.display.tool_output` 折叠 + Ctrl-O）加在块模型之上。

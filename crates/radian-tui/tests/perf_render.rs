@@ -823,7 +823,7 @@ fn dbg_render_costs() {
     // A big mermaid diagram.
     let diagram: String = (0..200).map(|i| format!("A{i}-->B{i};\n")).collect();
     let t = Instant::now();
-    let _ = codex_mermaid::render_spans(&format!("graph TD;\n{diagram}"), 120);
+    let _ = grok_mermaid::render(&format!("graph TD;\n{diagram}"), Some(120));
     println!("mermaid 200 edges: {} ms", t.elapsed().as_millis());
 }
 

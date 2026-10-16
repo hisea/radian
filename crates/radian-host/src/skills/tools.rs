@@ -364,12 +364,13 @@ mod tests {
     async fn the_skill_tool_reads_a_builtin_body() {
         let skills = Arc::new(crate::skills::discover_with_extras(None, &[], true, &[]).skills);
         let session = SkillTools::new(skills).open_session().await.unwrap();
-        let out = run(&session, &call("diagrams", None)).await.unwrap();
+        // `theme-import` is the only built-in skill (ADR 0042's supplement deleted `diagrams`).
+        let out = run(&session, &call("theme-import", None)).await.unwrap();
         let text = text_of(&out);
-        // The body explains the check tool and the unsupported list; the frontmatter is gone.
-        assert!(text.contains("mermaid_check"), "{text}");
-        assert!(text.contains("subgraph"), "{text}");
-        assert!(!text.contains("description: How to draw"), "{text}");
+        // The body is the embedded `SKILL.md`; the frontmatter is gone.
+        assert!(text.contains("Radian themes"), "{text}");
+        assert!(text.contains("tui.theme"), "{text}");
+        assert!(!text.contains("description: Bring a pi theme"), "{text}");
     }
 
     #[test]
