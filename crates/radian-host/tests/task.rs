@@ -1108,6 +1108,77 @@ fn creating_and_removing_a_worktree_runs_no_filter() {
         "worktree remove must not run a filter in the host"
     );
 }
+
+/// ADR 0039 decision 4: two task spawns in one process share `RADIAN_HOME/worktrees`, so both can
+/// see the same level of the root missing and both `mkdirat` it. The loser's `EEXIST` means
+/// "someone else created it", not a failure: the worktree is still created, through the same
+/// `O_NOFOLLOW|O_DIRECTORY` open. The seam creates the level between the miss and the `mkdirat`,
+/// which is the exact interleaving; a second caller's `mkdirat` is what produces the `EEXIST`.
+#[test]
+fn a_worktree_level_created_by_a_concurrent_spawn_still_succeeds() {
+    let lead = scratch("root-race-lead");
+    assert!(git(&lead, &["init", "-q", "-b", "main"]));
+    assert!(git(&lead, &["config", "user.email", "t@example.com"]));
+    assert!(git(&lead, &["config", "user.name", "t"]));
+    std::fs::write(lead.join("a.txt"), "hello\n").unwrap();
+    assert!(git(&lead, &["add", "-A"]));
+    assert!(git(&lead, &["commit", "-q", "-m", "init"]));
+
+    let home = scratch("root-race-home");
+    let root = home.join("worktrees").join("key");
+    let wt = root.join("t1");
+
+    radian_host::task::testing::arm_worktree_before_mkdir(&root, |level| {
+        std::fs::create_dir_all(level).expect("the concurrent creator");
+    });
+    radian_host::task::create_worktree(&lead, &home, &wt, "radian/t1")
+        .expect("a level created by a concurrent spawn must not fail the worktree add");
+    assert!(
+        wt.join("a.txt").exists(),
+        "the worktree must be checked out"
+    );
+    radian_host::task::remove_worktree(&lead, &wt, false).expect("worktree remove");
+}
+
+/// The `EEXIST` path still refuses a symlink left at the level by the concurrent creator: the
+/// open after the `mkdirat` is the same `O_NOFOLLOW|O_DIRECTORY` open (ADR 0039 decision 4), so a
+/// lost race cannot become a hole.
+#[cfg(unix)]
+#[test]
+fn a_symlink_left_by_a_concurrent_spawn_is_still_refused() {
+    let lead = scratch("root-race-link-lead");
+    assert!(git(&lead, &["init", "-q", "-b", "main"]));
+    assert!(git(&lead, &["config", "user.email", "t@example.com"]));
+    assert!(git(&lead, &["config", "user.name", "t"]));
+    std::fs::write(lead.join("a.txt"), "hello\n").unwrap();
+    assert!(git(&lead, &["add", "-A"]));
+    assert!(git(&lead, &["commit", "-q", "-m", "init"]));
+
+    let home = scratch("root-race-link-home");
+    let root = home.join("worktrees").join("key");
+    let wt = root.join("t1");
+    let outside = scratch("root-race-link-outside");
+
+    radian_host::task::testing::arm_worktree_before_mkdir(&root, {
+        let outside = outside.clone();
+        move |level| {
+            std::os::unix::fs::symlink(&outside, level).expect("the concurrent creator's symlink");
+        }
+    });
+    let error = radian_host::task::create_worktree(&lead, &home, &wt, "radian/t1")
+        .expect_err("a symlink at the level must be refused");
+    assert!(
+        error.to_string().contains("symlink"),
+        "the error must name the symlink: {error}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&outside).unwrap().count(),
+        0,
+        "the symlink target stays empty"
+    );
+    assert!(!wt.exists(), "nothing may be written through the symlink");
+}
+
 // ---------------------------------------------------------------------------------------------
 // ADR 0039 decision 4: the task worktree root is outside the workspace.
 // ---------------------------------------------------------------------------------------------

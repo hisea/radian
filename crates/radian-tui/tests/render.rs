@@ -1263,7 +1263,7 @@ fn thinking_has_one_blank_line_on_both_sides() {
         "shell",
         serde_json::json!({"command": "make test"}),
     );
-    let mut call = Entry::new(EntryKind::ToolCall, "-> shell: make test");
+    let mut call = Entry::new(EntryKind::ToolCall, "shell $ make test");
     call.tool = Some(Box::new(card));
     call.card = radian_tui::blocks::Card::Solo;
     app.session.entries.push(call);
@@ -1276,31 +1276,24 @@ fn thinking_has_one_blank_line_on_both_sides() {
         first + 1,
         "the body's own lines are adjacent:\n{text}"
     );
-    // The card's own block starts at its top border; the head text is inside it.
-    let top = row_of(&terminal, "┌").expect("the card's top border");
+    // The tool block starts at its head row (`• `) right after the one blank line.
+    let head = row_of(&terminal, "• shell").expect("the block's head row");
     assert_eq!(
-        top,
+        head,
         body + 2,
-        "one blank line between expanded thinking and the tool card:\n{text}"
+        "one blank line between expanded thinking and the tool block:\n{text}"
     );
     assert_eq!(
         row(&terminal, (body + 1) as u16).trim_end(),
         "",
         "and that line is empty:\n{text}"
     );
-    assert!(row(&terminal, top as u16).contains('┌'), "{text}");
 }
 
-/// ADR 0027 item 2 / ADR 0035: the `unicode` tier's tool
-/// success glyph is `✓` (not `+`). A regression to `+` fails here — the review found the change
-/// untested, so the rendered glyph is pinned.
+/// ADR 0028: the `unicode` tier's tool head ends with `✓` when the call
+/// succeeded (not `+`), and the `ascii` tier with `+`.
 #[test]
-fn the_unicode_tool_success_glyph_is_a_check_mark() {
-    assert_eq!(
-        radian_tui::footer::Glyphs::Unicode.tool_status()[1],
-        "✓",
-        "the unicode tier's success glyph"
-    );
+fn the_tool_head_ends_with_the_tiers_status_glyph() {
     let mut app = App::new("m", "s");
     app.push_message(&assistant_with(
         "",
@@ -1324,10 +1317,11 @@ fn the_unicode_tool_success_glyph_is_a_check_mark() {
     });
     let text = screen(&render(&mut app, 60, 12));
     assert!(
-        text.contains("✓ shell"),
-        "a completed card draws the check mark:\n{text}"
+        text.contains("• shell $ true · exit 0 ✓"),
+        "a completed block ends its head with the check mark:\n{text}"
     );
     assert!(!text.contains("+ shell"), "never the old `+`:\n{text}");
+    assert!(!text.contains("shell: true"), "never the old head:\n{text}");
 }
 
 /// A transcript selection draws with the theme's `selection` role: the band lands exactly on
@@ -1605,19 +1599,17 @@ fn a_tool_card_head_is_the_same_on_the_live_and_resume_paths() {
 
     let live_text = screen(&render(&mut live, 60, 12));
     let resume_text = screen(&render(&mut resumed, 60, 12));
-    // The card's head is the status line (ADR 0028): `shell: <title>`, with the
-    // command and the output as its sections.
-    let ok = live.footer_glyphs().tool_status()[1];
+    // The block's head is one line (ADR 0028): `• shell $ make test`
+    // with the meta and the status at its end, and the output in `│ ` rows.
     assert!(
-        live_text.contains(&format!("{ok} shell: make test")),
+        live_text.contains("• shell $ make test · exit 0 ✓"),
         "{live_text}"
     );
-    assert!(live_text.contains("$ make test"), "{live_text}");
+    assert!(live_text.contains("│ ok"), "the output body: {live_text}");
     assert!(
-        !live_text.contains("Command"),
-        "no command divider (ADR 0028): {live_text}"
+        !live_text.contains("┌") && !live_text.contains("├──"),
+        "no box, no divider: {live_text}"
     );
-    assert!(live_text.contains("├── Output"), "{live_text}");
     assert_eq!(live_text, resume_text, "live and resume render identically");
 }
 
@@ -1657,12 +1649,11 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
             meta: Default::default(),
         },
     });
-    // errors (the default): a success folds to the preview + one hint.
+    // errors (the default): a success folds to the last five rows.
     assert_eq!(app.tool_display.fold, ToolFold::Errors);
     let _ = render(&mut app, 60, 30);
     let folded = app.session.total_lines;
-    // The card's frame (top, the Command divider, the bottom) is constant across the folds.
-    assert!(folded < 14, "folded: {folded} lines");
+    assert!(folded < 12, "folded: {folded} lines");
     // Ctrl-O: errors -> expanded -> collapsed -> errors.
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(app.tool_display.fold, ToolFold::Expanded);
@@ -1670,19 +1661,21 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     let expanded = app.session.total_lines;
     assert_eq!(
         expanded,
-        folded + 14,
-        "20 lines instead of 5 preview + hint"
+        folded + 15,
+        "20 rows instead of the 5 preview rows"
     );
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(app.tool_display.fold, ToolFold::Collapsed);
-    let _ = render(&mut app, 60, 30);
-    // `collapsed` keeps the header only: the five preview lines `errors` showed are gone, and
-    // with them the Output divider (a folded hint is not a section, ADR 0028).
+    let terminal = render(&mut app, 60, 30);
+    // `collapsed` keeps the head only (ADR 0028): the five preview rows
+    // `errors` showed are gone, and the meta counts them (`· 20 lines`).
     assert_eq!(
         app.session.total_lines,
-        folded - 6,
-        "collapsed shows the header only"
+        folded - 5,
+        "collapsed shows the head only"
     );
+    let text = screen(&terminal);
+    assert!(text.contains("· 20 lines ✓"), "{text}");
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(app.tool_display.fold, ToolFold::Errors);
 }
@@ -1737,7 +1730,7 @@ fn a_git_diff_body_colors_its_line_kinds() {
     );
     // The head's counts come from the same text.
     let text = screen(&terminal);
-    assert!(text.contains("git_diff: 1 files +1/-1"), "{text}");
+    assert!(text.contains("• git_diff 1 files +1 −1 ✓"), "{text}");
 }
 
 /// A `patch` card shows the replacement: the head's +N/-M and the `-old`/`+new` body, whose
@@ -1774,7 +1767,7 @@ fn a_patch_card_shows_the_replacement_with_diff_roles() {
     app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
     let terminal = render(&mut app, 70, 20);
     let text = screen(&terminal);
-    assert!(text.contains("patch: src/main.rs +1/-2"), "{text}");
+    assert!(text.contains("• patch src/main.rs · +1 −2 ✓"), "{text}");
     let theme = app.theme;
     assert_eq!(
         style_of(&terminal, "-let a = 1;").expect("removed").fg,
@@ -1822,7 +1815,7 @@ fn a_write_card_shows_the_content_without_markers() {
     // Wide characters make the screen model insert a blank cell after each; compare without
     // spaces so the assertion is about the text, not the terminal's cell model.
     let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(squeezed.contains("write:笔记.md(19bytes,2lines)"), "{text}");
+    assert!(squeezed.contains("•write笔记.md·+2✓"), "{text}");
     assert!(squeezed.contains("第一行"), "{text}");
     assert!(squeezed.contains("第二行"), "{text}");
     let body = style_of(&terminal, "第").expect("the content");
@@ -1921,45 +1914,26 @@ fn the_block_layout_snapshot() {
             line.trim_end().to_string()
         })
         .collect();
-    // The status glyphs main's footer draws (running, success, failure).
+    // The status glyphs the head ends with (ADR 0028).
     let status = app.footer_glyphs().tool_status();
-    // The frame's rows are built, not typed out: an 80-column border is 78 cells wide.
-    let top = format!("┌{}┐", "─".repeat(78));
-    let bottom = format!("└{}┘", "─".repeat(78));
-    // `├── label ──…┤` is 80 cells: 4 + label + 1 + fill + 1.
-    let divider = |label: &str| format!("├── {label} {}┤", "─".repeat(74 - label.chars().count()));
-    let row = |text: &str| {
-        format!(
-            "│ {text}{}│",
-            " ".repeat(77usize.saturating_sub(text.chars().count()))
-        )
-    };
     let golden: Vec<String> = vec![
         // ADR 0035: the thin user row is `❯ 文本`, one line, no band and
         // no half-cell padding. The container's one blank line separates it from the block below.
         "❯ explain the failure".to_string(), // the user text
         "".to_string(),                      // the container gap after the user row
-        "› thinking · 3 lines".to_string(), // the folded channel: the unicode fold glyph (ADR 0027)
+        "▶ thinking · 3 lines".to_string(), // the folded channel: the unicode fold glyph
         "".to_string(), // ADR 0035: one blank line between thinking and the block below
         "  Looking into it.".to_string(), // the reply
         "".to_string(), // the gap
-        top.clone(),    // the shell card's frame (ADR 0028)
-        row(&format!("{} shell: make test", status[2])), // the head status line
-        row("$ make test"), // the command (no divider: part of the call)
-        divider("Error"), // the output section's label (the call failed)
-        row("$ make test"), // the output
-        row("exit code: 2"),
-        row("--- stdout ---"),
-        row("boom"),
-        row("⟦exit 2⟧"), // the meta row, `⟦ ⟧` (revision 3 rule 3)
-        bottom.clone(),  // the card's bottom border
-        "".to_string(),  // the gap
-        top.clone(),     // the list card
-        row(&format!("{} list: src (2 entries)", status[1])),
-        divider("Output"),
-        row("d 4.0K src"), // the aligned table
-        row("f 512 B b.md"),
-        bottom.clone(),
+        // The failed shell block (ADR 0028): one head line, `│ ` body rows.
+        "• shell $ make test · exit 2 ×".to_string(),
+        "│ $ make test".to_string(), // the tool's own text leads with the command
+        "│ exit code: 2".to_string(),
+        "│ --- stdout ---".to_string(),
+        "│ boom".to_string(),
+        "".to_string(), // the gap
+        // The `list` block: one line, its table only under Ctrl-O (it is a small tool).
+        format!("• list src (2 entries) {}", status[1]),
         "".to_string(), // the gap
         "* profile: workspace · sandbox macos-seatbelt".to_string(),
         "".to_string(), // the gap above the rule line
@@ -1967,35 +1941,18 @@ fn the_block_layout_snapshot() {
         "".to_string(), // the gap below it
     ];
     assert_eq!(rows[..golden.len()], golden[..], "{rows:#?}");
-    // The bands: ADR 0035 made the user row a foreground role with no
-    // band, so the row and the gap after it are plain. The failed card's frame and every row
-    // inside it still carry the card's band; a gap row carries none.
-    assert_eq!(app.theme.user.bg, None, "the user role has no background");
-    assert_eq!(
-        cell_style(&terminal, 0, 0).bg,
-        Some(Color::Reset),
-        "the user row is unbanded"
-    );
-    assert_eq!(
-        cell_style(&terminal, 79, 0).bg,
-        Some(Color::Reset),
-        "…to the row's end"
-    );
-    let bg = |x: u16, y: u16| buffer.cell((x, y)).map(|c| c.bg);
-    // The failed card is rows 6..=15: its top border, the content and the bottom border. The
-    // reply is row 4, the gap after it row 5, and the list card starts at row 17.
-    let failed = bg(0, 6);
-    for y in 6..=15u16 {
-        assert_eq!(
-            bg(0, y),
-            failed,
-            "the failed card's row {y} carries the band"
-        );
-        assert_eq!(bg(79, y), failed, "…to the row's end");
+    // No band anywhere in the transcript (ADR 0028 + ADR 0035
+    // decision 10): the user row, the assistant rows and the tool rows all sit on the terminal's
+    // own background.
+    for y in 0..golden.len() as u16 {
+        for x in [0u16, 79] {
+            assert_eq!(
+                buffer.cell((x, y)).map(|c| c.bg),
+                Some(Color::Reset),
+                "row {y} col {x} carries no background"
+            );
+        }
     }
-    assert_ne!(failed, bg(0, 4), "the assistant row has no card band");
-    assert_eq!(bg(0, 5), bg(0, 4), "a gap row is not banded");
-    assert_ne!(failed, bg(0, 17), "the successful card's band differs");
 }
 
 /// A tab is four columns when the wrap decides where to break (ADR 0028 R9), not zero: a line
@@ -2048,7 +2005,7 @@ fn a_list_card_shows_an_aligned_table() {
     });
     app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
     let text = screen(&render(&mut app, 70, 14));
-    assert!(text.contains("list: src (3 entries)"), "{text}");
+    assert!(text.contains("• list src (3 entries) ✓"), "{text}");
     assert!(text.contains("d ") && text.contains("src"), "{text}");
     assert!(text.contains("4.0K"), "a human-readable size: {text}");
     assert!(
@@ -2070,13 +2027,13 @@ fn the_list_and_memory_cards_have_their_own_heads() {
             "git_status",
             serde_json::json!({}),
             serde_json::json!({"entries": 2}),
-            "git_status: 2 entries",
+            "• git_status 2 entries ✓",
         ),
         (
             "list",
             serde_json::json!({"path": "src"}),
             serde_json::json!({"path": "src", "entries": 3, "total_entries": 3}),
-            "list: src (3 entries)",
+            "• list src (3 entries) ✓",
         ),
         (
             "ask_user",
@@ -2089,7 +2046,7 @@ fn the_list_and_memory_cards_have_their_own_heads() {
             "memory_get",
             serde_json::json!({"id": "mem-7"}),
             serde_json::json!({}),
-            "memory_get: mem-7",
+            "• memory_get mem-7 ✓",
         ),
     ] {
         let mut app = App::new("m", "s");
@@ -2252,7 +2209,7 @@ fn an_mcp_alias_renders_generic_and_the_builtin_keeps_its_card() {
         "the argument JSON summary: {text}"
     );
     assert!(
-        !text.contains("read: a.rs"),
+        !text.contains("• read a.rs"),
         "not the built-in read card: {text}"
     );
     // Same for a `shell` and a `list` from a server.
@@ -2262,7 +2219,7 @@ fn an_mcp_alias_renders_generic_and_the_builtin_keeps_its_card() {
         12,
     ));
     assert!(text.contains("x__shell"), "{text}");
-    assert!(!text.contains("shell: ls"), "{text}");
+    assert!(!text.contains("• shell $ ls"), "{text}");
     let text = screen(&render(
         &mut card_for("mcp__github__list", serde_json::json!({"repo": "r"})),
         70,
@@ -2278,7 +2235,7 @@ fn an_mcp_alias_renders_generic_and_the_builtin_keeps_its_card() {
         70,
         12,
     ));
-    assert!(text.contains("read: a.rs (lines 4..5)"), "{text}");
+    assert!(text.contains("• read a.rs 4-5 ✓"), "{text}");
 }
 
 /// A batch of calls pairs each result with **its own** call by id: results arriving in
@@ -2433,11 +2390,10 @@ fn collapsed_and_errors_differ_for_a_successful_card() {
         counts.push(app.session.total_lines);
     }
     // The empty assistant entry contributes nothing (its blank line is stripped, rule 1) and
-    // the container's gap before the card is one line. The card (ADR 0028) is the
-    // top border + the head + the body + the bottom border, plus the Output divider only when
-    // a real output section is shown: 20 body lines expanded, 5 preview + 1 hint + the
-    // divider under `errors`, a single `[20 lines]` hint and no divider under `collapsed`.
-    assert_eq!(counts, vec![25, 11, 5], "expanded / errors / collapsed");
+    // the container's gap before the block is one line. The block (ADR 0028
+    // decision 1) is the head row plus the body rows: 20 rows expanded, the last 5 under
+    // `errors`, none under `collapsed` (the head only).
+    assert_eq!(counts, vec![22, 7, 2], "expanded / errors / collapsed");
     // A failure: the same count in all three, and the body really visible.
     for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
         let mut app = app_with(true);
@@ -2445,7 +2401,6 @@ fn collapsed_and_errors_differ_for_a_successful_card() {
         let text = screen(&render(&mut app, 60, 40));
         assert!(text.contains("line 1 "), "{fold:?}: {text}");
         assert!(text.contains("line 20"), "{fold:?}");
-        assert!(!text.contains("more lines"), "{fold:?}: nothing folded");
     }
 }
 
@@ -2557,7 +2512,7 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
         message: assistant_with("THE ANSWER", "FIRST THOUGHT\nSECOND THOUGHT", false, vec![]),
     });
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("› thinking · 2 lines"), "{text}");
+    assert!(text.contains("▶ thinking · 2 lines"), "{text}");
     assert!(
         !text.contains("FIRST THOUGHT"),
         "folded by default:
@@ -2573,11 +2528,11 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
 {text}"
     );
     assert!(text.contains("SECOND THOUGHT"), "{text}");
-    assert!(!text.contains("› thinking"), "{text}");
+    assert!(!text.contains("▶ thinking"), "{text}");
 
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("› thinking · 2 lines"), "{text}");
+    assert!(text.contains("▶ thinking · 2 lines"), "{text}");
     assert!(!text.contains("FIRST THOUGHT"), "{text}");
 }
 
@@ -2694,48 +2649,42 @@ fn the_user_row_has_no_band_at_80_and_120() {
     }
 }
 
-/// A tool card's band follows its state (ADR 0028 R4): running / success / failure, and the
-/// result entry carries the same two.
+/// A tool block has **no** band, whatever its state (ADR 0028, replacing
+/// revision 4's neutral card background): every cell of the head row and of the body rows sits
+/// on the terminal's own background.
 #[test]
-fn a_tool_card_paints_the_state_band() {
-    for (result, expected) in [
-        (None, Color::Rgb(52, 56, 58)),
-        (Some(false), Color::Rgb(37, 65, 49)),
-        (Some(true), Color::Rgb(91, 40, 42)),
-    ] {
+fn a_tool_block_never_paints_a_band() {
+    for (result, is_error) in [(None, false), (Some(false), false), (Some(true), true)] {
         let mut app = App::new("m", "s");
-        let mut call = Entry::new(EntryKind::ToolCall, "shell({\"command\": \"ls\"})");
+        classic_footer(&mut app);
+        let mut call = Entry::new(EntryKind::ToolCall, "shell $ ls");
         call.result = result;
+        let mut card =
+            radian_tui::tools::ToolCard::new("c1", "shell", serde_json::json!({"command": "ls"}));
+        card.structured = Some(serde_json::json!({"command": "ls", "exit_code": 0}));
+        call.tool = Some(Box::new(card));
         app.session.entries.push(call);
+        if let Some(result) = result {
+            let mut entry = Entry::new(EntryKind::ToolResult, "line one\nline two");
+            entry.is_error = is_error;
+            entry.result = Some(result);
+            entry.tool = Some(Box::new(radian_tui::tools::ToolCard::new(
+                "c1",
+                "shell",
+                serde_json::json!({"command": "ls"}),
+            )));
+            app.session.entries.push(entry);
+        }
         let terminal = render(&mut app, 40, 10);
         let buffer = terminal.backend().buffer();
-        assert_eq!(
-            buffer.cell((0, 0)).expect("on screen").bg,
-            expected,
-            "the head row's band for {result:?}"
-        );
-        assert_eq!(
-            buffer.cell((39, 0)).expect("on screen").bg,
-            expected,
-            "the band reaches the row's end"
-        );
-    }
-
-    // A tool result paints the card body the same way.
-    let mut app = App::new("m", "s");
-    classic_footer(&mut app);
-    let mut result = Entry::new(EntryKind::ToolResult, "line one\nline two");
-    result.is_error = true;
-    app.session.entries.push(result);
-    let terminal = render(&mut app, 40, 10);
-    let buffer = terminal.backend().buffer();
-    for row in 0..2u16 {
-        for col in 0..40u16 {
-            assert_eq!(
-                buffer.cell((col, row)).expect("on screen").bg,
-                Color::Rgb(91, 40, 42),
-                "the error band covers row {row} col {col}"
-            );
+        for row in 0..3u16 {
+            for col in 0..40u16 {
+                assert_eq!(
+                    buffer.cell((col, row)).expect("on screen").bg,
+                    Color::Reset,
+                    "row {row} col {col} carries no background"
+                );
+            }
         }
     }
 }

@@ -184,7 +184,7 @@ pub enum Role {
     StatusOk,
     /// A tool head's warning marker (ADR 0029). pi's `warning`.
     StatusWarn,
-    /// A tool head's `✗` (ADR 0029). pi's `error`.
+    /// A tool head's `×` (ADR 0029; `✗` was replaced, ). pi's `error`.
     StatusError,
     Selection,
     ToolPendingBg,
@@ -517,7 +517,7 @@ pub struct Theme {
     pub status_ok: Style,
     /// A tool head's warning marker, ADR 0029.
     pub status_warn: Style,
-    /// A tool head's `✗`, ADR 0029.
+    /// A tool head's `×`, ADR 0029.
     pub status_error: Style,
     /// A transcript selection (mouse drag). pi's role map: `selectedBg`.
     pub selection: Style,

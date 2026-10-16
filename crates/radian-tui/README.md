@@ -321,7 +321,8 @@ A glyph the font does not have is drawn by a system fallback font with different
 sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
 characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code and
 Source Code Pro have (ADR 0027: Operator Mono left the reference set, and the tier's
-token arrows became `↑`/`↓`, its success `✓`, its fold marker `›` and its truncation `…`). The
+token arrows became `↑`/`↓`, its success `✓`, its fold marker `▶` — `▸` misses Fira Code and
+Source Code Pro, the owner's 2026-10-16 note — and its truncation `…`). The
 brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under `ascii`; `㎭` (U+33AD) is gone
 (East-Asian-Wide, off-baseline fallback). The spinner's default
 is `pulse` (`⏺`, one cell); the covered optional kind is `quadrant` (`▖▘▝▗`). The arc
@@ -346,7 +347,11 @@ from slipping in unchecked.
 | `↓` | U+2193 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `~` `✓` `×` | U+007E/2713/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `›` | U+203A | reasoning fold marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `•` | U+2022 | tool block head marker (ADR 0028) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `│` | U+2502 | tool block body rail / open frames | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `╭` `╰` | U+256D/70 | open frame corners (ADR 0035/7) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▼` | U+25BC | thinking header, expanded (ADR 0028) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▶` | U+25B6 | thinking header, folded | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `…` | U+2026 | truncation | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -379,13 +384,16 @@ Replaced or dropped in the `unicode` tier (they were not in all six fonts):
 | `^` `v` tokens | U+005E/76 | `↑` `↓` |
 | `⟲` auto | U+27F2 | `~` |
 | `⠋⠙⠸⠴` spinner | U+280B… | `▖▘▝▗` |
-| `▸` thinking fold | U+25B8 | `›` |
+| `▸` thinking fold | U+25B8 | `▶`` are in all six) |
 | `⟳` `✔` `✘` tool status | U+27F3/2714/2718 | `~` `✓` `×` |
+| `✗` tool failure | U+2717 | `×` |
 | `▶` `▼` startup fold | U+25B6/BC | `+` `-` |
 | `㎭` brand | U+33AD | `R` / `󰰠` / `rad` |
 
 Not in the all-six set but kept (they are not tier-gated icons): the `❯` input prompt (the
-owner's choice; `box` style only) and text arrows (`→`, `•` in the question UI — `•` is in all
+owner's choice; `box` style only), the ask record's `◉`/`○` markers (the owner's choice after
+the 2026-10-16 check: `◉` misses SF Mono and `○` misses Source Code Pro — accepted) and text
+arrows (`→`, `•` in the question UI — `•` is in all
 six, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
 characters (`╭╮╯╰`, `┌┐└┘`, `─│`) are in all six.
 - `theme`: `dark` and `light` are **pi's own palettes**, read

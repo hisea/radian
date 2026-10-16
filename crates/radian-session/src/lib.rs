@@ -91,18 +91,32 @@ pub mod testing {
     }
 
     /// A hook run by `SessionJournal::lock_for_resume` **before** it takes the lock
-    /// (resume-perf B2). A test appends a record here to prove the parse happens after the
-    /// lock: a resume that parsed first would miss it and truncate it away.
+    /// (resume-perf B2), for the one session path it was armed on. A test appends a record here
+    /// to prove the parse happens after the lock: a resume that parsed first would miss it and
+    /// truncate it away. Keyed by path so a test running in parallel cannot consume another
+    /// test's hook — the binary runs every write.rs test on its own thread at once.
     type ResumeBeforeLock = Box<dyn Fn(&std::path::Path) + Send + Sync>;
 
-    pub static RESUME_BEFORE_LOCK: std::sync::Mutex<Option<ResumeBeforeLock>> =
-        std::sync::Mutex::new(None);
+    static RESUME_BEFORE_LOCK: std::sync::Mutex<
+        std::collections::BTreeMap<std::path::PathBuf, ResumeBeforeLock>,
+    > = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+    /// Arms the resume hook for `path`.
+    pub fn arm_resume_before_lock<F>(path: &std::path::Path, hook: F)
+    where
+        F: Fn(&std::path::Path) + Send + Sync + 'static,
+    {
+        RESUME_BEFORE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_path_buf(), Box::new(hook));
+    }
 
     pub(crate) fn resume_before_lock(path: &std::path::Path) {
         let hook = RESUME_BEFORE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take();
+            .remove(path);
         if let Some(hook) = hook {
             hook(path);
         }
