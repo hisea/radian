@@ -3181,8 +3181,9 @@ fn md_wrap_marked(
 
 /// A table: column widths from the cells, wrapping a cell that does not fit; if even the
 /// minimum does not fit (too many columns), the raw `|` source comes back as plain text
-/// (ADR 0028 R2's fallback). Every two rows are separated by a border line (ADR 0035
-/// revision 1).
+/// (ADR 0028 R2's fallback). The header cells take the heading role and the body cells keep
+/// their inline styles (ADR 0035, ADR 0028).
+/// Every two rows are separated by a border line (ADR 0035).
 fn md_table(
     head: &[Vec<crate::markdown::Piece>],
     rows: &[Vec<Vec<crate::markdown::Piece>>],
@@ -3265,10 +3266,47 @@ fn md_table(
         .collect();
     let last_row = row_cells.len().saturating_sub(1);
     for (row_index, row) in row_cells.iter().enumerate() {
-        let wrapped: Vec<Vec<String>> = row
+        let header = row_index == 0;
+        // Each cell's styled pieces, wrapped to its column width. The header's whole cell is
+        // the heading role; a body cell keeps its inline roles (ADR 0035 decision
+        // 8, ADR 0028).
+        let wrapped: Vec<Vec<Vec<MdPiece>>> = row
             .iter()
             .enumerate()
-            .map(|(column, cell)| crate::render::wrap(&cell_text(cell), widths[column].max(1)))
+            .map(|(column, cell)| {
+                let pieces = md_pieces(
+                    cell,
+                    if header {
+                        MdStyle::Heading
+                    } else {
+                        MdStyle::Plain
+                    },
+                    glyphs,
+                );
+                let pieces: Vec<MdPiece> = if header {
+                    pieces
+                        .into_iter()
+                        .map(|piece| MdPiece {
+                            style: MdStyle::Heading,
+                            ..piece
+                        })
+                        .collect()
+                } else {
+                    pieces
+                };
+                // `md_wrap_marked`'s indent is 0, so its leading pad piece is empty: drop it
+                // (and any other empty piece) before the row is assembled.
+                md_wrap_marked(pieces, widths[column].max(1), 0, None)
+                    .into_iter()
+                    .map(|line| {
+                        line.md
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|piece| !piece.text.is_empty())
+                            .collect()
+                    })
+                    .collect()
+            })
             .collect();
         let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
         for line_index in 0..height {
@@ -3284,14 +3322,32 @@ fn md_table(
                     offset: None,
                 },
             ];
+            // A header cell's own chrome (the padding around its text) is the heading role
+            // too; a body cell's chrome is plain.
+            let chrome = if header {
+                MdStyle::Heading
+            } else {
+                MdStyle::Plain
+            };
             for (column, column_lines) in wrapped.iter().enumerate() {
-                let cell = column_lines
-                    .get(line_index)
-                    .map(String::as_str)
-                    .unwrap_or("");
+                let empty: Vec<MdPiece> = Vec::new();
+                let cell = column_lines.get(line_index).unwrap_or(&empty);
+                let used = UnicodeWidthStr::width(
+                    cell.iter()
+                        .map(|piece| piece.text.as_str())
+                        .collect::<String>()
+                        .as_str(),
+                );
+                let trailing = widths[column].saturating_sub(used);
                 pieces.push(MdPiece {
-                    text: format!(" {} ", pad_to(cell, widths[column])),
-                    style: MdStyle::Plain,
+                    text: " ".to_owned(),
+                    style: chrome,
+                    offset: None,
+                });
+                pieces.extend(cell.iter().cloned());
+                pieces.push(MdPiece {
+                    text: " ".repeat(trailing + 1),
+                    style: chrome,
                     offset: None,
                 });
                 pieces.push(MdPiece {
@@ -3405,12 +3461,6 @@ fn md_table_fallback(
     out
 }
 
-/// Right-pads `text` to `width` display columns.
-fn pad_to(text: &str, width: usize) -> String {
-    let used = UnicodeWidthStr::width(text);
-    format!("{text}{}", " ".repeat(width.saturating_sub(used)))
-}
-
 /// The text lines a tool card's body lays out to, for tests that need the body geometry
 /// without building an `Entry`.
 #[cfg(test)]
@@ -3478,6 +3528,10 @@ mod tests {
         "| column a | column b |\n| --- | --- |\n| value one | value two |\n",
         // ADR 0035: every two rows get a border now, not only the header.
         "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n",
+        // ADR 0035: every heading level (no `#` prefix, three roles).
+        "# One\n\n## Two\n\n### Three\n\n###### Six\n",
+        // ADR 0035: a table whose cells carry inline styles.
+        "| `code` | b |\n| --- | --- |\n| **bold** | plain |\n",
         // The HTML subset: `<br>` is a break, `<hr>` a rule, `<blockquote>` a quote.
         "a<br>b\n\n<hr>\n\n<blockquote>q</blockquote>\n",
         "text with a [link](https://example.com/a/b) and **bold** and `code`\n",

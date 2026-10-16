@@ -166,6 +166,42 @@ fn bold_uses_the_text_role() {
     );
 }
 
+/// ADR 0028 and ADR 0035: a table's header cells
+/// take the heading role and body cells keep their inline styles (inline code stays
+/// `md_code`, plain text stays the text role) instead of flattening every cell to one style.
+#[test]
+fn table_header_and_body_cells_keep_their_roles() {
+    use ratatui::style::Color;
+    let mut app = App::new("m", "s");
+    app.theme.md_heading = ratatui::style::Style::default().fg(Color::Blue);
+    app.theme.md_code = ratatui::style::Style::default().fg(Color::Green);
+    assistant(
+        &mut app,
+        "| Head | b |\n| --- | --- |\n| `code` | plain |\n",
+    );
+    let terminal = render(&mut app, 40, 12);
+    let head = style_of(&terminal, "Head").expect("the header cell");
+    assert_eq!(
+        head.fg, app.theme.md_heading.fg,
+        "the header takes the heading role"
+    );
+    let code = style_of(&terminal, "code").expect("the inline-code cell");
+    assert_eq!(
+        code.fg, app.theme.md_code.fg,
+        "the cell keeps its inline code role"
+    );
+    // The body's plain text keeps the body role, not the heading or code role.
+    let plain = style_of(&terminal, "plain").expect("the body cell");
+    assert_ne!(
+        plain.fg, app.theme.md_heading.fg,
+        "body text is not the heading role"
+    );
+    assert_ne!(
+        plain.fg, app.theme.md_code.fg,
+        "body text is not the code role"
+    );
+}
+
 /// A table draws borders when it fits, wraps a cell that does not, and falls back to the raw
 /// `|` text when there are too many columns.
 #[test]
