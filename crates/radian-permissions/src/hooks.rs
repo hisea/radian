@@ -281,6 +281,9 @@ impl PermissionHooks {
             decision,
             approver,
             reason,
+            // No policy-command producer exists yet (ADR 0030 Slice 5). Built-in rules and
+            // `auto` never name a policy, so this layer leaves it unset.
+            policy: None,
         });
     }
 }
@@ -336,6 +339,7 @@ pub fn runtime_event(event: &PermissionResolved) -> radian_session::RuntimeEvent
             AuditApprover::Policy => PermissionApprover::Policy,
         },
         event.reason.clone(),
+        event.policy.clone(),
     )
 }
 

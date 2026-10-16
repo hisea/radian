@@ -171,6 +171,7 @@ async fn build_base(dir: &TempDir) -> Base {
             PermissionDecision::Allow,
             PermissionApprover::User,
             None,
+            None,
         ),
     ] {
         journal.append_runtime_event(event).await.unwrap();

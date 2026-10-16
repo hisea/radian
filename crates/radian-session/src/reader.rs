@@ -29,7 +29,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 28] = [
+pub(crate) const KNOWN_EVENTS: [&str; 30] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -58,6 +58,8 @@ pub(crate) const KNOWN_EVENTS: [&str; 28] = [
     "GitCommitted",
     "BackgroundJobStarted",
     "BackgroundJobSettled",
+    "TaskSpawned",
+    "TaskFinished",
 ];
 
 /// The parsed body of one known event. Events this slice does not interpret (for example
@@ -167,6 +169,8 @@ pub enum EventData {
         decision: PermissionDecision,
         approver: PermissionApprover,
         reason: Option<String>,
+        /// The named external policy command (ADR 0030 O2 revision 2), when present.
+        policy: Option<String>,
     },
     /// The approval policy was switched in place (ADR 0026 D9). Typed for an exact round
     /// trip; audit only, never a transcript record.
@@ -198,6 +202,19 @@ pub enum EventData {
         commit: String,
         branch: String,
         files: usize,
+    },
+    /// A lead spawned a task agent (ADR 0030 O5). Typed for an exact round trip; audit only,
+    /// never a transcript record.
+    TaskSpawned {
+        agent_session_id: String,
+        worktree: Option<String>,
+        label: Option<String>,
+    },
+    /// A task agent finished (ADR 0030 O5). Typed for an exact round trip; audit only, never
+    /// a transcript record.
+    TaskFinished {
+        agent_session_id: String,
+        outcome: TurnOutcome,
     },
     /// A background `shell` job started (ADR 0037 decision 5). Typed for an exact round trip;
     /// audit only, never a transcript record. A start with no settle after a crash is how the
@@ -656,6 +673,7 @@ impl LineScanner {
                     decision: d.decision,
                     approver: d.approver,
                     reason: d.reason,
+                    policy: d.policy,
                 }
             }
             "ApprovalPolicyChanged" => {
@@ -688,6 +706,21 @@ impl LineScanner {
                     commit: d.commit,
                     branch: d.branch,
                     files: d.files,
+                }
+            }
+            "TaskSpawned" => {
+                let d: TaskSpawnedData = data_of(raw, self.lineno, path)?;
+                EventData::TaskSpawned {
+                    agent_session_id: d.agent_session_id,
+                    worktree: d.worktree,
+                    label: d.label,
+                }
+            }
+            "TaskFinished" => {
+                let d: TaskFinishedData = data_of(raw, self.lineno, path)?;
+                EventData::TaskFinished {
+                    agent_session_id: d.agent_session_id,
+                    outcome: d.outcome,
                 }
             }
             "BackgroundJobStarted" => {
@@ -1035,6 +1068,8 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::ProjectTrustChanged { .. }
         | EventData::UserBash { .. }
         | EventData::GitCommitted { .. }
+        | EventData::TaskSpawned { .. }
+        | EventData::TaskFinished { .. }
         | EventData::BackgroundJobStarted { .. }
         | EventData::BackgroundJobSettled { .. }
         | EventData::Other(_) => None,
@@ -1199,6 +1234,8 @@ struct PermissionResolvedData {
     approver: PermissionApprover,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    policy: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1230,6 +1267,21 @@ struct GitCommittedData {
     commit: String,
     branch: String,
     files: usize,
+}
+
+#[derive(Deserialize)]
+struct TaskSpawnedData {
+    agent_session_id: String,
+    #[serde(default)]
+    worktree: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TaskFinishedData {
+    agent_session_id: String,
+    outcome: TurnOutcome,
 }
 
 #[derive(Deserialize)]
