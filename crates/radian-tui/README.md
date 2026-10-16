@@ -138,28 +138,27 @@ the provider and the model only.
 ## Layout and keys
 
 ```
-transcript: user >, assistant, ~ reasoning, -> tool, <- result
-  ◜  Working · 12s · esc to interrupt
-▎ type here
+transcript: ❯ user  ·  assistant prose  ·  ▼/▶ thinking  ·  • tool head + │ body
+─────────────────────────────────────────────────────────────────────
+❯ type here
+─────────────────────────────────────────────────────────────────────
  model │ idle/running/cancelled │ tier │ usage in/out │ mcp servers/tools │ context │ scroll N/M
 ```
 
-The default input area is `tui.input_style = "bar"` (ADR 0035 V3, the omp `rail`): one
-background band per input row (the theme's `input_bar` role — pi's `text` on `userMessageBg`,
-the same band as a user message block), the accent rail `▎` on the left (`|` with
-`glyphs = "ascii"`), no border and no rules; a multi-line input grows the band by its rows, and
-its continuation rows carry the rail too. Directly above the band is a **fixed one-row status
-line**: blank while idle but still occupying its row — so the band and the transcript never
-move when a turn starts or finishes — and
-`<spinner>  Working · 12s · esc to interrupt` while a turn runs (the spinner is the same one the
-`lines`/`box` rule line uses, the rest is one level weaker; the clock is the footer's `elapsed`
-and `esc to interrupt` appears exactly while a turn is running). `tui.input_style = "lines"` is
-the earlier shape: a rule above and below with a `> ` prompt, continuation lines indented two
-cells. `tui.input_style = "box"` is the owner's bordered shape (2026-10-14): **rounded**
-corners, the `❯` prompt, and the border in the theme's accent role (`notice_label` — ADR 0029
-revision 1 reserves accent for labels and attention surfaces). The `lines` and `box` styles put
-the same running status on their top rule / border instead of on a status row. It is a real
-composer in all three (cursor editing, multi-line, history).
+The default input area is `tui.input_style = "lines"` (ADR 0035): a rule
+above and below with a `❯ ` prompt, continuation lines indented two cells. The running status
+sits on the top rule (`── <spinner>  Working · 12s · esc to interrupt ──`; the clock is the
+footer's `elapsed`). `tui.input_style = "bar"` is the omp-style band (ADR 0035 V3): one
+background band per input row (the theme's `input_bar` role), the accent rail `▎` on the left
+(`|` with `glyphs = "ascii"`), no border and no rules, a multi-line input growing the band by
+its rows, and a **fixed one-row status line** directly above the band — blank while idle but
+still occupying its row, `<spinner>  Working · 12s · esc to interrupt` while a turn runs — so
+the band and the transcript never move when a turn starts or finishes. `tui.input_style = "box"`
+is the owner's bordered shape (2026-10-14): **rounded** corners, the `❯` prompt, and the border
+in the theme's accent role (`notice_label` — ADR 0029 reserves accent for labels and
+attention surfaces); the `bar` and `box` styles put the same running status on their status row
+/ border instead of the top rule. It is a real composer in all three (cursor editing,
+multi-line, history).
 
 The **startup screen** is the leading block of transcript entries: the
 wordmark (three rows at the primary `text` level; below its width it drops to one line,
@@ -232,7 +231,7 @@ The file is read the same way as the CLI's (`--config`, `RADIAN_CONFIG`,
 schema_version = 1
 [tui]
 theme = "dark"                 # a built-in name, or a theme file name (see below)
-input_style = "bar"            # bar (default) | lines | box
+input_style = "lines"          # lines (default) | bar | box
 mouse = true                   # wheel + transcript selection (default true)
 clipboard = "osc52"            # osc52 (default) | pbcopy (macOS) | off
 
@@ -251,10 +250,10 @@ find = ["ctrl-f"]              # open the in-transcript search box
 find_next = ["ctrl-g", "shift-enter"]
 ```
 
-- `input_style`: `bar` (the default: the banded input with the accent rail and the fixed status
-  row above it, ADR 0035 V3), `lines` (a rule above and below, `> ` on the first line) or `box`
-  (the owner's rounded box with the `❯` prompt). An unknown value is ignored with a warning and
-  falls back to `bar`.
+- `input_style`: `lines` (the default: a rule above and below, the `❯` prompt on the first
+  line, ADR 0035), `bar` (the banded input with the accent rail and the
+  fixed status row above it, ADR 0035 V3) or `box` (the owner's rounded box with the `❯`
+  prompt). An unknown value is ignored with a warning and falls back to `lines`.
 - `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
   default to on; `false` hides them.
 - `footer` (ADR 0027 C2, revision 3): the status area's rows. `preset` is `deck` (the default,
@@ -574,13 +573,20 @@ the rest is sent as an ordinary message.
 ## What the screen shows
 
 - **Streaming text** (`ModelTextDelta`) appears as it arrives.
-- **Reasoning** (`ModelReasoningDelta`, ADR 0014) is rendered dim + italic with a `~ ` prefix,
-  separate from assistant text. It is never sent back to a provider (R4).
+- **Thinking** (`ModelReasoningDelta`, ADR 0014) is the thin channel (ADR 0028
+  decision 4): expanded, a `▼ thinking · <duration>` header over a `│ `-railed Markdown body
+  in one colour (the `reasoning` role, never italic); folded, the one line
+  `▶ thinking · <duration> · N lines` (while it streams the header carries a spinner frame
+  instead of the duration and the count). `Ctrl-T` toggles it; it is never sent back to a
+  provider (R4).
 - A committed assistant message **replaces** the live delta view, so a dropped delta cannot
   leave a duplicate.
 - An **interrupted** assistant prefix (ADR 0003) shows a yellow `[interrupted]` marker and
   italic body text.
-- Tool calls (`->`) and tool results (`<-`) each get a line.
+- Each tool call is a thin block (ADR 0028): one head line
+  `• <name> <title> · <meta> <status>` (`✓` success, `×` failure, the running spinner, or
+  `· cancelled`), and its body in `│ `-railed rows below; a small tool (`read`, `grep`, `glob`,
+  `list`) is that one line until it errors or `Ctrl-O` expands it.
 
 ## Scroll-follow rules
 
@@ -617,6 +623,7 @@ The transcript owns its scrolling:
 | 20 | Ctrl-C: idle with text, the first press clears it into the history (not a quit); idle and empty, the first press only shows `Press Ctrl-C again to quit` and a second inside 2 s quits with the exit line; a key in between, or the window closing, disarms | `tests/quit.rs`, `tests/pty.rs` |
 | 20 | auto (ADR 0026 D9): `!` approves once and enables auto (the next ask never prompts, `AUTO` on the status bar); `Y` stays allow-once; `/auto on\|off`, `/yolo` alias; switch audited + `ConfigChanged` journaled; resume restores on `workspace`, not on `full` (with the hint); config `auto` honored on `workspace`, ignored with a warning on `full` | `tests/auto.rs`, `tests/pty.rs` |
 | 21 | syntax highlighting (ADR 0028 R2): keyword/string/comment take the theme's `syntax*` colors, a theme file's value reaches the cells, an unclosed or unknown-language block stays plain, `highlight = false` disables it, a truncated line keeps its colors, and the text is unchanged (copy/search) | `tests/highlight.rs` |
+| — | the thin redesign (ADR 0028, slice ⑦): whole-screen snapshots of every shape at 80/120, dark/light and with CJK; the `│ ` rail and the marker column in every built-in theme; no background in any row; the three-hunk numbering row by row; the diff copy rule | `tests/thin.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 | — | background jobs (ADR 0037): `shell` `background:true` returns at once, `job_output wait=true` returns the increment and the settle, `job_list`/`job_kill` work, `/jobs` lists and `/jobs kill all` stops them, a settle arrives as a System message, and a crash reports an orphan | `tests/jobs.rs` (coding), `tests/job_notify.rs` (host), `tests/pty.rs` |
 
@@ -626,8 +633,9 @@ pty automation uses a `vt100` screen model, which answers queries instantly and 
 implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's lesson):
 
 - scroll feel: does PageUp/PageDown move a comfortable amount? does follow/pause feel right?
-- reasoning readability: is dim+italic `~` actually distinguishable, or too faint? does it
-  deserve collapsible "thinking cards" (Phase 5)?
+- thinking readability: is the single-colour `▼ thinking · 3.2s` body (no italic) readable apart
+  from the reply, is the `│ ` rail aligned, and is the folded `▶ thinking · … · N lines` line
+  obvious as a fold?
 - resize: drag the window while a turn streams — no residue, status line keeps working?
 - CJK and emoji width: alignment of a pasted Chinese line and an emoji.
 - paste: a large multi-line paste into the box.
@@ -677,13 +685,16 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   must say the shell description and the startup line are fixed for this session; a new session
   must show the read-only wording. pty automation cannot see the model-facing description, so
   this one is yours (ADR 0009).
-- **the input area's three styles**: is the default `bar` band
-  comfortable — the rail clear, the band reaching the right edge, multi-line and a CJK line
-  banded on every row, and the status row above it (`◜  Working · 12s · esc to interrupt`) not
-  shifting the band or the transcript? Compare `input_style = "lines"` (the rule above and
-  below, `> `) and `input_style = "box"`.
-- **the band's half-cell padding** (ADR 0035): the user block and the `bar` input
-  draw one row above (`▄`) and one below (`▀`) the band, in the band's color on the terminal's
+- **the input area's three styles**: the
+  default is `lines` — a rule above and below with the `❯ ` prompt; is it comfortable? Compare
+  `input_style = "bar"` (the banded input with the accent rail and its fixed status row above,
+  ADR 0035 V3) and `input_style = "box"` (the rounded box). For the `bar` band: is the rail
+  clear, does the band reach the right edge, are a multi-line and a CJK line banded on every
+  row, and does the status row (`◜  Working · 12s · esc to interrupt`) leave the band and the
+  transcript still?
+- **the `bar` band's half-cell padding** (ADR 0035; the `bar` input only — the thin
+  user row is a plain `❯ 文本` with no band, ADR 0035): the `bar` input
+  draws one row above (`▄`) and one below (`▀`) the band, in the band's color on the terminal's
   default background. Is the join **seamless** — no thin gap between the half cells and the
   banded rows — in Ghostty and in a font-drawn terminal? A half-block glyph is drawn by the
   font, so a font whose blocks are not exactly half-height shows a seam or a step; record the
@@ -752,6 +763,64 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   clearing the line, and does typing dismiss it? pty automation asserts the text and the keys,
   not the feel.
 
+### Thin redesign (ADR 0028, slice ⑦): one step per shape
+
+Run a general `workspace` session in a throwaway terminal and get the model to call each tool
+(or type the calls yourself where a `!` helps). `TestBackend` asserts the text and the roles
+(`tests/thin.rs`); these are the ones it cannot judge.
+
+1. **The shell block, success**: call `shell` with a short command. *Expect* one head line
+   `• shell $ <command> · exit 0 · <duration> ✓`, then a `│ ` body of the output. *Look*: is
+   the `•`/`│` rail aligned, is the meta (`· ` separated) readable, is the `✓` at the line end
+   obvious, and is there **no** background band or box?
+2. **The shell block, failure**: call a command that exits non-zero. *Expect* `×` at the head's
+   end and the error output in the body. *Look*: is the `×` clearly not the success `✓`, and is
+   the error body's colour the error level (not the normal output's)?
+3. **The shell block, running**: call a long command. *Expect* the head ends with the spinner
+   frame (`⏺` for `pulse`) and there is no meta and no body yet. *Look*: does the frame breathe
+   (see the spinner step) without moving the head, and does the head settle to `✓`/`×` with the
+   meta when the call ends?
+4. **The shell block, cancelled**: Ctrl-C (or Esc) a running command. *Expect* `· cancelled`
+   in the meta and **no** status glyph. *Look*: is it clear this is a cancel, not a failure?
+5. **The three fold levels**: with a multi-line output, press `Ctrl-O` through
+   `errors → expanded → collapsed`. *Expect* `errors` = the last `tool_preview_lines` rows,
+   `expanded` = all of them, `collapsed` = the head only with `· N lines` in the meta; a failed
+   call's body is never hidden. *Look*: does the head stay put as the body folds, and is the
+   `N lines` count right?
+6. **The small tool (`read`)**: call `read` with a path and a range. *Expect* one line
+   `• read <path> <start>-<end> · <duration> ✓` with no body. Press `Ctrl-O`: the body appears;
+   make it fail: the body appears with `×`. *Look*: is the one-liner's alignment with the
+   other heads right, and is the range (`100-160`) the file's 1-based numbers?
+7. **`patch` with line numbers**: ask for a patch that replaces two separate ranges in one
+   file (or `patch` by hand). *Expect* one head `• patch <path> · +N −M ✓` and, per replaced
+   range, an `@@ -old,old_lines +new,new_lines @@` line and `│ ` rows with a right-aligned
+   4-cell gutter: `-` rows carry the **old** file's numbers, `+` rows the **new** file's, and
+   the second range's `new_start` already includes what the first range added or removed.
+   *Look*: do the numbers line up in the 4-cell column, and is the code syntax-coloured?
+8. **`write`, new and overwrite**: write a new file, then overwrite an existing one. *Expect*
+   `• write <path> · +N ✓` for a new file and `+N −M` when the result carries `previous_lines`
+   (the overwrite). *Look*: does the `−M` show only for the overwrite?
+9. **`git_diff` multi-hunk and the no-start-line fallback**: run `git_diff` on a change with
+   two hunks in one file. *Expect* each hunk's `@@` (weak `frame` colour, **not** the accent)
+   and the numbered rows; then, for a diff text **without** `@@` (a resumed older entry, an MCP
+   tool), the numberless fallback: the signs and the code with **no** gutter. *Look*: does the
+   numbering restart at each `@@`, and does the fallback keep the sign column without a gutter?
+10. **The ask record**: trigger `ask_user`. *Expect* an **open** frame `╭─ ask ─…`, `│ ` rows,
+    `╰──` — never a closed box — with `○`/`◉` for single, multi and `Other` alike, the chosen
+    option `◉`. Decline one (Esc twice): the status shows inside the same frame's body column.
+    *Look*: is the marker a circle (not the old `☐`/`☑`), is it never bold, and does the
+    declined line sit inside the frame?
+11. **Thinking, expanded / folded / streaming**: with a reasoning model, get a reply with
+    thinking. *Expect* expanded `▼ thinking · 3.2s` over a `│ `-railed body in **one** colour
+    (never italic); `Ctrl-T` folds it to `▶ thinking · 3.2s · N lines`; while it streams, the
+    header carries the spinner frame instead of the duration and the count, and there is no
+    `**`/backtick markup. *Look*: is the duration only there for the entry you watched (a
+    resumed session shows none), and does the fold glyph read as a fold?
+12. **A table**: ask for a Markdown table with a header and inline code/emphasis in a cell.
+    *Expect* the header row in the `md_heading` style (accent, bold) and the cell's inline
+    code/emphasis in their own roles. *Look*: is the header visually distinct from the body
+    rows, and does the inline code in a cell keep its colour (not flattened to the body text)?
+
 Suggested 3-line manual pass (in a throwaway terminal, not your working one):
 
 ```sh
@@ -799,15 +868,16 @@ throwaway terminal, not your working one.
    text (empty: one cell into the prompt; the old byte-length bug put it two cells right); the
    continuation line aligns under the text; no corner breaks at any width. *Fail*: record the
    width where a corner/glyph breaks.
-3c. **The `bar` input and its status row** (ADR 0035 V3; default). *Steps*: open `radian`
-   (no `input_style`), type a one-line draft, then a `Ctrl-J` multi-line one, then a CJK line;
+3c. **The `bar` input and its status row** (ADR 0035 V3; the `bar` style — since revision 6
+   decision 9 the default is `lines`, so set `input_style = "bar"`). *Steps*: open `radian`,
+   type a one-line draft, then a `Ctrl-J` multi-line one, then a CJK line;
    send a message and watch a turn run; resize to 40/80/120. *Expect*: one banded row per input
    row, the accent `▎` rail on each, the band reaching the right edge (never a highlight that
    stops at the text); above the band one always-present row — blank when idle, `◜  Working ·
    12s · esc to interrupt` while a turn runs — and neither the band nor the transcript moves
    when the turn starts or ends; the cursor after the rail (CJK two cells). *Look*: is the rail
-   the accent and is the band the same color as a user message block? *Fail*: record the width
-   or the font where it reads wrong.
+   the accent, and does the band read against the plain transcript the thin user row leaves?
+   *Fail*: record the width or the font where it reads wrong.
 3b. **Shift+Enter** (`pi/ui-r3`). *Steps*: in Terminal.app, iTerm2/Ghostty (or another
    kitty-protocol terminal) and inside herdr, press `Shift+Enter` in a non-empty draft; then
    `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and
@@ -832,28 +902,26 @@ throwaway terminal, not your working one.
    press disarms it); two presses exit with the `session … saved; resume with …` line and a
    clean shell prompt. *Fail*: record whether the resize disarmed the quit (the `01177c2` fix)
    and whether the exit line is paste-ready.
-5. **Message and tool-card backgrounds, selection on top** (ADR 0028; merges `0f5a302`,
-   `608ce64`, `8456074`; the band pads are ADR 0035). *Steps*: send a message that
-   calls a tool; drag-select across a user message, a padding row and a tool card;
-   double-click a word, triple-click a message.
-   *Expect*: the user message's text row and each tool card paint a **full-width** background
-   band; the user message and the `bar` input additionally draw one `▄` row above and one `▀`
-   row below the band (the half-cell padding, revision 3), the tool cards **not**; the
-   selection highlight is visible **on top of** the bands (not hidden by them); a drag that
-   starts or ends on a padding row copies no padding and does not crash; the copied text
-   matches what you selected. *Look*: contrast in `dark`, `light`, `mono`, and whether the
-   half cells join the band without a seam (see the bullet above). *Fail*: record which role
-   loses the selection, the theme, and (for the pads) the terminal and font.
-6. **Thinking fold `Ctrl-T` and tool output `Ctrl-O`** (ADR 0028 R3/R4; merges `0f5a302`,
-   `608ce64`). *Steps*: with a reasoning model (e.g. `--thinking adaptive`), get a reply with
+5. **The thin user row and tool block, selection on top** (ADR 0028, ADR 0035
+   revision 6 decision 3/10; supersedes the old banded user block and tool cards). *Steps*:
+   send a message that calls a tool; drag-select across the user row, a tool head and a `│ `
+   body row; double-click a word, triple-click a message.
+   *Expect*: the user row is one plain `❯ <text>` line with **no** background and **no**
+   half-cell pad; each tool block is a thin `• ` head plus `│ ` body rows, also with **no**
+   background; the copied text matches what you selected (no `❯`, `•`, `│`, `✓`/`×` or diff
+   line number reaches the clipboard). *Look*: contrast in `dark`, `light` and `mono` now that
+   the transcript is on the terminal background, and whether the selection highlight reads on
+   it. *Fail*: record the theme, and which glyph the copy wrongly carried.
+6. **Thinking fold `Ctrl-T` and tool output `Ctrl-O`** (ADR 0028/4).
+   *Steps*: with a reasoning model (e.g. `--thinking adaptive`), get a reply with
    reasoning; press `Ctrl-T`; then call a tool with long output and press `Ctrl-O` three times.
-   *Expect*: `Ctrl-T` toggles reasoning between collapsed and expanded (default collapsed;
-   `tui.display.reasoning` sets the start); `Ctrl-O` cycles tool output
-   `errors → expanded → collapsed → errors` (default `errors`; `crates/radian-tui/src/app.rs`, `ToggleToolOutput`); the truncated body shows the `[N more
-   lines]` marker rather than silently cutting; the folded thinking line **hugs** the reply or
-   the tool card below it with no blank line between, while it is still separated from the
-   block above by one line (ADR 0035; an expanded thinking block hugs the
-   same way). *Fail*: record the fold state after each press and the config value.
+   *Expect*: `Ctrl-T` toggles the thinking channel between the folded one-liner
+   `▶ thinking · <duration> · N lines` and the expanded `▼ thinking · <duration>` over a `│ `
+   body (default collapsed; `tui.display.reasoning` sets the start); `Ctrl-O` cycles tool output
+   `errors → expanded → collapsed → errors` (default `errors`; `crates/radian-tui/src/app.rs`,
+   `ToggleToolOutput`); under `collapsed` the head's meta gains `· N lines` (the body is not
+   silently cut); the thinking block is separated from its neighbour by the container's one
+   blank line (not hugged). *Fail*: record the fold state after each press and the config value.
 7. **Mermaid** (ADR 0028 R8; merge `5628737`). *Steps*: ask for a small ` ```mermaid `
    flowchart; widen then narrow the terminal past the `TooWide` threshold, then widen again.
    *Expect*: wide → a Unicode diagram at the body width; narrow → the **source** plus one dim
@@ -1214,7 +1282,8 @@ Q6): it writes nothing and runs nothing, and the answer is data, not a permissio
 A question request is one `Modal::Question`, drawn with the shared panel primitive (ADR 0035
 revision 1, ADR 0024 R2): a titled rounded box, a **tab row** (each question's
 `header`, capped at 16 display cells, a `✓` on an answered one, then `Submit`), the current
-question's options (a `❯` cursor, `○`/`◉` single, `☐`/`☑` multi, ` (Recommended)`, a `↳`
+question's options (a `❯` cursor, `○`/`◉` for single, multi and `Other` alike — ADR 0028
+revision 5 decision 2: the marker is never bold — a ` (Recommended)`, a `↳`
 description), the `Other` row with inline editing, and the key hints in the bottom border
 (they change with the tab). `alt-h` collapses the panel to one line.
 
@@ -1242,9 +1311,10 @@ description), the `Other` row with inline editing, and the key hints in the bott
 | `alt-h` | collapse the panel to one line (`Ask · 2/3 answered · alt-h to show`) |
 | typing | the focused free-text field (a `text` question, the `Other` row, or a note), with the composer's editing keys |
 
-The transcript also shows the `ask_user` call and result as a boxed block (ADR 0024
-R1): the same questions, the chosen options marked `◉`/`☑`, a `↳` description, and the
-declined/cancelled status; `glyphs = ascii` falls back to `+ - |`, `(*)`/`[x]` and `->`.
+The transcript also shows the `ask_user` call and result as an **open frame** (ADR 0028
+revision 5 decision 2): `╭─ ask ─…`, the same questions and options in `│ `-railed rows, the
+chosen options marked `◉` (multi included), a `↳` description, and the declined/cancelled
+status inside the same frame. `glyphs = ascii` falls back to `+ - |`, `( )`/`(*)` and `->`.
 
 A `required` question with no answer blocks the submit with a notice. The drafts live in the
 form, so moving between questions keeps them. These are the **only** rebindable modal keys; the
@@ -1410,33 +1480,43 @@ context text and the scroll position are the first to go. The last segment is ne
 
 ## Tool display
 
-A tool call shows as `-> <the card's header>` and its result as `<- <the card's body>` (banded
-by state: pending / success / error). The header and the body come from a per-tool renderer,
+A tool call is a thin block (ADR 0028): one head line
+`• <name> <title> · <meta> <status>` — no box, no background, the meta inline, the status at the
+end (`✓` success, `×` failure, the ADR 0027 spinner frame while it runs, `cancelled` with no
+glyph) — and its body in `│ `-railed rows. The title and the body come from a per-tool renderer,
 looked up by name in a compile-time registry with a generic fallback:
 
-| Tool | Header | Body |
+| Tool | Head title | Body |
 |---|---|---|
-| `shell` | the command and the exit code | the output (the `--- stderr ---` section on the warning level) |
-| `read` | the path and the line range | collapsed by default (`[read: N lines]`) |
-| `patch` | the path and `+N/-M` | the `-old` / `+new` replacement, no invented context |
-| `write` | the path, byte count and line count | the content written (no `+` markers: nothing to compare) |
-| `git_diff` | the file count and `+N/-M` | git's unified diff, colored by the `diff_*` roles |
-| `git_status` / `list` | the entry count | the tool's lines |
-| `ask_user` | the question count | one `prompt → answer` line per question |
+| `shell` | `$ <command>` (wrapped) | the output (the `--- stderr ---` section on the warning level) |
+| `read` | the path and the line range | a small tool: one line, the text only when expanded or on error |
+| `patch` | the path (`+N −M` in the meta) | the numbered `-old` / `+new` rows, one hunk per replaced range (the `hunks` structured field), no invented context |
+| `write` | the path (`+N −M` in the meta) | the content written |
+| `git_diff` | the file count and `+N −M` | git's unified diff with the numbered gutter |
+| `git_status` / `list` | the entry count | a small tool: one line (the aligned table on expand) |
+| `ask_user` | the open `╭─ ask …` frame | one `prompt → answer` line per question, the chosen option marked `◉` |
 | `memory_search` / `_get` / `_save` / `_revise` | the operation and the record id | the tool's record summary |
 | anything else (MCP included) | the name and the arguments' JSON summary | the result text |
 
+The diff body (ADR 0028) is `│ ` + a right-aligned 4-cell line number +
+the sign + the code: a `+` or context row carries the **new** file's number, a `-` row the
+**old** file's (`@@` and file headers carry none); the number is the weak `diff_line_number`
+role, the sign its own side's colour, and the code is syntax-highlighted by the file's suffix.
+There is no line background. The gutter is synthesized, so a copy takes the sign and the code
+only — never a rail, a head marker, a status glyph or a line number.
+
 The lookup is on the **exact** built-in name: an MCP tool is aliased `server__tool`
 (`agent-extensions`' `alias.rs`), so a server-provided `read` arrives as `fs__read` and takes
-the generic card — its arguments and output are that server's own, not the built-in's.
+the generic block — its arguments and output are that server's own, not the built-in's.
 
 `tui.display.tool_output = "expanded" | "errors" | "collapsed"` (default `errors`) and
 `tui.display.tool_preview_lines` (default 5) fold the bodies; `Ctrl-O` (`toggle_tool_output`)
-steps through them; a failed call's body is never hidden. The status line still carries the
-`tool <name> running` note, so the call, the wait for approval, execution and the result stay
-distinguishable states. The note names a tool that is **still running** — a batch's calls settle
-in completion order, so the last call to start may not be the last to finish — and it cannot
-outlive its batch: the next model request drops it.
+steps through them; a failed call's body is never hidden, and `collapsed` puts `· N lines` in
+the head's meta. The status line still carries the `tool <name> running` note, so the call, the
+wait for approval, execution and the result stay distinguishable states. The note names a tool
+that is **still running** — a batch's calls settle in completion order, so the last call to
+start may not be the last to finish — and it cannot outlive its batch: the next model request
+drops it.
 
 ## Compaction summaries and search over folded content (ADR 0028 R5/R6)
 
