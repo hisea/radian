@@ -5076,6 +5076,7 @@ impl App {
                 .map(|candidate| crate::command::Candidate {
                     insert: candidate.clone(),
                     description: String::new(),
+                    current: false,
                 })
                 .collect(),
         );
