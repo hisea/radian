@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use agent_core::{ContextBudget, NoopSink, TurnOptions};
 use radian_permissions::{ApprovalPolicy, AuditSink, Preset, Profile};
-use radian_runtime::{CompactionSettingsFor, ConfigQueue, ConfigSlot};
+use radian_runtime::{CompactionSettingsFor, ConfigQueue, ConfigSlot, RuntimeEvents};
 use radian_sandbox::{Sandbox, SandboxPolicy};
 use radian_session::SessionJournal;
 
@@ -99,6 +99,11 @@ pub struct TaskHost {
     /// The audit sink factory (the same one the lead used). A task's permission decisions are
     /// audited in the task's own journal.
     pub audit: Arc<dyn Fn(Arc<SessionJournal>) -> Arc<dyn AuditSink> + Send + Sync>,
+    /// The sink for the task's **own** runtime events. It must not be the lead's live sink: a
+    /// task's stream (its turns, its tool calls) never appears in the lead's transcript. The
+    /// hosts pass a sink that ignores them (`NoopSink`) — the lead's notice lines come from the
+    /// registry's notifier instead (ADR 0030 O10).
+    pub task_events: Arc<dyn RuntimeEvents>,
 }
 
 /// Builds the production [`TaskBuilder`] from the host's resolved values.
@@ -177,10 +182,11 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
             shared_queue: None,
             ask_user: true,
             audit: Arc::clone(&host.audit),
-            // A task's own committed events and runtime events go nowhere the lead can see.
+            // A task's own committed events go nowhere the lead can see.
             events: Arc::new(NoopSink),
             projection: Arc::new(SessionProjection::new()),
-            runtime_events: Arc::new(|_: &radian_session::RuntimeEvent| {}),
+            // The host's sink for the task's own runtime events; it must not be the lead's.
+            runtime_events: Arc::clone(&host.task_events),
             driver_stopped: Arc::new(|_| {}),
             before_driver: None,
             memory_warning: Arc::new(|_| {}),

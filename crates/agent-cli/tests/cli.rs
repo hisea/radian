@@ -7763,3 +7763,27 @@ async fn pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo() {
     let stty = tail.split("EXITED:130").nth(1).unwrap_or("");
     assert_stty_has_echo(stty);
 }
+
+/// ADR 0030 slice 6b2: a headless lead (`radian exec`) mounts the lead tools from the start, so
+/// every lead tool name is in the model's list. The mode gate still refuses the calls (a
+/// `general` turn), which is pinned in `radian-host`'s `lead_tools` tests.
+#[tokio::test]
+async fn a_headless_lead_mounts_the_task_tools() {
+    let server = MockServer::start(vec![text_reply("hi")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let names = advertised_tools(&server, 0);
+    for lead in radian_host::LEAD_TOOL_NAMES {
+        assert!(
+            names.iter().any(|name| name == lead),
+            "`{lead}` is not mounted by a headless lead: {names:?}"
+        );
+    }
+}

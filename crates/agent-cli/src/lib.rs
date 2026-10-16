@@ -1721,6 +1721,9 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         memory_injection: setup.memory_injection,
         capabilities: radian_host::SessionCapability::ALL.to_vec(),
         audit: Arc::clone(&audit),
+        // A task's own stream must not reach the lead's live view (ADR 0030 O10); the CLI prints
+        // its own one-line notices for spawn/finish, not the task's stream.
+        task_events: Arc::new(|_: &radian_session::RuntimeEvent| {}),
     });
 
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function

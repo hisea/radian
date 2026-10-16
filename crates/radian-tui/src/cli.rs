@@ -1441,6 +1441,9 @@ fn run(
             memory_injection: config.memory.injection(),
             capabilities: radian_host::SessionCapability::ALL.to_vec(),
             audit: Arc::clone(&audit),
+            // A task's own stream must not reach the lead's live view (ADR 0030 O10); the
+            // status-bar count and the notice lines come from the registry and the projection.
+            task_events: Arc::new(|_: &radian_session::RuntimeEvent| {}),
         })
     };
 
