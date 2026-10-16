@@ -133,7 +133,7 @@ pub enum TaskError {
 }
 
 impl TaskError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self::Message(message.into())
     }
 }
@@ -313,6 +313,10 @@ pub struct SpawnRequest {
     pub model: Option<String>,
     /// A tier name that overrides the definition's `profile`. A task may only narrow.
     pub profile: Option<String>,
+    /// The commit-ish the task's `radian/<id>` branch is created from (ADR 0030
+    /// decision 3). `None` uses the registry's default: `radian/integration` once the lead's
+    /// integration worktree exists, else the lead's current HEAD. Ignored for `shared`.
+    pub base: Option<String>,
 }
 
 impl SpawnRequest {
@@ -328,6 +332,7 @@ impl SpawnRequest {
             agent: None,
             model: None,
             profile: None,
+            base: None,
         }
     }
 }
@@ -494,6 +499,12 @@ pub struct TaskRegistry {
     /// [`TaskRegistry::check_stalls`]; the ticker is then off, so it cannot consume a notice the
     /// test wanted to observe.
     manual_clock: bool,
+    /// The lead's integration worktree (ADR 0030): created lazily on the first
+    /// `integrate_task` and reused afterwards. `None` until then.
+    integration: Mutex<Option<crate::integration::Integration>>,
+    /// The lead's name for per-lead integration naming (ADR 0030): `None`
+    /// is the main lead, whose integration branch is `radian/integration`.
+    lead_name: Option<String>,
 }
 
 impl TaskRegistry {
@@ -542,7 +553,17 @@ impl TaskRegistry {
             observers: Mutex::new(BTreeMap::new()),
             clock: Box::new(Utc::now),
             manual_clock: false,
+            integration: Mutex::new(None),
+            lead_name: None,
         }
+    }
+
+    /// Names this lead for per-lead integration naming (ADR 0030). `None`
+    /// (the default) is the main lead (`radian/integration`); a named lead uses
+    /// `radian/integration-<name>`.
+    pub fn with_lead_name(mut self, name: impl Into<String>) -> Self {
+        self.lead_name = Some(name.into());
+        self
     }
 
     /// Installs the test seams (ADR 0039 decisions 5 and 7).
@@ -1049,10 +1070,13 @@ impl TaskRegistry {
     /// so a queued task starts from its submit-time snapshot.
     fn spawn_resolved(
         &self,
-        request: SpawnRequest,
+        mut request: SpawnRequest,
         resolved: ResolvedAgent,
     ) -> futures_util::future::BoxFuture<'_, Result<Arc<TaskRecord>, TaskError>> {
         Box::pin(async move {
+            // ADR 0030: the task branch's start point, captured before the
+            // request is destructured.
+            let base = request.base.take();
             let SpawnRequest {
                 id,
                 label,
@@ -1084,6 +1108,7 @@ impl TaskRegistry {
                     isolation,
                     label,
                     brief,
+                    base,
                     (approval, policy),
                     agent,
                 )
@@ -1120,6 +1145,8 @@ impl TaskRegistry {
         isolation: Isolation,
         label: Option<String>,
         brief: Option<String>,
+        // ADR 0030: the branch's start point, or `None` for the default.
+        base: Option<String>,
         // The task's approval policy and its optional edge policy command (ADR 0030 slice 5),
         // together: they are only ever read as a pair by the task approver below.
         (approval, policy): (ApprovalPolicy, Option<crate::task_pending::PolicyCommand>),
@@ -1141,8 +1168,11 @@ impl TaskRegistry {
                 let wt = worktree.clone();
                 let br = format!("radian/{id}");
                 let br_for_git = br.clone();
+                // ADR 0030: an explicit `base`, else the registry's
+                // default (`radian/integration` once the integration worktree exists).
+                let start = self.effective_base(base);
                 tokio::task::spawn_blocking(move || {
-                    create_worktree(&lead, &home, &wt, &br_for_git)
+                    create_worktree_from(&lead, &home, &wt, &br_for_git, start.as_deref())
                 })
                 .await
                 .map_err(|error| TaskError::new(format!("worktree task failed: {error}")))??;
@@ -1330,6 +1360,62 @@ impl TaskRegistry {
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.to_owned(), Arc::clone(&record));
         Ok(record)
+    }
+
+    /// ADR 0030: the start point a worktree task's branch is created from.
+    /// An explicit `base` wins; otherwise `radian/integration` once the lead's integration
+    /// worktree exists, else the lead's current HEAD (`None`).
+    fn effective_base(&self, base: Option<String>) -> Option<String> {
+        base.or_else(|| {
+            self.integration_cache()
+                .map(|integration| integration.branch.clone())
+        })
+    }
+
+    /// The lead's integration worktree, once it exists (ADR 0030): `None` until the
+    /// first `integrate_task` creates it.
+    pub fn integration(&self) -> Option<crate::integration::Integration> {
+        self.integration_cache()
+    }
+
+    fn integration_cache(&self) -> Option<crate::integration::Integration> {
+        self.integration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The lead's integration worktree, created lazily on first use (ADR 0030
+    /// decision 2) and cached after. Refuses when the branch or directory already exists.
+    pub fn ensure_integration(
+        &self,
+    ) -> futures_util::future::BoxFuture<'_, Result<crate::integration::Integration, TaskError>>
+    {
+        Box::pin(async move {
+            if let Some(existing) = self.integration_cache() {
+                return Ok(existing);
+            }
+            let root = self.worktree_root.as_ref().ok_or_else(|| {
+                TaskError::new(format!(
+                    "cannot create the integration worktree: {} is not a git repository, or \
+                     there is no usable ~/.radian",
+                    self.workspace.display()
+                ))
+            })?;
+            let lead = self.workspace.clone();
+            let home = root.home.clone();
+            let root_path = root.root.clone();
+            let lead_name = self.lead_name.clone();
+            let integration = tokio::task::spawn_blocking(move || {
+                crate::integration::create(&lead, &home, &root_path, lead_name.as_deref())
+            })
+            .await
+            .map_err(|error| {
+                TaskError::new(format!("integration worktree task failed: {error}"))
+            })??;
+            *self.integration.lock().unwrap_or_else(|e| e.into_inner()) = Some(integration.clone());
+            Ok(integration)
+        })
     }
 
     /// Runs the spawn test seam, if this registry has one (ADR 0039 decision 5).
@@ -1811,6 +1897,20 @@ pub fn create_worktree(
     worktree: &Path,
     branch: &str,
 ) -> Result<(), TaskError> {
+    create_worktree_from(lead, home, worktree, branch, None)
+}
+
+/// [`create_worktree`] with an explicit start point (ADR 0030): `start` is
+/// the commit-ish the new branch is created from (`None` means the lead's current HEAD). A task
+/// spawned with `base` uses it; the default names `radian/integration` once that exists, so a
+/// slice sees the earlier slices already merged.
+pub fn create_worktree_from(
+    lead: &Path,
+    home: &Path,
+    worktree: &Path,
+    branch: &str,
+    start: Option<&str>,
+) -> Result<(), TaskError> {
     let root = worktree.parent().ok_or_else(|| {
         TaskError::new(format!(
             "the worktree path {} has no parent directory",
@@ -1822,13 +1922,18 @@ pub fn create_worktree(
     let path = worktree
         .to_str()
         .ok_or_else(|| TaskError::new("the worktree path is not valid UTF-8"))?;
-    let output = worktree_git(lead)?
-        .args(["worktree", "add", "-b", branch, path])
+    let mut command = worktree_git(lead)?;
+    command.args(["worktree", "add", "-b", branch, path]);
+    if let Some(start) = start {
+        command.arg(start);
+    }
+    let output = command
         .output()
         .map_err(|error| TaskError::new(format!("could not run git: {error}")))?;
     if !output.status.success() {
+        let start = start.map(|start| format!(" {start}")).unwrap_or_default();
         return Err(TaskError::new(format!(
-            "git worktree add -b {branch} {path} failed: {}",
+            "git worktree add -b {branch} {path}{start} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
@@ -1838,8 +1943,10 @@ pub fn create_worktree(
 /// Creates — and checks — every level of `root` below `home` with an `openat` of
 /// `O_NOFOLLOW|O_DIRECTORY` from a directory fd (ADR 0039 decision 4). A symlink at any level
 /// fails with `ELOOP` and refuses the spawn; a missing level is created owner-only (0700).
+/// Public(crate) so [`crate::integration`] vets the lead's integration worktree the exact same
+/// way (ADR 0030).
 #[cfg(unix)]
-fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
+pub(crate) fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
     use std::ffi::CString;
     use std::os::unix::io::AsFd;
 
@@ -1907,7 +2014,7 @@ fn create_missing_level(
 
 /// The non-Unix fallback: no `openat`, so each level is checked with `symlink_metadata`.
 #[cfg(not(unix))]
-fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
+pub(crate) fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
     ensure_private_dir(root)
         .map_err(|error| TaskError::new(format!("cannot create {}: {error}", root.display())))?;
     let relative = root.strip_prefix(home).map_err(|_| {
@@ -2077,7 +2184,7 @@ pub fn remove_worktree(lead: &Path, worktree: &Path, force: bool) -> Result<(), 
 
 /// The worktree's HEAD commit, or `None` when it is not a repository (or git fails). A host
 /// `git` call through the shared helper.
-fn git_head(worktree: &Path) -> Option<String> {
+pub(crate) fn git_head(worktree: &Path) -> Option<String> {
     let output = radian_coding::host_git::host_git_command(worktree)
         .ok()?
         .args(["rev-parse", "HEAD"])
@@ -2088,6 +2195,28 @@ fn git_head(worktree: &Path) -> Option<String> {
     }
     let head = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     (!head.is_empty()).then_some(head)
+}
+
+/// Whether `branch` exists as a local branch in `workspace`, through a host `git` call. Used to
+/// refuse creating an integration worktree whose branch a previous lead already handed over
+/// (ADR 0030).
+pub(crate) fn refs_has_branch(workspace: &Path, branch: &str) -> Result<bool, TaskError> {
+    let reference = format!("refs/heads/{branch}");
+    let output = radian_coding::host_git::host_git_command(workspace)
+        .map_err(TaskError::new)?
+        .args(["show-ref", "--verify", "--quiet", &reference])
+        .output()
+        .map_err(|error| TaskError::new(format!("could not run git: {error}")))?;
+    // `show-ref --verify --quiet` exits 0 when the ref exists, 1 when it does not, and anything
+    // else is a real failure (a broken repository), which must not read as "does not exist".
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(TaskError::new(format!(
+            "git show-ref {reference} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
 }
 
 /// Whether the worktree has changes `git status --porcelain` reports. Resolves the pin the way

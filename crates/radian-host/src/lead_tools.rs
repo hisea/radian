@@ -191,6 +191,10 @@ pub fn specs() -> Vec<ToolSpec> {
                         "type": "string",
                         "enum": ["safe", "workspace"],
                         "description": "A tier that overrides the definition's `profile`; a task may only narrow (`safe` or `workspace`)."
+                    },
+                    "base": {
+                        "type": "string",
+                        "description": "The commit-ish the task branch is created from. Omit for the default: `radian/integration` once it exists, so the task sees earlier merged tasks, else your current HEAD."
                     }
                 },
                 "required": ["brief"],
@@ -559,6 +563,10 @@ struct SpawnArgs {
     model: Option<String>,
     /// A tier name that overrides the definition's `profile`. A task may only narrow.
     profile: Option<String>,
+    /// The commit-ish the task branch is created from (ADR 0030). Omit for
+    /// the default: `radian/integration` once the lead's integration worktree exists, else the
+    /// lead's current HEAD.
+    base: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -684,6 +692,7 @@ impl LeadSession {
         request.agent = args.agent;
         request.model = args.model;
         request.profile = args.profile;
+        request.base = args.base;
         // ADR 0030 item 3: the edge policy command is never a model argument, so
         // `spawn_task` has no way to set one and refuses the field (deny_unknown_fields).
         request.policy = None;

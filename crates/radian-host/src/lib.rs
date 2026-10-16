@@ -26,6 +26,7 @@ pub mod git_commit;
 mod headers;
 pub mod herdr;
 mod home;
+pub mod integration;
 pub mod job_notify;
 pub mod lead_tools;
 pub mod login;
@@ -120,6 +121,10 @@ pub use home::{
     legacy_sessions_hint_for, memory_dir, memory_dir_for, radian_home, radian_home_for,
     run_dir_for, sessions_dir, sessions_dir_for, skills_dir, skills_dir_for, themes_dir,
     themes_dir_for, trust_dir, trust_dir_for, user_home, worktrees_dir_for,
+};
+pub use integration::{
+    Integration, MergeOutcome, branch_for as integration_branch_for,
+    dir_name_for as integration_dir_name_for, worktree_path as integration_worktree_path,
 };
 pub use job_notify::{
     JobNotifier, MAX_CONSECUTIVE_WAKES, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message,
