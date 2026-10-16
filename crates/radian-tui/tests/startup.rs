@@ -28,7 +28,11 @@ fn screen() -> StartupScreen {
 }
 
 fn entry_texts(app: &App) -> Vec<String> {
-    app.entries.iter().map(|entry| entry.text.clone()).collect()
+    app.session
+        .entries
+        .iter()
+        .map(|entry| entry.text.clone())
+        .collect()
 }
 
 fn with_startup() -> App {
@@ -91,6 +95,7 @@ fn safety_lines_stay_visible_while_collapsed() {
             app.on_key(ctrl('p'));
         }
         let warnings: Vec<&str> = app
+            .session
             .entries
             .iter()
             .filter(|entry| entry.kind == EntryKind::Warning)
@@ -109,6 +114,7 @@ fn safety_lines_stay_visible_while_collapsed() {
 fn the_tip_is_one_entry_and_can_be_off() {
     let app = with_startup();
     let tips: Vec<&str> = app
+        .session
         .entries
         .iter()
         .filter(|entry| entry.kind == EntryKind::Tip)
@@ -121,7 +127,10 @@ fn the_tip_is_one_entry_and_can_be_off() {
     let mut app = App::new("mock", "s");
     app.set_startup(off);
     assert!(
-        !app.entries.iter().any(|entry| entry.kind == EntryKind::Tip),
+        !app.session
+            .entries
+            .iter()
+            .any(|entry| entry.kind == EntryKind::Tip),
         "tui.tips = false shows no Tip"
     );
 }

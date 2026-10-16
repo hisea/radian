@@ -160,11 +160,12 @@ fn a_required_question_blocks_the_submit() {
         "a missing required answer must not submit"
     );
     assert!(
-        app.entries
+        app.session
+            .entries
             .iter()
             .any(|entry| entry.text.contains("`two` is required")),
         "the block is explained: {:?}",
-        app.entries.last().map(|entry| &entry.text)
+        app.session.entries.last().map(|entry| &entry.text)
     );
     // Answer it, and the submit works: `Tab` back to it, type, then `Enter` through the tabs
     // to `Submit` (revision 1: each tab is a question, the last is `Submit`).
@@ -628,8 +629,8 @@ fn the_transcript_follows_after_the_panel_closes() {
     assert!(
         app.is_following(),
         "the transcript must follow after the panel closes (scroll={} max={})",
-        app.scroll,
-        app.max_scroll
+        app.session.scroll,
+        app.session.max_scroll
     );
 }
 

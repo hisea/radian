@@ -918,7 +918,7 @@ fn render_row(app: &App, row: &Row, width: usize, context_line: ContextLine) -> 
             // reentrant, so a call from a path that already holds it would deadlock.
             let fraction = match context_line {
                 ContextLine::Percentage => {
-                    let session = app.projection.read();
+                    let session = app.session.projection.read();
                     context_fraction(&session)
                 }
                 ContextLine::Off => None,
@@ -1075,9 +1075,10 @@ fn with_symbol(app: &App, item: &Item, text: String, style: Style) -> Piece {
 fn item_default_style(app: &App, item: &Item, data: &ItemData) -> Style {
     if item.id == "reasoning" {
         let level = app
+            .session
             .next_thinking
             .as_deref()
-            .or(app.thinking_level.as_deref());
+            .or(app.session.thinking_level.as_deref());
         return role_style(
             app,
             level.map(reasoning_role).unwrap_or(Role::ReasoningMedium),
@@ -1131,7 +1132,7 @@ fn contribution_item(app: &App, item: &Item) -> Option<(String, Style)> {
             let (branch, role, stale) = match contribution(app, "git_branch") {
                 Some(contribution) => contribution,
                 // The host's one-shot value, when no contributor is running.
-                None => (app.git_branch.clone()?, SegmentRole::Normal, false),
+                None => (app.session.git_branch.clone()?, SegmentRole::Normal, false),
             };
             // ADR 0027: the change counts from the same background refresh.
             let modified =
@@ -1242,7 +1243,7 @@ struct ItemData<'a> {
 }
 
 fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>> {
-    let session = app.projection.read();
+    let session = app.session.projection.read();
     match id {
         // ADR 0027/8: `tui.brand` when set, else the brand mark per glyph set.
         "brand" => Some(ItemData {
@@ -1256,7 +1257,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             numeric: None,
         }),
         "speed" => {
-            let speed = crate::timing::format_speed(app.timer.speed(app.now)?);
+            let speed = crate::timing::format_speed(app.session.timer.speed(app.now)?);
             Some(ItemData {
                 values: vec![("speed", speed)],
                 default_format: "{speed}",
@@ -1264,7 +1265,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             })
         }
         "elapsed" => {
-            let elapsed = crate::timing::format_duration(app.timer.elapsed(app.now)?);
+            let elapsed = crate::timing::format_duration(app.session.timer.elapsed(app.now)?);
             Some(ItemData {
                 values: vec![("elapsed", elapsed)],
                 default_format: "{elapsed}",
@@ -1275,21 +1276,23 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             values: vec![
                 (
                     "display_name",
-                    app.model_display
+                    app.session
+                        .model_display
                         .clone()
-                        .unwrap_or_else(|| app.model_name.clone()),
+                        .unwrap_or_else(|| app.session.model_name.clone()),
                 ),
-                ("id", app.model_name.clone()),
-                ("provider", app.provider.clone().unwrap_or_default()),
+                ("id", app.session.model_name.clone()),
+                ("provider", app.session.provider.clone().unwrap_or_default()),
             ],
             default_format: "{display_name}",
             numeric: None,
         }),
         "reasoning" => {
             let level = app
+                .session
                 .next_thinking
                 .as_deref()
-                .or(app.thinking_level.as_deref())?;
+                .or(app.session.thinking_level.as_deref())?;
             Some(ItemData {
                 values: vec![("level", level.to_string())],
                 default_format: "{level}",
@@ -1305,7 +1308,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             })
         }
         "cwd" => {
-            let path = app.cwd.as_deref()?;
+            let path = app.session.cwd.as_deref()?;
             let text = path.display().to_string();
             let home_text = std::env::var("HOME")
                 .ok()
@@ -1334,7 +1337,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             })
         }
         "git_branch" => {
-            let branch = app.git_branch.as_deref()?;
+            let branch = app.session.git_branch.as_deref()?;
             Some(ItemData {
                 values: vec![("branch", branch.to_string()), ("dirty", String::new())],
                 default_format: "{branch}",
@@ -1342,7 +1345,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             })
         }
         "session" => Some(ItemData {
-            values: vec![("id", app.session_id.clone())],
+            values: vec![("id", app.session.session_id.clone())],
             default_format: "{id}",
             numeric: None,
         }),
@@ -1472,17 +1475,22 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             numeric: None,
         }),
         "scroll" => {
-            let position = if app.max_scroll == 0 {
+            let position = if app.session.max_scroll == 0 {
                 "all".to_string()
             } else {
-                format!("{}/{}", app.scroll, app.max_scroll)
+                format!("{}/{}", app.session.scroll, app.session.max_scroll)
             };
             Some(ItemData {
                 values: vec![
                     ("position", position),
                     (
                         "mode",
-                        if app.follow { "follow" } else { "paused" }.to_string(),
+                        if app.session.follow {
+                            "follow"
+                        } else {
+                            "paused"
+                        }
+                        .to_string(),
                     ),
                 ],
                 default_format: "{position} {mode}",

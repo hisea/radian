@@ -79,7 +79,7 @@ fn a_fitting_switch_queues_directly() {
         "a fitting switch queues: {:?}",
         result.effects
     );
-    assert_eq!(app.next_model.as_deref(), Some("anthropic/claude"));
+    assert_eq!(app.session.next_model.as_deref(), Some("anthropic/claude"));
     // The route is the whole change: no key, no header values anywhere in the effect.
 }
 
@@ -99,7 +99,7 @@ fn an_over_budget_switch_asks_first() {
         result.effects
     );
     assert!(app.pending_command().is_some(), "the confirm modal is up");
-    assert!(app.next_model.is_none());
+    assert!(app.session.next_model.is_none());
     // y compacts first (D7), targeting the new model's budget.
     let result = app.update(Input::ConfirmCommand(true));
     assert!(result.effects.iter().any(|effect| matches!(
@@ -121,7 +121,7 @@ fn a_declined_confirm_queues_nothing() {
     });
     let result = app.update(Input::ConfirmCommand(false));
     assert!(result.effects.is_empty(), "{:?}", result.effects);
-    assert!(app.next_model.is_none());
+    assert!(app.session.next_model.is_none());
 }
 
 /// A failed pre-switch compaction never queues (D7).
@@ -134,7 +134,7 @@ fn a_failed_compaction_does_not_queue() {
         result: Err("the summarizer failed".into()),
     });
     assert!(result.effects.is_empty(), "{:?}", result.effects);
-    assert!(app.next_model.is_none());
+    assert!(app.session.next_model.is_none());
     assert!(
         app.pending_command().is_none(),
         "no modal stays up after the failure"
@@ -195,13 +195,13 @@ fn the_next_marker_clears_when_the_change_is_applied() {
         tokens: None,
         budget: None,
     });
-    assert!(app.next_model.is_some());
+    assert!(app.session.next_model.is_some());
     let event = radian_session::RuntimeEvent::ConfigChanged {
         revision: 1,
         change: radian_host::ModelRoute::new("anthropic", "claude").to_value(),
     };
     app.update(Input::Runtime(event));
-    assert!(app.next_model.is_none(), "the promise is spent");
+    assert!(app.session.next_model.is_none(), "the promise is spent");
 }
 
 /// The keys answer the confirm even though it is a switch: hardcoded y/n (ADR 0023 U4).
@@ -225,7 +225,7 @@ fn the_confirm_keys_are_hardcoded() {
         result.effects
     );
     // And the queue only happens once the compaction succeeds.
-    assert!(app.next_model.is_none());
+    assert!(app.session.next_model.is_none());
 }
 
 // ---------- /thinking (ADR 0026 D11) ----------
@@ -262,7 +262,7 @@ fn a_thinking_level_queues_after_the_clamp() {
         "{:?}",
         result.effects
     );
-    assert_eq!(app.next_thinking.as_deref(), Some("high"));
+    assert_eq!(app.session.next_thinking.as_deref(), Some("high"));
 }
 
 /// A model with no supported level changes nothing.
@@ -275,7 +275,7 @@ fn a_levelless_model_changes_nothing() {
         supported: Vec::new(),
     });
     assert!(result.effects.is_empty(), "{:?}", result.effects);
-    assert!(app.next_thinking.is_none());
+    assert!(app.session.next_thinking.is_none());
 }
 
 /// The queued level clears when the driver applies it (same rule as `next:`).
@@ -287,14 +287,14 @@ fn the_thinking_marker_clears_when_applied() {
         applied: Some("high".into()),
         supported: vec!["high".into()],
     });
-    assert!(app.next_thinking.is_some());
+    assert!(app.session.next_thinking.is_some());
     app.update(Input::Runtime(
         radian_session::RuntimeEvent::ConfigChanged {
             revision: 3,
             change: serde_json::json!({"thinking": "high"}),
         },
     ));
-    assert!(app.next_thinking.is_none());
+    assert!(app.session.next_thinking.is_none());
 }
 
 /// p4's provider completion (ADR 0026 D10): the list a switch could name comes from the

@@ -342,6 +342,7 @@ fn the_meta_writes_only_the_data_that_exists() {
     // none and shows none).
     let mut app = shell_app(Some(ok_result("done")));
     if let Some(entry) = app
+        .session
         .entries
         .iter_mut()
         .find(|e| e.kind == radian_tui::app::EntryKind::ToolResult)

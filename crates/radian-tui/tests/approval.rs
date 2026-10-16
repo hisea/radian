@@ -135,7 +135,9 @@ fn the_queue_head_drives_the_prompt_not_the_turn() {
 fn ctrl_c_while_a_prompt_is_up_cancels_instead_of_answering() {
     let mut app = App::new("m", "s");
     prompt(&mut app);
-    app.projection.set_turn(radian_tui::TurnState::Running);
+    app.session
+        .projection
+        .set_turn(radian_tui::TurnState::Running);
     let result = app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert_eq!(result.effects, vec![Effect::Cancel]);
     assert!(

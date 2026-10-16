@@ -47,7 +47,7 @@ struct Cli {
 
     /// Expose the built-in file and read-only git tools rooted at this directory
     /// (read/write/patch/list, git_status/git_diff). No shell is provided.
-    #[arg(help_heading = "TUI", long, value_name = "DIR")]
+    #[arg(help_heading = "TUI", long, short = 'w', value_name = "DIR")]
     workspace: Option<PathBuf>,
 
     #[arg(help_heading = "TUI", long)]
@@ -55,7 +55,7 @@ struct Cli {
 
     /// Model name sent to the API. Required unless the config file's `model.model` provides
     /// it.
-    #[arg(help_heading = "Model", long)]
+    #[arg(help_heading = "Model", long, short = 'm')]
     model: Option<String>,
 
     /// Provider wire protocol: `openai-compatible` (the default, unchanged) or `anthropic`.
@@ -98,11 +98,11 @@ struct Cli {
 
     /// Resume an existing session by id, rendering its history into the transcript. Without a
     /// value it shows the session picker (resuming only: no "new" entry).
-    #[arg(help_heading = "Session", long, value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
+    #[arg(help_heading = "Session", long, short = 'r', value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
     resume: Option<Option<String>>,
 
     /// List this workspace's sessions and exit.
-    #[arg(help_heading = "Session", long)]
+    #[arg(help_heading = "Session", long, short = 'l')]
     list: bool,
 
     /// Show a full-screen picker for this workspace's sessions before opening one (Phase 4):
@@ -132,7 +132,7 @@ struct Cli {
 
     /// Approve every tool call without asking, like `radian exec --yes`. Not "allow everything":
     /// `deny` rules still deny and the sandbox still applies; only the question is removed.
-    #[arg(help_heading = "Permissions", long)]
+    #[arg(help_heading = "Permissions", long, short = 'y')]
     yes: bool,
 
     /// The per-turn model call limit. The core's default (`DEFAULT_MAX_MODEL_CALLS`, 32) is a
@@ -900,7 +900,7 @@ fn run(
     // OpenAI-compatible sends none.
     // The app was built before the model was resolved (review M1): the status bar's model name
     // is set here, once, from the effective route.
-    app.model_name = model_name.clone();
+    app.session.model_name = model_name.clone();
     let request_max_output = match provider {
         Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
         Provider::OpenAiCompatible => None,
@@ -948,7 +948,7 @@ fn run(
         (None, None) => radian_host::generate_session_id(),
     };
     validate_session_id(&session_id)?;
-    app.session_id = session_id.clone();
+    app.session.session_id = session_id.clone();
     let user_headers = parse_headers(&header_args, &session_id)?;
     // Header values and **every** key in `auth.json` must not reach the panic log or an export
     // (dogfooding D4; ADR 0013 T4). The startup provider's key alone is not enough: a session
@@ -2510,7 +2510,7 @@ fn coalesce_resize(rows: u16, cols: u16) -> InputEvent {
 /// streaming buffer still changes what is on screen. `false` means another `Dirty` is already
 /// in flight, so this one is coalesced away.
 fn apply_dirty(app: &mut App) -> bool {
-    match app.projection.take_snapshot() {
+    match app.session.projection.take_snapshot() {
         Some(snapshot) => {
             app.update(AppInput::Stream(snapshot));
             true
@@ -2670,11 +2670,11 @@ impl LoopContext<'_> {
                         format!("driver panicked: {message}")
                     }
                 };
-                app.session_ended = Some(reason.clone());
-                app.pending_fork = None;
-                app.projection.set_turn(radian_tui::TurnState::Idle);
-                app.note = Some(reason.clone());
-                app.entries.push(radian_tui::Entry::new(
+                app.session.session_ended = Some(reason.clone());
+                app.session.pending_fork = None;
+                app.session.projection.set_turn(radian_tui::TurnState::Idle);
+                app.session.note = Some(reason.clone());
+                app.session.entries.push(radian_tui::Entry::new(
                     radian_tui::EntryKind::Notice,
                     format!("the session ended: {reason}"),
                 ));
@@ -2683,7 +2683,7 @@ impl LoopContext<'_> {
         };
         // The completion menu's current-value markers read these; keep them in step with the
         // app (the footer's `reasoning` item is the same value).
-        if let Some(level) = app.thinking_level.clone() {
+        if let Some(level) = app.session.thinking_level.clone() {
             self.current_thinking = level;
         }
         effects.extend(result.effects);
@@ -3416,7 +3416,7 @@ fn ui_loop(
             startup_route: startup_route.clone(),
             route_price: Arc::clone(&route_price),
             config_providers: config_providers.clone(),
-            current_thinking: app.thinking_level.clone().unwrap_or_default(),
+            current_thinking: app.session.thinking_level.clone().unwrap_or_default(),
             current_theme,
             thinking_max_tokens,
             workspace,
@@ -3471,6 +3471,7 @@ fn ui_loop(
                 .map(|deadline| deadline.saturating_duration_since(now));
             // A `/fork` waiting for the turn boundary has its own deadline (FORK_COMMIT_WAIT).
             let fork_remaining = app
+                .session
                 .pending_fork
                 .map(|deadline| deadline.saturating_duration_since(now));
             let wait_remaining = match (quit_remaining, fork_remaining) {
@@ -3502,6 +3503,7 @@ fn ui_loop(
                         // A `/fork` waiting for the journaled turn boundary: give up at its
                         // deadline with a notice, never an empty child session.
                         if app
+                            .session
                             .pending_fork
                             .is_some_and(|d| std::time::Instant::now() >= d)
                             && app.update(AppInput::ForkDeadline).dirty
@@ -4233,6 +4235,65 @@ mod tests {
         let cli =
             Cli::try_parse_from(["radian", "--model", "m", "--max-model-calls", "5"]).unwrap();
         assert_eq!(cli.max_model_calls, 5);
+    }
+
+    /// The short aliases shorthand") are the long flags: each
+    /// short parses to the same field as its long form, so nothing else about the surface moves.
+    #[test]
+    fn the_short_flags_parse_to_the_same_fields_as_the_long_ones() {
+        let long = Cli::try_parse_from([
+            "radian",
+            "--model",
+            "m",
+            "--workspace",
+            "/tmp/ws",
+            "--yes",
+            "--list",
+        ])
+        .unwrap();
+        let short =
+            Cli::try_parse_from(["radian", "-m", "m", "-w", "/tmp/ws", "-y", "-l"]).unwrap();
+        assert_eq!(short.model, long.model);
+        assert_eq!(short.workspace, long.workspace);
+        assert_eq!(short.yes, long.yes);
+        assert_eq!(short.list, long.list);
+        assert_eq!(short.resume, long.resume);
+    }
+
+    /// `--resume` takes an optional id (`num_args = 0..=1`); `-r` must behave the same: a bare
+    /// `-r` is the picker, and `-r <id>` resumes that id.
+    #[test]
+    fn the_resume_short_takes_no_value_and_a_value() {
+        let long_bare = Cli::try_parse_from(["radian", "--resume"]).unwrap();
+        let short_bare = Cli::try_parse_from(["radian", "-r"]).unwrap();
+        assert_eq!(short_bare.resume, long_bare.resume);
+        assert_eq!(short_bare.resume, Some(None));
+
+        let long_id = Cli::try_parse_from(["radian", "--resume", "abc"]).unwrap();
+        let short_id = Cli::try_parse_from(["radian", "-r", "abc"]).unwrap();
+        assert_eq!(short_id.resume, long_id.resume);
+        assert_eq!(short_id.resume, Some(Some("abc".to_string())));
+    }
+
+    /// The `--resume`/`--list` conflict is a property of the flags, not of the spelling: `-r`
+    /// rejects `--list` with the same clap error kind as `--resume`, bare or with an id.
+    #[test]
+    fn the_resume_short_conflicts_with_list_like_the_long_form() {
+        for (long, short) in [
+            (
+                Cli::try_parse_from(["radian", "--resume", "abc", "--list"]),
+                Cli::try_parse_from(["radian", "-r", "abc", "--list"]),
+            ),
+            (
+                Cli::try_parse_from(["radian", "--resume", "--list"]),
+                Cli::try_parse_from(["radian", "-r", "--list"]),
+            ),
+        ] {
+            let long = long.unwrap_err();
+            let short = short.unwrap_err();
+            assert_eq!(short.kind(), long.kind());
+            assert_eq!(short.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 
     /// The loop's `/model` rule (F4, ADR 0027): an **applied route change** carries

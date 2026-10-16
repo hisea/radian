@@ -42,7 +42,8 @@ fn app_with_memory(label: &str) -> (PathBuf, App, MemoryService) {
 }
 
 fn notices(app: &App) -> Vec<String> {
-    app.entries
+    app.session
+        .entries
         .iter()
         .filter(|entry| entry.kind == EntryKind::Notice)
         .map(|entry| entry.text.clone())
@@ -138,7 +139,7 @@ fn a_double_slash_sends_the_message_with_one_slash() {
             Effect::SendFollowup(agent_core::Message::user("/hi"))
         ]
     );
-    app.projection.set_turn(TurnState::Running);
+    app.session.projection.set_turn(TurnState::Running);
     assert_eq!(
         submit(&mut app, &service, "//steer me"),
         vec![
@@ -173,7 +174,7 @@ fn a_memory_read_runs_and_is_never_sent() {
     );
 
     // While a turn runs a read command still runs and does not steer the turn.
-    app.projection.set_turn(TurnState::Running);
+    app.session.projection.set_turn(TurnState::Running);
     let effects = submit(&mut app, &service, "/memory list");
     assert!(
         matches!(
@@ -302,7 +303,7 @@ fn a_skill_command_expands_through_the_host_then_sends() {
     );
 
     // While a turn runs the same command steers.
-    app.projection.set_turn(TurnState::Running);
+    app.session.projection.set_turn(TurnState::Running);
     assert_eq!(
         submit(&mut app, &service, "/skill:greet"),
         vec![Effect::ExpandSkill {
