@@ -1206,6 +1206,36 @@ IM-M2 与既有记录一致（见上文 `RESIZE-B`：closed-master 测试抓不�
 不是保证退出；退出由第一次 `tty_readiness` 的 Gone 与主循环兜底覆盖，两者都用同一个
 `tty_readiness`）。IM-M3 证明这次改动没有削弱该测试对 POLLHUP 的检查。
 
+## markdown-b：间距与 Markdown 各元素（ADR 0035，2026-10-16）
+
+Base `2ecb02b` · 一次性 worktree `/tmp/radian-mut-mdb` · 每条跑完 `git checkout -- .`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MD-A | 某元素自己多加一行空白（块间补两行） | `markdown_elements_have_one_blank_line_between_them` | ✅ |
+| MD-B | 续行固定 2 格（`marker_width` 恒 2） | `lists_use_a_dash_and_align_continuations_to_the_marker` | ✅ |
+| MD-C | 表格只画表头线（`row_index == 0`） | `a_table_has_a_border_between_every_row` | ✅ |
+| MD-D | 不画围栏行 | `a_code_block_shows_its_fence` | ✅ |
+| MD-E | `<br>` 不换行 | `html_br_hr_and_blockquote_render` | ✅ |
+
+5/5 抓住。
+
+### 补：任务勾选框的 nerd 档（并入 main 之后的交接，2026-10-16）
+
+`MdGlyphs::for_glyphs` 给 unicode 与 nerd 各一张表（`task_unchecked`/`task_checked`），但原来只有
+unicode 快照与 ascii 两处覆盖，**nerd 表改掉没有测试变红**（unicode 与 nerd 的勾选框字形相同，
+nerd 那条断言缺失）。新用例 `markdown::every_glyph_tier_renders_its_own_task_checkbox_prefix`
+对三档各渲染一个 `- [ ] todo` 与一个 `- [x] done`，断言各自的前缀。
+
+Base = 合并 origin/main 后的 `6db84c1` · 就地变异：改前 `cp crates/radian-tui/src/blocks.rs
+/tmp/mdb-blocks-backup.rs`，改后跑测试，再从副本写回并 `cmp`（逐字节相同），`git status --short`
+为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MD-F | nerd 表的 `task_unchecked` 从 `"☐ "` 改成 `"[?] "`（unicode 与 ascii 两档不动） | `markdown::every_glyph_tier_renders_its_own_task_checkbox_prefix`（`tier nerd: missing "☐ todo"`） | ✅ |
+
+1/1 抓住。本条的基线是合并 main 之后的树，与前面的 MD-A…MD-E（基线 `2ecb02b`）不同。
 ## small-fixes-2：footer 状态与 Esc 取消
 
 Base `e157bfb` · 一次性 worktree `.radian-worktrees/sf2-mut`（detached，跑完删除）。

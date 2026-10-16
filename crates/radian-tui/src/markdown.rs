@@ -21,6 +21,12 @@ pub enum Inline {
     Plain,
     Bold,
     Italic,
+    /// `~~struck~~` (ADR 0035): the crossed-out modifier.
+    Strikethrough,
+    /// A task list's checkbox (ADR 0035): `☐`/`☑` (`[ ]`/`[x]` under ascii). The
+    /// piece's own text is empty; the renderer supplies the glyph.
+    TaskUnchecked,
+    TaskChecked,
     Code,
     LinkText,
     /// The synthesized ` (url)` after a link's text; `offset` is `None`.
@@ -71,6 +77,11 @@ pub enum MdBlock {
     Quote(Vec<MdBlock>),
     /// A thematic break (`---`).
     Rule,
+    /// A task list's checkbox (ADR 0035), the first block of a task item: the
+    /// renderer uses it as the item's marker instead of the bullet.
+    TaskMarker {
+        checked: bool,
+    },
     Table {
         head: Vec<Vec<Piece>>,
         rows: Vec<Vec<Vec<Piece>>>,
@@ -79,7 +90,7 @@ pub enum MdBlock {
 
 /// The parser's options: CommonMark plus the two extensions Radian renders.
 fn options() -> Options {
-    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH
+    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
 }
 
 /// Parses `source` (a block's source range, starting at `base` in the entry's display text)
@@ -139,7 +150,7 @@ pub fn parse(source: &str, base: usize) -> Vec<MdBlock> {
                 }
                 Tag::Emphasis => inline.push(Inline::Italic),
                 Tag::Strong => inline.push(Inline::Bold),
-                Tag::Strikethrough => inline.push(Inline::Plain),
+                Tag::Strikethrough => inline.push(Inline::Strikethrough),
                 Tag::Link { dest_url, .. } => {
                     inline.push(Inline::LinkText);
                     link_url = Some(dest_url.into_string());
@@ -236,11 +247,25 @@ pub fn parse(source: &str, base: usize) -> Vec<MdBlock> {
                 };
                 append(&mut stack, Piece::plain(text, Some(base + range.start)));
             }
+            Event::TaskListMarker(checked) => {
+                // The checkbox is the task item's first block; the renderer draws the glyph
+                // instead of the bullet (ADR 0035).
+                push_block(&mut stack, MdBlock::TaskMarker { checked });
+            }
             Event::Rule => push_block(&mut stack, MdBlock::Rule),
-            Event::Html(text) | Event::InlineHtml(text) => append(
-                &mut stack,
-                Piece::plain(text.into_string(), Some(base + range.start)),
-            ),
+            // ADR 0035: a small HTML subset. `<br>` is a line break, `<hr>` a rule,
+            // `<blockquote>` a quote; every other tag is stripped, its text kept.
+            Event::InlineHtml(text) => {
+                for (index, part) in split_html_breaks(&text).into_iter().enumerate() {
+                    if index > 0 {
+                        append(&mut stack, Piece::plain("\n", Some(base + range.start)));
+                    }
+                    if !part.is_empty() {
+                        append(&mut stack, Piece::plain(part, Some(base + range.start)));
+                    }
+                }
+            }
+            Event::Html(text) => handle_block_html(&mut stack, &text, base + range.start),
             _ => {}
         }
     }
@@ -404,6 +429,59 @@ fn set_in_head(stack: &mut [Container], value: bool) {
         if let Container::Table { in_head, .. } = container {
             *in_head = value;
             return;
+        }
+    }
+}
+
+/// Splits raw inline HTML on `<br>`/`<br/>`, stripping every other tag. The parts are joined
+/// by a newline (the caller appends one between them).
+fn split_html_breaks(raw: &str) -> Vec<String> {
+    let mut text = raw.to_owned();
+    for br in ["<br>", "<br/>", "<br />", "<BR>", "<BR/>", "<BR />"] {
+        text = text.replace(br, "\n");
+    }
+    text.split('\n').map(strip_html_tags).collect()
+}
+
+/// Strips HTML tags, keeping the text between them.
+fn strip_html_tags(raw: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for ch in raw.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Block-level HTML (ADR 0035): `<hr>` is a rule, `<blockquote>…</blockquote>` a
+/// quote, `<br>` a break; anything else has its tags stripped and its text kept.
+fn handle_block_html(stack: &mut Vec<Container>, raw: &str, offset: usize) {
+    let trimmed = raw.trim();
+    let hr = ["<hr>", "<hr/>", "<hr />"];
+    if hr.iter().any(|mark| trimmed.eq_ignore_ascii_case(mark)) {
+        push_block(stack, MdBlock::Rule);
+        return;
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix("<blockquote>")
+        .and_then(|rest| rest.strip_suffix("</blockquote>"))
+    {
+        let inner = inner.trim();
+        let inner_offset = offset + raw.find(inner).unwrap_or(0);
+        push_block(stack, MdBlock::Quote(parse(inner, inner_offset)));
+        return;
+    }
+    for (index, part) in split_html_breaks(trimmed).into_iter().enumerate() {
+        if index > 0 {
+            append(stack, Piece::plain("\n", Some(offset)));
+        }
+        if !part.is_empty() {
+            append(stack, Piece::plain(part, Some(offset)));
         }
     }
 }

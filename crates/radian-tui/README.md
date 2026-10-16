@@ -1222,6 +1222,26 @@ costs ~2 s each, which would be a visible freeze on the first code block at runt
 embeds that dump and only deserializes it. The **language table above is what limits
 highlighting**; a grammar the set ships but the table does not name renders as plain text.
 
+## Markdown elements (ADR 0035)
+
+Assistant prose is CommonMark plus tables, strikethrough and task lists
+(`pulldown-cmark`). The renderer, not the source's blank lines, spaces the block-level
+elements: exactly one blank line between a heading, a paragraph, a list, a code block, a
+table, a quote and a rule. A heading keeps its `#` marks with the weak
+`md_heading_mark` role; the text is `md_heading` (level 1 underlined). The unordered marker
+is `-` and a continuation aligns to the marker's actual width (`10. ` is 4 cells). A task
+list shows `☐`/`☑` instead of the bullet. A quote's bar is `▏`, the rule is at most 40 cells,
+a table has a border between every two rows, and a code block shows its fence line (weak) as
+its title and end; code never wraps (ADR 0028 R9). A small HTML subset is handled: `<br>` is
+a line break, `<hr>` a rule, `<blockquote>` a quote, and every other tag is stripped with its
+text kept. The glyphs follow the footer's `glyphs` set (`unicode`/`nerd`/`ascii`): ascii uses
+`-`, `|`, `[ ]`/`[x]` and `+ - |` borders.
+
+**Copy and search see the real text, not the decorations.** A synthesized cell — a list
+bullet, a task checkbox, a quote bar, a heading's `#`, a fence line, a table border, a link's
+` (url)` — has no source offset, so a selection copy and a search match the source characters
+only; the decorations are drawn but never copied.
+
 ## Context budget and the model catalog
 
 The window comes from `--context-window TOKENS` (explicit; it never fetches — an existing

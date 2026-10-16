@@ -252,7 +252,12 @@ pub enum Overlay {
 
 /// The Markdown layout cache: `(width, text_len, paragraphs)`, where each paragraph is
 /// `(block start, lines)`. A type alias keeps the `Option` readable in `Entry`.
-pub(crate) type MdCache = (usize, usize, Vec<(usize, Vec<crate::blocks::BodyLine>)>);
+pub(crate) type MdCache = (
+    usize,
+    usize,
+    crate::footer::Glyphs,
+    Vec<(usize, Vec<crate::blocks::BodyLine>)>,
+);
 
 /// One approval as the UI shows it: the queue's id (ADR 0023 U7), the session that asked and
 /// the request itself. The queue id is what the answer names, not the permission layer's own

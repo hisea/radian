@@ -87,20 +87,21 @@ fn style_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::s
     None
 }
 
-/// A closed flowchart on a wide screen draws box drawing and no fence.
+/// A closed flowchart on a wide screen draws box drawing and shows its fence (ADR 0035
+/// revision 1: the fence is the code block's title).
 #[test]
-fn a_closed_flowchart_is_drawn_and_the_fence_is_not_shown() {
+fn a_closed_flowchart_is_drawn_and_the_fence_is_shown() {
     let mut app = App::new("m", "s");
     assistant(&mut app, &fenced(FLOW, true));
-    let text = screen(&render(&mut app, 80, 12));
+    let text = screen(&render(&mut app, 80, 20));
     assert!(
         text.contains('┌') || text.contains('└') || text.contains('│'),
         "the diagram's box drawing is on screen:\n{text}"
     );
     assert!(text.contains("Start"), "a node label is drawn:\n{text}");
     assert!(
-        !text.contains("```"),
-        "the fences are markup and do not show:\n{text}"
+        text.contains("```mermaid"),
+        "the fence line is the block's title:\n{text}"
     );
     assert!(
         !text.contains("flowchart LR"),
@@ -114,7 +115,7 @@ fn a_diagram_that_does_not_fit_keeps_the_source_and_names_the_reason() {
     let mut app = App::new("m", "s");
     assistant(&mut app, &fenced(FLOW, true));
     // Narrow enough that the vendor reports `TooWide`.
-    let text = screen(&render(&mut app, 16, 12));
+    let text = screen(&render(&mut app, 16, 20));
     assert!(
         text.contains("mermaid:"),
         "the reason line is shown:\n{text}"
@@ -134,7 +135,7 @@ fn a_diagram_that_does_not_fit_keeps_the_source_and_names_the_reason() {
 fn an_unclosed_block_shows_the_source() {
     let mut app = App::new("m", "s");
     assistant(&mut app, &fenced(FLOW, false));
-    let text = screen(&render(&mut app, 80, 12));
+    let text = screen(&render(&mut app, 80, 20));
     assert!(text.contains("flowchart LR"), "the source shows:\n{text}");
     assert!(
         !text.contains('┌') && !text.contains('└'),
@@ -148,7 +149,7 @@ fn the_config_flag_disables_the_diagram() {
     let mut app = App::new("m", "s");
     app.mermaid_enabled = false;
     assistant(&mut app, &fenced(FLOW, true));
-    let text = screen(&render(&mut app, 80, 12));
+    let text = screen(&render(&mut app, 80, 20));
     assert!(text.contains("flowchart LR"), "the source shows:\n{text}");
     assert!(
         !text.contains('┌') && !text.contains('└'),
@@ -163,7 +164,7 @@ fn the_diagram_roles_come_from_the_theme() {
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
     assistant(&mut app, &fenced(FLOW, true));
-    let terminal = render(&mut app, 80, 12);
+    let terminal = render(&mut app, 80, 20);
     let node = style_of(&terminal, "┌").expect("a box-drawing char");
     let edge = style_of(&terminal, "go").expect("an edge label");
     let text = style_of(&terminal, "Start").expect("a node label");
@@ -195,7 +196,7 @@ fn a_width_change_recounts_and_redraws() {
         assert_eq!(count, laid_out, "width {width}: count == laid out");
     }
     // Wide: the diagram renders (box drawing).
-    let wide = screen(&render(&mut app, 80, 12));
+    let wide = screen(&render(&mut app, 80, 20));
     assert!(wide.contains('┌'), "wide draws the diagram:\n{wide}");
     // The **immutable** layout path (selection, search, the reference renderer) reads the
     // cache; it must not reuse the 80-column diagram at 16 (the width is in the key). This
