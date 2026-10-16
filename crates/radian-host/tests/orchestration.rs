@@ -219,6 +219,9 @@ fn builder(
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
+/// A recorded hook event: `(name, payload)`.
+type HookLog = Arc<Mutex<Vec<(String, Value)>>>;
+
 struct Fixture {
     scratch: PathBuf,
     registry: Arc<TaskRegistry>,
@@ -254,7 +257,7 @@ impl Fixture {
         limits: OrchestrationLimits,
         base_url: String,
         clock: Clock,
-        hooks: Arc<Mutex<Vec<(String, Value)>>>,
+        hooks: HookLog,
     ) -> Self {
         Self::build(label, limits, base_url, Some(clock), Some(hooks))
     }
@@ -264,7 +267,7 @@ impl Fixture {
         limits: OrchestrationLimits,
         base_url: String,
         clock: Option<Clock>,
-        hooks: Option<Arc<Mutex<Vec<(String, Value)>>>>,
+        hooks: Option<HookLog>,
     ) -> Self {
         let _ = isolated_home();
         let scratch = scratch(label);
@@ -624,7 +627,7 @@ async fn the_stalled_hook_point_is_emitted() {
         let cell = Arc::clone(&cell);
         Arc::new(move || *cell.lock().unwrap_or_else(|e| e.into_inner()))
     };
-    let hooks = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let hooks: HookLog = Arc::new(Mutex::new(Vec::new()));
     let fixture = Fixture::with_clock_and_hooks(
         "stall-hook",
         limits(4, 30.0),

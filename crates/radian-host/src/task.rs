@@ -253,6 +253,10 @@ pub struct TaskRecord {
     /// The sandbox policy the task's tools run under (ADR 0030 O3): a `workspace` policy with
     /// the network off and `.git` read-only, or `None` for a host with no sandbox.
     pub sandbox_policy: Option<SandboxPolicy>,
+    /// The name of the edge policy command this task's approver was given (ADR 0030 O2 layer 2,
+    /// slice 9), or `None` when no policy is configured. Read from the orchestration snapshot,
+    /// never from a model argument.
+    pub policy: Option<String>,
     /// When the task started, the reference for the stall check before it has an event or a
     /// write (ADR 0030 R5).
     pub started_at: DateTime<Utc>,
@@ -1315,6 +1319,7 @@ impl TaskRegistry {
 
         // The task's asks and questions go to the task-side pending queue, not the human's; the
         // task is committed when its turn ends (ADR 0030 slice 5).
+        let policy_name = policy.as_ref().map(|policy| policy.name.clone());
         let task_approver = Arc::new(TaskApprover::new(
             Arc::clone(&self.pending),
             id.to_owned(),
@@ -1417,6 +1422,7 @@ impl TaskRegistry {
             start_seq,
             start_commit,
             sandbox_policy,
+            policy: policy_name,
             started_at: Utc::now(),
             finisher,
         });

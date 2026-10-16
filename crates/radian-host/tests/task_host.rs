@@ -65,6 +65,9 @@ fn text_reply(text: &str) -> Reply {
 /// A recorder for the runtime events one sink sees.
 type Seen = Arc<Mutex<Vec<RuntimeEvent>>>;
 
+/// A recorded hook event: `(name, payload)`.
+type HookLog = Arc<Mutex<Vec<(String, Value)>>>;
+
 fn recorder() -> Seen {
     Arc::new(Mutex::new(Vec::new()))
 }
@@ -181,7 +184,7 @@ impl Fixture {
         host: TaskHost,
         orchestration: Option<radian_host::Orchestration>,
         lead_seen: Seen,
-        hook_seen: Option<Arc<Mutex<Vec<(String, Value)>>>>,
+        hook_seen: Option<HookLog>,
     ) -> Arc<TaskRegistry> {
         let session_dir = self.scratch.join("sessions");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -511,6 +514,51 @@ async fn verify_runs_in_the_task_sandbox_and_is_reported_in_wait_task() {
     registry.remove("t1", true).await.expect("remove");
 }
 
+/// ADR 0030 O2 layer 2 / slice 9 / ADR 0031: the edge `policy` command comes only from the user
+/// config or a **trusted** project config, and reaches the task's approver through the snapshot.
+#[tokio::test]
+async fn the_edge_policy_comes_from_a_trusted_project_config_only() {
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    for trusted in [true, false] {
+        let fixture = Fixture::new("policy-trust");
+        std::fs::create_dir_all(fixture.lead.join(".radian")).unwrap();
+        std::fs::write(
+            fixture.lead.join(".radian/orchestration.toml"),
+            "policy = \"/bin/echo allow\"\n",
+        )
+        .unwrap();
+        let (orchestration, warnings) = radian_host::orchestration::resolve(
+            &fixture.lead,
+            trusted,
+            &radian_host::OrchestrationConfig::default(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let registry = fixture.registry_full(
+            host(&server.base_url, &fixture.scratch, recorder()),
+            Some(orchestration),
+            recorder(),
+            None,
+        );
+        let record = registry
+            .spawn(SpawnRequest::new("t1"))
+            .await
+            .expect("spawn");
+        if trusted {
+            assert_eq!(
+                record.policy.as_deref(),
+                Some("echo"),
+                "a trusted project policy reaches the approver"
+            );
+        } else {
+            assert!(
+                record.policy.is_none(),
+                "an untrusted project policy must not be read"
+            );
+        }
+        registry.remove("t1", true).await.expect("remove");
+    }
+}
+
 /// ADR 0030 freeze-list 6 / O7 rev 2 item 4: a task reads none of its own worktree's `.radian/`.
 /// Writing the task's own `orchestration.toml` and agent definitions, and editing the lead's
 /// project file **after the snapshot**, changes neither the running task's verify nor its agent.
@@ -585,7 +633,7 @@ async fn a_tasks_own_dot_radian_and_a_later_edit_do_not_change_the_running_task(
 async fn the_registry_emits_the_task_hook_points() {
     let server = MockServer::start(vec![text_reply("done")]).await;
     let fixture = Fixture::new("hooks");
-    let hooks = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let hooks: HookLog = Arc::new(Mutex::new(Vec::new()));
     let registry = fixture.registry_full(
         host(&server.base_url, &fixture.scratch, recorder()),
         None,
