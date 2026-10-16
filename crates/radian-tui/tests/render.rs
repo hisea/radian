@@ -12,7 +12,7 @@ use radian_tui::tools::DisplayModes;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 
 /// One streaming chunk the way the loop does it: the projection accumulates the delta, then the
 /// snapshot becomes the live entries (ADR 0023 U2).
@@ -538,6 +538,7 @@ fn form(questions: Vec<radian_coding::Question>) -> radian_tui::question::Questi
 fn panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> String {
     text_of(&render::question_panel(
         form,
+        "session",
         width,
         usize::MAX,
         &radian_tui::theme::Theme::dark(),
@@ -576,7 +577,7 @@ fn a_long_option_list_scrolls_to_keep_the_cursor_visible() {
     // The panel lays the whole list out; the frame clips it to the modal height.
     form.answers[0].cursor = 11;
     let shown = panel_text(&form, 40);
-    assert!(shown.contains("❯ ○ Option 11"), "{shown}");
+    assert!(shown.contains("❯ ☐ Option 11"), "{shown}");
     assert!(shown.contains("Option 0"), "{shown}");
 }
 
@@ -2774,6 +2775,164 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
     assert!(text.contains("Ask · session"), "{text}");
 }
 
+/// ADR 0024 rule 4: the Ask panel title is `Ask` alone when the asker is this
+/// process's own session, and `Ask · <origin>` only when another session (an ADR 0030 task
+/// agent) is asking. A TUI process has one session today, so `origin == own session` is the
+/// clean test.
+#[test]
+fn the_ask_panel_title_omits_the_own_session() {
+    let questions = vec![radian_coding::Question {
+        id: "q".into(),
+        header: None,
+        prompt: "Pick one".into(),
+        kind: QuestionKind::Text,
+        options: vec![],
+        allow_other: false,
+        required: true,
+    }];
+    let theme = radian_tui::theme::Theme::dark();
+    let title = |origin: &str, own: &str| {
+        let form = radian_tui::question::QuestionForm::new(7, origin.into(), questions.clone());
+        text_of(&render::question_panel(
+            &form,
+            own,
+            60,
+            usize::MAX,
+            &theme,
+            radian_tui::footer::Glyphs::Unicode,
+        ))
+    };
+    let own = title("session-abc", "session-abc");
+    assert!(
+        own.contains("╭─ Ask "),
+        "own session shows a bare Ask: {own}"
+    );
+    assert!(
+        !own.contains("session-abc"),
+        "the own session id never reaches the title: {own}"
+    );
+    let other = title("other-session", "session-abc");
+    assert!(
+        other.contains("Ask · other-session"),
+        "another session keeps its origin: {other}"
+    );
+}
+
+/// ADR 0024 rules 1-2: while the ask is pending the transcript shows one weak line
+/// ("the questions are in the panel below"); once the answer arrives the **same** entry draws
+/// the full closed block, and the result entry stays blank, so the ask is never drawn twice.
+#[test]
+fn a_pending_ask_is_one_line_and_becomes_the_block_once_answered() {
+    let mut app = App::new("m", "s");
+    let arguments = serde_json::json!({"questions":[
+        {"id":"pick","kind":"single","prompt":"Pick one","options":[
+            {"id":"a","label":"Option A"},{"id":"b","label":"Option B"}]},
+        {"id":"note","kind":"text","prompt":"Anything else?"}
+    ]});
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "ask_user".into(),
+            arguments,
+        }],
+    ));
+
+    // Pending: one line, no questions or options, and only one "Ask" line.
+    let pending = screen(&render(&mut app, 70, 16));
+    assert!(
+        pending.contains("-> Ask 2 questions · answering below"),
+        "the pending one-liner: {pending}"
+    );
+    assert!(
+        !pending.contains("Pick one") && !pending.contains("Option A"),
+        "the pending line carries no questions or options: {pending}"
+    );
+    assert_eq!(
+        pending.matches("Ask 2 questions").count(),
+        1,
+        "only one Ask line while pending: {pending}"
+    );
+
+    // Answered: the same call entry becomes the full closed block (its `->` marker kept), and
+    // the result entry draws nothing, so there is exactly one block.
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("Pick one → Option A")],
+            structured: Some(
+                serde_json::json!({"request_id":"r","answers":[{"id":"pick","selected":["a"]}]}),
+            ),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    let answered = screen(&render(&mut app, 70, 20));
+    assert!(
+        answered.contains("->╭─ Ask 2 questions"),
+        "the same entry draws the block, keeping its marker: {answered}"
+    );
+    assert!(answered.contains("Pick one"), "{answered}");
+    assert!(answered.contains("☑ Option A"), "{answered}");
+    assert!(
+        !answered.contains("answering below"),
+        "the pending line is gone: {answered}"
+    );
+    assert_eq!(
+        answered.matches("╭─ Ask 2 questions").count(),
+        1,
+        "exactly one block, not two: {answered}"
+    );
+}
+
+/// ADR 0024 rule 2: a declined ask shows its status line inside the same closed
+/// block.
+#[test]
+fn a_declined_ask_shows_the_status_inside_the_block() {
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "ask_user".into(),
+            arguments: serde_json::json!({"questions":[{"id":"q","kind":"text","prompt":"Say something"}]}),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("user declined to answer")],
+            structured: None,
+            is_error: true,
+            error_code: Some("user_declined".into()),
+        },
+        meta: Default::default(),
+    });
+    let declined = screen(&render(&mut app, 70, 16));
+    assert!(
+        declined.contains("->╭─ Ask 1 question"),
+        "the declined block keeps the call marker: {declined}"
+    );
+    assert!(
+        declined.contains("user declined to answer"),
+        "the status line stays inside the box: {declined}"
+    );
+    assert!(
+        !declined.contains("answering below"),
+        "the pending line is gone: {declined}"
+    );
+    assert_eq!(
+        declined.matches("╭─ Ask 1 question").count(),
+        1,
+        "exactly one block: {declined}"
+    );
+}
+
 /// `wrap_line_count` (the counting-only path, used to measure every entry on the first frame
 /// and after a resize) must agree with `wrap` for the same corpus, or the transcript's total
 /// line count and the virtualized window disagree.
@@ -2805,4 +2964,186 @@ fn the_line_count_matches_the_wrap() {
             "{text:?} at {width}"
         );
     }
+}
+
+// ---------- the ask markers (ADR 0024 implementation note) ----------
+
+/// A question of `kind` with `options` and `allow_other`.
+fn ask_question(
+    kind: QuestionKind,
+    options: Vec<radian_coding::QuestionOption>,
+    allow_other: bool,
+) -> radian_coding::Question {
+    radian_coding::Question {
+        id: "q".into(),
+        header: None,
+        prompt: "Pick".into(),
+        kind,
+        options,
+        allow_other,
+        required: true,
+    }
+}
+
+/// A panel over one question, laid out at `width`, as text (the same call the frame makes).
+fn ask_panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> String {
+    text_of(&render::question_panel(
+        form,
+        "session",
+        width,
+        usize::MAX,
+        &radian_tui::theme::Theme::dark(),
+        radian_tui::footer::Glyphs::Unicode,
+    ))
+}
+
+/// The chosen option's marker is drawn in its own span and is never bold: the owner's font
+/// draws a glyph missing from its bold face at a smaller size (ADR 0024 note).
+#[test]
+fn the_ask_panel_marker_is_never_bold() {
+    let mut form = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Chosen"), option("b", "Other option")],
+            true,
+        )],
+    );
+    form.answers[0].selected = vec!["a".into()];
+    let lines = render::question_panel(
+        &form,
+        "session",
+        60,
+        usize::MAX,
+        &radian_tui::theme::Theme::dark(),
+        radian_tui::footer::Glyphs::Unicode,
+    );
+    let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
+    terminal
+        .draw(|frame| {
+            frame.render_widget(ratatui::widgets::Paragraph::new(lines), frame.area());
+        })
+        .unwrap();
+
+    let marker = style_of(&terminal, "☑").expect("the chosen marker cell");
+    assert!(
+        !marker.add_modifier.contains(Modifier::BOLD),
+        "the chosen marker must not be bold: {marker:?}"
+    );
+    let label = style_of(&terminal, "Chosen").expect("the label cell");
+    assert!(
+        label.add_modifier.contains(Modifier::BOLD),
+        "the label keeps its chosen (accent) role: {label:?}"
+    );
+    // The cursor is not bold either.
+    let cursor = style_of(&terminal, "❯").expect("the cursor cell");
+    assert!(
+        !cursor.add_modifier.contains(Modifier::BOLD),
+        "the cursor must not be bold: {cursor:?}"
+    );
+}
+
+/// Single, multi and `Other` all draw the same checkbox pair (ADR 0024 note): the
+/// old circle pair is gone.
+#[test]
+fn the_ask_panel_uses_one_checkbox_pair_for_single_multi_and_other() {
+    let mut single = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Alpha"), option("b", "Beta")],
+            true,
+        )],
+    );
+    single.answers[0].selected = vec!["a".into()];
+    let text = ask_panel_text(&single, 60);
+    assert!(text.contains("☑ Alpha"), "the chosen single option: {text}");
+    assert!(
+        text.contains("☐ Beta"),
+        "the unchosen single option: {text}"
+    );
+    assert!(text.contains("☐ Other (type your own)"), "{text}");
+    assert!(
+        !text.contains('○')
+            && !text.contains('◉')
+            && !text.contains("(*)")
+            && !text.contains("( )"),
+        "no circle markers: {text}"
+    );
+
+    let mut multi = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Multi,
+            vec![option("a", "Alpha"), option("b", "Beta")],
+            false,
+        )],
+    );
+    multi.answers[0].selected = vec!["a".into()];
+    let text = ask_panel_text(&multi, 60);
+    assert!(text.contains("☑ Alpha"), "{text}");
+    assert!(text.contains("☐ Beta"), "{text}");
+    assert!(!text.contains('○') && !text.contains('◉'), "{text}");
+
+    let mut other = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Alpha")],
+            true,
+        )],
+    );
+    other.answers[0].other = true;
+    other.answers[0].cursor = 1;
+    let text = ask_panel_text(&other, 60);
+    assert!(
+        text.contains("☑ Other"),
+        "the chosen Other row uses the checked box, not a circle: {text}"
+    );
+}
+
+/// The panel and the transcript block draw the markers from the same source, so both show the
+/// checkbox pair (ADR 0024 note).
+#[test]
+fn the_ask_panel_and_the_transcript_block_use_the_same_markers() {
+    let mut form = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Alpha"), option("b", "Beta")],
+            false,
+        )],
+    );
+    form.answers[0].selected = vec!["a".into()];
+    let panel = ask_panel_text(&form, 60);
+    assert!(panel.contains('☑') && panel.contains('☐'), "{panel}");
+
+    let mut card = radian_tui::tools::ToolCard::new(
+        "c1",
+        "ask_user",
+        serde_json::json!({"questions":[{"id":"q","kind":"single","options":[
+            {"id":"a","label":"Alpha"},{"id":"b","label":"Beta"}]}]}),
+    );
+    card.structured = Some(serde_json::json!({"answers":[{"id":"q","selected":["a"]}]}));
+    let mut entry = radian_tui::app::Entry::new(radian_tui::app::EntryKind::ToolResult, "result");
+    entry.tool = Some(Box::new(card));
+    let block = radian_tui::blocks::layout(&entry, &[], EXPANDED, 60);
+    let block_text: String = block
+        .iter()
+        .map(|line| line.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        block_text.contains('☑') && block_text.contains('☐'),
+        "the transcript block uses the same pair: {block_text}"
+    );
+    assert!(
+        !block_text.contains('○') && !block_text.contains('◉'),
+        "{block_text}"
+    );
 }

@@ -1510,3 +1510,27 @@ Base `d8e4c28`（worktree `.radian-worktrees/build-script`，分支 `dogfood/sta
 对应的修复（Esc 在 `2b55c50` 与今天都是 `cancel_or_quit_now()`，那条报告复现不出来），它证明这条回归
 测试不是空转：把 Esc 的空输入分支改回「什么都不做」，它立刻失败。
 
+## ask-box：transcript 的 Ask 块、面板标题、待答一行、标记与两个按键（ADR 0024，2026-10-15）
+
+Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个变异就地改完后跑
+`cargo test -p radian-tui --lib -- <名字>` / `--test render` / `--test question`（`--no-fail-fast` 对
+单条用例等价），再从 `.radian/scratch/*.fixed`、`*.p2`、`*.p3`、`*.p4` 的副本写回并 `cmp` 逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ASK1-M1 | `ask_body` 去掉每行末尾的右边框 | `the_ask_block_is_closed_at_every_width` | ✅ |
+| ASK1-M2 | 底边改回 `repeat(width - 3)`（三格） | `the_ask_bottom_border_is_as_wide_as_the_top` | ✅ |
+| ASK1-M3 | 面板标题 `origin` 非空就加（去掉 own-session 判断） | `the_ask_panel_title_omits_the_own_session` | ✅ |
+| ASK2-M1 | 待答时仍画完整块（不走一行） | `a_pending_ask_is_one_line_and_becomes_the_block_once_answered` | ✅ |
+| ASK2-M2 | 闭合的结果条目（`Tail`）也画块 | `a_pending_ask_is_one_line_and_becomes_the_block_once_answered`、`a_declined_ask_shows_the_status_inside_the_block` | ✅ |
+| ASK2-M3 | 调用条目不再保留结果文本（状态行拿不到） | `a_declined_ask_shows_the_status_inside_the_block` | ✅ |
+| ASK3-M1 | 面板标记用加粗的强调样式（不再去掉 BOLD） | `the_ask_panel_marker_is_never_bold` | ✅ |
+| ASK3-M2 | `Other` 行改回画圆圈 | `the_ask_panel_uses_one_checkbox_pair_for_single_multi_and_other` | ✅ |
+| ASK3-M3 | `single_on` 改回 `◉` | `the_ask_glyphs_use_one_checkbox_pair` | ✅ |
+| ASK4-M1 | 去掉 ←/→ 的切题拦截（无字段时什么都不做） | `left_and_right_switch_questions_without_a_focused_field` | ✅ |
+| ASK4-M2 | `form_select` 永远只做选中（空格不进字段） | `typing_in_the_other_row_and_a_text_question_keeps_the_text` | ✅ |
+| ASK4-M3 | 底边提示永远写 `⇥/←/→ question` | `the_hint_row_shows_the_cursor_keys_while_a_field_has_focus` | ✅ |
+
+12/12 抓住。ASK2 的两个变异在同一条用例里：待答一行、答完同一条目成块且只有一个块。ASK4-M1/M3 是
+owner 反馈的两个按键问题的回归钉：←/→ 切题（无字段时）与底边提示跟随聚焦状态。`check-glyph-coverage.py`
+的结果（☐/☑ 缺 SF Mono / JetBrains Mono Nerd / Cascadia Code）写在 ADR 0024 的「实施补充」里。
