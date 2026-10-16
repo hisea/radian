@@ -139,6 +139,24 @@ const LANGUAGES: &[(&str, &str)] = &[
     ("zsh", "Bourne Again Shell (bash)"),
 ];
 
+/// The language a file **path**'s suffix names, in the spelling [`LANGUAGES`] uses: `src/main.rs`
+/// -> `rust`, `docs/notes.md` -> `markdown`, `Makefile` -> `None`. The diff body's entry point
+/// into the table (ADR 0028: `patch`, `git_diff` and `write` highlight by
+/// the file's suffix, with the same scope→role table a fenced code block uses — so this is only
+/// a lookup, and [`highlighted`] does the work).
+///
+/// Only the last suffix counts (`a/b.tar.gz` is `gz`), the match is case-insensitive, and a path
+/// with no suffix, a hidden file's own name (`.gitignore`), or a suffix outside the table is
+/// `None`: the diff code then draws plain instead of guessing a grammar.
+pub fn language_for_path(path: &str) -> Option<&'static str> {
+    let suffix = path.rsplit_once('.')?.1;
+    let suffix = suffix.to_ascii_lowercase();
+    LANGUAGES
+        .iter()
+        .find(|(alias, _)| *alias == suffix)
+        .map(|(alias, _)| *alias)
+}
+
 /// The syntax for a fence's info string, or `None` when the language is not in
 /// [`LANGUAGES`] (or the grammar is missing from this syntect build).
 pub fn syntax_for(lang: &str) -> Option<&'static SyntaxReference> {
@@ -417,6 +435,30 @@ mod tests {
         assert!(highlight_lines(&["x"], "nonesuch").is_none());
         // The set ships `Plain Text`, but it is not in the table.
         assert!(syntax_for("plain text").is_none());
+    }
+
+    /// The diff body's entry point into the table (ADR 0028): the **last**
+    /// suffix of a path, in the spelling the table uses, or `None` when the path names no
+    /// language we highlight. What it returns feeds `highlighted` unchanged, so a `.rs` diff
+    /// really produces pieces.
+    #[test]
+    fn the_path_suffix_names_the_language() {
+        assert_eq!(
+            language_for_path("crates/radian-tui/src/tools.rs"),
+            Some("rs")
+        );
+        assert_eq!(language_for_path("docs/notes.md"), Some("md"));
+        assert_eq!(language_for_path("A/B.RS"), Some("rs"));
+        assert_eq!(language_for_path("config.toml"), Some("toml"));
+        // No suffix, a suffix the table does not know, and a hidden file's whole name.
+        assert_eq!(language_for_path("README"), None);
+        assert_eq!(language_for_path("/etc/hosts"), None);
+        assert_eq!(language_for_path(".gitignore"), None);
+        assert_eq!(language_for_path("archive.tar.gz"), None);
+        assert_eq!(language_for_path("src/foo.unknownext"), None);
+        // Only the last suffix counts, so a dotted directory does not decide.
+        assert_eq!(language_for_path("a.b/c"), None);
+        assert!(highlighted("fn main() {}", language_for_path("a.rs").unwrap()).is_some());
     }
 
     /// The truncation mirrors the plain-text rule, and the ellipsis keeps the last role.

@@ -1687,8 +1687,9 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     assert_eq!(app.tool_display.fold, ToolFold::Errors);
 }
 
-/// The `git_diff` body colors the four line kinds with the theme's own roles (ADR 0028 R4 +
-/// ADR 0029): added, removed, context and the hunk/file-header structure.
+/// The `git_diff` body colors its rows with the theme's own roles (ADR 0028 decision
+/// 5 + ADR 0029): added, removed, context, and the hunk/file-header structure — whose rows now
+/// carry a line number and a synthesized space after the sign.
 #[test]
 fn a_git_diff_body_colors_its_line_kinds() {
     let mut app = App::new("m", "s");
@@ -1718,14 +1719,21 @@ fn a_git_diff_body_colors_its_line_kinds() {
     let terminal = render(&mut app, 70, 20);
     let theme = app.theme;
     let style = |needle: &str| style_of(&terminal, needle).expect(needle);
-    assert_eq!(style("+new line").fg, theme.diff_added.fg, "added");
-    assert_eq!(style("-old line").fg, theme.diff_removed.fg, "removed");
+    assert_eq!(style("+ new line").fg, theme.diff_added.fg, "added");
+    assert_eq!(style("- old line").fg, theme.diff_removed.fg, "removed");
     assert_eq!(style("context").fg, theme.diff_context.fg, "context");
-    assert_eq!(style("@@").fg, theme.diff_hunk.fg, "@@ is structure");
+    // `@@` and the file header are structure: the weak `frame` role (ADR 0028
+    // decision 5), never the accent `diff_hunk` used to carry.
+    assert_eq!(style("@@").fg, theme.frame.fg, "@@ is structure");
     assert_eq!(
         style("diff --git").fg,
-        theme.diff_hunk.fg,
+        theme.frame.fg,
         "the file header is structure"
+    );
+    assert_ne!(
+        style("@@").fg,
+        theme.notice_label.fg,
+        "@@ is not the accent"
     );
     // The head's counts come from the same text.
     let text = screen(&terminal);
@@ -1733,7 +1741,9 @@ fn a_git_diff_body_colors_its_line_kinds() {
 }
 
 /// A `patch` card shows the replacement: the head's +N/-M and the `-old`/`+new` body, whose
-/// lines carry the diff roles. The body **is** the entry's text, so it copies as shown.
+/// lines carry the diff roles. The body **is** the entry's text, so it copies as shown. This
+/// result carries no `hunks`, so the body keeps the numberless form (ADR 0028
+/// decision 5's fallback): the sign column, no gutter.
 #[test]
 fn a_patch_card_shows_the_replacement_with_diff_roles() {
     let mut app = App::new("m", "s");

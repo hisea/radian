@@ -1557,6 +1557,24 @@ Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个�
 owner 反馈的两个按键问题的回归钉：←/→ 切题（无字段时）与底边提示跟随聚焦状态。`check-glyph-coverage.py`
 的结果（☐/☑ 缺 SF Mono / JetBrains Mono Nerd / Cascadia Code）写在 ADR 0024 的「实施补充」里。
 
+## thin ④：diff 正文的行号、符号、高亮（ADR 0028）
+
+Base：本片 HEAD（`dogfood/thin-diff`）· 就地变异：每个变异先把文件复制到
+`.radian/scratch/mut.<变异>.orig`，用 `python3` 打补丁（带 `assert`），跑命名的测试，再从副本写回并用
+`cmp` 确认逐字节相同（`git status --short` 只剩本片改动）。脚本 `.radian/scratch/mutate.sh`（不提交）。
+测试都带 `--no-fail-fast`。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| D1 | `+` 与上下文行用新文件行号、`-` 行用旧文件行号 | `DiffKind::Added` 改用 `old` 计数 | `diff::a_patch_body_numbers_its_rows_once_per_hunk`、`tools::tests::a_git_diff_body_numbers_from_its_own_hunk_headers` | ✅ |
+| D2 | `@@` 与文件头是弱一级（`frame`），不是强调色 | `diff_role` 的结构行返回 `LineRole::Accent` | `diff::a_diff_row_colors_its_gutter_sign_and_code`、`render::a_git_diff_body_colors_its_line_kinds` | ✅ |
+| D3 | diff 的代码按文件后缀高亮 | `diff_line` 的 highlight 恒为 `None`（`Some` 分支不可达） | `diff::a_diff_row_colors_its_gutter_sign_and_code`（`.rs` 的 `let` 是 `syntax_keyword`） | ✅ |
+| D4 | `patch` 结构化结果的起始行 | `patch.rs::line_of_offset` 的 `+ 1` 改成 `+ 2` | `radian-coding tests/patch.rs` 的四条 hunk 测试（一/多区间、CRLF、首行与末行） | ✅ |
+
+4/4 抓住。**过程记录（D2 的第一轮没抓住，是实现的问题）**：`diff_body` 里 `@@` 与文件头两处直接把角色
+写成 `LineRole::Dim`，没有走 `diff_role`，所以变异 `diff_role` 对带 `@@` 的正文没有影响（只有"无起始行
+退路"那一支会变）。两处改成调用 `diff_role`（结构行的角色只有一个定义处）后立刻抓住。
+
 ## thin ⑥：用户行、默认输入框、压缩线（ADR 0035/9、ADR 0028，2026-10-16）
 
 Base：本片 HEAD（`oc/thin-user`）· 就地变异，每个变异后从 `.radian/scratch/render.rs.orig` /
