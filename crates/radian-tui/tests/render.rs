@@ -3134,10 +3134,9 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
     ));
     let text = screen(&render(&mut app, 60, 18));
     assert!(
-        text.contains("⏎ select"),
+        text.contains("╰─ space select · ⏎ next · ↑/↓ move"),
         "the keys are in the bottom border:\n{text}"
     );
-    assert!(text.contains("esc canc"), "{text}");
     assert!(text.contains("Ask · session"), "{text}");
 }
 

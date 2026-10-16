@@ -57,6 +57,12 @@ impl Composer {
         self.cursor
     }
 
+    /// Moves the cursor to the end of the buffer (used when the `Other` row is chosen, so the
+    /// next keys type at its end).
+    pub fn to_end(&mut self) {
+        self.cursor = self.chars.len();
+    }
+
     /// Inserts one character at the cursor.
     pub fn insert_char(&mut self, c: char) {
         self.chars.insert(self.cursor, c);
@@ -568,5 +574,16 @@ mod tests {
         c.clear();
         assert!(c.is_empty());
         assert_eq!(c.cursor(), 0);
+    }
+
+    #[test]
+    fn to_end_moves_the_cursor_to_the_buffer_end_from_the_middle() {
+        let mut c = composer("hello");
+        c.left();
+        c.left(); // cursor 3
+        assert_eq!(c.cursor(), 3);
+        c.to_end();
+        assert_eq!(c.cursor(), 5, "the cursor is at the end");
+        assert_eq!(c, "hello", "the text is unchanged");
     }
 }
