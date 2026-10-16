@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
 
 use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec};
 use regex::Regex;
@@ -12,7 +11,7 @@ use crate::args;
 use crate::fail;
 use crate::provider::Limits;
 use crate::search;
-use crate::workspace::WorkspaceRoot;
+use crate::workspace::{WorkspaceRoot, display_path};
 
 /// Bytes inspected to decide a file is binary: a NUL byte in the head means "skip".
 const SNIFF_BYTES: usize = 8 << 10;
@@ -42,7 +41,10 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "path": {
                 "type": "string",
-                "description": "Workspace-relative directory (or file) to search; defaults to the workspace root."
+                "description": "Workspace-relative directory (or file) to search; a read-only \
+                                absolute or `~` directory under the cargo registry sources or a \
+                                toolchain's `lib/rustlib/src` is also accepted (its results are \
+                                absolute). Defaults to the workspace root."
             },
             "glob": {
                 "type": "string",
@@ -137,31 +139,28 @@ pub(crate) async fn run(
     // base is always inside the workspace.
     let requested = args.path.as_deref().unwrap_or(".");
 
-    // ADR 0039 decision 2: the base and every file are opened through the root's directory
-    // fd; the walk hands back open fds, never paths to re-open.
+    // ADR 0039 decision 2 and revision 1: the base and every file are opened through the
+    // root's directory fd; the walk hands back open fds, never paths to re-open. An absolute
+    // or `~` base must be under a read-only root, and its results are rendered with that
+    // root's prefix so they can be passed to `read` again.
     let mut files: Vec<(File, String)> = Vec::new();
-    match root.open_dir(requested) {
+    match root.read_base(requested) {
         Ok(base) => {
-            let base_rel = PathBuf::from(requested.trim_start_matches("./").trim_end_matches('/'));
-            let base_rel = if base_rel == Path::new(".") {
-                PathBuf::new()
-            } else {
-                base_rel
-            };
-            search::walk(&base, &base_rel, &mut |found| {
+            let prefix = base.prefix.clone();
+            search::walk(&base.dir, &base.relative, &mut |found| {
                 let rel = found.relative;
                 if let Some(filter) = &file_filter
                     && !filter.is_match(&rel)
                 {
                     return true;
                 }
-                files.push((found.file, rel.to_string_lossy().into_owned()));
+                files.push((found.file, display_path(prefix.as_deref(), &rel)));
                 true
             });
             files.sort_by(|a, b| a.1.cmp(&b.1));
         }
         Err(failure) if failure.code == "not_a_directory" => {
-            // A file base: the pattern is matched against its own workspace-relative path.
+            // A file base: the pattern is matched against its own root-relative path.
             let opened = root.open_read(requested)?;
             if opened.stat.kind != crate::safe_fs::EntryKind::File {
                 return Err(fail(
@@ -169,14 +168,12 @@ pub(crate) async fn run(
                     format!("`{requested}` is not a regular file"),
                 ));
             }
-            let rel: PathBuf = crate::safe_fs::components(Path::new(requested))
-                .map(|parts| parts.iter().collect())
-                .unwrap_or_default();
+            let (rel, prefix) = root.read_relative(requested)?;
             if file_filter
                 .as_ref()
                 .is_none_or(|filter| filter.is_match(&rel))
             {
-                files.push((opened.file, rel.to_string_lossy().into_owned()));
+                files.push((opened.file, display_path(prefix.as_deref(), &rel)));
             }
         }
         Err(failure) => return Err(failure),

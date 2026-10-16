@@ -1,5 +1,3 @@
-use std::path::{Path, PathBuf};
-
 use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec};
 use serde::Deserialize;
 use serde_json::json;
@@ -8,7 +6,7 @@ use crate::args;
 use crate::fail;
 use crate::provider::Limits;
 use crate::search;
-use crate::workspace::WorkspaceRoot;
+use crate::workspace::{WorkspaceRoot, display_path};
 
 #[derive(Deserialize)]
 struct GlobArgs {
@@ -27,7 +25,10 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "path": {
                 "type": "string",
-                "description": "Workspace-relative directory (or file) to search under; defaults to the workspace root."
+                "description": "Workspace-relative directory (or file) to search under; a \
+                                read-only absolute or `~` directory under the cargo registry \
+                                sources or a toolchain's `lib/rustlib/src` is also accepted (its \
+                                results are absolute). Defaults to the workspace root."
             },
             "max_results": {
                 "type": "integer",
@@ -83,33 +84,30 @@ pub(crate) async fn run(
         None => limits.default_glob_results,
     };
 
-    // ADR 0039 decision 2: the base is opened through the root's directory fd (no symlink in
-    // any component) and the walk descends by fd; only regular files can match.
+    // ADR 0039 decision 2 and revision 1: the base is opened through the root's directory fd
+    // (no symlink in any component) and the walk descends by fd; only regular files can match.
+    // An absolute or `~` base must be under a read-only root, and its results are rendered
+    // with that root's prefix so they can be passed to `read` again.
     let requested = args.path.as_deref().unwrap_or(".");
     let mut matches: Vec<String> = Vec::new();
-    match root.open_dir(requested) {
+    match root.read_base(requested) {
         Ok(base) => {
-            let base_rel: PathBuf = crate::safe_fs::components(Path::new(requested))
-                .map(|parts| parts.iter().collect())
-                .unwrap_or_default();
-            search::walk(&base, &base_rel, &mut |found| {
-                let rel = found.relative.to_string_lossy().into_owned();
-                if matcher.is_match(Path::new(&rel)) {
-                    matches.push(rel);
+            let prefix = base.prefix.clone();
+            search::walk(&base.dir, &base.relative, &mut |found| {
+                let rel = found.relative;
+                if matcher.is_match(&rel) {
+                    matches.push(display_path(prefix.as_deref(), &rel));
                 }
                 true
             });
         }
         Err(failure) if failure.code == "not_a_directory" => {
-            // A file base: the pattern is matched against its own workspace-relative path.
+            // A file base: the pattern is matched against its own root-relative path.
             let opened = root.open_read(requested)?;
             if opened.stat.kind == crate::safe_fs::EntryKind::File {
-                let rel: PathBuf = crate::safe_fs::components(Path::new(requested))
-                    .map(|parts| parts.iter().collect())
-                    .unwrap_or_default();
-                let rel = rel.to_string_lossy().into_owned();
-                if matcher.is_match(Path::new(&rel)) {
-                    matches.push(rel);
+                let (rel, prefix) = root.read_relative(requested)?;
+                if matcher.is_match(&rel) {
+                    matches.push(display_path(prefix.as_deref(), &rel));
                 }
             }
         }

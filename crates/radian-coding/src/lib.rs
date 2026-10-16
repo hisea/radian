@@ -9,6 +9,12 @@
 //! not enforce.
 //!
 //! - paths are workspace-relative; absolute paths and `..` escapes are refused;
+//! - `read`, `grep`, `glob` and `list` additionally read two **read-only** roots outside the
+//!   workspace (ADR 0039): the cargo registry sources, `$CARGO_HOME/registry/src`,
+//!   and every toolchain's `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`. A model names one as an
+//!   absolute path or with `~`; it is opened from that root's fd with the same per-component
+//!   `O_NOFOLLOW` walk, and a path under neither root is refused with a message naming them.
+//!   `write`, `patch` and `shell`'s working directory never accept them;
 //! - the target is canonicalized and must stay under the canonical workspace root, which
 //!   catches symlink escapes, including a symlinked parent directory;
 //! - `write`/`patch` never follow a symlink at the destination (`O_NOFOLLOW` on Unix) and
@@ -56,6 +62,7 @@ mod list;
 mod patch;
 mod provider;
 mod read;
+mod read_roots;
 pub mod safe_fs;
 mod search;
 mod shell;
@@ -71,6 +78,7 @@ pub use jobs::{
     JOB_RING_BYTES, JobEvent, JobState, JobSummary, Jobs, MAX_RUNNING_JOBS, OUTPUT_HINT,
 };
 pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits};
+pub use read_roots::ReadRoots;
 pub use shell::{UserBash, run_user_bash};
 pub use workspace::{WorkspaceError, WorkspaceRoot};
 

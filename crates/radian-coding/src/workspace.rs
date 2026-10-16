@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use agent_core::ToolFailure;
 
+use crate::read_roots::{ReadRoots, normalise_absolute, user_home};
 use crate::safe_fs::{self, EntryKind, OpenMode, RootDir, SafeFsError, Stat};
 use crate::{CODE_OUTSIDE, fail};
 
@@ -22,10 +23,15 @@ pub enum WorkspaceError {
 /// The canonical workspace root, held as a directory fd (ADR 0039 decision 2). Constructed
 /// once per tool provider, so a symlinked root is resolved before anything is opened; every
 /// later open walks from this fd and never re-opens a path string.
+///
+/// Alongside the workspace it holds the read-only roots (ADR 0039: the cargo
+/// registry and toolchain sources). `read`/`grep`/`glob`/`list` resolve an absolute or `~`
+/// path against those roots; every other tool uses the workspace only.
 #[derive(Debug, Clone)]
 pub struct WorkspaceRoot {
     root: PathBuf,
     dir: Arc<RootDir>,
+    read_roots: Arc<ReadRoots>,
 }
 
 /// An open workspace file with the facts the tools check before using it.
@@ -34,8 +40,38 @@ pub(crate) struct OpenedFile {
     pub stat: Stat,
 }
 
+/// The directory a search tool (`grep`/`glob`) walks: the open fd, the path relative to the
+/// root it was opened from, and, for a read-only root, the prefix to render a result path the
+/// model can pass back to `read`.
+pub(crate) struct ReadBase {
+    pub dir: File,
+    pub relative: PathBuf,
+    pub prefix: Option<PathBuf>,
+}
+
+/// Where a read tool's `path` resolved to.
+enum Resolved {
+    /// A workspace-relative path.
+    Workspace(PathBuf),
+    /// A path under one of the read-only roots (ADR 0039).
+    Root {
+        index: usize,
+        relative: PathBuf,
+        prefix: PathBuf,
+    },
+}
+
 impl WorkspaceRoot {
+    /// The workspace only, with no read-only roots.
     pub fn new(root: impl AsRef<Path>) -> Result<Self, WorkspaceError> {
+        Self::with_read_roots(root, ReadRoots::none())
+    }
+
+    /// The workspace plus the read-only roots the file tools may read (ADR 0039).
+    pub fn with_read_roots(
+        root: impl AsRef<Path>,
+        read_roots: ReadRoots,
+    ) -> Result<Self, WorkspaceError> {
         let path = root.as_ref().to_path_buf();
         let canonical = std::fs::canonicalize(&path).map_err(|source| WorkspaceError::Io {
             path: path.clone(),
@@ -51,6 +87,7 @@ impl WorkspaceRoot {
         Ok(Self {
             root: canonical,
             dir: Arc::new(dir),
+            read_roots: Arc::new(read_roots),
         })
     }
 
@@ -104,25 +141,133 @@ impl WorkspaceRoot {
             .map_err(|error| self.map_error(user, error))
     }
 
-    /// Opens `user` for reading through the fd walk and reports what it is. Any symlink
-    /// component is refused; the caller checks `stat.kind`.
+    /// Opens `user` for reading through the fd walk and reports what it is. A relative path
+    /// is workspace-relative; an absolute or `~` path is resolved against the read-only roots
+    /// (ADR 0039) and refused when it is under none of them. Any symlink component
+    /// is refused; the caller checks `stat.kind`.
     pub(crate) fn open_read(&self, user: &str) -> Result<OpenedFile, ToolFailure> {
-        let relative = self.checked_relative(user)?;
-        let file = self
-            .dir
-            .file(&relative, OpenMode::Read)
-            .map_err(|error| self.map_error(user, error))?;
-        safe_fs::run_after_open_hook();
-        let stat = safe_fs::fstat(&file).map_err(|e| io_failure(user, e))?;
-        Ok(OpenedFile { file, stat })
+        match self.resolve_read(user)? {
+            Resolved::Workspace(relative) => self.open_workspace_file(user, &relative),
+            Resolved::Root {
+                index, relative, ..
+            } => self.open_root_file(user, index, &relative),
+        }
     }
 
-    /// Opens the directory `user` names (`.` is the root) through the fd walk.
+    /// Opens the directory `user` names (`.` is the root) through the fd walk. Same resolution
+    /// as [`WorkspaceRoot::open_read`].
     pub(crate) fn open_dir(&self, user: &str) -> Result<File, ToolFailure> {
-        let relative = self.checked_relative(user)?;
+        match self.resolve_read(user)? {
+            Resolved::Workspace(relative) => self.open_workspace_dir(user, &relative),
+            Resolved::Root {
+                index, relative, ..
+            } => self.open_root_dir(user, index, &relative),
+        }
+    }
+
+    /// Opens the base directory a search tool walks, with the path relative to its root and,
+    /// for a read-only root, the prefix to render result paths with.
+    pub(crate) fn read_base(&self, user: &str) -> Result<ReadBase, ToolFailure> {
+        match self.resolve_read(user)? {
+            Resolved::Workspace(relative) => {
+                let dir = self.open_workspace_dir(user, &relative)?;
+                Ok(ReadBase {
+                    dir,
+                    relative,
+                    prefix: None,
+                })
+            }
+            Resolved::Root {
+                index,
+                relative,
+                prefix,
+            } => {
+                let dir = self.open_root_dir(user, index, &relative)?;
+                Ok(ReadBase {
+                    dir,
+                    relative,
+                    prefix: Some(prefix),
+                })
+            }
+        }
+    }
+
+    /// The path `user` resolves to relative to its root, and the read-only root's prefix when
+    /// it is not a workspace path. For a search tool's file fallback and for rendering paths.
+    pub(crate) fn read_relative(
+        &self,
+        user: &str,
+    ) -> Result<(PathBuf, Option<PathBuf>), ToolFailure> {
+        match self.resolve_read(user)? {
+            Resolved::Workspace(relative) => Ok((relative, None)),
+            Resolved::Root {
+                relative, prefix, ..
+            } => Ok((relative, Some(prefix))),
+        }
+    }
+
+    /// Resolves a read tool's `path` to the workspace or one of the read-only roots (ADR 0039
+    /// revision 1). A relative path is workspace-relative and keeps the existing checks; an
+    /// absolute path, or one written with `~`, is refused unless it falls under a read-only
+    /// root, and the refusal names the readable roots.
+    fn resolve_read(&self, user: &str) -> Result<Resolved, ToolFailure> {
+        if is_absolute_or_home(user) {
+            let candidate = expand_home(user)
+                .and_then(|path| normalise_absolute(&path))
+                .ok_or_else(|| outside_read_failure(user))?;
+            let found = self
+                .read_roots
+                .lookup(&candidate)
+                .ok_or_else(|| outside_read_failure(user))?;
+            return Ok(Resolved::Root {
+                index: found.index,
+                relative: found.relative,
+                prefix: found.prefix,
+            });
+        }
+        Ok(Resolved::Workspace(self.checked_relative(user)?))
+    }
+
+    /// Opens a workspace-relative path for reading (the existing boundary, unchanged).
+    fn open_workspace_file(&self, user: &str, relative: &Path) -> Result<OpenedFile, ToolFailure> {
+        let file = self
+            .dir
+            .file(relative, OpenMode::Read)
+            .map_err(|error| self.map_error(user, error))?;
+        opened_file(user, file)
+    }
+
+    /// Opens a workspace-relative directory (the existing boundary, unchanged).
+    fn open_workspace_dir(&self, user: &str, relative: &Path) -> Result<File, ToolFailure> {
         self.dir
-            .dir(&relative)
+            .dir(relative)
             .map_err(|error| self.map_error(user, error))
+    }
+
+    /// Opens a path under a read-only root through that root's fd.
+    fn open_root_file(
+        &self,
+        user: &str,
+        index: usize,
+        relative: &Path,
+    ) -> Result<OpenedFile, ToolFailure> {
+        let root = &self.read_roots.roots()[index];
+        let file = root
+            .file(relative, OpenMode::Read)
+            .map_err(|error| self.map_root_error(index, user, error))?;
+        opened_file(user, file)
+    }
+
+    /// Opens a directory under a read-only root through that root's fd.
+    fn open_root_dir(
+        &self,
+        user: &str,
+        index: usize,
+        relative: &Path,
+    ) -> Result<File, ToolFailure> {
+        let root = &self.read_roots.roots()[index];
+        root.dir(relative)
+            .map_err(|error| self.map_root_error(index, user, error))
     }
 
     /// Opens `user` for an in-place overwrite: parents walked by fd, the leaf opened with
@@ -143,8 +288,8 @@ impl WorkspaceRoot {
             .dir
             .file(&relative, mode)
             .map_err(|error| self.map_error(user, error))?;
-        safe_fs::run_after_open_hook();
-        let stat = safe_fs::fstat(&file).map_err(|e| io_failure(user, e))?;
+        let opened = opened_file(user, file)?;
+        let stat = opened.stat;
         if stat.kind != EntryKind::File {
             return Err(fail(
                 "not_a_file",
@@ -160,7 +305,7 @@ impl WorkspaceRoot {
                 ),
             ));
         }
-        Ok(OpenedFile { file, stat })
+        Ok(opened)
     }
 
     /// A workspace-relative path whose parents exist and hold no symlink (walked by fd) and
@@ -196,7 +341,7 @@ impl WorkspaceRoot {
     /// confines the child; this keeps a link out of the `cwd` argument.
     pub(crate) fn checked_dir_path(&self, user: &str) -> Result<PathBuf, ToolFailure> {
         let relative = self.checked_relative(user)?;
-        let _dir = self.open_dir(user)?;
+        let _dir = self.open_workspace_dir(user, &relative)?;
         Ok(self.root.join(relative))
     }
 
@@ -253,6 +398,17 @@ impl WorkspaceRoot {
     /// workspace is named with its target (`path_is_symlink`); one that leaves it, or whose
     /// target cannot be read, is a boundary refusal that never prints the outside path.
     pub(crate) fn map_error(&self, user: &str, error: SafeFsError) -> ToolFailure {
+        self.map_error_at(&self.root, "workspace", user, error)
+    }
+
+    /// [`WorkspaceRoot::map_error`] for a path under a read-only root (ADR 0039):
+    /// the same failure codes, but "leaving the readable root" and the root's canonical path.
+    fn map_root_error(&self, index: usize, user: &str, error: SafeFsError) -> ToolFailure {
+        let root = &self.read_roots.roots()[index];
+        self.map_error_at(root.canonical(), "readable root", user, error)
+    }
+
+    fn map_error_at(&self, root: &Path, noun: &str, user: &str, error: SafeFsError) -> ToolFailure {
         match error {
             SafeFsError::Absolute => fail(
                 CODE_OUTSIDE,
@@ -279,9 +435,9 @@ impl WorkspaceRoot {
             } => fail(
                 CODE_OUTSIDE,
                 format!(
-                    "`{}` is a symlink leaving the workspace `{}`; the file tools never follow a link",
+                    "`{}` is a symlink leaving the {noun} `{}`; the file tools never follow a link",
                     component.display(),
-                    self.root.display()
+                    root.display()
                 ),
             ),
             SafeFsError::NotADirectory { component } => fail(
@@ -296,6 +452,59 @@ impl WorkspaceRoot {
                 io_failure(&component.to_string_lossy(), source)
             }
         }
+    }
+}
+
+/// Where a read tool's path came from, for the message that refuses an absolute/`~` path under
+/// no readable root (ADR 0039). It keeps naming the path kind, as the
+/// workspace-only refusal did, and lists the two readable roots.
+fn outside_read_failure(user: &str) -> ToolFailure {
+    let kind = if user.starts_with('~') {
+        "a `~` path"
+    } else {
+        "an absolute path"
+    };
+    fail(
+        CODE_OUTSIDE,
+        format!(
+            "`{user}` is {kind} outside the workspace; the file tools also read, read-only, {}",
+            crate::read_roots::READ_ROOTS_DESCRIPTION
+        ),
+    )
+}
+
+/// Whether the model wrote `user` as an absolute path or with `~` (the spellings a read-only
+/// root is named with). `~user` is not a home reference here: it stays a relative path.
+fn is_absolute_or_home(user: &str) -> bool {
+    Path::new(user).is_absolute() || user == "~" || user.starts_with("~/")
+}
+
+/// The absolute path `user` names: its own path when absolute, or `~`/`~/…` expanded with
+/// `HOME`. `None` for a relative path, or for `~` when `HOME` is unset (never guessed).
+fn expand_home(user: &str) -> Option<PathBuf> {
+    let path = Path::new(user);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+    let rest = user.strip_prefix('~')?;
+    Some(user_home()?.join(rest.trim_start_matches('/')))
+}
+
+/// Wraps an open file with the facts the tools check, running the test seam first (ADR 0039
+/// decision 2: the fd obtained here is the one used, never a path re-opened later).
+fn opened_file(user: &str, file: File) -> Result<OpenedFile, ToolFailure> {
+    safe_fs::run_after_open_hook();
+    let stat = safe_fs::fstat(&file).map_err(|e| io_failure(user, e))?;
+    Ok(OpenedFile { file, stat })
+}
+
+/// Renders a search result path: relative to its root for the workspace, prefixed with the
+/// spelling of the read-only root the model used otherwise, so the path can be passed to
+/// `read` again (ADR 0039).
+pub(crate) fn display_path(prefix: Option<&Path>, relative: &Path) -> String {
+    match prefix {
+        Some(prefix) => prefix.join(relative).to_string_lossy().into_owned(),
+        None => relative.to_string_lossy().into_owned(),
     }
 }
 

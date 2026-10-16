@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use agent_core::{
     NoopSink, ToolCall, ToolContext, ToolFailure, ToolOutput, ToolProvider, ToolSession,
 };
-use radian_coding::CodingTools;
+use radian_coding::{CodingTools, ReadRoots};
 use serde_json::{Value, json};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -66,8 +66,11 @@ pub fn sentinel_outside(dir: &TempDir) -> PathBuf {
     outside
 }
 
+/// The workspace tools with **no** read-only roots: the boundary tests are hermetic and never
+/// read the developer's real `~/.cargo`/`~/.rustup`. `tests/read_roots.rs` builds tools with
+/// `CodingTools::new` (which resolves the roots from `CARGO_HOME`/`RUSTUP_HOME`) instead.
 pub fn tools(root: &Path) -> CodingTools {
-    CodingTools::new(root).unwrap()
+    CodingTools::with_read_roots(root, ReadRoots::none()).unwrap()
 }
 
 pub async fn call(
