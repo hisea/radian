@@ -74,8 +74,10 @@ pub struct AgentDef {
     pub mcp: Vec<String>,
     /// `worktree` or `shared` (ADR 0030 O3); `None` means the task default.
     pub isolation: Option<String>,
-    /// The skill names to load (ADR 0025); recorded, not yet an allow-list (see the slice notes).
-    pub skills: Vec<String>,
+    /// The skill allow-list (ADR 0025 / ADR 0030 O11). `None` loads every discovered skill
+    /// (today's behaviour); `Some` keeps only the named ones, and a name discovery did not find
+    /// is a spawn-time warning, never a failure.
+    pub skills: Option<Vec<String>>,
     /// `true` for a lead definition (ADR 0030 O13). A task ignores it (depth limit 2).
     pub spawn: bool,
     /// `approval: on-ask` (ADR 0030 O2 layer 3); `None` means the default.
@@ -200,7 +202,7 @@ pub fn parse(path: &Path, expected_name: &str, text: &str) -> Result<AgentDef, A
     let mut tools = None;
     let mut mcp: Vec<String> = Vec::new();
     let mut isolation = None;
-    let mut skills: Vec<String> = Vec::new();
+    let mut skills: Option<Vec<String>> = None;
     let mut approval = None;
     let mut spawn = false;
     let mut unknown_fields: Vec<String> = Vec::new();
@@ -277,8 +279,10 @@ pub fn parse(path: &Path, expected_name: &str, text: &str) -> Result<AgentDef, A
                     .map_err(|message| AgentError::new(Some(path), Some(line), message))?;
             }
             "skills" => {
-                skills = parse_list(value)
-                    .map_err(|message| AgentError::new(Some(path), Some(line), message))?;
+                skills = Some(
+                    parse_list(value)
+                        .map_err(|message| AgentError::new(Some(path), Some(line), message))?,
+                );
             }
             _ => unreachable!("every known key is matched above"),
         }
@@ -325,7 +329,7 @@ pub fn builtin_def(name: &str) -> Option<AgentDef> {
         tools: None,
         mcp: Vec::new(),
         isolation: None,
-        skills: Vec::new(),
+        skills: None,
         spawn: false,
         approval: None,
         body: body.to_owned(),
@@ -487,8 +491,8 @@ pub struct SpawnAgent {
     pub tools: Option<Vec<String>>,
     /// The MCP server names the definition opts into; empty means none (ADR 0030 O8).
     pub mcp: Vec<String>,
-    /// The skill names to load (ADR 0025); recorded, not yet an allow-list.
-    pub skills: Vec<String>,
+    /// The skill allow-list (ADR 0025 / ADR 0030 O11); `None` means every discovered skill.
+    pub skills: Option<Vec<String>>,
     /// The resolved isolation (spawn argument wins over the definition).
     pub isolation: Option<Isolation>,
     /// The resolved approval (spawn argument wins over the definition).
@@ -639,7 +643,7 @@ mod tests {
         );
         assert!(def.mcp.is_empty());
         assert_eq!(def.isolation.as_deref(), Some("worktree"));
-        assert_eq!(def.skills, ["changelog"]);
+        assert_eq!(def.skills, Some(vec!["changelog".to_owned()]));
         assert!(def.spawn);
         assert_eq!(def.approval.as_deref(), Some("on-ask"));
         assert_eq!(def.body, "You are a writer.\n");

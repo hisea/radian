@@ -1791,6 +1791,10 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             skills_extra_paths: setup.skills_extra_paths,
             skills_builtin: setup.skills_builtin,
             skills_disabled: setup.skills_disabled,
+            // A lead session is not an agent definition (ADR 0030 O11): no built-in tool
+            // allow-list and no skills allow-list.
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: setup.memory_injection,
             trust: trust_setup,
             resume: cli.resume.is_some(),

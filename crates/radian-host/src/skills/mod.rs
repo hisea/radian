@@ -134,6 +134,30 @@ pub fn discover_with_extras(
     discovery
 }
 
+/// ADR 0030 O11: keeps only the discovered skills an agent definition's `skills` list names, in
+/// discovery order. This is the **allow-list** the definition gives a task; it is applied after
+/// discovery, not through `[skills] disabled` — that list only filters the compiled-in skills
+/// (`collect_builtin`), so it cannot disable a user-level or `extra_paths` skill by name.
+pub fn restrict_to(skills: Vec<Skill>, allow: &[String]) -> Vec<Skill> {
+    skills
+        .into_iter()
+        .filter(|skill| allow.iter().any(|name| name == &skill.name))
+        .collect()
+}
+
+/// ADR 0030 O11: the allow-listed names that discovery did not find, one warning line each. A
+/// name that does not exist is never a failure: the task loads the rest of its list and the
+/// registry reports these lines in the spawn result.
+pub fn missing(skills: &[Skill], allow: &[String]) -> Vec<String> {
+    allow
+        .iter()
+        .filter(|name| !skills.iter().any(|skill| &skill.name == *name))
+        .map(|name| {
+            format!("skill `{name}` named by the agent definition was not found; it is not loaded")
+        })
+        .collect()
+}
+
 /// Collects the skills of one root into `discovery`, keeping the first name seen in `by_name`.
 fn collect_from(
     root: &Path,
@@ -1366,5 +1390,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(untouched.system_prompt, None);
+    }
+
+    /// ADR 0030 O11: an agent definition's `skills` list is an allow-list over the discovered
+    /// catalog. `restrict_to` keeps only the named skills, in discovery order; `missing` names
+    /// the entries discovery did not find, one warning line each.
+    #[test]
+    fn restrict_to_keeps_the_named_skills_and_missing_warns_about_the_rest() {
+        let scratch = Scratch::new("allow-list");
+        scratch.skill("one", &frontmatter("one", "One."));
+        scratch.skill("two", &frontmatter("two", "Two."));
+        scratch.skill("three", &frontmatter("three", "Three."));
+        let skills = discover(&scratch.skills_dir()).skills;
+        assert_eq!(skills.len(), 3);
+
+        let allow = ["three".to_owned(), "one".to_owned()];
+        let kept = restrict_to(skills.clone(), &allow);
+        let names: Vec<&str> = kept.iter().map(|s| s.name.as_str()).collect();
+        // Discovery order, not the list's order.
+        assert_eq!(names, ["one", "three"], "keeps only the named skills");
+        assert!(
+            missing(&kept, &allow).is_empty(),
+            "every named skill was found"
+        );
+
+        // A name that is not in the catalog: kept skills are unchanged and the name is reported.
+        let allow = ["one".to_owned(), "nope".to_owned()];
+        let kept = restrict_to(skills, &allow);
+        let names: Vec<&str> = kept.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["one"]);
+        let warnings = missing(&kept, &allow);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("nope"), "{warnings:?}");
     }
 }

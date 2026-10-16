@@ -189,6 +189,10 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
             skills_extra_paths: host.skills_extra_paths.clone(),
             skills_builtin: host.skills_builtin,
             skills_disabled: host.skills_disabled.clone(),
+            // The registry's `enforce_task_setup` fills both from the resolved definition; the
+            // builder's defaults are "no narrowing".
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: host.memory_injection,
             // A task's worktree is a fresh, untrusted directory (ADR 0031).
             trust: trust::Setup::untrusted(&workspace, false),

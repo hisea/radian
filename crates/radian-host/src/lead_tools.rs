@@ -582,12 +582,17 @@ impl LeadSession {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "the shared workspace".to_owned());
+        // ADR 0030 O11: a bad skill name is a warning on a successful spawn, never a failure.
+        let mut text = format!(
+            "spawned task `{}` ({}) at {worktree}",
+            record.id,
+            record.isolation.as_str()
+        );
+        for warning in &record.warnings {
+            text.push_str(&format!("\nwarning: {warning}"));
+        }
         Ok(ToolOutput {
-            content: vec![agent_core::ContentPart::text(format!(
-                "spawned task `{}` ({}) at {worktree}",
-                record.id,
-                record.isolation.as_str()
-            ))],
+            content: vec![agent_core::ContentPart::text(text)],
             structured: Some(structured),
         })
     }
@@ -992,6 +997,9 @@ fn record_json(record: &Arc<TaskRecord>) -> Value {
         "label": record.label,
         "agent": record.agent,
         "spawn_ignored": record.spawn_ignored,
+        // ADR 0030 O11: a `skills` name the definition named but discovery did not find. Never a
+        // failure; the definition's other fields still apply.
+        "warnings": record.warnings,
     })
 }
 

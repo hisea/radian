@@ -232,6 +232,8 @@ fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> T
                     skills_extra_paths: Vec::new(),
                     skills_builtin: true,
                     skills_disabled: Vec::new(),
+                    tools_allow: None,
+                    skills_allow: None,
                     memory_injection: radian_host::memory::InjectionConfig::default(),
                     trust: radian_host::trust::Setup::untrusted(&workspace, false),
                     resume: false,
@@ -835,6 +837,8 @@ async fn open_plain(
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
             skills_disabled: Vec::new(),
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
             trust: radian_host::trust::Setup::untrusted(repo, false),
             resume: false,
@@ -1574,6 +1578,20 @@ fn write_agent(home: &Path, name: &str, text: &str) -> PathBuf {
     path
 }
 
+/// Writes one user-level skill (`$RADIAN_HOME/skills/<name>/SKILL.md`) so a task's catalog has
+/// something the definition's `skills` list can name (ADR 0025 / ADR 0030 O11).
+fn write_skill(home: &Path, name: &str, description: &str) -> PathBuf {
+    let dir = home.join("skills").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("SKILL.md");
+    std::fs::write(
+        &path,
+        format!("---\nname: {name}\ndescription: {description}\n---\nBody.\n"),
+    )
+    .unwrap();
+    path
+}
+
 fn agent_tool_call(name: &str) -> ToolCall {
     ToolCall {
         id: "c1".into(),
@@ -1592,6 +1610,21 @@ fn system_prompt(server: &MockServer, n: usize) -> String {
         .and_then(|message| message["content"].as_str())
         .unwrap_or_default()
         .to_owned()
+}
+
+/// The text of the tool result for `call_id` in the `n`-th recorded request.
+fn tool_result(server: &MockServer, n: usize, call_id: &str) -> String {
+    server.requests()[n].json()["messages"]
+        .as_array()
+        .map(|messages| {
+            messages
+                .iter()
+                .filter(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
+                .filter_map(|message| message["content"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
 }
 
 /// [`Reply`] with one assistant text then `stop`.
@@ -1703,6 +1736,196 @@ async fn a_tools_allow_list_can_only_narrow() {
     fixture.registry.remove("t2", true).await.expect("remove");
     let _ = std::fs::remove_file(fixture.home.join("agents/reader.md"));
     let _ = std::fs::remove_file(fixture.home.join("agents/safer.md"));
+}
+
+/// ADR 0030 O11 / problem 7 = A: the `tools` allow-list is a **physical unmount**, not only a
+/// permission deny. A task with `tools: [read, list]` advertises exactly those built-ins to the
+/// model and lists exactly those in its `<runtime>` layer; a call to `write` is an unknown tool
+/// and executes nothing. `git_commit` is a built-in like any other — the end-of-task commit is
+/// host-side and needs no tool — so a list that omits it unmounts it too. The permission `deny`
+/// the registry also installs stays beneath the unmount (defence in depth).
+#[tokio::test]
+async fn a_tools_allow_list_unmounts_the_unlisted_built_ins() {
+    // The model's first call is `write`, which the allow-list must have unmounted.
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                    "function": {"name": "write", "arguments": "{\"path\":\"made.txt\",\"content\":\"x\\n\"}"}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ]),
+        a_text_reply("done"),
+    ])
+    .await;
+    let fixture = Fixture::new("agent-unmount", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    write_agent(
+        &fixture.home,
+        "unmount-reader",
+        "---\nname: unmount-reader\ntools: [read, list]\n---\nBODY\n",
+    );
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("unmount-reader".to_owned());
+    request.brief = Some("go".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    let worktree = record.worktree.clone().expect("a worktree");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while server.requests().len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn did not finish"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // The tool specs the model actually received: exactly the allow-list.
+    let mut tools: Vec<String> = server.requests()[0].json()["tools"]
+        .as_array()
+        .expect("the request carries a tools array")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+        .collect();
+    tools.sort();
+    assert_eq!(
+        tools,
+        ["list", "read"],
+        "only the allow-listed built-ins are mounted"
+    );
+
+    // Layer 0a lists what is mounted and nothing else.
+    let system = system_prompt(&server, 0);
+    assert!(system.contains("- read:"), "{system}");
+    assert!(system.contains("- list:"), "{system}");
+    assert!(
+        !system.contains("- write:"),
+        "an unmounted built-in must not be in <runtime>: {system}"
+    );
+
+    // Calling the unmounted tool is an unknown tool: it ran nothing and wrote no file.
+    let result = tool_result(&server, 1, "c1");
+    assert!(
+        result.contains("no tool named") && result.contains("write"),
+        "{result}"
+    );
+    assert!(
+        !worktree.join("made.txt").exists(),
+        "an unmounted tool must not run"
+    );
+
+    // The deny rules are kept as defence in depth beside the unmount.
+    let profile = record.session.hooks().profile();
+    let action = |name: &str| {
+        radian_permissions::evaluate(profile.rules(), &profile.workspace, &agent_tool_call(name))
+            .action
+    };
+    assert_eq!(action("read"), radian_permissions::Action::Allow);
+    assert_eq!(action("write"), radian_permissions::Action::Deny);
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    let _ = std::fs::remove_file(fixture.home.join("agents/unmount-reader.md"));
+}
+
+/// ADR 0030 O11: a definition's `skills` list is the task's skill catalog — every other
+/// discovered skill is dropped. Other tasks and the lead keep all of them (absent = all).
+#[tokio::test]
+async fn a_skills_allow_list_keeps_only_the_named_skills() {
+    let fixture = Fixture::new("agent-skills", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let one = write_skill(&fixture.home, "s7a-one", "One.");
+    let two = write_skill(&fixture.home, "s7a-two", "Two.");
+    write_agent(
+        &fixture.home,
+        "skills-reader",
+        "---\nname: skills-reader\nskills: [s7a-one]\n---\nBODY\n",
+    );
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("skills-reader".to_owned());
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+
+    let names: Vec<&str> = record
+        .session
+        .skills()
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["s7a-one"],
+        "only the allow-listed skill is in the task's catalog"
+    );
+
+    // A task without a `skills` list still sees every discovered skill (absent = all).
+    let mut request = SpawnRequest::new("t2");
+    request.agent = Some("skills-none".to_owned());
+    write_agent(
+        &fixture.home,
+        "skills-none",
+        "---\nname: skills-none\n---\nBODY\n",
+    );
+    let record = fixture.registry.spawn(request).await.expect("spawn");
+    let names: Vec<&str> = record
+        .session
+        .skills()
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"s7a-one") && names.contains(&"s7a-two"),
+        "{names:?}"
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    fixture.registry.remove("t2", true).await.expect("remove");
+    let _ = std::fs::remove_file(one);
+    let _ = std::fs::remove_file(two);
+    let _ = std::fs::remove_file(fixture.home.join("agents/skills-reader.md"));
+    let _ = std::fs::remove_file(fixture.home.join("agents/skills-none.md"));
+}
+
+/// ADR 0030 O11: a `skills` name that does not exist is a spawn-time warning in the result, not
+/// a failure. The task opens, its catalog excludes the name, and the missing name is reported.
+#[tokio::test]
+async fn an_unknown_skill_name_is_a_spawn_warning_not_a_failure() {
+    let fixture = Fixture::new("agent-skill-missing", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    write_agent(
+        &fixture.home,
+        "missing-reader",
+        "---\nname: missing-reader\nskills: [s7a-nope]\n---\nBODY\n",
+    );
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("missing-reader".to_owned());
+    let record = fixture
+        .registry
+        .spawn(request)
+        .await
+        .expect("the spawn succeeds");
+
+    assert!(
+        record.warnings.iter().any(|w| w.contains("s7a-nope")),
+        "the missing skill is a warning: {:?}",
+        record.warnings
+    );
+    assert!(
+        !record
+            .session
+            .skills()
+            .iter()
+            .any(|skill| skill.name == "s7a-nope"),
+        "a missing skill is never invented"
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+    let _ = std::fs::remove_file(fixture.home.join("agents/missing-reader.md"));
 }
 
 /// Only the user level is read (a project-level definition is not, this slice): a definition

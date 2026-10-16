@@ -1521,6 +1521,10 @@ fn run(
                 ),
                 skills_builtin: config.skills.builtin.unwrap_or(true),
                 skills_disabled: config.skills.disabled.clone(),
+                // The human's `main` session is not an agent definition (ADR 0030 O11): no
+                // built-in tool allow-list and no skills allow-list.
+                tools_allow: None,
+                skills_allow: None,
                 memory_injection: config.memory.injection(),
                 trust: trust_setup,
                 resume: resume.is_some(),

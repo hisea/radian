@@ -195,6 +195,10 @@ pub struct TaskRecord {
     /// Whether the definition asked for `spawn: true`, ignored because a task is depth 2
     /// (ADR 0030 O13).
     pub spawn_ignored: bool,
+    /// Spawn-time warnings about the agent definition (ADR 0030 O11), today a `skills` name
+    /// discovery did not find. Empty when the definition names none. A warning is never a
+    /// failure; the lead's `spawn_task` result carries these.
+    pub warnings: Vec<String>,
     /// The seq of the lead's `TaskSpawned` (the task's `parent.seq`).
     pub start_seq: u64,
     /// The commit the worktree's branch was created from (the lead's HEAD at spawn), so a later
@@ -739,6 +743,14 @@ impl TaskRegistry {
                 .map_err(|error| TaskError::new(format!("cannot send the brief: {error}")))?;
         }
 
+        // ADR 0030 O11: a `skills` name discovery did not find is a spawn-time warning, never a
+        // failure. The session's own catalog is already filtered to the allow-list, so the
+        // names still missing there are exactly the ones to warn about.
+        let warnings = match &agent.skills {
+            Some(allow) => crate::skills::missing(session.skills(), allow),
+            None => Vec::new(),
+        };
+
         let record = Arc::new(TaskRecord {
             id: id.to_owned(),
             session,
@@ -748,6 +760,7 @@ impl TaskRegistry {
             label,
             agent: agent.name.clone(),
             spawn_ignored: agent.spawn_ignored,
+            warnings,
             start_seq,
             start_commit,
             sandbox_policy,
@@ -964,13 +977,24 @@ fn enforce_task_setup(
     }
     // ADR 0030 problem 7 = A: the `tools` allow-list is enforced by denying every built-in it
     // does not name, so it can narrow a tier but never widen one (`deny` outranks `allow`).
-    if let Some(tools) = agent.and_then(|agent| agent.tools.as_deref()) {
+    // ADR 0030 O11 ("not in the list is not mounted") also removes the unlisted built-ins from
+    // the session's mounted specs and its `<runtime>` layer; the deny above stays beneath that
+    // as defence in depth. MCP tools are never in this universe (the `mcp` list governs them).
+    if let Some(agent) = agent
+        && let Some(tools) = agent.tools.as_deref()
+    {
         let denied: Vec<String> = builtin_tool_names()
             .into_iter()
             .filter(|name| !tools.iter().any(|allowed| allowed == name))
             .map(str::to_owned)
             .collect();
         setup.profile = setup.profile.clone().with_denied_tools(denied);
+        setup.tools_allow = agent.tools.clone();
+    }
+    // ADR 0030 O11: a definition's `skills` list is the task's skill allow-list; `None` keeps
+    // every discovered skill (the task default). A missing name is reported at spawn.
+    if let Some(agent) = agent {
+        setup.skills_allow = agent.skills.clone();
     }
     // ADR 0030 O8: a task has no MCP server unless its definition opts in by name (the default
     // stays none); an opted-in name with no configured server is dropped, never invented.

@@ -552,6 +552,8 @@ fn builder(session_dir: std::path::PathBuf, base_url: String) -> TaskBuilder {
                     skills_extra_paths: Vec::new(),
                     skills_builtin: true,
                     skills_disabled: Vec::new(),
+                    tools_allow: None,
+                    skills_allow: None,
                     memory_injection: radian_host::memory::InjectionConfig::default(),
                     trust: radian_host::trust::Setup::untrusted(&workspace, false),
                     resume: false,
