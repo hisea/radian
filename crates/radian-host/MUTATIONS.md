@@ -914,3 +914,28 @@ allowed_branch=None)` 在 `main` 上，此时只有 `refuse_main` 在起作用�
 （`a_shared_task_writes_no_end_commit`）先等任务 journal 里出现 `TurnFinished`，再给错误的 finisher
 一个有界的窗口（2 s）去提交，然后断言 lead 工作区未变——纯 `requests()` 计数会在 finisher 运行前
 就通过（假绿）。
+
+## sec-git：ADR 0039 决定 3（宿主不执行任何仓库配置的 filter 命令，2026-10-16）
+
+工作树 `.radian-worktrees/sec-git`，基线 `11e4b01`。变异就地施加，用 `.radian/scratch/mut/` 的
+副本还原（每个变异后 `cmp` 证明与副本一致）；每个变异用
+`cargo test -p radian-host --test git_commit --no-fail-fast -- <过滤>` 与
+`cargo test -p radian-host --test task --no-fail-fast -- creating_and_removing_a_worktree_runs_no_filter`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SG-M1 | 暂存退回 `git add -A` / `git add -- <paths>`（宿主的 `git add` 执行仓库 filter） | `lfs_runs_radians_own_command_and_never_the_configured_one`（配置的 `filter.lfs.clean` 脚本被 `git add` 跑了） | ✅ 1 FAILED |
+| SG-M2 | `lfs` 从仓库配置读 `filter.lfs.clean` 命令串并用 `sh -c` 运行，而不是 Radian 自己的固定 `git-lfs clean -- <path>` | `lfs_runs_radians_own_command_and_never_the_configured_one`（配置的脚本跑了，提交的是脚本输出而不是固定命令的指针） | ✅ 1 FAILED |
+| SG-M3 | `dirty()` 与 task 的 `create_worktree`/`remove_worktree` 去掉 no-filter 覆盖（`git status` / `git worktree add\|remove` 直接跑 filter） | `a_driver_in_info_attributes_never_runs`、`a_driver_in_core_attributes_file_never_runs`（`dirty` 跑了 clean），`creating_and_removing_a_worktree_runs_no_filter`（`worktree add` 跑了 smudge） | ✅ 3 FAILED |
+
+3/3 全抓。SG-M1 由 lfs 那条确定性抓住：`git add` 对 `filter=lfs` 的文件会执行仓库配置里的
+命令，而 lfs 是唯一「被允许、因而不会被 `plan_path` 提前拒绝」的驱动，所以「退回 git add」在这条
+路径上必然跑配置命令。`a_gitattributes_flip_during_commit_never_runs_a_filter` 是并发断言
+（断言「标记永不出现」），在 SG-M1 下 8 次提交里没有恰好撞上 check-attr 与 git add 之间的窗口，
+因此不算 SG-M1 的抓取测试——确定性的抓取是 lfs 那条。
+
+**如实记录（未做变异）**：`GIT_ATTR_SOURCE=<空树>` 不足以关掉 `$GIT_DIR/info/attributes` 与
+`core.attributesFile`（实测见 `.radian/scratch/investigate3.out`），所以实现用「从生效配置枚举
+filter 名字 + 对每个名字 `-c filter.<name>.{clean,smudge,process}=` 与 `required=false`」。这一层
+的测试是 `a_driver_in_info_attributes_never_runs` 与 `a_driver_in_core_attributes_file_never_runs`；
+SG-M3 证明它们确实区分「关掉命令」与「没关」。

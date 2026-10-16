@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use agent_core::{ToolCall, ToolProvider, ToolSession};
-use radian_host::git_commit::{Committed, GitCommitTools, RepoPin, commit, run};
+use radian_host::git_commit::{Committed, GitCommitTools, RepoPin, commit, dirty, run};
 use radian_session::{SessionCreatedData, SessionJournal};
 use serde_json::json;
 
@@ -34,6 +34,17 @@ fn git(dir: &Path, args: &[&str]) -> bool {
         .status()
         .expect("git runs")
         .success()
+}
+
+/// `git`'s trimmed stdout, for a query the test asserts on.
+fn git_text(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(output.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 /// A repo on `feature/x` with one staged-worthy change.
@@ -604,9 +615,12 @@ fn a_filter_driver_not_in_allowed_filters_is_refused() {
     assert!(!marker.exists());
 }
 
-/// The opt-in: a driver the user named in `allowed_filters` runs (its command is not inspected).
+/// ADR 0039 decision 3: Radian runs only `lfs` itself, with its own fixed `git-lfs clean`; it
+/// never reads a filter command from the repository config. A driver the user named in
+/// `allowed_filters` but which is not `lfs` is therefore refused — and its configured script
+/// never runs.
 #[test]
-fn a_driver_named_in_allowed_filters_is_allowed() {
+fn a_non_lfs_driver_is_refused_even_when_named_in_allowed_filters() {
     let dir = repo("filter-allowed");
     let marker = dir.join("FILTER-RAN");
     let script = dir.join("custom-clean.sh");
@@ -622,66 +636,94 @@ fn a_driver_named_in_allowed_filters_is_allowed() {
     change(&dir);
 
     let allowed = vec!["custom".to_owned()];
-    let committed = commit_with_filters(&dir, "m", &[], &allowed).expect("allowed by name");
+    let error = commit_with_filters(&dir, "m", &[], &allowed).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(error.message.contains("custom"), "{error:?}");
     assert!(
-        committed.files >= 2,
-        "a.txt and .gitattributes: {committed:?}"
+        !marker.exists(),
+        "a configured filter command must never run in the host"
     );
     assert!(
-        marker.exists(),
-        "an allowed driver runs: the user opted in by name"
+        git(&dir, &["diff", "--cached", "--quiet"]),
+        "the refusal stages nothing"
     );
 }
 
-/// `lfs` is the default allowed driver, but only when its commands are a `git-lfs` command.
+/// ADR 0039 decision 3: an allowed `lfs` path is filtered by Radian's **own** fixed command,
+/// `git-lfs clean -- <path>`, never by the `filter.lfs.clean` string from git config. With a fake
+/// `git-lfs` (the real one is often absent) the committed blob is the fake's stdout, the fake
+/// sees the fixed argv, and a configured `filter.lfs.clean` script cannot run. Without `git-lfs`
+/// the path is refused with a clear error.
 #[test]
-fn lfs_is_allowed_only_with_a_git_lfs_command() {
+fn lfs_runs_radians_own_command_and_never_the_configured_one() {
     let dir = repo("filter-lfs");
+    let configured_marker = dir.join("CONFIGURED-LFS-RAN");
+    let configured = dir.join("lfs-clean.sh");
+    write_executable(
+        &configured,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", configured_marker.display()),
+    );
     assert!(git(
         &dir,
-        &["config", "filter.lfs.clean", "git-lfs clean -- %f"]
+        &["config", "filter.lfs.clean", configured.to_str().unwrap()]
     ));
     assert!(git(
         &dir,
-        &["config", "filter.lfs.process", "git-lfs filter-process"]
+        &["config", "filter.lfs.process", configured.to_str().unwrap()]
     ));
     std::fs::write(dir.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
     std::fs::write(dir.join("b.bin"), "binary\n").unwrap();
 
-    // The check passes and `git add` is attempted. Whether `git-lfs` is installed decides the
-    // outcome; the filter check itself must not refuse.
-    match commit_in(&dir, "m", &[], None, &[]) {
-        Ok(committed) => assert!(committed.files >= 1),
-        Err(error) => {
-            assert_ne!(
-                error.code, "filter_not_allowed",
-                "a git-lfs command must be allowed: {error:?}"
-            );
-            assert_eq!(
-                error.code, "git_failed",
-                "staging must have been attempted: {error:?}"
-            );
-        }
+    // No `git-lfs`: refuse the path, and never fall back to the configured command.
+    unsafe {
+        std::env::set_var("RADIAN_GIT_LFS", dir.join("no-such-git-lfs"));
     }
-
-    // A non-git-lfs `clean` for the `lfs` driver is refused.
-    let other = repo("filter-lfs-other");
-    let marker = other.join("LFS-FILTER-RAN");
-    let script = other.join("lfs-clean.sh");
-    write_executable(
-        &script,
-        &format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    let error = commit_in(&dir, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_unavailable", "{error:?}");
+    assert!(
+        !configured_marker.exists(),
+        "the configured lfs command must not run"
     );
-    assert!(git(
-        &other,
-        &["config", "filter.lfs.clean", script.to_str().unwrap()]
-    ));
-    std::fs::write(other.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
-    std::fs::write(other.join("b.bin"), "binary\n").unwrap();
-    let error = commit_in(&other, "m", &[], None, &[]).unwrap_err();
-    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
-    assert!(error.message.contains("filter.lfs.clean"), "{error:?}");
-    assert!(!marker.exists(), "the non-git-lfs clean must not run");
+    assert!(
+        git(&dir, &["diff", "--cached", "--quiet"]),
+        "a missing git-lfs stages nothing"
+    );
+
+    // A fake `git-lfs` on Radian's own command line: it logs its argv and cats a pointer file.
+    let pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 7\n";
+    let pointer_file = temp("filter-lfs-pointer").join("pointer");
+    std::fs::write(&pointer_file, pointer).unwrap();
+    let args_file = dir.join("LFS-ARGS");
+    let fake = dir.join("fake-git-lfs");
+    write_executable(
+        &fake,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\ncat {}\n",
+            args_file.display(),
+            pointer_file.display()
+        ),
+    );
+    unsafe {
+        std::env::set_var("RADIAN_GIT_LFS", &fake);
+    }
+    let committed = commit_in(&dir, "m", &[], None, &[]).expect("radian's own git-lfs runs");
+    assert!(committed.files >= 1, "{committed:?}");
+    assert!(
+        !configured_marker.exists(),
+        "the configured lfs command must not run"
+    );
+    let args = std::fs::read_to_string(&args_file).expect("the fake logged its argv");
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        ["clean", "--", "b.bin"],
+        "Radian's fixed command line"
+    );
+    // The committed blob is the pointer Radian hashed, not the working-tree content.
+    let committed_blob = git_text(&dir, &["rev-parse", "HEAD:b.bin"]);
+    std::fs::write(dir.join("pointer.txt"), pointer).unwrap();
+    let pointer_blob = git_text(&dir, &["hash-object", "--no-filters", "--", "pointer.txt"]);
+    assert_eq!(committed_blob, pointer_blob);
+    let _ = std::fs::remove_file(dir.join("pointer.txt"));
 }
 
 /// A repo whose `.gitattributes` routes `*.txt` through `filter.evil`, whose `clean` touches
@@ -787,4 +829,181 @@ fn a_large_repository_does_not_hit_the_argument_limit() {
     let committed = commit_in(&dir, "m", &[], None, &[]).expect("a large repo commits");
     assert!(committed.files >= 1, "{committed:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Configures `filter.<driver>.<kind>` in `dir` to a command that touches `marker`, then passes
+/// the input through (a marker-writing filter, ADR 0039 decision 3).
+fn marker_filter(dir: &Path, driver: &str, kind: &str, marker: &Path) {
+    let script = dir.join(format!("{driver}-{kind}.sh"));
+    write_executable(
+        &script,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    );
+    assert!(
+        git(
+            dir,
+            &[
+                "config",
+                &format!("filter.{driver}.{kind}"),
+                script.to_str().unwrap(),
+            ],
+        ),
+        "configure filter.{driver}.{kind}"
+    );
+}
+
+/// ADR 0039 decision 3, the vector `GIT_ATTR_SOURCE=<empty tree>` does not close: a driver named
+/// in `$GIT_DIR/info/attributes`. The commit reads it (and refuses); `dirty` reads attributes
+/// without a check, so the no-filter overrides are what keep its command from running.
+#[test]
+fn a_driver_in_info_attributes_never_runs() {
+    let dir = repo("filter-info-attrs");
+    // Track a.txt first (no attributes yet), so the dirty check has a tracked stat-dirty file:
+    // `git status` runs the clean filter for one, not for an untracked path.
+    commit_in(&dir, "init", &[], None, &[]).expect("the initial commit");
+    let marker = temp("filter-info-marker").join("FILTER-RAN");
+    marker_filter(&dir, "evil", "clean", &marker);
+    std::fs::create_dir_all(dir.join(".git/info")).unwrap();
+    std::fs::write(dir.join(".git/info/attributes"), "*.txt filter=evil\n").unwrap();
+    change(&dir);
+
+    let pin = RepoPin::resolve(&dir).expect("a repository");
+    assert!(dirty(&dir, &pin).expect("the dirty check"), "a.txt changed");
+    assert!(!marker.exists(), "the dirty check must not run a filter");
+
+    let error = commit_in(&dir, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(
+        !marker.exists(),
+        "info/attributes must not reach a filter command"
+    );
+}
+
+/// The same for `core.attributesFile`, which also survives `GIT_ATTR_SOURCE=empty`.
+#[test]
+fn a_driver_in_core_attributes_file_never_runs() {
+    let dir = repo("filter-caf");
+    commit_in(&dir, "init", &[], None, &[]).expect("the initial commit");
+    let marker = temp("filter-caf-marker").join("FILTER-RAN");
+    marker_filter(&dir, "evil", "clean", &marker);
+    let attrs = temp("filter-caf-attrs").join("attributes");
+    std::fs::write(&attrs, "*.txt filter=evil\n").unwrap();
+    assert!(git(
+        &dir,
+        &["config", "core.attributesFile", attrs.to_str().unwrap()]
+    ));
+    change(&dir);
+
+    let pin = RepoPin::resolve(&dir).expect("a repository");
+    assert!(dirty(&dir, &pin).expect("the dirty check"), "a.txt changed");
+    assert!(
+        !marker.exists(),
+        "core.attributesFile must not run a filter"
+    );
+
+    let error = commit_in(&dir, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(
+        !marker.exists(),
+        "core.attributesFile must not run a filter"
+    );
+}
+
+/// ADR 0037 background job vs ADR 0039 decision 3: a thread rewrites `.gitattributes` to name a
+/// marker filter, over and over, while commits run. Whatever the interleaving, the filter never
+/// runs — staging is plumbing, and the commit's own index refresh carries the no-filter
+/// overrides, so there is no check-then-use window. No sleeps.
+#[test]
+fn a_gitattributes_flip_during_commit_never_runs_a_filter() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = repo("filter-flip");
+    let marker = temp("filter-flip-marker").join("FILTER-RAN");
+    marker_filter(&dir, "flip", "clean", &marker);
+    marker_filter(&dir, "flip", "smudge", &marker);
+    marker_filter(&dir, "flip", "process", &marker);
+    change(&dir);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let attrs = dir.join(".gitattributes");
+    let flipper = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                let _ = std::fs::write(&attrs, "*.txt filter=flip\n");
+                let _ = std::fs::write(&attrs, "# no filter\n");
+            }
+        })
+    };
+
+    // Several commits, so the flip and a commit overlap in many schedules.
+    for n in 0..8 {
+        change(&dir);
+        match commit_in(&dir, &format!("flip {n}"), &[], None, &[]) {
+            Ok(_) => {}
+            Err(error) => assert_eq!(error.code, "filter_not_allowed", "{error:?}"),
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    flipper.join().unwrap();
+    assert!(
+        !marker.exists(),
+        "no filter may run, whatever .gitattributes said"
+    );
+}
+
+/// ADR 0039 decision 3: for a path with no filter, the plumbing stages exactly the blob `git add`
+/// would.
+#[test]
+fn a_plain_file_stages_the_blob_git_add_would() {
+    let dir = repo("filter-blob-eq");
+    std::fs::write(dir.join("new.txt"), "new content\n").unwrap();
+    let committed = commit_in(&dir, "m", &[], None, &[]).expect("the commit");
+    assert!(committed.files >= 2, "{committed:?}");
+    let staged = git_text(&dir, &["rev-parse", "HEAD:new.txt"]);
+    let raw = git_text(&dir, &["hash-object", "--no-filters", "--", "new.txt"]);
+    assert_eq!(staged, raw);
+}
+
+/// ADR 0039 decision 3: the executable bit and a symlink survive the plumbing (a symlink's blob
+/// is its target path, which `git add` stores too).
+#[cfg(unix)]
+#[test]
+fn the_executable_bit_and_symlinks_survive_staging() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = repo("filter-modes");
+    let _ = std::fs::remove_file(dir.join("a.txt"));
+    std::fs::write(dir.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+    std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    symlink("run.sh", dir.join("link")).unwrap();
+
+    let committed = commit_in(&dir, "m", &[], None, &[]).expect("the commit");
+    assert!(committed.files >= 2, "{committed:?}");
+    let tree = git_text(&dir, &["ls-tree", "-r", "HEAD"]);
+    assert!(tree.contains("100755") && tree.contains("run.sh"), "{tree}");
+    assert!(tree.contains("120000") && tree.contains("link"), "{tree}");
+
+    let link_blob = git_text(&dir, &["rev-parse", "HEAD:link"]);
+    std::fs::write(dir.join("target.txt"), "run.sh").unwrap();
+    let target_blob = git_text(&dir, &["hash-object", "--no-filters", "--", "target.txt"]);
+    assert_eq!(link_blob, target_blob);
+}
+
+/// ADR 0039 decision 3: the plumbing covers the `git add -A` shapes — a deletion and the files of
+/// a new directory.
+#[test]
+fn staging_covers_deletions_and_a_new_directory() {
+    let dir = repo("filter-shapes");
+    commit_in(&dir, "init", &[], None, &[]).expect("the initial commit");
+    std::fs::create_dir_all(dir.join("new/deep")).unwrap();
+    std::fs::write(dir.join("new/deep/x.txt"), "x\n").unwrap();
+    std::fs::remove_file(dir.join("a.txt")).unwrap();
+
+    let committed = commit_in(&dir, "shapes", &[], None, &[]).expect("the commit");
+    assert!(committed.files >= 2, "{committed:?}");
+    let tree = git_text(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(tree.contains("new/deep/x.txt"), "{tree}");
+    assert!(
+        !tree.contains("a.txt"),
+        "the deletion must be staged: {tree}"
+    );
 }

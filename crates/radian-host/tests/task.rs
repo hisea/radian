@@ -966,3 +966,59 @@ async fn the_turn_end_commits_the_worktree() {
 
     fixture.registry.remove("t1", true).await.expect("remove");
 }
+
+/// ADR 0039 decision 3 (and ADR 0030): `git worktree add` checks files out, so a
+/// smudge filter named in the writable `.gitattributes` would run in the host; `git worktree
+/// remove` reads the clean filter to test dirtiness. Neither may run a repository filter command.
+#[test]
+fn creating_and_removing_a_worktree_runs_no_filter() {
+    let lead = scratch("wt-filter-lead");
+    assert!(git(&lead, &["init", "-q", "-b", "main"]));
+    assert!(git(&lead, &["config", "user.email", "t@example.com"]));
+    assert!(git(&lead, &["config", "user.name", "t"]));
+    // Commit the tree (with an attribute that will name a filter) while no filter exists yet.
+    std::fs::write(lead.join("a.txt"), "hello\n").unwrap();
+    std::fs::write(lead.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    assert!(git(&lead, &["add", "-A"]));
+    assert!(git(&lead, &["commit", "-q", "-m", "init"]));
+
+    // Now the filter exists in the repo config, and its command touches a marker.
+    let marker = scratch("wt-filter-marker").join("FILTER-RAN");
+    let script = lead.join("evil.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(git(
+        &lead,
+        &["config", "filter.evil.clean", script.to_str().unwrap()]
+    ));
+    assert!(git(
+        &lead,
+        &["config", "filter.evil.smudge", script.to_str().unwrap()]
+    ));
+    assert!(git(&lead, &["config", "filter.evil.required", "true"]));
+
+    let wt = scratch("wt-filter-work");
+    radian_host::task::create_worktree(&lead, &wt, "radian/wt-filter").expect("worktree add");
+    assert!(
+        wt.join("a.txt").exists(),
+        "the worktree must be checked out"
+    );
+    assert!(
+        !marker.exists(),
+        "worktree add must not run a smudge filter in the host"
+    );
+
+    radian_host::task::remove_worktree(&lead, &wt, false).expect("worktree remove");
+    assert!(
+        !marker.exists(),
+        "worktree remove must not run a filter in the host"
+    );
+}
