@@ -31,3 +31,13 @@ serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-util = "0.7"
+
+# Build speed and disk. Dependencies
+# carry no debug info at all; the workspace crates keep only line tables, so a panic backtrace
+# still names file and line. Test failure locations do not depend on debug info. `test` inherits
+# `dev`.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
