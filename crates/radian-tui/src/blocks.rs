@@ -769,11 +769,12 @@ fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
 ///   call, with no gap in between;
 /// * either side is a user block: its pad row is the separation already (painted in a theme
 ///   with a user background, blank in one without - the shape is the same either way);
-/// * the previous entry is the thinking channel (ADR 0035): it hugs the block below
-///   it (the reply or the tool call it introduces), so the folded one-liner reads as part of
-///   what follows. The gap **above** thinking is unchanged.
+/// * the startup block: one block built from several entries (see [`is_startup_block`]).
 ///
-/// Otherwise exactly one line. The counting ([`line_count`]'s callers), the drawing
+/// Otherwise exactly one line -- the thinking channel included: ADR 0035 replaced
+/// revision 3's "the folded one-liner hugs the block it introduces" with one blank line on both
+/// sides, because a folded `> thinking (N lines)` against the reply read as one cramped block.
+/// The counting ([`line_count`]'s callers), the drawing
 /// ([`crate::render::visible_lines`]), the selection mapping and the find geometry all call
 /// this, so a gap cannot exist in one and not the other.
 pub fn block_gap(prev: Option<&Entry>, next: &Entry) -> usize {
@@ -786,10 +787,6 @@ pub fn block_gap(prev: Option<&Entry>, next: &Entry) -> usize {
     // The startup block is **one** block built from several entries (the wordmark, the folded
     // line or the full lines, the safety lines that never fold, the Tip): no gaps inside it.
     if is_startup_block(prev.kind) && is_startup_block(next.kind) {
-        return 0;
-    }
-    // ADR 0035: thinking hugs the block below it.
-    if prev.kind == EntryKind::Reasoning {
         return 0;
     }
     if prev.kind == EntryKind::User || next.kind == EntryKind::User {
@@ -3514,6 +3511,7 @@ mod tests {
         let user = Entry::new(EntryKind::User, "hi");
         let assistant = Entry::new(EntryKind::Assistant, "hello");
         let notice = Entry::new(EntryKind::Notice, "note");
+        let thinking = Entry::new(EntryKind::Reasoning, "a thought");
         let banner = Entry::new(EntryKind::Banner, "radian");
         let startup = Entry::new(EntryKind::Startup, "profile: x");
         let mut call = Entry::new(EntryKind::ToolCall, "-> shell");
@@ -3539,6 +3537,28 @@ mod tests {
         assert_eq!(block_gap(Some(&assistant), &notice), 1, "ordinary blocks");
         assert_eq!(block_gap(Some(&assistant), &user), 0, "a user block's pad");
         assert_eq!(block_gap(Some(&user), &assistant), 0, "the same pad");
+        // ADR 0035: thinking keeps the container's one blank line below it, next to
+        // the reply and next to a tool call.
+        assert_eq!(
+            block_gap(Some(&thinking), &assistant),
+            1,
+            "one line between thinking and the reply"
+        );
+        assert_eq!(
+            block_gap(Some(&thinking), &call),
+            1,
+            "one line between thinking and a call"
+        );
+        assert_eq!(
+            block_gap(Some(&thinking), &thinking),
+            1,
+            "two thinking entries are two blocks"
+        );
+        assert_eq!(
+            block_gap(Some(&assistant), &thinking),
+            1,
+            "one line above thinking too"
+        );
         assert_eq!(block_gap(Some(&call), &result), 0, "a result hugs its call");
         assert_eq!(
             block_gap(Some(&call), &other),

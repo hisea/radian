@@ -1446,3 +1446,50 @@ Base `acbc455`（`origin/main`）· 就地变异：改前 `cp` 到 scratchpad，
 1/1 抓住。这条是**接线**变异：白名单本身的行为由 `radian-sandbox` 的逃逸矩阵覆盖（`unix_socket` 组的
 `whitelisted_allowed` 对照），而「TUI 把解析后的列表交给 `build_sandbox`」只有源码结构能钉住
 （`run` 在 `main.rs` 里、测试够不到），所以按 `structure.rs` 的既有做法做结构断言。
+
+## pulse：呼吸 spinner（ADR 0027，2026-10-15）
+
+Base `19dc0d7`（worktree `.radian-worktrees/pulse`，分支 `dogfood/pulse`）。每个变异改完后跑
+`cargo test -p radian-tui --lib -- spinner`（或 `--bin radian`），再从 `.radian/scratch/` 的副本还原并用
+`diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| P1-M1 | `PULSE_STEPS` 12 → 2（步数退回两档） | `spinner::tests::the_breath_walks_one_sine_period_in_twelve_steps`（取样序列 `[0, 2]` ≠ `[0, 1, 3, …, 1]`，以及 ADR 两个常量的断言）、`spinner::tests::a_pulse_that_cannot_interpolate_keeps_the_two_colour_switch`（一步 ≈117 ms 的断言）、`tests::the_breath_redraws_once_per_step_and_only_when_a_spinner_is_visible`（循环唤醒 250 ms ≠ 700 ms） | ✅（3 条 FAILED） |
+| P1-M2 | `breath_color` 不再要求两端都是 RGB（非 RGB 端按 `Rgb(0, 0, 0)` 也插值） | `spinner::tests::the_breath_colour_interpolates_only_between_two_rgb_ends`（4 个 `None` 断言；`Indexed(5)` 处得到 `Rgb(45, 45, 45)`） | ✅ |
+| P1-M3 | `spinner_frame_at` 去掉 `spinner_visible()` 检查（不可见时也刷新） | `tests::the_breath_redraws_once_per_step_and_only_when_a_spinner_is_visible`（空闲那次走完两个周期得到 24 帧，应为 0） | ✅ |
+
+高亮的**正常**路径没有变：`pty_the_pulse_breathes_through_rgb_colours` 在真实 pty 上看到 `⏺` 前的
+24-bit 颜色按呼吸变化（一个周期里 7 个不同颜色、包含主题的强调色与暗色两端），而
+`pty_an_idle_screen_is_not_redrawn`（空闲零重绘）与 `pty_a_visible_spinner_redraws_on_its_interval`
+（`arc` 250 ms 不变）都仍然通过。
+
+## pulse：bar 竖条加高到半格、状态行点移到竖条列（ADR 0035，2026-10-15）
+
+同上一节的工作区。改完后跑 `cargo test -p radian-tui --test render`（`--test cursor` 一并跑），再从
+`.radian/scratch/render.rs.orig` 还原并用 `diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| R4-M1 | 留白行仍画 `▄`/`▀` 而不是 `▖`/`▘` | `render::the_bar_band_fills_the_terminal_width`（第一格 `▄` ≠ `▖`，两档宽度都查） | ✅ |
+| R4-M2 | 竖条仍是 `▎`（`BAR_RAIL` 回退） | `render::the_bar_input_style_draws_a_full_width_band_with_the_rail`、`the_bar_band_fills_the_terminal_width`、`the_bar_input_takes_the_status_row_the_pad_rows_and_its_text_rows`、`the_bar_status_row_never_moves_the_band_or_the_transcript`、`the_empty_input_shows_the_placeholder_after_the_prompt`（5 条 FAILED），以及 `pty::pty_the_slash_completion_walks_the_command_tree` 的 `▌ /memory` | ✅（5 条 FAILED） |
+| R4-M3 | 点回到正文列（状态行恢复两个前导空格与两个空格分隔） | `render::the_bar_status_row_never_moves_the_band_or_the_transcript`（第 0 格不是 `◜`）、`the_bar_rail_and_spinner_fall_back_to_ascii`、`the_input_rule_shows_the_spinner_status_while_running`、`the_input_rule_shows_compacting` | ✅（4 条 FAILED） |
+
+光标列不动的断言在 `cursor::the_bar_cursor_stays_at_the_text_column`（空输入 x=2、`ab` x=4）；
+`▖`/`▘` 这一格的前景是强调色、背景是终端默认（`the_bar_band_fills_the_terminal_width` 的第 0 格断言）。
+
+## pulse：thinking 与下面的块之间空一行（ADR 0035，2026-10-15）
+
+同上一节的工作区。变异改 `blocks.rs::block_gap`，跑 `cargo test -p radian-tui --lib` 与
+`--test render`，再从 `.radian/scratch/blocks.rs.orig` 还原并用 `diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T5-M1 | `block_gap` 恢复「thinking 贴住下面」（`prev.kind == Reasoning` → 0） | `blocks::tests::the_container_gap_is_one_line_except_within_a_block`（pair 规则）、`render::thinking_has_one_blank_line_on_both_sides`、`render::the_block_layout_snapshot`、`render::folding_changes_the_transcript_line_count` | ✅（1 + 3 条 FAILED） |
+
+行数计数与布局的一致性由结构保证（`line_count`、`md_line_count` 与绘制都走同一个 `block_gap`），
+`blocks::tests::md_line_count_matches_the_layout` 与 `tests/virtual.rs` 的窗口测试在改前改后都通过。
+另一个观察（不是本变异的缺口）：`push_message` 对没有正文的 assistant 回合也会压一个空的 Assistant
+条目，它是独立的一块，所以「thinking + 无正文的工具调用」在屏幕上会是两行空行（thinking 自己的一行
++ 空块两侧的行）；`thinking_has_one_blank_line_on_both_sides` 直接压条目来测 thinking 这条规则本身，
+并在注释里写明这一点。

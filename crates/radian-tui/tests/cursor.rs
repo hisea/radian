@@ -193,3 +193,22 @@ fn a_continuation_line_aligns_with_the_first_line() {
 fn first_text_column(row: &str) -> usize {
     row.chars().position(|c| c.is_alphanumeric()).unwrap_or(0)
 }
+
+/// ADR 0035: the rail is a half-cell wide (`▌`) and continues into the band's pad
+/// rows as `▖`/`▘`, but the text column does not move — `BAR_LEAD` cells before the text, and
+/// the cursor sits on the character it is on.
+#[test]
+fn the_bar_cursor_stays_at_the_text_column() {
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.input_style = radian_tui::render::InputStyle::Bar;
+    app.input = "ab".into();
+    // The text starts at `BAR_LEAD` (the rail plus its one cell of padding): two cells, then the
+    // two characters, so the cursor is at column 4.
+    let cursor = render(&mut app, 20, 8).backend().cursor_position();
+    assert_eq!(cursor.x, 4, "two lead cells plus the two characters");
+    // Empty input: the cursor is on the text column itself.
+    app.input = "".into();
+    let cursor = render(&mut app, 20, 8).backend().cursor_position();
+    assert_eq!(cursor.x, 2, "the rail plus its one cell of padding");
+}

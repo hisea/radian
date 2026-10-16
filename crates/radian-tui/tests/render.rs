@@ -257,9 +257,10 @@ fn the_status_line_shows_model_and_turn_state() {
     assert!(text.contains("running"), "{text}");
 }
 
-/// ADR 0027: the input rule shows the spinner and the running state while a turn
-/// runs (`── ◜  Working `), and is a plain rule when idle. The spinner and the text are
-/// separated by **two** spaces.
+/// ADR 0027 + ADR 0035: the default `bar` status row shows the spinner
+/// and the running state while a turn runs (`◜ Working`), and is blank when idle. The dot sits
+/// in the rail's column with **one** cell before the text (which starts at the text column);
+/// the `lines`/`box` rule line keeps revision 2's two spaces (the box test below).
 #[test]
 fn the_input_rule_shows_the_spinner_status_while_running() {
     let mut app = App::new("m", "s");
@@ -272,8 +273,8 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
     assert!(
-        text.contains("◜  Working"),
-        "the spinner and two spaces on the input rule: {text}"
+        text.contains("◜ Working"),
+        "the spinner on the bar's status row: {text}"
     );
 
     // Idle: no spinner, no text.
@@ -284,7 +285,7 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
     assert!(!text.contains('◜'), "{text}");
 }
 
-/// ADR 0018 + ADR 0027: a running compaction shows `Compacting` on the input rule
+/// ADR 0018 + ADR 0027: a running compaction shows `Compacting` on the status row
 /// (the `CompactionStarted`/`CompactionFinished` events exist, so this is not invented).
 #[test]
 fn the_input_rule_shows_compacting() {
@@ -297,7 +298,7 @@ fn the_input_rule_shows_compacting() {
     app.session.compacting = true;
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
-    assert!(text.contains("◜  Compacting"), "{text}");
+    assert!(text.contains("◜ Compacting"), "{text}");
 
     // The flag clears when the compaction ends.
     app.session.compacting = false;
@@ -626,7 +627,7 @@ fn the_empty_input_shows_the_placeholder_after_the_prompt() {
     let mut bar = App::new("m", "s");
     let text = screen(&render(&mut bar, 80, 8));
     assert!(
-        text.contains("▎ (type a message, Enter to send, Ctrl-J for a new line)"),
+        text.contains("▌ (type a message, Enter to send, Ctrl-J for a new line)"),
         "the bar's placeholder follows the rail:\n{text}"
     );
 }
@@ -729,8 +730,8 @@ fn the_bar_input_style_draws_a_full_width_band_with_the_rail() {
     let terminal = render(&mut app, 20, 8);
     let text = screen(&terminal);
     let band = app.theme.input_bar.bg.expect("the band's background");
-    let first = row_of(&terminal, "▎ first").expect("the first band row");
-    let second = row_of(&terminal, "▎ second").expect("the second band row");
+    let first = row_of(&terminal, "▌ first").expect("the first band row");
+    let second = row_of(&terminal, "▌ second").expect("the second band row");
     assert_eq!(second, first + 1, "one band row per input row:\n{text}");
     for y in [first as u16, second as u16] {
         let line = row(&terminal, y);
@@ -759,17 +760,18 @@ fn the_bar_input_style_draws_a_full_width_band_with_the_rail() {
     wide.input = "中文中文中文".into();
     let terminal = render(&mut wide, 12, 8);
     // Inner width 10: five 2-cell characters, then the sixth.
-    let first = row_of(&terminal, "▎ 中").expect("the first band row");
+    let first = row_of(&terminal, "▌ 中").expect("the first band row");
     let wrapped = row(&terminal, (first + 1) as u16);
     assert!(
-        wrapped.starts_with("▎ ") && wrapped.contains('文'),
+        wrapped.starts_with("▌ ") && wrapped.contains('文'),
         "the band grew a row for the wrapped tail: {wrapped:?}"
     );
     assert_band_across(&terminal, (first + 1) as u16, wide.theme.input_bar.bg, 12);
 }
 
 /// The band reaches the terminal's last column at both widths the brief pins (80 and 120), and
-/// its half-cell pads (ADR 0035) do too: `▄` above, `▀` below, in the band's color.
+/// its half-cell pads (ADR 0035/4) do too: the rail's own quadrant (`▖` above, `▘`
+/// below, in the accent) then `▄`/`▀` in the band's color across the rest.
 #[test]
 fn the_bar_band_fills_the_terminal_width() {
     use radian_tui::render::InputStyle;
@@ -778,18 +780,39 @@ fn the_bar_band_fills_the_terminal_width() {
         app.input_style = InputStyle::Bar;
         app.input = "wide".into();
         let terminal = render(&mut app, width, 8);
-        let y = row_of(&terminal, "▎ wide").expect("the band") as u16;
+        let y = row_of(&terminal, "▌ wide").expect("the band") as u16;
         let band = app.theme.input_bar.bg;
         assert_band_across(&terminal, y, band, width);
-        assert_eq!(row(&terminal, y - 1), "▄".repeat(width as usize), "{width}");
-        assert_eq!(row(&terminal, y + 1), "▀".repeat(width as usize), "{width}");
-        for (y, glyph) in [(y - 1, "▄"), (y + 1, "▀")] {
-            for col in [0u16, width - 1] {
+        // ADR 0035: the rail continues into the pad rows as the half-cell-wide
+        // quadrants, so it is as tall as the band; the rest of the row is the band's half cell.
+        assert_eq!(
+            row(&terminal, y - 1),
+            format!("▖{}", "▄".repeat(width as usize - 1)),
+            "{width}"
+        );
+        assert_eq!(
+            row(&terminal, y + 1),
+            format!("▘{}", "▀".repeat(width as usize - 1)),
+            "{width}"
+        );
+        for (y, rail, glyph) in [(y - 1, "▖", "▄"), (y + 1, "▘", "▀")] {
+            let rail_style = cell_style(&terminal, 0, y);
+            assert_eq!(rail_style.fg, app.theme.notice_label.fg, "the {rail} rail");
+            assert_eq!(
+                rail_style.bg,
+                Some(Color::Reset),
+                "the {rail} rail's cell keeps the terminal background"
+            );
+            for col in [1u16, width - 1] {
                 let style = cell_style(&terminal, col, y);
                 assert_eq!(style.fg, band, "the {glyph} pad's color at {col}");
                 assert_eq!(style.bg, Some(Color::Reset), "the {glyph} pad's background");
             }
         }
+        // The text rows' rail is the same accent in the same column, and the cell after it is
+        // the band's own (the one cell of padding before the text at `BAR_LEAD`).
+        assert_eq!(cell_style(&terminal, 0, y).fg, app.theme.notice_label.fg);
+        assert_eq!(cell_style(&terminal, 1, y).fg, app.theme.input_bar.fg);
     }
 }
 
@@ -808,11 +831,12 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
 
     // Wide enough that the whole status row fits: it is asserted on, not clipped.
     let idle = render(&mut app, 80, 10);
-    let band_row = row_of(&idle, "▎ hello").expect("the band");
+    let band_row = row_of(&idle, "▌ hello").expect("the band");
     let transcript_row = row_of(&idle, "a question").expect("the transcript");
-    // The band's half-cell pads are always there (ADR 0035): `▄` above, `▀` below.
-    assert!(row(&idle, (band_row - 1) as u16).starts_with('▄'));
-    assert!(row(&idle, (band_row + 1) as u16).starts_with('▀'));
+    // The band's half-cell pads are always there (ADR 0035/4): the rail's `▖`
+    // above, `▘` below, then `▄`/`▀` for the rest of the row.
+    assert!(row(&idle, (band_row - 1) as u16).starts_with("▖▄"));
+    assert!(row(&idle, (band_row + 1) as u16).starts_with("▘▀"));
     // The status row is one above the top pad, and blank (but there) while idle.
     assert_eq!(row(&idle, (band_row - 2) as u16).trim_end(), "");
     assert!(!screen(&idle).contains("Working"));
@@ -826,7 +850,7 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     app.set_now(app.session.spinner_origin + std::time::Duration::from_secs(12));
     let running = render(&mut app, 80, 10);
     assert_eq!(
-        row_of(&running, "▎ hello"),
+        row_of(&running, "▌ hello"),
         Some(band_row),
         "the band must not move when the turn starts"
     );
@@ -837,14 +861,28 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     );
     let status = row(&running, (band_row - 2) as u16);
     assert!(
-        status.contains("◜  Working · 12s · esc to interrupt"),
+        status.contains("◜ Working · 12s · esc to interrupt"),
         "the live status row: {status:?}"
+    );
+    // ADR 0035: the dot is in the rail's column (0) — the same vertical line as the
+    // rail — one cell before the text, which starts at the text column.
+    let cells: Vec<char> = status.chars().collect();
+    assert_eq!(cells[0], '◜', "the dot's column: {status:?}");
+    assert_eq!(
+        cells[1], ' ',
+        "one cell between the dot and the text: {status:?}"
+    );
+    assert_eq!(cells[2], 'W', "the text column: {status:?}");
+    assert_eq!(
+        cell_style(&running, 0, (band_row - 2) as u16).fg,
+        app.theme.notice_label.fg,
+        "the dot takes the accent"
     );
 
     // The turn ends: the row is blank again and nothing moved.
     app.session.projection.set_turn(radian_tui::TurnState::Idle);
     let after = render(&mut app, 80, 10);
-    assert_eq!(row_of(&after, "▎ hello"), Some(band_row));
+    assert_eq!(row_of(&after, "▌ hello"), Some(band_row));
     assert_eq!(row_of(&after, "a question"), Some(transcript_row));
     assert_eq!(row(&after, (band_row - 2) as u16).trim_end(), "");
 
@@ -876,25 +914,37 @@ fn the_bar_input_takes_the_status_row_the_pad_rows_and_its_text_rows() {
     // the band 5, the bottom pad 6.
     let terminal = render(&mut app, 20, 8);
     assert_eq!(
-        row_of(&terminal, "▎ hello"),
+        row_of(&terminal, "▌ hello"),
         Some(5),
         "the band sits between the two pad rows:\n{}",
         screen(&terminal)
     );
     assert_eq!(row(&terminal, 3).trim_end(), "", "the blank status row");
-    assert!(row(&terminal, 4).starts_with('▄'), "the top pad");
-    assert!(row(&terminal, 6).starts_with('▀'), "the bottom pad");
+    assert!(
+        row(&terminal, 4).starts_with('▖'),
+        "the top pad's rail cell"
+    );
+    assert!(
+        row(&terminal, 6).starts_with('▘'),
+        "the bottom pad's rail cell"
+    );
 
     app.input = "one\ntwo".into();
     let terminal = render(&mut app, 20, 8);
     assert_eq!(
-        row_of(&terminal, "▎ one"),
+        row_of(&terminal, "▌ one"),
         Some(4),
         "the status row moved up"
     );
-    assert_eq!(row_of(&terminal, "▎ two"), Some(5));
-    assert!(row(&terminal, 3).starts_with('▄'), "the top pad");
-    assert!(row(&terminal, 6).starts_with('▀'), "the bottom pad");
+    assert_eq!(row_of(&terminal, "▌ two"), Some(5));
+    assert!(
+        row(&terminal, 3).starts_with('▖'),
+        "the top pad's rail cell"
+    );
+    assert!(
+        row(&terminal, 6).starts_with('▘'),
+        "the bottom pad's rail cell"
+    );
 }
 
 /// `tui.footer.glyphs = "ascii"` reaches the rail and the status spinner too (ADR 0027
@@ -915,14 +965,14 @@ fn the_bar_rail_and_spinner_fall_back_to_ascii() {
         .set_turn(radian_tui::TurnState::Running);
     let text = screen(&render(&mut app, 40, 10));
     assert!(text.contains("| hi"), "the ascii rail:\n{text}");
-    assert!(!text.contains('▎'), "no unicode rail:\n{text}");
+    assert!(!text.contains('▌'), "no unicode rail:\n{text}");
     // ADR 0035: the `ascii` tier gets no half-cell band padding.
     assert!(
         !text.contains('▄') && !text.contains('▀'),
         "no band padding under ascii:\n{text}"
     );
     assert!(
-        text.contains("*  Working · esc to interrupt"),
+        text.contains("* Working · esc to interrupt"),
         "the ascii pulse glyph: \n{text}"
     );
 }
@@ -948,11 +998,12 @@ fn the_ascii_tier_has_no_band_padding() {
     assert_eq!(row_of(&terminal, "> again"), Some(1), "{text}");
 }
 
-/// ADR 0035: the folded thinking line hugs the block below it (the reply
-/// or the tool call it introduces), while the gap above it stays one line — here the user
-/// block's bottom pad.
+/// ADR 0035 (replacing revision 3 decision 3): thinking has **one blank line on both
+/// sides** — folded or expanded, and whether the block below it is the reply or a tool card. The
+/// gap above it stays one line (here the user block's bottom pad).
 #[test]
-fn thinking_hugs_the_block_below() {
+fn thinking_has_one_blank_line_on_both_sides() {
+    // Folded, before the reply.
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
     app.push_message(&Message::user("q"));
@@ -972,9 +1023,57 @@ fn thinking_hugs_the_block_below() {
     );
     assert_eq!(
         answer,
-        thinking + 1,
-        "the reply hugs thinking, with no gap:\n{text}"
+        thinking + 2,
+        "one blank line between thinking and the reply:\n{text}"
     );
+    assert_eq!(
+        row(&terminal, (thinking + 1) as u16).trim_end(),
+        "",
+        "and that line is empty:\n{text}"
+    );
+
+    // Expanded, and directly against a tool card: the same single line. The entries are pushed
+    // directly because `push_message` always puts an (empty) assistant entry between them — a
+    // block of its own, which is what makes a text-less call show two blank rows in a real
+    // transcript, not this rule. The unit test in `blocks.rs` pins the pair rule itself.
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
+    app.session.entries.push(Entry::new(
+        EntryKind::Reasoning,
+        "first thought\nsecond thought",
+    ));
+    let card = radian_tui::tools::ToolCard::new(
+        "c1",
+        "shell",
+        serde_json::json!({"command": "make test"}),
+    );
+    let mut call = Entry::new(EntryKind::ToolCall, "-> shell: make test");
+    call.tool = Some(Box::new(card));
+    call.card = radian_tui::blocks::Card::Solo;
+    app.session.entries.push(call);
+    let terminal = render(&mut app, 40, 12);
+    let text = screen(&terminal);
+    let first = row_of(&terminal, "first thought").expect("the expanded thinking body");
+    let body = row_of(&terminal, "second thought").expect("the second thinking line");
+    assert_eq!(
+        body,
+        first + 1,
+        "the body's own lines are adjacent:\n{text}"
+    );
+    // The card's own block starts at its top border; the head text is inside it.
+    let top = row_of(&terminal, "┌").expect("the card's top border");
+    assert_eq!(
+        top,
+        body + 2,
+        "one blank line between expanded thinking and the tool card:\n{text}"
+    );
+    assert_eq!(
+        row(&terminal, (body + 1) as u16).trim_end(),
+        "",
+        "and that line is empty:\n{text}"
+    );
+    assert!(row(&terminal, top as u16).contains('┌'), "{text}");
 }
 
 /// ADR 0027 item 2 / ADR 0035: the `unicode` tier's tool
@@ -1616,13 +1715,14 @@ fn the_block_layout_snapshot() {
         "> explain the failure".to_string(), // the user text
         "▀".repeat(80),                      // the user block's bottom half cell
         "› thinking (3 lines)".to_string(), // the folded channel: the unicode fold glyph (ADR 0027)
-        "  Looking into it.".to_string(),   // thinking hugs the reply: no container gap
-        "".to_string(),                     // the gap
-        top.clone(),                        // the shell card's frame (ADR 0028)
+        "".to_string(), // ADR 0035: one blank line between thinking and the block below
+        "  Looking into it.".to_string(), // the reply
+        "".to_string(), // the gap
+        top.clone(),    // the shell card's frame (ADR 0028)
         row(&format!("{} shell: make test", status[2])), // the head status line
-        row("$ make test"),                 // the command (no divider: part of the call)
-        divider("Error"),                   // the output section's label (the call failed)
-        row("$ make test"),                 // the output
+        row("$ make test"), // the command (no divider: part of the call)
+        divider("Error"), // the output section's label (the call failed)
+        row("$ make test"), // the output
         row("exit code: 2"),
         row("--- stdout ---"),
         row("boom"),
@@ -1657,8 +1757,10 @@ fn the_block_layout_snapshot() {
         );
     }
     let bg = |x: u16, y: u16| buffer.cell((x, y)).map(|c| c.bg);
-    let failed = bg(0, 6);
-    for y in 6..=15u16 {
+    // ADR 0035's blank line moved everything below thinking down by one: the reply is
+    // row 5, the gap row 6, the failed card 7..=16 and the list card starts at 18.
+    let failed = bg(0, 7);
+    for y in 7..=16u16 {
         assert_eq!(
             bg(0, y),
             failed,
@@ -1666,9 +1768,9 @@ fn the_block_layout_snapshot() {
         );
         assert_eq!(bg(79, y), failed, "…to the row's end");
     }
-    assert_ne!(failed, bg(0, 4), "the assistant row has no card band");
-    assert_eq!(bg(0, 5), bg(0, 4), "a gap row is not banded");
-    assert_ne!(bg(0, 17), failed, "the successful card's band differs");
+    assert_ne!(failed, bg(0, 5), "the assistant row has no card band");
+    assert_eq!(bg(0, 6), bg(0, 5), "a gap row is not banded");
+    assert_ne!(failed, bg(0, 18), "the successful card's band differs");
 }
 
 /// A tab is four columns when the wrap decides where to break (ADR 0028 R9), not zero: a line
@@ -2273,9 +2375,8 @@ fn folding_changes_the_transcript_line_count() {
         collapsed + 2,
         "three thinking lines become one placeholder"
     );
-    // The placeholder and the answer, **no** gap between them (ADR 0035: thinking
-    // hugs the block below).
-    assert_eq!(collapsed, 2, "placeholder + answer, no gap");
+    // The placeholder, one blank line (ADR 0035) and the answer.
+    assert_eq!(collapsed, 3, "placeholder + the one-line gap + answer");
 }
 
 /// `tui.display.reasoning = "hidden"` removes the reasoning lines entirely.

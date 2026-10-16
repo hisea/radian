@@ -309,19 +309,45 @@ fn pad_glyph(pad: blocks::Pad) -> &'static str {
     }
 }
 
-/// One half-cell padding row of a banded block (ADR 0035): `glyph` repeated across
-/// `width` cells, in the band's color as the foreground and with no background of its own (the
-/// band's background is painted on the block's text rows, which this row sits half a cell
-/// against). Shared by a user block's pad rows and the `bar` input's.
-fn band_pad_line(glyph: &str, width: usize, band: Style) -> Line<'static> {
+/// The style a band's half-cell pad cell takes (ADR 0035): the band's own color as
+/// the foreground and no background of its own — the band's background is painted on the block's
+/// text rows, which these rows sit half a cell against. Under `mono` both are absent, so the half
+/// cell is the terminal default — still a visible block, just uncolored.
+fn band_pad_style(band: Style) -> Style {
     let mut style = Style::default().add_modifier(band.add_modifier);
-    // The band's own color: the background it would paint, else its foreground (`mono`, a theme
-    // with no user background). Under `mono` both are absent, so the half cell is the terminal
-    // default — still a visible block, just uncolored.
     if let Some(color) = band.bg.or(band.fg) {
         style = style.fg(color);
     }
-    Line::from(Span::styled(glyph.repeat(width), style))
+    style
+}
+
+/// One half-cell padding row of a banded block (ADR 0035): `glyph` repeated across
+/// `width` cells, in the band's color as the foreground and with no background of its own (the
+/// band's background is painted on the block's text rows, which this row sits half a cell
+/// against). A user block's pad row; the `bar` input's one carries the rail in front of it
+/// (ADR 0035, [`bar_pad_line`]).
+fn band_pad_line(glyph: &str, width: usize, band: Style) -> Line<'static> {
+    Line::from(Span::styled(glyph.repeat(width), band_pad_style(band)))
+}
+
+/// The `bar` input's half-cell padding row (ADR 0035): the rail's own cell first —
+/// `rail` is `▖` (quadrant lower left) on the row above the band, `▘` (quadrant upper left) on
+/// the row below it, both in the accent — then the band's half cell (`glyph`) across the rest.
+/// The quadrant is what lets the rail stop at the half cell: the cell keeps the terminal's own
+/// background (its right half carries no band on a pad row, which is the cost of the shape), so
+/// the rail reads as two cells tall with a straight right edge next to the `▌` text rows.
+fn bar_pad_line(
+    rail: &str,
+    rail_style: Style,
+    glyph: &str,
+    width: usize,
+    band: Style,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(rail.to_string(), rail_style)];
+    if width > 1 {
+        spans.push(Span::styled(glyph.repeat(width - 1), band_pad_style(band)));
+    }
+    Line::from(spans)
 }
 
 /// The text a frame shows for `entry`. A user message's `@` attachments are folded to one
@@ -949,15 +975,17 @@ pub fn logout_panel(
         .lines(width, theme, glyphs)
 }
 
-/// The `bar` style's left rail (ADR 0035 V3): the accent vertical bar on every input row
-/// (omp's `ACCENT_RAIL`). The `ascii` glyph set uses `|` (ADR 0027's rule: the
-/// unicode glyphs are only used when the font set has them).
-const BAR_RAIL: &str = "▎";
+/// The `bar` style's left rail (ADR 0035 V3, revision 4): the accent vertical bar on every input
+/// row (omp's `ACCENT_RAIL`). Revision 4 made it `▌` (the left **half** block): the rail is half
+/// a cell wide, so it can be continued into the band's half-cell pad rows as half-cell-wide
+/// quadrants ([`bar_pad_line`]) and read as two cells tall. The `ascii` glyph set uses `|`
+/// (ADR 0027's rule: the unicode glyphs are only used when the font set has them).
+const BAR_RAIL: &str = "▌";
 /// The `bar` rail in the `ascii` glyph set.
 const BAR_RAIL_ASCII: &str = "|";
 /// The cells before the `bar` style's text: the rail plus one cell of padding (omp's rail
-/// `defaultPaddingX = 1`). The status row's spinner starts at the same column — the text
-/// column (ADR 0035, 正文列起) — so the two read as one block.
+/// `defaultPaddingX = 1`), which is also where the status row's spinner starts (ADR 0035
+/// revision 4: the dot sits in the rail's column, the state text at this text column).
 const BAR_LEAD: usize = 2;
 
 /// The input area's height: the text rows plus the style's chrome — two rule/border rows for
@@ -1021,25 +1049,26 @@ fn bar_rail(app: &App) -> &'static str {
 }
 
 /// The status row a `bar` input carries **above** its band (ADR 0035 V3 / decision 1):
-/// `<spinner>  Working · 12s · esc to interrupt` while a turn runs, and a blank row — which
+/// `<spinner> Working · 12s · esc to interrupt` while a turn runs, and a blank row — which
 /// still occupies its line — when idle, so the band and the transcript never move when a turn
 /// starts or ends.
 ///
 /// The spinner and the state word are the ones the `lines`/`box` rule line shows (ADR 0027
-/// revision 2, `App::spinner_status`), with ADR 0027's two spaces after the
-/// spinner; the spinner takes the accent and the rest is one level weaker. The clock is the
-/// footer's `elapsed` (`TurnTimer`: the running generation, else the last one), written in
-/// whole seconds as the ADR's `12s`; `esc to interrupt` is shown exactly while a turn runs,
-/// because that is when Esc cancels it.
+/// revision 2, `App::spinner_status`). Since ADR 0035 the dot sits in the **rail's**
+/// column (0) rather than at the text column, so it is on the same vertical line as the rail;
+/// the state text starts at the text column (`BAR_LEAD`) with one cell between the two.
+/// The spinner takes the accent and the rest is one level weaker. The clock is the footer's
+/// `elapsed` (`TurnTimer`: the running generation, else the last one), written in whole seconds
+/// as the ADR's `12s`; `esc to interrupt` is shown exactly while a turn runs, because that is
+/// when Esc cancels it.
 pub fn bar_status_line(app: &App) -> Line<'static> {
     let Some(status) = app.spinner_status() else {
         return Line::from("");
     };
     let spin = app.spinner_frame();
     let mut spans = vec![
-        Span::styled(" ".repeat(BAR_LEAD), app.theme.hint),
         Span::styled(spin.glyph, app.spinner_style(spin)),
-        Span::styled("  ", app.theme.hint),
+        Span::styled(" ".repeat(BAR_LEAD - 1), app.theme.hint),
         Span::styled(status.to_string(), app.theme.hint),
     ];
     if let Some(elapsed) = app.session.timer.elapsed(app.now) {
@@ -1808,11 +1837,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     let text_style = band.patch(style);
                     let area_width = input_area.width as usize;
                     let mut body: Vec<Line> = vec![bar_status_line(app)];
-                    // The band's half-cell pads (ADR 0035): half a row of the band
-                    // above (`▄`) and below (`▀`) the text rows, so the band reads as extending
-                    // half a cell beyond its text. The `ascii` tier has none.
+                    // The band's half-cell pads (ADR 0035/4): half a row of the band
+                    // above and below the text rows, so the band reads as extending half a cell
+                    // beyond its text, with the rail continued into them as `▖`/`▘` so it is as
+                    // tall as the band. The `ascii` tier has none.
                     if bar_pad_rows(app) == 2 {
-                        body.push(band_pad_line("▄", area_width, band));
+                        body.push(bar_pad_line(
+                            "▖",
+                            app.theme.notice_label,
+                            "▄",
+                            area_width,
+                            band,
+                        ));
                     }
                     let text_rows: Vec<String> = if empty {
                         vec![INPUT_HINT.to_string()]
@@ -1836,7 +1872,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         body.push(Line::from(spans));
                     }
                     if bar_pad_rows(app) == 2 {
-                        body.push(band_pad_line("▀", area_width, band));
+                        body.push(bar_pad_line(
+                            "▘",
+                            app.theme.notice_label,
+                            "▀",
+                            area_width,
+                            band,
+                        ));
                     }
                     frame.render_widget(Paragraph::new(body), input_area);
                 }
