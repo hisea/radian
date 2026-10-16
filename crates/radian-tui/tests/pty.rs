@@ -5694,8 +5694,9 @@ async fn pty_the_pulse_breathes_through_rgb_colours() {
         after >= start + 10,
         "the breath must redraw about every 117 ms (a two-colour switch would be 4): {start} -> {after}"
     );
-    // The breath's 12 samples hold 7 distinct colours (the sine's levels 0, 1, 3, 6, 9, 11, 12);
-    // a two-colour switch would show 2 and a rotating frame 1.
+    // The breath's 12 samples hold 7 distinct colours (the sine's levels 0, 1, 3, 6, 9, 11, 12),
+    // and one sample is missed whenever a wake lands late, so the exact ends need not appear in a
+    // given window: a two-colour switch would show 2 colours, a rotating frame 1.
     assert!(
         breathed.len() >= 6,
         "the dot must take the breath's colours: {breathed:?}"
@@ -5705,14 +5706,47 @@ async fn pty_the_pulse_breathes_through_rgb_colours() {
         Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
         other => panic!("an RGB theme role: {other:?}"),
     };
+    // Every colour it took is a point on the dim -> accent line (the breath is one interpolation,
+    // not two unrelated colours), and the set reaches both ends of it.
+    let (lowest, highest) = breathed
+        .iter()
+        .map(|colour| {
+            (
+                colour,
+                mix_of(*colour, rgb(theme.truncation), rgb(theme.notice_label)),
+            )
+        })
+        .fold((1.0f64, 0.0f64), |(low, high), (_, t)| {
+            (low.min(t), high.max(t))
+        });
     assert!(
-        breathed.contains(&rgb(theme.notice_label)),
-        "the accent must be reached: {breathed:?}"
+        lowest <= 0.15,
+        "the breath must reach the dim end: {breathed:?}"
     );
-    assert!(
-        breathed.contains(&rgb(theme.truncation)),
-        "and the dim end: {breathed:?}"
-    );
+    assert!(highest >= 0.85, "and the accent: {breathed:?}");
+}
+
+/// Where `colour` sits between the dim end and the accent (0 = dim, 1 = accent), asserting that it
+/// is on that line: the channel that moves most fixes the position and every other channel must
+/// land within one rounding step of it.
+fn mix_of(colour: (u8, u8, u8), dim: (u8, u8, u8), accent: (u8, u8, u8)) -> f64 {
+    let colour = [colour.0, colour.1, colour.2];
+    let dim = [dim.0, dim.1, dim.2];
+    let accent = [accent.0, accent.1, accent.2];
+    let spread: [i32; 3] = std::array::from_fn(|i| i32::from(accent[i]) - i32::from(dim[i]));
+    let widest = (0..3usize)
+        .max_by_key(|i| spread[*i].abs())
+        .expect("three channels");
+    let t =
+        f64::from(i32::from(colour[widest]) - i32::from(dim[widest])) / f64::from(spread[widest]);
+    for (i, moved) in spread.iter().enumerate() {
+        let expected = f64::from(dim[i]) + t * f64::from(*moved);
+        assert!(
+            (f64::from(colour[i]) - expected).abs() <= 1.0,
+            "{colour:?} is not on the dim -> accent line (channel {i})"
+        );
+    }
+    t
 }
 
 /// The distinct 24-bit colours written immediately in front of the pulse glyph (`⏺`), in the
