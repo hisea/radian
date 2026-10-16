@@ -522,8 +522,9 @@ fuzzy match (a subsequence, prefix matches first): `/mem` → `/memory`, then `/
 `forget`. The menu highlights its first row; `Up`/`Down` move the highlight, `Tab` or `Enter`
 accepts the highlighted row (it completes the line, it never runs it) and `Esc` closes the menu
 keeping the line. `/mem fo` completes both levels at once. The `/theme`, `/model` and
-`/thinking` rows mark the value in effect with `● current`, and each `/thinking` row names the
-wire value it sends (`enabled:4096` for Anthropic, `high` for openai-compatible).
+`/thinking` rows mark the value in effect with ` ✓` right after its name (ASCII ` *`), and each
+`/thinking` row names the wire value it sends (`enabled:4096` for Anthropic, `high` for
+openai-compatible).
 
 The levels are data (`command.rs`): the command names from their `/help` lines, `/memory`'s
 subcommands, the record ids of `show`/`edit`/`archive`/`restore`/`forget`/`confirm` (listed by

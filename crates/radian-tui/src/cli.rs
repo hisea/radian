@@ -2987,8 +2987,7 @@ impl LoopContext<'_> {
                             .into_iter()
                             .map(|mut candidate| {
                                 if Some(&candidate.insert) == current.as_ref() {
-                                    candidate.description =
-                                        format!("● current · {}", candidate.description);
+                                    candidate.current = true;
                                 }
                                 candidate
                             })
@@ -3010,8 +3009,7 @@ impl LoopContext<'_> {
                                 == format!("{current_provider}/{current_model}")
                                 || candidate.insert == format!("{current_provider}/");
                             if is_current {
-                                candidate.description =
-                                    format!("● current · {}", candidate.description);
+                                candidate.current = true;
                             }
                             candidate
                         })
@@ -3044,6 +3042,7 @@ impl LoopContext<'_> {
                             .map(|(name, description)| radian_tui::command::Candidate {
                                 insert: name,
                                 description,
+                                current: false,
                             })
                             .collect()
                     }
@@ -3059,12 +3058,14 @@ impl LoopContext<'_> {
                                         "api_key" => "stored (unusable here)".to_owned(),
                                         other => format!("stored {other} entry"),
                                     },
+                                    current: false,
                                 })
                                 .collect(),
                             Err(error) => {
                                 vec![radian_tui::command::Candidate {
                                     insert: String::new(),
                                     description: format!("cannot read auth.json: {error}"),
+                                    current: false,
                                 }]
                             }
                         }
@@ -3799,6 +3800,7 @@ fn model_route_candidates(
             candidates.push(radian_tui::command::Candidate {
                 insert: format!("{name}/{model}"),
                 description: name.clone(),
+                current: false,
             });
         }
     }
@@ -3893,6 +3895,7 @@ fn memory_record_candidates(
                 record.kind.as_str(),
                 record_snippet(&record.content)
             ),
+            current: false,
         })
         .collect()
 }
@@ -4360,6 +4363,7 @@ mod tests {
         let candidate = |insert: &str, provider: &str| radian_tui::command::Candidate {
             insert: insert.to_owned(),
             description: provider.to_owned(),
+            current: false,
         };
         let mut candidates = vec![
             candidate("openai/gpt-5", "openai"),
