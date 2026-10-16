@@ -350,7 +350,8 @@ const SCOPE_ROLES: &[(&str, SyntaxRole)] = &[
     ("punctuation", SyntaxRole::Punctuation),
 ];
 
-/// Truncates one highlighted line to `width`, exactly as [`crate::blocks::code_line_layout`]
+/// Truncates one highlighted line to `width`, exactly as
+/// [`crate::blocks::markdown::code_line_layout`]
 /// truncates the plain text: tabs expand to four spaces, a line that fits is kept whole, a
 /// wider one keeps `width - 1` columns and ends in `…`. The ellipsis takes the role of the
 /// character before it, so a cut string stays string-colored. The joined text equals

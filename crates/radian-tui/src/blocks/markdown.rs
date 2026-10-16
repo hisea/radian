@@ -3,6 +3,7 @@
 //! turns a Markdown paragraph or a fenced code block into [`BodyLine`]s.
 
 use super::*;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// One Mermaid block's render result. `Failed` keeps the reason for the dim line.
 #[derive(Debug, Clone, PartialEq, Eq)]
