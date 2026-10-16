@@ -159,7 +159,7 @@ pub fn merge_task_branch(
         // (ADR 0030: no `MERGE_HEAD`, clean tree).
         let paths = git_lines(worktree, &["diff", "--name-only", "--diff-filter=U"]);
         let status = git_text(worktree, &["status", "--porcelain"]).unwrap_or_default();
-        let stderr = tail(&String::from_utf8_lossy(&merge.stderr), 2000);
+        let stderr = head(&String::from_utf8_lossy(&merge.stderr), 2000);
         let _ = radian_coding::host_git::host_git_command(worktree)
             .map_err(TaskError::new)?
             .args(["merge", "--abort"])
@@ -227,9 +227,9 @@ fn git_text(dir: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Keeps the last `limit` characters of `text`, with a marker when it cut. A merge's useful
-/// message (the first conflict) is at the start, so this keeps a head instead.
-fn tail(text: &str, limit: usize) -> String {
+/// Keeps the first `limit` characters of `text`, with a marker when it cut. A merge's useful
+/// message (the first conflict) is at the start, so this keeps a head.
+fn head(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_owned();
     }
