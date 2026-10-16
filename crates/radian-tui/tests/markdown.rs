@@ -306,7 +306,7 @@ fn line_count_matches_the_layout() {
     let mut app = App::new("m", "s");
     assistant(
         &mut app,
-        "# Title\n\nA paragraph that is long enough to wrap at a narrow width for sure.\n\n- one\n- two\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n```rust\nlet x = 1;\n```\n",
+        "# Title\n\nA paragraph that is long enough to wrap at a narrow width for sure.\n\n- one\n- two\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n```rust\nlet x = 1;\n```",
     );
     let entry = &app.session.entries[0];
     let blocks = blocks::parse_blocks(entry.text.as_str());
