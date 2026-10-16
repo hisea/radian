@@ -6,13 +6,17 @@ license.workspace = true
 rust-version.workspace = true
 description = "Full-screen TUI shell on radian-runtime (Phase 4 / A)"
 
+# `radian` is the full-screen TUI and `rad` its alias. Both are thin wrappers around
+# `radian_tui::cli::run_cli`; `rad` has its own one-line `src/rad.rs` (not a second `[[bin]]`
+# on `src/main.rs`) so no source file belongs to two targets, and the command's unit tests are
+# built once (in the library) instead of twice.
 [[bin]]
 name = "radian"
 path = "src/main.rs"
 
 [[bin]]
 name = "rad"
-path = "src/main.rs"
+path = "src/rad.rs"
 
 [dependencies]
 # The `radian exec` subcommand and the top-level management commands (ADR 0032 slice 1): the
@@ -61,7 +65,7 @@ syntect = { version = "5.3", default-features = false, features = ["parsing", "r
 
 [target.'cfg(unix)'.dependencies]
 # `poll(2)` detects a terminal that has gone away (the pty master closed) before crossterm's
-# event reader busy-loops on the resulting EOF; see `read_input` in `main.rs`. Already in the
+# event reader busy-loops on the resulting EOF; see `read_input` in `cli.rs`. Already in the
 # dependency tree (a dev-dependency of this crate and a transitive dependency elsewhere).
 libc = "0.2"
 

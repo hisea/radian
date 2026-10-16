@@ -1771,6 +1771,22 @@ EM-M2 下 `a_live_empty_assistant_keeps_its_blank_line` 在 `gap_at(...) == 1` �
 两条既有测试（`render::collapsed_and_errors_differ_for_a_successful_card` 的 `[22,7,2]`、
 `selection::a_selection_over_a_tool_head_copies_its_text` 的第 1 行 head）承载的是旧几何，本片随实现一起
 更新到 `[21,6,1]` / 第 0 行——它们各自也被 EM-M1 抓住，说明改动后仍有效。
+## thin ④ × `write`：`write` 正文按行编号的 diff（ADR 0028，2026-10-16）
+
+Base：本片 HEAD（`oc/write-diff`）· 就地变异（改 `tools.rs`），每个变异前把文件复制到
+`.radian/scratch/mut/tools.rs.orig`，跑完用**不带 `-p`** 的 `cp` 还原（mtime 落回当前）并 `cmp`
+逐字节确认；结束 `git status --short` 只剩本片自己的改动。每个变异用
+`cargo test -p radian-tui [--lib|--test card|--test diff] --locked --no-fail-fast -- <test>`。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| W4 | 行号从 1 起 | `write_body` 的 `number: Some(index as u64 + 1)` → `Some(index as u64)` | `tools::tests::a_write_body_numbers_every_content_line_as_an_addition`、`card::a_new_file_write_numbers_each_content_line`、`diff::a_write_body_numbers_the_content_and_copies_it_without_the_gutter` | ✅ |
+| W5 | 覆盖时头部写 `+M −N` | `diff_meta` 的 `write` 分支丢掉 `previous_lines`（`Some(removed) => …` → `Some(_) => "+{added}"`） | `card::an_overwrite_write_head_shows_the_removed_count` | ✅ |
+| W6 | `write` 行的符号是合成的（正文就是 content，无符号列） | `write_body` 两处 `signed: false` → `true`（首字符被当成 diff 符号吃掉） | `card::a_new_file_write_numbers_each_content_line`、`diff::a_write_body_numbers_the_content_and_copies_it_without_the_gutter` | ✅ |
+
+3/3 抓住。W6 复现本片之前的形状（`write` 的正文直接就是 content、没有符号与行号）：变异后
+`diff_line` 把每个内容行的首字符当作 diff 符号，行变成 `1 o ne`，编号与复制都不对。W4/W6 在旧代码上
+必失败——旧 `write` 的 renderer body 是 `plain_body`，`write_body` 当时并不存在，没有任何行号。
 ## Slice ⑦: thin snapshots, the hand-test list and the mutation list (2026-10-16)
 
 Base `1d58517` (the slice's own tests/README) · mutations applied in place by

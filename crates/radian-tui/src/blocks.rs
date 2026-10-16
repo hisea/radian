@@ -1910,11 +1910,16 @@ fn diff_row(line: &tools::BodyLine) -> Option<&tools::DiffRow> {
     }
 }
 
-/// A diff row's code: its text without the sign (everything after the row's first character).
+/// A diff row's code: its text without the sign. A row whose sign is synthesized (`write`) has
+/// no sign in its source, so the whole slice is the code.
 fn diff_code<'a>(row: &tools::DiffRow, text: &'a str) -> &'a str {
     let slice = text.get(row.source.clone()).unwrap_or("");
-    let sign_len = slice.chars().next().map_or(0, char::len_utf8);
-    &slice[sign_len..]
+    if row.signed {
+        let sign_len = slice.chars().next().map_or(0, char::len_utf8);
+        &slice[sign_len..]
+    } else {
+        slice
+    }
 }
 
 /// Lays one diff row out (ADR 0028): `│ `-free (the card's frame draws the
@@ -1931,8 +1936,15 @@ fn diff_line(
     width: usize,
 ) -> BodyLine {
     let slice = text.get(row.source.clone()).unwrap_or("");
-    let sign_len = slice.chars().next().map_or(0, char::len_utf8);
-    let (sign, code) = slice.split_at(sign_len);
+    // The sign is the row's own first byte for a unified diff; a `write` row's text is the code
+    // alone, so its sign is synthesized from the row's kind (never copied: it has no source).
+    let (sign, code, code_start) = if row.signed {
+        let sign_len = slice.chars().next().map_or(0, char::len_utf8);
+        let (sign, code) = slice.split_at(sign_len);
+        (sign.to_owned(), code, row.source.start + sign_len)
+    } else {
+        (row.kind.sign().to_string(), slice, row.source.start)
+    };
     // The gutter is four cells and a space; the numberless fallback has none, and keeps today's
     // form: the sign column, then the code.
     let gutter = row
@@ -1947,8 +1959,9 @@ fn diff_line(
     for ch in gutter.chars() {
         cells.push((ch, tools::DiffRole::Number, None));
     }
+    let sign_source = row.signed.then_some(row.source.start);
     for ch in sign.chars() {
-        cells.push((ch, row.kind.sign_role(), Some(row.source.start)));
+        cells.push((ch, row.kind.sign_role(), sign_source));
     }
     for ch in gap.chars() {
         cells.push((ch, row.kind.sign_role(), None));
@@ -1971,11 +1984,7 @@ fn diff_line(
         None => code_roles.resize(code.chars().count(), row.kind.code_role()),
     }
     for (index, (offset, ch)) in code.char_indices().enumerate() {
-        cells.push((
-            ch,
-            code_roles[index],
-            Some(row.source.start + sign_len + offset),
-        ));
+        cells.push((ch, code_roles[index], Some(code_start + offset)));
     }
     // The layout: the same rule as a code line (tabs expand to four cells, a row that does not
     // fit keeps `width - 1` cells and ends in `…`).

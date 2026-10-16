@@ -111,6 +111,28 @@ fn block_rows(lines: &[String]) -> Vec<&String> {
         .collect()
 }
 
+/// A `write` call for `a.rs` (`"one\ntwo\nthree\n"`, three lines) plus its result.
+fn write_app(result: ToolResult) -> App {
+    let mut app = App::new("m", "s");
+    app.push_message(&Message::Assistant {
+        content: vec![],
+        reasoning: vec![],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "write".into(),
+            arguments: json!({"path": "a.rs", "content": "one\ntwo\nthree\n"}),
+        }],
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    });
+    app.push_message(&Message::Tool {
+        result,
+        meta: Default::default(),
+    });
+    app
+}
+
 #[test]
 fn the_head_line_is_the_name_the_title_the_meta_and_the_status() {
     for width in [80u16, 120] {
@@ -313,6 +335,48 @@ fn a_small_tool_is_one_line_until_it_is_expanded() {
     let block = block_rows(&lines);
     assert_eq!(block.len(), 3, "{block:?}");
     assert!(block[0].ends_with(FAILED), "{block:?}");
+}
+
+/// `write` (ADR 0028): a whole-file write with no hunk, so every content
+/// line is a numbered `Added` row. A new file has no `previous_lines`, so the head stays `+M`.
+#[test]
+fn a_new_file_write_numbers_each_content_line() {
+    let mut app = write_app(ToolResult {
+        call_id: "c1".into(),
+        content: vec![ContentPart::text("wrote 14 bytes to a.rs")],
+        structured: Some(json!({"path": "a.rs", "bytes_written": 14})),
+        is_error: false,
+        error_code: None,
+    });
+    app.tool_display.fold = ToolFold::Expanded;
+    let lines = rows(&render(&mut app, 80, 16), 80, 16);
+    let block = block_rows(&lines);
+    assert_eq!(block[0], "• write a.rs · +3 ✓", "{block:?}");
+    // Every content line is an addition, numbered from 1; the `+` is synthesized (the entry
+    // text is the content alone).
+    assert_eq!(block[1], "│    1 + one", "{block:?}");
+    assert_eq!(block[2], "│    2 + two", "{block:?}");
+    assert_eq!(block[3], "│    3 + three", "{block:?}");
+    assert_eq!(block.len(), 4, "{block:?}");
+}
+
+/// An overwrite's real result carries `previous_lines`, so the head shows `+M −N` (the removed
+/// side is the old file's line count; the body is only the additions — the old content is not
+/// in the result).
+#[test]
+fn an_overwrite_write_head_shows_the_removed_count() {
+    let mut app = write_app(ToolResult {
+        call_id: "c1".into(),
+        content: vec![ContentPart::text("wrote 14 bytes to a.rs")],
+        structured: Some(json!({"path": "a.rs", "bytes_written": 14, "previous_lines": 5})),
+        is_error: false,
+        error_code: None,
+    });
+    app.tool_display.fold = ToolFold::Expanded;
+    let lines = rows(&render(&mut app, 80, 16), 80, 16);
+    let block = block_rows(&lines);
+    assert_eq!(block[0], "• write a.rs · +3 −5 ✓", "{block:?}");
+    assert_eq!(block[1], "│    1 + one", "{block:?}");
 }
 
 /// `patch` shows its replacement as a diff body: `│ ` rows with the gutter, the sign and the

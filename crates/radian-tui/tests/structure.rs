@@ -22,7 +22,7 @@ fn app_rs() -> String {
 }
 
 fn main_rs() -> String {
-    code(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+    code(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli.rs"))
 }
 
 /// `App` holds UI state only: every session fact moved to `SessionProjection`, and the app
@@ -51,8 +51,8 @@ fn app_holds_no_session_facts() {
     );
 }
 
-/// `main.rs` does not establish the session itself: `radian_host::open_session` does, so both
-/// binaries share one path.
+/// `cli.rs` (the command body; `main.rs`/`rad.rs` only enter it) does not establish the
+/// session itself: `radian_host::open_session` does, so both binaries share one path.
 #[test]
 fn main_does_not_establish_a_session() {
     let code = main_rs();
@@ -74,7 +74,7 @@ fn main_does_not_establish_a_session() {
     }
     assert!(
         code.contains("radian_host::open_session("),
-        "main.rs must call the shared open_session"
+        "cli.rs must call the shared open_session"
     );
 }
 
@@ -86,7 +86,7 @@ fn main_forwards_the_allowed_unix_sockets_to_the_sandbox() {
     let code = main_rs();
     let call = code
         .split_once("radian_tui::profile::build_sandbox(")
-        .expect("main.rs builds the sandbox")
+        .expect("cli.rs builds the sandbox")
         .1
         .split_once(")?;")
         .expect("the build_sandbox call ends with `)?;`")
