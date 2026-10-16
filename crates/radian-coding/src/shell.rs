@@ -126,11 +126,11 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
     ToolSpec {
         name: "shell".into(),
         description: format!(
-            "Run a shell command with `/bin/sh -c`. {confinement} To look at a file or a \
-             directory, prefer the `read` and `list` tools over `cat`, `sed -n` or `ls`: they \
-             report truncation and total size, they use less of the context window, and `read` \
-             takes `offset`/`limit` to read a large file in sections. Use \
-             `shell` to run programs (builds, tests, searches across many files). Each stream's \
+            "Run a shell command with `/bin/sh -c`. {confinement} Read files with `read` and \
+             `list`, and search with `grep` and `glob`, not with `cat`, `sed -n`, `ls`, `grep` \
+             or `find` through `shell`: they report truncation and total size, they use less of \
+             the context window, and they run in parallel, while `shell` runs alone. Use \
+             `shell` to run programs (builds, tests). Each stream's \
              output is \
              capped: past the budget the start and the end are kept and the middle is \
              replaced by a marker naming the discarded bytes (the end is always kept, \

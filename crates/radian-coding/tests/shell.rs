@@ -747,10 +747,12 @@ async fn full_access_is_never_the_default() {
 }
 
 /// Dogfooding D10: the model used `shell` (`cat -n`, `sed -n`) for 101 of 111 calls and `read`
-/// 3 times, filling the context with uncapped dumps. The description steers file viewing to
-/// `read`/`list`, in the enforced mode and in the unsandboxed one.
+/// 3 times, filling the context with uncapped dumps. A later session (2026-10-15) sent 38 reads
+/// and searches through `shell` although `read`/`grep`/`glob` exist. The description steers
+/// file reading to `read`/`list` and searching to `grep`/`glob`, and says why (`shell` runs
+/// alone; the read-only tools run in parallel), in the enforced mode and in the unsandboxed one.
 #[tokio::test]
-async fn the_shell_description_points_file_viewing_at_read_and_list() {
+async fn the_shell_description_points_file_reading_and_searching_at_the_read_only_tools() {
     let dir = TempDir::new("shell-spec-d10");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -768,12 +770,17 @@ async fn the_shell_description_points_file_viewing_at_read_and_list() {
             .iter()
             .find(|spec| spec.name == "shell")
             .expect("shell is advertised with a sandbox");
-        assert!(
-            spec.description
-                .contains("prefer the `read` and `list` tools"),
-            "{}",
-            spec.description
-        );
+        for wanted in [
+            "Read files with `read` and `list`",
+            "search with `grep` and `glob`",
+            "they run in parallel, while `shell` runs alone",
+        ] {
+            assert!(
+                spec.description.contains(wanted),
+                "{wanted:?} is missing from {}",
+                spec.description
+            );
+        }
         checked += 1;
     }
     assert!(checked >= 1, "no shell was built to check");
