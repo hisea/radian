@@ -11,7 +11,6 @@ mod common;
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use common::TempDir;
 use radian_coding::Jobs;
@@ -23,20 +22,6 @@ static LOCK: Mutex<()> = Mutex::new(());
 fn full_access(ws: &Path) -> Sandbox {
     let policy = SandboxPolicy::new(SandboxMode::FullAccess, ws).expect("full-access policy");
     Sandbox::from_policy(policy).expect("full-access needs no backend")
-}
-
-/// Bounded poll for a file's existence; the sleep is the poll interval, not the
-/// synchronization.
-async fn wait_for(path: &Path, what: &str) {
-    let start = Instant::now();
-    while !path.exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "timed out waiting for {what} at {}",
-            path.display()
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 }
 
 #[cfg(unix)]
@@ -63,8 +48,8 @@ fn plant_symlink(link: &Path, target: &Path) {
 /// The job's output file lives under the registry's own (0700) directory, is 0600, and the
 /// workspace never grows a `.radian/jobs` directory.
 #[cfg(unix)]
-#[tokio::test]
-async fn the_output_file_is_owner_only_and_under_the_jobs_directory() {
+#[test]
+fn the_output_file_is_owner_only_and_under_the_jobs_directory() {
     let _guard = LOCK.lock().unwrap();
     let dir = TempDir::new("job-sec-private");
     let ws = dir.file("ws");
@@ -77,7 +62,8 @@ async fn the_output_file_is_owner_only_and_under_the_jobs_directory() {
         .start(&sandbox, &ws, "echo hi", None)
         .expect("start the job");
     let output = jobs.output_path(&info.id);
-    wait_for(&output, "the output file").await;
+    // `start` creates the file before it returns, so its metadata is available at once.
+    assert!(output.exists(), "the output file is created");
 
     assert_eq!(mode(&jobs_dir), 0o700, "the jobs directory is 0700");
     assert_eq!(mode(&output), 0o600, "the output file is 0600");
@@ -97,8 +83,8 @@ async fn the_output_file_is_owner_only_and_under_the_jobs_directory() {
 /// workspace location) never receives the job's output. The outside file is unchanged, and the
 /// start either fails cleanly or uses a fresh regular file.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_planted_symlink_at_the_next_output_file_is_not_followed() {
+#[test]
+fn a_planted_symlink_at_the_next_output_file_is_not_followed() {
     let _guard = LOCK.lock().unwrap();
     let dir = TempDir::new("job-sec-symlink");
     let ws = dir.file("ws");
@@ -150,8 +136,8 @@ async fn a_planted_symlink_at_the_next_output_file_is_not_followed() {
 /// A pre-existing regular file at the next id is never appended to: the exclusive create fails
 /// cleanly. Dropping `create_new` (keeping the append open) would append to it.
 #[cfg(unix)]
-#[tokio::test]
-async fn an_existing_output_file_at_the_next_id_is_not_appended_to() {
+#[test]
+fn an_existing_output_file_at_the_next_id_is_not_appended_to() {
     let _guard = LOCK.lock().unwrap();
     let dir = TempDir::new("job-sec-existing");
     let ws = dir.file("ws");

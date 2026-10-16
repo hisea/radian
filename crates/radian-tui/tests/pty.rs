@@ -5047,12 +5047,15 @@ async fn pty_a_fork_gives_up_when_the_turn_is_still_being_written() {
         "the fork did not time out:\n{}",
         pty.screen()
     );
-    // No child session file was created.
-    let files: Vec<String> = std::fs::read_dir(&sessions)
+    // No child session file was created. The session's own `<id>.jobs/` directory is not a
+    // session (ADR 0039 decision 1), so only `.jsonl` files count here.
+    let mut files: Vec<String> = std::fs::read_dir(&sessions)
         .unwrap()
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".jsonl"))
         .collect();
+    files.sort();
     assert_eq!(
         files,
         vec!["parent.jsonl".to_string()],
