@@ -541,8 +541,9 @@ pub struct TaskRegistry {
     /// `integrate_task` and reused afterwards. `None` until then.
     integration: Mutex<Option<crate::integration::Integration>>,
     /// The lead's name for per-lead integration naming (ADR 0030): `None`
-    /// is the main lead, whose integration branch is `radian/integration`.
-    lead_name: Option<String>,
+    /// is the main lead, whose integration branch is `radian/integration`. A named lead's
+    /// `NamedRegistry` sets its name once the session opens (`set_lead_name`).
+    lead_name: Mutex<Option<String>>,
 }
 
 impl TaskRegistry {
@@ -597,7 +598,7 @@ impl TaskRegistry {
             clock: Box::new(Utc::now),
             manual_clock: false,
             integration: Mutex::new(None),
-            lead_name: None,
+            lead_name: Mutex::new(None),
         }
     }
 
@@ -605,8 +606,16 @@ impl TaskRegistry {
     /// (the default) is the main lead (`radian/integration`); a named lead uses
     /// `radian/integration-<name>`.
     pub fn with_lead_name(mut self, name: impl Into<String>) -> Self {
-        self.lead_name = Some(name.into());
+        self.lead_name = Mutex::new(Some(name.into()));
         self
+    }
+
+    /// Names this lead after construction (ADR 0030): a named agent's
+    /// [`crate::named::NamedRegistry`] sets its name once the session has opened, so the lead's
+    /// integration branch is `radian/integration-<name>`. The main lead never calls this and keeps
+    /// `radian/integration`.
+    pub fn set_lead_name(&self, name: impl Into<String>) {
+        *self.lead_name.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.into());
     }
 
     /// Installs the test seams (ADR 0039 decisions 5 and 7).
@@ -1501,6 +1510,17 @@ impl TaskRegistry {
         self.integration_cache()
     }
 
+    /// The integration branch this lead uses (ADR 0030):
+    /// `radian/integration` for the main lead, `radian/integration-<name>` for a named lead.
+    pub fn integration_branch(&self) -> String {
+        let lead_name = self
+            .lead_name
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        crate::integration::branch_for(lead_name.as_deref())
+    }
+
     fn integration_cache(&self) -> Option<crate::integration::Integration> {
         self.integration
             .lock()
@@ -1528,7 +1548,11 @@ impl TaskRegistry {
             let lead = self.workspace.clone();
             let home = root.home.clone();
             let root_path = root.root.clone();
-            let lead_name = self.lead_name.clone();
+            let lead_name = self
+                .lead_name
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let integration = tokio::task::spawn_blocking(move || {
                 crate::integration::create(&lead, &home, &root_path, lead_name.as_deref())
             })

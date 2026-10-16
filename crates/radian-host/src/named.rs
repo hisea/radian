@@ -522,6 +522,15 @@ impl NamedRegistry {
             }
         };
 
+        // ADR 0030: a named lead's integration branch is
+        // `radian/integration-<name>`, not the main lead's `radian/integration`. The registry only
+        // exists when the named agent mounted the lead tools (`spawn: true`).
+        if agent.spawn
+            && let Some(registry) = session.lead_tasks()
+        {
+            registry.set_lead_name(name);
+        }
+
         // ADR 0030 O11: a `skills` name discovery did not find is a warning, never a failure.
         let mut warnings = match &agent.skills {
             Some(allow) => crate::skills::missing(session.skills(), allow),

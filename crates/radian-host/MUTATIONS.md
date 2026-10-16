@@ -1405,3 +1405,13 @@ worktree 只 checkout `radian/integration`，且 `integrate_task` 只在它上�
 （`an_integration_commit_accepts_only_the_integration_branch`、
 `integrate_task_merges_then_verifies_and_emits_before_merge`、
 `a_conflicting_integrate_aborts_and_still_emits_before_merge`）。
+
+补充（片 10，命名 lead 的集成分支）：`set_lead_name` 是命名 lead 唯一的接线点，
+`with_lead_name` 是测试/注册表上的入口。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| MUT10-10 | `named.rs` 不再 `set_lead_name`（命名 lead 落回 `radian/integration`） | ✅ failed | `a_named_agent_mounts_the_lead_tools_only_when_spawn_is_true`（`integration_branch()` 是 `radian/integration` 而非 `radian/integration-chief`） |
+| MUT10-11 | `with_lead_name` 忽略名字 | ✅ failed | `a_named_lead_uses_a_per_lead_integration_branch`（分支/目录名不是 `radian/integration-dev`） |
+
+11/11（含上表 9 条）全部抓住。

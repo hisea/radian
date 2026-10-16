@@ -204,6 +204,19 @@ async fn the_integration_worktree_is_created_lazily_from_the_lead_head_and_never
     );
 }
 
+/// ADR 0030: a named lead's integration branch is per-lead, so two leads
+/// never share `radian/integration`.
+#[tokio::test]
+async fn a_named_lead_uses_a_per_lead_integration_branch() {
+    let _ = isolated_home();
+    let lead = lead_repo("named-lead");
+    let registry = registry_for(&lead, "lead").with_lead_name("dev");
+    assert_eq!(registry.integration_branch(), "radian/integration-dev");
+    let integration = registry.ensure_integration().await.expect("create");
+    assert_eq!(integration.branch, "radian/integration-dev");
+    assert_eq!(integration.worktree.file_name().unwrap(), "integration-dev");
+}
+
 /// ADR 0030: an existing integration **directory** (with no branch, e.g. a
 /// previous run that left it) is refused too, with our refusal.
 #[tokio::test]
