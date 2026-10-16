@@ -46,6 +46,15 @@ pub type BudgetFor = Arc<dyn Fn(&str, &str) -> Option<ContextBudget> + Send + Sy
 /// injects with [`InputSource::System`]: the message is context, never human input (ADR 0005
 /// G2). A `None` return or an inbox refusal changes nothing about the turn.
 pub type TurnAdditions = Arc<dyn Fn(&str, &[Message]) -> Option<Message> + Send + Sync>;
+
+/// Computes the request-level settings the **compaction** (summary) call carries for a
+/// (provider, model) (ADR 0018). The host supplies it; it converts the configured
+/// `[compaction] thinking` level to the route's wire value with the same map `/thinking` uses.
+/// It must not touch the network. Like [`BudgetFor`], it lets the summary settings follow a
+/// `/model` switch: a frozen value would send `reasoning_effort` to an Anthropic route (or the
+/// reverse) and the provider would reject the request.
+pub type CompactionSettingsFor = Arc<dyn Fn(&str, &str) -> serde_json::Value + Send + Sync>;
+
 use crate::inbox::{ControlRequest, Inbox, InboxEntry, Lane};
 
 /// Why the driver could not continue.
@@ -138,6 +147,12 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// The budget the next turn runs under: set when a model change is applied, `None` keeps
     /// the configured one.
     turn_budget: Option<ContextBudget>,
+    /// Computes the compaction call's request-level settings for a (provider, model) (ADR 0018
+    /// revision 8). The host sets it; without it a switch cannot move the settings.
+    compaction_settings_for: Option<CompactionSettingsFor>,
+    /// The compaction settings the next turn runs under: set when a model change is applied,
+    /// `None` keeps the configured value.
+    turn_compaction_settings: Option<serde_json::Value>,
     /// `true` while a turn (or a `/compact` control request) is in flight (ADR 0037 decision
     /// 3). The host shares it so a job-settle notifier can choose the `inject` lane (busy) or
     /// the waking `followup` lane (idle).
@@ -229,6 +244,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             recovered_history: Some(recovered_history),
             budget_for: None,
             turn_budget: None,
+            compaction_settings_for: None,
+            turn_compaction_settings: None,
             turn_running: Arc::new(AtomicBool::new(false)),
             turn_additions: None,
             closed: false,
@@ -268,6 +285,19 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             && let Some(resolver) = &self.budget_for
         {
             self.turn_budget = resolver(&route.provider, &route.model);
+        }
+    }
+
+    /// Sets the resolver that recomputes the compaction call's request-level settings for a
+    /// switched model (ADR 0018). Like [`Driver::set_budget_for`], it recomputes for
+    /// the route already in the slot at once, so a resume restores the right form before the
+    /// first turn.
+    pub fn set_compaction_settings_for(&mut self, resolver: CompactionSettingsFor) {
+        self.compaction_settings_for = Some(resolver);
+        if let Some(route) = ModelRoute::from_value(&self.slot.value())
+            && let Some(resolver) = &self.compaction_settings_for
+        {
+            self.turn_compaction_settings = Some(resolver(&route.provider, &route.model));
         }
     }
 
@@ -429,6 +459,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         // ADR 0026 D7: a `/model` switch moves the budget with the model. `None` keeps the
         // configured budget, so a session that never switches behaves exactly as before.
         options.context_budget = self.turn_budget;
+        // ADR 0018: the same switch moves the compaction call's wire settings.
+        options.compaction_settings = self.turn_compaction_settings.clone();
         if let Some(timeout) = self.turn_timeout {
             options.deadline = Some(tokio::time::Instant::now() + timeout);
         }
@@ -587,8 +619,17 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let generation = inbox.cancel_generation();
         let token = CancellationToken::new();
         let live = Arc::clone(&self.live);
+        // The compaction settings in force (ADR 0018): cloned before the mutable
+        // borrow of the session below.
+        let settings = self.turn_compaction_settings.clone();
         let session = &mut self.session;
-        let compact = session.compact_now(request.instructions, &token, &*live, request.budget);
+        let compact = session.compact_now(
+            request.instructions,
+            &token,
+            &*live,
+            request.budget,
+            settings,
+        );
         tokio::pin!(compact);
         let result = loop {
             tokio::select! {
@@ -646,10 +687,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let mut merged = self.slot.value();
         merge_change(&mut merged, &change);
         self.slot.apply(merged, revision);
-        if let Some(route) = ModelRoute::from_value(&change)
-            && let Some(resolver) = &self.budget_for
-        {
-            self.turn_budget = resolver(&route.provider, &route.model);
+        if let Some(route) = ModelRoute::from_value(&change) {
+            if let Some(resolver) = &self.budget_for {
+                self.turn_budget = resolver(&route.provider, &route.model);
+            }
+            if let Some(resolver) = &self.compaction_settings_for {
+                self.turn_compaction_settings = Some(resolver(&route.provider, &route.model));
+            }
         }
     }
 }

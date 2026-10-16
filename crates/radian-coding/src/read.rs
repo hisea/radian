@@ -4,6 +4,7 @@ use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::args;
 use crate::fail;
 use crate::provider::Limits;
 use crate::workspace::{WorkspaceRoot, io_failure};
@@ -18,45 +19,53 @@ struct ReadArgs {
     limit: Option<i64>,
 }
 
+pub(crate) fn schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative file path."
+            },
+            "max_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1048576,
+                "description": "Byte budget for this read; defaults to 65536."
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "1-based line to start reading at; defaults to 1."
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum number of lines to read; no line limit if omitted."
+            }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    })
+}
+
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "read".into(),
-        description: "Read a UTF-8 text file from the workspace. For a large file, read it in \
-                      sections with offset (the 1-based first line) and limit (how many lines): \
-                      do NOT raise max_bytes to reach a later part, that rereads the prefix \
-                      every time. max_bytes (default 65536, hard cap 1048576) bounds the bytes \
-                      returned. A byte budget that runs out mid-line drops the incomplete line \
-                      and the result names the line range and the next_offset to pass; the only \
-                      exception is a first line longer than the whole budget, which is returned \
-                      as a prefix with line_truncated. Binary (non-UTF-8) content is refused."
+        description: "Read a UTF-8 text file from the workspace. Every returned line is \
+                      prefixed with its file line number as `N: `. That prefix is NOT part of \
+                      the file: remove it before using the text anywhere else, in particular \
+                      before passing it as the `old` text of `patch`. For a large file, read it \
+                      in sections with offset (the 1-based first line) and limit (how many \
+                      lines): do NOT raise max_bytes to reach a later part, that rereads the \
+                      prefix every time. max_bytes (default 65536, hard cap 1048576) bounds the \
+                      file bytes read. A byte budget that runs out mid-line drops the incomplete \
+                      line and the result names the line range and the next_offset to pass; the \
+                      only exception is a first line longer than the whole budget, which is \
+                      returned as a prefix with line_truncated. Binary (non-UTF-8) content is \
+                      refused."
             .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Workspace-relative file path."
-                },
-                "max_bytes": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1048576,
-                    "description": "Byte budget for this read; defaults to 65536."
-                },
-                "offset": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "1-based line to start reading at; defaults to 1."
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Maximum number of lines to read; no line limit if omitted."
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        }),
+        input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
     }
 }
@@ -103,13 +112,35 @@ impl ReadOutcome {
     }
 }
 
+/// How many similar names a missing-file error offers.
+const MAX_SUGGESTIONS: usize = 3;
+
+/// A missing file is the one place a typo is likelier than a wrong path: keep the `not_found`
+/// code, but when the requested directory holds names close to the one asked for, append
+/// `Did you mean …?` so the model can retry without another `list`/`glob`. Every suggestion is
+/// a workspace-relative name inside the requested directory (see
+/// [`WorkspaceRoot::suggest_similar`]).
+fn missing_file(root: &WorkspaceRoot, user: &str, failure: ToolFailure) -> ToolFailure {
+    if failure.code != "not_found" {
+        return failure;
+    }
+    let suggestions = root.suggest_similar(user, MAX_SUGGESTIONS);
+    if suggestions.is_empty() {
+        return failure;
+    }
+    let names: Vec<String> = suggestions.iter().map(|name| format!("`{name}`")).collect();
+    fail(
+        "not_found",
+        format!("{} Did you mean {}?", failure.message, names.join(", ")),
+    )
+}
+
 pub(crate) async fn run(
     root: &WorkspaceRoot,
     limits: &Limits,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: ReadArgs = serde_json::from_value(arguments.clone())
-        .map_err(|e| fail("invalid_arguments", e.to_string()))?;
+    let args: ReadArgs = args::parse("read", &schema(), arguments)?;
     let budget = match args.max_bytes {
         Some(0) => return Err(fail("read_limit_exceeded", "max_bytes must be at least 1")),
         Some(n) if n as usize > limits.max_read_bytes => {
@@ -126,15 +157,28 @@ pub(crate) async fn run(
     };
     let offset = args.offset.unwrap_or(1);
     if offset < 1 {
-        return Err(fail("invalid_arguments", "offset must be at least 1"));
+        return Err(args::invalid(
+            "read",
+            arguments,
+            ["`offset` must be at least 1"],
+        ));
     }
     let limit = match args.limit {
-        Some(n) if n < 1 => return Err(fail("invalid_arguments", "limit must be at least 1")),
+        Some(n) if n < 1 => {
+            return Err(args::invalid(
+                "read",
+                arguments,
+                ["`limit` must be at least 1"],
+            ));
+        }
         Some(n) => Some(n as usize),
         None => None,
     };
 
-    let path = root.resolve_existing(&args.path)?;
+    let path = match root.resolve_existing(&args.path) {
+        Ok(path) => path,
+        Err(failure) => return Err(missing_file(root, &args.path, failure)),
+    };
     let metadata = std::fs::metadata(&path).map_err(|e| io_failure(&args.path, e))?;
     if !metadata.is_file() {
         return Err(fail(
@@ -250,7 +294,15 @@ fn read_stream<R: BufRead>(
         }
     };
     let truncated = next_offset.is_some();
-    let mut content = text;
+    // Number the file lines for the model: `N: ` before each. The prefix is not file content.
+    // The body is numbered *before* the continuation hint is appended, so the hint carries no
+    // prefix. An empty body with `next_offset` set is the truncated-first-line case where the
+    // budget could not hold even one character; the number still names that line.
+    let mut content = if text.is_empty() && line_truncated {
+        format!("{start_line}: ")
+    } else {
+        number_lines(&text, start_line)
+    };
     if let Some(next) = next_offset {
         // The adapters never send `structured` to the model, so the continuation hint must be
         // in the body. A truncated first line is named as such (its prefix is a partial line,
@@ -275,6 +327,19 @@ fn read_stream<R: BufRead>(
         line_truncated,
         next_offset,
     })
+}
+
+/// Prefixes each line of `text` with its file line number as `N: `. `split_inclusive` keeps
+/// the exact bytes, including each line's trailing newline and the absence of one on the last
+/// line, so the only change is the prefix.
+fn number_lines(text: &str, start_line: i64) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 8 + 8);
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        out.push_str(&(start_line + index as i64).to_string());
+        out.push_str(": ");
+        out.push_str(line);
+    }
+    out
 }
 
 /// What [`read_line_capped`] did.
@@ -460,7 +525,7 @@ mod tests {
         let outcome = read_stream(&mut reader, "long.txt", bytes.len() as u64, 4, 1, None)
             .expect("a budget cut is not an error");
         assert!(
-            outcome.content.starts_with("ab"),
+            outcome.content.starts_with("1: ab"),
             "only complete characters survive: {}",
             outcome.content
         );
@@ -491,7 +556,7 @@ mod tests {
         let outcome = read_stream(&mut reader, "late-bad.bin", bytes.len() as u64, 8, 1, None)
             .expect("the invalid byte was never read");
         assert!(
-            outcome.content.starts_with("aaaaaaaa"),
+            outcome.content.starts_with("1: aaaaaaaa"),
             "content: {}",
             outcome.content
         );

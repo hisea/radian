@@ -37,6 +37,25 @@ impl SandboxMode {
     }
 }
 
+/// What a session may do with the git metadata (`.git`) the sandbox discovered (ADR 0038
+/// decision 4). The choice is explicit on the policy so the two kinds of session stay apart:
+/// general and lead sessions get `WritableExceptExec`, task agents keep `ReadOnly`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GitAccess {
+    /// The whole discovered git metadata is read-only. This is what task agents keep (ADR 0030)
+    /// and what the escape matrix's `git_readonly` group asserts. It is the default because it
+    /// is the narrower grant: a caller must name `WritableExceptExec` to widen it.
+    #[default]
+    ReadOnly,
+    /// The git metadata is writable except the entries git can execute. In a git directory that
+    /// is `config`, `config.worktree` and `hooks/` (and, under `modules/<name>/`, each
+    /// submodule's `config` and `hooks/`). A worktree's per-worktree git dir and its shared
+    /// common dir are discovered separately and get the same treatment. Everything else — the
+    /// object store, refs, the index, `logs/`, `info/` — stays writable, so `git commit`,
+    /// `checkout`, `stash`, `branch` and friends run natively in the sandbox (ADR 0038).
+    WritableExceptExec,
+}
+
 /// Everything a backend needs. Paths are canonicalized when the policy is built, because
 /// SBPL `subpath` and bwrap binds match resolved paths (the macOS spike's realpath lesson).
 #[derive(Debug, Clone)]
@@ -47,8 +66,12 @@ pub struct SandboxPolicy {
     /// `true` allows network; the default follows the mode: **off for `safe`, on for
     /// `workspace`** (ADR 0016). A caller can still override it with [`SandboxPolicy::network`].
     pub network: bool,
-    /// Paths inside (or outside) the workspace that must stay read-only, e.g. `.git`.
+    /// The git metadata discovered under the workspace (`.git` directories, a worktree pointer
+    /// file and its shared common dir). [`SandboxPolicy::git_access`] decides whether each entry
+    /// is wholly read-only or writable except for the parts git executes.
     pub read_only: Vec<PathBuf>,
+    /// How [`SandboxPolicy::read_only`] is enforced (ADR 0038). `ReadOnly` by default.
+    pub git_access: GitAccess,
     /// Paths that must not be readable (ADR 0012 decision 3). Missing paths are
     /// dropped at build time; a backend never widens them.
     pub deny_read: Vec<PathBuf>,
@@ -115,6 +138,7 @@ impl SandboxPolicy {
             // ADR 0016: the workspace tier opens the network; safe keeps it off.
             network: matches!(mode, SandboxMode::WorkspaceWrite),
             read_only,
+            git_access: GitAccess::default(),
             deny_read,
             allow_unix_sockets: Vec::new(),
             allow_env: DEFAULT_ALLOW_ENV.iter().map(|s| (*s).to_owned()).collect(),
@@ -141,6 +165,15 @@ impl SandboxPolicy {
         {
             self.read_only.push(p);
         }
+        self
+    }
+
+    /// Chooses how the discovered git metadata is enforced (ADR 0038). `ReadOnly` (the default)
+    /// keeps the whole `.git` read-only; `WritableExceptExec` opens it except for the entries
+    /// git executes. General and lead sessions in the `workspace` tier pass the latter; task
+    /// agents stay on the default.
+    pub fn git_access(mut self, access: GitAccess) -> Self {
+        self.git_access = access;
         self
     }
 

@@ -22,7 +22,8 @@ use agent_extensions::{McpServerConfig, McpToolProvider};
 use radian_coding::CodingTools;
 use radian_permissions::{ApprovalPolicy, Approver, AuditSink, PermissionHooks, Preset, Profile};
 use radian_runtime::{
-    BudgetFor, CancelCause, ConfigQueue, ConfigSlot, Driver, Inbox, RuntimeEvents,
+    BudgetFor, CancelCause, CompactionSettingsFor, ConfigQueue, ConfigSlot, Driver, Inbox,
+    RuntimeEvents,
 };
 use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
@@ -330,6 +331,15 @@ pub struct SessionSetup {
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
     pub auto_compact: bool,
+    /// The request-level settings the **compaction** call carries (ADR 0018,
+    /// decision 1), already converted to the route's wire value by the host
+    /// ([`crate::compaction_settings_for`]); `Null` sends none. Copied into
+    /// `AgentConfig.compaction_settings` and used until the first `/model` switch.
+    pub compaction_settings: serde_json::Value,
+    /// Recomputes [`SessionSetup::compaction_settings`] for a switched route (ADR 0018
+    /// revision 8, ADR 0026 D7). `None` means a switch cannot move the settings (they stay at
+    /// the startup value).
+    pub compaction_settings_for: Option<CompactionSettingsFor>,
     /// The sandbox `shell` runs under; `None` for the safe tier.
     pub sandbox: Option<Sandbox>,
     /// The tier, for the startup description.
@@ -925,6 +935,8 @@ pub async fn open_session(
         system_prompt,
         context_budget,
         auto_compact,
+        compaction_settings,
+        compaction_settings_for,
         sandbox,
         tier,
         profile,
@@ -1133,6 +1145,7 @@ pub async fn open_session(
         system_prompt,
         context_budget,
         auto_compact,
+        compaction_settings,
         ..AgentConfig::default()
     };
     let facts_hooks = Arc::new(crate::prompt::SessionFactsHooks::new(
@@ -1194,6 +1207,11 @@ pub async fn open_session(
     )));
     if let Some(budget_for) = budget_for.clone() {
         driver.set_budget_for(budget_for);
+    }
+    // ADR 0018: the same per-route resolver for the summary call's settings, so a
+    // `/model` switch converts the shrunk level for the route in force.
+    if let Some(settings_for) = compaction_settings_for.clone() {
+        driver.set_compaction_settings_for(settings_for);
     }
     // resume-perf B: the recovered transcript goes to the host, which would otherwise open and
     // fold the same journal a second time for its initial view.

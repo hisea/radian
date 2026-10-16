@@ -9,9 +9,9 @@ contract; this file is the practical summary.
 
 | Tool | Concurrency | What it does |
 |---|---|---|
-| `read` | `Shared` | Read a UTF-8 file, bounded by `max_bytes` (default 64 KiB, hard cap 1 MiB). `offset` (1-based first line) and `limit` (lines) read a large file in sections. Reports `start_line`/`end_line`/`line_truncated` and, when not finished, `next_offset`; refuses non-UTF-8. |
+| `read` | `Shared` | Read a UTF-8 file, bounded by `max_bytes` (default 64 KiB, hard cap 1 MiB). Every returned line is prefixed with its file line number, `N: ` (that prefix is not file content). `offset` (1-based first line) and `limit` (lines) read a large file in sections. Reports `start_line`/`end_line`/`line_truncated` and, when not finished, `next_offset`; a missing file names up to three close names in its directory; refuses non-UTF-8. |
 | `write` | `Exclusive` | Create or overwrite a file with exact content (no newline added). Parent must exist. Never follows a symlink at the destination. |
-| `patch` | `Exclusive` | Replace exactly one occurrence of `old` with `new`. Zero or multiple matches refuse the edit and leave the file untouched (no fuzzy matching). |
+| `patch` | `Exclusive` | Replace `old` with `new`. A match is located by layer (exact, then typographic normalisation, then line-by-line ignoring trailing whitespace) and must be unique unless `replace_all` is set. A CRLF file is matched on an LF view and stays CRLF. Zero matches refuse the edit and report the closest region with line numbers. |
 | `list` | `Shared` | List a directory, sorted, with kind and size; symlinks shown but not followed; capped by `max_entries`. |
 | `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore` respected, `.git` skipped, symlinks never followed; capped by `max_results`. |
 | `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore` respected, binary files skipped; capped per file and in total. |
@@ -40,6 +40,47 @@ or `[line N truncated at max_bytes; continue with offset=N+1]` for that exceptio
 bounded by about `max_bytes` plus one reader buffer, even for a file with a single enormous
 line. This is the fix for dogfood10 D25 (a 73 KB guide read 20 times): read the section you
 need, do **not** raise `max_bytes` to reach it.
+
+### Line numbers and a missing file
+
+Every line `read` returns carries its **file** line number as `N: `, so a read at `offset`
+3 starts at `3: `, and the continuation hint (`[truncated: …]`) is not numbered. The prefix
+is not file content: the description says to strip it before using the text anywhere else,
+in particular as `patch`'s `old`. `bytes_read` still counts the file bytes, not the prefix.
+
+A `read` of a missing file keeps the `not_found` code but, when the requested directory
+holds names close to the one asked for (case-insensitive edit distance), appends
+`Did you mean …?` with up to three of them. Only the requested file's own directory is
+listed, after canonicalization, so a suggestion never points outside the workspace.
+
+### `patch` matching layers
+
+`patch` locates `old` in three layers, tried in order, and stops at the first that matches:
+
+1. **exact** — `old` appears byte for byte;
+2. **typographic normalisation** — curly quotes, en/em dashes and no-break spaces are mapped
+   to ASCII on **both** sides before comparing;
+3. **line-by-line** — a block of whole lines agrees once each line's trailing whitespace is
+   stripped; a needle ending in `\n` has that newline included in the replaced range.
+
+A layer only *locates* text; the replacement is always `new`, and the bytes replaced are the
+file's own. A match at any layer must be unique; more than one is still the `patch_ambiguous`
+error, and the file is untouched. `replace_all: true` replaces every occurrence the winning
+layer located. A CRLF file is matched on an LF view, offsets map back, and the file (and the
+replacement) stays CRLF. When no layer matches, the `patch_not_found` error names the closest
+region of the file with line numbers, so the model can correct `old` without another `read`.
+
+### Argument errors
+
+Every tool parses its arguments through `src/args.rs` against its own published
+`input_schema`. A bad call returns one `invalid_arguments` failure that lists **every**
+problem (a missing required argument, a wrong type, an unknown argument), echoes the
+arguments received (bounded to 4 KiB), and ends with `Update the arguments and call the tool
+again`. An **optional** argument sent as `""` is treated as absent — a frequent DeepSeek
+shape for "use the default"; a **required** `""` is kept, because `write`'s `content` and
+`patch`'s `new` may legitimately be empty. `minimum`/`maximum` stay the tools' own checks so
+a limit that is exceeded keeps its semantic code (`read_limit_exceeded`, `glob_limit_exceeded`,
+…).
 
 ## Search (`glob`, `grep`)
 

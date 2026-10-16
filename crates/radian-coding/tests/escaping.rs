@@ -117,7 +117,7 @@ async fn a_symlinked_workspace_root_works_and_still_confines() {
     let output = call(&tools, "read", json!({"path": "inside.txt"}))
         .await
         .unwrap();
-    assert_eq!(text(&output), "INSIDE");
+    assert_eq!(text(&output), "1: INSIDE");
 
     let failure = call(&tools, "read", json!({"path": "/etc/passwd"}))
         .await
@@ -144,7 +144,7 @@ async fn a_hard_link_to_an_outside_file_is_readable_and_that_is_documented() {
         .unwrap();
     assert_eq!(
         text(&output),
-        "SENTINEL-CONTENT",
+        "1: SENTINEL-CONTENT",
         "the crate documents that read cannot detect a hard link"
     );
 }
@@ -179,7 +179,7 @@ async fn read_reports_truncation_and_the_total_size() {
     // The body is the prefix plus the human-readable continuation hint: the model only sees
     // the body (the adapters never send `structured`), so the hint must be in it.
     let content = text(&output);
-    assert!(content.starts_with("0123"), "{content}");
+    assert!(content.starts_with("1: 0123"), "{content}");
     assert!(
         content.contains("[line 1 truncated at max_bytes; continue with offset=2]"),
         "{content}"

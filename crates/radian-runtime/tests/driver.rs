@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use agent_core::{Agent, InputSource, Message, MessageId, Step, TurnOptions};
 use common::{MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, text};
-use radian_runtime::{Driver, Inbox};
+use radian_runtime::{ConfigQueue, Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
 use serde_json::{Value, json};
 
@@ -663,4 +663,163 @@ fn addition_message(text: &str) -> Message {
             ),
         },
     }
+}
+// ---------- ADR 0018: the summary settings follow the switched route ----------
+
+/// A driver whose `AgentConfig.compaction_settings` is the **startup** route's form and whose
+/// resolver converts the configured level for the route in force. The big first message makes
+/// the second turn's transcript over `B`, so it compacts.
+struct SwitchEnv {
+    driver: Driver<Arc<ScriptedModel>, MemTools, ()>,
+    model: Arc<ScriptedModel>,
+    recorder: Arc<Recorder>,
+    inbox: Arc<Inbox>,
+    queue: Arc<ConfigQueue>,
+    /// Kept so the temp directory lives as long as the env.
+    _dir: TempDir,
+}
+
+async fn switch_env(label: &str, startup_settings: serde_json::Value) -> SwitchEnv {
+    let dir = TempDir::new(label);
+    let path = dir.file("s.jsonl");
+    let journal = Arc::new(SessionJournal::create(&path, "sid", created()).unwrap());
+    let inbox = Inbox::durable(16, Arc::clone(&journal));
+    let recorder = Arc::new(Recorder::default());
+    // Turn 1's conversation reply, then turn 2's summary and conversation replies.
+    let model = ScriptedModel::new([text("ack"), text("summary"), text("done")]);
+    let tools = MemTools::new();
+    let agent = Arc::new(Agent::new(Arc::clone(&model), tools).with_config(
+        agent_core::AgentConfig {
+            context_budget: Some(agent_core::ContextBudget::new(3_000).with_bytes_per_token(1)),
+            compaction_settings: startup_settings,
+            ..agent_core::AgentConfig::default()
+        },
+    ));
+    let mut driver = Driver::open(
+        &agent,
+        Arc::clone(&journal),
+        Arc::clone(&inbox),
+        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        TurnOptions::default(),
+    )
+    .await
+    .unwrap();
+    // The host's per-route resolver: the same level, converted per route.
+    driver.set_compaction_settings_for(Arc::new(|provider, _model| {
+        if provider == "anthropic" {
+            json!({"thinking": {"type": "enabled", "budget_tokens": 2048}})
+        } else {
+            json!({"reasoning_effort": "low"})
+        }
+    }));
+    let queue = Arc::clone(driver.config_queue());
+    SwitchEnv {
+        driver,
+        model,
+        recorder,
+        inbox,
+        queue,
+        _dir: dir,
+    }
+}
+
+/// ADR 0018: after `/model` from an OpenAI-compatible route to an Anthropic route,
+/// the summary call must carry the Anthropic form and **not** `reasoning_effort` (which
+/// Anthropic would reject with a 400 and the compaction would fail). Startup is the
+/// OpenAI-compatible route, so the startup `compaction_settings` is `reasoning_effort`.
+#[tokio::test]
+async fn the_summary_settings_follow_a_switch_to_an_anthropic_route() {
+    let SwitchEnv {
+        mut driver,
+        model,
+        recorder,
+        inbox,
+        queue,
+        _dir,
+    } = switch_env(
+        "switch-summary-anthropic",
+        json!({"reasoning_effort": "low"}),
+    )
+    .await;
+    let handle = tokio::spawn(async move { driver.run().await });
+
+    // Turn 1 builds an over-budget history (no compaction yet: one atomic unit).
+    inbox
+        .followup("x".repeat(20_000), InputSource::User)
+        .await
+        .unwrap();
+    recorder.wait_finished().await;
+    // Switch to the Anthropic route; the next turn boundary applies it.
+    queue.push(radian_runtime::ModelRoute::new("anthropic", "claude").to_value());
+    inbox.followup("last", InputSource::User).await.unwrap();
+    recorder.wait_finished().await;
+    handle.abort();
+    let _ = handle.await;
+
+    let requests = model.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "turn 1 conversation, then the summary and conversation of turn 2"
+    );
+    assert_eq!(
+        requests[1].settings,
+        json!({"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+        "the summary carries the Anthropic route's form"
+    );
+    assert!(
+        requests[1].settings.get("reasoning_effort").is_none(),
+        "the summary must not carry the startup route's reasoning_effort: {:?}",
+        requests[1].settings
+    );
+    // The conversation request is untouched.
+    assert_eq!(requests[2].settings, serde_json::Value::Null);
+}
+
+/// The reverse: startup on the Anthropic route (so the startup setting is `thinking`), switch
+/// to an OpenAI-compatible route, and the summary must carry `reasoning_effort` and no
+/// `thinking`.
+#[tokio::test]
+async fn the_summary_settings_follow_a_switch_to_an_openai_route() {
+    let SwitchEnv {
+        mut driver,
+        model,
+        recorder,
+        inbox,
+        queue,
+        _dir,
+    } = switch_env(
+        "switch-summary-openai",
+        json!({"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+    )
+    .await;
+    let handle = tokio::spawn(async move { driver.run().await });
+
+    inbox
+        .followup("x".repeat(20_000), InputSource::User)
+        .await
+        .unwrap();
+    recorder.wait_finished().await;
+    queue.push(radian_runtime::ModelRoute::new("opencode-go", "deepseek-v4.1-flash").to_value());
+    inbox.followup("last", InputSource::User).await.unwrap();
+    recorder.wait_finished().await;
+    handle.abort();
+    let _ = handle.await;
+
+    let requests = model.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "turn 1 conversation, then the summary and conversation of turn 2"
+    );
+    assert_eq!(
+        requests[1].settings,
+        json!({"reasoning_effort": "low"}),
+        "the summary carries the OpenAI-compatible route's form"
+    );
+    assert!(
+        requests[1].settings.get("thinking").is_none(),
+        "the summary must not carry the startup route's thinking object: {:?}",
+        requests[1].settings
+    );
 }
