@@ -87,6 +87,9 @@ pub struct TaskHost {
     pub protected_branches: Vec<String>,
     /// Filter drivers `git add` may run (ADR 0030).
     pub allowed_filters: Option<Vec<String>>,
+    /// The lead's `[shell] auto_background_secs` (ADR 0037): a task's foreground
+    /// shell calls adopt into a job the same way.
+    pub shell_auto_background: Option<Duration>,
     /// Skills discovery inputs (ADR 0025).
     pub skills_extra_paths: Vec<PathBuf>,
     pub skills_builtin: bool,
@@ -142,6 +145,7 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
             price_for: None,
             protected_branches: host.protected_branches.clone(),
             allowed_filters: host.allowed_filters.clone(),
+            shell_auto_background: host.shell_auto_background,
             // ADR 0030 O8: a task mounts no MCP server by default. The builder passes none.
             servers: Vec::new(),
             // The registry sets the `task` role; `--system` (a fixed layer 1) does not apply.

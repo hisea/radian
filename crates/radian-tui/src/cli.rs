@@ -1435,6 +1435,7 @@ fn run(
             wording: radian_host::TUI_WORDING,
             protected_branches: config.git.protected_branches.clone(),
             allowed_filters: Some(config.git.allowed_filters()),
+            shell_auto_background: config.shell.auto_background_after(),
             skills_extra_paths: task_skills,
             skills_builtin: config.skills.builtin.unwrap_or(true),
             skills_disabled: config.skills.disabled.clone(),

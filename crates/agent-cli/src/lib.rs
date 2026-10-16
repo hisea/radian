@@ -1719,6 +1719,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         wording: radian_host::CLI_WORDING,
         protected_branches: Vec::new(),
         allowed_filters: None,
+        shell_auto_background: setup.shell_auto_background,
         skills_extra_paths: setup.skills_extra_paths.clone(),
         skills_builtin: setup.skills_builtin,
         skills_disabled: setup.skills_disabled.clone(),
