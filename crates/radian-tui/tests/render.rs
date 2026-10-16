@@ -1517,7 +1517,11 @@ fn a_git_diff_body_colors_its_line_kinds() {
         theme.frame.fg,
         "the file header is structure"
     );
-    assert_ne!(style("@@").fg, theme.notice_label.fg, "@@ is not the accent");
+    assert_ne!(
+        style("@@").fg,
+        theme.notice_label.fg,
+        "@@ is not the accent"
+    );
     // The head's counts come from the same text.
     let text = screen(&terminal);
     assert!(text.contains("git_diff: 1 files +1/-1"), "{text}");

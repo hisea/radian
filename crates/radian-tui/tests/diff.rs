@@ -336,3 +336,79 @@ fn a_diff_row_copies_its_own_text_without_the_gutter() {
         "the copy is the row's own text: no gutter, the sign as the diff carries it"
     );
 }
+
+/// The line count a card reports equals the lines it draws, with numbered diff rows — at two
+/// widths, including one where a row has to be cut (ADR 0028 R1's virtualization: the count
+/// and the drawing derive from the same plan).
+#[test]
+fn a_diff_body_line_count_matches_its_layout() {
+    let mut app = App::new("m", "s");
+    let diff = "diff --git a/src/main.rs b/src/main.rs\n\
+                +++ b/src/main.rs\n\
+                @@ -1,2 +1,2 @@\n\
+                -let a = 1; let b = 2; let c = 3; let d = 4; let e = 5; let f = 6; let g = 7;\n\
+                +let a = 2;\n";
+    card(
+        &mut app,
+        "git_diff",
+        serde_json::json!({}),
+        diff,
+        serde_json::json!(null),
+    );
+    app.tool_display.fold = ToolFold::Expanded;
+    let modes = app.display_modes();
+    let entry = app
+        .session
+        .entries
+        .iter()
+        .find(|entry| entry.kind == EntryKind::ToolResult)
+        .expect("the result entry");
+    for width in [80usize, 30] {
+        let count = radian_tui::blocks::line_count(entry, modes, width);
+        let laid_out = radian_tui::blocks::layout(entry, &[], modes, width).len();
+        assert_eq!(count, laid_out, "width {width}");
+    }
+}
+
+/// A diff row never wraps (R9): a row wider than the body is truncated with `…` and stays one
+/// transcript line, and its cells still cover the row's source (the cut tail copies).
+#[test]
+fn a_long_diff_row_truncates_instead_of_wrapping() {
+    let mut app = App::new("m", "s");
+    let diff = "diff --git a/src/main.rs b/src/main.rs\n\
+                +++ b/src/main.rs\n\
+                @@ -1,1 +1,1 @@\n\
+                -let a = 1;\n\
+                +let a = 2; let b = 3; let c = 4; let d = 5; let e = 6; let f = 7; let g = 8;\n";
+    card(
+        &mut app,
+        "git_diff",
+        serde_json::json!({}),
+        diff,
+        serde_json::json!(null),
+    );
+    app.tool_display.fold = ToolFold::Expanded;
+    let modes = app.display_modes();
+    let entry = app
+        .session
+        .entries
+        .iter()
+        .find(|entry| entry.kind == EntryKind::ToolResult)
+        .expect("the result entry");
+    let body = radian_tui::blocks::layout(entry, &[], modes, 40);
+    let rows: Vec<&radian_tui::blocks::BodyLine> = body
+        .iter()
+        .filter(|line| line.text.contains("let a = 2;"))
+        .collect();
+    assert_eq!(rows.len(), 1, "the row is one line, not a wrapped pair");
+    assert!(rows[0].text.ends_with('…'), "{:?}", rows[0].text);
+    // The result's marker column is three cells (ADR 0028 rule 4), so at width 40
+    // the body is 37 cells: the row keeps 36 of them and spends the last on the `…`.
+    assert_eq!(rows[0].text.chars().count(), 37, "{:?}", rows[0].text);
+    // The last cell maps to a source byte, so the copy of the row still reaches its text.
+    assert!(
+        rows[0].chars.last().copied().flatten().is_some(),
+        "the ellipsis keeps the last cell's source: {:?}",
+        rows[0].chars
+    );
+}

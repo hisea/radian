@@ -783,7 +783,9 @@ fn diff_body(card: &ToolCard, text: &str) -> (Vec<BodyLine>, Option<String>) {
             in_hunk = true;
             out.push(BodyLine::Text {
                 source,
-                role: LineRole::Dim,
+                // `@@` is structure: `diff_role` classifies it, so the row cannot drift from
+                // the fallback's own structure role.
+                role: diff_role(stripped),
             });
             continue;
         }
@@ -794,7 +796,7 @@ fn diff_body(card: &ToolCard, text: &str) -> (Vec<BodyLine>, Option<String>) {
             }
             out.push(BodyLine::Text {
                 source,
-                role: LineRole::Dim,
+                role: diff_role(stripped),
             });
             continue;
         }
