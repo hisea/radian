@@ -38,6 +38,9 @@ pub struct WorkspaceRoot {
 pub(crate) struct OpenedFile {
     pub file: File,
     pub stat: Stat,
+    /// Whether the fd was opened read-write and can be read back. Only `write`'s count needs it:
+    /// its fallback open is write-only (review fix 1).
+    pub readable: bool,
 }
 
 /// The directory a search tool (`grep`/`glob`) walks: the open fd, the path relative to the
@@ -234,7 +237,7 @@ impl WorkspaceRoot {
             .dir
             .file(relative, OpenMode::Read)
             .map_err(|error| self.map_error(user, error))?;
-        opened_file(user, file)
+        opened_file(user, file, true)
     }
 
     /// Opens a workspace-relative directory (the existing boundary, unchanged).
@@ -255,7 +258,7 @@ impl WorkspaceRoot {
         let file = root
             .file(relative, OpenMode::Read)
             .map_err(|error| self.map_root_error(index, user, error))?;
-        opened_file(user, file)
+        opened_file(user, file, true)
     }
 
     /// Opens a directory under a read-only root through that root's fd.
@@ -279,16 +282,31 @@ impl WorkspaceRoot {
         if relative.as_os_str().is_empty() {
             return Err(fail(CODE_OUTSIDE, format!("`{user}` does not name a file")));
         }
-        let mode = if create {
-            OpenMode::WriteCreate
+        // `write` wants to count the old file's lines on the very fd it truncates, which needs a
+        // read-write open; a file the user may write but not read refuses that with EACCES. The
+        // write is the point and the count is a display nicety, so on that one error fall back
+        // to the write-only create and let `write` skip the count (review fix 1). `patch` edits
+        // an existing file and always reads it.
+        let (file, readable) = if create {
+            match self.dir.file(&relative, OpenMode::WriteCreateReadWrite) {
+                Ok(file) => (file, true),
+                Err(error) if is_permission_denied(&error) => {
+                    let file = self
+                        .dir
+                        .file(&relative, OpenMode::WriteCreate)
+                        .map_err(|error| self.map_error(user, error))?;
+                    (file, false)
+                }
+                Err(error) => return Err(self.map_error(user, error)),
+            }
         } else {
-            OpenMode::ReadWrite
+            let file = self
+                .dir
+                .file(&relative, OpenMode::ReadWrite)
+                .map_err(|error| self.map_error(user, error))?;
+            (file, true)
         };
-        let file = self
-            .dir
-            .file(&relative, mode)
-            .map_err(|error| self.map_error(user, error))?;
-        let opened = opened_file(user, file)?;
+        let opened = opened_file(user, file, readable)?;
         let stat = opened.stat;
         if stat.kind != EntryKind::File {
             return Err(fail(
@@ -491,11 +509,29 @@ fn expand_home(user: &str) -> Option<PathBuf> {
 }
 
 /// Wraps an open file with the facts the tools check, running the test seam first (ADR 0039
-/// decision 2: the fd obtained here is the one used, never a path re-opened later).
-fn opened_file(user: &str, file: File) -> Result<OpenedFile, ToolFailure> {
+/// decision 2: the fd obtained here is the one used, never a path re-opened later). `readable`
+/// is whether the fd's mode allows reading it back (every read path does; `write`'s write-only
+/// fallback does not).
+fn opened_file(user: &str, file: File, readable: bool) -> Result<OpenedFile, ToolFailure> {
     safe_fs::run_after_open_hook();
     let stat = safe_fs::fstat(&file).map_err(|e| io_failure(user, e))?;
-    Ok(OpenedFile { file, stat })
+    Ok(OpenedFile {
+        file,
+        stat,
+        readable,
+    })
+}
+
+/// Whether an open failed because the process was not allowed to (Unix `EACCES`), the one
+/// error `write` falls back on when its read-write create is refused: the write-only open may
+/// still be allowed (review fix 1). Every other failure — a symlink, a missing parent, an
+/// outside path — is propagated, never retried.
+fn is_permission_denied(error: &SafeFsError) -> bool {
+    matches!(
+        error,
+        SafeFsError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied
+    )
 }
 
 /// Renders a search result path: relative to its root for the workspace, prefixed with the

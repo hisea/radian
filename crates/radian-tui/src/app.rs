@@ -2,7 +2,7 @@
 //!
 //! `update` is **pure**: it never does I/O, never touches the runtime, never reads a file or a
 //! directory, and never calls into a service. Everything that needs the outside world comes
-//! back as an [`Effect`], which the event loop in `main.rs` runs; the result returns as another
+//! back as an [`Effect`], which the event loop in `cli.rs` runs; the result returns as another
 //! [`Input`]. `tests/purity.rs` asserts the structure (no `std::fs`, no `MemoryService`, no
 //! `tokio`, no `mention::expand`/`complete` call in this file).
 //!
@@ -5076,6 +5076,7 @@ impl App {
                 .map(|candidate| crate::command::Candidate {
                     insert: candidate.clone(),
                     description: String::new(),
+                    current: false,
                 })
                 .collect(),
         );
@@ -5124,7 +5125,7 @@ mod tests {
         assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_ACCENT_STEP);
         app.set_now(base + std::time::Duration::from_millis(500));
         assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_DIM_STEP);
-        // An RGB theme breathes instead: the step advances every ~117 ms.
+        // An RGB theme breathes instead: the step advances every 125 ms.
         app.theme = crate::theme::Theme::dark();
         app.set_now(base);
         assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_DIM_STEP);

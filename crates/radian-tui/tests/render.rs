@@ -450,6 +450,7 @@ fn candidate(label: &str) -> radian_tui::command::Candidate {
     radian_tui::command::Candidate {
         insert: label.into(),
         description: String::new(),
+        current: false,
     }
 }
 
@@ -521,6 +522,108 @@ fn the_completion_list_scrolls_instead_of_showing_more() {
         "the window follows the highlight: {text}"
     );
     assert!(!text.contains("file00.txt"), "{text}");
+}
+
+/// A candidate with a description column (the current flag is set by the test).
+fn described(label: &str, description: &str) -> radian_tui::command::Candidate {
+    radian_tui::command::Candidate {
+        insert: label.into(),
+        description: description.into(),
+        current: false,
+    }
+}
+
+/// The display column where a row's description starts: right after the label, its optional
+/// current mark and the padding. The cursor `❯ ` is a wide glyph, so the prefix is measured by
+/// display width, not by byte index.
+fn description_column(row: &str, label: &str) -> usize {
+    let after_label = row.find(label).expect("the label is on the row") + label.len();
+    let rest = &row[after_label..];
+    let (marker, rest) = match rest.strip_prefix(" ✓").or_else(|| rest.strip_prefix(" *")) {
+        Some(rest) => (2, rest),
+        None => (0, rest),
+    };
+    let spaces = rest.len() - rest.trim_start_matches(' ').len();
+    unicode_width::UnicodeWidthStr::width(&row[..after_label]) + marker + spaces
+}
+
+/// a completion menu marks the item in effect with ` ✓` right after its name
+/// (never in the description), so every row's description starts in the same column. `/theme`,
+/// `/model` and `/thinking` all draw through the shared list.
+fn assert_menu_marks_current(app: &mut App, labels: &[&str], current: usize) {
+    let terminal = render(app, 80, 20);
+    let text = screen(&terminal);
+    assert!(
+        text.contains(&format!("{} ✓", labels[current])),
+        "the current row is marked after its name:\n{text}"
+    );
+    assert!(
+        !text.contains("current"),
+        "no row carries the old marker text:\n{text}"
+    );
+    let columns: Vec<usize> = labels
+        .iter()
+        .map(|label| {
+            let y = row_of(&terminal, label).expect("a menu row") as u16;
+            description_column(&row(&terminal, y), label)
+        })
+        .collect();
+    assert!(
+        columns.windows(2).all(|pair| pair[0] == pair[1]),
+        "a row's description column moved: {columns:?}\n{text}"
+    );
+    // The mark is drawn in the `status_ok` role.
+    let mark = style_of(&terminal, "✓").expect("the current mark is on screen");
+    assert_eq!(
+        mark.fg, app.theme.status_ok.fg,
+        "the mark uses the status_ok role:\n{text}"
+    );
+}
+
+#[test]
+fn the_theme_model_and_thinking_menus_mark_the_current_row() {
+    // `/theme`: the built-ins, `mono` in effect.
+    let mut theme: Vec<radian_tui::command::Candidate> =
+        radian_tui::command::theme_candidates(None);
+    theme
+        .iter_mut()
+        .find(|c| c.insert == "mono")
+        .unwrap()
+        .current = true;
+    let mut app = App::new("m", "s");
+    app.input = "/theme ".into();
+    app.completion_set(theme);
+    assert_menu_marks_current(&mut app, &["dark", "light", "mono"], 2);
+
+    // `/model`: the flat list, `opencode-go/deepseek-v4.1-flash` in effect.
+    let mut model = vec![
+        described("anthropic/claude-4", "anthropic"),
+        described("opencode-go/deepseek-v4.1-flash", "opencode-go"),
+        described("openai/gpt-5", "openai"),
+    ];
+    model[1].current = true;
+    let mut app = App::new("m", "s");
+    app.input = "/model ".into();
+    app.completion_set(model);
+    assert_menu_marks_current(
+        &mut app,
+        &[
+            "anthropic/claude-4",
+            "opencode-go/deepseek-v4.1-flash",
+            "openai/gpt-5",
+        ],
+        1,
+    );
+
+    // `/thinking`: the real producer, `high` in effect.
+    let opencode =
+        radian_host::ProviderRef::BuiltIn(radian_host::descriptor("opencode-go").unwrap());
+    let thinking =
+        radian_tui::command::thinking_candidates(&opencode, "deepseek-v4.1-flash", 4096, "high");
+    let mut app = App::new("m", "s");
+    app.input = "/thinking ".into();
+    app.completion_set(thinking);
+    assert_menu_marks_current(&mut app, &["low", "high", "max"], 1);
 }
 
 // ---------- the question form (ADR 0024 Q7) ----------
@@ -1783,10 +1886,10 @@ fn a_patch_card_shows_the_replacement_with_diff_roles() {
     );
 }
 
-/// A `write` card: the head counts, the body is the content (no `+` markers), and a CJK path
-/// renders.
+/// A `write` card: the head counts, the body numbers every content line as an addition
+/// (`write` is a whole-file write, ADR 0028), and a CJK path renders.
 #[test]
-fn a_write_card_shows_the_content_without_markers() {
+fn a_write_card_numbers_every_content_line() {
     // A CJK path and content: the byte count is UTF-8 bytes, the line count is lines.
     let mut app = App::new("m", "s");
     app.push_message(&assistant_with(
@@ -1816,12 +1919,19 @@ fn a_write_card_shows_the_content_without_markers() {
     // spaces so the assertion is about the text, not the terminal's cell model.
     let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(squeezed.contains("•write笔记.md·+2✓"), "{text}");
-    assert!(squeezed.contains("第一行"), "{text}");
-    assert!(squeezed.contains("第二行"), "{text}");
+    // The new file has no old content (`previous_lines` absent), so the head stays `+2`, and
+    // each content line is a numbered `Added` row. The `+` is the diff-added sign.
+    assert!(squeezed.contains("1+第一行"), "{text}");
+    assert!(squeezed.contains("2+第二行"), "{text}");
+    let sign = style_of(&terminal, "1 +").expect("the line number");
+    assert_eq!(
+        sign.fg, app.theme.diff_line_number.fg,
+        "the line number is the weak diff gutter"
+    );
     let body = style_of(&terminal, "第").expect("the content");
     assert_eq!(
         body.fg, app.theme.tool_result.fg,
-        "no diff role for a write body"
+        "plain content keeps the body style"
     );
 }
 

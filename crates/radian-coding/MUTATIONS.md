@@ -355,6 +355,23 @@ what gets written — so the "defence in depth, untestable" note no longer appli
 parent-directory window the earlier record called "not mitigated at all" is the one M-A/M-B
 cover.
 
+## `write` 结果的 `previous_lines`（ADR 0028，2026-10-16）
+
+Base：本片 HEAD（`oc/write-diff`）· 就地变异（改 `write.rs`），每个变异前把文件复制到
+`.radian/scratch/mut/write.rs.orig`，跑完用**不带 `-p`** 的 `cp` 还原（mtime 落回当前，避开
+`radian-tui/MUTATIONS.md` 记过的「副本旧 mtime → cargo 判定新鲜、变异留在构建缓存」陷阱）并
+`cmp` 逐字节确认；结束时 `git status --short` 只剩本片自己的改动。每个变异用
+`cargo test -p radian-coding --test mutation --locked --no-fail-fast -- <test>`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| W1 | 覆盖时不再写 `previous_lines`（`if previous_lines > 0` → `if false`） | `write_reports_the_overwritten_files_line_count`、`write_counts_an_old_file_larger_than_max_write_bytes` | ✅ |
+| W2 | 先 `truncate` 再数行（读到的旧文件已被清空） | `write_reports_the_overwritten_files_line_count` | ✅ |
+| W3 | 行数公式差一（`newlines + 1`，结尾换行也算成一行） | `write_reports_the_overwritten_files_line_count` | ✅ |
+
+3/3 抓住。W1 等同本片之前的行为：旧代码的 `structured` 里根本没有 `previous_lines`，断言
+`== 3` 得到 `null` 即失败。空文件不写字面量 0（字段缺席）由同一用例末段钉住；`\r\n` 算一个换行、
+结尾换行不算新行由同一用例中段钉住。
 ## ADR 0039: read-only cargo registry and toolchain roots (2026-10-16, branch `oc/ro-roots`)
 
 Base `5410774` · in-place mutations (each source file backed up under `.radian/scratch/mut/`,
@@ -387,3 +404,16 @@ Base 是 `oc/orch-s6b`。变异就地施加，源文件先复制到 `.radian/scr
 
 2/2 抓住。`heavy.rs` 里 `is_heavy` 的前缀匹配（默认模式、边界、`bash -c` 不可见）由同文件的单元测试
 `the_default_patterns_match_their_commands_and_only_theirs` 钉住。
+## review fix 1：读写打开被拒时回退到只写、跳过行数（2026-10-16）
+
+Base：本片 HEAD（`oc/write-diff`，fix 1 提交前）· 就地变异（改 `workspace.rs`），变异前复制到
+`.radian/scratch/mut/workspace.rs.orig`，跑完用**不带 `-p`** 的 `cp` 还原并 `cmp` 逐字节确认；
+每个变异用 `cargo test -p radian-coding --test mutation --locked --no-fail-fast -- <test>`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| RF1 | `is_permission_denied` 恒 `false`（去掉回退，即 a035006 的行为：`O_RDWR` 打不开就让整个写失败） | `write_overwrites_a_write_only_file_without_counting_its_lines` | ✅ failed |
+
+同一变异下 `write_reports_the_overwritten_files_line_count` 仍过：回退只影响进程读不了的文件，
+普通覆盖不受影响。RF1 就是 a035006 的可观测行为，所以 0200 用例在 a035006 上必失败。0200 用例在
+root 下跳过（root 无视 mode 位，构造不出那次拒绝），跳过前先探测能否读一个 0200 文件。

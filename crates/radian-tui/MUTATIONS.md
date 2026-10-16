@@ -1087,7 +1087,7 @@ Base `8789877` · 一次性 worktree `/tmp/radian-cm-mut`，每个变异跑完 `
 | CM-M3 | `effective_thinking_level` 直接返回请求值（footer 显示配置值而非钳制值） | `command::the_footer_thinking_level_is_the_clamped_one` | ✅ |
 | CM-M4 | 去掉 `completion_set` 里的高亮重置（打字后高亮不回到第一行） | `update::typing_filters_the_slash_menu_and_resets_the_highlight` | ✅ |
 | CM-M5 | `accept_slash_candidate` 固定取第 0 行（忽略高亮） | `update::the_slash_menu_moves_its_highlight_and_enter_accepts_it` | ✅ |
-| CM-M6 | `thinking_candidates` 的 description 丢掉 wire 值与 `● current` | `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level` | ✅ |
+| CM-M6 | `thinking_candidates` 的 description 丢掉 wire 值，或 `current` 不按等级设置 | `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level` | ✅ |
 
 6/6 抓住。
 ## trust-Esc：Esc 不得信任（2026-10-14）
@@ -1746,6 +1746,22 @@ Base：本片 HEAD（`oc/thin-think`）· 就地变异，每个变异先把文�
 2/2 抓住。测试正文**不带**结尾换行，所以 `line_count` 走镜像分支而不是 `has_blank_edge` 的 layout
 兜底（第一版带了结尾换行，TH7 没抓住：兜底直接返回 layout 的长度，绕过镜像）。
 
+## thin ④ × `write`：`write` 正文按行编号的 diff（ADR 0028，2026-10-16）
+
+Base：本片 HEAD（`oc/write-diff`）· 就地变异（改 `tools.rs`），每个变异前把文件复制到
+`.radian/scratch/mut/tools.rs.orig`，跑完用**不带 `-p`** 的 `cp` 还原（mtime 落回当前）并 `cmp`
+逐字节确认；结束 `git status --short` 只剩本片自己的改动。每个变异用
+`cargo test -p radian-tui [--lib|--test card|--test diff] --locked --no-fail-fast -- <test>`。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| W4 | 行号从 1 起 | `write_body` 的 `number: Some(index as u64 + 1)` → `Some(index as u64)` | `tools::tests::a_write_body_numbers_every_content_line_as_an_addition`、`card::a_new_file_write_numbers_each_content_line`、`diff::a_write_body_numbers_the_content_and_copies_it_without_the_gutter` | ✅ |
+| W5 | 覆盖时头部写 `+M −N` | `diff_meta` 的 `write` 分支丢掉 `previous_lines`（`Some(removed) => …` → `Some(_) => "+{added}"`） | `card::an_overwrite_write_head_shows_the_removed_count` | ✅ |
+| W6 | `write` 行的符号是合成的（正文就是 content，无符号列） | `write_body` 两处 `signed: false` → `true`（首字符被当成 diff 符号吃掉） | `card::a_new_file_write_numbers_each_content_line`、`diff::a_write_body_numbers_the_content_and_copies_it_without_the_gutter` | ✅ |
+
+3/3 抓住。W6 复现本片之前的形状（`write` 的正文直接就是 content、没有符号与行号）：变异后
+`diff_line` 把每个内容行的首字符当作 diff 符号，行变成 `1 o ne`，编号与复制都不对。W4/W6 在旧代码上
+必失败——旧 `write` 的 renderer body 是 `plain_body`，`write_body` 当时并不存在，没有任何行号。
 ## Slice ⑦: thin snapshots, the hand-test list and the mutation list (2026-10-16)
 
 Base `1d58517` (the slice's own tests/README) · mutations applied in place by
@@ -1768,3 +1784,35 @@ restored to a different byte.
 8/8 caught, no misses and no equivalent mutants. Each mutation is a real behaviour change (the
 script asserts its anchor, so a `cargo fmt` shift or a no-op patch fails loudly rather than
 passing as "caught" — the U3/U4 trap); the restoring `cmp` is the guard that nothing leaked.
+
+## pulse-slow: the breath's period 1.4 s -> 2.0 s and 12 -> 16 samples
+
+Worktree `.radian-worktrees/pulse-slow`, branch `oc/pulse-slow`. In-place mutation: `cp` the file
+to `.radian/scratch/spinner.rs.fixed` first, then a `python3` patch replaces the const line (with
+an `assert` that the anchor occurs once and `assert old in s`, so a no-op patch fails loudly), the
+suite runs `cargo test -p radian-tui --lib --locked --no-fail-fast`, and finally the file is
+restored with a plain `cp` (no `-p`, so the mtime is "now" and cargo rebuilds) and `cmp` reports it
+byte-identical (`git status --short` empty).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| PS-M1 | `PULSE_PERIOD` 2_000 -> 1_400 (the period back to the old value, samples left at 16) | `spinner::tests::the_breath_walks_one_sine_period_in_sixteen_steps` (the pinned `2_000 ms`), `spinner::tests::a_pulse_that_cannot_interpolate_keeps_the_two_colour_switch` (one 87.5 ms step is outside the `100..130` ms assertion), `cli::tests::the_breath_redraws_once_per_step_and_only_when_a_spinner_is_visible` (the two-colour switch counts 6 frames over the now 2.8 s window, not the asserted 8) | ✅ (3 FAILED) |
+
+1/1 caught. The three different tests fail for three different reasons — the pinned constant, the
+step length, and the frame count over two periods — so the slower period is not pinned by a single
+assertion. After the plain-`cp` restore the whole lib suite is green again (272 passed).
+## current-mark: the current menu row carries ` ✓` after its name
+
+Base `01e7b40` (the code and its tests; the docs follow in `c6c0ea0`). In-place mutations: each
+file backed up under `.radian/scratch/`, the mutated source restored with a plain `cp` and
+`cmp`ed byte-for-byte, `git status --short` empty after each one.
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| CMK-1 | the description never carries the marker | `command.rs::thinking_candidates` prefixes the current level's description with `● current · ` and clears `current` | `render::the_theme_model_and_thinking_menus_mark_the_current_row` (no row may contain `current`) | ✅ |
+| CMK-2 | the ` ✓` must not push the description column | `select_list.rs::row_line` drops `used +=` around the `draw_marker` call (the mark is drawn but not counted before the padding) | `select_list::tests::the_current_item_is_marked_after_its_label` (the description columns differ) | ✅ |
+| CMK-3 | a truncated label keeps its ` ✓` | `row_line` truncates the label without reserving the mark (`used + marker_width + 1` → `used + 1`) and passes `label_column` to `draw_marker` | `select_list::tests::a_long_current_label_is_truncated_before_its_mark` (the mark is gone) | ✅ |
+
+3/3 caught. CMK-1 also fails `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level`;
+CMK-2 and CMK-3 fail only their `select_list` test. The mark is new behaviour, so these are its
+first mutations.

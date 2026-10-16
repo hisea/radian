@@ -4,8 +4,14 @@
 //! ours to build. [`app::App`] is pure state, [`render`] turns it into a frame, and
 //! [`terminal::TtyGuard`] owns the terminal's modified state.
 
+// The command entry point ([`cli`]) was the `radian` binary; it is a library module now so the
+// `rad` alias can call the same code without a source file belonging to two build targets.
+// `extern crate self` keeps its `radian_tui::…` paths resolving after the move.
+extern crate self as radian_tui;
+
 pub mod app;
 pub mod blocks;
+pub mod cli;
 pub mod clip;
 pub mod command;
 pub mod composer;

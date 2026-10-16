@@ -6,9 +6,9 @@
 //! to.
 //!
 //! Most measurements drive the **public API** only ([`App`], [`render::draw`], the ratatui
-//! `TestBackend`), so the same test runs after an internal refactor of `app.rs`/`main.rs` as
+//! `TestBackend`), so the same test runs after an internal refactor of `app.rs`/`cli.rs` as
 //! long as those names hold. Two things `TestBackend` cannot see go through a real pty
-//! (`libc::openpty`): the idle redraw loop (it lives in `main.rs`) and `--resume` startup.
+//! (`libc::openpty`): the idle redraw loop (it lives in `cli.rs`) and `--resume` startup.
 //!
 //! `TestBackend` measures **our** render cost only; it does not include terminal I/O latency,
 //! the terminal's own parsing, or the compositor. The pty numbers include a real tty write and

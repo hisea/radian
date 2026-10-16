@@ -192,8 +192,9 @@ impl DiffKind {
 }
 
 /// One diff row's data. The number is synthesized (`number` is not part of the entry's text),
-/// while `source` **is**: the copy of a row is the row's own text, the sign and the code,
-/// without the gutter — the rule the entry-text model has always had.
+/// while `source` **is**: the copy of a row is the row's own text — the sign and the code for a
+/// unified diff, the code alone for `write` (whose entry text is the file's content) — without
+/// the gutter, the rule the entry-text model has always had.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffRow {
     /// The 1-based line to draw right-aligned in the 4-cell gutter (`diff_line_number`).
@@ -201,12 +202,18 @@ pub struct DiffRow {
     /// (an older journal entry, an MCP tool's text).
     pub number: Option<u64>,
     pub kind: DiffKind,
-    /// The row's bytes in the entry's display text: the sign, then the code.
+    /// The row's bytes in the entry's display text: the sign, then the code for a unified
+    /// diff (`signed`), the code alone for a row whose sign is synthesized (`write`).
     pub source: Range<usize>,
     /// The language the code highlights with — the file's suffix through
     /// [`crate::highlight::language_for_path`] — or `None` when the path names no language we
     /// highlight (the code then draws unhighlighted).
     pub lang: Option<&'static str>,
+    /// Whether `source` begins with the row's sign character. A unified diff's own text carries
+    /// the sign column (`patch`, `git_diff`); `write`'s entry text is the file's content with
+    /// no signs, so its sign is synthesized and `source` is the code only (ADR 0028
+    /// decision 5).
+    pub signed: bool,
 }
 
 /// The role one **piece** of a diff row renders with. A diff row carries three at once — the
@@ -351,7 +358,7 @@ pub fn renderer_for(name: &str) -> ToolRender {
         },
         "write" => ToolRender {
             head: write_head,
-            body: plain_body,
+            body: write_body,
             compact: false,
         },
         "git_diff" => ToolRender {
@@ -761,6 +768,42 @@ fn write_head(card: &ToolCard, _text: &str) -> String {
     string_field(&card.arguments, "path").unwrap_or_else(|| "<path>".into())
 }
 
+/// `write`'s body (ADR 0028): the content it wrote, one `Added` diff row
+/// per line, numbered from 1. A `write` is a whole-file replacement with no hunk to compare, so
+/// every row is an addition, and the entry's text — the content itself — carries no sign: the
+/// `+` and the line number are synthesized (drawn, never copied). The language comes from the
+/// call's path, like `patch`.
+fn write_body(card: &ToolCard, text: &str) -> Vec<BodyLine> {
+    let lang = call_path(card)
+        .as_deref()
+        .and_then(crate::highlight::language_for_path);
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        let stripped = line.strip_suffix('\n').unwrap_or(line);
+        let source = offset..offset + stripped.len();
+        offset += line.len();
+        out.push(BodyLine::Diff(DiffRow {
+            number: Some(index as u64 + 1),
+            kind: DiffKind::Added,
+            source,
+            lang,
+            signed: false,
+        }));
+    }
+    // `split_inclusive` yields nothing for an empty write: one empty row, like a code block.
+    if out.is_empty() {
+        out.push(BodyLine::Diff(DiffRow {
+            number: Some(1),
+            kind: DiffKind::Added,
+            source: 0..0,
+            lang,
+            signed: false,
+        }));
+    }
+    out
+}
+
 /// `git_diff`: the file count and the added/removed line counts, parsed from the diff text
 /// (`git_diff` reports no structured counts, so they stay in the title).
 fn git_diff_head(_card: &ToolCard, text: &str) -> String {
@@ -944,6 +987,7 @@ fn diff_body(card: &ToolCard, text: &str) -> Vec<BodyLine> {
                     kind,
                     source,
                     lang,
+                    signed: true,
                 }));
             }
             // Outside a hunk, or a row with no sign at all: the row's whole line takes its
@@ -1827,6 +1871,30 @@ mod tests {
         // Every other tool keeps its own result text.
         let read = card("read", json!({"path": "a"}));
         assert_eq!(result_display_text(&read, "the file"), "the file");
+    }
+
+    /// `write`'s body (ADR 0028): every content line is an `Added` row,
+    /// numbered from 1, with the call path's language, and the sign is synthesized (the entry
+    /// text is the content, with no sign of its own).
+    #[test]
+    fn a_write_body_numbers_every_content_line_as_an_addition() {
+        let write = card("write", json!({"path": "src/a.rs", "content": "l1\nl2\n"}));
+        let text = result_display_text(&write, "wrote 6 bytes to src/a.rs");
+        assert_eq!(text, "l1\nl2\n");
+        let body = write_body(&write, &text);
+        assert_eq!(
+            diff_rows(&body),
+            vec![(Some(1), DiffKind::Added), (Some(2), DiffKind::Added)]
+        );
+        assert!(
+            body.iter().all(
+                |line| matches!(line, BodyLine::Diff(row) if !row.signed && row.lang == Some("rs"))
+            ),
+            "{body:?}"
+        );
+        // An empty write is one empty row, like a code block (the count mirror needs it).
+        let empty = card("write", json!({"path": "a", "content": ""}));
+        assert_eq!(write_body(&empty, "").len(), 1);
     }
 
     #[test]

@@ -25,7 +25,7 @@ App::update(input: Input) -> UpdateResult { dirty: bool, effects: Vec<Effect> }
   `Quit`, `AnswerApproval`/`AbandonApproval`, `ExpandMentions` (the `@` expansion reads
   files), `CompleteMention` (reads a directory), `RunMemoryCommand`, `Compact`, `Session`
   (`/export`, `/fork`), and `OpenPicker` (reads the session index for `/sessions`).
-- The event loop in `main.rs` runs the effects and feeds their results back as inputs. A key
+- The event loop in `cli.rs` runs the effects and feeds their results back as inputs. A key
   press is resolved by `App::key_input` (the keymap plus the current layer) and `App::on_key`
   is the thin wrapper around it.
 - **`update` never** does I/O, touches the runtime, reads a file or a directory, or calls the
@@ -67,7 +67,7 @@ projection handle, now reached through `app.session.projection`.
 
 ### The loop: one channel, three promises (ADR 0023 U2)
 
-`main.rs`'s loop blocks on **one** `std::sync::mpsc` channel of `UiEvent`:
+`cli.rs`'s loop blocks on **one** `std::sync::mpsc` channel of `UiEvent`:
 
 | Source | Event | Promise |
 |---|---|---|
@@ -522,8 +522,9 @@ fuzzy match (a subsequence, prefix matches first): `/mem` → `/memory`, then `/
 `forget`. The menu highlights its first row; `Up`/`Down` move the highlight, `Tab` or `Enter`
 accepts the highlighted row (it completes the line, it never runs it) and `Esc` closes the menu
 keeping the line. `/mem fo` completes both levels at once. The `/theme`, `/model` and
-`/thinking` rows mark the value in effect with `● current`, and each `/thinking` row names the
-wire value it sends (`enabled:4096` for Anthropic, `high` for openai-compatible).
+`/thinking` rows mark the value in effect with ` ✓` right after its name (ASCII ` *`), and each
+`/thinking` row names the wire value it sends (`enabled:4096` for Anthropic, `high` for
+openai-compatible).
 
 The levels are data (`command.rs`): the command names from their `/help` lines, `/memory`'s
 subcommands, the record ids of `show`/`edit`/`archive`/`restore`/`forget`/`confirm` (listed by
@@ -888,7 +889,7 @@ throwaway terminal, not your working one.
    `"braille"`, then `glyphs = "ascii"`. *Expect*: the input rule shows
    `── <spinner>  Working ` (two spaces) while the turn runs, a plain rule when idle; `pulse`
    is a `⏺` that only changes color — it **breathes** between the accent and the dim level
-   (1.4 s, 12 steps, a sine, so it slows at both ends) when the terminal has truecolor
+   (2.0 s, 16 steps, a sine, so it slows at both ends) when the terminal has truecolor
    (`COLORTERM=truecolor`/`24bit`); without it (and for `glyphs = "ascii"`) it is the two-color
    switch every 500 ms; `arc`/`quadrant`/`braille` turn every 250 ms;
    `ascii` is `*` (pulse) or `| / - \`. *Look*: **does the spinner render in your terminal
