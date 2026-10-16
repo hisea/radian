@@ -421,7 +421,7 @@ impl BodyLine {
             end: offset,
             text: text.clone(),
             code: true,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             // `hint: true` so `strip_edge_blanks` never treats a fence as a blank edge line.
