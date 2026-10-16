@@ -8,7 +8,7 @@ Prints a whole TUI frame with ANSI truecolor in radian's built-in dark palette:
                compaction rule, task notices and a warning
   menu         the `/` command menu above the input (--menu on)
   modal        an approval panel or the Ask panel in place of the input (--modal ...)
-  input        the status row and the input line (--input rule | bar)
+  input        the status row and the input line (--input thin | bar | lines)
   footer       the three `deck` rows (ADR 0027)
   panel        the orchestration board on the right (--panel on): agents, queue, pending,
                a mini dashboard (ADR 0030 O10's three built-in panels, folded into one)
@@ -24,7 +24,7 @@ The rules the proposal keeps everywhere (that is the point: one set, every compo
   * exactly one blank row between blocks (ADR 0035 V1), none inside a block
 
 Switches: --width N (default 110) --panel on|off --menu on|off --modal none|approval|ask
-          --input rule|bar --marks on|off --numbers on|off --today (the current look, for
+          --input thin|bar|lines --marks on|off --numbers on|off --today (the current look, for
           the transcript only; reconstructed from origin/main 5836485)
           --theme dark|light|<pi theme>  (radian's built-ins, or one of the 19 bundled pi
           themes such as tokyo-night, catppuccin-latte, gruvbox-dark; a pi theme paints its
@@ -401,15 +401,23 @@ def ask_modal(b, opt):
 
 def input_rows(b, opt):
     status = [("◜", VIOLET, "", None), ("  Working · 12s", DIM, "", None), (" · esc to interrupt", DIM, "", None)]
+    prompt = [("❯ ", VIOLET, "", None), ("explain the inbox lanes", TEXT, "", None), ("▏", TEXT, "", None)]
     if opt.input == "bar":
+        # today's default (ADR 0035 V3 / rev 3 / rev 4): a status row, then a band with the `▌` rail
         b.line([("  ", TEXT, "", None)] + status)
         b.halfpad(True, USER_BG, rail=ACCENT_BAR)
-        b.line([("▌ ", ACCENT_BAR, "", None), ("explain the inbox lanes", TEXT, "", None), ("▏", TEXT, "", None)], row_bg=USER_BG)
+        b.line([("▌ ", ACCENT_BAR, "", None)] + prompt[1:], row_bg=USER_BG)
         b.halfpad(False, USER_BG, rail=ACCENT_BAR)
         return
-    # rule style: the status sits on a thin rule above the prompt, nothing below
+    if opt.input == "lines":
+        # today's `lines` style: a rule above (the spinner on it, ADR 0027) and a rule below
+        b.line([("── ", DIM, "", None)] + status + [(" " + "─" * b.cols, DIM, "", None)])
+        b.line(prompt)
+        b.line([("─" * b.cols, DIM, "", None)])
+        return
+    # thin: one rule above carrying the status, the prompt, nothing below
     b.line([("── ", DIM, "", None)] + status + [(" " + "─" * b.cols, DIM, "", None)])
-    b.line([("❯ ", VIOLET, "", None), ("explain the inbox lanes", TEXT, "", None), ("▏", TEXT, "", None)])
+    b.line(prompt)
 
 
 def footer_rows(b, opt):
@@ -459,7 +467,7 @@ def main():
     ap.add_argument("--panel", choices=["on", "off"], default="on")
     ap.add_argument("--menu", choices=["on", "off"], default="off")
     ap.add_argument("--modal", choices=["none", "approval", "ask"], default="none")
-    ap.add_argument("--input", choices=["rule", "bar"], default="rule")
+    ap.add_argument("--input", choices=["thin", "bar", "lines"], default="thin")
     ap.add_argument("--marks", choices=["on", "off"], default="off")
     ap.add_argument("--numbers", choices=["on", "off"], default="on")
     ap.add_argument("--today", action="store_true")

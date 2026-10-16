@@ -5,7 +5,7 @@
 - **opencode** 2.0.30（anomalyco/opencode，commit f40dc43，`packages/tui/src/`），TUI 由 **OpenTUI v0.5.17** 绘制（`packages/tui/package.json` 走 catalog，根 `package.json:57` 锁 `0.5.17`；本文的 OpenTUI 行号按 tag `v0.5.17`）。
 - **dsh-TUI**＠截图；源码 `ccch1mneyyy/dsh-TUI` 0.15.0，commit 6e9f07d，Ink/chalk 实现；本机装的 `@deepseek-ai/dsh` 0.2.0-rc.2 不含这套终端界面）。owner 的定位：**只作参考，radian 要有自己统一的一套，有自己的特色**。
 - **radian**：origin/main 5836485（已含 ADR 0028、ADR 0035/5、ADR 0024）。「radian 今天」一列的渲染文本是**按代码复原**的，不是 TestBackend 的无头输出（时间所限，见文末「未做」）。
-- **原型**：`docs/research/2026-10-16-render-prototype/render-prototype.sh`，在终端里打印「今天 → 提案」两段，每个有争议的点是一个开关（`--help`）。owner 的口味（2026-10-15 晚）：「简洁、干净、留白一致、有点文艺范」，所以原型默认是 **`--style rule`**（dsh 式：无底色、第一列标记、细线），`--style band` 是 opencode 式（底色卡片、`▌` 竖条）。
+- **原型**：`docs/research/2026-10-16-render-prototype/render-prototype.sh`，在终端里打印「今天 → 提案」两段，每个有争议的点是一个开关（`--help`）。owner 的口味（2026-10-15 晚）：「简洁、干净、留白一致、有点文艺范」，所以原型默认是 **`--style thin`**（dsh 式：无底色、第一列标记、细线），`--style band` 是 opencode 式（底色卡片、`▌` 竖条）。
 
 ## 一、助手 Markdown
 
@@ -18,7 +18,7 @@
 | 表格 | `tableOptions={{style:"grid", cellPaddingX:1}}`（`routes/session/message-parts.tsx:188`）；grid = 外框 + 每两行之间横线 + 列间竖线（OpenTUI `TextTable.ts` 边框布局：`innerHorizontal` 在有边框且行数 >1 时为真）；**表头单元格用 `markup.heading` 样式**（`Markdown.ts:1390-1410`）；单元格内行内样式保留 | 全框线、每两行之间横线（ADR 0035）；表头无样式；**单元格把 piece 文本拼成纯字符串，行内样式丢失**（`blocks.rs:3047-3176`，`cell_text` 在 `:3055`）；框线角色 `md_hr` | 表头加粗强调色（`--header bold`）；单元格保留行内样式（代码、加粗） | 无（0028 R2 的实施细节） |
 | 块间距 | 标题、列表、独立块前后 marginTop 1；段落之间只在源码有空行时空一行（`Markdown.ts:1318-1326`） | 块与块之间恰好 1 行空白（`blocks.rs:2347-2352`，ADR 0035 V1） | 不改 | 无 |
 | 正文左边距 | `paddingLeft={3}`（`message-parts.tsx:181`） | 2 格标记列，助手为空白（`render.rs:197-201`） | 保持 2 格；回复的第一行在标记列放 `●`（dsh，`--marker dot`） | 0028 修订 1 规则 2 保持 2 格，`●` 是标记列内容，不冲突 |
-| 代码块 | `<code>` 块，围栏隐藏（`highlights.scm` `fenced_code_block_delimiter … conceal`） | 围栏行显示、dim；与正文同列（ADR 0035 表） | rule 风格：顶线带语言 `┌─ rust ───`、左侧细线 `│`、短底线 `└──`（dsh-TUI 顶层代码块走 `CodeBlockFrame` 组件，截图可见；嵌套代码块只有 muted 的 ```` ```lang ```` 开栏行、2 格缩进、**没有闭栏**，`src/terminal-utils/markdown.ts:341-349`） | **反转 0035 修订 1 表「显示围栏行」**；进 0035 修订 6 |
+| 代码块 | `<code>` 块，围栏隐藏（`highlights.scm` `fenced_code_block_delimiter … conceal`） | 围栏行显示、dim；与正文同列（ADR 0035 表） | thin 风格：顶线带语言 `┌─ rust ───`、左侧细线 `│`、短底线 `└──`（dsh-TUI 顶层代码块走 `CodeBlockFrame` 组件，截图可见；嵌套代码块只有 muted 的 ```` ```lang ```` 开栏行、2 格缩进、**没有闭栏**，`src/terminal-utils/markdown.ts:341-349`） | **反转 0035 修订 1 表「显示围栏行」**；进 0035 修订 6 |
 
 ## 二、展开的 thinking
 
@@ -33,9 +33,9 @@
 
 | 元素 | opencode | radian 今天 | 提案 | 冲突 |
 |---|---|---|---|---|
-| 容器 | `BlockTool`（`routes/session/index.tsx:2726-2800`）：左边 `┃` 用终端底色、背景 `background.raised`、上下各 1 行、左 2 格、`gap 1`；标签 `← Edit` + 路径，muted（`:3297`） | ADR 0028：无方框、中性底色、半格留白、head `✓ patch 路径`、末行 `⟦0.03s⟧` | rule 风格：**无底色**，一行 `• patch 路径 · 0.03s`（工具名蓝，dsh 的 `Bash(...)`），正文在左侧细线 `│` 下；band 风格：保持修订 4 的卡片 | **rule 风格反转 0028 修订 4 决定 1-4（底色、半格留白）**；要 0028 修订 5 |
+| 容器 | `BlockTool`（`routes/session/index.tsx:2726-2800`）：左边 `┃` 用终端底色、背景 `background.raised`、上下各 1 行、左 2 格、`gap 1`；标签 `← Edit` + 路径，muted（`:3297`） | ADR 0028：无方框、中性底色、半格留白、head `✓ patch 路径`、末行 `⟦0.03s⟧` | thin 风格：**无底色**，一行 `• patch 路径 · 0.03s`（工具名蓝，dsh 的 `Bash(...)`），正文在左侧细线 `│` 下；band 风格：保持修订 4 的卡片 | **thin 风格反转 0028 修订 4 决定 1-4（底色、半格留白）**；要 0028 修订 5 |
 | 行号 gutter | OpenTUI `Diff.ts:530-586`（unified）：一列行号，`+` 与上下文行用新文件行号，`-` 用旧文件行号；行号后 ` +`/` -`；`showLineNumbers` 默认 true（`:132`） | 无行号；`+`/`-` 在行首，角色 `diff_added`/`diff_removed` 前景色（`tools.rs:320-343`，`:611`；`theme.rs:726-729`） | 加行号 gutter（`--numbers on`），格式 `  120 + ` | 无 ADR 冲突；**前提**：`patch` 的结果文本要带起始行号。`tools.rs:607-609` 说 patch 的条目文本是「合成的 `-old/+new`」，是否带 `@@` 行**未核实**（`radian-coding/src/patch.rs` 未读）；`git_diff` 本来就有 `@@` |
-| 行底色 | `+` 行 `diff.background.added #20303b`、`-` 行 `removed #37222c`、上下文 `context`（= raised）；gutter 另一组更深的底色（`lineNumber.background.added #1b2b34` / `removed #2d1f26`）；符号色 `highlight.added #b8db87` / `removed #e26a75`（`opencode.json` `base.diff`，`index.tsx:3306-3315` 传入） | 只有前景色 | rule 风格默认**关**（只前景色，和 dsh 一样干净）；band 风格开（`--tint`） | 开的话要新角色 `diff_added_bg`/`diff_removed_bg`（ADR 0029）；pi 主题文件有没有对应键**未核实** |
+| 行底色 | `+` 行 `diff.background.added #20303b`、`-` 行 `removed #37222c`、上下文 `context`（= raised）；gutter 另一组更深的底色（`lineNumber.background.added #1b2b34` / `removed #2d1f26`）；符号色 `highlight.added #b8db87` / `removed #e26a75`（`opencode.json` `base.diff`，`index.tsx:3306-3315` 传入） | 只有前景色 | thin 风格默认**关**（只前景色，和 dsh 一样干净）；band 风格开（`--tint`） | 开的话要新角色 `diff_added_bg`/`diff_removed_bg`（ADR 0029）；pi 主题文件有没有对应键**未核实** |
 | 语法高亮 | diff 正文按路径后缀高亮（`index.tsx:3302-3304` `filetype(path())`） | 无 | 复用 `highlight.rs`，按路径后缀（`--numbers on` 时原型里是粗糙的示意） | 无 |
 | hunk 头 | 第一个 hunk 的 `@@` 不显示，之后的 hunk 之间显示一条 `hunkHeader` 色的横条（`component/patch-diff.tsx:117-125`） | 每个 `@@` 行显示，`diff_hunk` = VIOLET | 保留显示，改 dim（结构信息，不该抢眼） | 无 |
 | 宽屏 | 宽度 >120 自动 split 视图（`index.tsx:3283-3288`） | 无 | 不做 | 无 |
@@ -49,7 +49,7 @@
 
 ## 五、给 owner 的决定（每条一个原型开关；推荐在前）
 
-1. **整体风格：`rule`（细线、无底色）还是 `band`（底色卡片）。** 推荐 `rule`。代价：ADR 0028（昨天刚定的中性底色卡片、半格留白）要改成修订 5：工具卡片 = 一行 head + 左侧细线正文；用户消息 = `❯ 文本`（强调色，无带）。bar 输入框的 `▌` 与半格留白（0035 修订 3/4）是否也改成细线，一并定；不定就只有输入框带底色，和 dsh 截图一致。
+1. **整体风格：`thin`（细线、无底色）还是 `band`（底色卡片）。** 推荐 `thin`。代价：ADR 0028（昨天刚定的中性底色卡片、半格留白）要改成修订 5：工具卡片 = 一行 head + 左侧细线正文；用户消息 = `❯ 文本`（强调色，无带）。bar 输入框的 `▌` 与半格留白（0035 修订 3/4）是否也改成细线，一并定；不定就只有输入框带底色，和 dsh 截图一致。
 2. **标题隐藏 `#`。** 推荐隐藏：一级强调色加粗下划线、二级强调色加粗、三级起只加粗（三档，不照 dsh 做六档）。反转 0035 决定 3 → 0035 修订 6。
 3. **回复第一行 `●`。** 推荐开；标记列 2 格不变。
 4. **加粗颜色。** 推荐不上色（TEXT 加粗）。

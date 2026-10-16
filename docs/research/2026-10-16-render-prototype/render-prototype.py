@@ -12,7 +12,7 @@ Three looks:
 
   --today          what radian draws now, reconstructed from `blocks.rs` / `render.rs` /
                    `tools.rs` at origin/main 5836485 (after ADR 0028, ADR 0035)
-  --style rule     the proposal: no background bands; columns 1-2 are the marker column and
+  --style thin     the proposal: thin rules, no background bands; columns 1-2 are the marker column and
                    hold the marker OR a thin rail (thinking, code, diff); every body row
                    starts at column 3 (default)
   --style band     the proposal, opencode-like: raised-background cards and a `▌` rail
@@ -516,7 +516,7 @@ def main():
     ap.add_argument("--width", type=int, default=80)
     ap.add_argument("--today", action="store_true", help="only today's look")
     ap.add_argument("--new", action="store_true", help="only the proposal")
-    ap.add_argument("--style", choices=["rule", "band"], default="rule")
+    ap.add_argument("--style", choices=["thin", "band"], default="thin")
     ap.add_argument("--marks", choices=["on", "off"], default="off")
     ap.add_argument("--marker", choices=["dot", "blank"], default="dot")
     ap.add_argument("--bold", choices=["plain", "warm"], default="plain")
