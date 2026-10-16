@@ -60,6 +60,11 @@ pub struct CompactionInfo {
     pub revision: Option<u64>,
     pub tokens_before: Option<u64>,
     pub tokens_after: Option<u64>,
+    /// ADR 0018, decision 3: live only — `true` when the summary path failed and the
+    /// deterministic fallback committed instead. A resume replay does not carry it.
+    pub deterministic: bool,
+    /// The messages the deterministic fallback dropped; live only, like the numbers above.
+    pub dropped: Option<u64>,
 }
 
 impl CompactionInfo {
@@ -78,8 +83,14 @@ impl CompactionInfo {
     }
 
     /// The folded one-liner, omitting whatever is not known: `── context compacted (rev 3,
-    /// 12000 → 4000) ──`, `── context compacted (rev 3) ──` or `── context compacted ──`.
+    /// 12000 → 4000) ──`, `── context compacted (rev 3) ──` or `── context compacted ──`. A
+    /// deterministic compaction (ADR 0018, decision 3) says "without a summary".
     pub fn line(&self) -> String {
+        let label = if self.deterministic {
+            "context compacted without a summary"
+        } else {
+            "context compacted"
+        };
         let mut parts: Vec<String> = Vec::new();
         if let Some(revision) = self.revision {
             parts.push(format!("rev {revision}"));
@@ -87,10 +98,13 @@ impl CompactionInfo {
         if let (Some(before), Some(after)) = (self.tokens_before, self.tokens_after) {
             parts.push(format!("{before} → {after}"));
         }
+        if let Some(dropped) = self.dropped {
+            parts.push(format!("{dropped} dropped"));
+        }
         if parts.is_empty() {
-            "── context compacted ──".to_string()
+            format!("── {label} ──")
         } else {
-            format!("── context compacted ({}) ──", parts.join(", "))
+            format!("── {label} ({}) ──", parts.join(", "))
         }
     }
 }
@@ -1367,7 +1381,9 @@ pub struct SessionView {
     last_click: Option<LastClick>,
     /// The revision and token counts of the compaction that just finished (ADR 0028 R5): the
     /// summary message that follows takes them for its one-liner. Empty on a resume replay.
-    pending_compaction: Option<(u64, u64, u64)>,
+    /// The last `CompactionFinished`'s numbers, handed to the summary message that follows it
+    /// (ADR 0018). `(revision, tokens_before, tokens_after, deterministic, dropped)`.
+    pending_compaction: Option<(u64, u64, u64, bool, u64)>,
 }
 
 /// The whole TUI's state: the global chrome every session view shares, plus exactly one
@@ -4486,17 +4502,31 @@ impl App {
                 revision,
                 tokens_before,
                 tokens_after,
+                deterministic,
+                dropped,
                 ..
             } => {
                 self.session.note = None;
                 self.session.compacting = false;
-                self.session.entries.push(Entry::new(
-                    EntryKind::Notice,
-                    format!("context compacted ({tokens_before} → {tokens_after} tokens)"),
-                ));
+                // ADR 0018, decision 3: a deterministic fallback says so and names
+                // how many messages it dropped; a model summary keeps the token line.
+                let text = if *deterministic {
+                    format!("compacted without a summary ({dropped} dropped)")
+                } else {
+                    format!("context compacted ({tokens_before} → {tokens_after} tokens)")
+                };
+                self.session
+                    .entries
+                    .push(Entry::new(EntryKind::Notice, text));
                 // The summary message arrives right after this event (ADR 0018): the numbers
                 // are handed to it, since the journaled message does not carry them.
-                self.session.pending_compaction = Some((*revision, *tokens_before, *tokens_after));
+                self.session.pending_compaction = Some((
+                    *revision,
+                    *tokens_before,
+                    *tokens_after,
+                    *deterministic,
+                    *dropped,
+                ));
             }
             AgentEvent::CompactionFailed { reason } => {
                 self.session.note = None;
@@ -4608,11 +4638,16 @@ impl App {
                     // The live path knows the revision and the token counts from the
                     // `CompactionFinished` event that preceded this message; a resume replay
                     // does not, and omits them.
-                    if let Some((revision, before, after)) = self.session.pending_compaction.take()
+                    if let Some((revision, before, after, deterministic, dropped)) =
+                        self.session.pending_compaction.take()
                     {
                         info.revision = Some(revision);
                         info.tokens_before = Some(before);
                         info.tokens_after = Some(after);
+                        info.deterministic = deterministic;
+                        // `dropped` is 0 for a model summary; only a deterministic compaction
+                        // names it (ADR 0018, decision 3).
+                        info.dropped = deterministic.then_some(dropped);
                     }
                     let mut entry = Entry::new(EntryKind::Compaction, info.display_text());
                     entry.compaction = Some(Box::new(info));
@@ -5080,6 +5115,8 @@ mod tests {
             tokens_before: 100,
             tokens_after: 40,
             below_target: false,
+            deterministic: false,
+            dropped: 0,
         });
         assert_eq!(app.spinner_status(), Some("Working"));
 
@@ -5104,6 +5141,54 @@ mod tests {
             reason: "already fits".to_string(),
         });
         assert_eq!(app.spinner_status(), Some("Working"));
+    }
+
+    /// ADR 0018, decision 3: a deterministic compaction shows "compacted without a
+    /// summary (N dropped)", and the summary entry's folded line says "without a summary".
+    #[test]
+    fn a_deterministic_compaction_is_shown_without_a_summary() {
+        let mut app = App::new("m", "s");
+        app.apply_event(&AgentEvent::CompactionFinished {
+            revision: 2,
+            tokens_before: 900,
+            tokens_after: 120,
+            below_target: false,
+            deterministic: true,
+            dropped: 7,
+        });
+        assert!(
+            app.session
+                .entries
+                .iter()
+                .any(|entry| entry.text == "compacted without a summary (7 dropped)"),
+            "the notice names the count: {:?}",
+            app.session
+                .entries
+                .iter()
+                .map(|e| &e.text)
+                .collect::<Vec<_>>()
+        );
+
+        let message = agent_core::compaction::compacted_history(
+            "[context compacted without a summary: 7 messages dropped, 0 tool results truncated]",
+            &[],
+            &[],
+        )
+        .unwrap();
+        app.push_message(&message[0]);
+        let info = app
+            .session
+            .entries
+            .iter()
+            .find_map(|entry| entry.compaction.as_deref())
+            .expect("the summary entry");
+        assert!(info.deterministic);
+        assert_eq!(info.dropped, Some(7));
+        assert!(
+            info.line().contains("without a summary") && info.line().contains("7 dropped"),
+            "{}",
+            info.line()
+        );
     }
 
     /// ADR 0017: a retry names the attempt on the status line and discards the

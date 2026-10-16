@@ -2148,6 +2148,8 @@ fn a_compaction_summary_is_one_line_that_expands() {
         tokens_before: 12_000,
         tokens_after: 4_000,
         below_target: false,
+        deterministic: false,
+        dropped: 0,
     });
     live.apply_event(&AgentEvent::TranscriptAppended {
         index: 0,
