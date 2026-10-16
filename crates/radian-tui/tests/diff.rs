@@ -384,14 +384,11 @@ fn a_write_body_numbers_the_content_and_copies_it_without_the_gutter() {
         .iter()
         .enumerate()
         .map(|(index, entry)| {
-            radian_tui::blocks::block_gap(entries.get(index.wrapping_sub(1)), entry)
+            radian_tui::blocks::gap_at(entries, index)
                 + render::display_lines(entry, modes, width).len()
         })
         .sum::<usize>()
-        + radian_tui::blocks::block_gap(
-            entries.get(result_index.wrapping_sub(1)),
-            &entries[result_index],
-        );
+        + radian_tui::blocks::gap_at(entries, result_index);
     let anchor = locate(entries, modes, width, base, 0).expect("the first row's start");
     let head =
         locate(entries, modes, width, base + body.len() - 1, 200).expect("the last row's end");
