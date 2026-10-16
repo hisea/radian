@@ -20,8 +20,11 @@
 //!   is deliberately no `approve` (ADR 0030 R9).
 //! - `task_status`, `list_tasks` — the read-only observer (ADR 0023 U6).
 //! - `cancel_task`, `remove_task`.
+//! - `integrate_task { id }` — the host-side merge of one task branch into the lead's integration
+//!   branch (ADR 0030); it is not a control-port verb (decision 10).
 //!
-//! `spawn_task` and `remove_task` are `Exclusive`; the rest are `Shared` (ADR 0030 O4).
+//! `spawn_task`, `remove_task` and `integrate_task` are `Exclusive`; the rest are `Shared`
+//! (ADR 0030 O4).
 //!
 //! **Part b1 (this slice):** `spawn_task` past `max_tasks` (default 4) queues the task FIFO with
 //! a queue position (ADR 0030 O4/O8); a queued task waits through the queue in `wait_task`/
@@ -29,7 +32,7 @@
 //! position. The registry also owns the process heavy gate and the `stalled` watch; those are the
 //! registry's, not a tool.
 //!
-//! **What is not here (part b2):** `send_agent`, `steer_task` and the verify runner.
+//! **What is not here (later slices):** `steer_task`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -1488,7 +1491,10 @@ mod tests {
         let names: Vec<&str> = specs.iter().map(|spec| spec.name.as_str()).collect();
         assert_eq!(names, LEAD_TOOL_NAMES);
         for spec in &specs {
-            let expected = if matches!(spec.name.as_str(), "spawn_task" | "remove_task") {
+            let expected = if matches!(
+                spec.name.as_str(),
+                "spawn_task" | "remove_task" | "integrate_task"
+            ) {
                 ToolConcurrency::Exclusive
             } else {
                 ToolConcurrency::Shared
