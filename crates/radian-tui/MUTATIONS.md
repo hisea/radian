@@ -1087,7 +1087,7 @@ Base `8789877` · 一次性 worktree `/tmp/radian-cm-mut`，每个变异跑完 `
 | CM-M3 | `effective_thinking_level` 直接返回请求值（footer 显示配置值而非钳制值） | `command::the_footer_thinking_level_is_the_clamped_one` | ✅ |
 | CM-M4 | 去掉 `completion_set` 里的高亮重置（打字后高亮不回到第一行） | `update::typing_filters_the_slash_menu_and_resets_the_highlight` | ✅ |
 | CM-M5 | `accept_slash_candidate` 固定取第 0 行（忽略高亮） | `update::the_slash_menu_moves_its_highlight_and_enter_accepts_it` | ✅ |
-| CM-M6 | `thinking_candidates` 的 description 丢掉 wire 值与 `● current` | `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level` | ✅ |
+| CM-M6 | `thinking_candidates` 的 description 丢掉 wire 值，或 `current` 不按等级设置 | `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level` | ✅ |
 
 6/6 抓住。
 ## trust-Esc：Esc 不得信任（2026-10-14）
@@ -1784,3 +1784,19 @@ restored to a different byte.
 8/8 caught, no misses and no equivalent mutants. Each mutation is a real behaviour change (the
 script asserts its anchor, so a `cargo fmt` shift or a no-op patch fails loudly rather than
 passing as "caught" — the U3/U4 trap); the restoring `cmp` is the guard that nothing leaked.
+
+## current-mark: the current menu row carries ` ✓` after its name
+
+Base `01e7b40` (the code and its tests; the docs follow in `c6c0ea0`). In-place mutations: each
+file backed up under `.radian/scratch/`, the mutated source restored with a plain `cp` and
+`cmp`ed byte-for-byte, `git status --short` empty after each one.
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| CMK-1 | the description never carries the marker | `command.rs::thinking_candidates` prefixes the current level's description with `● current · ` and clears `current` | `render::the_theme_model_and_thinking_menus_mark_the_current_row` (no row may contain `current`) | ✅ |
+| CMK-2 | the ` ✓` must not push the description column | `select_list.rs::row_line` drops `used +=` around the `draw_marker` call (the mark is drawn but not counted before the padding) | `select_list::tests::the_current_item_is_marked_after_its_label` (the description columns differ) | ✅ |
+| CMK-3 | a truncated label keeps its ` ✓` | `row_line` truncates the label without reserving the mark (`used + marker_width + 1` → `used + 1`) and passes `label_column` to `draw_marker` | `select_list::tests::a_long_current_label_is_truncated_before_its_mark` (the mark is gone) | ✅ |
+
+3/3 caught. CMK-1 also fails `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level`;
+CMK-2 and CMK-3 fail only their `select_list` test. The mark is new behaviour, so these are its
+first mutations.
