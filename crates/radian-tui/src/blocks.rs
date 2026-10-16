@@ -574,10 +574,12 @@ pub(crate) enum DiagramOutcome {
 }
 
 /// Renders `source` at `width` (ADR 0028 R8): a pure function of the two, so the cache key is
-/// exactly that pair. No partial diagram: `render_spans` either returns every line or an error.
+/// exactly that pair. No partial diagram: the renderer either returns every line or an error.
+/// `radian_host::mermaid::render_spans` is the one entry point (revision 6): Radian's own
+/// layered flowchart layout first, the vendored renderer for everything else.
 pub(crate) fn diagram_for(source: &str, width: usize) -> DiagramOutcome {
     let t = std::time::Instant::now();
-    let rendered = codex_mermaid::render_spans(source, width);
+    let rendered = radian_host::mermaid::render_spans(source, width);
     radian_session::trace::took("first-frame/mermaid", t);
     match rendered {
         Ok(lines) => DiagramOutcome::Rendered(
