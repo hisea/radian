@@ -884,3 +884,33 @@ Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 每个变异就地�
 那一半）没有任何测试能区分——`<session>` 段里不写 mode，重算与不重算的字节相同（只有 date/git 这类
 活读在两次计算之间变了才有差别，本片的用例都在同一个工作区、同一天、不是 git 仓库）。保留这行是因为
 ADR 0036 明说 `/mode` 与 `/model` 一样重算 0b；它是那个规则的实现，不是可测行为。
+
+## orch-s4：task 会话生命周期与 Q8（ADR 0030 切片 4，2026-10-16）
+
+工作树 `.radian-worktrees/orch-s4`。每个变异就地施加，用 `.radian/scratch/` 里的副本还原，
+`cmp` 证明与副本一致、`git status --short` 只留下新测试文件；每个变异用
+`cargo test -p radian-host --test task <测试> --no-fail-fast`（git_commit 的两条用 `--test git_commit`）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T-S4-A | `task_sandbox_policy` 把 `network` 留在 `true`（沙箱仍联网） | `the_task_sandbox_turns_the_network_off`（真实外连成功） | ✅ grabbed (rc=101) |
+| T-S4-B | `open_session` 不再调 `with_allowed_branch`（task 会话可提交到任意分支） | `a_task_git_commit_is_limited_to_its_branch`（模型在 `other` 分支上调 `git_commit`，本应拒绝） | ✅ grabbed (rc=101) |
+| T-S4-C | `end_of_task_commit` 恒返回 `Ok(None)`（收尾提交不再提交，工作树留脏） | `the_end_of_task_commit_cleans_the_worktree` | ✅ grabbed (rc=101) |
+| T-S4-D | task 的会话根用 lead 工作区而不是 worktree | `a_task_opens_in_a_worktree_on_its_branch_with_a_task_parent`（`SessionCreated.workspace` 与 worktree 不符） | ✅ grabbed (rc=101) |
+| T-S4-E | `commit()` 的 `main`/`master` 拒绝对所有会话重新生效（忽略 `refuse_main`） | `a_general_session_commits_on_main_through_the_session`（general 会话经模型工具在 `main` 提交） | ✅ grabbed (rc=101) |
+| T-S4-F | task 会话的 `with_refuse_main(false)`（task agent 可在 `main` 提交） | `a_task_agent_session_refuses_a_commit_on_main`（task_agent=true、无 allowed_branch、在 `main` 上） | ✅ grabbed (rc=101) |
+| T-S4-G | 收尾提交把 shared 任务也算进（finisher 拿到 lead 工作区与可解析的 pin） | `a_shared_task_writes_no_end_commit`（lead 工作区有未提交改动，错误提交会把用户改动提交掉） | ✅ grabbed (rc=101) |
+
+7/7 全抓。
+
+**T-S4-F 与 allowed_branch 的关系（如实记录）**：registry 起出来的 task 会话总有 `allowed_branch =
+Some("radian/<id>")`，那种情况下 `refuse_main=false` 与 `true` **不可区分**（两者都拒绝 `main`，只是
+错误码不同）。所以抓住这条变异必须用 registry 不产生的组合：`open_session(task_agent=true,
+allowed_branch=None)` 在 `main` 上，此时只有 `refuse_main` 在起作用（对应 Q8 的「task agent 一律
+拒绝 main/protected」）。`a_task_git_commit_is_limited_to_its_branch` 覆盖的是另一条：allowed_branch
+这条线本身。
+
+**T-S4-G 的时序**：正的收尾提交（`the_turn_end_commits_the_worktree`）轮询提交出现；反的
+（`a_shared_task_writes_no_end_commit`）先等任务 journal 里出现 `TurnFinished`，再给错误的 finisher
+一个有界的窗口（2 s）去提交，然后断言 lead 工作区未变——纯 `requests()` 计数会在 finisher 运行前
+就通过（假绿）。

@@ -153,6 +153,8 @@ async fn open(
             profile: Profile::safe(&workspace).unwrap(),
             access_builder: None,
             task_agent: options.task_agent,
+            parent: None,
+            allowed_branch: None,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
@@ -168,6 +170,7 @@ async fn open(
         },
         HostBindings {
             approvals: radian_host::ApprovalRouting::Direct(Arc::new(NoopApprover)),
+            shared_queue: None,
             audit: Arc::new(|_journal| {
                 Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
             }),
