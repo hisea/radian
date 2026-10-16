@@ -1517,3 +1517,23 @@ Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个�
 12/12 抓住。ASK2 的两个变异在同一条用例里：待答一行、答完同一条目成块且只有一个块。ASK4-M1/M3 是
 owner 反馈的两个按键问题的回归钉：←/→ 切题（无字段时）与底边提示跟随聚焦状态。`check-glyph-coverage.py`
 的结果（☐/☑ 缺 SF Mono / JetBrains Mono Nerd / Cascadia Code）写在 ADR 0024 的「实施补充」里。
+
+## markdown-③：标题不画 `#`、加粗不上色、代码块线框、表格表头与单元格行内样式（ADR 0035/6/7/8、ADR 0028；2026-10-16）
+
+Base `origin/main` `28f4703`（worktree `.radian-worktrees/thin-md`，branch `oc/thin-md`）。每个变异就地改完
+`blocks.rs` / `render.rs` 后跑 `cargo test -p radian-tui --locked --no-fail-fast --lib <名字>`
+与 `--test markdown <名字>`，再从 `.radian/scratch/blocks.rs.orig`、`.radian/scratch/render.rs.orig`
+的副本写回并用 `cmp` 确认逐字节相同（每个变异都打印 `RESTORED IDENTICAL`）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MD-M1 | 标题又画回 `# ` 前缀（`md_blocks` 的 `Heading` 分支恢复合成前缀） | `blocks::tests::headings_have_no_hash_and_three_roles`、`markdown::headings_show_no_hash_and_level_attributes` | ✅ 两条都 FAILED |
+| MD-M2 | 加粗又借 `md_heading` 的颜色（`MdStyle::Bold` 回到 `theme.md_heading.patch(BOLD)`） | `markdown::bold_uses_the_text_role` | ✅ FAILED |
+| MD-M3 | 代码块又画围栏行（`code_frame_top` 顶线改回原文 ```lang） | `markdown::a_code_block_draws_a_frame`、`blocks::tests::a_code_block_draws_an_open_frame` | ✅ 两条都 FAILED |
+| MD-M4 | 表格单元格丢掉行内样式（单元格又用一段平文本拼平） | `markdown::table_header_and_body_cells_keep_their_roles` | ✅ FAILED（行内代码格不是 `md_code` 色） |
+| MD-M5 | 代码块的行数记账不含线框（`code_line_count` 的 `frame` 置 0） | `markdown::line_count_matches_the_layout` | ✅ FAILED |
+
+5/5 抓住。MD-M5 起初没有抓住：`line_count_matches_the_layout` 的正文以 `\n` 收尾，`has_blank_edge`
+为真，`line_count` 于是走「整段排版后取行数」的退路，压根没碰 `code_line_count`。去掉正文末尾的换行
+（并保留 `code_line_matches_the_layout` 里那块代码）后，该用例走逐块计数，变异即失败；这一处测试修正
+作为第 5 个提交（`2dfc4e1`）落盘，不改前面的四个提交。
