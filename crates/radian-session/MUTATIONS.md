@@ -262,3 +262,23 @@ Base: `a4a00bf` · 在本任务工作树内逐条施加，改前把 `writer.rs`/
 6/6 抓住。S1-M1/M2 是 brief 要求的「relation 掉线」「旧 parent 被拒」两条；S1-M3 是
 「policy（即 PermissionResolved 事件）被标 critical」；S1-M4/M4b 是「有 policy 时省略」与
 「None 时也序列化」两面。S1-M3b 是额外加的：两个新事件同样不能标 critical。
+
+## ADR 0040 组提交（2026-10-16）
+
+Base: `d2d0f7f` · worktree `.radian-worktrees/group-commit` · `writer.rs` 先 `cp` 到
+`/tmp/gc-mut/writer.rs.bak`，每条变异施加后跑测试，再 `cp` 还原；结束时
+`diff -q` 与副本一致、`git status --short` 为空。测试用 `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| GC1 | `must_sync` 去掉 `ToolExecutionStarted` | `a_crash_between_sync_points_keeps_the_invariant`（在工具已执行、其文件存在而 `ToolExecutionStarted` 不在盘上时断言失败，`radian-runtime/tests/group_commit.rs:196`）、`a_step_fsyncs_only_at_its_sync_points`，以及 lib 单测 `the_sync_set_is_exactly_the_boundaries` | ✅ failed |
+| GC2 | `must_sync` 去掉 `TurnFinished` | `a_sync_point_makes_every_earlier_record_durable`（`TurnFinished` 一例）、`non_sync_records_ride_the_next_sync_point` | ✅ failed |
+| GC3 | `must_sync` 去掉 `TranscriptReplacementCommitted` | `a_sync_point_makes_every_earlier_record_durable`（提交一例） | ✅ failed |
+| GC4 | `seq` 计数器在写入成功之前前进（把 `next_seq = seq + 1` 挪到写入前） | `a_failed_write_does_not_burn_a_seq`（`next_seq` 在注入的失败后仍前进） | ✅ failed |
+
+4/4 抓住。GC1 是 brief 要求的「工具派发前不 fsync」——它**不是**只靠参考回合的 fsync 计数
+断言（那会让变异因"少了一次 fsync"这种元断言而失败），而是靠故障注入的不变式：在**每一条记录
+边界**注入崩溃（是"每两个同步点之间"的超集），只要工具跑过、其副作用文件存在，其
+`ToolExecutionStarted` 就必须在盘上。GC4 的变异必须放在失败接缝**之前**才被触发（接缝在
+`write_locked` 顶部返回 `Err`），所以忠实变异是"在写入前就前进计数器"而不是"在 `write_all`
+前一步前进"。

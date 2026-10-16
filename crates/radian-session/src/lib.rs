@@ -4,9 +4,10 @@
 //!
 //! - [`SessionJournal`] is a [`agent_core::TranscriptJournal`]: every record the core
 //!   commits is written to one `session_id` file — seven-field envelope, strict `seq` from 0,
-//!   LF-terminated lines, and an fsync before `append` returns. One file allows exactly one
-//!   writer (kernel `flock`), and opening an existing file for append first truncates any
-//!   torn tail (ADR 0006 §3.2).
+//!   LF-terminated lines, and an fsync at the ADR 0040 sync points (a group of records becomes
+//!   durable together, at a boundary or before an external side effect, not on every append).
+//!   One file allows exactly one writer (kernel `flock`), and opening an existing file for
+//!   append first truncates any torn tail (ADR 0006 §3.2).
 //! - [`Session`] is the streaming reader implementing the unknown-content policy of the ADR
 //!   (§7): unknown optional fields are ignored, unknown non-critical events are skipped and
 //!   reported, unknown critical events refuse the whole file, higher `schema_version` files
