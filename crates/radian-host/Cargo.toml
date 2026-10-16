@@ -41,8 +41,9 @@ radian-session = { path = "../radian-session" }
 # same `chrono` the session writer already uses to format them, so no new crate enters the tree.
 chrono = "0.4"
 # The model catalog fetches over HTTP (ADR 0018); the same client the adapters use, so no new
-# dependency is introduced.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy"] }
+# dependency is introduced. `json`/`form`: the ChatGPT OAuth token and device-code endpoints
+# (ADR 0026 slice ①) are JSON and form-encoded respectively.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy", "json", "form"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -53,11 +54,22 @@ libc = "0.2"
 # The pending-request queue (ADR 0023 U7) needs `oneshot`/`watch`, and `Approver::decide`
 # returns a `BoxFuture`.
 futures-util.workspace = true
-tokio = { workspace = true }
+# `net`/`io-util`: the ChatGPT OAuth login's one-shot loopback callback listener (ADR 0026
+# revision 1 slice ①) is production code, not a test fixture, so these two features are on
+# unconditionally (the mock-server crates only need them under `testing`).
+tokio = { workspace = true, features = ["net", "io-util"] }
 # The configuration file (ADR 0008) is TOML. `toml` reads it; `toml_edit` is the one place
 # that writes it back, format-preserving (`/theme`, ADR 0008 revision).
 toml = "0.8"
 toml_edit = "0.22"
+# SHA-256 for the OAuth PKCE challenge (ADR 0026 slice ①); the same crate and
+# version `agent-extensions` already depends on, so no new major version enters the tree.
+sha2 = "0.10"
+# A cryptographically secure RNG for the PKCE verifier and the CSRF `state` (hand-rolling a
+# random source for these is exactly the kind of "inventing crypto" AGENTS.md warns against);
+# already resolved transitively (rustls' `ring`), this makes it a direct, auditable dependency
+# at the version already in the lockfile.
+getrandom = "0.3"
 
 [dev-dependencies]
 # The crate's own tests always build with the worktree-root test seam, so a plain `cargo test`

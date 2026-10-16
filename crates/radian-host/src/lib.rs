@@ -35,6 +35,7 @@ pub mod mermaid;
 mod mermaid_layout;
 mod model;
 pub mod named;
+pub mod oauth_chatgpt;
 pub mod observer;
 pub mod opencode_go;
 mod output;
@@ -61,9 +62,9 @@ pub use agents::{
 };
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
-    AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, RADIAN_BASE_URL, ResolvedKey, auth_path,
-    list as list_auth, remove as remove_auth, resolve_key, resolve_note, resolved_keys,
-    upsert_api_key as upsert_auth_api_key,
+    AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, OAuthEntry, RADIAN_BASE_URL, ResolvedKey,
+    auth_path, list as list_auth, remove as remove_auth, resolve_key, resolve_note,
+    resolved_keys, upsert_api_key as upsert_auth_api_key,
 };
 /// The machine's hostname (ADR 0027 `host`), read once at startup. `HOSTNAME` is
 /// set by most shells (and by BSD's `login`); the `hostname` command is the portable fallback.
@@ -139,6 +140,13 @@ pub use model::{
 pub use named::{
     NamedBuilder, NamedContext, NamedError, NamedRecord, NamedRegistry, NamedSeams, SendOutcome,
     known_definitions as known_agent_definitions,
+};
+pub use oauth_chatgpt::{
+    BrowserLogin, DeviceStart, DevicePoll, Endpoints as OAuthEndpoints, ListenerHandle,
+    OAuthError, PROVIDER_ID as CHATGPT_PROVIDER_ID, RefreshError as OAuthRefreshError,
+    TokenResponse as OAuthTokenResponse, device_start as oauth_device_start,
+    ensure_fresh as oauth_ensure_fresh, ensure_fresh_in as oauth_ensure_fresh_in,
+    poll_device_until_done as oauth_poll_device_until_done, store_token as oauth_store_token,
 };
 pub use observer::{JournalObserver, SessionObserver};
 pub use opencode_go::{
