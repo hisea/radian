@@ -2032,6 +2032,7 @@ fn run(
     };
     mark("startup-set");
     let lead_tasks = session.lead_tasks().cloned();
+    let lead_named = session.named_agents().cloned();
     let session = Arc::new(session);
     let facade: Arc<dyn radian_host::SessionFacade> =
         Arc::clone(&session) as Arc<dyn radian_host::SessionFacade>;
@@ -2048,6 +2049,7 @@ fn run(
             host: &session_host,
             memory: &memory_service,
             lead_tasks,
+            lead_named,
         },
         (provider_name.clone(), model_name.clone()),
         Arc::clone(&route_price),
@@ -2801,6 +2803,9 @@ struct LoopContext<'a> {
     host: &'a SessionHost,
     /// The lead's task registry (ADR 0030 slice 6b2), when this session mounted the lead tools.
     lead_tasks: Option<Arc<radian_host::TaskRegistry>>,
+    /// The lead's named-agent registry (ADR 0030 O12), when this session has one; `/send` reads
+    /// it.
+    lead_named: Option<Arc<radian_host::NamedRegistry>>,
     tx: &'a Sender<UiEvent>,
     /// The pending queue (ADR 0023 U7): the loop reads the head and the count when it is told
     /// something changed, and the facade answers it.
@@ -3341,6 +3346,64 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
+            // ADR 0030 O12: `/send` lists the known definitions, or sends to a named agent
+            // (source `User`). The reply arrives later as `AgentReplied`, when the turn ends.
+            Effect::Send(request) => {
+                let Some(named) = self.lead_named.clone() else {
+                    self.send(AppInput::SessionDone(vec![
+                        "this session has no named agents".to_owned(),
+                    ]));
+                    return Ok(());
+                };
+                match request {
+                    radian_tui::command::SendRequest::List => {
+                        let names = radian_host::known_agent_definitions();
+                        self.send(AppInput::SessionDone(vec![format!(
+                            "known definitions: {}",
+                            names.join(", ")
+                        )]));
+                    }
+                    radian_tui::command::SendRequest::Send { name, text } => {
+                        match self.runtime.block_on(named.send(
+                            &name,
+                            text,
+                            agent_core::InputSource::User,
+                        )) {
+                            Ok(outcome) => {
+                                self.send(AppInput::AgentSent {
+                                    name: name.clone(),
+                                    created: outcome.created,
+                                });
+                                // Wait for this send's turn to end, then show the first lines of
+                                // the reply. The task is dropped when the loop exits.
+                                let record = named.get(&name);
+                                let tx = self.tx.clone();
+                                let turn = outcome.turn;
+                                self.runtime.spawn(async move {
+                                    let summary = match record {
+                                        Some(record) => record
+                                            .await_turn_end(turn)
+                                            .await
+                                            .map(|reply| bound_reply(&reply))
+                                            .unwrap_or_default(),
+                                        None => String::new(),
+                                    };
+                                    let _ = tx.send(UiEvent::Command(AppInput::AgentReplied {
+                                        name,
+                                        summary,
+                                    }));
+                                });
+                            }
+                            Err(error) => {
+                                self.send(AppInput::SessionDone(vec![format!(
+                                    "cannot send to `{name}`: {error}"
+                                )]));
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
             // ADR 0031 T3: apply the startup trust choice through the facade (it writes
             // `trust.json` and journals `ProjectTrustChanged`), then show the new state.
             Effect::SetTrust { choice } => {
@@ -3595,7 +3658,27 @@ enum Phase<'a> {
         /// The lead's task registry (ADR 0030 slice 6b2), when this session mounted the lead
         /// tools; `/tasks` and the status-bar count read it.
         lead_tasks: Option<Arc<radian_host::TaskRegistry>>,
+        /// The lead's named-agent registry (ADR 0030 O12), when this session has one; `/send`
+        /// reads it.
+        lead_named: Option<Arc<radian_host::NamedRegistry>>,
     },
+}
+
+/// Bounds a named agent's reply for the `/send` notice (ADR 0030 O12): the first 5 lines and at
+/// most 500 characters, with a marker when cut. The full observation view is a later slice.
+fn bound_reply(text: &str) -> String {
+    let mut out = text.lines().take(5).collect::<Vec<_>>().join("\n");
+    let more_lines = text.lines().count() > 5;
+    let truncated = out.chars().count() > 500;
+    if truncated {
+        out = out.chars().take(500).collect();
+    }
+    if more_lines {
+        out.push_str("\n… [more lines]");
+    } else if truncated {
+        out.push_str("\n… [truncated]");
+    }
+    out
 }
 
 /// Handles one event in the pre-session `--pick` phase. Returns whether the frame is dirty.
@@ -3705,6 +3788,7 @@ fn ui_loop(
             host,
             memory,
             lead_tasks,
+            lead_named,
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
             route_price: Arc::clone(&route_price),
@@ -3718,6 +3802,7 @@ fn ui_loop(
             memory,
             host,
             lead_tasks,
+            lead_named,
             tx,
             queue: session.pending(),
             signal: None,

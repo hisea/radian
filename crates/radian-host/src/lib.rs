@@ -133,8 +133,8 @@ pub use model::{
     resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref, route_replays_reasoning,
 };
 pub use named::{
-    NamedBuilder, NamedContext, NamedError, NamedNotifier, NamedRecord, NamedRegistry, NamedSeams,
-    SendOutcome, known_definitions as known_agent_definitions,
+    NamedBuilder, NamedContext, NamedError, NamedRecord, NamedRegistry, NamedSeams, SendOutcome,
+    known_definitions as known_agent_definitions,
 };
 pub use observer::{JournalObserver, SessionObserver};
 pub use opencode_go::{

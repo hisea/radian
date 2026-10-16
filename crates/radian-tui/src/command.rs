@@ -37,6 +37,8 @@ pub const HELP: &str = "\
 /jobs [kill <id|all>] list this session's background jobs, or stop one/all (ADR 0037)
 /tasks [cancel|kill <id>]
                       list the task agents, or cancel/kill one (ADR 0030)
+/send [<name> <text>] send a task to a named agent, creating it on first use; no argument
+                      lists the known definitions (ADR 0030 O12)
 /login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
@@ -79,6 +81,16 @@ pub enum TasksRequest {
     /// `/tasks kill <id>`: close the task's session and abandon its pending requests, keeping
     /// its worktree (ADR 0030 O12).
     Kill(String),
+}
+
+/// What `/send` asked for (ADR 0030 O12, slice 7b). The named-agent registry lives in the host,
+/// so the command is an effect the loop runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendRequest {
+    /// `/send`: list the known agent definitions (`~/.radian/agents/*.md` plus the built-ins).
+    List,
+    /// `/send <name> <text>`: send `text` to the named agent, creating it on first use.
+    Send { name: String, text: String },
 }
 
 /// What one submitted `/…` line meant. Parsing only: running the command is the loop's job
@@ -132,6 +144,10 @@ pub enum Outcome {
     /// `/tasks`: list the live task agents, or cancel/kill one (ADR 0030 O10/O12). The registry
     /// lives in the host, so the loop runs it and answers with [`Outcome::Notices`]-style lines.
     Tasks(TasksRequest),
+    /// `/send <name> <text>` (ADR 0030 O12, slice 7b): send a task to a named agent, creating it
+    /// from its definition on first use; `/send` with no argument lists the known definitions.
+    /// The named-agent registry lives in the host, so the loop runs it.
+    Send(SendRequest),
     /// A user's `!`/`!!` shell command (ADR 0033). The command string runs in the sandbox
     /// (the tier's shell); `exclude_from_context` (`!!`) keeps its output out of the model's
     /// context. Execution is the loop's effect.
@@ -314,6 +330,11 @@ pub fn tree() -> &'static [Command] {
             name: "tasks",
             description: "list the task agents, or cancel/kill one",
             levels: &[tasks_level, tasks_level],
+        },
+        Command {
+            name: "send",
+            description: "send a task to a named agent, creating it on first use",
+            levels: &[send_level, send_level],
         },
     ];
     TREE
@@ -574,6 +595,11 @@ fn tasks_level(typed: &[&str], _partial: &str) -> Level {
     } else {
         Level::Free
     }
+}
+
+/// `/send`: the agent name and the text are free (the definitions live in the host).
+fn send_level(_typed: &[&str], _partial: &str) -> Level {
+    Level::Free
 }
 
 /// `/export`: the format, then the path (with `--force` offered as a candidate).
@@ -989,6 +1015,7 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/skills") => Outcome::Notices(vec!["usage: /skills (no arguments)".to_owned()]),
         Some("/jobs") => jobs_request(&tokens[1..]),
         Some("/tasks") => tasks_request(&tokens[1..]),
+        Some("/send") => send_request(&tokens[1..]),
         Some(other) if other.starts_with("/skill:") => skill_command(other, line),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
@@ -1019,6 +1046,19 @@ fn tasks_request(args: &[String]) -> Outcome {
             Outcome::Tasks(TasksRequest::Kill(id.clone()))
         }
         _ => Outcome::Notices(vec!["usage: /tasks [cancel|kill <id>]".to_owned()]),
+    }
+}
+
+/// `/send [<name> <text>]` (ADR 0030 O12, slice 7b). No argument lists the known definitions; a
+/// name needs at least one word of text. The text is the remaining tokens joined with spaces.
+fn send_request(args: &[String]) -> Outcome {
+    match args {
+        [] => Outcome::Send(SendRequest::List),
+        [name, rest @ ..] if !rest.is_empty() => Outcome::Send(SendRequest::Send {
+            name: name.clone(),
+            text: rest.join(" "),
+        }),
+        _ => Outcome::Notices(vec!["usage: /send <name> <text>".to_owned()]),
     }
 }
 

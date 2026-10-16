@@ -99,10 +99,6 @@ pub struct NamedContext<'a> {
 pub type NamedBuilder =
     Arc<dyn Fn(&NamedContext<'_>) -> Result<TaskSession, SessionError> + Send + Sync>;
 
-/// A callback the registry calls on each named turn boundary (when a turn ends), so the host's
-/// live view can show the reply as a notice (ADR 0030 O10's shape, for named agents).
-pub type NamedNotifier = Arc<dyn Fn(&str) + Send + Sync>;
-
 /// A test seam run at the start of a named session's creation, on the runtime thread.
 pub type NamedCreateHook = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
@@ -173,15 +169,13 @@ impl NamedRecord {
     }
 }
 
-/// One named agent's turn tracking: `running`/`last_outcome`/the `watch` a waiter uses, plus the
-/// host's notice callback. It has no end-of-task commit (that is a task rule, ADR 0030 O2).
+/// One named agent's turn tracking: `running`/`last_outcome`/the `watch` a waiter uses. It has
+/// no end-of-task commit (that is a task rule, ADR 0030 O2).
 #[derive(Default)]
 struct NamedTurns {
     running: AtomicBool,
     last_outcome: Mutex<Option<TurnOutcome>>,
     turns: watch::Sender<u64>,
-    notifier: Option<NamedNotifier>,
-    name: String,
 }
 
 impl NamedTurns {
@@ -195,14 +189,12 @@ impl NamedTurns {
                 self.running.store(false, Ordering::SeqCst);
                 *self.last_outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(*outcome);
                 self.signal();
-                self.notify();
             }
             RuntimeEvent::TurnFailed { .. } => {
                 self.running.store(false, Ordering::SeqCst);
                 *self.last_outcome.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(TurnOutcome::Failed);
                 self.signal();
-                self.notify();
             }
             _ => {}
         }
@@ -211,12 +203,6 @@ impl NamedTurns {
     fn signal(&self) {
         self.turns
             .send_modify(|version| *version = version.wrapping_add(1));
-    }
-
-    fn notify(&self) {
-        if let Some(notifier) = &self.notifier {
-            notifier(&self.name);
-        }
     }
 }
 
@@ -245,7 +231,6 @@ pub struct NamedRegistry {
     /// The lead's journal: `NamedAgentStarted` lands here (ADR 0030 O12).
     lead_journal: Arc<SessionJournal>,
     builder: NamedBuilder,
-    notifier: Option<NamedNotifier>,
     seams: NamedSeams,
     /// Serializes first-use creation, so two concurrent sends cannot open two sessions for one
     /// name. Held across `open_session`; not held on the reuse path.
@@ -270,7 +255,6 @@ impl NamedRegistry {
             lead_queue,
             lead_journal,
             builder,
-            notifier: None,
             seams: NamedSeams::default(),
             creating: AsyncMutex::new(()),
             agents: Mutex::new(BTreeMap::new()),
@@ -280,12 +264,6 @@ impl NamedRegistry {
     /// Installs the test seams.
     pub fn with_seams(mut self, seams: NamedSeams) -> Self {
         self.seams = seams;
-        self
-    }
-
-    /// Installs the host's turn-boundary callback (the TUI's reply notice).
-    pub fn with_notifier(mut self, notifier: NamedNotifier) -> Self {
-        self.notifier = Some(notifier);
         self
     }
 
@@ -462,8 +440,6 @@ impl NamedRegistry {
             running: AtomicBool::new(false),
             last_outcome: Mutex::new(None),
             turns: watch::channel(0u64).0,
-            notifier: self.notifier.clone(),
-            name: name.to_owned(),
         });
         let inner = Arc::clone(&bindings.runtime_events);
         bindings.runtime_events = Arc::new(NamedRuntimeEvents {

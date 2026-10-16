@@ -624,6 +624,8 @@ fn is_user_input(input: &Input) -> bool {
         | Input::ModelChecked { .. }
         | Input::SwitchCompacted { .. }
         | Input::SessionDone(_)
+        | Input::AgentSent { .. }
+        | Input::AgentReplied { .. }
         | Input::TrustResolved(_)
         | Input::AccessApplied { .. }
         | Input::ModeApplied { .. }
@@ -826,6 +828,12 @@ pub enum Input {
     },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
+    /// A `/send`'s input was accepted by the named agent (ADR 0030 O12): the "sent to `<name>`"
+    /// notice. `created` distinguishes a first use from a reuse.
+    AgentSent { name: String, created: bool },
+    /// A named agent's turn ended (ADR 0030 O12): the bounded first lines of its last assistant
+    /// text, shown as a notice. `summary` is empty when it produced no text.
+    AgentReplied { name: String, summary: String },
     /// A `/skill:<name> [args]` expansion finished (ADR 0025 S3): the message text to send, or
     /// a notice (an unknown skill or a file that can no longer be read). `steer` mirrors the
     /// turn state when the command was submitted.
@@ -1043,6 +1051,10 @@ pub enum Effect {
     /// `/tasks` (ADR 0030 O10/O12): list the live task agents, or cancel/kill one. The loop runs
     /// it (the task registry lives in the host) and answers with [`Input::SessionDone`].
     Tasks(command::TasksRequest),
+    /// `/send` (ADR 0030 O12): list the known definitions, or send to a named agent. The loop
+    /// runs it (the named registry lives in the host) and answers with [`Input::AgentSent`] and
+    /// then [`Input::AgentReplied`].
+    Send(command::SendRequest),
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
@@ -2925,6 +2937,22 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            // ADR 0030 O12: `/send`'s two notices. The input was accepted by the named agent.
+            Input::AgentSent { name, created } => {
+                let verb = if created { "created" } else { "sent to" };
+                self.push_notice(format!("{verb} `{name}`"));
+                UpdateResult::dirty()
+            }
+            // The named agent's turn ended: show the first lines of its last assistant text.
+            Input::AgentReplied { name, summary } => {
+                let text = if summary.trim().is_empty() {
+                    format!("`{name}` finished with no text")
+                } else {
+                    format!("`{name}` replied:\n{summary}")
+                };
+                self.push_notice(text);
+                UpdateResult::dirty()
+            }
             Input::TrustMove(delta) => {
                 if let Some(Modal::Trust(wizard)) =
                     self.layers.iter_mut().rev().find_map(|layer| match layer {
@@ -4405,6 +4433,7 @@ impl App {
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
             command::Outcome::Jobs(request) => UpdateResult::effect(Effect::Jobs(request)),
             command::Outcome::Tasks(request) => UpdateResult::effect(Effect::Tasks(request)),
+            command::Outcome::Send(request) => UpdateResult::effect(Effect::Send(request)),
             command::Outcome::Message => UpdateResult::none(),
         }
     }
