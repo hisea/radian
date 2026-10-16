@@ -913,6 +913,11 @@ fn a_driver_in_core_attributes_file_never_runs() {
 /// marker filter, over and over, while commits run. Whatever the interleaving, the filter never
 /// runs — staging is plumbing, and the commit's own index refresh carries the no-filter
 /// overrides, so there is no check-then-use window. No sleeps.
+///
+/// The flipped file is excluded from the commit's path set (`.git/info/exclude`): the flip still
+/// races the attribute read for `a.txt`, but it can no longer race `git hash-object`, which would
+/// otherwise read `.gitattributes` mid-rewrite and fail with "short read while indexing" — a
+/// `git_failed`, not the filter refusal under test.
 #[test]
 fn a_gitattributes_flip_during_commit_never_runs_a_filter() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -923,6 +928,21 @@ fn a_gitattributes_flip_during_commit_never_runs_a_filter() {
     marker_filter(&dir, "flip", "process", &marker);
     change(&dir);
 
+    // The flipper rewrites `.gitattributes` in place, and `check-attr` reads attributes from the
+    // worktree whether or not the file is tracked. Excluding it from the commit's path set keeps
+    // it out of `git ls-files --others --exclude-standard`, so the plumbing never hashes a file
+    // that is being rewritten: without this, `git hash-object` reads `.gitattributes` between the
+    // flipper's truncate and its write and fails with "short read while indexing" (`git_failed`),
+    // which is not the refusal this test is about. The flip still races the attribute read for
+    // `a.txt`, which is the property pinned below.
+    {
+        use std::io::Write;
+        let mut exclude = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join(".git/info/exclude"))
+            .expect("the repository's exclude file");
+        writeln!(exclude, ".gitattributes").expect("exclude .gitattributes from the commit");
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let attrs = dir.join(".gitattributes");
     let flipper = {

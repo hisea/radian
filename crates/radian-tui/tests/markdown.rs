@@ -10,6 +10,7 @@ use radian_tui::tools::{DisplayModes, ToolDisplay, ToolFold};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Modifier;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -67,7 +68,9 @@ fn style_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::s
             line.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
         }
         if let Some(col) = line.find(needle) {
-            let x = area.left() + col as u16;
+            // `col` is a byte offset; the buffer column is the display width of the prefix
+            // (the code frame's rail is multi-byte, e.g. `│`).
+            let x = area.left() + unicode_width::UnicodeWidthStr::width(&line[..col]) as u16;
             return buffer.cell((x, y)).map(|c| c.style());
         }
     }
@@ -109,6 +112,97 @@ fn the_block_kinds_and_inline_roles_render() {
     // share a foreground (they differ by weight); the code role is a different hue.
     assert_eq!(heading.fg, link.fg, "heading and link are both the accent");
     assert_ne!(heading.fg, code.fg, "the code role is a different hue");
+}
+
+/// ADR 0035: no `#` is drawn; level 1 underlines the heading role,
+/// level 2 is the heading role (bold), level 3 and below are the text role (bold).
+#[test]
+fn headings_show_no_hash_and_level_attributes() {
+    let mut app = App::new("m", "s");
+    assistant(&mut app, "# One\n\n## Two\n\n### Three\n");
+    let terminal = render(&mut app, 60, 20);
+    let text = screen(&terminal);
+    assert!(!text.contains('#'), "no `#` on any heading row:\n{text}");
+    let one = style_of(&terminal, "One").expect("level 1");
+    assert!(
+        one.add_modifier.contains(Modifier::UNDERLINED),
+        "level 1 is underlined: {one:?}"
+    );
+    let two = style_of(&terminal, "Two").expect("level 2");
+    assert!(
+        !two.add_modifier.contains(Modifier::UNDERLINED),
+        "level 2 is not underlined: {two:?}"
+    );
+    assert!(
+        two.add_modifier.contains(Modifier::BOLD),
+        "level 2 is bold: {two:?}"
+    );
+    let three = style_of(&terminal, "Three").expect("level 3");
+    assert!(
+        !three.add_modifier.contains(Modifier::UNDERLINED),
+        "level 3 is not underlined: {three:?}"
+    );
+    assert!(
+        three.add_modifier.contains(Modifier::BOLD),
+        "level 3 is bold: {three:?}"
+    );
+}
+
+/// ADR 0035: bold is the text role plus the bold modifier, uncolored
+/// by the heading role. Distinct theme colors make the two roles distinguishable.
+#[test]
+fn bold_uses_the_text_role() {
+    use ratatui::style::Color;
+    let mut app = App::new("m", "s");
+    app.theme.text = ratatui::style::Style::default().fg(Color::Red);
+    app.theme.md_heading = ratatui::style::Style::default().fg(Color::Blue);
+    assistant(&mut app, "A **bold** word.\n");
+    let terminal = render(&mut app, 60, 6);
+    let bold = style_of(&terminal, "bold").expect("the bold run");
+    assert_eq!(
+        bold.fg, app.theme.text.fg,
+        "bold keeps the text role's color, not the heading role's: {bold:?}"
+    );
+    assert!(
+        bold.add_modifier.contains(Modifier::BOLD),
+        "bold is bold: {bold:?}"
+    );
+}
+
+/// ADR 0028 and ADR 0035: a table's header cells
+/// take the heading role and body cells keep their inline styles (inline code stays
+/// `md_code`, plain text stays the text role) instead of flattening every cell to one style.
+#[test]
+fn table_header_and_body_cells_keep_their_roles() {
+    use ratatui::style::Color;
+    let mut app = App::new("m", "s");
+    app.theme.md_heading = ratatui::style::Style::default().fg(Color::Blue);
+    app.theme.md_code = ratatui::style::Style::default().fg(Color::Green);
+    assistant(
+        &mut app,
+        "| Head | b |\n| --- | --- |\n| `code` | plain |\n",
+    );
+    let terminal = render(&mut app, 40, 12);
+    let head = style_of(&terminal, "Head").expect("the header cell");
+    assert_eq!(
+        head.fg, app.theme.md_heading.fg,
+        "the header takes the heading role"
+    );
+    let code = style_of(&terminal, "code").expect("the inline-code cell");
+    assert_eq!(
+        code.fg, app.theme.md_code.fg,
+        "the cell keeps its inline code role"
+    );
+    // The body's plain text keeps the body role, not the heading or code role.
+    let plain = style_of(&terminal, "plain").expect("the body cell");
+    assert_ne!(
+        plain.fg, app.theme.md_heading.fg,
+        "body text is not the heading role"
+    );
+    assert_ne!(
+        plain.fg, app.theme.md_code.fg,
+        "body text is not the code role"
+    );
 }
 
 /// A table draws borders when it fits, wraps a cell that does not, and falls back to the raw
@@ -215,7 +309,7 @@ fn line_count_matches_the_layout() {
     let mut app = App::new("m", "s");
     assistant(
         &mut app,
-        "# Title\n\nA paragraph that is long enough to wrap at a narrow width for sure.\n\n- one\n- two\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+        "# Title\n\nA paragraph that is long enough to wrap at a narrow width for sure.\n\n- one\n- two\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n```rust\nlet x = 1;\n```",
     );
     let entry = &app.session.entries[0];
     let blocks = blocks::parse_blocks(entry.text.as_str());
@@ -657,20 +751,30 @@ fn a_long_ordered_list_item_wraps_in_a_wide_window() {
     }
 }
 
-// ---- ADR 0035: the sample snapshot and the code fence ----
+// ---- ADR 0035: the sample snapshot and the code frame ----
 
-/// A code block shows its fence line (weak) as its title and end.
+/// A code block draws an open frame (ADR 0035): a top line titled with
+/// the language, a rail on the code row, and a bottom line, all in the `frame` role (ADR 0029
+/// revision 2).
 #[test]
-fn a_code_block_shows_its_fence() {
+fn a_code_block_draws_a_frame() {
     let mut app = App::new("m", "s");
     assistant(&mut app, "```rust\nlet x = 1;\n```\n");
     let terminal = render(&mut app, 60, 12);
     let text = screen(&terminal);
-    assert!(text.contains("```rust"), "the opening fence: {text}");
-    assert!(text.contains("let x = 1;"), "{text}");
-    // The fence uses the weak role (dim).
-    let fence = style_of(&terminal, "```rust").expect("the fence");
-    assert_eq!(fence.fg, app.theme.truncation.fg, "the fence is weak");
+    assert!(text.contains("╭─ rust"), "the titled top line:\n{text}");
+    assert!(
+        text.contains("│ let x = 1;"),
+        "the rail and the code:\n{text}"
+    );
+    assert!(text.contains("╰──"), "the bottom line:\n{text}");
+    assert!(!text.contains("```"), "no fence is drawn:\n{text}");
+    // The frame takes the `frame` role (ADR 0029, landed with slice ⓪).
+    let frame = style_of(&terminal, "╭").expect("the frame top line");
+    assert_eq!(
+        frame.fg, app.theme.frame.fg,
+        "the frame is the `frame` role"
+    );
 }
 
 /// The sample Markdown covering every element at 80 and 120 columns, and the ascii glyph set.
@@ -693,7 +797,7 @@ fn the_sample_markdown_snapshot() {
         for needle in [
             // The CJK characters are wide, so the screen model has a cell between them;
             // assert the parts, not the contiguous string.
-            "# ",
+            // ADR 0035: no `#` is drawn on a heading.
             "Heading",
             "标",
             "题",
@@ -709,7 +813,7 @@ fn the_sample_markdown_snapshot() {
             "▏ quoted",
             "引",
             "┌",
-            "```rust",
+            "╭─ rust",
             "let x = 1;",
             "html quote",
         ] {

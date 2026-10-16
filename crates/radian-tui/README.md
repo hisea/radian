@@ -394,57 +394,58 @@ characters (`╭╮╯╰`, `┌┐└┘`, `─│`) are in all six.
   sits at the 67% level, told apart by hue. `mono` uses no color at all (bold/underline/dim
   only). A non-empty `NO_COLOR` environment variable forces `mono`
   (<https://no-color.org>). An unknown theme is ignored with a warning.
-#### Theme files (ADR 0029): any pi theme works as-is
+#### Theme files (ADR 0029): Radian's own TOML format
 
 `tui.theme` accepts any name. The built-ins (`dark`, `light`, `mono`) resolve first; any other
-name is read from `~/.radian/themes/<name>.json` — and that file is **pi's theme JSON, read
-as-is**. Copy a pi theme over and it just works:
+name is read from `~/.radian/themes/<name>.toml`:
 
-```sh
-mkdir -p ~/.radian/themes && cp ~/.pi/agent/themes/kanagawa-wave.json ~/.radian/themes/
+```toml
+name = "tokyo-night"
+appearance = "dark"          # dark | light; picks which built-in the unset roles keep
+
+[vars]                       # optional, reusable colors
+accent = "#7aa2f7"
+
+[roles]
+text = "#c0caf5"             # a bare color is the foreground only
+user = "$accent"             # $name references a [vars] entry (chains allowed)
+selection = { bg = "#283457" }
+frame = { fg = "$accent", dim = true }
 ```
 
-(set `theme = "kanagawa-wave"` in the config; the file's `name` field should match.) Colors
-come in six forms, all supported: `#rgb`/`#rrggbb`, `oklch(L C H)`, `okhsl(H S L)`, a 0–255
-palette index, a `vars` reference (chains allowed), and `""` (the terminal default). With
-truecolor (`COLORTERM` is `truecolor` or `24bit`) colors render as RGB; otherwise each is
-approximated to the nearest 256-color entry, with the same algorithm pi uses.
+The keys are Radian role names (`Role`'s snake_case names, the same set `[tui.colors]` uses); a
+value is a color string or a table `{ fg, bg, bold, italic, dim, underline }`. That shape is
+`[tui.colors]`'s exactly — `radian-host`'s `TuiColorOverride::from_toml` is the one parser.
+Colors: `#rgb`/`#rrggbb`, `oklch(…)`, `okhsl(…)`, a 0–255 palette index, `$var`, and `""` (the
+terminal default). With truecolor (`COLORTERM` is `truecolor` or `24bit`) colors render as RGB;
+otherwise each is approximated to the nearest 256-color entry, with the same algorithm pi uses.
 
-Radian is more forgiving than pi on purpose (ADR 0029 decision 4): a missing variable, a
-circular reference or an unknown role only makes the *affected roles* fall back to the
-built-in palette (chosen by the file's `appearance`, `dark` by default), each problem warning
-once on the startup line; a broken file falls back as a whole. Nothing blocks startup. pi's
-reserved `system` theme (OSC terminal probing) is deliberately not implemented.
+Radian is more forgiving than pi on purpose (ADR 0029 decision 4): an unknown role, a bad
+value, a missing variable or a circular reference only makes the *affected roles* fall back to
+the built-in palette (chosen by `appearance`, `dark` by default), each problem warning once on
+the startup line; a broken file falls back as a whole. Nothing blocks startup. pi's reserved
+`system` theme (OSC terminal probing) is deliberately not implemented.
 
-Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families):
+##### Bringing a pi theme over
 
-| Radian role | pi role(s) it takes |
-|---|---|
-| `user` | `userMessageText` (fg) + `userMessageBg` (bg) |
-| `input_bar` | `text` (fg) + `userMessageBg` (bg) — the `bar` input's band, the same band as a user message block (ADR 0035 V3) |
-| `selection` | `selectedBg` (bg only — the text keeps its own foreground under the band) |
-| `tool_pending_bg` / `tool_success_bg` / `tool_error_bg` | `toolPendingBg` / `toolSuccessBg` / `toolErrorBg` (the tool card's band by state) |
-| `notice_label` / `notice_body` | `accent` / `muted` (a structured notice's label and the rest) |
-| `diff_added` / `diff_removed` / `diff_context` | `toolDiffAdded` / `toolDiffRemoved` / `toolDiffContext` (the unified-diff line kinds) |
-| `diff_hunk` | `accent` (pi has no hunk role; this covers the `@@` markers and the file headers) |
-| `reasoning` | `thinkingText` |
-| `reasoning_off` … `reasoning_max` | pi's `thinkingOff` … `thinkingMax` (the footer's `reasoning` item, one role per level) |
-| `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` (= `text`) / `toolOutput` (= `muted`) / `error` |
-| `text` | `text` (the main level: answers, user words, tool titles) |
-| `notice` | `text` (the notice line itself) |
-| `hint` / `completion` / `truncation` | `dim` (the weak level) |
-| `turn_idle` / `turn_running` / `turn_cancelled` | `success` / `warning` / `error` |
-| `interrupted` / `note` / `budget_over` | `warning` |
-| `model` / `mcp` / `find` | `accent` |
-| `auto` | `warning` (pi has no auto role; the status bar's `AUTO` marker is reversed) |
-| `tier` / `usage` / `budget` | `muted` |
-| `approval_border` | `borderAccent` |
-| `auto`（状态栏的 `AUTO` 标记，ADR 0026 D9） | `warning` |
+A pi theme JSON is converted **once**, by code, not read as the run-time format:
 
-The pi roles nothing renders yet — the `md*`, `toolDiff*`, `syntax*` and `thinking*` families
-and the panel roles (`scrollbar*`, `searchMatch*`, `customMessage*`, `toolPendingBg`,
-`toolSuccessBg`, `toolErrorBg`, `bashMode`) — are parsed and kept on the theme (ADR 0029
-decision 3), so ADR 0027/0028 can wire them without re-reading the file.
+```sh
+radian theme import ~/.pi/agent/themes/kanagawa-wave.json [--name <name>] [--force]
+```
+
+It writes `~/.radian/themes/<name>.toml` (the file's own `name`, else the file stem), prints a
+report of every pi key it drops and every role that keeps the built-in value, and refuses to
+overwrite an existing file without `--force`. The pi → Radian role mapping
+(`userMessageText` → `user`, `thinkingText` → `reasoning`, `toolTitle` → `tool_call`, …) lives
+in the importer (`src/theme/importer.rs`), one table with the legacy loader's; at run time the
+TOML loader knows Radian names only.
+
+For one version a `<name>.json` beside the `<name>.toml` still loads through the old pi loader,
+with a startup hint to run `radian theme import`, and `[tui.colors]` still accepts pi role names
+(ADR 0029). The built-in skill `theme-import` tells the model when to run
+the command and how to write a Radian theme by hand from a palette or a screenshot and tune it
+with `[tui.colors]`.
 - `mouse` (default `true`): the app enables button + wheel reporting (`CSI ?1000h`), button
   motion (`CSI ?1002h`, the transcript drag) and SGR coordinates (`CSI ?1006h`), so a wheel
   notch scrolls the transcript instead of the terminal translating it to arrow keys (dogfood
