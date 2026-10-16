@@ -9,7 +9,6 @@ use crate::args;
 use crate::fail;
 use crate::provider::Limits;
 use crate::workspace::{WorkspaceRoot, edit_distance_ci, io_failure};
-use crate::write::write_error;
 
 #[derive(Deserialize)]
 struct PatchArgs {
@@ -82,28 +81,22 @@ pub(crate) async fn run(
         ));
     }
 
-    // Patch targets must already exist, so canonicalize and require the result inside.
-    let target = root.resolve_existing(&args.path)?;
-    root.guard_mutation_target(&args.path, &target)?;
-    let metadata = std::fs::metadata(&target).map_err(|e| io_failure(&args.path, e))?;
-    if !metadata.is_file() {
-        return Err(fail(
-            "not_a_file",
-            format!("`{}` is not a regular file", args.path),
-        ));
-    }
-    if metadata.len() as usize > limits.max_patch_bytes {
+    // ADR 0039 decision 2: the target is opened read-write through the root's directory fd
+    // (`O_NOFOLLOW` at every component, no `O_CREAT`: a patch target must exist) and the
+    // regular-file / hard-link checks run on that fd. The same fd is read and later written;
+    // nothing is re-opened by path.
+    let opened = root.open_write(&args.path, false)?;
+    let mut file = opened.file;
+    if opened.stat.size as usize > limits.max_patch_bytes {
         return Err(fail(
             "patch_limit_exceeded",
             format!(
                 "`{}` is {} bytes, over the {} byte patch limit",
-                args.path,
-                metadata.len(),
-                limits.max_patch_bytes
+                args.path, opened.stat.size, limits.max_patch_bytes
             ),
         ));
     }
-    let content = std::fs::read_to_string(&target).map_err(|e| io_failure(&args.path, e))?;
+    let content = crate::safe_fs::read_to_string(&file).map_err(|e| io_failure(&args.path, e))?;
 
     let view = LfView::new(&content);
     let (layer, ranges) = match locate(&view, &args.old) {
@@ -141,18 +134,8 @@ pub(crate) async fn run(
         ));
     }
 
-    // Write the canonical target: it is already known to be inside the root, and
-    // `O_NOFOLLOW` still refuses a link that appeared at that exact path meanwhile.
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(&target)
-        .map_err(|e| write_error(&args.path, e))?;
+    // Write back through the fd that was read: truncate, rewind, write.
+    crate::safe_fs::truncate(&file).map_err(|e| io_failure(&args.path, e))?;
     file.write_all(updated.as_bytes())
         .and_then(|()| file.flush())
         .map_err(|e| io_failure(&args.path, e))?;

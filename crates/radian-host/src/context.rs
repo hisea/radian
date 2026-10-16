@@ -139,7 +139,9 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
         if !seen.insert(key) {
             continue;
         }
-        let bytes = match std::fs::read(&path) {
+        // ADR 0039: the leaf is opened with `O_NOFOLLOW`, so a repository cannot point
+        // `AGENTS.md` at a file outside it and have the host read that into the prompt.
+        let bytes = match radian_coding::safe_fs::read_nofollow(&path) {
             Ok(bytes) => bytes,
             Err(error) => {
                 result
