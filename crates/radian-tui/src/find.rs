@@ -194,20 +194,19 @@ mod tests {
             entry(EntryKind::Notice, "say hello\nand HELLO again"),
         ];
         let (matches, starts) = compute(&entries, EXPANDED, 80, "hello");
-        // The user entry's block has a padding row above and below (ADR 0028 R1): its text
-        // line is line 1 of its three, and every later entry's start shifts by it.
+        // The thin user row is one line and an ordinary block (ADR 0035): line 0,
+        // then the container's blank line 1, so the assistant starts at line 2.
         assert_eq!(
             matches,
             vec![
-                MatchLine { entry: 0, line: 1 },
+                MatchLine { entry: 0, line: 0 },
                 MatchLine { entry: 2, line: 0 },
                 MatchLine { entry: 2, line: 1 },
             ]
         );
-        // The user block's bottom pad is its separation (no container gap after it); the
-        // assistant entry is followed by one container gap, so the notice starts at 5.
-        assert_eq!(starts, vec![0, 3, 5]);
-        assert_eq!(starts[2], 5);
+        // The assistant entry is followed by one container gap, so the notice starts at 4.
+        assert_eq!(starts, vec![0, 2, 4]);
+        assert_eq!(starts[2], 4);
     }
 
     #[test]

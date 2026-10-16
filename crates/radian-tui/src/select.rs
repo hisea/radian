@@ -587,18 +587,18 @@ mod tests {
     #[test]
     fn entries_are_joined_by_a_newline_and_prefixes_are_never_copied() {
         let entries = [Entry::new(EntryKind::User, "asked"), entry("answered")];
-        // A user block is pad / text / pad, so the text line is 1 and the assistant's line
-        // is 3.
+        // The thin user row is one line and an ordinary block (ADR 0035), so the
+        // user text is line 0, the container's blank line is 1, and the assistant's line is 2.
         let sel = Selection {
-            anchor: locate(&entries, EXPANDED, 20, 1, 2).expect("user start"),
-            head: locate(&entries, EXPANDED, 20, 3, 200).expect("assistant end"),
+            anchor: locate(&entries, EXPANDED, 20, 0, 2).expect("user start"),
+            head: locate(&entries, EXPANDED, 20, 2, 200).expect("assistant end"),
         };
         assert_eq!(logical_text(&entries, &sel), "asked\nanswered");
         // A one-entry slice skips the other entirely: the user prefix is two cells, so
         // columns 2..5 (body 0..3) are "ask".
         let sel = Selection {
-            anchor: locate(&entries, EXPANDED, 20, 1, 2).expect("user"),
-            head: locate(&entries, EXPANDED, 20, 1, 5).expect("user"),
+            anchor: locate(&entries, EXPANDED, 20, 0, 2).expect("user"),
+            head: locate(&entries, EXPANDED, 20, 0, 5).expect("user"),
         };
         assert_eq!(logical_text(&entries, &sel), "ask");
         assert_eq!(
@@ -627,11 +627,12 @@ mod tests {
         };
         app.push_message(&message);
         let entries = &app.session.entries;
-        // One user entry: "look at this\n\n[file: notes.txt, 3 lines]" — the fold plus its
-        // padding rows. Line 1 is the text, line 3 the fold; selecting both copies them.
+        // One user entry: "look at this\n\n[file: notes.txt, 3 lines]" — the fold, no padding
+        // rows (ADR 0035). Line 0 is the text, line 2 the fold; selecting both
+        // copies them.
         let sel = Selection {
-            anchor: locate(entries, EXPANDED, 40, 1, 2).expect("start"),
-            head: locate(entries, EXPANDED, 40, 3, 200).expect("end"),
+            anchor: locate(entries, EXPANDED, 40, 0, 2).expect("start"),
+            head: locate(entries, EXPANDED, 40, 2, 200).expect("end"),
         };
         let copied = logical_text(entries, &sel);
         assert!(copied.contains("look at this"), "{copied:?}");
