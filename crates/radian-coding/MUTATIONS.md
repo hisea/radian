@@ -390,3 +390,17 @@ only this slice's own changes at the end). Each mutation run with
 (`tests/safe_fs.rs`) catch it too; the named test is the read-roots one. RR0 is recorded because
 the brief's first rule is "tests fail on the current branch": with `from_env` disabled the
 read-root tests fail on the boundary refusal, not on a missing API.
+
+## review fix 1：读写打开被拒时回退到只写、跳过行数（2026-10-16）
+
+Base：本片 HEAD（`oc/write-diff`，fix 1 提交前）· 就地变异（改 `workspace.rs`），变异前复制到
+`.radian/scratch/mut/workspace.rs.orig`，跑完用**不带 `-p`** 的 `cp` 还原并 `cmp` 逐字节确认；
+每个变异用 `cargo test -p radian-coding --test mutation --locked --no-fail-fast -- <test>`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| RF1 | `is_permission_denied` 恒 `false`（去掉回退，即 a035006 的行为：`O_RDWR` 打不开就让整个写失败） | `write_overwrites_a_write_only_file_without_counting_its_lines` | ✅ failed |
+
+同一变异下 `write_reports_the_overwritten_files_line_count` 仍过：回退只影响进程读不了的文件，
+普通覆盖不受影响。RF1 就是 a035006 的可观测行为，所以 0200 用例在 a035006 上必失败。0200 用例在
+root 下跳过（root 无视 mode 位，构造不出那次拒绝），跳过前先探测能否读一个 0200 文件。

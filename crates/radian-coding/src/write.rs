@@ -68,12 +68,21 @@ pub(crate) async fn run(
     // regular-file and hard-link checks run on the open fd **before** it is truncated. Nothing
     // is re-opened by path, so a parent swapped for a link mid-call is refused, not followed.
     let opened = root.open_write(&args.path, true)?;
+    let readable = opened.readable;
     let mut file = opened.file;
     // ADR 0028: the result carries the old file's line count so the TUI
     // can show `+M −N`. It is counted on the fd that is about to be truncated (never a second
     // open of the path), streamed in chunks so a large old file is not held in memory, and
     // before the truncate so the bytes are still there. An empty file reports nothing.
-    let previous_lines = count_lines(&file).map_err(|e| io_failure(&args.path, e))?;
+    //
+    // The count is a display nicety and must never fail the write (review fix 1): a file the
+    // user may write but not read opens write-only (`readable` is false), and a read error on a
+    // readable fd is swallowed too — the write goes ahead with no `previous_lines` either way.
+    let previous_lines = if readable {
+        count_lines(&file).unwrap_or(0)
+    } else {
+        0
+    };
     crate::safe_fs::truncate(&file).map_err(|e| io_failure(&args.path, e))?;
     file.write_all(args.content.as_bytes())
         .and_then(|()| file.flush())

@@ -118,6 +118,46 @@ async fn write_counts_an_old_file_larger_than_max_write_bytes() {
     assert_eq!(read(&root.join("big.txt")), "x");
 }
 
+/// Review fix 1: counting the old lines is a display nicety and must never fail the write. A
+/// file the user may write but not read (mode 0200) refuses the read-write open, so `write`
+/// falls back to a write-only open and skips `previous_lines`. Running as root this test is
+/// skipped: root ignores the mode bits, so there is no refusal to exercise.
+#[tokio::test]
+async fn write_overwrites_a_write_only_file_without_counting_its_lines() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new("write-mode-0200");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("locked.txt");
+    std::fs::write(&path, "old one\nold two\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
+    // Root (or a filesystem that ignores mode bits) can still read it, so the fallback would not
+    // be reached; skip with a note instead of asserting a refusal that cannot happen.
+    if std::fs::File::open(&path).is_ok() {
+        eprintln!("skipping: this user can read a 0200 file (root?); the fallback is unreachable");
+        return;
+    }
+    let tools = tools(&root);
+
+    let output = call(
+        &tools,
+        "write",
+        json!({"path": "locked.txt", "content": "new"}),
+    )
+    .await
+    .expect("a write-only file must still be overwritable");
+    assert!(
+        structured(&output).get("previous_lines").is_none(),
+        "the count is skipped when the old file cannot be read: {:?}",
+        structured(&output)
+    );
+    assert_eq!(structured(&output)["bytes_written"], 3);
+    // Restore read permission so the content can be checked (and the temp dir cleaned up).
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(read(&path), "new");
+}
+
 #[tokio::test]
 async fn patch_replaces_exactly_one_occurrence() {
     let dir = TempDir::new("patch-happy");
