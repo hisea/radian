@@ -195,3 +195,25 @@ Base `dfa66b7`（oc/compaction-thinking）· 在本任务工作树内逐条施�
 断言的是「确定性兜底不得留下任何 `CompactionUsage` 记录」。D7 是第一档（`drop = 0`）就达标时的
 计数：新测试的计划头含 1 条用户原话（逐字保留）+ 1 个 assistant/结果单元（共 3 条被移出前缀），
 老公式报 0，新公式报 2；它同时让旧测试的 `3`（只数切点之外）变红，两条一起钉住口径。
+
+## summary-retry：摘要调用的暂时性重试（ADR 0017 用于压缩，compact-retry）
+
+Base `7e20baa`（oc/compact-retry）· 在该工作树内逐条施加，只改 `crates/agent-core/src/turn.rs`；
+每次从 `.radian/scratch/turn.rs.orig`（施加前 `cmp` 确认等于 `git show HEAD:` 的内容）用 `cp`
+还原并 `cmp` 确认一致（`cp` 更新 mtime，cargo 会重编；不用 `git checkout --`/`git restore`）·
+每个变异跑 `cargo test -p agent-core --test compaction_retry --locked --no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S1 | 摘要不重试（`summarize` 传 `max_retries = 0`） | `compaction_retry::a_transient_summary_error_is_retried_and_the_model_summary_commits`（同一条改动还让其余 5 条失败） | ✅ failed |
+| S2 | 重试忽略 `is_transient()`（去掉该守卫，400 也重试） | `compaction_retry::a_non_transient_summary_error_is_not_retried` | ✅ failed |
+| S3 | 去掉 60 s 等待预算用尽的停止（条件去掉 `waited < MAX_RETRY_WAIT`） | `compaction_retry::the_summary_call_waits_at_most_sixty_seconds`（变成 3 次尝试、`after 3 retries`，期望 2 次、`after 1 retry`） | ✅ failed |
+| S4 | 退避不与中断赛跑（`tokio::time::sleep(delay).await; continue;`） | `compaction_retry::cancelling_during_a_summary_backoff_cancels`（等待 30 s，而非 deadline 的 1 s） | ✅ failed |
+| S5 | 两个 sumlen 尝试不各有预算（第二个尝试传 `retries.saturating_sub(attempt)`） | `compaction_retry::each_summary_attempt_has_its_own_retry_budget`（缩短请求不再重试，落到确定性兜底） | ✅ failed |
+| S6 | 放弃时不加 `after_retries`（删掉包装） | `compaction_retry::transient_summary_errors_past_the_retries_fail_a_manual_compact`（消息无 `after 2 retries`；`the_summary_call_waits_at_most_sixty_seconds` 同） | ✅ failed |
+| S7 | 摘要也发 `ModelRetrying`（`announce` 传 `Some(events)`） | `compaction_retry::a_transient_summary_error_is_retried_and_the_model_summary_commits`、`transient_summary_errors_past_the_retries_fall_back`（断言 `ModelRetrying` 次数为 0） | ✅ failed |
+
+7/7 抓住。S5 是「共享一份预算」的近似：真正的共享要把重试状态提到 `summarize` 的循环之外、改
+helper 签名，这里让第二个 sumlen 尝试的预算更小，测试钉住的是「缩短尝试仍能重试」。S4/S6 同时被
+`retry.rs` 的对话调用测试覆盖（两个调用共用同一个 helper），本表只记摘要侧的抓取者。S2 在旧代码上
+同样通过（该行为未变），它是回归护栏而非新行为测试。
