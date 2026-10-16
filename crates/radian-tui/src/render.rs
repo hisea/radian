@@ -202,7 +202,10 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::User => USER_MARKER,
         EntryKind::Assistant => "  ",
-        EntryKind::Reasoning => "~ ",
+        // The expanded thinking channel's header marker (ADR 0035); the
+        // folded one-liner overrides this with the fold marker in `render_row`. Two cells under
+        // every tier, so the body column never moves.
+        EntryKind::Reasoning => REASONING_MARKER,
         // ADR 0028: a tool block's marker column carries `• ` on its
         // head row and `│ ` on its body rows (drawn by [`render_row`], not by the generic
         // lead — both are two cells, like every other marker).
@@ -226,6 +229,21 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
 /// The user row's two-cell marker (ADR 0035): `❯ ` in the `user` role.
 /// The default (unicode) spelling, also what [`marker_prefix`] returns for the width.
 const USER_MARKER: &str = "❯ ";
+
+/// The expanded thinking channel's header marker (ADR 0035). The design's
+/// `▸`/`▾` are not in all six checked fonts on the **folded** side, where the footer's existing
+/// `fold_marker()` is the replacement (`›`, see the README's "replaced or dropped" table); the
+/// expanded side keeps `▾` (there is no covered down-triangle). `ascii` maps to `v` (ADR 0035
+/// revision 6 decision 11). Two cells under every tier.
+const REASONING_MARKER: &str = "▾ ";
+
+/// The thinking channel's header marker in the terminal's glyph set.
+fn reasoning_marker(glyphs: crate::footer::Glyphs) -> &'static str {
+    match glyphs {
+        crate::footer::Glyphs::Ascii => "v ",
+        _ => REASONING_MARKER,
+    }
+}
 
 /// The user row's marker in the terminal's glyph set (ADR 0035): `❯ `
 /// normally, `> ` under `ascii`. Two cells either way, so the body column never moves.
@@ -260,10 +278,12 @@ fn marker(kind: EntryKind, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'s
             exclude_from_context: true,
         } => theme.hint,
     };
-    // The user row draws its own marker per glyph tier; every other entry's marker has one
-    // spelling. Both are two cells, so nothing else changes with the tier.
+    // The user row draws its own marker per glyph tier; the thinking channel's header does
+    // too (the ascii `v`); every other entry's marker has one spelling. All are two cells, so
+    // nothing else changes with the tier.
     let prefix = match kind {
         EntryKind::User => user_marker(glyphs),
+        EntryKind::Reasoning => reasoning_marker(glyphs),
         _ => marker_prefix(kind),
     };
     (prefix, style)
@@ -449,7 +469,19 @@ fn render_row(
     // between folded and expanded. The marker is the tier's fold glyph (ADR 0027
     // item 2: `›` for unicode, `>` for nerd/ascii; `▸` is not in all six checked fonts).
     let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
-    let lead = if row.code {
+    // An expanded thinking row (ADR 0028): the header carries the expand
+    // marker, every other **prose** row the `│ ` rail in the marker column, so the body stays at
+    // column 3 whether the channel is folded or expanded. A code row keeps its own frame (the
+    // `│ ` rail `code_lines` already writes, or the `╭`/`╰` frame lines of ADR 0035
+    // decision 7), exactly like an Assistant reply, so it takes no reasoning lead.
+    let reasoning_body = entry.kind == EntryKind::Reasoning && !placeholder;
+    let lead = if reasoning_body && !row.code {
+        if first_text {
+            prefix.to_string()
+        } else {
+            format!("{} ", glyphs.frame().vertical)
+        }
+    } else if row.code {
         String::new()
     } else if placeholder {
         format!("{} ", glyphs.fold_marker())
@@ -468,7 +500,14 @@ fn render_row(
         role_style(row.role, style, theme)
     };
     let mut spans = Vec::with_capacity(4);
-    spans.push(Span::styled(lead, prefix_style));
+    // The thinking body's rail is structural (the `frame` role); the header keeps the
+    // channel's own `reasoning` marker style (ADR 0028).
+    let lead_style = if reasoning_body && !first_text && !row.code {
+        theme.frame
+    } else {
+        prefix_style
+    };
+    spans.push(Span::styled(lead, lead_style));
     spans.extend(body_spans(entry, row, body, theme, first_text));
     Line::from(spans)
 }
@@ -2392,8 +2431,6 @@ pub fn completion_rows(app: &App, width: usize, visible: usize) -> Vec<Line<'sta
 
 /// The body spans of one row: a structured notice's label split, a Markdown line's pieces, a
 /// syntax-highlighted code line, a diagram, a weak reason, or the plain body. Shared by the
-/// The body spans of one row: a structured notice's label split, a Markdown line's pieces, a
-/// syntax-highlighted code line, a diagram, a weak reason, or the plain body. Shared by the
 /// unframed path and a tool block's `│ ` body rows, so both render identically.
 fn body_spans(
     entry: &Entry,
@@ -2414,9 +2451,17 @@ fn body_spans(
         out.push(Span::styled(label.to_owned(), theme.notice_label));
         out.push(Span::styled(rest.to_owned(), theme.notice_body));
     } else if let Some(md) = &row.md {
-        // Assistant Markdown (ADR 0028 R2): each piece takes its own role's style.
+        // Assistant Markdown (ADR 0028 R2): each piece takes its own role's style. The
+        // thinking channel (ADR 0028) is the one row kind that does not
+        // use the mapping: every piece is the `reasoning` role, keeping only its weight
+        // attributes. The mapping is left exactly as it is; the channel overrides its result.
+        let reasoning = entry.kind == EntryKind::Reasoning;
         for piece in md {
-            let style = md_style(piece.style, body_style, theme);
+            let style = if reasoning {
+                reasoning_md_style(piece.style, body_style)
+            } else {
+                md_style(piece.style, body_style, theme)
+            };
             out.push(Span::styled(piece.text.clone(), style));
         }
         // A code row carries its rail (a `Frame` piece) **and** its highlighted code, so the
@@ -2508,6 +2553,23 @@ fn md_style(style: blocks::MdStyle, body_style: Style, theme: &Theme) -> Style {
         // a non-head path never meets one.
         blocks::MdStyle::StatusRunning => theme.status_ok,
         blocks::MdStyle::Plain => body_style,
+    }
+}
+
+/// The style one **thinking-channel** Markdown piece takes (ADR 0028):
+/// the single `reasoning` role plus only the piece's weight attributes. The Assistant mapping
+/// in [`body_spans`] is deliberately untouched; this is the thinking channel's own variant.
+/// Code and syntax highlighting are off for the channel, so a code piece reaches this as
+/// `MdStyle::Code`/`Fence` and is coloured like the rest — no second colour.
+fn reasoning_md_style(style: blocks::MdStyle, base: Style) -> Style {
+    match style {
+        blocks::MdStyle::Bold | blocks::MdStyle::Heading => base.add_modifier(Modifier::BOLD),
+        blocks::MdStyle::Heading1 => base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        blocks::MdStyle::Italic => base.add_modifier(Modifier::ITALIC),
+        blocks::MdStyle::Strikethrough => base.add_modifier(Modifier::CROSSED_OUT),
+        // Every other piece — code, inline code, links, quote bars, bullets, rules, table
+        // borders, fences, task boxes, dim/accent — is the one reasoning colour.
+        _ => base,
     }
 }
 

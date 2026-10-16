@@ -1683,3 +1683,41 @@ Base：本片 HEAD（`oc/theme-format`；决定 1 = `cff5d35`，决定 4 = `e9f2
 JSON loader 与 TOML loader，而两者共用 `fg_source`/`bg_source` 同一张表，映射一起错、两者照样相等。
 钉住映射的是金标准（golden）那条：它是「转换器的输出」而不是「两个 loader 互相一致」。这正是决定 3
 把映射放进 importer、又把转换结果入库为 golden 的原因。
+## thin ②：thinking 的头行、时长、单色 Markdown 正文、折叠行（ADR 0028，2026-10-16）
+
+Base：本片 HEAD（`oc/thin-think`）· 就地变异，每个变异先把文件复制到 `.radian/scratch/mut.orig`，
+用 `python3` 打补丁（带 `assert old in s`），跑命名的测试，再从副本写回并用 `cmp` 确认逐字节相同
+（脚本 `.radian/scratch/mutate-think.sh`，不提交）。`--no-fail-fast`。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| TH1 | 正文不斜体 | `render.rs::body_style` 的 Reasoning 加回 `ITALIC` | `thinking::the_thinking_body_is_single_colour_markdown` | ✅ |
+| TH2 | 正文按 Markdown 排版 | `blocks.rs::reasoning_body_lines` 的 Paragraph 分支改回 `prose_lines`（`**`/反引号露出） | 同上（断言屏幕无 `**`、无反引号） | ✅ |
+| TH3 | 正文只有一个 reasoning 颜色 | `render.rs::body_spans` 去掉 reasoning 分支（走 Assistant 的 MdStyle 映射） | `thinking::every_thinking_body_cell_is_the_reasoning_colour` | ✅ |
+| TH4 | 折叠行带行数 | `blocks.rs::placeholder` 的 resumed 分支改成只写 `thinking` | `thinking::the_folded_thinking_is_one_line_with_the_line_count` | ✅ |
+| TH5 | resume 的条目没有时长 | `app.rs::push_message` 无条件给提交的 reasoning 条目写 `self.now` / `self.now` | `thinking::the_duration_is_shown_for_a_live_entry_and_absent_for_a_resumed_one` | ✅ |
+
+5/5 抓住，无等价变异。
+
+**诚实补充（TH1 的第一轮没抓住）**：第一次的变异改的是 `reasoning_md_style` 的兜底分支
+（`_ => base.add_modifier(ITALIC)`），只让 code/link 那些 piece 斜体，而测试断言的 `bold` 词走
+`Bold` 分支，所以测试仍绿；改成变异 `body_style`（整个 body 的基样式）后立刻抓住，因为 `**bold**`
+的基色也变斜体。这说明「正文仍斜体」这条需求针对的是**整个正文的基样式**，不是某一种 piece。
+
+另外，`blocks.rs::strip_edge_blanks` 的空白判据从 `chars.is_empty()` 改成 `text.is_empty()`：新增的
+`▾ thinking · …` 头行是合成行（没有源字符）但**画了文字**，旧判据把它当空白边缘行删掉，整个头行消失。
+只有这一种形状受影响，由 `thinking::the_expanded_thinking_has_a_header_and_a_rail` 与
+`blocks::reasoning_modes_change_the_line_count` 钉住。
+
+## thin ② × slice ③：thinking 正文的代码块用 slice ③ 的 open frame（2026-10-16）
+
+切片 ③ 把围栏代码块改成 open frame（ADR 0035）后，thinking 正文的代码块跟随同一形状，
+由新增测试 `thinking::a_thinking_code_block_draws_the_open_frame_and_counts_the_drawn_lines` 钉住。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| TH6 | thinking 正文的代码块画 open frame | `blocks.rs::reasoning_body_lines` 去掉 `code_frame_top(...)` 的 push | `thinking::a_thinking_code_block_draws_the_open_frame_and_counts_the_drawn_lines`（屏幕没有 `╭─ rust `） | ✅ |
+| TH7 | 计数的行数等于画出的行数 | `blocks.rs::line_count` 的 Reasoning 分支改成 `code_line_count(&text[start..end], closed) - 1` | 同上（`left: 5, right: 6`） | ✅ |
+
+2/2 抓住。测试正文**不带**结尾换行，所以 `line_count` 走镜像分支而不是 `has_blank_edge` 的 layout
+兜底（第一版带了结尾换行，TH7 没抓住：兜底直接返回 layout 的长度，绕过镜像）。

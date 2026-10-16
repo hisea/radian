@@ -646,12 +646,15 @@ pub fn is_folded(entry: &Entry, modes: DisplayModes) -> bool {
 
 /// Strips an entry's **backgroundless blank** edge lines (ADR 0028 rule 1): the
 /// container owns the spacing between blocks, so a text-derived blank line at an entry's
-/// start or end (a leading/trailing newline in the message) must not add a second one. A
-/// **pad** row is the block's own shape (a user block's breathing room, painted or not) and
-/// stays; the layout is the one place this happens, so counting, drawing, the selection
-/// mapping and the search all see the stripped form.
+/// start or end (a leading/trailing newline in the message) must not add a second one. The
+/// layout is the one place this happens, so counting, drawing, the selection mapping and the
+/// search all see the stripped form.
 fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
-    let blank = |line: &BodyLine| !line.hint && line.chars.is_empty();
+    // `chars.is_empty()` would also match a **synthesized** line that draws text but has no
+    // source characters — the thinking channel's `▼ thinking · …` header or a tool block's
+    // head (ADR 0028/4). `text.is_empty()` is the real "blank line"
+    // test; a synthesized line with text is content and must survive.
+    let blank = |line: &BodyLine| !line.hint && line.text.is_empty();
     let start = lines
         .iter()
         .position(|line| !blank(line))
@@ -784,6 +787,33 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
         EntryKind::User => {
             // The thin user row (ADR 0035): just the wrapped text, no padding rows.
             crate::render::wrap_line_count(&text, body_width)
+        }
+        EntryKind::Reasoning => {
+            // The expanded thinking channel (ADR 0028): the header line
+            // plus the Markdown body. **Counts only** (resume-perf2): `md_line_count_cached`
+            // counts a paragraph without building a line; code blocks count through
+            // `code_line_count`, the same mirror the Assistant arm uses.
+            let mut count = 1usize;
+            for block in parse_blocks_for(entry, mode) {
+                match block {
+                    Block::Paragraph { start, end, .. } => {
+                        count += md_line_count_cached(
+                            entry,
+                            start,
+                            end,
+                            body_width,
+                            modes.glyphs,
+                            &text,
+                        );
+                    }
+                    Block::Code {
+                        start, end, closed, ..
+                    } => {
+                        count += code_line_count(&text[start..end], closed);
+                    }
+                }
+            }
+            count
         }
         EntryKind::Assistant => {
             let mut diagram_index = 0;
@@ -969,10 +999,12 @@ fn cheap_count(entry: &Entry, modes: DisplayModes) -> Option<usize> {
 }
 
 /// The entry's parsed blocks, reusing the entry's cache when the key matches (the streaming
-/// path: closed blocks are not re-parsed, ADR 0028 R1). Fresh parse otherwise.
+/// path: closed blocks are not re-parsed, ADR 0028 R1). Fresh parse otherwise. Assistant prose
+/// and the thinking channel carry fence grammar (ADR 0028: a thinking
+/// body lays its code blocks out too).
 pub fn blocks_for(entry: &mut Entry, mode: ReasoningMode) -> Vec<Block> {
-    if entry.kind != EntryKind::Assistant {
-        // Only assistant prose carries fences today; every other kind is one paragraph.
+    if !matches!(entry.kind, EntryKind::Assistant | EntryKind::Reasoning) {
+        // Every other kind is one paragraph.
         return Vec::new();
     }
     let key = (entry.text.len(), mode);
@@ -994,7 +1026,7 @@ pub fn blocks_for(entry: &mut Entry, mode: ReasoningMode) -> Vec<Block> {
 /// [`blocks_for`] for an immutable entry (the selection, search and reference paths:
 /// discrete events, a fresh parse is fine when the cache misses).
 pub(crate) fn parse_blocks_for(entry: &Entry, mode: ReasoningMode) -> Vec<Block> {
-    if entry.kind != EntryKind::Assistant {
+    if !matches!(entry.kind, EntryKind::Assistant | EntryKind::Reasoning) {
         return Vec::new();
     }
     if let Some((cached, blocks)) = &entry.block_cache
@@ -1064,6 +1096,11 @@ fn layout_unstripped(
                 md: None,
                 syntax: None,
             }]
+        }
+        (EntryKind::Reasoning, _) => {
+            // The expanded thinking channel (ADR 0028): a header line,
+            // then the body as a **single-colour** Markdown layout behind the `│ ` rail.
+            reasoning_body_lines(entry, blocks, modes, width, &text, spinner)
         }
         (EntryKind::User, _) => {
             // The thin user row (ADR 0035/3): `❯ 文本`, no background,
@@ -1949,18 +1986,103 @@ fn prose_lines(text: &str, width: usize) -> Vec<BodyLine> {
         .collect()
 }
 
-/// The collapsed reasoning placeholder (ADR 0028 R3). `live` entries get the spinner frame
-/// (ADR 0027: a function of the tick, not of the text length); the line count
-/// stays 1 either way.
+/// The reasoning channel's measured wall clock (ADR 0028): the
+/// difference between the entry's first-delta instant and its end. `None` for a resumed
+/// entry (neither instant was ever stamped) and while the entry is still live (no end yet).
+fn reasoning_duration(entry: &Entry) -> Option<String> {
+    let started = entry.reasoning_started?;
+    let ended = entry.reasoning_ended?;
+    Some(crate::timing::format_duration(
+        ended.saturating_duration_since(started),
+    ))
+}
+
+/// The expanded thinking channel's header line: `thinking · <duration>`, `thinking · <spinner
+/// frame>` while streaming, and bare `thinking` for a resumed entry with no duration (ADR
+/// 0028 revision 5 decision 4). The `▾ ` marker is the marker column's, drawn by the renderer.
+fn reasoning_header(entry: &Entry, spinner: crate::spinner::Frame) -> String {
+    if entry.live {
+        return format!("thinking · {}", spinner.glyph);
+    }
+    match reasoning_duration(entry) {
+        Some(duration) => format!("thinking · {duration}"),
+        None => "thinking".to_string(),
+    }
+}
+
+/// The collapsed reasoning placeholder (ADR 0028): `thinking · <duration>
+/// · N lines`, `thinking · <spinner frame>` while streaming, and `thinking · N lines` for a
+/// resumed entry. The line count is the entry's own text; the `▸ ` marker is the marker
+/// column's (ADR 0028 rule 5), so the body column is the same folded and expanded.
 fn placeholder(entry: &Entry, spinner: crate::spinner::Frame) -> String {
     let lines = entry.text.lines().count().max(1);
-    // No `▸` here: the marker column carries it (ADR 0028 rule 5), so the body
-    // column is the same folded and expanded.
     if entry.live {
-        format!("thinking ({lines} lines) {}", spinner.glyph)
-    } else {
-        format!("thinking ({lines} lines)")
+        return format!("thinking · {}", spinner.glyph);
     }
+    match reasoning_duration(entry) {
+        Some(duration) => format!("thinking · {duration} · {lines} lines"),
+        None => format!("thinking · {lines} lines"),
+    }
+}
+
+/// The expanded thinking channel's body (ADR 0028): the header line,
+/// then the entry's Markdown laid out at `body_width`. It is the **same** Markdown layout as
+/// an Assistant reply ([`md_lines_cached`], fences through [`code_lines`]) — the thinking
+/// channel only differs in how the renderer colours it (one role, no syntax highlighting) and
+/// in the `│ ` rail the renderer puts in the marker column. Fenced code blocks keep their
+/// structure (the weak fence lines, `code_lines`) but are **never highlighted**.
+fn reasoning_body_lines(
+    entry: &Entry,
+    blocks: &[Block],
+    modes: DisplayModes,
+    width: usize,
+    text: &str,
+    spinner: crate::spinner::Frame,
+) -> Vec<BodyLine> {
+    // The prose rows carry the `│ ` rail, so they lay out two columns narrower; a code block
+    // draws its own frame in the marker column (like an Assistant reply), so it uses the full
+    // width.
+    let body_width = width
+        .saturating_sub(crate::render::marker_prefix(EntryKind::Reasoning).width())
+        .max(1);
+    let mut lines = vec![BodyLine::prose(
+        Vec::new(),
+        0,
+        reasoning_header(entry, spinner),
+    )];
+    for block in blocks {
+        match block {
+            Block::Paragraph { start, end, .. } => {
+                lines.extend(md_lines_cached(
+                    entry,
+                    *start,
+                    *end,
+                    body_width,
+                    modes.glyphs,
+                    text,
+                ));
+            }
+            Block::Code {
+                start,
+                end,
+                closed,
+                lang,
+            } => {
+                let source = &text[*start..*end];
+                let md_glyphs = MdGlyphs::for_glyphs(modes.glyphs);
+                // ADR 0035: the same open code frame as an Assistant
+                // reply — a top line titled with the language, a rail on every code row, a
+                // bottom line when the block is closed. `highlight = None`: the thinking body
+                // is never syntax-highlighted (ADR 0028).
+                lines.push(code_frame_top(lang, *start, width, &md_glyphs));
+                lines.extend(code_lines(source, *start, *closed, width, &md_glyphs, None));
+                if *closed && source.lines().count() > 1 {
+                    lines.push(code_frame_bottom(*start, &md_glyphs));
+                }
+            }
+        }
+    }
+    lines
 }
 
 /// One code source line laid out for `width`: the rendered text (tab-expanded to 4 spaces,
@@ -2087,6 +2209,34 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
         (EntryKind::Reasoning, ReasoningMode::Hidden) if !reasoning_expanded => Vec::new(),
         (EntryKind::Reasoning, ReasoningMode::Collapsed) if !reasoning_expanded => {
             vec![placeholder(entry, crate::spinner::Frame::default())]
+        }
+        (EntryKind::Reasoning, _) => {
+            // The expanded channel's text (ADR 0028): the header, then
+            // the Markdown body's text, exactly as [`reasoning_body_lines`] lays it out. The
+            // `│ ` rail is the renderer's marker, so it is not part of the text.
+            let mut lines = vec![reasoning_header(entry, crate::spinner::Frame::default())];
+            for block in parse_blocks_for(entry, mode) {
+                match block {
+                    Block::Paragraph { start, end, .. } => {
+                        lines.extend(
+                            md_lines_cached(entry, start, end, body_width, modes.glyphs, &text)
+                                .into_iter()
+                                .map(|line| line.text),
+                        );
+                    }
+                    Block::Code {
+                        start, end, closed, ..
+                    } => {
+                        let source = &text[start..end];
+                        // The code rows' text, exactly as `reasoning_body_lines` lays them out
+                        // through `code_lines` (the full width; a code block draws its own
+                        // frame). The frame lines are synthesized, absent here as in the
+                        // Assistant path.
+                        lines.extend(code_text_lines(source, closed, width));
+                    }
+                }
+            }
+            lines
         }
         (EntryKind::User, _) => {
             // The thin user row (ADR 0035): just the wrapped text, no padding rows
@@ -3965,22 +4115,29 @@ mod tests {
             1
         );
         assert_eq!(line_count(&entry, modes_with(ReasoningMode::Hidden), 40), 0);
-        assert_eq!(line_count(&entry, EXPANDED, 40), 3);
-        // The collapsed placeholder carries the spinner while streaming.
+        // Expanded, the channel is the header plus the three Markdown lines (ADR 0028
+        // revision 5 decision 4).
+        assert_eq!(line_count(&entry, EXPANDED, 40), 4);
+        // The collapsed placeholder carries the spinner while streaming, not the line count.
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
-        // The marker column carries the fold glyph (rule 5), not the placeholder text.
-        assert!(lines[0].text.contains("thinking (3 lines)"));
         assert!(lines[0].hint, "the placeholder is a synthesized line");
-        assert!(
-            lines[0]
-                .text
-                .ends_with(crate::spinner::Frame::default().glyph),
-            "{}",
-            lines[0].text
+        assert_eq!(
+            lines[0].text,
+            format!("thinking · {}", crate::spinner::Frame::default().glyph)
         );
+        // On a resumed entry (no clock) the line count shows and there is no duration.
         entry.live = false;
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
-        assert_eq!(lines[0].text, "thinking (3 lines)");
+        assert_eq!(lines[0].text, "thinking · 3 lines");
+        // The expanded header is a harness line of its own; the `▾ ` is the marker column's.
+        let expanded = layout(&entry, &parse_blocks(&entry.text), EXPANDED, 40);
+        assert_eq!(expanded.len(), 4);
+        assert_eq!(expanded[0].text, "thinking");
+        assert_eq!(expanded[1].text, "one");
+        assert!(
+            expanded[1..].iter().all(|line| !line.hint),
+            "the body is real content"
+        );
     }
     // ---- ADR 0035: the Markdown elements ----
 
