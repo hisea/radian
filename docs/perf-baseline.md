@@ -886,3 +886,84 @@ user 503 s → 489 s）。构建的墙钟由「我们拿到多少核 × 总 CPU 
   1:1 少在墙钟上，但**未实测**。
 - `aws-lc-sys` 的 build script（C 编译，同一台机器 19.4–46.7 s，本片时段里常是下一个最慢的单元）
   不属本片范围，未动。
+## Resume 首帧：`push_message` 的第二次 O(n²) 与 Markdown 只数不建（resume-perf2）
+
+**方法**：一段一次性 Python pty 探针（`pty.fork` + `TIOCSWINSZ`，24×100，与
+`perf_render.rs` 的 `libc::openpty` harness 同判据：读到状态栏 `context budget off`），以
+`RADIAN_TRACE_PHASES=1` 跑 release 的 `radian --resume <id>`，把子进程 stderr 的 `[trace]`
+段表读出来。为什么不用 `perf_render.rs` 的 `dbg_resume_trace`：它的 `wait_for` 上限是 180 s，
+在负载 500+ 的几分钟里连 1k 都等不到首帧而超时；这段探针把上限放到 1200 s 只为穿过负载尖峰，
+判据与取样方式不变。会话由一段同格式的生成器写出，与共享的
+`crates/radian-session/tests/common/long_session.rs` 同一混合（1k/10k/50k → 1.6/16.3/81.8 MB，
+退出时校验解析）。两个脚本都在 `.radian/`（gitignored），不入库。
+
+**负载**：本机 `uptime` 1 分钟负载 **~97–120**（基线各节 0.4–570；先前的 pty 测量在负载
+500+ 时甚至等不到首帧）。每档 3 次。
+
+**一个测量前提**：pty 探针里 `enter_terminal` 会调 `supports_keyboard_enhancement`，终端的
+pty 既不回 kitty flags 也不回 device-attributes，于是付满 **2 s**（`terminal.rs` 写明了这条；
+真实终端只付毫秒）。所以 `terminal-ready` 里含这固定的 ~2.0 s——下表用
+`first-frame-done − 2.0 s` 作为「真实终端」的估计，并同时给出原始值。
+
+50k（66 672 条目），三次：
+
+| 段（进程起） | 本片前 run1/2/3 | 本片后 run1/2/3 |
+|---|---|---|
+| `open/parse-once` | 481 / 284 / 218 | 247 / 186 / 466 |
+| `open-session-done` | 1342 / 868 / 944 | 928 / 607 / 1823 |
+| `terminal-ready`（含 2 s pty 查询） | 3351 / 2888 / 2986 | 2955 / 2612 / 3859 |
+| `history-read` | 0（= terminal-ready，见下） | 0 |
+| **`entries-built` 增量** | **1473 / 872 / 3050** | **22 / 32 / 24** |
+| **`line-counts`（66 672 条目）** | **1373 / 468 / 1644** | **65 / 87 / 74** |
+| `first-frame-done` | 6204 / 4238 / 7693 | 3061 / 2748 / 3963 |
+| 减掉 2 s pty 查询 | ~4200 / 2200 / 5700 | **~1050 / 750 / 1950** |
+| pty 首帧 `FIRST_FRAME_MS` | 6215 / 4246 / 7703 | 3075 / 2758 / 3973 |
+
+1k / 10k 的 `first-frame-done`：本片前 2226 / 2415，本片后 2146–2185 / 2225–2532
+（小档位里 2 s 查询占绝对多数，差别看不清）。
+
+**两处原因**
+
+1. **`push_message` 还有第二次 O(n²)（本片修）**。每个工具结果先用一次**从后往前**的扫描
+   按 call id 找到它的调用（这一步本来就对），然后又用 `entries.iter().position()` **从头**
+   扫一遍拿插入下标——resume 时调用就在末尾，这次前扫要走过几乎整个 transcript。resume-perf A
+   只修掉了每条消息的 `retain` 全扫，没看到这一条。修法：只扫一次，复用从后扫已经拿到的下标。
+   50k 的 `entries-built` 增量从 ~0.87–3.05 s 降到 ~22–32 ms。不依赖墙钟的测试：
+   `app::tests::tool_result_pairing_does_not_walk_the_transcript`（`TOOL_PAIR_SCANS`
+   统计配对走过的条目数；变异回前扫 → 400 个结果走 240 200 条，测试失败）。
+
+2. **首帧给每个条目算行数时**不再把 Markdown 段落**排出来**（本片修）。此前
+   `line_count_cached` 对每个 Assistant 条目调 `fill_md_cache`，即 `md_lines`——解析
+   pulldown、建 `BodyLine`、逐字符建 cells；50k 的 `line-counts` 因此 ~0.47–1.64 s。现在量测走
+   `blocks::md_line_count`：与 `md_lines` **逐臂镜像**地只数行（不建行），把每个段落的行数写进
+   `Entry.md_count_cache`（键 `(width, text_len)`，不含折叠，所以 Ctrl-T 切换仍不重解析），而
+   **行缓存改由真正要排版三路径（可见窗口、选择、搜索）懒填充**。`wrap_line_count` 另给 ASCII
+   快路径（同样的宽度，不走 Unicode 表）。50k 的 `line-counts` 降到 65–87 ms。
+   不依赖墙钟的测试：`blocks::tests::the_measure_pass_never_lays_out_markdown`（`md_line_builds`
+   计数；变异成 `md_lines(..).len()` → 失败）、`a_repeat_frame_reuses_the_markdown_line_cache`
+   （懒填充；变异成不填 → 失败）、`md_line_count_matches_the_layout`（20 个 Markdown 源 × 7 个
+   宽度，与 `md_lines(..).len()` 逐一对齐；变异成不补结尾换行 → 失败），以及
+   `virtual::every_window_matches_the_full_wrap`（语料加了两种 Assistant Markdown；
+   `wrap_line_count` 的 ASCII 宽度变异在这里被抓住）。
+
+**无退化**：R7 的两个门槛不变——量测仍然只数不建，`md_count_cache` 让折叠切换不重解析（
+`a_fold_toggle_reuses_the_markdown_counts`）；稳态帧、改宽首帧走的是 `layout`/`md_lines_cached`
+的既有路径，只是行缓存由懒填充提供，重复帧命中（`a_repeat_frame_reuses_the_markdown_line_cache`）。
+带空行边的条目（首行/末行是空白段，即文本以换行开头或结尾）仍走 `line_count` 原有的
+`layout` 回退——边缘空白由排版剥掉，那是规则唯一的所在；resume 语料没有这种条目。
+
+**第 2 步（第二次完整读）在本 base 上已经是 resume-perf B 完成的**：`history-read` 在
+`terminal-ready` 之后再花 0 ms（`main.rs` 取 `host_session.history`，不再 `Session::open`）。
+本片补了任务要求的对照测试：
+`radian-host/tests/session.rs::a_resumed_history_matches_the_disk_fold_through_compaction_and_replacement`
+——一份含「已提交压缩替换 + 文件末尾未提交替换」的 fixture，直接断言 host 的初始
+`history` 与 `Session::open(path).history()` 逐条相等（未提交段被丢弃、已提交段保留）。
+
+**合并 origin/main（`39c67ad`）后**同法复测（同负载区间）：50k `line-counts` 52 / 97 / 52 ms、
+`entries-built` 增量 27 / 25 / 17 ms、`first-frame-done` 2731 / 3249 / 2990 ms，与本表一致；全套
+Verify（含 1.88）已在该合并树上重跑。
+
+**本片没做**：`open_session`（~0.6–1.8 s，parse-once + replay + recover 建 records）没有动；
+`terminal-ready` 里的 2 s pty 查询是探针环境的假象，真实终端不付；100k 条、真实 provider 首
+token 未测。
+

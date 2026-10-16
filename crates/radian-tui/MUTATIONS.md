@@ -1349,6 +1349,27 @@ catching tests are the render snapshots, not the footer ones.
 
 另记一个无效变异：「只给第 200 字节之后的第一个合成格子假偏移」——那一处的上一个字符是 ASCII，`+1` 正好是合法边界，不会 panic，不能说明覆盖缺口；MS-M2 用确定落在多字节中间的单格变异代替。
 
+## resume-perf2：`push_message` 的 O(n²) 与 Markdown 只数不建（2026-10-16）
+
+Base `oc/resume-perf2` · 就地变异：改前 `cp` 到 `.radian/mut/`，改后跑测试，再从副本写回，
+逐个 `diff` 确认与副本逐字节相同（`git status --short` 只剩本片的五个改动文件）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| RP2-M1 | 工具结果配对从前端扫（`iter_mut().enumerate()`，索引取 `rev`），即修复前的第二次 O(n²) | `app::tests::tool_result_pairing_does_not_walk_the_transcript`（400 个结果走了 240 200 条） | ✅ |
+| RP2-M2 | 计数路径改成 `md_lines(..).len()`（量测即排版） | `blocks::tests::the_measure_pass_never_lays_out_markdown` | ✅ |
+| RP2-M3 | 去掉 `md_lines_cached` 的懒填充（行缓存永不写入） | `blocks::tests::a_repeat_frame_reuses_the_markdown_line_cache` | ✅ |
+| RP2-M4 | `wrap_line_count` 的 ASCII 快路径给错宽度（+1） | `virtual::every_window_matches_the_full_wrap`（总数与实际排版不符） | ✅ |
+| RP2-M5 | `md_line_count` 去掉「补回被 pulldown 吃掉的结尾换行」 | `blocks::tests::md_line_count_matches_the_layout` | ✅ |
+
+5/5 抓住。两处过程记录：
+
+- RP2-M2 第一次变异放在 `md_line_count_cached` 的兜底分支，**没抓住**：量测时
+  `fill_md_count_cache` 先填好计数缓存，`md_line_count_cached` 总是命中，兜底分支在生产路径里
+  几乎不可达。改成变异真正的计数入口 `fill_md_count_cache` 后抓住——即变异要落在会被执行的路径上。
+- RP2-M1 的变异保留了配对的正确性（前端扫也找到同一个 call id），只放大扫描量；测试断言的是
+  「走过的条目数」，不是结果，所以抓住了「修复后的算法没被还原」这层回归。
+
 ## band-padding：带的半格留白与 thinking 贴住下一块（ADR 0035，2026-10-15）
 
 Base `a36a099` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`，每条只跑列出的测试，

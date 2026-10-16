@@ -41,7 +41,23 @@ fn mixed_entries() -> Vec<Entry> {
     for i in 0..40 {
         let (kind, body) = match i % 6 {
             0 => (EntryKind::User, format!("question {i}")),
-            1 => (EntryKind::Assistant, "word ".repeat(40 + i)),
+            1 => {
+                // Assistant Markdown (resume-perf2): one variant without a blank edge (the
+                // measure pass counts it) and one with (the layout fallback strips the edge).
+                // Both must count to exactly what the full wrap lays out.
+                let body = if (i / 6) % 2 == 0 {
+                    format!(
+                        "## Heading {i}\n\nA **bold** paragraph that wraps at this width.\n\n\
+                         - one\n- two\n  - nested"
+                    )
+                } else {
+                    format!(
+                        "## Heading {i}\n\nA paragraph with a `code` span and words.\n\n\
+                         ```rust\nfn f{i}() -> u8 {{ {i} }}\n```\n"
+                    )
+                };
+                (EntryKind::Assistant, body)
+            }
             2 => (EntryKind::Reasoning, "思考中文内容".repeat(7)),
             3 => (
                 EntryKind::ToolCall,
