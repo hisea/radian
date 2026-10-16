@@ -1477,3 +1477,19 @@ Base `19dc0d7`（worktree `.radian-worktrees/pulse`，分支 `dogfood/pulse`）�
 
 光标列不动的断言在 `cursor::the_bar_cursor_stays_at_the_text_column`（空输入 x=2、`ab` x=4）；
 `▖`/`▘` 这一格的前景是强调色、背景是终端默认（`the_bar_band_fills_the_terminal_width` 的第 0 格断言）。
+
+## pulse：thinking 与下面的块之间空一行（ADR 0035，2026-10-15）
+
+同上一节的工作区。变异改 `blocks.rs::block_gap`，跑 `cargo test -p radian-tui --lib` 与
+`--test render`，再从 `.radian/scratch/blocks.rs.orig` 还原并用 `diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T5-M1 | `block_gap` 恢复「thinking 贴住下面」（`prev.kind == Reasoning` → 0） | `blocks::tests::the_container_gap_is_one_line_except_within_a_block`（pair 规则）、`render::thinking_has_one_blank_line_on_both_sides`、`render::the_block_layout_snapshot`、`render::folding_changes_the_transcript_line_count` | ✅（1 + 3 条 FAILED） |
+
+行数计数与布局的一致性由结构保证（`line_count`、`md_line_count` 与绘制都走同一个 `block_gap`），
+`blocks::tests::md_line_count_matches_the_layout` 与 `tests/virtual.rs` 的窗口测试在改前改后都通过。
+另一个观察（不是本变异的缺口）：`push_message` 对没有正文的 assistant 回合也会压一个空的 Assistant
+条目，它是独立的一块，所以「thinking + 无正文的工具调用」在屏幕上会是两行空行（thinking 自己的一行
++ 空块两侧的行）；`thinking_has_one_blank_line_on_both_sides` 直接压条目来测 thinking 这条规则本身，
+并在注释里写明这一点。

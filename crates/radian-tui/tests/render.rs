@@ -983,11 +983,12 @@ fn the_ascii_tier_has_no_band_padding() {
     assert_eq!(row_of(&terminal, "> again"), Some(1), "{text}");
 }
 
-/// ADR 0035: the folded thinking line hugs the block below it (the reply
-/// or the tool call it introduces), while the gap above it stays one line — here the user
-/// block's bottom pad.
+/// ADR 0035 (replacing revision 3 decision 3): thinking has **one blank line on both
+/// sides** — folded or expanded, and whether the block below it is the reply or a tool card. The
+/// gap above it stays one line (here the user block's bottom pad).
 #[test]
-fn thinking_hugs_the_block_below() {
+fn thinking_has_one_blank_line_on_both_sides() {
+    // Folded, before the reply.
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
     app.push_message(&Message::user("q"));
@@ -1007,9 +1008,57 @@ fn thinking_hugs_the_block_below() {
     );
     assert_eq!(
         answer,
-        thinking + 1,
-        "the reply hugs thinking, with no gap:\n{text}"
+        thinking + 2,
+        "one blank line between thinking and the reply:\n{text}"
     );
+    assert_eq!(
+        row(&terminal, (thinking + 1) as u16).trim_end(),
+        "",
+        "and that line is empty:\n{text}"
+    );
+
+    // Expanded, and directly against a tool card: the same single line. The entries are pushed
+    // directly because `push_message` always puts an (empty) assistant entry between them — a
+    // block of its own, which is what makes a text-less call show two blank rows in a real
+    // transcript, not this rule. The unit test in `blocks.rs` pins the pair rule itself.
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
+    app.entries.push(Entry::new(
+        EntryKind::Reasoning,
+        "first thought\nsecond thought",
+    ));
+    let card = radian_tui::tools::ToolCard::new(
+        "c1",
+        "shell",
+        serde_json::json!({"command": "make test"}),
+    );
+    let mut call = Entry::new(EntryKind::ToolCall, "-> shell: make test");
+    call.tool = Some(Box::new(card));
+    call.card = radian_tui::blocks::Card::Solo;
+    app.entries.push(call);
+    let terminal = render(&mut app, 40, 12);
+    let text = screen(&terminal);
+    let first = row_of(&terminal, "first thought").expect("the expanded thinking body");
+    let body = row_of(&terminal, "second thought").expect("the second thinking line");
+    assert_eq!(
+        body,
+        first + 1,
+        "the body's own lines are adjacent:\n{text}"
+    );
+    // The card's own block starts at its top border; the head text is inside it.
+    let top = row_of(&terminal, "┌").expect("the card's top border");
+    assert_eq!(
+        top,
+        body + 2,
+        "one blank line between expanded thinking and the tool card:\n{text}"
+    );
+    assert_eq!(
+        row(&terminal, (body + 1) as u16).trim_end(),
+        "",
+        "and that line is empty:\n{text}"
+    );
+    assert!(row(&terminal, top as u16).contains('┌'), "{text}");
 }
 
 /// ADR 0027 item 2 / ADR 0035: the `unicode` tier's tool
@@ -1651,13 +1700,14 @@ fn the_block_layout_snapshot() {
         "> explain the failure".to_string(), // the user text
         "▀".repeat(80),                      // the user block's bottom half cell
         "› thinking (3 lines)".to_string(), // the folded channel: the unicode fold glyph (ADR 0027)
-        "  Looking into it.".to_string(),   // thinking hugs the reply: no container gap
-        "".to_string(),                     // the gap
-        top.clone(),                        // the shell card's frame (ADR 0028)
+        "".to_string(), // ADR 0035: one blank line between thinking and the block below
+        "  Looking into it.".to_string(), // the reply
+        "".to_string(), // the gap
+        top.clone(),    // the shell card's frame (ADR 0028)
         row(&format!("{} shell: make test", status[2])), // the head status line
-        row("$ make test"),                 // the command (no divider: part of the call)
-        divider("Error"),                   // the output section's label (the call failed)
-        row("$ make test"),                 // the output
+        row("$ make test"), // the command (no divider: part of the call)
+        divider("Error"), // the output section's label (the call failed)
+        row("$ make test"), // the output
         row("exit code: 2"),
         row("--- stdout ---"),
         row("boom"),
@@ -1692,8 +1742,10 @@ fn the_block_layout_snapshot() {
         );
     }
     let bg = |x: u16, y: u16| buffer.cell((x, y)).map(|c| c.bg);
-    let failed = bg(0, 6);
-    for y in 6..=15u16 {
+    // ADR 0035's blank line moved everything below thinking down by one: the reply is
+    // row 5, the gap row 6, the failed card 7..=16 and the list card starts at 18.
+    let failed = bg(0, 7);
+    for y in 7..=16u16 {
         assert_eq!(
             bg(0, y),
             failed,
@@ -1701,9 +1753,9 @@ fn the_block_layout_snapshot() {
         );
         assert_eq!(bg(79, y), failed, "…to the row's end");
     }
-    assert_ne!(failed, bg(0, 4), "the assistant row has no card band");
-    assert_eq!(bg(0, 5), bg(0, 4), "a gap row is not banded");
-    assert_ne!(bg(0, 17), failed, "the successful card's band differs");
+    assert_ne!(failed, bg(0, 5), "the assistant row has no card band");
+    assert_eq!(bg(0, 6), bg(0, 5), "a gap row is not banded");
+    assert_ne!(failed, bg(0, 18), "the successful card's band differs");
 }
 
 /// A tab is four columns when the wrap decides where to break (ADR 0028 R9), not zero: a line
@@ -2303,9 +2355,8 @@ fn folding_changes_the_transcript_line_count() {
         collapsed + 2,
         "three thinking lines become one placeholder"
     );
-    // The placeholder and the answer, **no** gap between them (ADR 0035: thinking
-    // hugs the block below).
-    assert_eq!(collapsed, 2, "placeholder + answer, no gap");
+    // The placeholder, one blank line (ADR 0035) and the answer.
+    assert_eq!(collapsed, 3, "placeholder + the one-line gap + answer");
 }
 
 /// `tui.display.reasoning = "hidden"` removes the reasoning lines entirely.
