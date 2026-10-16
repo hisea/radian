@@ -67,7 +67,7 @@ fn press_drag_release_produces_the_copy_effect() {
     );
     let drag = drag(&mut app, ASSISTANT, 25);
     assert!(drag.dirty);
-    assert!(app.selection.is_some(), "the drag is live");
+    assert!(app.session.selection.is_some(), "the drag is live");
     let release = release(&mut app, ASSISTANT, 25);
     assert!(release.dirty);
     assert_eq!(
@@ -78,7 +78,7 @@ fn press_drag_release_produces_the_copy_effect() {
         "one newline between entries"
     );
     // The selection stays visible until the next press.
-    assert!(app.selection.is_some());
+    assert!(app.session.selection.is_some());
 }
 
 #[test]
@@ -120,15 +120,15 @@ fn a_click_clears_the_selection() {
     let mut app = app();
     press(&mut app, 0, 2);
     drag(&mut app, 1, 25);
-    assert!(app.selection.is_some());
+    assert!(app.session.selection.is_some());
     // A second press on a different cell clears immediately (the same cell inside the
     // double-click window would be a word select, not a clear).
     assert!(press(&mut app, 2, 4).dirty);
-    assert!(app.selection.is_none());
+    assert!(app.session.selection.is_none());
     // ...and its release (the click) copies nothing.
     let release = release(&mut app, 2, 4);
     assert!(release.effects.is_empty());
-    assert!(app.selection.is_none());
+    assert!(app.session.selection.is_none());
 }
 
 #[test]
@@ -136,10 +136,10 @@ fn a_press_outside_the_transcript_never_starts_one() {
     let mut app = app();
     // Rows 7.. are the input box and the status bar (viewport height 7).
     assert!(!press(&mut app, 7, 0).dirty);
-    assert!(app.selection.is_none());
+    assert!(app.session.selection.is_none());
     drag(&mut app, 8, 3);
     release(&mut app, 8, 3);
-    assert!(app.selection.is_none(), "no gesture, no selection");
+    assert!(app.session.selection.is_none(), "no gesture, no selection");
 }
 
 #[test]
@@ -150,19 +150,19 @@ fn a_press_on_a_modal_never_starts_one() {
     // shrunk transcript viewport (rows 0..2 are still transcript on screen) starts nothing —
     // the modal owns the input until it is answered.
     app.set_viewport(2, 6);
-    app.scroll = 0;
-    app.follow = false;
+    app.session.scroll = 0;
+    app.session.follow = false;
     assert!(!press(&mut app, 1, 5).dirty);
-    assert!(app.selection.is_none());
+    assert!(app.session.selection.is_none());
     drag(&mut app, 1, 9);
     release(&mut app, 1, 9);
     assert!(
-        app.selection.is_none(),
+        app.session.selection.is_none(),
         "the drag would have selected real text"
     );
     // The modal's own rows are outside the viewport, doubly so.
     assert!(!press(&mut app, 4, 5).dirty);
-    assert!(app.selection.is_none());
+    assert!(app.session.selection.is_none());
 }
 
 #[test]
@@ -179,7 +179,7 @@ fn a_press_on_the_picker_overlay_never_starts_one() {
         radian_tui::picker::Picker::new(rows, None, "/w"),
     ));
     assert!(!press(&mut app, 0, 0).dirty);
-    assert!(app.selection.is_none());
+    assert!(app.session.selection.is_none());
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn with_mouse_off_the_whole_feature_is_gone() {
     press(&mut app, 0, 2);
     drag(&mut app, 1, 7);
     let release = release(&mut app, 1, 7);
-    assert!(app.selection.is_none());
+    assert!(app.session.selection.is_none());
     assert!(release.effects.is_empty());
 }
 
@@ -247,20 +247,23 @@ fn an_oversized_selection_is_refused_with_the_reason() {
     let mut app = app();
     // One entry of a char-run over the cap: it wraps mid-run (the wrap breaks anywhere), so
     // the drag lands at a row **past the transcript**, which clamps to the last entry's end.
-    app.entries.clear();
+    app.session.entries.clear();
     app.push_message(&Message::assistant("z".repeat(MAX_CLIPBOARD_BYTES + 1)));
     app.set_transcript_width(30);
     let (total, _) =
-        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 30, 0, 0, &app.theme);
+        radian_tui::render::visible_lines(&mut app.session.entries, EXPANDED, 30, 0, 0, &app.theme);
     app.set_viewport(1, total);
-    app.scroll = 0;
-    app.follow = false;
+    app.session.scroll = 0;
+    app.session.follow = false;
     press(&mut app, 0, 2);
     drag(&mut app, u16::MAX, 79);
     let release = release(&mut app, u16::MAX, 79);
     assert!(release.effects.is_empty(), "nothing is copied");
-    assert!(app.selection.is_none(), "the refused selection is dropped");
-    let notice = app.entries.last().expect("the reason is a notice");
+    assert!(
+        app.session.selection.is_none(),
+        "the refused selection is dropped"
+    );
+    let notice = app.session.entries.last().expect("the reason is a notice");
     assert!(notice.text.contains("too large"), "{:?}", notice.text);
     assert!(
         notice.text.contains(&MAX_CLIPBOARD_BYTES.to_string()),
@@ -273,7 +276,10 @@ fn an_oversized_selection_is_refused_with_the_reason() {
 fn the_clipboard_result_is_an_honest_status_note() {
     let mut app = app();
     app.update(Input::ClipboardDone("copied 12 chars (via OSC 52)".into()));
-    assert_eq!(app.note.as_deref(), Some("copied 12 chars (via OSC 52)"));
+    assert_eq!(
+        app.session.note.as_deref(),
+        Some("copied 12 chars (via OSC 52)")
+    );
 }
 
 #[test]
@@ -298,11 +304,15 @@ fn the_drag_autoscrolls_at_the_edges_one_tick_at_a_time() {
         app.mouse_autoscroll(),
         "held past the bottom, the view moves"
     );
-    assert_eq!(app.scroll, app.max_scroll - 9, "one line per tick");
+    assert_eq!(
+        app.session.scroll,
+        app.session.max_scroll - 9,
+        "one line per tick"
+    );
     // Held at the top edge it scrolls back up.
     drag(&mut app, 0, 0);
     let mut ticks = 0;
-    while app.scroll > 0 {
+    while app.session.scroll > 0 {
         assert!(
             app.mouse_autoscroll(),
             "held at the top, the view keeps moving"
@@ -312,7 +322,7 @@ fn the_drag_autoscrolls_at_the_edges_one_tick_at_a_time() {
     }
     assert!(!app.mouse_autoscroll(), "at the very top nothing moves");
     // The head followed the pointer: the selection extends over the scrolled content.
-    assert!(app.selection.is_some());
+    assert!(app.session.selection.is_some());
     let release = release(&mut app, 0, 0);
     assert!(
         matches!(release.effects.as_slice(), [Effect::Copy { text }] if !text.is_empty()),
@@ -400,7 +410,7 @@ fn a_double_click_selects_a_word_and_its_release_copies_it() {
     // "hello there": double-click the 'h' of "there" (body col 6 → col 8).
     press(&mut app, USER1, 8);
     press(&mut app, USER1, 8);
-    let selection = app.selection.expect("the word is selected");
+    let selection = app.session.selection.expect("the word is selected");
     let (start, end) = selection.ordered();
     assert_eq!(
         (start.entry, start.offset, end.entry, end.offset),
@@ -438,7 +448,7 @@ fn a_click_sequence_on_different_cells_is_three_single_clicks() {
     press(&mut app, USER1, 9);
     press(&mut app, USER1, 10);
     assert!(
-        app.selection.is_none(),
+        app.session.selection.is_none(),
         "no word got selected: not one cell"
     );
 }
@@ -532,7 +542,7 @@ fn a_selection_from_a_padding_row_copies_no_pad_characters_with_cjk() {
 fn a_selection_over_a_tool_card_head_copies_its_text() {
     use agent_core::{ContentPart, Message, ToolCall, ToolResult};
     let mut app = app();
-    app.entries.clear();
+    app.session.entries.clear();
     app.push_message(&Message::Assistant {
         content: vec![],
         reasoning: vec![],

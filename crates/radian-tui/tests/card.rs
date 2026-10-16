@@ -6,9 +6,11 @@
 use agent_core::{ContentPart, Message, ToolCall, ToolResult};
 use radian_tui::app::{App, Effect, Input, UpdateResult};
 use radian_tui::render;
+use radian_tui::theme::Theme;
 use radian_tui::tools::{ToolDisplay, ToolFold};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::style::Color;
 use serde_json::json;
 
 fn render(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
@@ -340,6 +342,7 @@ fn the_meta_writes_only_the_data_that_exists() {
     // none and shows none).
     let mut app = shell_app(Some(ok_result("done")));
     if let Some(entry) = app
+        .session
         .entries
         .iter_mut()
         .find(|e| e.kind == radian_tui::app::EntryKind::ToolResult)
@@ -493,4 +496,141 @@ fn a_copy_of_a_card_has_no_border_characters() {
     assert!(!copied.contains('─'), "no horizontal border: {copied:?}");
     assert!(!copied.contains('┌'), "no corner: {copied:?}");
     assert!(copied.contains("make test"), "{copied:?}");
+}
+
+/// A card for `name` with `arguments`, and its result when `result` is `Some`, under `theme`.
+fn tool_app(
+    theme: &Theme,
+    name: &str,
+    arguments: serde_json::Value,
+    result: Option<ToolResult>,
+) -> App {
+    let mut app = App::new("m", "s");
+    app.theme = theme.clone();
+    app.push_message(&Message::Assistant {
+        content: vec![],
+        reasoning: vec![],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments,
+        }],
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    });
+    if let Some(result) = result {
+        app.push_message(&Message::Tool {
+            result,
+            meta: Default::default(),
+        });
+    }
+    app
+}
+
+/// Asserts every cell from the card's `┌` row to its `└` row, across the full width, has the
+/// card's band background: the borders, the head, the command, the output and the padding all
+/// sit on the state's `tool_*_bg` band (ADR 0028 R4 + owner acceptance). A cell on any other
+/// background shows as a darker stripe under the text.
+fn assert_card_band(terminal: &Terminal<TestBackend>, width: u16, height: u16, band: Color) {
+    let buffer = terminal.backend().buffer();
+    let sym = |y: u16| buffer.cell((0, y)).map(|c| c.symbol().to_string());
+    let top = (0..height)
+        .find(|&y| sym(y).as_deref() == Some("┌"))
+        .expect("the card's top border");
+    let bottom = (0..height)
+        .rev()
+        .find(|&y| sym(y).as_deref() == Some("└"))
+        .expect("the card's bottom border");
+    for y in top..=bottom {
+        let line: String = (0..width)
+            .map(|x| {
+                buffer
+                    .cell((x, y))
+                    .map(|c| c.symbol().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        for x in 0..width {
+            let cell = buffer.cell((x, y)).expect("a cell");
+            assert_eq!(
+                cell.bg, band,
+                "row {y} col {x} is off the card band: {line:?}"
+            );
+        }
+    }
+}
+
+/// Every cell of a tool card sits on the card's own band, in each built-in theme that carries a
+/// tool background (pi dark/light), for a pending, a succeeded and a failed card, with short and
+/// wrapped argument/result lines and a diff body. The card band must not show around the text
+/// with the text cells on some other (darker) background.
+#[test]
+fn every_cell_of_a_card_sits_on_the_card_band() {
+    let long = format!(
+        "cargo test --workspace --locked --no-fail-fast -- --nocapture {}",
+        "x".repeat(40)
+    );
+    for theme in [Theme::dark(), Theme::light()] {
+        let pending = theme.tool_pending_bg.bg.expect("a pending band");
+        let success = theme.tool_success_bg.bg.expect("a success band");
+        let error = theme.tool_error_bg.bg.expect("an error band");
+
+        // Pending: a command long enough to wrap onto a second row.
+        let mut app = tool_app(
+            &theme,
+            "shell",
+            json!({"command": long, "timeout_secs": 30}),
+            None,
+        );
+        assert_card_band(&render(&mut app, 80, 24), 80, 24, pending);
+
+        // Succeeded: a wrapped command and a wrapped output line.
+        let mut app = tool_app(
+            &theme,
+            "shell",
+            json!({"command": long, "timeout_secs": 30}),
+            Some(ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text(format!(
+                    "all good\n{}\n12 passed",
+                    "y".repeat(120)
+                ))],
+                structured: Some(json!({"command": long, "exit_code": 0, "timeout_secs": 30})),
+                is_error: false,
+                error_code: None,
+            }),
+        );
+        assert_card_band(&render(&mut app, 80, 24), 80, 24, success);
+
+        // Failed: the error band and the `Error` divider label.
+        let mut app = tool_app(
+            &theme,
+            "shell",
+            json!({"command": "make test"}),
+            Some(ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text("boom")],
+                structured: Some(json!({"command": "make test", "exit_code": 2})),
+                is_error: true,
+                error_code: None,
+            }),
+        );
+        assert_card_band(&render(&mut app, 80, 24), 80, 24, error);
+
+        // A diff body (`patch`): hunk, context, removed and added lines.
+        let mut app = tool_app(
+            &theme,
+            "patch",
+            json!({"path": "a.rs"}),
+            Some(ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text("@@ -1,2 +1,3 @@\n context\n-old\n+new")],
+                structured: None,
+                is_error: false,
+                error_code: None,
+            }),
+        );
+        assert_card_band(&render(&mut app, 80, 24), 80, 24, success);
+    }
 }

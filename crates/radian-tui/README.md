@@ -38,6 +38,33 @@ Because of this, most behavior tests are pure `update` tests (`tests/update.rs`,
 `tests/input.rs`, `tests/command.rs`, `tests/approval.rs`); the pty tests keep the terminal
 state, the real key protocol and the recovery paths.
 
+### Global state and the session view (ADR 0030 slice ⓪)
+
+`App` is split in two so a later slice (ADR 0030 slice ⑥) can hold several sessions and
+switch between them. Today exactly one session view exists: `app.session`.
+
+- **`App`** holds the **global chrome** the whole TUI shares: the theme, the keymap, the
+  footer and its glyphs, the input composer and its completion state (`slash_completion`,
+  `mention_completion`, `pending_expand`, `pending_fetch`), the layer stack (popups and
+  modals), the shared pending-request count and the queue head (`pending`, `last_answered`),
+  the process/terminal flags (`quit`, `quit_pending`, `mouse_enabled`, `clipboard`, `startup`
+  and the pre-session picker outcome), the display modes, the footer facts read once at
+  startup (`hostname`, `auto_compact`, `now`), and `memory_enabled`.
+- **`App.session: SessionView`** holds everything that belongs to one session: the
+  transcript (`entries` and the `live_count` cache), the projection read handle, the scroll
+  and follow state, the selection and mouse gesture, the history, the pending turn state
+  (`running_tools`, `turn_committed`, `compacting`, `pending_compaction`, `note`, the turn
+  `timer`, `spinner_origin`), `session_ended`, `pending_fork`, the session's own model and its
+  queued switches (`model_name`, `model_display`, `provider`, `model_price`, `thinking_level`,
+  `next_model`, `next_thinking`), its `!`/`!!` shell state, its workspace/cwd/branch and the
+  startup banner, and its mode/tier markers (`auto`, `access_source`).
+
+The line: a value the user sets once for the whole terminal (a theme, a footer row, the
+composer) is global; a value a second session would need its own copy of (a transcript, a
+scroll position, a tier, a model) is per-session. This extends the rule ADR 0023 U5 set for
+`SessionProjection` to the view state around it. `tests/structure.rs` still pins the
+projection handle, now reached through `app.session.projection`.
+
 ### The loop: one channel, three promises (ADR 0023 U2)
 
 `main.rs`'s loop blocks on **one** `std::sync::mpsc` channel of `UiEvent`:
@@ -1061,9 +1088,12 @@ event loop, before any session exists: `Up`/`Down` select, type to filter by id/
 
 ## Flags
 
-`--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
-`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--pick`, `--version`,
-`--workspace DIR`, `--mcp-config FILE`,
+The common flags have short forms: `-m`/`--model`, `-w`/`--workspace`, `-r`/`--resume`,
+`-l`/`--list` and `-y`/`--yes`. `-V`/`--version` is clap's.
+
+`-m`/`--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
+`--system`, `--session-dir`, `--session-id`, `-r`/`--resume`, `-l`/`--list`, `--pick`,
+`--version`, `-w`/`--workspace DIR`, `--mcp-config FILE`,
 `--profile safe|workspace|full` (default `workspace`; the old `workspace-write`/`full-access`
 are accepted aliases but not listed),
 `--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
@@ -1125,7 +1155,7 @@ Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementat
   it stays a fuse, because the context-budget guard does not stop a loop of small calls. When a turn hits it, the pending tool calls are answered with
   "the model call budget is used up" and the turn ends; a new message starts a fresh count.
   Tested by `pty_max_model_calls_limits_the_turn`.
-- `--yes` answers every `ask` with "allow once" and shows no dialog, the same as
+- `-y`/`--yes` answers every `ask` with "allow once" and shows no dialog, the same as
   `radian exec --yes`. It removes the question only: `deny` rules still deny, the sandbox still
   applies, every decision is still audited, and the startup says it is on. With
   `workspace` this means "the sandbox is the boundary"; with `full` there is no

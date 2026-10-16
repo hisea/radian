@@ -1071,7 +1071,7 @@ pub fn bar_status_line(app: &App) -> Line<'static> {
         Span::styled(" ".repeat(BAR_LEAD - 1), app.theme.hint),
         Span::styled(status.to_string(), app.theme.hint),
     ];
-    if let Some(elapsed) = app.timer.elapsed(app.now) {
+    if let Some(elapsed) = app.session.timer.elapsed(app.now) {
         spans.push(Span::styled(
             format!(" · {}", crate::timing::format_seconds(elapsed)),
             app.theme.hint,
@@ -1283,13 +1283,13 @@ struct Segment {
 fn status_segments(app: &App) -> Vec<Segment> {
     // A queued `/model` switch (ADR 0026 D5) or `/thinking` level (D11): visible until the
     // driver applies it.
-    if let Some(next) = &app.next_model {
+    if let Some(next) = &app.session.next_model {
         return vec![Segment {
             text: format!("next: {next}"),
             style: app.theme.turn_running,
         }];
     }
-    if let Some(next) = &app.next_thinking {
+    if let Some(next) = &app.session.next_thinking {
         return vec![Segment {
             text: format!("next: thinking {next}"),
             style: app.theme.turn_running,
@@ -1297,21 +1297,21 @@ fn status_segments(app: &App) -> Vec<Segment> {
     }
     // The session facts come from the projection, not from `App` (ADR 0023 U5). One read, so
     // the whole status bar is one instant.
-    let session = app.projection.read();
+    let session = app.session.projection.read();
     let turn = session.turn();
     let turn_style = match turn {
         TurnState::Idle => app.theme.turn_idle,
         TurnState::Running => app.theme.turn_running,
         TurnState::Cancelled => app.theme.turn_cancelled,
     };
-    let position = if app.max_scroll == 0 {
+    let position = if app.session.max_scroll == 0 {
         "all".to_string()
     } else {
-        format!("{}/{}", app.scroll, app.max_scroll)
+        format!("{}/{}", app.session.scroll, app.session.max_scroll)
     };
     let mut segments = vec![
         Segment {
-            text: format!(" {} ", app.model_name),
+            text: format!(" {} ", app.session.model_name),
             style: app.theme.model,
         },
         Segment {
@@ -1342,7 +1342,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
     }
     // ADR 0026 D9: while auto is on the status bar says so, prominently — the session is
     // approving tool calls without asking.
-    if app.auto {
+    if app.session.auto {
         segments.push(Segment {
             text: "AUTO".to_string(),
             style: app.theme.auto,
@@ -1359,7 +1359,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
     // The transient note ("tool … running", "copied N chars (via OSC 52)", a compaction
     // failure) sits ahead of the long tails: a narrow terminal drops the *rightmost*
     // segments, and a note the user just caused must survive that, not be the first to go.
-    if let Some(note) = &app.note {
+    if let Some(note) = &app.session.note {
         segments.push(Segment {
             text: note.clone(),
             style: app.theme.note,
@@ -1387,7 +1387,11 @@ fn status_segments(app: &App) -> Vec<Segment> {
     segments.push(Segment {
         text: format!(
             "scroll {position} {}",
-            if app.follow { "follow" } else { "paused" }
+            if app.session.follow {
+                "follow"
+            } else {
+                "paused"
+            }
         ),
         style: Style::default(),
     });
@@ -1538,15 +1542,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The live spinner frame (ADR 0027): computed once per frame from the loop's
     // clock, so a live reasoning line and the input rule animate.
     let spinner = app.spinner_frame();
-    let (total, _) = visible_lines_with(&mut app.entries, modes, width, 0, 0, &theme, spinner);
+    let (total, _) = visible_lines_with(
+        &mut app.session.entries,
+        modes,
+        width,
+        0,
+        0,
+        &theme,
+        spinner,
+    );
     radian_session::trace::took("draw/measure", t_draw);
     app.set_viewport(chunks[0].height, total);
     let t_window = std::time::Instant::now();
     let (_, visible) = visible_lines_with(
-        &mut app.entries,
+        &mut app.session.entries,
         modes,
         width,
-        app.scroll,
+        app.session.scroll,
         height,
         &theme,
         spinner,
@@ -1562,13 +1574,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // A live transcript selection: the visible rows' selected display columns, styled with
     // the theme's `selection` role. `highlight_rows` derives from the same wrap the lines
     // above were rendered from, so the band lands exactly on the copied text.
-    let visible = match app.selection.filter(|sel| !sel.is_empty()) {
+    let visible = match app.session.selection.filter(|sel| !sel.is_empty()) {
         Some(selection) => {
             let ranges = crate::select::highlight_rows(
-                &app.entries,
+                &app.session.entries,
                 modes,
                 width,
-                app.scroll,
+                app.session.scroll,
                 visible.len(),
                 &selection,
             );
@@ -1932,13 +1944,13 @@ fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
 /// The chrome segments that survive any footer layout, as one line (empty when none is on).
 fn chrome_line(app: &App, width: usize) -> Option<Line<'static>> {
     let mut segments = Vec::new();
-    if let Some(next) = &app.next_model {
+    if let Some(next) = &app.session.next_model {
         segments.push(Segment {
             text: format!("next: {next}"),
             style: app.theme.turn_running,
         });
     }
-    if let Some(next) = &app.next_thinking {
+    if let Some(next) = &app.session.next_thinking {
         segments.push(Segment {
             text: format!("next: thinking {next}"),
             style: app.theme.turn_running,
@@ -1956,13 +1968,13 @@ fn chrome_line(app: &App, width: usize) -> Option<Line<'static>> {
             style: app.theme.note,
         });
     }
-    if app.auto {
+    if app.session.auto {
         segments.push(Segment {
             text: "AUTO".to_string(),
             style: app.theme.auto,
         });
     }
-    if let Some(note) = &app.note {
+    if let Some(note) = &app.session.note {
         segments.push(Segment {
             text: note.clone(),
             style: app.theme.note,
@@ -2547,7 +2559,13 @@ fn render_frame_row(
                 spans.push(Span::styled(command.to_owned(), patch_band(body, band)));
             } else {
                 spans.extend(body_spans(
-                    entry, row, body, theme, band, first_text, spinner,
+                    entry,
+                    row,
+                    patch_band(body, band),
+                    theme,
+                    band,
+                    first_text,
+                    spinner,
                 ));
             }
             let used = 2 + UnicodeWidthStr::width(row.text.as_str()) + if meta { 2 } else { 0 };
