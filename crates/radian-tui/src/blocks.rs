@@ -403,9 +403,9 @@ pub enum MdStyle {
     /// A task list's checkbox (`☐`/`☑`, `[ ]`/`[x]` under ascii).
     TaskUnchecked,
     TaskChecked,
-    /// A code block's fence line (weak). Retained for the layout's single fence-shaped line
-    /// helper; ADR 0035 no longer draws a fence.
-    Fence,
+    /// A code block's frame line and rail (ADR 0035): the `frame` role,
+    /// drawn with `md_hr` until the `frame` role lands (ADR 0029).
+    Frame,
     Bold,
     Italic,
     /// Inline code (`mdCode`).
@@ -433,30 +433,6 @@ pub enum MdStyle {
 }
 
 impl BodyLine {
-    /// A code block's fence line (ADR 0035): weak, at the body column (no marker
-    /// lead, like a code line).
-    fn fence(text: String, offset: usize) -> Self {
-        Self {
-            chars: Vec::new(),
-            end: offset,
-            text: text.clone(),
-            code: true,
-            pad: Pad::None,
-            frame: Frame::None,
-            role: tools::LineRole::Normal,
-            // `hint: true` so `strip_edge_blanks` never treats a fence as a blank edge line.
-            hint: true,
-            diagram: None,
-            reason: false,
-            md: Some(vec![MdPiece {
-                text,
-                style: MdStyle::Fence,
-                offset: None,
-            }]),
-            syntax: None,
-        }
-    }
-
     fn prose(chars: Vec<Option<usize>>, end: usize, text: String) -> Self {
         Self {
             chars,
@@ -905,15 +881,15 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                         lang,
                     } => {
                         let source = &text[*start..*end];
-                        // ADR 0035: the fence lines are counted too (the layout
-                        // shows them).
-                        let fences = if *closed { 2 } else { 1 };
+                        // ADR 0035: the frame lines are counted too
+                        // (the layout draws them).
+                        let frame = if *closed { 2 } else { 1 };
                         if is_mermaid(lang, *closed, modes.mermaid) {
                             let index = diagram_index;
                             diagram_index += 1;
                             match diagram_outcome(entry, index, &code_body(source, *closed), width)
                             {
-                                DiagramOutcome::Rendered(lines) => lines.len() + fences,
+                                DiagramOutcome::Rendered(lines) => lines.len() + frame,
                                 DiagramOutcome::Failed(_) => 1 + code_line_count(source, *closed),
                             }
                         } else {
@@ -977,12 +953,12 @@ fn tool_plan(
     }
 }
 
-/// How many display lines a fenced code block lays out to: its body's line count (the fence
-/// lines are markup). Mirrors [`code_lines`]'s skipping exactly.
+/// How many display lines a fenced code block lays out to: its body's line count plus the
+/// frame lines (the fences are markup). Mirrors [`code_lines`]'s skipping exactly.
 fn code_line_count(raw: &str, closed: bool) -> usize {
-    // The fence lines are shown (ADR 0035): the opening fence always, the closing
-    // fence when the block is closed.
-    let fences = if closed { 2 } else { 1 };
+    // The frame is shown (ADR 0035): the top line always, the bottom
+    // line when the block is closed.
+    let frame = if closed { 2 } else { 1 };
     let lines: Vec<&str> = raw.lines().collect();
     let mut count = lines.len();
     if lines
@@ -999,7 +975,7 @@ fn code_line_count(raw: &str, closed: bool) -> usize {
     {
         count -= 1;
     }
-    count.max(1) + fences
+    count.max(1) + frame
 }
 
 /// The cached count (the renderer's per-frame path for **every** entry, on screen or not).
@@ -1212,6 +1188,7 @@ fn layout_unstripped(
                         lang,
                     } => {
                         let source = &text[*start..*end];
+                        let md_glyphs = MdGlyphs::for_glyphs(modes.glyphs);
                         // A Mermaid block is drawn, not highlighted; every other closed block
                         // whose language is in the table is (ADR 0028 R2).
                         let highlight = if is_mermaid(lang, *closed, modes.mermaid) {
@@ -1219,15 +1196,10 @@ fn layout_unstripped(
                         } else {
                             syntax_lines_cached(*start, *end, &text, lang, *closed, modes.highlight)
                         };
-                        // ADR 0035: the fence line is shown weak as the code
-                        // block's title and end.
-                        let opening = source.lines().next().unwrap_or("").to_owned();
-                        // The closing fence is a separate line even when it is identical to
-                        // the opening (the usual ``` pair).
-                        let closing = (*closed)
-                            .then(|| source.lines().last().unwrap_or("").to_owned())
-                            .filter(|_| source.lines().count() > 1);
-                        lines.push(BodyLine::fence(opening, *start));
+                        // ADR 0035: the block is an open frame — a top
+                        // line titled with the language, a rail on every row, and a bottom
+                        // line when the block is closed. The frame is in the marker column.
+                        lines.push(code_frame_top(lang, *start, width, &md_glyphs));
                         if is_mermaid(lang, *closed, modes.mermaid) {
                             let index = diagram_index;
                             diagram_index += 1;
@@ -1251,6 +1223,7 @@ fn layout_unstripped(
                                         *start,
                                         *closed,
                                         width,
+                                        &md_glyphs,
                                         highlight.as_deref().map(Vec::as_slice),
                                     ));
                                 }
@@ -1261,11 +1234,14 @@ fn layout_unstripped(
                                 *start,
                                 *closed,
                                 width,
+                                &md_glyphs,
                                 highlight.as_deref().map(Vec::as_slice),
                             ));
                         }
-                        if let Some(closing) = closing {
-                            lines.push(BodyLine::fence(closing, *start));
+                        // A closed block is a separate line even when it is identical to the
+                        // opening (the usual ``` pair).
+                        if *closed && source.lines().count() > 1 {
+                            lines.push(code_frame_bottom(*start, &md_glyphs));
                         }
                     }
                 }
@@ -2103,7 +2079,8 @@ fn code_line_text(line: &str, width: usize) -> String {
     code_line_layout(line, width).0
 }
 
-/// The text of a fenced code block's display lines (fences are markup). Mirrors [`code_lines`].
+/// The text of a fenced code block's display lines (the rail and the fences are markup).
+/// Mirrors [`code_lines`]: the code is truncated at `width - 2` to leave the two rail columns.
 fn code_text_lines(raw: &str, closed: bool, width: usize) -> Vec<String> {
     let lines: Vec<&str> = raw.lines().collect();
     let body = match (lines.first(), lines.last()) {
@@ -2118,9 +2095,10 @@ fn code_text_lines(raw: &str, closed: bool, width: usize) -> Vec<String> {
         (Some(first), _) if fence_open(first.trim()).is_some() && lines.len() > 1 => &lines[1..],
         _ => &lines[..],
     };
+    let inner = width.saturating_sub(2).max(1);
     let mut out: Vec<String> = body
         .iter()
-        .map(|line| code_line_text(line, width))
+        .map(|line| code_line_text(line, inner))
         .collect();
     if out.is_empty() {
         out.push(String::new());
@@ -2267,17 +2245,65 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
     }
 }
 
-/// Lays one fenced code block out (ADR 0028 R9): the fence lines themselves are markup and
-/// do not show; each source line is one display line, tab-expanded (4 spaces), truncated to
-/// `width` with `…`. The `chars` cover the kept characters only — what is cut cannot be
-/// clicked — while `end` still reaches the source line's end, so a selection that spans the
-/// line copies the full text. `raw` is the whole block range (fences included) starting at
-/// `offset` in the display text.
+/// The code frame's top line (ADR 0035): `╭─ <lang> ───…`, or `╭───…`
+/// when the block has no language, filled to `width`. Synthesized: it has no source offset,
+/// so it never selects or copies (like the fence it replaces).
+fn code_frame_top(lang: &str, start: usize, width: usize, glyphs: &MdGlyphs) -> BodyLine {
+    let text = if lang.is_empty() {
+        let mut text = String::from(glyphs.code_open);
+        text.push_str(&glyphs.dash.to_string().repeat(width.saturating_sub(1)));
+        text
+    } else {
+        let prefix = format!("{}{} {lang} ", glyphs.code_open, glyphs.dash);
+        let used = UnicodeWidthStr::width(prefix.as_str());
+        let mut text = prefix;
+        text.push_str(&glyphs.dash.to_string().repeat(width.saturating_sub(used)));
+        text
+    };
+    frame_line(text, start)
+}
+
+/// The code frame's bottom line (ADR 0035): `╰──`.
+fn code_frame_bottom(start: usize, glyphs: &MdGlyphs) -> BodyLine {
+    frame_line(glyphs.code_bottom.to_owned(), start)
+}
+
+/// A synthesized frame line: its own single `Frame` piece, no source offsets.
+fn frame_line(text: String, start: usize) -> BodyLine {
+    BodyLine {
+        chars: Vec::new(),
+        end: start,
+        text: text.clone(),
+        code: true,
+        pad: Pad::None,
+        frame: Frame::None,
+        role: tools::LineRole::Normal,
+        // `hint: true` so `strip_edge_blanks` never treats a frame as a blank edge line.
+        hint: true,
+        diagram: None,
+        reason: false,
+        md: Some(vec![MdPiece {
+            text,
+            style: MdStyle::Frame,
+            offset: None,
+        }]),
+        syntax: None,
+    }
+}
+
+/// Lays one fenced code block out (ADR 0028 R9, ADR 0035): the fence
+/// lines themselves are markup; each source line is one display line, prefixed by the rail
+/// `│ ` (the frame's left edge) and starting its code at column 3, tab-expanded (4 spaces)
+/// and truncated to `width - 2` with `…`. The `chars` cover the kept characters only — the
+/// rail and what is cut cannot be clicked — while `end` still reaches the source line's end,
+/// so a selection that spans the line copies the full text. `raw` is the whole block range
+/// (fences included) starting at `offset` in the display text.
 fn code_lines(
     raw: &str,
     offset: usize,
     closed: bool,
     width: usize,
+    glyphs: &MdGlyphs,
     highlight: Option<&[crate::highlight::HighlightedLine]>,
 ) -> Vec<BodyLine> {
     let lines: Vec<&str> = raw.lines().collect();
@@ -2296,33 +2322,36 @@ fn code_lines(
         (Some(first), _) if fence_open(first.trim()).is_some() && lines.len() > 1 => &lines[1..],
         _ => &lines[..],
     };
+    // The rail takes the first two columns, so the code has two fewer.
+    let inner = width.saturating_sub(2).max(1);
     let mut out = Vec::new();
     for (index, line) in body.iter().enumerate() {
         // Byte offset of the line's first char within the display text.
         let offset = line.as_ptr() as usize - base + offset;
-        let (plain, kept, cut) = code_line_layout(line, width);
-        let mut chars: Vec<Option<usize>> =
-            kept.into_iter().map(|idx| Some(offset + idx)).collect();
+        let (plain, kept, cut) = code_line_layout(line, inner);
+        // The rail's two cells are synthesized, never source: a click or a copy skips them.
+        let mut chars: Vec<Option<usize>> = vec![None, None];
+        chars.extend(kept.into_iter().map(|idx| Some(offset + idx)));
         if cut {
-            // The ellipsis is decoration; map it to the last kept char.
+            // The ellipsis is decoration; map it to the last kept char (the rail's `None` for
+            // an empty cut, so the counts still match).
             if let Some(&last) = chars.last() {
                 chars.push(last);
             }
         }
         let end = offset + line.len();
         // `styled_line` mirrors `code_line_layout` (same tab expansion, same width rule), so
-        // the drawn text is the same either way; only the roles differ.
-        let syntax = highlight
-            .and_then(|lines| lines.get(index))
-            .map(|hl| crate::highlight::styled_line(hl, width));
-        let text = match &syntax {
-            Some(pieces) => pieces.iter().map(|(text, _)| text.as_str()).collect(),
-            None => plain,
+        // the drawn text is the same either way; only the roles differ. With no highlight the
+        // code is one `Plain` piece, so the rail and the code render in order.
+        let syntax = match highlight.and_then(|lines| lines.get(index)) {
+            Some(hl) => crate::highlight::styled_line(hl, inner),
+            None => vec![(plain, crate::highlight::SyntaxRole::Plain)],
         };
+        let code: String = syntax.iter().map(|(text, _)| text.as_str()).collect();
         out.push(BodyLine {
             chars,
             end,
-            text,
+            text: format!("{}{}", glyphs.rail, code),
             code: true,
             pad: Pad::None,
             frame: Frame::None,
@@ -2330,26 +2359,17 @@ fn code_lines(
             hint: false,
             diagram: None,
             reason: false,
-            md: None,
-            syntax,
+            md: Some(vec![MdPiece {
+                text: glyphs.rail.to_owned(),
+                style: MdStyle::Frame,
+                offset: None,
+            }]),
+            syntax: Some(syntax),
         });
     }
     if out.is_empty() {
-        // An empty code block still shows one blank line.
-        out.push(BodyLine {
-            chars: Vec::new(),
-            end: 0,
-            text: String::new(),
-            code: true,
-            pad: Pad::None,
-            frame: Frame::None,
-            role: tools::LineRole::Normal,
-            hint: false,
-            diagram: None,
-            reason: false,
-            md: None,
-            syntax: None,
-        });
+        // An empty code block still shows its rail on one line.
+        out.push(frame_line(glyphs.rail.to_owned(), offset));
     }
     out
 }
@@ -2392,6 +2412,12 @@ struct MdGlyphs {
     bottom: (&'static str, &'static str, &'static str),
     horizontal: &'static str,
     vertical: &'static str,
+    /// The code frame (ADR 0035): the top-left corner, the bottom line
+    /// (`╰──`) and the rail (`│ `) that prefixes every code row.
+    code_open: &'static str,
+    code_bottom: &'static str,
+    rail: &'static str,
+    dash: char,
 }
 
 impl MdGlyphs {
@@ -2408,6 +2434,10 @@ impl MdGlyphs {
                 bottom: ("+", "+", "+"),
                 horizontal: "-",
                 vertical: "|",
+                code_open: "+",
+                code_bottom: "+--",
+                rail: "| ",
+                dash: '-',
             },
             // ADR 0035: nerd uses the heavier `│`, unicode the lighter `▏`.
             crate::footer::Glyphs::Nerd => Self {
@@ -2421,6 +2451,10 @@ impl MdGlyphs {
                 bottom: ("└", "┴", "┘"),
                 horizontal: "─",
                 vertical: "│",
+                code_open: "╭",
+                code_bottom: "╰──",
+                rail: "│ ",
+                dash: '─',
             },
             crate::footer::Glyphs::Unicode => Self {
                 bullet: "- ",
@@ -2433,6 +2467,10 @@ impl MdGlyphs {
                 bottom: ("└", "┴", "┘"),
                 horizontal: "─",
                 vertical: "│",
+                code_open: "╭",
+                code_bottom: "╰──",
+                rail: "│ ",
+                dash: '─',
             },
         }
     }
@@ -3768,13 +3806,21 @@ mod tests {
         let entry = assistant("```\nshort\nabc def gh ijk\n```");
         let blocks = parse_blocks(&entry.text);
         let lines = layout(&entry, &blocks, EXPANDED, 10);
-        // The two fence lines plus the body's two lines.
+        // The top frame, the body's two rows (each `│ ` plus code) and the bottom frame.
         assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0].text, "```", "the opening fence");
-        assert_eq!(lines[1].text, "short");
-        assert_eq!(lines[2].text, "abc def g…", "truncated at 9 columns + …");
-        assert_eq!(lines[3].text, "```", "the closing fence");
+        assert_eq!(lines[0].text, "╭─────────", "the top frame, no language");
+        assert_eq!(lines[1].text, "│ short");
+        assert_eq!(
+            lines[2].text, "│ abc def…",
+            "rail + code cut at 8 columns + …"
+        );
+        assert_eq!(lines[3].text, "╰──", "the bottom frame");
         assert_eq!(lines[2].chars.len(), lines[2].text.chars().count());
+        assert!(
+            lines[2].chars[..2].iter().all(|c| c.is_none()),
+            "the rail is synthesized: {:?}",
+            lines[2].chars
+        );
         // The gap still reaches the source line's end (byte offsets are into the entry
         // text, fences included): a selection across it copies all.
         let start = entry.text.find("abc").expect("the line is in the text");
@@ -3786,11 +3832,13 @@ mod tests {
         let entry = assistant("```\na\tb\n```");
         let blocks = parse_blocks(&entry.text);
         let lines = layout(&entry, &blocks, EXPANDED, 20);
-        assert_eq!(lines[1].text, "a    b");
+        assert_eq!(lines[1].text, "│ a    b");
         let base = entry.text.find('a').expect("the line is in the text");
         assert_eq!(
             lines[1].chars,
             vec![
+                None,
+                None,
                 Some(base),
                 Some(base + 1),
                 Some(base + 1),
@@ -3803,17 +3851,18 @@ mod tests {
 
     #[test]
     fn a_code_line_that_fits_exactly_is_not_truncated() {
-        // Exactly the width: it fits, so no ellipsis (the `…` costs a column).
+        // The code's own width is `width - 2` (the rail takes the first two columns).
+        // Exactly that: it fits, so no ellipsis (the `…` costs a column).
         let entry = assistant(&format!("```\n{}\n```", "x".repeat(20)));
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, EXPANDED, 20);
-        assert_eq!(lines[1].text, "x".repeat(20));
+        let lines = layout(&entry, &blocks, EXPANDED, 22);
+        assert_eq!(lines[1].text, format!("│ {}", "x".repeat(20)));
         assert!(!lines[1].text.contains('…'));
         // One over: it does not fit; keep width-1 and mark the cut.
         let entry = assistant(&format!("```\n{}\n```", "x".repeat(21)));
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, EXPANDED, 20);
-        assert_eq!(lines[1].text, format!("{}…", "x".repeat(19)));
+        let lines = layout(&entry, &blocks, EXPANDED, 22);
+        assert_eq!(lines[1].text, format!("│ {}…", "x".repeat(19)));
         // The mapping still reaches the source line's end either way (the offset is into the
         // entry text, which starts with the "```\n" fence line).
         assert_eq!(lines[1].end, "```\n".len() + 21);
@@ -3821,27 +3870,76 @@ mod tests {
 
     #[test]
     fn cjk_lines_follow_the_same_fit_rule() {
-        // 6 columns at width 6: as-is.
+        // 6 code columns at width 8 (inner 6): as-is.
         let entry = assistant("```\n日本語\n```");
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, EXPANDED, 6);
-        assert_eq!(lines[1].text, "日本語");
-        // 6 columns at width 5: keep 4 columns (2 wide chars) and the ellipsis.
-        let lines = layout(&entry, &blocks, EXPANDED, 5);
-        assert_eq!(lines[1].text, "日本…");
-        assert_eq!(lines[1].chars.len(), lines[1].text.chars().count());
-        // 6 columns at width 7: as-is.
+        let lines = layout(&entry, &blocks, EXPANDED, 8);
+        assert_eq!(lines[1].text, "│ 日本語");
+        // 6 code columns at width 7 (inner 5): keep 4 columns (2 wide chars) and the ellipsis.
         let lines = layout(&entry, &blocks, EXPANDED, 7);
-        assert_eq!(lines[1].text, "日本語");
+        assert_eq!(lines[1].text, "│ 日本…");
+        assert_eq!(lines[1].chars.len(), lines[1].text.chars().count());
+        // 6 code columns at width 9 (inner 7): as-is.
+        let lines = layout(&entry, &blocks, EXPANDED, 9);
+        assert_eq!(lines[1].text, "│ 日本語");
     }
 
     #[test]
     fn cjk_widths_count_in_the_truncation() {
         let entry = assistant("```\n日本語テキスト\n```");
         let blocks = parse_blocks(&entry.text);
-        // Width 7: 日(2)本(2)語(2) = 6, テ would exceed → cut after 語.
-        let lines = layout(&entry, &blocks, EXPANDED, 7);
-        assert_eq!(lines[1].text, "日本語…");
+        // width 9 → inner 7: 日(2)本(2)語(2) = 6, テ would exceed → cut after 語.
+        let lines = layout(&entry, &blocks, EXPANDED, 9);
+        assert_eq!(lines[1].text, "│ 日本語…");
+    }
+
+    /// ADR 0035: the block is an open frame — a top line titled with
+    /// the language, a rail on every row (the code from column 3), and a bottom line.
+    #[test]
+    fn a_code_block_draws_an_open_frame() {
+        let mut entry = Entry::new(EntryKind::Assistant, "```rust\nlet x = 1;\n```\n");
+        let blocks = blocks_for(&mut entry, ReasoningMode::Collapsed);
+        let lines = layout(&entry, &blocks, DisplayModes::default(), 40);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(
+            texts[0].starts_with("╭─ rust "),
+            "the top line is titled with the language: {texts:?}"
+        );
+        assert_eq!(
+            UnicodeWidthStr::width(texts[0]),
+            40,
+            "the top line fills the width: {texts:?}"
+        );
+        assert!(
+            texts.contains(&"│ let x = 1;"),
+            "the code row carries the rail and starts at column 3: {texts:?}"
+        );
+        assert!(texts.contains(&"╰──"), "the bottom frame: {texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("```")),
+            "no fence markup is drawn: {texts:?}"
+        );
+    }
+
+    /// The `ascii` glyph tier's code frame (ADR 0035): `+-` opens,
+    /// `|` rails and `+--` closes.
+    #[test]
+    fn the_ascii_code_frame_uses_plus_and_pipe() {
+        let entry = assistant("```\ncode\n```");
+        let blocks = parse_blocks(&entry.text);
+        let modes = DisplayModes {
+            glyphs: crate::footer::Glyphs::Ascii,
+            ..EXPANDED
+        };
+        let lines = layout(&entry, &blocks, modes, 20);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            texts[0],
+            format!("+{}", "-".repeat(19)),
+            "the ascii top frame, no language: {texts:?}"
+        );
+        assert!(texts.contains(&"| code"), "the ascii rail: {texts:?}");
+        assert!(texts.contains(&"+--"), "the ascii bottom frame: {texts:?}");
     }
 
     #[test]
@@ -4019,22 +4117,6 @@ mod tests {
             crate::footer::Glyphs::Unicode,
         );
         assert!(stripped.iter().any(|t| t.contains("a b c")), "{stripped:?}");
-    }
-
-    /// A code block shows its fence line (weak) as its title and end.
-    #[test]
-    fn a_code_block_shows_its_fence() {
-        let mut entry = Entry::new(EntryKind::Assistant, "```rust\nlet x = 1;\n```\n");
-        let blocks = blocks_for(&mut entry, ReasoningMode::Collapsed);
-        let lines = layout(&entry, &blocks, DisplayModes::default(), 40);
-        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
-        assert!(texts.contains(&"```rust"), "{texts:?}");
-        assert!(texts.contains(&"let x = 1;"), "{texts:?}");
-        assert_eq!(
-            texts.iter().filter(|t| **t == "```").count(),
-            1,
-            "{texts:?}"
-        );
     }
 
     /// The synthesized Markdown decorations (bullet, checkbox, quote bar) have no source

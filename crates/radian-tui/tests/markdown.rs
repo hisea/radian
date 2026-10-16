@@ -68,7 +68,9 @@ fn style_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::s
             line.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
         }
         if let Some(col) = line.find(needle) {
-            let x = area.left() + col as u16;
+            // `col` is a byte offset; the buffer column is the display width of the prefix
+            // (the code frame's rail is multi-byte, e.g. `│`).
+            let x = area.left() + unicode_width::UnicodeWidthStr::width(&line[..col]) as u16;
             return buffer.cell((x, y)).map(|c| c.style());
         }
     }
@@ -268,7 +270,7 @@ fn line_count_matches_the_layout() {
     let mut app = App::new("m", "s");
     assistant(
         &mut app,
-        "# Title\n\nA paragraph that is long enough to wrap at a narrow width for sure.\n\n- one\n- two\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+        "# Title\n\nA paragraph that is long enough to wrap at a narrow width for sure.\n\n- one\n- two\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n```rust\nlet x = 1;\n```\n",
     );
     let entry = &app.session.entries[0];
     let blocks = blocks::parse_blocks(entry.text.as_str());
@@ -706,20 +708,30 @@ fn a_long_ordered_list_item_wraps_in_a_wide_window() {
     }
 }
 
-// ---- ADR 0035: the sample snapshot and the code fence ----
+// ---- ADR 0035: the sample snapshot and the code frame ----
 
-/// A code block shows its fence line (weak) as its title and end.
+/// A code block draws an open frame (ADR 0035): a top line titled with
+/// the language, a rail on the code row, and a bottom line, all in the `frame` role (drawn
+/// with `md_hr` until that role lands).
 #[test]
-fn a_code_block_shows_its_fence() {
+fn a_code_block_draws_a_frame() {
     let mut app = App::new("m", "s");
     assistant(&mut app, "```rust\nlet x = 1;\n```\n");
     let terminal = render(&mut app, 60, 12);
     let text = screen(&terminal);
-    assert!(text.contains("```rust"), "the opening fence: {text}");
-    assert!(text.contains("let x = 1;"), "{text}");
-    // The fence uses the weak role (dim).
-    let fence = style_of(&terminal, "```rust").expect("the fence");
-    assert_eq!(fence.fg, app.theme.truncation.fg, "the fence is weak");
+    assert!(text.contains("╭─ rust"), "the titled top line:\n{text}");
+    assert!(
+        text.contains("│ let x = 1;"),
+        "the rail and the code:\n{text}"
+    );
+    assert!(text.contains("╰──"), "the bottom line:\n{text}");
+    assert!(!text.contains("```"), "no fence is drawn:\n{text}");
+    // The frame takes the `frame` role, drawn with `md_hr` for now.
+    let frame = style_of(&terminal, "╭").expect("the frame top line");
+    assert_eq!(
+        frame.fg, app.theme.md_hr.fg,
+        "the frame is the `frame` role"
+    );
 }
 
 /// The sample Markdown covering every element at 80 and 120 columns, and the ascii glyph set.
@@ -758,7 +770,7 @@ fn the_sample_markdown_snapshot() {
             "▏ quoted",
             "引",
             "┌",
-            "```rust",
+            "╭─ rust",
             "let x = 1;",
             "html quote",
         ] {

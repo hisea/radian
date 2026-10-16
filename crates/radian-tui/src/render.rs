@@ -2418,7 +2418,9 @@ fn body_spans(
                 blocks::MdStyle::TaskUnchecked | blocks::MdStyle::TaskChecked => {
                     theme.md_list_bullet
                 }
-                blocks::MdStyle::Fence => theme.truncation,
+                // ADR 0035: the code frame is the `frame` role, drawn
+                // with `md_hr` until that role lands (ADR 0029).
+                blocks::MdStyle::Frame => theme.md_hr,
                 // ADR 0035: bold is the text role plus the bold
                 // modifier; it never takes the heading role's color.
                 blocks::MdStyle::Bold => theme.text.add_modifier(Modifier::BOLD),
@@ -2442,29 +2444,16 @@ fn body_spans(
             };
             out.push(Span::styled(piece.text.clone(), style));
         }
+        // A code row carries its rail (a `Frame` piece) **and** its highlighted code, so the
+        // two render in order (ADR 0035).
+        if let Some(syntax) = &row.syntax {
+            push_syntax(&mut out, syntax, body_style, theme, band);
+        }
     } else if let Some(syntax) = &row.syntax {
         // A syntax-highlighted code line (ADR 0028 R2): each piece takes its Radian role's
         // style; `Plain` keeps the code block's own style. The text is unchanged, so
         // selection, copy and search are unaffected.
-        for (text, role) in syntax {
-            let style = match role {
-                crate::highlight::SyntaxRole::Comment => theme.syntax_comment,
-                crate::highlight::SyntaxRole::Keyword => theme.syntax_keyword,
-                crate::highlight::SyntaxRole::Function => theme.syntax_function,
-                crate::highlight::SyntaxRole::Variable => theme.syntax_variable,
-                crate::highlight::SyntaxRole::String => theme.syntax_string,
-                crate::highlight::SyntaxRole::Number => theme.syntax_number,
-                crate::highlight::SyntaxRole::Type => theme.syntax_type,
-                crate::highlight::SyntaxRole::Operator => theme.syntax_operator,
-                crate::highlight::SyntaxRole::Punctuation => theme.syntax_punctuation,
-                crate::highlight::SyntaxRole::Plain => body_style,
-            };
-            let style = match band {
-                Some(band) => style.patch(band),
-                None => style,
-            };
-            out.push(Span::styled(text.clone(), style));
-        }
+        push_syntax(&mut out, syntax, body_style, theme, band);
     } else if let Some(diagram) = &row.diagram {
         // A rendered diagram (ADR 0028 R8): each piece takes its own role's style.
         for (piece, role) in diagram {
@@ -2492,6 +2481,37 @@ fn body_spans(
         out.push(Span::styled(row.text.clone(), body_style));
     }
     out
+}
+
+/// Pushes one code line's highlighted pieces (ADR 0028 R2): each takes its Radian role's
+/// style, `Plain` keeps the code block's own style. Shared by a plain syntax row and a code
+/// row that also carries its frame rail.
+fn push_syntax(
+    out: &mut Vec<Span<'static>>,
+    syntax: &crate::highlight::HighlightedLine,
+    body_style: Style,
+    theme: &Theme,
+    band: Option<Style>,
+) {
+    for (text, role) in syntax {
+        let style = match role {
+            crate::highlight::SyntaxRole::Comment => theme.syntax_comment,
+            crate::highlight::SyntaxRole::Keyword => theme.syntax_keyword,
+            crate::highlight::SyntaxRole::Function => theme.syntax_function,
+            crate::highlight::SyntaxRole::Variable => theme.syntax_variable,
+            crate::highlight::SyntaxRole::String => theme.syntax_string,
+            crate::highlight::SyntaxRole::Number => theme.syntax_number,
+            crate::highlight::SyntaxRole::Type => theme.syntax_type,
+            crate::highlight::SyntaxRole::Operator => theme.syntax_operator,
+            crate::highlight::SyntaxRole::Punctuation => theme.syntax_punctuation,
+            crate::highlight::SyntaxRole::Plain => body_style,
+        };
+        let style = match band {
+            Some(band) => style.patch(band),
+            None => style,
+        };
+        out.push(Span::styled(text.clone(), style));
+    }
 }
 
 /// A framed content row (ADR 0028): `│ ` in the marker column, the body from
