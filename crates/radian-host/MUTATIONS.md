@@ -1164,3 +1164,34 @@ Base `2f41f69` · 在 worktree 内直接改文件、跑单个测试、再从 `.r
 sink 就是宿主会传的 sink），因为生产 builder 的 `task_events` 由宿主提供，没有"把 lead 的
 sink 塞进 builder"的单行源码改法；测试断言（任务自己的 sink 收到它自己的 stream、lead 的
 sink 只收到 `TaskSpawned`/`TaskFinished`）在变异下失败。S6B2-2 的变异是源码变异。
+
+## ADR 0030 切片 7 part b：named agent、`send_agent`、`/send`（2026-10-16）
+
+工作树 `.radian-worktrees/orch-s7b`（分支 `oc/orch-s7b`，基 `ce085d9` = 片 7a）。每条变异就地改，
+跑单个测试，再从 `/tmp` 的副本 `cp` 还原并 `cmp` 确认；跑完 `git status --short` 只剩源码改动。
+跑法（`timeout` 包裹，`--no-fail-fast`）：
+
+```sh
+cargo test -p radian-host --test named --no-fail-fast -- <下面的测试名>
+cargo test -p radian-tui --test send --no-fail-fast -- <下面的测试名>
+```
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S7B-1 | `NamedRegistry::get_or_create` 不查已有的同名会话（把两次 reuse 检查都去掉，总是 `create`） | ✅ failed | `first_send_creates_and_the_second_reuses`（第二次 `send` 走 `create`：`open_session` 对同名会话文件失败，第二次 send 报错） |
+| S7B-2 | `send_agent` 用 `InputSource::User` 入队（`InputSource::Subagent` → `User`） | ✅ failed | `send_agent_and_wait_agent_round_trip`（断言 named 会话的 `turn_source == Subagent`） |
+| S7B-3 | TUI `/send` 用 `InputSource::Subagent` 入队（`command::send_source()` 返回 `Subagent`） | ✅ failed | `a_submitted_send_line_is_the_loop_effect`（断言 `send_source() == User`） |
+| S7B-4 | named agent 打开 memory（`enforce_named_setup` 去掉 `setup.memory_root = None;`） | ✅ failed | `a_named_agent_has_no_memory_and_is_not_a_task`（builder 故意传 `memory_root = Some(...)`，去掉清除后 `session.memory()` 为 `Some`） |
+
+4/4 抓住。
+
+**说明（如实记录）**：
+- S7B-2 的变异在 `lead_tools.rs` 的 `send_agent`（源码），由 host 测试断言 named 会话的
+  `hooks().turn_source()` 抓住；`send_agent` 是 `send(..., Subagent)` 的薄包装，来源错误会让
+  这一断言变红。
+- S7B-3 的变异在 `command.rs` 的 `send_source()`（源码），由 TUI 单测断言它返回 `User` 抓住。
+  这是纯函数断言：TUI 的 `/send` 真入队路径在事件循环里，事件循环没有 `TestBackend` 级测试，
+  来源规则因此用一个可直接断言的接缝钉住（与 7a 的 `tools` 允许名单同法）。**未做端到端 pty
+  试跑**：`/send` 的真实入队来源没有 pty 覆盖，属本条已知缺口。
+- S7B-4 的测试 builder 必须传 `memory_root = Some(...)`，否则 enforcer 的那行不是承重的，变异不会
+  变红；这一点写进测试注释。

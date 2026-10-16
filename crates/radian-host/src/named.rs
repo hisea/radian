@@ -31,7 +31,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{InputSource, Message};
@@ -126,9 +125,9 @@ pub struct NamedRecord {
 }
 
 impl NamedRecord {
-    /// Whether the named agent's turn is running right now.
+    /// Whether the named agent's turn is running right now (the driver's own flag).
     pub fn running(&self) -> bool {
-        self.turns.running.load(Ordering::SeqCst)
+        self.session.turn_running()
     }
 
     /// The outcome of the last turn that ended, or `None` before its first.
@@ -169,11 +168,11 @@ impl NamedRecord {
     }
 }
 
-/// One named agent's turn tracking: `running`/`last_outcome`/the `watch` a waiter uses. It has
-/// no end-of-task commit (that is a task rule, ADR 0030 O2).
-#[derive(Default)]
+/// One named agent's turn tracking: the last turn outcome and the `watch` a waiter uses. It has
+/// no end-of-task commit (that is a task rule, ADR 0030 O2). "Running" comes from the session's
+/// own driver flag, not from here: the driver does not deliver `TurnStarted` to a runtime-events
+/// sink, only the turn boundaries.
 struct NamedTurns {
-    running: AtomicBool,
     last_outcome: Mutex<Option<TurnOutcome>>,
     turns: watch::Sender<u64>,
 }
@@ -181,17 +180,11 @@ struct NamedTurns {
 impl NamedTurns {
     fn on_turn_event(&self, event: &RuntimeEvent) {
         match event {
-            RuntimeEvent::TurnStarted { .. } => {
-                self.running.store(true, Ordering::SeqCst);
-                self.signal();
-            }
             RuntimeEvent::TurnFinished { outcome, .. } => {
-                self.running.store(false, Ordering::SeqCst);
                 *self.last_outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(*outcome);
                 self.signal();
             }
             RuntimeEvent::TurnFailed { .. } => {
-                self.running.store(false, Ordering::SeqCst);
                 *self.last_outcome.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(TurnOutcome::Failed);
                 self.signal();
@@ -437,7 +430,6 @@ impl NamedRegistry {
         }
 
         let turns = Arc::new(NamedTurns {
-            running: AtomicBool::new(false),
             last_outcome: Mutex::new(None),
             turns: watch::channel(0u64).0,
         });

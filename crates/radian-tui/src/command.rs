@@ -93,6 +93,12 @@ pub enum SendRequest {
     Send { name: String, text: String },
 }
 
+/// The source a `/send` input carries (ADR 0030 O12): the human typed it, so `User`. The loop
+/// enqueues with this; a diagnostic here, not a policy the command can loosen.
+pub fn send_source() -> agent_core::InputSource {
+    agent_core::InputSource::User
+}
+
 /// What one submitted `/…` line meant. Parsing only: running the command is the loop's job
 /// (ADR 0023 U3), and whether a write needs confirmation is the executor's answer.
 #[derive(Debug)]

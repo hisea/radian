@@ -1186,6 +1186,7 @@ impl PartialEq for Effect {
             (ListSkills, ListSkills) => true,
             (Jobs(a), Jobs(b)) => a == b,
             (Tasks(a), Tasks(b)) => a == b,
+            (Send(a), Send(b)) => a == b,
             (Theme { name: a }, Theme { name: b }) => a == b,
             (Inject(a), Inject(b)) => a == b,
             (CancelBash, CancelBash) => true,

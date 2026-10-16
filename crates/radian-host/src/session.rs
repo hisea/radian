@@ -564,6 +564,9 @@ pub struct LocalSession {
     lead: Option<Arc<crate::task::TaskRegistry>>,
     /// The lead's named-agent registry (ADR 0030 O12), or `None` for a session with none.
     named: Option<Arc<crate::named::NamedRegistry>>,
+    /// Whether a turn is running right now (the driver's own flag, `false` before the first
+    /// turn). A named agent's `/send` and `wait_agent` read it to tell "busy" from "idle".
+    turn_running: Arc<std::sync::atomic::AtomicBool>,
     /// Whether layer 1 is fixed for the session (`--system` or an explicit role): `set_mode`
     /// refuses then.
     role_fixed: bool,
@@ -636,6 +639,12 @@ impl LocalSession {
     /// The lead's named-agent registry (ADR 0030 O12), or `None`. For the host's `/send`.
     pub fn named_agents(&self) -> Option<&Arc<crate::named::NamedRegistry>> {
         self.named.as_ref()
+    }
+
+    /// Whether a turn is running right now (the driver's flag). `false` before the first turn and
+    /// between turns; a named agent's `send` uses it to choose "queued" over "started".
+    pub fn turn_running(&self) -> bool {
+        self.turn_running.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn projection(&self) -> &Arc<SessionProjection> {
@@ -1681,6 +1690,7 @@ pub async fn open_session(
         task_agent,
         lead: lead_registry,
         named: named_registry,
+        turn_running,
         role_fixed,
         facts_hooks,
         projection,

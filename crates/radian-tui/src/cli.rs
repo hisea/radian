@@ -3367,7 +3367,7 @@ impl LoopContext<'_> {
                         match self.runtime.block_on(named.send(
                             &name,
                             text,
-                            agent_core::InputSource::User,
+                            radian_tui::command::send_source(),
                         )) {
                             Ok(outcome) => {
                                 self.send(AppInput::AgentSent {
