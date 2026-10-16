@@ -2,6 +2,7 @@ use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::args;
 use crate::fail;
 use crate::provider::Limits;
 use crate::workspace::{WorkspaceRoot, io_failure};
@@ -12,6 +13,25 @@ struct ListArgs {
     max_entries: Option<u64>,
 }
 
+pub(crate) fn schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative directory; defaults to the workspace root."
+            },
+            "max_entries": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5000,
+                "description": "Maximum entries to return; defaults to 500."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "list".into(),
@@ -19,22 +39,7 @@ pub(crate) fn spec() -> ToolSpec {
                       with their kind (`file`, `dir`, `symlink`, `other`) and size; symlinks \
                       are shown, never followed. Truncated past max_entries."
             .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Workspace-relative directory; defaults to the workspace root."
-                },
-                "max_entries": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 5000,
-                    "description": "Maximum entries to return; defaults to 500."
-                }
-            },
-            "additionalProperties": false
-        }),
+        input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
     }
 }
@@ -50,8 +55,7 @@ pub(crate) async fn run(
     limits: &Limits,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: ListArgs = serde_json::from_value(arguments.clone())
-        .map_err(|e| fail("invalid_arguments", e.to_string()))?;
+    let args: ListArgs = args::parse("list", &schema(), arguments)?;
     let requested = args.path.as_deref().unwrap_or(".");
     let cap = match args.max_entries {
         Some(0) => {

@@ -339,6 +339,6 @@ async fn patch_rejects_an_empty_needle() {
                 .await
                 .unwrap()
         ),
-        "a"
+        "1: a"
     );
 }
