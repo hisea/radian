@@ -1085,9 +1085,12 @@ event loop, before any session exists: `Up`/`Down` select, type to filter by id/
 
 ## Flags
 
-`--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
-`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--pick`, `--version`,
-`--workspace DIR`, `--mcp-config FILE`,
+The common flags have short forms: `-m`/`--model`, `-w`/`--workspace`, `-r`/`--resume`,
+`-l`/`--list` and `-y`/`--yes`. `-V`/`--version` is clap's.
+
+`-m`/`--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
+`--system`, `--session-dir`, `--session-id`, `-r`/`--resume`, `-l`/`--list`, `--pick`,
+`--version`, `-w`/`--workspace DIR`, `--mcp-config FILE`,
 `--profile safe|workspace|full` (default `workspace`; the old `workspace-write`/`full-access`
 are accepted aliases but not listed),
 `--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
@@ -1149,7 +1152,7 @@ Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementat
   it stays a fuse, because the context-budget guard does not stop a loop of small calls. When a turn hits it, the pending tool calls are answered with
   "the model call budget is used up" and the turn ends; a new message starts a fresh count.
   Tested by `pty_max_model_calls_limits_the_turn`.
-- `--yes` answers every `ask` with "allow once" and shows no dialog, the same as
+- `-y`/`--yes` answers every `ask` with "allow once" and shows no dialog, the same as
   `radian exec --yes`. It removes the question only: `deny` rules still deny, the sandbox still
   applies, every decision is still audited, and the startup says it is on. With
   `workspace` this means "the sandbox is the boundary"; with `full` there is no

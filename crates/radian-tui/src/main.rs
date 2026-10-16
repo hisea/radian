@@ -47,7 +47,7 @@ struct Cli {
 
     /// Expose the built-in file and read-only git tools rooted at this directory
     /// (read/write/patch/list, git_status/git_diff). No shell is provided.
-    #[arg(help_heading = "TUI", long, value_name = "DIR")]
+    #[arg(help_heading = "TUI", long, short = 'w', value_name = "DIR")]
     workspace: Option<PathBuf>,
 
     #[arg(help_heading = "TUI", long)]
@@ -55,7 +55,7 @@ struct Cli {
 
     /// Model name sent to the API. Required unless the config file's `model.model` provides
     /// it.
-    #[arg(help_heading = "Model", long)]
+    #[arg(help_heading = "Model", long, short = 'm')]
     model: Option<String>,
 
     /// Provider wire protocol: `openai-compatible` (the default, unchanged) or `anthropic`.
@@ -98,11 +98,11 @@ struct Cli {
 
     /// Resume an existing session by id, rendering its history into the transcript. Without a
     /// value it shows the session picker (resuming only: no "new" entry).
-    #[arg(help_heading = "Session", long, value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
+    #[arg(help_heading = "Session", long, short = 'r', value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
     resume: Option<Option<String>>,
 
     /// List this workspace's sessions and exit.
-    #[arg(help_heading = "Session", long)]
+    #[arg(help_heading = "Session", long, short = 'l')]
     list: bool,
 
     /// Show a full-screen picker for this workspace's sessions before opening one (Phase 4):
@@ -132,7 +132,7 @@ struct Cli {
 
     /// Approve every tool call without asking, like `radian exec --yes`. Not "allow everything":
     /// `deny` rules still deny and the sandbox still applies; only the question is removed.
-    #[arg(help_heading = "Permissions", long)]
+    #[arg(help_heading = "Permissions", long, short = 'y')]
     yes: bool,
 
     /// The per-turn model call limit. The core's default (`DEFAULT_MAX_MODEL_CALLS`, 32) is a
@@ -4235,6 +4235,65 @@ mod tests {
         let cli =
             Cli::try_parse_from(["radian", "--model", "m", "--max-model-calls", "5"]).unwrap();
         assert_eq!(cli.max_model_calls, 5);
+    }
+
+    /// The short aliases shorthand") are the long flags: each
+    /// short parses to the same field as its long form, so nothing else about the surface moves.
+    #[test]
+    fn the_short_flags_parse_to_the_same_fields_as_the_long_ones() {
+        let long = Cli::try_parse_from([
+            "radian",
+            "--model",
+            "m",
+            "--workspace",
+            "/tmp/ws",
+            "--yes",
+            "--list",
+        ])
+        .unwrap();
+        let short =
+            Cli::try_parse_from(["radian", "-m", "m", "-w", "/tmp/ws", "-y", "-l"]).unwrap();
+        assert_eq!(short.model, long.model);
+        assert_eq!(short.workspace, long.workspace);
+        assert_eq!(short.yes, long.yes);
+        assert_eq!(short.list, long.list);
+        assert_eq!(short.resume, long.resume);
+    }
+
+    /// `--resume` takes an optional id (`num_args = 0..=1`); `-r` must behave the same: a bare
+    /// `-r` is the picker, and `-r <id>` resumes that id.
+    #[test]
+    fn the_resume_short_takes_no_value_and_a_value() {
+        let long_bare = Cli::try_parse_from(["radian", "--resume"]).unwrap();
+        let short_bare = Cli::try_parse_from(["radian", "-r"]).unwrap();
+        assert_eq!(short_bare.resume, long_bare.resume);
+        assert_eq!(short_bare.resume, Some(None));
+
+        let long_id = Cli::try_parse_from(["radian", "--resume", "abc"]).unwrap();
+        let short_id = Cli::try_parse_from(["radian", "-r", "abc"]).unwrap();
+        assert_eq!(short_id.resume, long_id.resume);
+        assert_eq!(short_id.resume, Some(Some("abc".to_string())));
+    }
+
+    /// The `--resume`/`--list` conflict is a property of the flags, not of the spelling: `-r`
+    /// rejects `--list` with the same clap error kind as `--resume`, bare or with an id.
+    #[test]
+    fn the_resume_short_conflicts_with_list_like_the_long_form() {
+        for (long, short) in [
+            (
+                Cli::try_parse_from(["radian", "--resume", "abc", "--list"]),
+                Cli::try_parse_from(["radian", "-r", "abc", "--list"]),
+            ),
+            (
+                Cli::try_parse_from(["radian", "--resume", "--list"]),
+                Cli::try_parse_from(["radian", "-r", "--list"]),
+            ),
+        ] {
+            let long = long.unwrap_err();
+            let short = short.unwrap_err();
+            assert_eq!(short.kind(), long.kind());
+            assert_eq!(short.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 
     /// The loop's `/model` rule (F4, ADR 0027): an **applied route change** carries
