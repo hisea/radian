@@ -437,7 +437,8 @@ async fn wait_task_returns_a_question_then_the_finish() {
 /// A timeout returns `still_running` and never cancels the task.
 #[tokio::test]
 async fn a_timeout_returns_still_running_and_keeps_the_task() {
-    let fixture = Fixture::new("timeout", "http://127.0.0.1:1/v1");
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let fixture = Fixture::new("timeout", &server.base_url);
     let session = fixture.lead_session().await;
     // No brief: the task never runs a turn, so nothing can finish or ask.
     fixture
@@ -454,6 +455,18 @@ async fn a_timeout_returns_still_running_and_keeps_the_task() {
     let record = fixture.registry.get("t1").expect("the task is untouched");
     assert!(!record.running(), "the timeout must not leave it running");
     assert!(record.last_outcome().is_none(), "no turn ended");
+
+    // The task was not cancelled: it still runs a turn when it is given one.
+    record
+        .session
+        .inbox()
+        .followup(
+            agent_core::Message::user("late"),
+            agent_core::InputSource::Subagent,
+        )
+        .await
+        .expect("the task's inbox still works");
+    wait_requests(&server, 1).await;
     fixture.registry.remove("t1", true).await.expect("remove");
 }
 
