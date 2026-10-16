@@ -19,7 +19,8 @@ use clap::Parser;
 use radian_host::memory::MemoryService;
 use radian_host::{
     DEFAULT_MAX_TOKENS, ModelArgs, Provider, SessionFacade, Thinking, build_model,
-    check_provider_flags, is_local_base_url, load_mcp_config, parse_headers, validate_session_id,
+    check_context_window_flag, check_provider_flags, is_local_base_url, load_mcp_config,
+    parse_headers, validate_session_id,
 };
 use radian_permissions::{AuditSink, PermissionResolved, runtime_event};
 use radian_session::SessionJournal;
@@ -932,6 +933,10 @@ fn run(
     // an error before the session file exists (dogfooding D15). `--thinking` left this check in
     // D11: the unified levels ride both wire protocols.
     check_provider_flags(provider, Thinking::Off, cli.max_tokens)?;
+    // ADR 0015: the same usage error `radian exec` gives, so the two hosts read `--context-window
+    // 0` alike; the config's `[model] context_window = 0` is "unset" in both (the reader already
+    // mapped it to `None`).
+    check_context_window_flag(cli.context_window)?;
     // The generic descriptor's endpoint; a non-generic descriptor refuses it (`resolve_route`).
     // The generic provider's endpoint override (D0): refused for any other provider, so it is
     // dropped here rather than passed to `resolve_route_for`, which would error.
@@ -1471,6 +1476,9 @@ fn run(
             retries: settings.retries,
             context_budget: window
                 .budget
+                // ADR 0015: a zero budget is unset, never a real zero-token budget (the CLI
+                // builds its session budget the same way).
+                .filter(|tokens| *tokens > 0)
                 .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
             auto_compact: settings.auto_compact,
             compaction_settings: settings.compaction_settings.clone(),
@@ -1524,6 +1532,8 @@ fn run(
                 system_prompt: cli.system.clone(),
                 context_budget: window
                     .budget
+                    // ADR 0015: a zero budget is unset, never a real zero-token budget.
+                    .filter(|tokens| *tokens > 0)
                     .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
                 sandbox,
                 tier: tier.preset(),

@@ -788,6 +788,12 @@ struct Setup {
     profile: profile::ProfileArg,
     /// The resolved approval policy and its startup record (ADR 0026 D9).
     approval: radian_host::StartupApproval,
+    /// `[git]` (ADR 0030 R10 and revision 4): the branches `git_commit` refuses besides
+    /// `main`/`master`, and the filter drivers it may run. Carried whole so the session setup
+    /// reads exactly what the TUI's session reads (`config.git`), not a weaker default: under
+    /// `radian exec` a dropped section would let `git_commit` commit on a configured protected
+    /// branch and silently apply the default allow-list (ADR 0032).
+    git: radian_host::config::GitConfig,
     /// The config file actually read, for the `[config]` startup line.
     config_path: Option<PathBuf>,
     /// Known-but-unwired and unknown config keys, named (never their values) at startup.
@@ -909,6 +915,11 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // a usage error before the session file exists (dogfooding D15). `--thinking` left this
     // check in D11: the unified levels ride both wire protocols.
     check_provider_flags(provider, Thinking::Off, cli.max_tokens).map_err(SetupError)?;
+    // ADR 0015: an explicit `--context-window 0` is a usage error, before any session file
+    // exists, and the TUI refuses it the same way. The config's `[model] context_window = 0` is
+    // the config's spelling of "unset" and never reaches this check (the reader maps it to
+    // `None`), so the two readings cannot be confused.
+    radian_host::check_context_window_flag(cli.context_window).map_err(SetupError)?;
     // The endpoint this run would talk to, before the session id (for the local-endpoint check).
     let probe_base_url = if provider_ref.takes_base_url_override() {
         base_url_override.clone()
@@ -1212,12 +1223,10 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     let mut secrets: Vec<String> = radian_host::resolved_keys();
     secrets.extend(route.headers.iter().map(|(_, value)| value.clone()));
     secrets.retain(|secret| !secret.is_empty());
+    // ADR 0015: the flag's zero was refused as a usage error above, and the config's zero was
+    // mapped to `None` by the reader, so this is a window the user really asked for. The catalog
+    // decides when it is `None`.
     let context_window = cli.context_window.or(config.model.context_window);
-    if context_window == Some(0) {
-        return Err(SetupError(
-            "--context-window must be at least 1 token".into(),
-        ));
-    }
     // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
     // failure is not a startup failure: the window is then unknown and the guard stays off.
     // This runs before the session file exists.
@@ -1268,6 +1277,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         model_name,
         profile,
         approval: startup_approval,
+        git: config.git.clone(),
         config_path: config.source.clone(),
         config_skipped: config.skipped.clone(),
         control_enabled: config.control.enabled,
@@ -1706,8 +1716,10 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         },
         turn_timeout: setup.turn_timeout_secs.map(Duration::from_secs),
         wording: radian_host::CLI_WORDING,
-        protected_branches: Vec::new(),
-        allowed_filters: None,
+        // ADR 0030 R10 / revision 4, ADR 0032: the task builder carries the same `[git]` the
+        // lead's session does, from the config this host read.
+        protected_branches: setup.git.protected_branches.clone(),
+        allowed_filters: Some(setup.git.allowed_filters()),
         shell_auto_background: setup.settings.shell_auto_background,
         skills_extra_paths: setup.settings.skills_extra_paths.clone(),
         skills_builtin: setup.settings.skills_builtin,
@@ -1739,8 +1751,10 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             config_slot: setup.config_slot,
             budget_for: Some(setup.budget_for),
             price_for: setup.price_for,
-            protected_branches: Vec::new(),
-            allowed_filters: None,
+            // ADR 0030 R10 / revision 4: resolved from the config exactly like the TUI's
+            // session, so `radian exec` is not a weaker path (ADR 0032).
+            protected_branches: setup.git.protected_branches.clone(),
+            allowed_filters: Some(setup.git.allowed_filters()),
             servers: setup.servers,
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,

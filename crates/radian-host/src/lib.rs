@@ -87,10 +87,10 @@ pub fn hostname() -> Option<String> {
 pub use catalog::{
     CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, ModelPrice,
     OUTPUT_RESERVATION_CAP, PriceRates, PriceTier, ProviderInfo, ProviderModels, Window,
-    WindowCheck, WindowQuery, WindowSource, cache_path, fetch_provider_models, host_of,
-    input_budget, output_ceiling_warning, output_reservation, provider_for_host,
-    provider_models_cache, provider_models_stale, read_provider_models, resolve, resolve_offline,
-    write_provider_models,
+    WindowCheck, WindowQuery, WindowSource, cache_path, check_context_window_flag,
+    fetch_provider_models, host_of, input_budget, output_ceiling_warning, output_reservation,
+    provider_for_host, provider_models_cache, provider_models_stale, read_provider_models, resolve,
+    resolve_offline, write_provider_models,
 };
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::theme_write::{ThemeWriteError, write_theme};
