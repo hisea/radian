@@ -2349,6 +2349,7 @@ dependencies = [
  "agent-extensions",
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
+ "chrono",
  "clap",
  "codex-mermaid",
  "futures-util",
