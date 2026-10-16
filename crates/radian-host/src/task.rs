@@ -864,6 +864,10 @@ impl TaskRegistry {
             .collect();
         let mut fired = 0;
         for record in records {
+            // A task removed between the snapshot and here is gone; do not raise for it.
+            if self.get(&record.id).is_none() {
+                continue;
+            }
             if record.last_outcome().is_some() {
                 // A finished task is not making progress toward nothing; clear any episode so a
                 // later turn can raise a new one. (A task's turn state is "has it finished",
@@ -1228,6 +1232,10 @@ impl TaskRegistry {
     /// worktree is clean). `force` removes it regardless. The record is kept when the removal
     /// is refused.
     pub async fn remove(&self, id: &str, force: bool) -> Result<(), TaskError> {
+        // The scheduler lock keeps a queued-task removal from interleaving with the pump's
+        // dispatch (which holds it across `spawn`): without it, the pump could observe the
+        // ticket, then a concurrent removal sets it `Removed`, and the pump still starts it.
+        let _guard = self.scheduler.lock().await;
         // A queued task has no session and no worktree: dropping it from the queue is all
         // (ADR 0030 O4). It wrote no `TaskSpawned`, so nothing needs pairing.
         if let Some(queued) = self
