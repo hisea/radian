@@ -1630,6 +1630,61 @@ Base：本片 HEAD（`oc/thin-user`）· 就地变异，每个变异后从 `.rad
 来自的 span 的前景色（原先最后一段回退到 `Style::default()`，会把选区尾部的前景色抹掉），由
 `render::a_selection_draws_the_selection_role_on_its_cells` 的「文字保留自己的前景色」断言钉住。
 
+## thin ①：工具块（ADR 0028，2026-10-16）
+
+Base：本片 HEAD（`dogfood/thin-tools`）· 就地变异：脚本 `.radian/scratch/mutate.py`（不提交）先把
+`render.rs`/`blocks.rs`/`tools.rs` 复制到 `.radian/scratch/mut-backup/`，用带 `assert` 的精确文本替换打补丁，
+跑命名的测试（`--no-fail-fast`），再从副本写回并用 `cmp` 确认逐字节相同（脚本结尾对三个文件各 `cmp` 一次，
+`git status --short` 只剩本片改动）。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| T1-M1 | head 行没有底色 | `render_head_row` 的 `• ` 标记加 `patch(theme.tool_success_bg)` | `card::every_tool_row_has_no_background_and_the_marker_column_holds`、`render::a_tool_block_never_paints_a_band`、`render::the_block_layout_snapshot` | ✅ |
+| T1-M2 | 元信息在 head 行上，不单独成行 | `head_rows` 把 meta+状态另起一行 | `card::the_head_line_is_the_name_the_title_the_meta_and_the_status` 等（card 12 条全 FAILED） | ✅ |
+| T1-M3 | 小工具成功时只有一行 | `body_plan` 去掉 `renderer.compact` 分支 | `card::a_small_tool_is_one_line_until_it_is_expanded` | ✅ |
+| T1-M4 | 状态符号在行尾 | `styled_row` 把 tail（meta+状态）旋到行首 | `card::the_head_line_is_the_name_the_title_the_meta_and_the_status`、`card::every_tool_row_has_no_background_and_the_marker_column_holds`（card 11 条 FAILED） | ✅ |
+| T1-M5 | `collapsed` 不画输出 | `body_plan` 的 collapsed 分支返回全部行 | `card::the_fold_modes_decide_the_body_and_the_collapsed_meta`、`render::collapsed_and_errors_differ_for_a_successful_card`、`render::the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it` | ✅ |
+
+5/5 抓住。行数记账（`line_count` 与 `layout`）由新增的
+`card::line_count_matches_the_layout_for_a_tool_block`（三种折叠 × 80/24 列）与既有的
+`markdown::line_count_matches_the_layout`、`tests/virtual.rs` 的窗口测试共同钉住。
+
+**「测试先于实现」的核对**：把 `origin/main` 的 `crates/radian-tui/src/{tools,blocks,render,app}.rs`
+拷回来（本片实现先另存，改完 `cmp` 逐字节还原）再跑 `cargo test -p radian-tui --test card`：
+**11 条 FAILED / 12**。唯一通过的是 `line_count_matches_the_layout_for_a_tool_block`，它断言的是
+改前改后都成立的不变量（`line_count` == `layout` 的行数），是本片改动引入的计数镜像的回归钉，
+不声称新行为。
+
+**一处要记录的缺口（review fix 1 已关闭，保留原文）**：状态符号 `✗`（U+2717）不在 ADR 0027 的
+六款参考字体核对集里（那张表用 `×`，`✓` 在表内）。ADR 0028 与原型 `render-screen.py` 都
+写 `✗`，所以 transcript 当时用了它；review 提给 owner 后，owner 在 ADR 0035 的实施补充
+（2026-10-16，`5e8eccb`）里定：工具失败用 `×`，thinking 用 `▼`/`▶`——见下一节。
+
+## thin ① review fix 1：字形＼�ADR 0035 实施补充）
+
+Base：本片 HEAD（`dogfood/thin-tools`）· 就地变异，脚本仍是 `.radian/scratch/mutate.py`（每个变异前把
+`render.rs`/`blocks.rs`/`tools.rs`/`footer.rs` 复制到 `.radian/scratch/mut-backup/`，跑命名的测试，再从
+副本写回并用 `cmp` 逐字节确认；`git status --short` 只剩本片改动）。`--no-fail-fast`。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| M6 | 工具失败的符号是 `×`，不是 `✗` | `status_marks` 的 unicode 档改回 `('✓', '✗')` | `card::a_failed_call_ends_the_head_with_a_cross_and_shows_the_error_body`、`card::a_small_tool_is_one_line_until_it_is_expanded`（read 出错那条也以失败符号结尾）、`render::the_block_layout_snapshot` | ✅ |
+| M7 | 折叠的 thinking 标记是 `▶`（unicode/nerd），不是 `›` | `Glyphs::fold_marker` 改回 `Unicode => "›"`、`Nerd => ">"` | `thinking::the_folded_thinking_is_one_line_with_the_line_count`、`render::thinking_folds_to_one_line_and_ctrl_t_expands_it` | ✅ |
+| M8 | 展开的 thinking 标记是 `▼`，不是 `▾` | `REASONING_MARKER` 改回 `"▾ "` | `thinking::the_expanded_thinking_has_a_header_and_a_rail`、`thinking::the_duration_is_shown_for_a_live_entry_and_absent_for_a_resumed_one`、`thinking::streaming_shows_the_spinner_not_the_duration`（render 的整屏快照那条**没抓住**：它里面的 thinking 是折叠的，走的是 M7 的标记） | ✅ |
+
+3/3 抓住，无等价变异。同一次复跑里 slice ① 的 T1-M1..M5 仍然全部抓住（字形改了不影响它们的判据）。
+
+**方法记录（踩到过，值得记）**：还原变异时用 `shutil.copy2` 会把**副本的旧 mtime** 一起写回，于是还原后的源文件看起来比 cargo 用变异版编译出的产物更旧——cargo 判定「新鲜」，**变异留在构建缓存里**，
+后续的测试跑的是变异代码（这一次的表现是 `card::the_fold_modes…` 与两条 render 折叠用例在源码与 HEAD
+逐字节相同的情况下失败）。`mutate.py` 现在用 `copyfile` + `os.utime(dst, None)` 落回当前时间，并且每次
+变异结束都重跑一遍整包测试确认回到绿；也可以 `touch` 相关源文件或 `cargo clean -p radian-tui` 来强制重建。
+
+覆盖检查的三处同步：`scripts/check-glyph-coverage.py` 的 `GLYPHS`、`footer.rs` 的
+`unicode_tier_glyphs_are_all_verified_covered` 的 `VERIFIED_COVERED`、以及 README 里那张脚本输出的表。
+`▼ ▶ • ╭ ╰` 加入，`›` 移出（没有任何一行再画它）；`× ✓ │` 本来就在表里。用 venv 里的 `fonttools 4.67.0`
+跑脚本核对：六款字体（本机都装了）对 `× • │ ╭ ╰ ▼ ▶ ✓` 全是 ✅，与 owner 的结论一致。
+`◉`/`○`（问答标记）**没有**加进任何一个清单——owner 明知它们缺字并接受，README 的「kept」一段记下了这一点。
+
 ## Theme format：TOML 主题、一次性 pi 导入、过渡期（ADR 0029/3/4，2026-10-16）
 
 Base：本片 HEAD（`oc/theme-format`；决定 1 = `cff5d35`，决定 4 = `e9f29ef`，决定 3 = 本提交）·
