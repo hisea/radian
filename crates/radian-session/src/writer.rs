@@ -34,7 +34,7 @@ const LOCK_RETRY_FIRST: Duration = Duration::from_millis(1);
 /// the seq of the lead's `TaskSpawned`.
 ///
 /// `relation` distinguishes the two. A `parent` written before ADR 0030 carries no `relation`
-/// and reads as `"fork"` ([`default_relation`]); ADR 0006 §7(a) forward compatibility.
+/// and reads as `"fork"` via `default_relation`; ADR 0006 §7(a) forward compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkParent {
     pub session_id: String,
