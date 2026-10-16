@@ -1493,6 +1493,45 @@ Base `19dc0d7`（worktree `.radian-worktrees/pulse`，分支 `dogfood/pulse`）�
 条目，它是独立的一块，所以「thinking + 无正文的工具调用」在屏幕上会是两行空行（thinking 自己的一行
 + 空块两侧的行）；`thinking_has_one_blank_line_on_both_sides` 直接压条目来测 thinking 这条规则本身，
 并在注释里写明这一点。
+
+## thin ⓪：新角色与内建取值（ADR 0029/6，ADR 0028 的片 ⓪）
+
+Base：本片 HEAD（`oc/thin-roles`）· 就地变异，每个变异后从 `.radian/scratch/theme.rs.new`
+还原并用 `cmp` 确认逐字节相同（`git status --short` 只留本片改动）。测试 `--no-fail-fast`。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| R0-M1 | `frame` 取 `accent` 的值而不是 `dim`（dark/light 两处） | 细线是弱一级 | `theme::tests::the_thin_roles_and_the_changed_builtin_values` FAILED（"frame is the dim level"） |
+| R0-M2 | `user` 仍是背景角色（恢复 `text.bg(band)`，dark/light 两处） | user 是前景角色、无底色 | `theme::tests::the_thin_roles_and_the_changed_builtin_values`（"user is the accent foreground"）与 `theme::tests::the_input_bar_keeps_the_user_band_on_the_main_level` FAILED |
+| R0-M3 | `reasoning` 仍斜体（dark/light 两处加回 `Modifier::ITALIC`） | reasoning 不斜体 | `theme::tests::the_thin_roles_and_the_changed_builtin_values` 与 `render::reasoning_and_assistant_text_are_visually_distinct` FAILED |
+
+3/3 抓住，无等价变异。新角色的映射/解析另有正向断言（`theme::file::tests::the_thin_roles_map_to_their_pi_keys`、
+`the_thin_roles_resolve_from_a_theme_file`、`the_thin_roles_are_settable_from_tui_colors`）。
+## status：footer 的 `tool <name> running` note 与 Esc（2026-10-16）
+
+Base `d8e4c28`（worktree `.radian-worktrees/build-script`，分支 `dogfood/status`）· 就地变异：改前把
+`crates/radian-tui/src/app.rs` 复制到 `.radian/scratch/app.rs.status-orig`，变异脚本带 `assert old in s`
+（no-op 会显式 PATCH FAILED）；每条跑完从副本写回并用 `cmp` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S1-M1 | `SessionView::finish_tool` 只清 note、不把 note 移到仍在运行的调用（退回旧行为：`if note_is_the_tools && self.running_tools.is_empty() { self.note = None }`） | `render::the_note_names_a_tool_that_is_still_running`（`left: Some("tool read running")`，应为 `tool shell running`） | ✅ |
+| S1-M2 | `ModelRequestStarted` 不再调用 `forget_running_tools()` | `render::the_tool_note_does_not_survive_the_next_model_request`（note 停在 `Some("tool shell running")`，应为 `None`） | ✅ |
+| E1 | `Action::Escape` 的空输入分支退回 `UpdateResult::none()`（2026-10-14 报告的症状：Esc 什么都不做） | `input::esc_on_an_empty_input_cancels_a_running_turn`（`left: []`，应为 `[Cancel]`） | ✅ |
+
+前两条是修复各自的配对变异，且都只由目标测试抓住（同一文件里另两条 note 测试保持绿色）。E1 没有
+对应的修复（Esc 在 `2b55c50` 与今天都是 `cancel_or_quit_now()`，那条报告复现不出来），它证明这条回归
+测试不是空转：把 Esc 的空输入分支改回「什么都不做」，它立刻失败。
+
+**S1-M3（修一个自己造的回归）**：`start_tool` 最初带一次 `running_tools.iter().any(...)` 去重扫描，
+在 20 000 个 fact 的洪水下是二次的。变异把它加回来（`if !...any(...) { push }`），
+`cargo test -p radian-tui --test pty pty_a_flooding_producer_still_draws_and_answers_keys`
+连跑 5 次：带扫描 **2 次失败**（load 166–178：一次 `the key was not handled`，一次
+`the flood starved the draw: 92 frames in 2 s`），去掉扫描 **5 次全过**（load 194–251）。同一条 pty
+测试也是先抓住这个回归的那一个：合入 `origin/main` 后的整套 `radian-tui` 测试里正是它红。
+去重本身不是必需的：每个 call 的 `ToolStarted` 只有一次，而 `finish_tool` 的 `retain` 会删掉该 id 的
+**每一条**，所以重复的 start 也留不下残渣。
+
 ## ask-box：transcript 的 Ask 块、面板标题、待答一行、标记与两个按键（ADR 0024，2026-10-15）
 
 Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个变异就地改完后跑

@@ -139,10 +139,10 @@ fn reasoning_and_assistant_text_are_visually_distinct() {
         "reasoning must not share the assistant text's style"
     );
     assert!(
-        reasoning
+        !reasoning
             .add_modifier
             .contains(ratatui::style::Modifier::ITALIC),
-        "reasoning is italic: {reasoning:?}"
+        "reasoning is upright now (ADR 0029): {reasoning:?}"
     );
 }
 
@@ -239,6 +239,77 @@ fn the_note_clears_when_the_tools_finish() {
         budget: None,
     });
     assert_eq!(app.session.note, None);
+}
+
+/// The note must name a tool that is **still running**. `ToolFinished` is emitted in completion
+/// order, "which may differ from the transcript order" (agent-core's own event contract), so the
+/// call the note names can settle while another call of the same batch is still running. A note
+/// naming a settled tool is the same defect as the owner's stuck "tool shell running".
+#[test]
+fn the_note_names_a_tool_that_is_still_running() {
+    let mut app = App::new("m", "s");
+    app.apply_event(&AgentEvent::ToolStarted {
+        index: 0,
+        call_id: "c1".into(),
+        name: "shell".into(),
+    });
+    app.apply_event(&AgentEvent::ToolStarted {
+        index: 1,
+        call_id: "c2".into(),
+        name: "read".into(),
+    });
+    assert_eq!(app.session.note.as_deref(), Some("tool read running"));
+
+    // `read` (the call the note names) settles first; `shell` is still running.
+    app.apply_event(&AgentEvent::ToolFinished {
+        index: 1,
+        call_id: "c2".into(),
+        is_error: false,
+    });
+    assert_eq!(
+        app.session.note.as_deref(),
+        Some("tool shell running"),
+        "the settled call must not stay named"
+    );
+    // The footer itself (the default preset's chrome line), not only the field behind it.
+    let terminal = render(&mut app, 80, 12);
+    let text = screen(&terminal);
+    assert!(text.contains("tool shell running"), "{text}");
+    assert!(!text.contains("tool read running"), "{text}");
+
+    // When the last call settles the note goes, before the next model request.
+    app.apply_event(&AgentEvent::ToolFinished {
+        index: 0,
+        call_id: "c1".into(),
+        is_error: false,
+    });
+    assert_eq!(app.session.note, None);
+}
+
+/// A tool note may not outlive its batch: the next model request starts only after every call of
+/// the batch settled, so a `ToolStarted` whose `ToolFinished` never came must be forgotten there.
+/// The core does produce that: when a journal append fails, `run_group` discards the results of
+/// the calls already running (`agent-core/src/turn.rs`, the `journal_failed` path), so no
+/// `ToolFinished` is emitted for them.
+#[test]
+fn the_tool_note_does_not_survive_the_next_model_request() {
+    let mut app = App::new("m", "s");
+    app.apply_event(&AgentEvent::ToolStarted {
+        index: 0,
+        call_id: "c1".into(),
+        name: "shell".into(),
+    });
+    assert_eq!(app.session.note.as_deref(), Some("tool shell running"));
+
+    // Its `ToolFinished` was lost; the turn moved on to the next model request.
+    app.apply_event(&AgentEvent::ModelRequestStarted {
+        model_call: 2,
+        budget: None,
+    });
+    assert_eq!(
+        app.session.note, None,
+        "the next request ends the tool phase"
+    );
 }
 
 #[test]
@@ -1150,8 +1221,8 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
     let before = style_of(&terminal, "hello").expect("the unselected head of the line");
     assert_eq!(
         before.bg,
-        Some(Color::Rgb(33, 59, 73)),
-        "the user block's band, not the selection's"
+        Some(Color::Reset),
+        "the user block has no band now (ADR 0029), only the selection is banded"
     );
     assert_eq!(before.fg, word.fg, "the text keeps its own foreground");
 }
@@ -1201,8 +1272,8 @@ fn an_empty_selection_draws_nothing() {
     assert!(text.contains("hello selection"), "{text}");
     assert_eq!(
         style_of(&render(&mut app, 40, 10), "selection").map(|s| s.bg),
-        Some(Some(Color::Rgb(33, 59, 73))),
-        "no selection band: the two anchors coincide, only the user band is there"
+        Some(Some(Color::Reset)),
+        "no selection and no user band now (ADR 0029): the text is unbanded"
     );
 }
 
@@ -1712,9 +1783,11 @@ fn the_block_layout_snapshot() {
         )
     };
     let golden: Vec<String> = vec![
-        "▄".repeat(80),                      // the user block's top half cell (ADR 0035)
+        // ADR 0029 made `user` a foreground role, so the user block's
+        // two pad rows are plain blank rows now (no band).
+        "".to_string(),
         "> explain the failure".to_string(), // the user text
-        "▀".repeat(80),                      // the user block's bottom half cell
+        "".to_string(),
         "› thinking (3 lines)".to_string(), // the folded channel: the unicode fold glyph (ADR 0027)
         "".to_string(), // ADR 0035: one blank line between thinking and the block below
         "  Looking into it.".to_string(), // the reply
@@ -1743,14 +1816,18 @@ fn the_block_layout_snapshot() {
         "".to_string(), // the gap below it
     ];
     assert_eq!(rows[..golden.len()], golden[..], "{rows:#?}");
-    // The bands: the user text row paints the band; its two pad rows are a half cell of it (the
-    // band's color as the foreground, on the terminal's default background); the failed card's
-    // frame and every row inside it carry the card's band; a gap row carries none.
-    let user_band = app.theme.user.bg;
-    assert_eq!(cell_style(&terminal, 0, 1).bg, user_band, "the text row");
+    // The bands: ADR 0029 made `user` a foreground role, so the user
+    // block has no band — its two pad rows are plain blank rows. The failed card's frame and
+    // every row inside it still carry the card's band; a gap row carries none.
+    assert_eq!(app.theme.user.bg, None, "the user role has no background");
+    assert_eq!(
+        cell_style(&terminal, 0, 1).bg,
+        Some(Color::Reset),
+        "the user text row is unbanded"
+    );
     for y in [0u16, 2] {
         let style = cell_style(&terminal, 79, y);
-        assert_eq!(style.fg, user_band, "the pad's half cell at {y}");
+        assert_eq!(style.fg, Some(Color::Reset), "no pad color at {y}");
         assert_eq!(
             style.bg,
             Some(Color::Reset),
