@@ -158,12 +158,17 @@ impl JournalObserver {
             EventData::TurnFailed { .. } => {
                 self.projection.set_turn(TurnState::Idle);
             }
-            // Usage is the provider's own report; the observer has no route to price a call
-            // (ADR 0027), so it adds tokens and contributes no fee.
-            EventData::ModelUsageRecorded { usage }
-            | EventData::CompactionUsageRecorded { usage, .. } => {
-                self.projection.add_usage(usage);
-            }
+            // A recorded fee is authoritative (ADR 0007). An old record has none, and
+            // the observer has no route to price it (ADR 0027), so it adds tokens only.
+            EventData::ModelUsageRecorded { usage, fee }
+            | EventData::CompactionUsageRecorded { usage, fee, .. } => match fee {
+                Some(fee) => {
+                    self.projection.add_recorded_usage(usage, *fee);
+                }
+                None => {
+                    self.projection.add_usage(usage);
+                }
+            },
             EventData::ToolExecutionStarted { call_id, name, .. } => {
                 self.projection.set_last_tool(LastToolCall {
                     index: self.tool_index,

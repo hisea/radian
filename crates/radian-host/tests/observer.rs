@@ -546,3 +546,34 @@ fn the_observer_declares_only_observe_and_folds_the_facts() {
     assert_eq!(tool.call_id, "c1");
     assert_eq!(tool.index, 0);
 }
+
+/// A usage record's own fee is authoritative (ADR 0007): the observer folds it, and a
+/// record without one adds tokens only.
+///
+/// Catches a mutation that drops the recorded fee (the cost would stay `None`).
+#[test]
+fn a_recorded_fee_is_folded_and_an_old_record_adds_tokens_only() {
+    let dir = Scratch::new("recorded-fee");
+    let path = dir.file("s.jsonl");
+    let body = format!(
+        "{}\n{}\n{}\n",
+        session_created(),
+        envelope(
+            1,
+            "2026-10-15T00:00:01.000000Z",
+            "ModelUsageRecorded",
+            serde_json::json!({"usage": {"input": 10}, "fee": {"micros": 42}})
+        ),
+        envelope(
+            2,
+            "2026-10-15T00:00:02.000000Z",
+            "ModelUsageRecorded",
+            serde_json::json!({"usage": {"input": 5}})
+        ),
+    );
+    std::fs::write(&path, body).unwrap();
+    let observer = JournalObserver::open(&path).unwrap();
+    assert_eq!(observer.projection().usage_input(), Some(15));
+    assert_eq!(observer.projection().cost_micros(), Some(42));
+    assert!(!observer.projection().cost_estimated());
+}
