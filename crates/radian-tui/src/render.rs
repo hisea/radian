@@ -203,10 +203,11 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::User => USER_MARKER,
         EntryKind::Assistant => "  ",
         EntryKind::Reasoning => "~ ",
-        // Rule 2: every marker is two cells; rule 4: a result's marker sits one cell further
-        // right, so a result reads as subordinate to its call.
-        EntryKind::ToolCall => "->",
-        EntryKind::ToolResult => " <-",
+        // ADR 0028: a tool block's marker column carries `• ` on its
+        // head row and `│ ` on its body rows (drawn by [`render_row`], not by the generic
+        // lead — both are two cells, like every other marker).
+        EntryKind::ToolCall => "• ",
+        EntryKind::ToolResult => "│ ",
         EntryKind::Notice => "* ",
         // The compaction line has no marker of its own: it is a rule-like `── … ──` line.
         EntryKind::Compaction => "",
@@ -240,8 +241,8 @@ fn marker(kind: EntryKind, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'s
         EntryKind::User => theme.user,
         EntryKind::Assistant => Style::default(),
         EntryKind::Reasoning => theme.reasoning,
-        EntryKind::ToolCall => theme.tool_call,
-        EntryKind::ToolResult => theme.tool_result,
+        // The tool block's own markers (`• `/`│ `) are `frame` (ADR 0035).
+        EntryKind::ToolCall | EntryKind::ToolResult => theme.frame,
         EntryKind::Notice => theme.notice,
         EntryKind::Banner => theme.hint,
         EntryKind::Startup => theme.hint,
@@ -302,46 +303,9 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
     }
 }
 
-/// The background band an entry's block paints across the transcript (ADR 0028 R4 + owner
-/// acceptance): a tool card the state's (`tool_pending_bg` / `tool_success_bg` /
-/// `tool_error_bg`). A user message has **no** band (ADR 0035: its
-/// `user` role is a foreground, with no background), so this returns `None` for it; `None`
-/// also means no band for every other kind.
-fn card_band(entry: &Entry, theme: &Theme) -> Option<Style> {
-    let role = match entry.kind {
-        // The user row is a foreground role now and never paints a band (ADR 0035
-        // decision 3), so it is not a band source here.
-        EntryKind::ToolCall => match entry.result {
-            None => theme.tool_pending_bg,
-            Some(false) => theme.tool_success_bg,
-            Some(true) => theme.tool_error_bg,
-        },
-        EntryKind::ToolResult if entry.is_error => theme.tool_error_bg,
-        EntryKind::ToolResult => theme.tool_success_bg,
-        _ => return None,
-    };
-    // Background and modifiers only: the text under the band keeps its own foreground.
-    let mut band = Style::default().add_modifier(role.add_modifier);
-    if let Some(bg) = role.bg {
-        band = band.bg(bg);
-    }
-    (band.bg.is_some() || !band.add_modifier.is_empty()).then_some(band)
-}
-
-/// The half-block glyph a band's padding row draws (ADR 0035): `▄` (lower half) for
-/// the row above the band, `▀` (upper half) for the row below it. `ascii` never gets a padding
-/// row ([`crate::blocks::banded_pad`]), so this is only asked for `unicode`/`nerd`.
-fn pad_glyph(pad: blocks::Pad) -> &'static str {
-    match pad {
-        blocks::Pad::Top => "▄",
-        blocks::Pad::Bottom => "▀",
-        blocks::Pad::None => "",
-    }
-}
-
 /// The style a band's half-cell pad cell takes (ADR 0035): the band's own color as
 /// the foreground and no background of its own — the band's background is painted on the block's
-/// text rows, which these rows sit half a cell against. Under `mono` both are absent, so the half
+/// text rows, which this row sits half a cell against. Under `mono` both are absent, so the half
 /// cell is the terminal default — still a visible block, just uncolored.
 fn band_pad_style(band: Style) -> Style {
     let mut style = Style::default().add_modifier(band.add_modifier);
@@ -349,15 +313,6 @@ fn band_pad_style(band: Style) -> Style {
         style = style.fg(color);
     }
     style
-}
-
-/// One half-cell padding row of a banded block (ADR 0035): `glyph` repeated across
-/// `width` cells, in the band's color as the foreground and with no background of its own (the
-/// band's background is painted on the block's text rows, which this row sits half a cell
-/// against). A user block's pad row; the `bar` input's one carries the rail in front of it
-/// (ADR 0035, [`bar_pad_line`]).
-fn band_pad_line(glyph: &str, width: usize, band: Style) -> Line<'static> {
-    Line::from(Span::styled(glyph.repeat(width), band_pad_style(band)))
 }
 
 /// The `bar` input's half-cell padding row (ADR 0035): the rail's own cell first —
@@ -411,27 +366,13 @@ fn entry_lines(
     spinner: crate::spinner::Frame,
 ) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
-    let band = card_band(entry, theme);
     let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
     let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
     let style = body_style(entry, theme);
-    // A card's border rows carry no text (ADR 0028), so they are not "text rows":
-    // `first_text` must be the head line, or a running card's live spinner never replaces the
-    // status glyph baked at call time (ADR 0027).
-    let text_rows: Vec<usize> = body
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| {
-            !line.pad.is_pad()
-                && !matches!(
-                    line.frame,
-                    blocks::Frame::Top | blocks::Frame::Bottom | blocks::Frame::Divider
-                )
-        })
-        .map(|(i, _)| i)
-        .collect();
-    let first_text = text_rows.first().copied();
-    let last = text_rows.last().copied();
+    // The first and last text rows: the `first_text` flag is the structured-notice label's
+    // (ADR 0028) and the interrupted marker sits on the last.
+    let first_text = body.iter().position(|line| !line.pad.is_pad());
+    let last = body.iter().rposition(|line| !line.pad.is_pad());
     let mut lines = Vec::with_capacity(body.len());
     for (i, row) in body.into_iter().enumerate() {
         let mut line = render_row(
@@ -442,8 +383,6 @@ fn entry_lines(
             style,
             theme,
             Some(i) == first_text,
-            band,
-            width,
             modes.glyphs,
             spinner,
         );
@@ -479,10 +418,10 @@ pub fn split_label(text: &str) -> Option<(&str, &str)> {
     Some((&text[start..end], &text[end..]))
 }
 
-/// One laid-out [`BodyLine`] as styled spans. `first_text` puts the entry's marker prefix on
-/// the lead; a padding row renders as an empty line; a code line has no lead at all (it is
-/// full-width by design, ADR 0028 R9). A block with a band (ADR 0028 R4) is padded out to the
-/// full transcript width, so the band covers the row's trailing cells too.
+/// One laid-out [`BodyLine`] as styled spans. A tool block's head and body rows carry their own
+/// markers ([`render_head_row`]/[`render_body_row`]); every other row takes the entry's marker
+/// prefix on its first line; a code line has no lead at all (it is full-width by design,
+/// ADR 0028 R9).
 #[allow(clippy::too_many_arguments)]
 fn render_row(
     entry: &Entry,
@@ -492,27 +431,22 @@ fn render_row(
     style: Style,
     theme: &Theme,
     first_text: bool,
-    band: Option<Style>,
-    width: usize,
     glyphs: crate::footer::Glyphs,
     spinner: crate::spinner::Frame,
 ) -> Line<'static> {
     if row.pad.is_pad() {
-        // A banded block's half-cell padding row (ADR 0035): a half cell of the
-        // band, its color as the glyph's foreground and the terminal's default background, so
-        // the band reads as extending half a cell further up (`▄`) or down (`▀`). A block with
-        // no band keeps a plain blank row.
-        return match band {
-            Some(band) => band_pad_line(pad_glyph(row.pad), width, band),
-            None => Line::from(vec![Span::raw(String::new())]),
-        };
+        // A padding row carries no text (ADR 0035): the transcript's blocks have
+        // none since ADR 0028 (the `bar` input draws its own).
+        return Line::from(vec![Span::raw(String::new())]);
     }
-    // A merged tool card's frame (ADR 0028): the borders are decoration, never
-    // text, so a copy carries none of them.
-    if row.frame != blocks::Frame::None {
-        return render_frame_row(
-            entry, row, style, theme, first_text, band, width, glyphs, spinner,
-        );
+    match row.frame {
+        // The tool block's head (ADR 0028): `• ` and the head's pieces.
+        blocks::Frame::Head => return render_head_row(row, style, theme, glyphs, spinner),
+        // A `│ `-prefixed body row.
+        blocks::Frame::Body => {
+            return render_body_row(entry, row, style, theme, first_text, glyphs);
+        }
+        blocks::Frame::None => {}
     }
     // The collapsed reasoning placeholder is one synthetic line: its marker is the marker
     // column's own glyph (ADR 0028 rule 5), so the body column does not move
@@ -534,51 +468,119 @@ fn render_row(
         theme.reasoning
     } else if matches!(entry.kind, EntryKind::Notice | EntryKind::Startup) {
         theme.notice_body
-    } else if row.role != crate::tools::LineRole::Normal {
-        // A card body line's own role (ADR 0028 R4 + ADR 0029's diff roles): the warning
-        // channel and the unified-diff line kinds.
-        match row.role {
-            crate::tools::LineRole::Warn => theme.note,
-            crate::tools::LineRole::DiffAdded => theme.diff_added,
-            crate::tools::LineRole::DiffRemoved => theme.diff_removed,
-            crate::tools::LineRole::DiffContext => theme.diff_context,
-            crate::tools::LineRole::DiffHunk => theme.diff_hunk,
-            // The `ask_user` block (ADR 0024 R1): the prompt is the emphasis, a
-            // description/note is weak, the box is structural.
-            crate::tools::LineRole::Accent => theme.notice_label,
-            crate::tools::LineRole::Muted => theme.notice_body,
-            crate::tools::LineRole::Dim => theme.truncation,
-            crate::tools::LineRole::Heading => theme
-                .notice_label
-                .add_modifier(ratatui::style::Modifier::BOLD),
-            crate::tools::LineRole::Normal => style,
-        }
     } else {
-        style
+        role_style(row.role, style, theme)
     };
-    let lead_width = UnicodeWidthStr::width(lead.as_str());
     let mut spans = Vec::with_capacity(4);
-    let lead_style = match band {
-        Some(band) => prefix_style.patch(band),
-        None => prefix_style,
-    };
-    let body_style = match band {
-        Some(band) => body.patch(band),
-        None => body,
-    };
-    spans.push(Span::styled(lead, lead_style));
-    spans.extend(body_spans(
-        entry, row, body_style, theme, band, first_text, spinner,
-    ));
-    if let Some(band) = band {
-        // Pad to the full width so the band reaches the row's end (owner acceptance:
-        // including the row's trailing whitespace).
-        let used = lead_width + UnicodeWidthStr::width(row.text.as_str());
-        if used < width {
-            spans.push(Span::styled(" ".repeat(width - used), band));
+    spans.push(Span::styled(lead, prefix_style));
+    spans.extend(body_spans(entry, row, body, theme, first_text));
+    Line::from(spans)
+}
+
+/// The style of a body row's own role (ADR 0028 R4 + ADR 0029's diff roles): the warning
+/// channel, the unified-diff line kinds and the structural `frame`.
+fn role_style(role: crate::tools::LineRole, style: Style, theme: &Theme) -> Style {
+    if role == crate::tools::LineRole::Normal {
+        return style;
+    }
+    match role {
+        crate::tools::LineRole::Warn => theme.note,
+        crate::tools::LineRole::DiffAdded => theme.diff_added,
+        crate::tools::LineRole::DiffRemoved => theme.diff_removed,
+        crate::tools::LineRole::DiffContext => theme.diff_context,
+        crate::tools::LineRole::DiffHunk => theme.diff_hunk,
+        crate::tools::LineRole::Frame => theme.frame,
+        // The `ask_user` block (ADR 0024 R1): the prompt is the emphasis, a
+        // description/note is weak, the box is structural.
+        crate::tools::LineRole::Accent => theme.notice_label,
+        crate::tools::LineRole::Muted => theme.notice_body,
+        crate::tools::LineRole::Dim => theme.truncation,
+        crate::tools::LineRole::Heading => theme
+            .notice_label
+            .add_modifier(ratatui::style::Modifier::BOLD),
+        crate::tools::LineRole::Normal => style,
+    }
+}
+
+/// A tool block's head row (ADR 0028): the `• ` marker (the `frame`
+/// role, in the marker column, never copied) and the row's pieces — the tool name
+/// (`tool_name`), the title (the entry's own text), the meta (weak) and the status glyph.
+///
+/// A **running** call's status is the live spinner frame in place of the placeholder the
+/// layout carries (ADR 0027/13), drawn with the pulse's own colour.
+#[allow(clippy::too_many_arguments)]
+fn render_head_row(
+    row: &BodyLine,
+    style: Style,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+    spinner: crate::spinner::Frame,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(tool_marker(glyphs).to_string(), theme.frame)];
+    match &row.md {
+        Some(pieces) => {
+            for piece in pieces {
+                match piece.style {
+                    blocks::MdStyle::StatusRunning => spans.push(Span::styled(
+                        spinner.glyph.to_string(),
+                        spinner_style(theme, spinner),
+                    )),
+                    other => spans.push(Span::styled(
+                        piece.text.clone(),
+                        md_style(other, style, theme),
+                    )),
+                }
+            }
         }
+        None => spans.push(Span::styled(row.text.clone(), style)),
     }
     Line::from(spans)
+}
+
+/// A tool block's body row (ADR 0028): `│ ` in the marker column, the
+/// row's content from the body column (the body's own role).
+fn render_body_row(
+    entry: &Entry,
+    row: &BodyLine,
+    style: Style,
+    theme: &Theme,
+    first_text: bool,
+    glyphs: crate::footer::Glyphs,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(body_marker(glyphs).to_string(), theme.frame)];
+    let body = role_style(row.role, style, theme);
+    spans.extend(body_spans(entry, row, body, theme, first_text));
+    Line::from(spans)
+}
+
+/// The tool block's head marker (ADR 0035): `• `, `- ` under `ascii`.
+/// Two cells, like every marker.
+pub(crate) fn tool_marker(glyphs: crate::footer::Glyphs) -> &'static str {
+    match glyphs {
+        crate::footer::Glyphs::Ascii => "- ",
+        _ => "• ",
+    }
+}
+
+/// The tool block's body marker (ADR 0028): `│ `, `| ` under `ascii`.
+fn body_marker(glyphs: crate::footer::Glyphs) -> &'static str {
+    match glyphs {
+        crate::footer::Glyphs::Ascii => "| ",
+        _ => "│ ",
+    }
+}
+
+/// The pulse's colour at a frame (ADR 0027): the theme's accent while it breathes,
+/// the two ends when it cannot interpolate. The same rule [`crate::app::App::spinner_style`]
+/// applies to the input's status row.
+pub(crate) fn spinner_style(theme: &Theme, frame: crate::spinner::Frame) -> Style {
+    let accent = theme.notice_label;
+    let dim = theme.truncation;
+    match crate::spinner::breath_color(accent.fg, dim.fg, frame.step) {
+        Some(color) => accent.fg(color),
+        None if frame.step == crate::spinner::PULSE_DIM_STEP => dim,
+        None => accent,
+    }
 }
 
 /// How many lines `entry` lays out to at `width`, from its cache when the entry has not
@@ -708,24 +710,8 @@ pub fn visible_lines_with(
             let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
             let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
             let style = body_style(entry, theme);
-            let band = card_band(entry, theme);
-            // Border rows carry no text (ADR 0028): `first_text` is the head
-            // line, so a running card's live spinner replaces the baked status glyph
-            // (ADR 0027). The framed path and `entry_lines` agree.
-            let text_rows: Vec<usize> = body
-                .iter()
-                .enumerate()
-                .filter(|(_, line)| {
-                    !line.pad.is_pad()
-                        && !matches!(
-                            line.frame,
-                            blocks::Frame::Top | blocks::Frame::Bottom | blocks::Frame::Divider
-                        )
-                })
-                .map(|(i, _)| i)
-                .collect();
-            let first_text = text_rows.first().copied();
-            let last = text_rows.last().copied();
+            let first_text = body.iter().position(|line| !line.pad.is_pad());
+            let last = body.iter().rposition(|line| !line.pad.is_pad());
             out.extend(
                 body.into_iter()
                     .enumerate()
@@ -740,8 +726,6 @@ pub fn visible_lines_with(
                             style,
                             theme,
                             Some(i) == first_text,
-                            band,
-                            width,
                             modes.glyphs,
                             spinner,
                         );
@@ -2412,15 +2396,15 @@ pub fn completion_rows(app: &App, width: usize, visible: usize) -> Vec<Line<'sta
 
 /// The body spans of one row: a structured notice's label split, a Markdown line's pieces, a
 /// syntax-highlighted code line, a diagram, a weak reason, or the plain body. Shared by the
-/// unframed path and a card's framed content rows, so both render identically.
+/// The body spans of one row: a structured notice's label split, a Markdown line's pieces, a
+/// syntax-highlighted code line, a diagram, a weak reason, or the plain body. Shared by the
+/// unframed path and a tool block's `│ ` body rows, so both render identically.
 fn body_spans(
     entry: &Entry,
     row: &BodyLine,
     body_style: Style,
     theme: &Theme,
-    band: Option<Style>,
     first_text: bool,
-    spinner: crate::spinner::Frame,
 ) -> Vec<Span<'static>> {
     let mut out = Vec::with_capacity(4);
     // A structured notice's **first** line (`profile: …`, `[memory] …`) steps the label up
@@ -2431,48 +2415,12 @@ fn body_spans(
         && matches!(entry.kind, EntryKind::Notice | EntryKind::Startup)
         && let Some((label, rest)) = split_label(&row.text)
     {
-        let label_style = match band {
-            Some(band) => theme.notice_label.patch(band),
-            None => theme.notice_label,
-        };
-        let rest_style = match band {
-            Some(band) => theme.notice_body.patch(band),
-            None => theme.notice_body,
-        };
-        out.push(Span::styled(label.to_owned(), label_style));
-        out.push(Span::styled(rest.to_owned(), rest_style));
+        out.push(Span::styled(label.to_owned(), theme.notice_label));
+        out.push(Span::styled(rest.to_owned(), theme.notice_body));
     } else if let Some(md) = &row.md {
         // Assistant Markdown (ADR 0028 R2): each piece takes its own role's style.
         for piece in md {
-            let style = match piece.style {
-                blocks::MdStyle::Heading => theme.md_heading,
-                blocks::MdStyle::Heading1 => theme.md_heading.add_modifier(Modifier::UNDERLINED),
-                blocks::MdStyle::HeadingMark => theme.md_heading_mark,
-                blocks::MdStyle::Strikethrough => theme.text.add_modifier(Modifier::CROSSED_OUT),
-                blocks::MdStyle::TaskUnchecked | blocks::MdStyle::TaskChecked => {
-                    theme.md_list_bullet
-                }
-                blocks::MdStyle::Fence => theme.truncation,
-                blocks::MdStyle::Bold => theme.md_heading.patch(Modifier::BOLD),
-                blocks::MdStyle::Italic => theme.text.add_modifier(Modifier::ITALIC),
-                blocks::MdStyle::Code => theme.md_code,
-                blocks::MdStyle::Link => theme.md_link,
-                blocks::MdStyle::LinkUrl => theme.md_link_url,
-                blocks::MdStyle::Quote => theme.md_quote,
-                blocks::MdStyle::QuoteBar => theme.md_quote_border,
-                blocks::MdStyle::Bullet => theme.md_list_bullet,
-                blocks::MdStyle::Rule => theme.md_hr,
-                blocks::MdStyle::Accent => theme.notice_label,
-                blocks::MdStyle::Muted => theme.notice_body,
-                blocks::MdStyle::Dim => theme.truncation,
-                blocks::MdStyle::Diff(role) => diff_style(role, body_style, theme),
-                blocks::MdStyle::TableBorder => theme.md_hr,
-                blocks::MdStyle::Plain => body_style,
-            };
-            let style = match band {
-                Some(band) => style.patch(band),
-                None => style,
-            };
+            let style = md_style(piece.style, body_style, theme);
             out.push(Span::styled(piece.text.clone(), style));
         }
     } else if let Some(syntax) = &row.syntax {
@@ -2481,10 +2429,6 @@ fn body_spans(
         // selection, copy and search are unaffected.
         for (text, role) in syntax {
             let style = syntax_style(*role, body_style, theme);
-            let style = match band {
-                Some(band) => style.patch(band),
-                None => style,
-            };
             out.push(Span::styled(text.clone(), style));
         }
     } else if let Some(diagram) = &row.diagram {
@@ -2494,10 +2438,6 @@ fn body_spans(
                 blocks::DiagramRole::Node => theme.mermaid_node,
                 blocks::DiagramRole::Edge => theme.mermaid_edge,
                 blocks::DiagramRole::Text => theme.mermaid_text,
-            };
-            let style = match band {
-                Some(band) => style.patch(band),
-                None => style,
             };
             out.push(Span::styled(piece.clone(), style));
         }
@@ -2509,157 +2449,47 @@ fn body_spans(
         // ADR 0028): the `frame` role, from column 1. The expanded body
         // (`hint == false`) keeps the summary's own body style, unchanged.
         out.push(Span::styled(row.text.clone(), theme.frame));
-    } else if entry.kind == EntryKind::ToolCall && entry.result.is_none() && first_text {
-        // A running tool card's leading status glyph is the live spinner (ADR 0027 revision
-        // 10): strip the glyph baked at call time and prepend the current frame. Every frame
-        // is one cell wide, like the glyph it replaces, so the layout does not move.
-        let rest: String = row.text.chars().skip(1).collect();
-        out.push(Span::styled(format!("{}{rest}", spinner.glyph), body_style));
     } else {
         out.push(Span::styled(row.text.clone(), body_style));
     }
     out
 }
 
-/// A framed content row (ADR 0028): `│ ` in the marker column, the body from
-/// column 2, the right border at the last column. The row's text never contains a border
-/// character.
-#[allow(clippy::too_many_arguments)]
-fn render_frame_row(
-    entry: &Entry,
-    row: &BodyLine,
-    style: Style,
-    theme: &Theme,
-    first_text: bool,
-    band: Option<Style>,
-    width: usize,
-    glyphs: crate::footer::Glyphs,
-    spinner: crate::spinner::Frame,
-) -> Line<'static> {
-    let frame = glyphs.frame();
-    let border_style = patch_band(theme.approval_border, band);
-    let inner = width.saturating_sub(2);
-    let content_width = width.saturating_sub(3);
-    match row.frame {
-        blocks::Frame::Top => Line::from(Span::styled(
-            format!(
-                "{}{}{}",
-                frame.top_left,
-                frame.horizontal.repeat(inner),
-                frame.top_right
-            ),
-            border_style,
-        )),
-        blocks::Frame::Bottom => Line::from(Span::styled(
-            format!(
-                "{}{}{}",
-                frame.bottom_left,
-                frame.horizontal.repeat(inner),
-                frame.bottom_right
-            ),
-            border_style,
-        )),
-        blocks::Frame::Divider => {
-            // `├── Output ──…┤`: the label is a level weaker than the border (`Error` when the
-            // call failed). Only the output section carries a divider (ADR 0028:
-            // the command is part of the call).
-            let label = if entry.is_error { "Error" } else { "Output" };
-            let used = 2 + 1 + UnicodeWidthStr::width(label) + 1;
-            let fill = content_width.saturating_sub(used);
-            Line::from(vec![
-                Span::styled(
-                    format!("{}{} ", frame.tee_left, frame.horizontal.repeat(2)),
-                    border_style,
-                ),
-                Span::styled(label.to_owned(), patch_band(theme.truncation, band)),
-                Span::styled(
-                    format!(" {}{}", frame.horizontal.repeat(fill + 1), frame.tee_right),
-                    border_style,
-                ),
-            ])
-        }
-        blocks::Frame::Body | blocks::Frame::Meta => {
-            let meta = row.frame == blocks::Frame::Meta;
-            let body = body_style_of(entry, row, style, theme);
-            let mut spans = vec![Span::styled(format!("{} ", frame.vertical), border_style)];
-            if meta {
-                // The meta row (ADR 0028 rule 3): `⟦…⟧` (ascii `[…]`), a level
-                // weaker than the border.
-                spans.push(Span::styled(frame.bracket_left.to_owned(), border_style));
-                spans.push(Span::styled(
-                    row.text.clone(),
-                    patch_band(theme.truncation, band),
-                ));
-                spans.push(Span::styled(frame.bracket_right.to_owned(), border_style));
-            } else if entry.kind == EntryKind::ToolCall
-                && let Some(split) = shell_call_split(&row.text)
-            {
-                // A shell command line is `$ <command>` (revision 3): the `$` is a level
-                // weaker, the command keeps the call's accent.
-                let (prompt, command) = split;
-                spans.push(Span::styled(
-                    prompt.to_owned(),
-                    patch_band(theme.truncation, band),
-                ));
-                spans.push(Span::styled(command.to_owned(), patch_band(body, band)));
-            } else {
-                spans.extend(body_spans(
-                    entry,
-                    row,
-                    patch_band(body, band),
-                    theme,
-                    band,
-                    first_text,
-                    spinner,
-                ));
-            }
-            let used = 2 + UnicodeWidthStr::width(row.text.as_str()) + if meta { 2 } else { 0 };
-            if used < content_width + 2 {
-                spans.push(Span::styled(
-                    " ".repeat(content_width + 2 - used),
-                    band.unwrap_or_default(),
-                ));
-            }
-            spans.push(Span::styled(frame.vertical.to_owned(), border_style));
-            Line::from(spans)
-        }
-        blocks::Frame::None => Line::from(vec![]),
-    }
-}
-
-/// Patches a style with a card band (the background is the band's, the foreground the
-/// style's).
-fn patch_band(style: Style, band: Option<Style>) -> Style {
-    match band {
-        Some(band) => style.patch(band),
-        None => style,
-    }
-}
-
-/// The body role for a row, the same computation the unframed path makes.
-fn body_style_of(entry: &Entry, row: &BodyLine, style: Style, theme: &Theme) -> Style {
-    let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
-    if placeholder {
-        theme.reasoning
-    } else if matches!(entry.kind, EntryKind::Notice | EntryKind::Startup) {
-        theme.notice_body
-    } else if row.role != crate::tools::LineRole::Normal {
-        match row.role {
-            crate::tools::LineRole::Warn => theme.note,
-            crate::tools::LineRole::DiffAdded => theme.diff_added,
-            crate::tools::LineRole::DiffRemoved => theme.diff_removed,
-            crate::tools::LineRole::DiffContext => theme.diff_context,
-            crate::tools::LineRole::DiffHunk => theme.diff_hunk,
-            crate::tools::LineRole::Accent => theme.notice_label,
-            crate::tools::LineRole::Muted => theme.notice_body,
-            crate::tools::LineRole::Dim => theme.truncation,
-            crate::tools::LineRole::Heading => theme
-                .notice_label
-                .add_modifier(ratatui::style::Modifier::BOLD),
-            crate::tools::LineRole::Normal => style,
-        }
-    } else {
-        style
+/// The style one per-piece role takes (ADR 0028 R2's Markdown roles, ADR 0029's thin roles):
+/// the tool head's name and status glyphs included. One definition for the head and for every
+/// Markdown line.
+fn md_style(style: blocks::MdStyle, body_style: Style, theme: &Theme) -> Style {
+    match style {
+        blocks::MdStyle::Heading => theme.md_heading,
+        blocks::MdStyle::Heading1 => theme.md_heading.add_modifier(Modifier::UNDERLINED),
+        blocks::MdStyle::HeadingMark => theme.md_heading_mark,
+        blocks::MdStyle::Strikethrough => theme.text.add_modifier(Modifier::CROSSED_OUT),
+        blocks::MdStyle::TaskUnchecked | blocks::MdStyle::TaskChecked => theme.md_list_bullet,
+        blocks::MdStyle::Fence => theme.truncation,
+        blocks::MdStyle::Bold => theme.md_heading.patch(Modifier::BOLD),
+        blocks::MdStyle::Italic => theme.text.add_modifier(Modifier::ITALIC),
+        blocks::MdStyle::Code => theme.md_code,
+        blocks::MdStyle::Link => theme.md_link,
+        blocks::MdStyle::LinkUrl => theme.md_link_url,
+        blocks::MdStyle::Quote => theme.md_quote,
+        blocks::MdStyle::QuoteBar => theme.md_quote_border,
+        blocks::MdStyle::Bullet => theme.md_list_bullet,
+        blocks::MdStyle::Rule => theme.md_hr,
+        blocks::MdStyle::Accent => theme.notice_label,
+        blocks::MdStyle::Muted => theme.notice_body,
+        blocks::MdStyle::Dim => theme.truncation,
+        blocks::MdStyle::Diff(role) => diff_style(role, body_style, theme),
+        blocks::MdStyle::TableBorder => theme.md_hr,
+        // The `ask_user` record's open frame and the tool head's tool name (ADR 0028
+        // decision 1/2).
+        blocks::MdStyle::Frame => theme.frame,
+        blocks::MdStyle::ToolName => theme.tool_name,
+        blocks::MdStyle::StatusOk => theme.status_ok,
+        blocks::MdStyle::StatusError => theme.status_error,
+        // Handled by [`render_head_row`], which draws the live frame instead of a stored glyph:
+        // a non-head path never meets one.
+        blocks::MdStyle::StatusRunning => theme.status_ok,
+        blocks::MdStyle::Plain => body_style,
     }
 }
 
@@ -2694,10 +2524,4 @@ fn diff_style(role: crate::tools::DiffRole, body_style: Style, theme: &Theme) ->
         crate::tools::DiffRole::Code => theme.text,
         crate::tools::DiffRole::Syntax(role) => syntax_style(role, body_style, theme),
     }
-}
-
-/// Splits a shell call line into its prompt (`<glyph> $ `) and the command (ADR 0028 revision
-/// 2 rule 3), when the row is one.
-fn shell_call_split(text: &str) -> Option<(&str, &str)> {
-    text.starts_with("$ ").then(|| text.split_at(2))
 }

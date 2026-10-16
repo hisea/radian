@@ -1,10 +1,10 @@
-//! The merged tool card (ADR 0028): a call and its result draw one framed block
-//! with a head status line, the `$ <command>` section (no divider: it is part of the call)
-//! and an `Output` section behind a `├── Output ──┤` divider, a `⟦…⟧` meta row, and frame
-//! characters that never enter the text a copy takes.
+//! The thin tool block (ADR 0028): one head line
+//! `• <tool name> <title> · <meta> <status>` and `│ `-prefixed body rows. No background, no
+//! half-cell padding, no box, no `⟦…⟧` meta row — the meta is on the head line — and no
+//! marker or status glyph ever reaches the text a copy takes.
 
 use agent_core::{ContentPart, Message, ToolCall, ToolResult};
-use radian_tui::app::{App, Effect, Input, UpdateResult};
+use radian_tui::app::{App, Effect, EntryKind, Input, UpdateResult};
 use radian_tui::render;
 use radian_tui::theme::Theme;
 use radian_tui::tools::{ToolDisplay, ToolFold};
@@ -38,39 +38,18 @@ fn rows(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> Vec<String
         .collect()
 }
 
-/// The status glyphs the app's footer draws (running, success, failure). main's glyph set
-/// (ADR 0027/10 + the glyphs branch) is `~`/`+`/`×`, so the tests never hardcode
-/// them.
-fn status(app: &App) -> [&'static str; 3] {
-    app.footer_glyphs().tool_status()
-}
-
-fn screen(terminal: &Terminal<TestBackend>) -> String {
-    let buffer = terminal.backend().buffer();
-    let area = *buffer.area();
-    (area.top()..area.bottom())
-        .map(|y| {
-            (area.left()..area.right())
-                .map(|x| {
-                    buffer
-                        .cell((x, y))
-                        .map(|c| c.symbol())
-                        .unwrap_or(" ")
-                        .to_string()
-                })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+/// The status glyphs the transcript's head ends with (ADR 0028): `✓`
+/// when the call succeeded, `✗` when it failed. The `ascii` tier draws `+`/`x`.
+const OK: char = '✓';
+const FAILED: char = '✗';
 
 /// A shell call, with its result if `result` is `Some`.
 fn shell_app(result: Option<ToolResult>) -> App {
     shell_app_with(result, |_| {})
 }
 
-/// `shell_app` with a setup step before any message arrives (the app's real order: the footer
-/// glyph set comes from the config at startup, before the first tool result writes its head).
+/// `shell_app` with a setup step before any message arrives (the app's real order: the glyph
+/// set comes from the config at startup).
 fn shell_app_with(result: Option<ToolResult>, setup: impl FnOnce(&mut App)) -> App {
     let mut app = App::new("m", "s");
     setup(&mut app);
@@ -109,54 +88,54 @@ fn ok_result(text: &str) -> ToolResult {
     }
 }
 
+/// Sets the (producer-less) measured duration on the call's card, so the meta shows one.
+fn with_duration(app: &mut App, ms: u64) {
+    if let Some(entry) = app
+        .session
+        .entries
+        .iter_mut()
+        .find(|entry| entry.kind == EntryKind::ToolCall)
+        && let Some(card) = entry.tool.as_mut()
+    {
+        card.duration_ms = Some(ms);
+    }
+}
+
+/// The rows a tool block occupies: the head row and its body rows.
+fn block_rows(lines: &[String]) -> Vec<&String> {
+    lines
+        .iter()
+        .skip_while(|line| !line.starts_with("• "))
+        .take_while(|line| line.starts_with("• ") || line.starts_with("│ "))
+        .collect()
+}
+
 #[test]
-fn the_card_has_three_sections_at_80_and_120_columns() {
+fn the_head_line_is_the_name_the_title_the_meta_and_the_status() {
     for width in [80u16, 120] {
         let mut app = shell_app(Some(ok_result("all good\n12 passed")));
-        let ok = status(&app)[1];
+        with_duration(&mut app, 12400);
         let terminal = render(&mut app, width, 16);
         let lines = rows(&terminal, width, 16);
-        let w = width as usize;
-        let inner = w - 2;
-        assert_eq!(lines[0], "", "the container's gap");
+        let block = block_rows(&lines);
         assert_eq!(
-            lines[1],
-            format!("┌{}┐", "─".repeat(inner)),
-            "the top border at {width} columns"
+            block[0], "• shell $ make test · exit 0 · 12.4s ✓",
+            "the head at {width} columns"
         );
-        // The head status line: the glyph, `shell:` and the title (revision 3 rule 1).
-        assert!(
-            lines[2].starts_with(&format!("│ {ok} shell: make test")),
-            "{}",
-            lines[2]
-        );
-        assert!(lines[2].ends_with('│'), "{}", lines[2]);
-        // The command section carries no divider (omp's first section has no label, and the
-        // command is part of the call): the head and the command read as one unit.
-        assert!(lines[3].starts_with("│ $ make test"), "{}", lines[3]);
-        assert_eq!(
-            lines[4],
-            format!("├── Output {}┤", "─".repeat(inner - 10)),
-            "the output divider"
-        );
-        assert!(lines[5].starts_with("│ all good"), "{}", lines[5]);
-        assert!(lines[6].starts_with("│ 12 passed"), "{}", lines[6]);
-        // The meta row: the brackets from the glyph set, the fields that exist.
-        assert!(
-            lines[7].starts_with("│ ⟦exit 0 | timeout 30s⟧"),
-            "{}",
-            lines[7]
-        );
-        assert_eq!(
-            lines[8],
-            format!("└{}┘", "─".repeat(inner)),
-            "the bottom border"
-        );
+        // The output rows: `│ ` and the text from column 3.
+        assert_eq!(block[1], "│ all good", "{block:?}");
+        assert_eq!(block[2], "│ 12 passed", "{block:?}");
+        assert_eq!(block.len(), 3, "no other row: {block:?}");
+        // No box, no divider, no band and no `⟦…⟧` meta row anywhere.
+        let all = lines.join("\n");
+        for glyph in ['┌', '┐', '└', '┘', '├', '┤', '⟦', '⟧'] {
+            assert!(!all.contains(glyph), "{glyph:?} is gone: {all}");
+        }
     }
 }
 
 #[test]
-fn a_failed_call_labels_its_section_error() {
+fn a_failed_call_ends_the_head_with_a_cross_and_shows_the_error_body() {
     let mut app = shell_app(Some(ToolResult {
         call_id: "c1".into(),
         content: vec![ContentPart::text("boom")],
@@ -164,68 +143,47 @@ fn a_failed_call_labels_its_section_error() {
         is_error: true,
         error_code: None,
     }));
-    let failed = status(&app)[2];
     let terminal = render(&mut app, 80, 20);
-    let text = screen(&terminal);
-    assert!(
-        text.contains(&format!("{failed} shell: make test")),
-        "{text}"
-    );
-    assert!(text.contains("├── Error "), "{text}");
-    assert!(!text.contains("├── Output "), "{text}");
-    // The error band covers the whole card (ADR 0028 rule 3). The card starts
-    // below the container's gap and its row indices move with the input style's height
-    // (ADR 0035 V3), so find its top and bottom borders instead of hardcoding rows.
+    let lines = rows(&terminal, 80, 20);
+    let block = block_rows(&lines);
+    assert_eq!(block[0], "• shell $ make test · exit 2 ✗", "{block:?}");
+    assert_eq!(block[1], "│ boom", "the error body: {block:?}");
+    // The head's cross and the error body carry the error roles.
     let buffer = terminal.backend().buffer();
-    let symbol = |y: u16| buffer.cell((0, y)).map(|c| c.symbol().to_string());
-    let top = (0..20)
-        .find(|&y| symbol(y).as_deref() == Some("┌"))
-        .expect("top border");
-    let bottom = (0..20)
-        .rev()
-        .find(|&y| symbol(y).as_deref() == Some("└"))
-        .expect("bottom border");
-    let band = buffer.cell((0, top)).map(|c| c.bg);
-    assert!(band.is_some(), "the card carries a band");
+    let cell_of = |ch: char| {
+        let (x, y) = (0..80u16)
+            .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                buffer.cell((x, y)).map(|c| c.symbol()) == Some(ch.to_string().as_str())
+            })
+            .unwrap_or_else(|| panic!("{ch:?} is on screen"));
+        buffer.cell((x, y)).map(|c| c.fg)
+    };
+    assert_eq!(cell_of(FAILED), app.theme.status_error.fg, "the `✗` role");
     assert_eq!(
-        buffer.cell((0, bottom)).map(|c| c.bg),
-        band,
-        "…to the last row"
+        cell_of('b'),
+        app.theme.tool_result_error.fg,
+        "the error body's role"
     );
 }
 
 #[test]
-fn a_call_with_no_output_draws_no_output_section() {
-    let mut app = shell_app(Some(ok_result("")));
-    let terminal = render(&mut app, 80, 12);
-    let text = screen(&terminal);
-    assert!(
-        text.contains("$ make test"),
-        "the command section stays: {text}"
-    );
-    assert!(!text.contains("├── "), "no output, no divider: {text}");
-}
-
-#[test]
-fn a_running_call_is_a_card_with_a_spinner_and_no_output_section() {
+fn a_running_call_ends_the_head_with_the_pulse_and_shows_no_body() {
     let mut app = shell_app(None);
     let terminal = render(&mut app, 80, 12);
-    let text = screen(&terminal);
-    // The running glyph is the live spinner frame (ADR 0027: the default pulse
-    // draws `⏺`); the renderer substitutes it for the status glyph baked at call time.
-    let head = text
-        .lines()
-        .find(|l| l.contains("shell: make test"))
-        .unwrap();
-    assert!(head.starts_with("│ "), "{head}");
-    assert!(head.contains('⏺'), "the running spinner: {head}");
-    assert!(text.contains("$ make test"), "the command section: {text}");
-    assert!(!text.contains("├── "), "no output, no divider: {text}");
-    assert!(text.contains('└'), "the card closes: {text}");
+    let lines = rows(&terminal, 80, 12);
+    let block = block_rows(&lines);
+    assert_eq!(block.len(), 1, "one head line: {block:?}");
+    assert!(block[0].starts_with("• shell $ make test"), "{block:?}");
+    assert!(block[0].ends_with('⏺'), "the pulse at the end: {block:?}");
+    assert!(
+        !block[0].contains('·'),
+        "no meta while the call runs: {block:?}"
+    );
 }
 
 #[test]
-fn a_cancelled_call_says_cancelled_in_its_meta() {
+fn a_cancelled_call_says_cancelled_in_its_meta_and_draws_no_status_glyph() {
     let mut app = shell_app(Some(ToolResult {
         call_id: "c1".into(),
         content: vec![],
@@ -234,66 +192,133 @@ fn a_cancelled_call_says_cancelled_in_its_meta() {
         error_code: Some("interrupted".into()),
     }));
     let terminal = render(&mut app, 80, 12);
-    assert!(
-        screen(&terminal).contains("⟦cancelled⟧"),
-        "{}",
-        screen(&terminal)
-    );
+    let lines = rows(&terminal, 80, 12);
+    let block = block_rows(&lines);
+    assert_eq!(block[0], "• shell $ make test · cancelled", "{block:?}");
+    assert!(!block[0].contains(OK), "{block:?}");
+    assert!(!block[0].contains(FAILED), "{block:?}");
 }
 
+/// The three fold modes (ADR 0028): `expanded` everything, `errors` the
+/// last `tool_preview_lines` rows, `collapsed` no body at all plus `· N lines` in the meta.
 #[test]
-fn a_folded_card_keeps_its_head_and_its_meta() {
-    let mut app = shell_app(Some(ok_result(
-        "line 1\nline 2\nline 3\nline 4\nline 5\nline 6",
-    )));
+fn the_fold_modes_decide_the_body_and_the_collapsed_meta() {
+    let output = (1..=6).map(|i| format!("line {i}\n")).collect::<String>();
+    let mut app = shell_app(Some(ok_result(&output)));
+    app.tool_display = ToolDisplay {
+        fold: ToolFold::Expanded,
+        preview_lines: 5,
+    };
+    let lines = rows(&render(&mut app, 80, 20), 80, 20);
+    let block = block_rows(&lines);
+    assert_eq!(block.len(), 7, "the head and every output row: {block:?}");
+    assert_eq!(block[6], "│ line 6", "{block:?}");
+
+    let mut app = shell_app(Some(ok_result(&output)));
+    app.tool_display = ToolDisplay {
+        fold: ToolFold::Errors,
+        preview_lines: 2,
+    };
+    let lines = rows(&render(&mut app, 80, 20), 80, 20);
+    let block = block_rows(&lines);
+    assert_eq!(
+        block,
+        vec![
+            &"• shell $ make test · exit 0 ✓".to_string(),
+            &"│ line 5".to_string(),
+            &"│ line 6".to_string(),
+        ],
+        "the last preview rows only"
+    );
+
+    let mut app = shell_app(Some(ok_result(&output)));
     app.tool_display = ToolDisplay {
         fold: ToolFold::Collapsed,
         preview_lines: 2,
     };
-    let ok = status(&app)[1];
-    let terminal = render(&mut app, 80, 12);
-    let text = screen(&terminal);
-    assert!(text.contains(&format!("{ok} shell: make test")), "{text}");
-    assert!(
-        text.contains("$ make test"),
-        "the command is the call: {text}"
-    );
-    assert!(
-        !text.contains("├── "),
-        "a folded hint is no section: {text}"
-    );
-    assert!(text.contains("[6 lines]"), "the folded hint: {text}");
-    assert!(text.contains("⟦exit 0"), "the meta stays: {text}");
-}
-
-#[test]
-fn a_multi_line_command_wraps_as_is() {
-    let mut app = App::new("m", "s");
-    app.push_message(&Message::Assistant {
-        content: vec![],
-        reasoning: vec![],
-        tool_calls: vec![ToolCall {
-            id: "c1".into(),
-            name: "shell".into(),
-            arguments: json!({"command": "make test\nmake lint"}),
-        }],
-        provider_payload: None,
-        interrupted: false,
-        meta: Default::default(),
-    });
-    let terminal = render(&mut app, 80, 12);
-    let text = screen(&terminal);
-    assert!(text.contains("│ $ make test"), "{text}");
-    assert!(
-        text.contains("│ make lint"),
-        "the second command line: {text}"
+    let lines = rows(&render(&mut app, 80, 20), 80, 20);
+    let block = block_rows(&lines);
+    assert_eq!(
+        block,
+        vec![&"• shell $ make test · exit 0 · 6 lines ✓".to_string()],
+        "the head only, with the hidden count"
     );
 }
 
+/// `read` is a small tool (ADR 0028): a successful call is one line, and
+/// `Ctrl-O` (the expanded fold) or an error gives it a body.
 #[test]
-fn other_tools_are_their_head_and_their_output_section() {
+fn a_small_tool_is_one_line_until_it_is_expanded() {
+    let read_app = |fold: ToolFold, is_error: bool| {
+        let mut app = App::new("m", "s");
+        app.tool_display = ToolDisplay {
+            fold,
+            preview_lines: 5,
+        };
+        app.push_message(&Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "crates/radian-host/src/job_notify.rs", "offset": 99, "limit": 61}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        });
+        app.push_message(&Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text("fn main() {}\nsecond line")],
+                structured: None,
+                is_error,
+                error_code: None,
+            },
+            meta: Default::default(),
+        });
+        app
+    };
+
+    // The default fold: one head line, no body.
+    let lines = rows(
+        &render(&mut read_app(ToolFold::Errors, false), 80, 12),
+        80,
+        12,
+    );
+    let block = block_rows(&lines);
+    assert_eq!(
+        block,
+        vec![&"• read crates/radian-host/src/job_notify.rs 100-160 ✓".to_string()],
+        "a read one-liner"
+    );
+
+    // Expanded: the body rows appear.
+    let lines = rows(
+        &render(&mut read_app(ToolFold::Expanded, false), 80, 12),
+        80,
+        12,
+    );
+    let block = block_rows(&lines);
+    assert_eq!(block.len(), 3, "{block:?}");
+    assert_eq!(block[1], "│ fn main() {}", "{block:?}");
+
+    // An error gives it a body whatever the fold says.
+    let lines = rows(
+        &render(&mut read_app(ToolFold::Errors, true), 80, 12),
+        80,
+        12,
+    );
+    let block = block_rows(&lines);
+    assert_eq!(block.len(), 3, "{block:?}");
+    assert!(block[0].ends_with(FAILED), "{block:?}");
+}
+
+/// `patch` shows its replacement as a diff body: `│ ` rows with the gutter, the sign and the
+/// code (slice ④'s row builder, kept).
+#[test]
+fn a_patch_block_shows_its_diff_body() {
     let mut app = App::new("m", "s");
-    // `read` folds to a hint by default; the section shows under `expanded`.
     app.tool_display = ToolDisplay {
         fold: ToolFold::Expanded,
         preview_lines: 5,
@@ -303,8 +328,8 @@ fn other_tools_are_their_head_and_their_output_section() {
         reasoning: vec![],
         tool_calls: vec![ToolCall {
             id: "c1".into(),
-            name: "read".into(),
-            arguments: json!({"path": "a.rs"}),
+            name: "patch".into(),
+            arguments: json!({"path": "src/a.rs", "old": "old one\n", "new": "new one\n"}),
         }],
         provider_payload: None,
         interrupted: false,
@@ -313,119 +338,28 @@ fn other_tools_are_their_head_and_their_output_section() {
     app.push_message(&Message::Tool {
         result: ToolResult {
             call_id: "c1".into(),
-            content: vec![ContentPart::text("fn main() {}")],
-            structured: None,
+            content: vec![ContentPart::text("replaced 1 occurrence in src/a.rs")],
+            structured: Some(json!({
+                "path": "src/a.rs",
+                "replaced": 1,
+                "matched": "exact",
+                "hunks": [{"old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1}],
+            })),
             is_error: false,
             error_code: None,
         },
         meta: Default::default(),
     });
-    let terminal = render(&mut app, 80, 12);
-    let ok = status(&app)[1];
-    let text = screen(&terminal);
-    assert!(text.contains(&format!("{ok} read: a.rs")), "{text}");
-    assert!(
-        !text.contains("Command"),
-        "no shell command section: {text}"
-    );
-    assert!(text.contains("├── Output "), "{text}");
-    assert!(text.contains("fn main() {}"), "{text}");
-    // The meta row only writes the data that exists: `read` has no exit code, no duration, no
-    // timeout, so there is no meta row at all (ADR 0028 rule 3).
-    assert!(!text.contains("exit"), "no invented exit code: {text}");
-    assert!(!text.contains('⟦'), "no empty meta row: {text}");
+    let lines = rows(&render(&mut app, 80, 16), 80, 16);
+    let block = block_rows(&lines);
+    assert_eq!(block[0], "• patch src/a.rs · +1 −1 ✓", "{block:?}");
+    assert_eq!(block[1], "│ @@ -3,1 +3,1 @@", "{block:?}");
+    assert_eq!(block[2], "│    3 - old one", "{block:?}");
+    assert_eq!(block[3], "│    3 + new one", "{block:?}");
 }
 
 #[test]
-fn the_meta_writes_only_the_data_that_exists() {
-    // A measured duration is written; an unmeasured one is not (the shell card above has
-    // none and shows none).
-    let mut app = shell_app(Some(ok_result("done")));
-    if let Some(entry) = app
-        .session
-        .entries
-        .iter_mut()
-        .find(|e| e.kind == radian_tui::app::EntryKind::ToolResult)
-    {
-        entry.tool.as_mut().expect("the card").duration_ms = Some(50);
-    }
-    let terminal = render(&mut app, 80, 12);
-    assert!(
-        screen(&terminal).contains("⟦exit 0 | 0.05s | timeout 30s⟧"),
-        "{}",
-        screen(&terminal)
-    );
-    // A shell card with no timeout argument writes no timeout.
-    let mut app = App::new("m", "s");
-    app.push_message(&Message::Assistant {
-        content: vec![],
-        reasoning: vec![],
-        tool_calls: vec![ToolCall {
-            id: "c1".into(),
-            name: "shell".into(),
-            arguments: json!({"command": "true"}),
-        }],
-        provider_payload: None,
-        interrupted: false,
-        meta: Default::default(),
-    });
-    app.push_message(&Message::Tool {
-        result: ToolResult {
-            call_id: "c1".into(),
-            content: vec![ContentPart::text("")],
-            structured: Some(json!({"command": "true", "exit_code": 0})),
-            is_error: false,
-            error_code: None,
-        },
-        meta: Default::default(),
-    });
-    let terminal = render(&mut app, 80, 12);
-    assert!(
-        screen(&terminal).contains("⟦exit 0⟧"),
-        "only the exit code: {}",
-        screen(&terminal)
-    );
-    assert!(
-        !screen(&terminal).contains("timeout"),
-        "{}",
-        screen(&terminal)
-    );
-}
-
-#[test]
-fn the_ascii_glyph_set_draws_ascii_borders_and_brackets() {
-    // The glyph set is chosen before the result arrives, as at startup: the head's status glyph
-    // is written into the entry when the result lands (app.rs), so a later switch would not
-    // repaint it (a separate, known limit).
-    let mut app = shell_app_with(Some(ok_result("done")), |app| {
-        app.apply_footer(&radian_host::config::TuiFooterConfig {
-            glyphs: Some("ascii".into()),
-            ..Default::default()
-        });
-    });
-    let terminal = render(&mut app, 60, 12);
-    let lines = rows(&terminal, 60, 12);
-    // The card's own rows (the footer draws its own separators, not this assertion's).
-    let card: Vec<&String> = lines
-        .iter()
-        .skip_while(|l| !l.starts_with('+'))
-        .take_while(|l| l.starts_with('+') || l.starts_with('|'))
-        .collect();
-    let text = card
-        .iter()
-        .map(|l| l.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let ok = status(&app)[1];
-    assert!(text.contains(&format!("| {ok} shell: make test")), "{text}");
-    assert!(text.contains("| $ make test"), "{text}");
-    assert!(text.contains("+-- Output "), "{text}");
-    assert!(text.contains("[exit 0 | timeout 30s]"), "{text}");
-    assert!(!text.contains('┌') && !text.contains('│'), "{text}");
-}
-
-#[test]
-fn a_cjk_command_and_output_fit_the_frame() {
+fn a_cjk_command_and_output_keep_the_marker_column() {
     let mut app = App::new("m", "s");
     app.push_message(&Message::Assistant {
         content: vec![],
@@ -449,39 +383,142 @@ fn a_cjk_command_and_output_fit_the_frame() {
         },
         meta: Default::default(),
     });
-    let terminal = render(&mut app, 40, 12);
-    let lines = rows(&terminal, 40, 12);
-    // Every frame row is exactly 40 columns wide (the CJK glyphs are two cells).
-    for line in lines.iter().take_while(|l| !l.is_empty()) {
-        if line.starts_with('│') || line.starts_with('┌') || line.starts_with('├') {
-            assert_eq!(line.chars().count(), 40, "{line:?}");
+    let lines = rows(&render(&mut app, 40, 12), 40, 12);
+    let block = block_rows(&lines);
+    assert_eq!(block.len(), 3, "{block:?}");
+    // The screen model inserts a blank cell after each wide glyph, so compare without spaces.
+    let squeeze = |text: &str| {
+        text.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+    };
+    assert_eq!(
+        squeeze(block[0]),
+        squeeze("• shell $ echo 你好世界 · exit 0 ✓"),
+        "{block:?}"
+    );
+    assert_eq!(squeeze(block[1]), "│你好，世界", "{block:?}");
+    assert_eq!(squeeze(block[2]), "│完成", "{block:?}");
+}
+
+/// The mechanical rules of the thin block (ADR 0028's acceptance, ADR 0040's column
+/// rule): no cell of a tool row carries a background, every body row starts with `│ ` and its
+/// content begins at column 3, and the head ends with the status glyph.
+#[test]
+fn every_tool_row_has_no_background_and_the_marker_column_holds() {
+    let long = "cargo test --workspace --locked --no-fail-fast -- --nocapture";
+    for theme in [Theme::dark(), Theme::light()] {
+        for width in [80u16, 120] {
+            let mut app = App::new("m", "s");
+            app.theme = theme.clone();
+            app.push_message(&Message::Assistant {
+                content: vec![],
+                reasoning: vec![],
+                tool_calls: vec![
+                    ToolCall {
+                        id: "c1".into(),
+                        name: "shell".into(),
+                        arguments: json!({"command": long}),
+                    },
+                    ToolCall {
+                        id: "c2".into(),
+                        name: "read".into(),
+                        arguments: json!({"path": "src/main.rs"}),
+                    },
+                ],
+                provider_payload: None,
+                interrupted: false,
+                meta: Default::default(),
+            });
+            for (id, text, is_error) in [
+                ("c1", format!("all good\n{}", "y".repeat(120)), false),
+                ("c2", "fn main() {}".to_string(), false),
+            ] {
+                app.push_message(&Message::Tool {
+                    result: ToolResult {
+                        call_id: id.into(),
+                        content: vec![ContentPart::text(text)],
+                        structured: (id == "c1").then(|| json!({"command": long, "exit_code": 0})),
+                        is_error,
+                        error_code: None,
+                    },
+                    meta: Default::default(),
+                });
+            }
+            let height = 20;
+            let terminal = render(&mut app, width, height);
+            let lines = rows(&terminal, width, height);
+            let buffer = terminal.backend().buffer();
+            let block = block_rows(&lines);
+            assert!(block.len() >= 3, "{block:?}");
+            // The head row ends with the status glyph; every other row is a `│ ` body row
+            // whose content starts at column 3.
+            for (index, row) in block.iter().enumerate() {
+                let y = lines.iter().position(|line| line == *row).unwrap() as u16;
+                if index == 0 || row.starts_with("• ") {
+                    assert!(row.ends_with(OK), "{row:?}");
+                } else {
+                    assert!(row.starts_with("│ "), "{row:?}");
+                    assert_ne!(
+                        row.chars().nth(2),
+                        Some(' '),
+                        "the content starts at column 3: {row:?}"
+                    );
+                }
+                for x in 0..width {
+                    let cell = buffer.cell((x, y)).expect("a cell");
+                    assert_eq!(
+                        cell.bg,
+                        Color::Reset,
+                        "{theme:?} {width} row {y} col {x} carries a background"
+                    );
+                }
+            }
         }
     }
 }
 
 #[test]
-fn a_copy_of_a_card_has_no_border_characters() {
+fn the_ascii_glyph_set_draws_ascii_markers_and_status() {
+    let mut app = shell_app_with(Some(ok_result("done")), |app| {
+        app.apply_footer(&radian_host::config::TuiFooterConfig {
+            glyphs: Some("ascii".into()),
+            ..Default::default()
+        });
+    });
+    let lines = rows(&render(&mut app, 60, 12), 60, 12);
+    let head = lines
+        .iter()
+        .position(|line| line.starts_with("- shell"))
+        .expect("the ascii head row");
+    assert_eq!(lines[head], "- shell $ make test · exit 0 +", "{lines:?}");
+    assert_eq!(lines[head + 1], "| done", "{lines:?}");
+    let all = lines.join("\n");
+    assert!(!all.contains('•'), "{all}");
+    assert!(!all.contains('│'), "{all}");
+}
+
+#[test]
+fn a_copy_of_a_block_has_no_marker_meta_or_status() {
     let mut app = shell_app(Some(ok_result("all good")));
+    with_duration(&mut app, 30);
     app.set_viewport(20, 20);
     app.set_transcript_width(80);
-    // The card is lines 0 (top) .. 7 (bottom): select from the head row's first text column
-    // to the last output row.
-    // The head row's on-screen index (the view follows the bottom, so it may be scrolled).
     let terminal = render(&mut app, 80, 20);
     let head_row = rows(&terminal, 80, 20)
         .iter()
-        .position(|line| line.contains("shell: make test"))
+        .position(|line| line.starts_with("• shell"))
         .expect("the head row") as u16;
     let _down: UpdateResult = app.update(Input::MouseDown {
         row: head_row,
-        col: 2,
+        col: 0,
     });
     let _ = app.update(Input::MouseDrag {
-        row: head_row + 5,
+        row: head_row + 1,
         col: 12,
     });
     let result = app.update(Input::MouseUp {
-        row: head_row + 5,
+        row: head_row + 1,
         col: 12,
     });
     let copied = result
@@ -492,145 +529,15 @@ fn a_copy_of_a_card_has_no_border_characters() {
             _ => None,
         })
         .expect("a copy effect");
-    assert!(!copied.contains('│'), "no side border: {copied:?}");
-    assert!(!copied.contains('─'), "no horizontal border: {copied:?}");
-    assert!(!copied.contains('┌'), "no corner: {copied:?}");
+    // The head's own words and the body's output copy; the markers, the meta and the status
+    // glyph do not.
     assert!(copied.contains("make test"), "{copied:?}");
-}
-
-/// A card for `name` with `arguments`, and its result when `result` is `Some`, under `theme`.
-fn tool_app(
-    theme: &Theme,
-    name: &str,
-    arguments: serde_json::Value,
-    result: Option<ToolResult>,
-) -> App {
-    let mut app = App::new("m", "s");
-    app.theme = theme.clone();
-    app.push_message(&Message::Assistant {
-        content: vec![],
-        reasoning: vec![],
-        tool_calls: vec![ToolCall {
-            id: "c1".into(),
-            name: name.into(),
-            arguments,
-        }],
-        provider_payload: None,
-        interrupted: false,
-        meta: Default::default(),
-    });
-    if let Some(result) = result {
-        app.push_message(&Message::Tool {
-            result,
-            meta: Default::default(),
-        });
+    assert!(copied.contains("all good"), "{copied:?}");
+    for glyph in ['•', '│', OK, FAILED, '·'] {
+        assert!(!copied.contains(glyph), "{glyph:?} in {copied:?}");
     }
-    app
-}
-
-/// Asserts every cell from the card's `┌` row to its `└` row, across the full width, has the
-/// card's band background: the borders, the head, the command, the output and the padding all
-/// sit on the state's `tool_*_bg` band (ADR 0028 R4 + owner acceptance). A cell on any other
-/// background shows as a darker stripe under the text.
-fn assert_card_band(terminal: &Terminal<TestBackend>, width: u16, height: u16, band: Color) {
-    let buffer = terminal.backend().buffer();
-    let sym = |y: u16| buffer.cell((0, y)).map(|c| c.symbol().to_string());
-    let top = (0..height)
-        .find(|&y| sym(y).as_deref() == Some("┌"))
-        .expect("the card's top border");
-    let bottom = (0..height)
-        .rev()
-        .find(|&y| sym(y).as_deref() == Some("└"))
-        .expect("the card's bottom border");
-    for y in top..=bottom {
-        let line: String = (0..width)
-            .map(|x| {
-                buffer
-                    .cell((x, y))
-                    .map(|c| c.symbol().to_string())
-                    .unwrap_or_default()
-            })
-            .collect();
-        for x in 0..width {
-            let cell = buffer.cell((x, y)).expect("a cell");
-            assert_eq!(
-                cell.bg, band,
-                "row {y} col {x} is off the card band: {line:?}"
-            );
-        }
-    }
-}
-
-/// Every cell of a tool card sits on the card's own band, in each built-in theme that carries a
-/// tool background (pi dark/light), for a pending, a succeeded and a failed card, with short and
-/// wrapped argument/result lines and a diff body. The card band must not show around the text
-/// with the text cells on some other (darker) background.
-#[test]
-fn every_cell_of_a_card_sits_on_the_card_band() {
-    let long = format!(
-        "cargo test --workspace --locked --no-fail-fast -- --nocapture {}",
-        "x".repeat(40)
+    assert!(
+        !copied.contains("exit 0"),
+        "the meta never copies: {copied:?}"
     );
-    for theme in [Theme::dark(), Theme::light()] {
-        let pending = theme.tool_pending_bg.bg.expect("a pending band");
-        let success = theme.tool_success_bg.bg.expect("a success band");
-        let error = theme.tool_error_bg.bg.expect("an error band");
-
-        // Pending: a command long enough to wrap onto a second row.
-        let mut app = tool_app(
-            &theme,
-            "shell",
-            json!({"command": long, "timeout_secs": 30}),
-            None,
-        );
-        assert_card_band(&render(&mut app, 80, 24), 80, 24, pending);
-
-        // Succeeded: a wrapped command and a wrapped output line.
-        let mut app = tool_app(
-            &theme,
-            "shell",
-            json!({"command": long, "timeout_secs": 30}),
-            Some(ToolResult {
-                call_id: "c1".into(),
-                content: vec![ContentPart::text(format!(
-                    "all good\n{}\n12 passed",
-                    "y".repeat(120)
-                ))],
-                structured: Some(json!({"command": long, "exit_code": 0, "timeout_secs": 30})),
-                is_error: false,
-                error_code: None,
-            }),
-        );
-        assert_card_band(&render(&mut app, 80, 24), 80, 24, success);
-
-        // Failed: the error band and the `Error` divider label.
-        let mut app = tool_app(
-            &theme,
-            "shell",
-            json!({"command": "make test"}),
-            Some(ToolResult {
-                call_id: "c1".into(),
-                content: vec![ContentPart::text("boom")],
-                structured: Some(json!({"command": "make test", "exit_code": 2})),
-                is_error: true,
-                error_code: None,
-            }),
-        );
-        assert_card_band(&render(&mut app, 80, 24), 80, 24, error);
-
-        // A diff body (`patch`): hunk, context, removed and added lines.
-        let mut app = tool_app(
-            &theme,
-            "patch",
-            json!({"path": "a.rs"}),
-            Some(ToolResult {
-                call_id: "c1".into(),
-                content: vec![ContentPart::text("@@ -1,2 +1,3 @@\n context\n-old\n+new")],
-                structured: None,
-                is_error: false,
-                error_code: None,
-            }),
-        );
-        assert_card_band(&render(&mut app, 80, 24), 80, 24, success);
-    }
 }

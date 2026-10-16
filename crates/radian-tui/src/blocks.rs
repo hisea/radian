@@ -288,28 +288,18 @@ pub enum Card {
     Solo,
 }
 
-/// One laid-out line of an entry's body. `chars`/`end` are the selection mapping's view (the
-/// same semantics as [`crate::render::WrappedLine`]: byte offsets into the entry's display
-/// text, `end` the gap after the line); `text` is what the body span renders.
-/// The card frame a line draws (ADR 0028). The merged tool card is drawn as one
-/// bordered block: a `┌───┐` row, content rows carrying the side borders, a `├── Output ──┤`
-/// divider, and a `└───┘` row. The frame characters are **not** in the line's text: a
-/// selection copies the content without them.
+/// The tool block's line shape (ADR 0028). A block is one head line and
+/// `│ `-prefixed body rows; the markers live in the marker column and are **drawn**, never part
+/// of the line's text, so a selection copies none of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Frame {
     #[default]
     None,
-    /// The top border row.
-    Top,
-    /// A content row: the side borders, the body from column 2.
+    /// The block's head row: `• ` in the marker column, `<name> <title> · <meta> <status>` from
+    /// the body column.
+    Head,
+    /// A body row: `│ ` in the marker column, the content from the body column.
     Body,
-    /// The `├── Output ──┤` / `├── Error ──┤` row (the label comes from the entry).
-    Divider,
-    /// The meta row: content inside the borders, wrapped in the glyph set's brackets
-    /// (ADR 0028 rule 3: `⟦ ⟧`, ascii `[ ]`).
-    Meta,
-    /// The bottom border row.
-    Bottom,
 }
 
 /// A banded block's half-cell padding row (ADR 0035): a half cell of the band above
@@ -421,6 +411,19 @@ pub enum MdStyle {
     /// the sign and the code, which one row carries at once. Not Markdown either; the same
     /// per-piece mechanism.
     Diff(crate::tools::DiffRole),
+    /// The structural `frame` role (ADR 0029): the `ask_user` record's open frame
+    /// (`╭─`, `│ `, `╰──`).
+    Frame,
+    /// A tool head's tool name (ADR 0028 / ADR 0029's
+    /// `tool_name`).
+    ToolName,
+    /// A tool head's status glyph when the call succeeded (`✓`, `status_ok`).
+    StatusOk,
+    /// A tool head's status glyph when the call failed (`✗`, `status_error`).
+    StatusError,
+    /// A tool head's running indicator: the live pulse frame, drawn in place of the
+    /// placeholder cell the layout carries (ADR 0027/13).
+    StatusRunning,
     /// A quote's `│ ` bar (`mdQuoteBorder`).
     QuoteBar,
     /// A list bullet or number (`mdListBullet`).
@@ -467,44 +470,6 @@ impl BodyLine {
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
-            diagram: None,
-            reason: false,
-            md: None,
-            syntax: None,
-        }
-    }
-
-    /// A synthetic frame row (ADR 0028): the borders are drawn, not stored, so
-    /// the row carries no text and copies nothing.
-    fn frame_row(frame: Frame) -> Self {
-        Self {
-            chars: Vec::new(),
-            end: 0,
-            text: String::new(),
-            code: false,
-            pad: Pad::None,
-            frame,
-            role: tools::LineRole::Normal,
-            hint: true,
-            diagram: None,
-            reason: false,
-            md: None,
-            syntax: None,
-        }
-    }
-
-    /// The card's meta row: frame content (inside the borders), synthesized from the result's
-    /// data, so it copies as text but never matches a search.
-    fn meta_row(text: String) -> Self {
-        Self {
-            chars: Vec::new(),
-            end: 0,
-            text,
-            code: false,
-            pad: Pad::None,
-            frame: Frame::Meta,
-            role: tools::LineRole::Normal,
-            hint: true,
             diagram: None,
             reason: false,
             md: None,
@@ -723,7 +688,7 @@ pub fn is_folded(entry: &Entry, modes: DisplayModes) -> bool {
                 modes.tools.fold,
                 modes.tools.preview_lines,
             );
-            shown.len() < full.len()
+            shown.lines.len() < full.lines.len()
         }
         _ => false,
     }
@@ -903,18 +868,14 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                 })
                 .sum()
         }
-        // One header line, never wrapped - unless a shell command carries its own newlines
-        // (ADR 0028 rule 3: a multi-line command wraps as-is, one row per line).
-        EntryKind::ToolCall => {
-            // The head line and the command lines: no divider between them (ADR 0028 revision
-            // 3; the command is part of the call).
-            let content = text.lines().count().max(1);
-            content + frame_rows(frame_plan(entry.card, false, false))
-        }
+        // The head line, never wrapped - unless a shell command carries its own newlines (ADR
+        // 0028 revision 5 decision 1: a multi-line command wraps, one continuation row per
+        // line). The meta and the status glyph are part of the head's own row.
+        EntryKind::ToolCall => text.lines().count().max(1),
         EntryKind::ToolResult => {
             let card = entry.tool.as_deref();
             let plan = tool_plan(card, &text, entry.is_error, modes, entry.fold_override);
-            let content: usize = plan
+            plan.lines
                 .iter()
                 .map(|line| match line {
                     tools::BodyLine::Text { source, .. } => {
@@ -923,11 +884,8 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                     // A diff row never wraps: one row, one transcript line (ADR 0028
                     // decision 5, R9).
                     tools::BodyLine::Diff(_) => 1,
-                    tools::BodyLine::Hint(_) => 1,
                 })
-                .sum();
-            let has_output = plan_has_output(&plan, &text);
-            content + frame_rows(frame_plan(entry.card, has_output, has_meta(entry)))
+                .sum()
         }
         _ => crate::render::wrap_line_count(&text, body_width),
     }
@@ -941,7 +899,7 @@ fn tool_plan(
     is_error: bool,
     modes: DisplayModes,
     fold_override: Option<bool>,
-) -> Vec<tools::BodyLine> {
+) -> tools::BodyPlan {
     let fold = if fold_override.unwrap_or(modes.tools.fold == tools::ToolFold::Expanded) {
         tools::ToolFold::Expanded
     } else {
@@ -1139,7 +1097,6 @@ fn layout_unstripped(
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
     let text = crate::render::display_text(entry);
-    let tool_expanded = expanded(entry, modes.tools.fold == tools::ToolFold::Expanded);
     let reasoning_expanded = expanded(entry, mode == ReasoningMode::Expanded);
     match (entry.kind, mode) {
         (EntryKind::Reasoning, ReasoningMode::Hidden) if !reasoning_expanded => Vec::new(),
@@ -1260,12 +1217,11 @@ fn layout_unstripped(
                     None => ask_pending_line(card, body_width, modes.glyphs),
                     Some(is_error) => ask_block(card, &text, is_error, body_width, modes.glyphs),
                 },
-                // The call line, laid out like a code line: never wrapped, truncated with `…`
-                // when it does not fit (a shell command's own newlines do wrap). The entry's
-                // text **is** this header (set at push time from the same function), so the
-                // characters map back and copy correctly. The frame (ADR 0028)
-                // wraps it.
-                _ => frame_head(entry.card, call_lines(&text, width)),
+                // The head line (ADR 0028): `• <name> <title> · <meta>
+                // <status>`. The entry's text **is** the `<name> <title>` part (set at push
+                // time from the same function), so those characters copy; the meta and the
+                // status are synthesized.
+                _ => head_rows(entry, &text, body_width, modes),
             }
         }
         (EntryKind::Compaction, _) => {
@@ -1311,36 +1267,14 @@ fn layout_unstripped(
                     ask_block(card, &text, entry.is_error, body_width, modes.glyphs)
                 };
             }
-            let plan = match card {
-                Some(card) => tools::body_plan(
-                    card,
-                    &text,
-                    entry.is_error,
-                    // The per-entry override (a search hit) opens this body.
-                    if tool_expanded {
-                        tools::ToolFold::Expanded
-                    } else {
-                        modes.tools.fold
-                    },
-                    modes.tools.preview_lines,
-                ),
-                // No card data (an older entry, or a shape the TUI did not model): the raw
-                // text, always expanded — a renderer must cope with "no card".
-                None => tools::body_plan(
-                    &tools::ToolCard::new("", "", serde_json::Value::Null),
-                    &text,
-                    entry.is_error,
-                    tools::ToolFold::Expanded,
-                    0,
-                ),
-            };
-            let has_output = plan_has_output(&plan, &text);
-            frame_tail(
-                entry.card,
-                body_plan_lines(&plan, &text, body_width),
-                card_meta(entry),
-                has_output,
-            )
+            let plan = tool_plan(
+                entry.tool.as_deref(),
+                &text,
+                entry.is_error,
+                modes,
+                entry.fold_override,
+            );
+            body_plan_lines(&plan.lines, &text, body_width)
         }
         _ => prose_lines(&text, body_width),
     }
@@ -1587,17 +1521,17 @@ fn ask_block(
 
 /// The open frame's top line (ADR 0028 / ADR 0035):
 /// `╭─ <label> ───…`, with the rule running to the body width and **no** right corner. The whole
-/// line is the frame role (`md_hr` until slice ⓪ lands, per ADR 0035).
+/// line is the `frame` role (ADR 0029's structural level).
 fn ask_top(g: &AskGlyphs, width: usize, label: &str) -> Vec<(String, MdStyle)> {
     let prefix = format!("{}{} ", g.top_left, g.horizontal);
     let mut pieces = vec![
-        (prefix.clone(), MdStyle::Rule),
-        (label.to_owned(), MdStyle::Rule),
-        (" ".to_string(), MdStyle::Rule),
+        (prefix.clone(), MdStyle::Frame),
+        (label.to_owned(), MdStyle::Frame),
+        (" ".to_string(), MdStyle::Frame),
     ];
     let used = UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(label) + 1;
     let fill = width.saturating_sub(used);
-    pieces.push((g.horizontal.to_string().repeat(fill), MdStyle::Rule));
+    pieces.push((g.horizontal.to_string().repeat(fill), MdStyle::Frame));
     pieces
 }
 
@@ -1640,7 +1574,7 @@ fn ask_body(
                 " ".repeat(prefix_width)
             };
             ask_line(vec![
-                (marker.clone(), MdStyle::Rule),
+                (marker.clone(), MdStyle::Frame),
                 (lead, prefix.1),
                 (chunk, value.1),
             ])
@@ -1654,252 +1588,210 @@ fn ask_body(
 fn ask_bottom(g: &AskGlyphs) -> Vec<(String, MdStyle)> {
     vec![(
         format!("{}{}{}", g.bottom_left, g.horizontal, g.horizontal),
-        MdStyle::Rule,
+        MdStyle::Frame,
     )]
 }
 
-/// The call entry's content rows (ADR 0028 rule 1): the head status line, then the
-/// `$ <command>` lines (a multi-line command wraps as-is, one row per line). **No divider
-/// between them**: omp's first section carries no label, and the command is part of the call
-/// (the decision 2), so the two read as one unit - the `Output` divider is the only
-/// one, and the card is one row shorter.
-fn call_lines(text: &str, width: usize) -> Vec<BodyLine> {
-    let mut lines = text.lines();
-    let head = lines.next().unwrap_or("");
-    let mut out = tool_line_at(head, 0, width);
-    let mut offset = head.len() + 1;
-    for line in lines {
-        out.extend(tool_line_at(line, offset, width));
+/// The head row(s) of a tool block (ADR 0028):
+/// `• <tool name> <title> · <meta> <status>`. The entry's text is the `<name> <title>` part
+/// (the call entry's text, set at push time from the same function) so those characters copy;
+/// the name's own style, the meta and the status glyph are synthesized cells (no source).
+///
+/// One row per line of the entry's text: a multi-line `shell` command wraps with its
+/// continuation rows from the body column. The meta and the status sit at the **end** of the
+/// head (the last row).
+fn head_rows(entry: &Entry, text: &str, width: usize, modes: DisplayModes) -> Vec<BodyLine> {
+    let card = entry.tool.as_deref();
+    let name = card.map(|card| card.name.as_str()).unwrap_or("");
+    let mut meta = card_meta(entry).unwrap_or_default();
+    // `collapsed` hides the whole body, so the head says how many rows it hid (the count is
+    // the paired result's, which only its own entry lays out: `ToolCard::result_lines`).
+    if modes.tools.fold == tools::ToolFold::Collapsed
+        && entry.fold_override != Some(true)
+        && let Some(lines) = card.and_then(|card| card.result_lines)
+        && lines > 0
+    {
+        if !meta.is_empty() {
+            meta.push_str(" · ");
+        }
+        meta.push_str(&format!("{lines} lines"));
+    }
+    let status = head_status(entry, card);
+    let (ok, failed) = status_marks(modes.glyphs);
+    // The name is the head text's own first word (`call_text` puts it there), so its cells keep
+    // their source offsets and the whole head copies.
+    let named = !name.is_empty() && text.starts_with(name);
+    let lines: Vec<&str> = if text.is_empty() {
+        vec![""]
+    } else {
+        text.lines().collect()
+    };
+    let last = lines.len() - 1;
+    let mut rows = Vec::with_capacity(lines.len());
+    let mut offset = 0usize;
+    for (index, line) in lines.iter().enumerate() {
+        let mut cells: Vec<(char, MdStyle, Option<usize>)> = Vec::new();
+        for (at, ch) in line.char_indices() {
+            let style = if index == 0 && named && at < name.len() {
+                MdStyle::ToolName
+            } else {
+                MdStyle::Plain
+            };
+            cells.push((ch, style, Some(offset + at)));
+        }
+        // The tail — the meta and the status glyph — is never truncated away: the title is.
+        let mut tail: Vec<(char, MdStyle, Option<usize>)> = Vec::new();
+        if index == last {
+            if !meta.is_empty() {
+                for ch in format!(" · {meta}").chars() {
+                    tail.push((ch, MdStyle::Dim, None));
+                }
+            }
+            let glyph = match status {
+                HeadStatus::Ok => Some((ok, MdStyle::StatusOk)),
+                HeadStatus::Error => Some((failed, MdStyle::StatusError)),
+                HeadStatus::Running => Some((running_glyph(modes.glyphs), MdStyle::StatusRunning)),
+                HeadStatus::None => None,
+            };
+            if let Some((glyph, style)) = glyph {
+                tail.push((' ', MdStyle::Plain, None));
+                tail.push((glyph, style, None));
+            }
+        }
+        rows.push(styled_row(
+            cells,
+            tail,
+            offset + line.len(),
+            width,
+            Frame::Head,
+        ));
         offset += line.len() + 1;
     }
-    out
+    rows
 }
 
-/// One call line: the same fit rule as a code line, with its characters mapped back into the
-/// entry's text at `offset` so selection and copy work on it.
-fn tool_line_at(line: &str, offset: usize, width: usize) -> Vec<BodyLine> {
-    let (rendered, kept, cut) = crate::blocks::code_line_layout(line, width);
-    let mut chars: Vec<usize> = kept.into_iter().map(|i| offset + i).collect();
-    if cut && let Some(&last) = chars.last() {
-        chars.push(last);
-    }
-    vec![BodyLine {
-        chars: chars.into_iter().map(Some).collect(),
-        end: offset + line.len(),
-        text: rendered,
-        code: false,
-        pad: Pad::None,
-        frame: Frame::None,
-        role: tools::LineRole::Normal,
-        hint: false,
-        diagram: None,
-        reason: false,
-        md: None,
-        syntax: None,
-    }]
-}
-
-/// The frame rows a card draws **around** its content, as a plan both the layout and the
-/// count-only path derive from (they cannot disagree).
+/// A tool call's state as the head's end shows it (ADR 0028).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FramePlan {
-    top: bool,
-    divider: bool,
-    meta: bool,
-    bottom: bool,
+enum HeadStatus {
+    /// The call has no result yet: the live pulse frame.
+    Running,
+    Ok,
+    Error,
+    /// A cancelled call: no glyph at all, the meta says `cancelled`.
+    None,
 }
 
-fn frame_plan(card: Card, has_output: bool, has_meta: bool) -> FramePlan {
-    match card {
-        // A call whose result follows: the top border only (the tail closes the card).
-        Card::Head => FramePlan {
-            top: true,
-            divider: false,
-            meta: false,
-            bottom: false,
-        },
-        // A result that closes a card: the divider only when there is output (rule 4), the
-        // meta row only when there is data, and the bottom border.
-        Card::Tail => FramePlan {
-            top: false,
-            divider: has_output,
-            meta: has_meta,
-            bottom: true,
-        },
-        // A tool entry with no pair: a whole card of its own.
-        Card::Solo => FramePlan {
-            top: true,
-            divider: has_output,
-            meta: has_meta,
-            bottom: true,
-        },
-        Card::None => FramePlan {
-            top: false,
-            divider: false,
-            meta: false,
-            bottom: false,
-        },
+/// Whether the call succeeded, failed, is still running or was cancelled. A cancelled call is
+/// the meta's (`card_meta`), never a glyph.
+fn head_status(entry: &Entry, card: Option<&tools::ToolCard>) -> HeadStatus {
+    let cancelled = entry.error_code.as_deref() == Some("interrupted")
+        || card.is_some_and(|card| {
+            card.structured
+                .as_ref()
+                .and_then(|value| value.get("cancelled"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        });
+    if cancelled {
+        return HeadStatus::None;
+    }
+    match entry.result {
+        Some(true) => HeadStatus::Error,
+        Some(false) => HeadStatus::Ok,
+        None => HeadStatus::Running,
     }
 }
 
-/// Whether a body plan shows a real output section: a non-blank text line. A folded hint is
-/// not a section, and neither is an empty result (ADR 0028 rule 1's "no output, no
-/// section").
-fn plan_has_output(plan: &[tools::BodyLine], text: &str) -> bool {
-    // One whole-text blankness test (trimming scans only the ends) and one plan scan: this
-    // runs for every tool entry on a resize, so it must not walk the body line by line.
-    !text.trim().is_empty() && plan.iter().any(tools::BodyLine::is_content)
+/// The status glyphs `✓`/`✗` (ADR 0028). `ascii` draws `+`/`x`; the
+/// `nerd` tier keeps the footer's Font Awesome pair. The **running** state draws the live
+/// spinner frame instead ([`running_glyph`] is the non-animated placeholder the layout
+/// carries).
+pub(crate) fn status_marks(glyphs: crate::footer::Glyphs) -> (char, char) {
+    match glyphs {
+        crate::footer::Glyphs::Unicode => ('✓', '✗'),
+        crate::footer::Glyphs::Nerd => ('\u{f00c}', '\u{f00d}'),
+        crate::footer::Glyphs::Ascii => ('+', 'x'),
+    }
 }
 
-/// How many rows a frame adds to a card's content.
-fn frame_rows(plan: FramePlan) -> usize {
-    plan.top as usize + plan.divider as usize + plan.meta as usize + plan.bottom as usize
+/// The placeholder a running head row carries where the renderer then draws the live frame
+/// (ADR 0027/13). Every spinner glyph is one cell, so the head's shape is stable.
+fn running_glyph(glyphs: crate::footer::Glyphs) -> char {
+    match glyphs {
+        crate::footer::Glyphs::Ascii => '*',
+        _ => '⏺',
+    }
 }
 
-/// The text-only path's frame rows: the border rows have no text (they are drawn), the meta
-/// row is content. Mirrors [`frame_head`]/[`frame_tail`] row for row, so the search geometry
-/// and the drawing cannot disagree.
-fn frame_text(plan: FramePlan, content: Vec<String>, meta: Option<String>) -> Vec<String> {
-    let mut out = Vec::with_capacity(content.len() + frame_rows(plan));
-    if plan.top {
-        out.push(String::new());
-    }
-    if plan.divider {
-        out.push(String::new());
-    }
-    out.extend(content);
-    if plan.meta {
-        out.push(meta.unwrap_or_default());
-    }
-    if plan.bottom {
-        out.push(String::new());
-    }
-    out
-}
-
-/// Wraps a call's content rows in its frame: the top border, then the rows carrying the side
-/// borders.
-fn frame_head(card: Card, content: Vec<BodyLine>) -> Vec<BodyLine> {
-    if card == Card::None {
-        return content;
-    }
-    let plan = frame_plan(card, false, false);
-    let mut out = Vec::with_capacity(content.len() + frame_rows(plan));
-    if plan.top {
-        out.push(BodyLine::frame_row(Frame::Top));
-    }
-    out.extend(content.into_iter().map(|mut line| {
-        if line.frame == Frame::None {
-            line.frame = Frame::Body;
+/// One synthesized row laid out like a code line (tabs expanded, truncated to `width` with
+/// `…`) while each cell keeps its own role and source offset. `tail` is the row's own ending
+/// (the head's meta and status glyph): it is appended whole, so a long title truncates but the
+/// status never disappears. The head's own builder; the diff rows have theirs ([`diff_line`]).
+fn styled_row(
+    cells: Vec<(char, MdStyle, Option<usize>)>,
+    tail: Vec<(char, MdStyle, Option<usize>)>,
+    end: usize,
+    width: usize,
+    frame: Frame,
+) -> BodyLine {
+    let tail_width: usize = tail
+        .iter()
+        .map(|(ch, _, _)| UnicodeWidthChar::width(*ch).unwrap_or(0))
+        .sum();
+    let body_width = width.saturating_sub(tail_width).max(1);
+    let plain: String = cells.iter().map(|(ch, _, _)| *ch).collect();
+    let (rendered, kept, _cut) = code_line_layout(&plain, body_width);
+    let starts: Vec<usize> = plain.char_indices().map(|(byte, _)| byte).collect();
+    let mut pieces: Vec<MdPiece> = Vec::with_capacity(rendered.chars().count() + tail.len());
+    let mut cursor = 0usize;
+    for (index, ch) in rendered.chars().enumerate() {
+        let Some(&byte) = kept.get(index) else {
+            // The ellipsis: it takes the last kept cell's role and offset, so a cut tail still
+            // copies the characters it stands for (R9).
+            if let Some(last) = pieces.last() {
+                pieces.push(MdPiece {
+                    text: ch.to_string(),
+                    style: last.style,
+                    offset: last.offset,
+                });
+            }
+            continue;
+        };
+        while cursor + 1 < cells.len() && starts[cursor] != byte {
+            cursor += 1;
         }
-        line
+        if let Some((_, style, offset)) = cells.get(cursor) {
+            pieces.push(MdPiece {
+                text: ch.to_string(),
+                style: *style,
+                offset: *offset,
+            });
+        }
+    }
+    pieces.extend(tail.into_iter().map(|(ch, style, offset)| MdPiece {
+        text: ch.to_string(),
+        style,
+        offset,
     }));
-    if plan.bottom {
-        out.push(BodyLine::frame_row(Frame::Bottom));
-    }
-    out
+    let mut row = BodyLine::md(md_chars(&pieces), end, pieces);
+    row.frame = frame;
+    row
 }
 
-/// Wraps a result's content rows in its frame: the top border (a torn result has no call to
-/// draw one), the divider, the output, the meta row and the bottom border.
-fn frame_tail(
-    card: Card,
-    content: Vec<BodyLine>,
-    meta: Option<String>,
-    has_output: bool,
-) -> Vec<BodyLine> {
-    if card == Card::None {
-        return content;
-    }
-    let plan = frame_plan(card, has_output, meta.is_some());
-    let mut out = Vec::with_capacity(content.len() + frame_rows(plan));
-    if plan.top {
-        out.push(BodyLine::frame_row(Frame::Top));
-    }
-    if plan.divider {
-        out.push(BodyLine::frame_row(Frame::Divider));
-    }
-    out.extend(content.into_iter().map(|mut line| {
-        line.frame = Frame::Body;
-        line
-    }));
-    if plan.meta {
-        out.push(BodyLine::meta_row(meta.unwrap_or_default()));
-    }
-    if plan.bottom {
-        out.push(BodyLine::frame_row(Frame::Bottom));
-    }
-    out
-}
-
-/// Whether a card has any meta at all, without building the row: the count-only path needs
-/// only the presence, and it runs for every entry on a resize.
-fn has_meta(entry: &Entry) -> bool {
-    let Some(card) = entry.tool.as_deref() else {
-        return false;
-    };
-    let structured = card.structured.as_ref();
-    let flag = |key: &str| {
-        structured
-            .and_then(|value| value.get(key))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    };
-    flag("cancelled")
-        || entry.error_code.as_deref() == Some("interrupted")
-        || (card.name == "shell"
-            && (crate::tools::exit_code_of(card).is_some() || flag("timed_out")))
-        || card.duration_ms.is_some()
-        || structured
-            .and_then(|value| value.get("timeout_secs"))
-            .is_some()
-}
-
-/// The card's meta row (ADR 0028 rule 6): weak, `[` `]`-wrapped, `|`-separated,
-/// only the data that exists. Shell writes the exit code, the duration and the timeout; every
-/// other tool the duration; a cancelled call `cancelled`.
+/// The head's meta (ADR 0028): weak, ` · `-separated, only the data that
+/// exists. The fields are [`tools::meta_parts`]; `cancelled` is here because the entry's own
+/// error code is the paired result's.
 fn card_meta(entry: &Entry) -> Option<String> {
     let card = entry.tool.as_deref()?;
-    let structured = card.structured.as_ref();
-    let flag = |key: &str| {
-        structured
-            .and_then(|value| value.get(key))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    };
-    let mut parts: Vec<String> = Vec::new();
-    if flag("cancelled") || entry.error_code.as_deref() == Some("interrupted") {
-        parts.push("cancelled".to_string());
-    }
-    if card.name == "shell" {
-        match crate::tools::exit_code_of(card) {
-            Some(code) => parts.push(format!("exit {code}")),
-            None if flag("timed_out") => parts.push("timeout".to_string()),
-            None => {}
-        }
-    }
-    if let Some(ms) = card.duration_ms {
-        parts.push(if ms < 1000 {
-            format!("{:.2}s", ms as f64 / 1000.0)
-        } else {
-            format!("{:.1}s", ms as f64 / 1000.0)
-        });
-    }
-    if let Some(secs) = structured
-        .and_then(|value| value.get("timeout_secs"))
-        .and_then(serde_json::Value::as_u64)
-    {
-        parts.push(format!("timeout {secs}s"));
-    }
-    // The brackets are the renderer's (ADR 0028 rule 3: `⟦ ⟧`, ascii `[ ]`), so
-    // the stored text carries only the fields.
-    (!parts.is_empty()).then(|| parts.join(" | "))
+    let cancelled = entry.error_code.as_deref() == Some("interrupted");
+    let parts = tools::meta_parts(card, cancelled);
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// Turns a tool body plan into laid-out lines: a text line wraps like prose at the body width
-/// (tabs expanded, its characters keeping their source offsets), a diff row is laid out as one
-/// line (never wrapped: truncated with `…`, ADR 0028), a hint is one
-/// synthesized line.
+/// Turns a tool body plan into laid-out rows (ADR 0028's `│ ` body): a
+/// text line wraps like prose at the body width (tabs expanded, its characters keeping their
+/// source offsets), a diff row is laid out as one line (never wrapped: truncated with `…`,
+/// ADR 0028).
 fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> Vec<BodyLine> {
     let highlights = diff_highlights(plan, text);
     let mut out = Vec::new();
@@ -1909,26 +1801,15 @@ fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> V
                 let slice = text.get(source.clone()).unwrap_or("");
                 for mut laid in prose_lines(slice, body_width) {
                     laid.role = *role;
+                    laid.frame = Frame::Body;
                     out.push(laid);
                 }
             }
             tools::BodyLine::Diff(row) => {
-                out.push(diff_line(row, highlights[index].as_ref(), text, body_width));
+                let mut row = diff_line(row, highlights[index].as_ref(), text, body_width);
+                row.frame = Frame::Body;
+                out.push(row);
             }
-            tools::BodyLine::Hint(hint) => out.push(BodyLine {
-                chars: Vec::new(),
-                end: 0,
-                text: hint.clone(),
-                code: false,
-                pad: Pad::None,
-                frame: Frame::None,
-                role: tools::LineRole::Normal,
-                hint: true,
-                diagram: None,
-                reason: false,
-                md: None,
-                syntax: None,
-            }),
         }
     }
     out
@@ -2307,14 +2188,10 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
             }
             lines
         }
-        (EntryKind::ToolCall, _) => frame_text(
-            frame_plan(entry.card, false, false),
-            call_lines(&text, width)
-                .into_iter()
-                .map(|line| line.text)
-                .collect(),
-            None,
-        ),
+        (EntryKind::ToolCall, _) => head_rows(entry, &text, body_width, modes)
+            .into_iter()
+            .map(|line| line.text)
+            .collect(),
         (EntryKind::Compaction, _) => {
             if expanded(entry, modes.tools.fold == tools::ToolFold::Expanded) {
                 crate::render::wrap(&text, body_width)
@@ -2337,7 +2214,7 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
                 entry.fold_override,
             );
             let mut content = Vec::new();
-            for line in &plan {
+            for line in &plan.lines {
                 match line {
                     tools::BodyLine::Text { source, .. } => {
                         // The same lines the layout draws (tabs expanded included).
@@ -2350,16 +2227,9 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
                     tools::BodyLine::Diff(row) => {
                         content.push(diff_line(row, None, &text, body_width).text);
                     }
-                    tools::BodyLine::Hint(hint) => content.push(hint.clone()),
                 }
             }
-            let meta = card_meta(entry);
-            let has_output = plan_has_output(&plan, &text);
-            frame_text(
-                frame_plan(entry.card, has_output, meta.is_some()),
-                content,
-                meta,
-            )
+            content
         }
         _ => crate::render::wrap(&text, body_width),
     }

@@ -4686,17 +4686,12 @@ impl App {
                         call.name.clone(),
                         call.arguments.clone(),
                     );
-                    // The call-time head has no result text yet (a `git_diff` head is terse
-                    // until its diff arrives and the pairing refreshes it). Its status glyph
-                    // is the running one (rule 4); the pairing swaps it for ✔/✘. The renderer
-                    // substitutes the live spinner frame for it while the call runs (ADR 0027
-                    // revision 10).
-                    let [running, _, _] = self.footer.glyphs().tool_status();
-                    let glyph = running.to_string();
-                    let mut entry = Entry::new(
-                        EntryKind::ToolCall,
-                        crate::tools::call_text(&card, &glyph, ""),
-                    );
+                    // The call-time head is the tool name and the renderer's title (ADR 0028
+                    // revision 5 decision 1); the meta and the status glyph are the block
+                    // layer's, drawn from the card and the entry's state. The pairing refreshes
+                    // the title once the result is in (a `git_diff` title is terse until then).
+                    let mut entry =
+                        Entry::new(EntryKind::ToolCall, crate::tools::call_text(&card, ""));
                     entry.tool = Some(Box::new(card));
                     // A call with no result yet is a whole card of its own (ADR 0028 revision
                     // 2); the pairing below turns it into the head of the merged card.
@@ -4713,7 +4708,6 @@ impl App {
                 // matching card, and the index it found is reused for the insertion below.
                 // (A second front `position` for the index walked the whole transcript per
                 // result — the same O(n^2) family as the `retain` resume-perf A fixed.)
-                let [_, ok_glyph, failed_glyph] = self.footer.glyphs().tool_status();
                 let mut paired: Option<(String, serde_json::Value)> = None;
                 let mut call_index: Option<usize> = None;
                 let len = self.session.entries.len();
@@ -4729,21 +4723,20 @@ impl App {
                         entry.result = Some(result.is_error);
                         if let Some(card) = entry.tool.as_mut() {
                             card.structured = result.structured.clone();
-                            // The header can only be final now (the `shell` exit code comes
-                            // from the result), so the entry's text - what renders and copies -
-                            // is regenerated from the same function the layout uses.
-                            let glyph = if result.is_error {
-                                failed_glyph
-                            } else {
-                                ok_glyph
-                            };
+                            // The head's title can only be final now (a `git_diff`'s counts
+                            // come from the result text), so the entry's text - what renders
+                            // and copies - is regenerated from the same function the layout
+                            // uses. The result's own row count is part of the head's collapsed
+                            // meta (`· N lines`), and only this entry can see the result text.
+                            let display = crate::tools::result_display_text(card, &result.text());
+                            card.result_lines = Some(crate::tools::body_line_count(&display));
                             // ADR 0024: the call entry draws the whole ask block
                             // (its result entry is blank), so it keeps the result's own text
                             // for the declined/cancelled status line inside the box.
                             entry.text = if card.name == "ask_user" {
                                 result.text()
                             } else {
-                                crate::tools::call_text(card, glyph, &result.text())
+                                crate::tools::call_text(card, &result.text())
                             };
                             paired = Some((card.name.clone(), card.arguments.clone()));
                         }
@@ -4905,15 +4898,8 @@ impl App {
     /// when both ends are RGB (ADR 0027); otherwise it is revision 10's two-colour
     /// switch, and the rotating frames stay on the accent.
     pub fn spinner_style(&self, frame: crate::spinner::Frame) -> ratatui::style::Style {
-        let accent = self.theme.notice_label;
-        let dim = self.theme.truncation;
-        match crate::spinner::breath_color(accent.fg, dim.fg, frame.step) {
-            // The breath interpolates the colour only: the accent's other attributes (its bold)
-            // stay at every step, so no weight pops in the middle of the breath.
-            Some(color) => accent.fg(color),
-            None if frame.step == crate::spinner::PULSE_DIM_STEP => dim,
-            None => accent,
-        }
+        // One definition, shared with the transcript's running tool head (`crate::render`).
+        crate::render::spinner_style(&self.theme, frame)
     }
 
     /// The input rule's status text (ADR 0027): the most specific running state, or

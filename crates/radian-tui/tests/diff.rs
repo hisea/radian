@@ -402,9 +402,9 @@ fn a_long_diff_row_truncates_instead_of_wrapping() {
         .collect();
     assert_eq!(rows.len(), 1, "the row is one line, not a wrapped pair");
     assert!(rows[0].text.ends_with('…'), "{:?}", rows[0].text);
-    // The result's marker column is three cells (ADR 0028 rule 4), so at width 40
-    // the body is 37 cells: the row keeps 36 of them and spends the last on the `…`.
-    assert_eq!(rows[0].text.chars().count(), 37, "{:?}", rows[0].text);
+    // The tool block's marker column is two cells (ADR 0028), so at
+    // width 40 the body is 38 cells: the row keeps 37 of them and spends the last on the `…`.
+    assert_eq!(rows[0].text.chars().count(), 38, "{:?}", rows[0].text);
     // The last cell maps to a source byte, so the copy of the row still reaches its text.
     assert!(
         rows[0].chars.last().copied().flatten().is_some(),
