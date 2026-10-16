@@ -302,6 +302,93 @@ async fn runtime_events_never_enter_the_transcript_fold() {
     assert_eq!(recover(&records).unwrap(), [Message::user("real message")]);
 }
 
+/// ADR 0030 O5: the two lead-journal task events round-trip typed, are `critical = false`,
+/// skip their optional fields when absent, and never enter the transcript fold.
+#[tokio::test]
+async fn the_task_events_round_trip_and_are_not_critical() {
+    let dir = TempDir::new("task-events");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, "sid-task", created()).unwrap();
+
+    let spawned = RuntimeEvent::TaskSpawned {
+        agent_session_id: "task-1".into(),
+        worktree: Some("/work/example/.radian-worktrees/task-1".into()),
+        label: Some("slice 1".into()),
+    };
+    assert_eq!(spawned.name(), "TaskSpawned");
+    assert!(!spawned.critical(), "a task event is audit (ADR 0030 O5)");
+    journal.append_runtime_event(spawned).await.unwrap();
+    // A `shared`-isolation task has no worktree and may have no label; both are skipped.
+    journal
+        .append_runtime_event(RuntimeEvent::TaskSpawned {
+            agent_session_id: "task-2".into(),
+            worktree: None,
+            label: None,
+        })
+        .await
+        .unwrap();
+    let finished = RuntimeEvent::TaskFinished {
+        agent_session_id: "task-1".into(),
+        outcome: TurnOutcome::Completed,
+    };
+    assert_eq!(finished.name(), "TaskFinished");
+    assert!(!finished.critical(), "a task event is audit (ADR 0030 O5)");
+    journal.append_runtime_event(finished).await.unwrap();
+    drop(journal);
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let bare = raw
+        .lines()
+        .find(|line| line.contains("\"agent_session_id\":\"task-2\""))
+        .expect("the bare TaskSpawned line");
+    assert!(!bare.contains("worktree"), "{bare}");
+    assert!(!bare.contains("label"), "{bare}");
+
+    let session = Session::open(&path).unwrap();
+    assert!(session.skipped().is_empty());
+    let spawned: Vec<(String, Option<String>, Option<String>)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::TaskSpawned {
+                agent_session_id,
+                worktree,
+                label,
+            } => Some((agent_session_id.clone(), worktree.clone(), label.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        spawned,
+        vec![
+            (
+                "task-1".to_string(),
+                Some("/work/example/.radian-worktrees/task-1".to_string()),
+                Some("slice 1".to_string()),
+            ),
+            ("task-2".to_string(), None, None),
+        ]
+    );
+    let finished: Vec<(String, TurnOutcome)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::TaskFinished {
+                agent_session_id,
+                outcome,
+            } => Some((agent_session_id.clone(), *outcome)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        finished,
+        vec![("task-1".to_string(), TurnOutcome::Completed)]
+    );
+    // Audit only: never a transcript record, so replay/recover see nothing.
+    assert!(session.journal_records().is_empty());
+    assert!(session.history().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn the_new_method_respects_the_single_writer_lock() {
     let dir = TempDir::new("runtime-lock");

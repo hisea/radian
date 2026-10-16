@@ -6949,7 +6949,7 @@ async fn fork_creates_a_child_and_refuses_a_locked_parent() {
     let child = std::fs::read_to_string(sessions.join("child.jsonl")).unwrap();
     assert!(
         child.contains(&format!(
-            "\"parent\":{{\"session_id\":\"parent\",\"seq\":{boundary}}}"
+            "\"parent\":{{\"session_id\":\"parent\",\"seq\":{boundary},\"relation\":\"fork\"}}"
         )),
         "{child}"
     );

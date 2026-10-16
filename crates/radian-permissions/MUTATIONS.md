@@ -59,3 +59,15 @@ Base `cf37140` · 一次性 worktree `/tmp/radian-diag-mut`。
 | DG-M3 | 把 `mermaid_check` 从 `always_allowed()` 去掉（落到默认 ask） | `profile::tests::mermaid_check_is_allowed_in_every_tier` | ✅ |
 
 1/1 抓住。
+
+## ADR 0030 slice 1：`PermissionResolved.policy` 穿过 `runtime_event`
+
+Base: `a4a00bf` · 改前把 `src/hooks.rs` 复制到 `/tmp/orch-s1-mut-backup/`，改后 `cp` 还原
+（本任务禁 `git checkout --`）；`git status --short` 结束后为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| PM-O1 | `runtime_event` 传 `None` 而不是 `event.policy.clone()` | `hooks::runtime_event_threads_the_optional_policy_name` | ✅ failed |
+
+1/1 抓住。审计层的 `record` 现在恒为 `policy: None`（还没有策略命令生产者，ADR 0030 切片 ②），
+所以这条变异只改 `runtime_event` 的映射，测的就是「字段穿过这一层」这一件事。

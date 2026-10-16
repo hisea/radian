@@ -1283,11 +1283,16 @@ under `third_party/syntaxes` (`TypeScript`, `TypeScriptReact`, `TOML`; see its
 `RADIAN-CHANGES.md` and the root `NOTICE`) — syntect's set does not ship those. A hand-reduced
 `.packdump` of the default set was attempted first; syntect resolves cross-syntax context
 references at build time, so a hand-picked subset panics unless the full transitive closure is
-computed. `build.rs` instead loads the default set, parses the three vendored YAML grammars and
-dumps the **combined** set to `$OUT_DIR` (parsing the ~200 KB TypeScript YAML with `yaml-rust`
-costs ~2 s each, which would be a visible freeze on the first code block at runtime); the binary
-embeds that dump and only deserializes it. The **language table above is what limits
-highlighting**; a grammar the set ships but the table does not name renders as plain text.
+computed. The **merged** set is generated once and committed as
+`crates/radian-tui/assets/syntaxes.packdump` (431 KB): parsing the ~200 KB TypeScript YAML
+costs ~12 s, and most of that is `syntect` validating every pattern by compiling its regex and
+then throwing it away, so it must not run on every cold build. `build.rs` only checks that dump
+against the vendored grammars (a digest in `assets/syntaxes.packdump.digest`) and copies it to
+`$OUT_DIR`; the binary embeds that dump and only deserializes it. A grammar edit fails the build
+until `RADIAN_REGENERATE_SYNTAXES=1 cargo build -p radian-tui` regenerates both files, which are
+then committed. `docs/perf-baseline.md` has the before/after numbers. The **language table
+above is what limits highlighting**; a grammar the set ships but the table does not name
+renders as plain text.
 
 ## Markdown elements (ADR 0035)
 

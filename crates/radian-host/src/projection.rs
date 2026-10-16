@@ -182,6 +182,18 @@ impl SessionProjection {
         self.revision.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Discards **every** fact, as if the projection had just been constructed.
+    ///
+    /// The observer calls this when its journal file is replaced or truncated (ADR 0023 U6):
+    /// the replaced file's facts must not survive into the new one. The revision stays
+    /// monotonic (a reader that keys on it never sees it go back), and the dirty flag is left
+    /// alone — a polled observer reads on its own schedule, not on a wake-up.
+    pub fn reset(&self) {
+        let mut facts = self.facts.lock().expect("the projection lock");
+        *facts = Facts::default();
+        self.revision.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The turn state.
     pub fn set_turn(&self, turn: TurnState) -> bool {
         self.write(|facts| facts.turn = turn)
@@ -650,6 +662,42 @@ mod tests {
         let snapshot = projection.snapshot();
         assert_eq!(snapshot, StreamSnapshot::default());
         // Clearing does not wake the UI: the committed message is the event that matters.
+        assert!(!projection.take_dirty());
+    }
+
+    /// `reset` is the observer's "the file was replaced" (ADR 0023 U6): every fact goes back to
+    /// the default, the revision stays monotonic, and nothing is woken.
+    #[test]
+    fn reset_discards_every_fact_but_keeps_the_revision_moving() {
+        let projection = SessionProjection::new();
+        projection.set_turn(TurnState::Running);
+        projection.set_last_tool(LastToolCall {
+            index: 3,
+            call_id: "c1".into(),
+            name: "write".into(),
+        });
+        projection.set_tier(Some("workspace".into()));
+        projection.add_usage(&ModelUsage {
+            input: Some(10),
+            output: Some(2),
+            ..ModelUsage::default()
+        });
+        projection.push_delta(StreamKind::Assistant, "hi");
+        projection.take_dirty();
+        let before = projection.revision();
+
+        projection.reset();
+
+        let read = projection.read();
+        assert_eq!(read.turn(), TurnState::Idle);
+        assert!(read.last_tool().is_none());
+        assert!(read.tier().is_none());
+        assert_eq!(read.usage_input(), None);
+        assert_eq!(read.usage_output(), None);
+        assert_eq!(read.stream(), StreamSnapshot::default());
+        assert!(read.revision() > before, "the revision stays monotonic");
+        drop(read);
+        // A polled reader looks on its own schedule; reset does not enqueue a wake-up.
         assert!(!projection.take_dirty());
     }
 }

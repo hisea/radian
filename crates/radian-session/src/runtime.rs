@@ -180,6 +180,10 @@ pub enum RuntimeEvent {
         decision: PermissionDecision,
         approver: PermissionApprover,
         reason: Option<String>,
+        /// The named external policy command that decided, when `approver = "policy"` and the
+        /// decision came from `orchestration.toml`'s policy command (ADR 0030 O2 revision 2,
+        /// ADR 0006 §5.9). Built-in rules and `auto` leave it `None`.
+        policy: Option<String>,
     },
     /// The session's approval policy was switched in place (ADR 0026 D9). Audit only:
     /// `critical = false`. The durable state a resume restores is the `ConfigChanged`
@@ -221,6 +225,24 @@ pub enum RuntimeEvent {
         branch: String,
         files: usize,
     },
+    /// A lead spawned a task agent (ADR 0030 O5). Audit only: `critical = false`. Written to
+    /// the **lead's** journal, so the lead's file alone answers "which task agents were
+    /// started, which never finished". `agent_session_id` is the task agent's session; a
+    /// `TaskSpawned` with no matching `TaskFinished` after a crash is `unknown_after_crash`
+    /// and is never restarted (ADR 0002 E7's stance).
+    TaskSpawned {
+        agent_session_id: String,
+        /// The task agent's worktree, when it has one (`isolation = "shared"` has none).
+        worktree: Option<String>,
+        /// The human-facing label, when one was given.
+        label: Option<String>,
+    },
+    /// A task agent finished (ADR 0030 O5). Audit only: `critical = false`. `outcome` is the
+    /// task agent's own final turn outcome.
+    TaskFinished {
+        agent_session_id: String,
+        outcome: TurnOutcome,
+    },
     /// A background `shell` job started (ADR 0037 decision 5). Audit only: `critical =
     /// false`. The start/settle pair is how a resume learns a job existed; a start with no
     /// settle after a crash is reported once as unknown and never re-run.
@@ -260,6 +282,8 @@ impl RuntimeEvent {
             RuntimeEvent::ProjectTrustChanged { .. } => "ProjectTrustChanged",
             RuntimeEvent::UserBash { .. } => "UserBash",
             RuntimeEvent::GitCommitted { .. } => "GitCommitted",
+            RuntimeEvent::TaskSpawned { .. } => "TaskSpawned",
+            RuntimeEvent::TaskFinished { .. } => "TaskFinished",
             RuntimeEvent::BackgroundJobStarted { .. } => "BackgroundJobStarted",
             RuntimeEvent::BackgroundJobSettled { .. } => "BackgroundJobSettled",
         }
@@ -284,18 +308,22 @@ impl RuntimeEvent {
             | RuntimeEvent::ProjectTrustChanged { .. }
             | RuntimeEvent::UserBash { .. }
             | RuntimeEvent::GitCommitted { .. }
+            | RuntimeEvent::TaskSpawned { .. }
+            | RuntimeEvent::TaskFinished { .. }
             | RuntimeEvent::BackgroundJobStarted { .. }
             | RuntimeEvent::BackgroundJobSettled { .. } => false,
         }
     }
 
-    /// Builds a `PermissionResolved` event (ADR 0006 §5.9).
+    /// Builds a `PermissionResolved` event (ADR 0006 §5.9). `policy` names the external policy
+    /// command when one decided (ADR 0030 O2 revision 2), `None` for every other approver.
     pub fn permission_resolved(
         request_id: String,
         call_id: String,
         decision: PermissionDecision,
         approver: PermissionApprover,
         reason: Option<String>,
+        policy: Option<String>,
     ) -> Self {
         RuntimeEvent::PermissionResolved {
             request_id,
@@ -303,6 +331,7 @@ impl RuntimeEvent {
             decision,
             approver,
             reason,
+            policy,
         }
     }
 
@@ -383,6 +412,8 @@ pub(crate) struct PermissionResolvedData<'a> {
     pub approver: PermissionApprover,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -423,6 +454,21 @@ pub(crate) struct GitCommittedData<'a> {
 }
 
 #[derive(Serialize)]
+pub(crate) struct TaskSpawnedData<'a> {
+    pub agent_session_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct TaskFinishedData<'a> {
+    pub agent_session_id: &'a str,
+    pub outcome: TurnOutcome,
+}
+
+#[derive(Serialize)]
 pub(crate) struct BackgroundJobStartedData<'a> {
     pub job_id: &'a str,
     pub command: &'a str,
@@ -454,6 +500,8 @@ pub(crate) enum RuntimeData<'a> {
     ProjectTrustChanged(ProjectTrustChangedData),
     UserBash(UserBashData<'a>),
     GitCommitted(GitCommittedData<'a>),
+    TaskSpawned(TaskSpawnedData<'a>),
+    TaskFinished(TaskFinishedData<'a>),
     BackgroundJobStarted(BackgroundJobStartedData<'a>),
     BackgroundJobSettled(BackgroundJobSettledData<'a>),
 }
@@ -476,6 +524,8 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::ProjectTrustChanged(d) => d.serialize(serializer),
             RuntimeData::UserBash(d) => d.serialize(serializer),
             RuntimeData::GitCommitted(d) => d.serialize(serializer),
+            RuntimeData::TaskSpawned(d) => d.serialize(serializer),
+            RuntimeData::TaskFinished(d) => d.serialize(serializer),
             RuntimeData::BackgroundJobStarted(d) => d.serialize(serializer),
             RuntimeData::BackgroundJobSettled(d) => d.serialize(serializer),
         }
@@ -555,12 +605,14 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             decision,
             approver,
             reason,
+            policy,
         } => RuntimeData::PermissionResolved(PermissionResolvedData {
             request_id,
             call_id,
             decision: *decision,
             approver: *approver,
             reason: reason.as_deref(),
+            policy: policy.as_deref(),
         }),
         RuntimeEvent::ApprovalPolicyChanged { policy } => {
             RuntimeData::ApprovalPolicyChanged(ApprovalPolicyChangedData { policy: *policy })
@@ -600,6 +652,22 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             commit,
             branch,
             files: *files,
+        }),
+        RuntimeEvent::TaskSpawned {
+            agent_session_id,
+            worktree,
+            label,
+        } => RuntimeData::TaskSpawned(TaskSpawnedData {
+            agent_session_id,
+            worktree: worktree.as_deref(),
+            label: label.as_deref(),
+        }),
+        RuntimeEvent::TaskFinished {
+            agent_session_id,
+            outcome,
+        } => RuntimeData::TaskFinished(TaskFinishedData {
+            agent_session_id,
+            outcome: *outcome,
         }),
         RuntimeEvent::BackgroundJobStarted {
             job_id,

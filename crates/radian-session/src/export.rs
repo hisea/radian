@@ -395,12 +395,14 @@ fn event_data_value(
             decision,
             approver,
             reason,
+            policy,
         } => json!({
             "request_id": request_id,
             "call_id": call_id,
             "decision": decision,
             "approver": approver,
             "reason": reason,
+            "policy": policy,
         }),
         EventData::MemoryInjected { records } => json!({"records": records}),
         EventData::ProjectTrustChanged { path, decision } => {
@@ -425,6 +427,22 @@ fn event_data_value(
             "commit": commit,
             "branch": branch,
             "files": files,
+        }),
+        EventData::TaskSpawned {
+            agent_session_id,
+            worktree,
+            label,
+        } => json!({
+            "agent_session_id": agent_session_id,
+            "worktree": worktree,
+            "label": label,
+        }),
+        EventData::TaskFinished {
+            agent_session_id,
+            outcome,
+        } => json!({
+            "agent_session_id": agent_session_id,
+            "outcome": outcome,
         }),
         EventData::BackgroundJobStarted {
             job_id,
