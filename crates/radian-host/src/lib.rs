@@ -31,6 +31,7 @@ pub mod login;
 mod mcp;
 pub mod memory;
 pub mod mermaid;
+mod mermaid_layout;
 mod model;
 pub mod observer;
 pub mod opencode_go;

@@ -1,6 +1,10 @@
 //! `mermaid_check`: the read-only tool that renders a Mermaid block with the same bounded
 //! renderer the TUI uses (ADR 0028 R8's generation side, ADR 0025).
 //!
+//! [`render`] and [`render_spans`] are that renderer's one entry point (ADR 0028):
+//! Radian's own layered flowchart layout first, the vendored `codex-mermaid` second. The TUI and
+//! this tool both go through it, so the transcript and the check cannot disagree.
+//!
 //! It exists because a model cannot see the terminal: before this, a model drawing Radian's
 //! architecture spent most of a turn reading the vendored renderer, compiling its example and
 //! measuring widths by hand. The check returns what the transcript would show — the rendered
@@ -100,10 +104,39 @@ impl ToolSession for MermaidCheckSession {
     }
 }
 
+/// Renders a diagram the way the transcript and the check both see it (ADR 0028):
+/// Radian's own layered flowchart layout first, then the vendored renderer.
+///
+/// This is the **one** entry point. A `flowchart`/`graph` is drawn by
+/// [`mermaid_layout`](super::mermaid_layout) when that layout can draw it; everything
+/// `mermaid_layout` refuses — sequences, states, classes, ER, and every flowchart outside its
+/// subset or wider than `width` — goes to the vendored renderer, byte for byte what the
+/// transcript showed before revision 6. An error therefore means the vendored renderer's reason;
+/// the caller keeps the source (R8).
+pub fn render(source: &str, max_width: usize) -> Result<String, codex_mermaid::RenderError> {
+    Ok(render_spans(source, max_width)?
+        .into_iter()
+        .map(|line| line.into_iter().map(|span| span.text).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// [`render`] as lines of semantic spans, for the caller's own theme (the same three roles as
+/// the vendored renderer).
+pub fn render_spans(
+    source: &str,
+    max_width: usize,
+) -> Result<Vec<Vec<codex_mermaid::Span>>, codex_mermaid::RenderError> {
+    if let Some(lines) = crate::mermaid_layout::render(source, max_width) {
+        return Ok(lines);
+    }
+    codex_mermaid::render_spans(source, max_width)
+}
+
 /// Renders `source` and describes the result, or returns the renderer's reason as a tool-result
 /// error. Pure, so the tests call it directly.
 pub fn check(source: &str, width: usize) -> String {
-    match codex_mermaid::render(source, width) {
+    match render(source, width) {
         Ok(text) => {
             let lines: Vec<&str> = text.lines().collect();
             let height = lines.len();

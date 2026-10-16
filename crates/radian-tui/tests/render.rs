@@ -1376,7 +1376,8 @@ fn thinking_has_one_blank_line_on_both_sides() {
         first + 1,
         "the body's own lines are adjacent:\n{text}"
     );
-    // The tool block starts at its head row (`• `) right after the one blank line.
+    // The tool block starts at its head row (`• `, a running call draws no body) right after
+    // the one blank line.
     let head = row_of(&terminal, "• shell").expect("the block's head row");
     assert_eq!(
         head,
@@ -1433,7 +1434,7 @@ fn a_text_less_assistant_reply_leaves_one_blank_row() {
     let terminal = render(&mut app, 40, 12);
     let text = screen(&terminal);
     let thought = row_of(&terminal, "a thought").expect("the thinking body");
-    let head = row_of(&terminal, "• shell").expect("the tool head");
+    let head = row_of(&terminal, "◻ shell").expect("the tool head");
     assert_eq!(
         head,
         thought + 2,
@@ -1463,7 +1464,7 @@ fn a_text_less_assistant_reply_leaves_one_blank_row() {
     let terminal = render(&mut app, 40, 12);
     let text = screen(&terminal);
     let user = row_of(&terminal, "❯ q").expect("the user row");
-    let head = row_of(&terminal, "• shell").expect("the tool head");
+    let head = row_of(&terminal, "◻ shell").expect("the tool head");
     assert_eq!(
         head,
         user + 2,
@@ -1587,7 +1588,7 @@ fn the_tool_head_ends_with_the_tiers_status_glyph() {
     });
     let text = screen(&render(&mut app, 60, 12));
     assert!(
-        text.contains("• shell $ true · exit 0 ✓"),
+        text.contains("◻ shell $ true · exit 0 ✓"),
         "a completed block ends its head with the check mark:\n{text}"
     );
     assert!(!text.contains("+ shell"), "never the old `+`:\n{text}");
@@ -1872,7 +1873,7 @@ fn a_tool_card_head_is_the_same_on_the_live_and_resume_paths() {
     // The block's head is one line (ADR 0028): `• shell $ make test`
     // with the meta and the status at its end, and the output in `│ ` rows.
     assert!(
-        live_text.contains("• shell $ make test · exit 0 ✓"),
+        live_text.contains("◻ shell $ make test · exit 0 ✓"),
         "{live_text}"
     );
     assert!(live_text.contains("│ ok"), "the output body: {live_text}");
@@ -2000,7 +2001,7 @@ fn a_git_diff_body_colors_its_line_kinds() {
     );
     // The head's counts come from the same text.
     let text = screen(&terminal);
-    assert!(text.contains("• git_diff 1 files +1 −1 ✓"), "{text}");
+    assert!(text.contains("◻ git_diff 1 files +1 −1 ✓"), "{text}");
 }
 
 /// A `patch` card shows the replacement: the head's +N/-M and the `-old`/`+new` body, whose
@@ -2037,7 +2038,7 @@ fn a_patch_card_shows_the_replacement_with_diff_roles() {
     app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
     let terminal = render(&mut app, 70, 20);
     let text = screen(&terminal);
-    assert!(text.contains("• patch src/main.rs · +1 −2 ✓"), "{text}");
+    assert!(text.contains("◻ patch src/main.rs · +1 −2 ✓"), "{text}");
     let theme = app.theme;
     assert_eq!(
         style_of(&terminal, "-let a = 1;").expect("removed").fg,
@@ -2085,7 +2086,7 @@ fn a_write_card_numbers_every_content_line() {
     // Wide characters make the screen model insert a blank cell after each; compare without
     // spaces so the assertion is about the text, not the terminal's cell model.
     let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(squeezed.contains("•write笔记.md·+2✓"), "{text}");
+    assert!(squeezed.contains("◻write笔记.md·+2✓"), "{text}");
     // The new file has no old content (`previous_lines` absent), so the head stays `+2`, and
     // each content line is a numbered `Added` row. The `+` is the diff-added sign.
     assert!(squeezed.contains("1+第一行"), "{text}");
@@ -2198,18 +2199,20 @@ fn the_block_layout_snapshot() {
         // no half-cell padding. The container's one blank line separates it from the block below.
         "❯ explain the failure".to_string(), // the user text
         "".to_string(),                      // the container gap after the user row
-        "▶ thinking · 3 lines".to_string(), // the folded channel: the unicode fold glyph
+        "◼ thinking · 3 lines".to_string(), // the folded channel: the unicode fold glyph (ADR 0035's 2026-10-16 note)
         "".to_string(), // ADR 0035: one blank line between thinking and the block below
         "  Looking into it.".to_string(), // the reply
         "".to_string(), // the gap
         // The failed shell block (ADR 0028): one head line, `│ ` body rows.
-        "• shell $ make test · exit 2 ×".to_string(),
+        "◻ shell $ make test · exit 2 ×".to_string(),
         "│ $ make test".to_string(), // the tool's own text leads with the command
         "│ exit code: 2".to_string(),
         "│ --- stdout ---".to_string(),
         "│ boom".to_string(),
         "".to_string(), // the gap
-        // The `list` block: one line, its table only under Ctrl-O (it is a small tool).
+        // The `list` block: a compact tool, so its head is the `•` one-liner whatever its result
+        // hides (ADR 0035's 2026-10-16 note, option A; its two-entry table is not laid out under
+        // `errors`).
         format!("• list src (2 entries) {}", status[1]),
         "".to_string(), // the gap
         "* profile: workspace · sandbox macos-seatbelt".to_string(),
@@ -2282,7 +2285,7 @@ fn a_list_card_shows_an_aligned_table() {
     });
     app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
     let text = screen(&render(&mut app, 70, 14));
-    assert!(text.contains("• list src (3 entries) ✓"), "{text}");
+    assert!(text.contains("◻ list src (3 entries) ✓"), "{text}");
     assert!(text.contains("d ") && text.contains("src"), "{text}");
     assert!(text.contains("4.0K"), "a human-readable size: {text}");
     assert!(
@@ -2304,7 +2307,7 @@ fn the_list_and_memory_cards_have_their_own_heads() {
             "git_status",
             serde_json::json!({}),
             serde_json::json!({"entries": 2}),
-            "• git_status 2 entries ✓",
+            "◻ git_status 2 entries ✓",
         ),
         (
             "list",
@@ -2323,7 +2326,7 @@ fn the_list_and_memory_cards_have_their_own_heads() {
             "memory_get",
             serde_json::json!({"id": "mem-7"}),
             serde_json::json!({}),
-            "• memory_get mem-7 ✓",
+            "◻ memory_get mem-7 ✓",
         ),
     ] {
         let mut app = App::new("m", "s");
@@ -2789,7 +2792,7 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
         message: assistant_with("THE ANSWER", "FIRST THOUGHT\nSECOND THOUGHT", false, vec![]),
     });
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("▶ thinking · 2 lines"), "{text}");
+    assert!(text.contains("◼ thinking · 2 lines"), "{text}");
     assert!(
         !text.contains("FIRST THOUGHT"),
         "folded by default:
@@ -2805,11 +2808,11 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
 {text}"
     );
     assert!(text.contains("SECOND THOUGHT"), "{text}");
-    assert!(!text.contains("▶ thinking"), "{text}");
+    assert!(!text.contains("◼ thinking"), "{text}");
 
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("▶ thinking · 2 lines"), "{text}");
+    assert!(text.contains("◼ thinking · 2 lines"), "{text}");
     assert!(!text.contains("FIRST THOUGHT"), "{text}");
 }
 

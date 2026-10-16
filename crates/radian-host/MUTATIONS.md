@@ -1193,6 +1193,38 @@ turn 结束（state 仍 `Idle`）时各补一条 `cancelled`。`TaskFinisher::fi
 保证每 task 至多一条；第二个 turn 结束因为 `CommitState != Idle` 直接返回，也不会写第二条
 （ADR 0030 O3：一个 task 一个 turn）。
 
+## ADR 0028: radian's own layered flowchart layout (2026-10-16)
+
+Worktree `.radian-worktrees/build-script`, branch `dogfood/mermaid-layout`. Each mutation is
+applied in place by `.radian/scratch/mutate.py` (it asserts the anchor occurs the expected number
+of times, so a `cargo fmt` shift or a no-op patch fails loudly instead of passing as "caught"),
+the suite runs with `--no-fail-fast`, and the file is restored with a plain `cp` and `cmp`ed byte
+for byte (drivers: `.radian/scratch/mutate-layout{,2,3,4,5}.sh`). `git status --short` held only the
+source and test files at the end.
+
+| # | Requirement mutated | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| L1 | decision 3: an adjacent edge leaves the **middle** of a box (`mermaid_layout.rs::adjacent_edge`) | `let source = from.centre();` → `from.across_end()` | `the_owner_chain_is_a_centred_column_of_three_row_boxes` (the fork's `┴` is off the box's middle, so the connector is no longer one column), `a_diamond_splits_and_joins_on_the_bus_rows`, `an_lr_chain_is_the_same_drawing_turned`, `a_back_edge_wraps_outside_the_canvas`, `the_width_decides_between_the_vendored_reason_and_the_drawing` | ✅ 5 failed |
+| L2 | decision 3: a box is **one row high**, not port-counted | `plan`: the vertical `along_size` back to the vendor's rule (`3 + ports`) | `the_owner_chain_...` (`bottom - top == 2`), `a_diamond_...`, `a_back_edge_...` | ✅ 3 failed |
+| L3 | decision 3: every layer is **centred** in the canvas | `place`: `let mut across = (canvas - layer_across[index]) / 2;` → `0` | `the_owner_chain_...` (the layer's left is not `(canvas - extent) / 2`), `a_diamond_...`, `a_back_edge_...` | ✅ 3 failed |
+| L4 | decision 3: a back edge leaves a box's **side** and wraps **outside** the canvas | `channel_edge`: `let out = (from.across_end(), from.mid_along());` → `(from.centre(), ...)`, so the run starts inside the box | `a_back_edge_wraps_outside_the_canvas` (the route is refused, the diagram becomes the vendor's) and `accepts_the_same_samples_as_the_vendored_renderer` | ✅ 2 failed |
+| L5 | decision 4: a refusal goes to the **vendored renderer**, not an error | `mermaid.rs::render_spans`: the fallback call → `Err(RenderError::Unsupported)` | `a_diagram_the_layout_refuses_is_the_vendored_render_byte_for_byte`, `accepts_the_same_samples_as_the_vendored_renderer`, `the_width_decides_...` | ✅ 3 failed |
+| L6a | decision 5 / ADR 0029: an edge's label keeps the **edge** role (vertical layout) | `adjacent_edge`: the TD label's `Role::Edge` → `Role::Text` | `the_layout_emits_only_the_three_roles` (`role_of("yes")`) | ✅ 1 failed |
+| L6b | the same, horizontal layout | the LR label's `Role::Edge` → `Role::Text` | `the_diagram_roles_come_from_the_theme` (radian-tui) | ✅ 1 failed |
+| L7 | two edges of one gap that would **cross** are refused | `draw`: `bus_rows_are_clear(graph, plan)?;` removed | `a_diagram_the_layout_refuses_is_the_vendored_render_byte_for_byte` (the crossing sample is drawn instead of falling back) | ✅ 1 failed |
+| L8 | a wide character's second cell carries nothing (ADR 0028 R9) | `spans`: `Screen::Covered => continue` → an `Edge` space | `a_cjk_label_is_sized_by_display_width` (the label row is wider than its box) | ✅ 1 failed |
+| L9 | a stadium's corners are rounded (decision 3) *and* turned with the layout | `round_corners`: `round_glyph(screen_bits(cell.bits, flow))` → `round_glyph(cell.bits)` | `a_stadium_keeps_its_corners_rounded` (the `LR` golden gets `╭`/`╰` in the wrong corners) | ✅ 1 failed |
+
+9 mutations, 9 caught.
+
+**An equivalent mutant, honestly recorded (the ADR's "回边穿过框")**: "a back edge crosses a box"
+is defended **twice** — the route's freedom pre-check (`channel_edge`'s `grid.free` loop) and the
+grid's own refusal to draw over text or an arrowhead (`Grid::wire`/`Grid::arrow`). Removing
+either one alone changes no output on any sample: the first round of this check removed the
+`grid.free` pre-checks (`mutate-layout.sh` M4) and the whole suite stayed green, because the
+route is stopped by the label text of the box in its way. L4 is the observable form of the same
+requirement: the route then starts inside the box, the layout refuses it, and the back-edge
+snapshot sees the vendor's drawing instead of the layout's.
 ## ADR 0030 片 6b2：宿主的真任务 builder（2026-10-16）
 
 Base `2f41f69` · 在 worktree 内直接改文件、跑单个测试、再从 `.radian/scratch/mut/` 的副本
