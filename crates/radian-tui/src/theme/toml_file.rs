@@ -389,16 +389,18 @@ fancy_role = "#010203"
         let (theme, warnings) = loaded("this is not toml = = =\n");
         assert_eq!(theme.name, ThemeName::Dark);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].contains("could not parse the TOML"), "{warnings:?}");
+        assert!(
+            warnings[0].contains("could not parse the TOML"),
+            "{warnings:?}"
+        );
     }
 
     /// The foreground-only grammar: `""` is the terminal default, `oklch`/`okhsl` convert, and
     /// without truecolor an RGB value becomes the nearest 256-color entry.
     #[test]
     fn the_color_grammar_and_the_256_fallback_apply() {
-        let (theme, warnings) = loaded(
-            "appearance = \"dark\"\n[roles]\nuser = \"oklch(62% 0.1 200)\"\ntext = \"\"\n",
-        );
+        let (theme, warnings) =
+            loaded("appearance = \"dark\"\n[roles]\nuser = \"oklch(62% 0.1 200)\"\ntext = \"\"\n");
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(fg(theme.user), Some(Color::Rgb(28, 152, 158)));
         assert_eq!(fg(theme.text), Some(Color::Reset));

@@ -1,7 +1,14 @@
-//! Loading a theme file and applying per-role overrides (ADR 0029).
+//! Loading a **legacy** pi theme JSON and applying per-role overrides (ADR 0029).
 //!
-//! A theme file is **pi's theme JSON, read as-is** (ADR 0029 decision 1): `name`,
-//! `appearance`, `vars`, `colors`, `export`. Differences from pi, both by decision:
+//! Radian's own theme format is TOML ([`super::toml_file`], ADR 0029).
+//! This module is the old loader, kept for one version so a user's existing
+//! `~/.radian/themes/<name>.json` keeps working (revision 2 decision 4): `load_file` reads
+//! `<name>.toml` first, then `<name>.json` through here with a startup hint to run
+//! `radian theme import`. The pi → Radian role mapping below is the same table the importer
+//! uses; at run time the TOML loader knows Radian role names only.
+//!
+//! A pi theme JSON is pi's own file shape: `name`, `appearance`, `vars`, `colors`, `export`.
+//! Differences from pi, both by decision:
 //!
 //! - **Leniency** (decision 4): pi invalidates the whole theme on a missing variable or a
 //!   circular reference; Radian only falls the *affected roles* back to the built-in palette
@@ -1235,7 +1242,10 @@ mod tests {
             let value: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
             let mut warnings = Vec::new();
             let theme = build(&name, &value, true, &mut warnings);
-            assert!(warnings.is_empty(), "{name} produced warnings: {warnings:?}");
+            assert!(
+                warnings.is_empty(),
+                "{name} produced warnings: {warnings:?}"
+            );
             assert_eq!(theme.name, ThemeName::File, "{name} loaded as a file theme");
             // The three levels exist (a level may legitimately be the terminal default).
             for (level, style) in [
@@ -1353,11 +1363,47 @@ mod tests {
         assert_eq!(theme.status_error.fg, Some(Color::Rgb(6, 6, 6)));
     }
 
+    /// ADR 0029: importing a pi theme and loading the resulting TOML gives
+    /// **the same** resolved theme, role by role, as the old JSON loader — the acceptance's
+    /// round-trip. Two real fixtures. (The bundled ones all omit `appearance`, so they import as
+    /// dark; the light fallback is pinned by the TOML loader's own test.)
+    #[test]
+    fn an_imported_fixture_round_trips_to_the_json_loader_role_by_role() {
+        for stem in ["kanagawa-wave", "catppuccin-latte"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/data/themes/{stem}.json"));
+            let text = std::fs::read_to_string(&path).expect("the fixture is readable");
+            round_trip(stem, &text);
+        }
+    }
+
+    /// Imports `text` and asserts the TOML round-trips to the JSON loader's theme, role by role.
+    fn round_trip(name: &str, text: &str) {
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        let mut json_warnings = Vec::new();
+        let mut json_theme = build(name, &value, true, &mut json_warnings);
+        assert!(json_warnings.is_empty(), "{name}: {json_warnings:?}");
+
+        let converted = crate::theme::importer::convert(text, None, name).unwrap();
+        let mut toml_warnings = Vec::new();
+        let mut toml_theme =
+            crate::theme::toml_file::build(name, &converted.toml, true, &mut toml_warnings);
+        assert!(toml_warnings.is_empty(), "{name}: {toml_warnings:?}");
+        assert_eq!(toml_theme.name, ThemeName::File);
+
+        for role in Role::ALL {
+            let left = *role.style_mut(&mut json_theme);
+            let right = *role.style_mut(&mut toml_theme);
+            assert_eq!(left, right, "{name}: role {} differs", role.as_str());
+        }
+    }
+
     /// ADR 0029: `<name>.toml` wins over `<name>.json`; without the TOML
     /// the old JSON loader runs and the startup warnings carry the import hint.
     #[test]
     fn a_toml_theme_wins_over_a_json_one_and_the_json_fallback_hints() {
-        let dir = std::env::temp_dir().join(format!("radian-theme-dispatch-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("radian-theme-dispatch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(

@@ -1182,7 +1182,7 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
     for (key, value) in table {
         match (key.as_str(), value) {
             // Any name is accepted (ADR 0029 decision 1): built-in names resolve directly,
-            // anything else is looked up in `~/.radian/themes/<name>.json` by the TUI, which
+            // anything else is looked up in `~/.radian/themes/<name>.toml` by the TUI, which
             // warns and falls back when neither exists. A display preference never refuses
             // the file.
             ("theme", Value::String(theme)) => config.tui.theme = Some(theme.clone()),
@@ -2012,7 +2012,7 @@ theme = "light"
         );
 
         // ADR 0029: any theme name is carried; whether it resolves (built-in or
-        // `~/.radian/themes/<name>.json`) is the TUI's finding, a startup warning.
+        // `~/.radian/themes/<name>.toml`) is the TUI's finding, a startup warning.
         let config = parse_str("schema_version = 1\n[tui]\ntheme = \"future\"\n").unwrap();
         assert_eq!(config.tui.theme.as_deref(), Some("future"));
         assert!(config.skipped.is_empty());

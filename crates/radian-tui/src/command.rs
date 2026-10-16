@@ -1508,7 +1508,7 @@ mod theme_tests {
         assert!(names.contains(&"kanagawa"), "{names:?}");
         assert!(
             !names.contains(&"notes"),
-            "only *.json is a theme: {names:?}"
+            "only *.toml/*.json is a theme: {names:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

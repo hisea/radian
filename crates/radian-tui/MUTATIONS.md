@@ -1610,3 +1610,26 @@ Base：本片 HEAD（`oc/thin-user`）· 就地变异，每个变异后从 `.rad
 与 `render::thinking_has_one_blank_line_on_both_sides` 钉住。`apply_selection` 顺带修正：选中段保留它
 来自的 span 的前景色（原先最后一段回退到 `Style::default()`，会把选区尾部的前景色抹掉），由
 `render::a_selection_draws_the_selection_role_on_its_cells` 的「文字保留自己的前景色」断言钉住。
+
+## Theme format：TOML 主题、一次性 pi 导入、过渡期（ADR 0029/3/4，2026-10-16）
+
+Base：本片 HEAD（`oc/theme-format`；决定 1 = `cff5d35`，决定 4 = `e9f29ef`，决定 3 = 本提交）·
+就地变异，每个变异前把 `file.rs`/`importer.rs`/`toml_file.rs` 复制到 `.radian/scratch/mut-bak/`，
+变异后跑对应测试、从副本还原并用 `cmp` 逐字节确认（脚本 `.radian/scratch/mutate.sh`）。测试都
+`--no-fail-fast`，只跑命中的那条（`cargo test -p radian-tui [--lib|--test …] <name>`）。
+
+| # | 需求 | 变异 | 抓住它的测试 |
+|---|---|---|---|
+| TH-M1 | importer 把 pi 键映射到**正确的** Radian 角色 | `file.rs` 的 `fg_source` 把 `Role::User => Some("userMessageText")` 改成 `Some("toolTitle")` | `theme::importer::tests::every_fixture_converts_to_its_committed_golden`（golden 里 `user = "#dcd7ba"` 变成 `tool_call` 的 `#938aa9`） |
+| TH-M2 | `<name>.toml` 优先于 `<name>.json` | `file.rs` 的 `load_file` 把 `.toml` 分支的判据改成 `if false && toml_path.is_file()`（等于永远先读 `.json`） | `theme::file::tests::a_toml_theme_wins_over_a_json_one_and_the_json_fallback_hints`（「the .toml must win」失败） |
+| TH-M3a | 覆盖已有 `<name>.toml` 必须 `--force` | `importer.rs` 的 `write` 把 `if force {` 改成 `if true {`（永远走覆盖分支，不再 `create_new`） | `theme::importer::tests::write_refuses_an_existing_file_without_force` |
+| TH-M3b | 同上，走 `radian theme import` 的整条路 | 同 TH-M3a | `theme_import::import_refuses_to_overwrite_without_force_and_force_wins`（第二次导入退出码 0，期望 1） |
+| TH-M4 | 变量循环只让相关角色退回内建 | `toml_file.rs` 的 `Variables::resolve_var` 把循环的 `return Err(VarError::Cycle(..))` 改成 `return Ok(ColorValue::Default)`（循环不再报错、角色拿到终端默认色） | `theme::toml_file::tests::a_cycle_only_breaks_its_own_roles`（工具行的颜色与警告条数都不符） |
+
+5 条运行全部抓住（TH-M3 的变异同时打中 a、b 两条测试），无等价变异。
+
+**诚实补充（TH-M1 的边界）**：round-trip 测试
+`an_imported_fixture_round_trips_to_the_json_loader_role_by_role` **抓不住**映射错位——它比较的是
+JSON loader 与 TOML loader，而两者共用 `fg_source`/`bg_source` 同一张表，映射一起错、两者照样相等。
+钉住映射的是金标准（golden）那条：它是「转换器的输出」而不是「两个 loader 互相一致」。这正是决定 3
+把映射放进 importer、又把转换结果入库为 golden 的原因。

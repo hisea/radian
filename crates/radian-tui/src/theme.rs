@@ -10,6 +10,7 @@
 
 mod color;
 mod file;
+pub mod importer;
 mod toml_file;
 
 pub use color::{
@@ -94,7 +95,8 @@ use std::collections::BTreeMap;
 use ratatui::style::{Color, Modifier, Style};
 
 /// The named built-in themes, plus `File` for a theme loaded from
-/// `~/.radian/themes/<name>.json` (ADR 0029 decision 1).
+/// `~/.radian/themes/<name>.toml` (ADR 0029; a `<name>.json` is the
+/// one-version transition, decision 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeName {
     #[default]

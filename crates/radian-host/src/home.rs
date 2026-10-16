@@ -111,7 +111,8 @@ pub fn credentials_dir() -> Option<PathBuf> {
 }
 
 /// The themes directory for this process, created 0700. Sandbox-readable (ADR 0020): theme
-/// files are user UI data, like the config (ADR 0029 decision 1: `~/.radian/themes/<name>.json`).
+/// files are user UI data, like the config (ADR 0029:
+/// `~/.radian/themes/<name>.toml`).
 pub fn themes_dir() -> Option<PathBuf> {
     Some(private(themes_dir_for(&radian_home()?)))
 }
