@@ -10,10 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_core::{
-    CancellationToken, ContentPart, ToolCall, ToolContext, ToolProvider, ToolSession,
+    CancellationToken, ContentPart, NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession,
 };
 use common::TempDir;
-use radian_coding::{CodingTools, HeavySlots};
+use radian_coding::{CodingSession, CodingTools, HeavySlots};
 use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
 use serde_json::json;
 
@@ -157,4 +157,151 @@ async fn cancelling_a_queued_heavy_command_runs_nothing() {
     assert!(!marker.exists(), "a cancelled wait never runs the command");
     drop(held);
     assert_eq!(gate.available(), 1);
+}
+
+// ---------- the release at settle (ADR 0030 O8 review fix) ----------
+
+/// Opens **one** session over `ws` with `gate` as the heavy gate. Unlike [`shell`], the whole
+/// test shares this session and its job registry, so a background job and the commands after it
+/// draw on the same gate.
+async fn heavy_session(ws: &Path, gate: Arc<HeavySlots>) -> CodingSession {
+    let policy = SandboxPolicy::new(SandboxMode::FullAccess, ws).expect("full-access policy");
+    let sandbox = Sandbox::from_policy(policy).expect("full access needs no backend");
+    let tools = CodingTools::with_sandbox(ws, sandbox)
+        .expect("matching workspaces")
+        .with_heavy(gate);
+    tools.open_session().await.expect("open session")
+}
+
+/// Runs one tool call through an already-open session.
+async fn exec(
+    session: &CodingSession,
+    name: &str,
+    arguments: serde_json::Value,
+) -> Result<agent_core::ToolOutput, String> {
+    let call = ToolCall {
+        id: "t".into(),
+        name: name.into(),
+        arguments,
+    };
+    let sink = NoopSink;
+    let cx = ToolContext {
+        cancellation: CancellationToken::new(),
+        events: &sink,
+        index: 0,
+    };
+    session
+        .execute(&call, cx)
+        .await
+        .map_err(|failure| failure.message)
+}
+
+/// Starts `command` as a background job and returns its id.
+async fn start_background(session: &CodingSession, command: &str) -> String {
+    let output = exec(
+        session,
+        "shell",
+        json!({ "command": command, "background": true }),
+    )
+    .await
+    .expect("start the job");
+    output.structured.as_ref().expect("structured")["job_id"]
+        .as_str()
+        .expect("a job id")
+        .to_owned()
+}
+
+/// Waits for the job to settle and returns the `[status: ...]` text.
+async fn wait_for_settle(session: &CodingSession, id: &str) -> String {
+    let output = exec(
+        session,
+        "job_output",
+        json!({ "job_id": id, "wait": true, "timeout_ms": 30_000 }),
+    )
+    .await
+    .expect("wait for the job");
+    text_of(&output)
+}
+
+/// A background heavy job releases its slot when it settles on its own. A settled cell stays in
+/// the registry for `job_list`, so without that release the slot is held until the cell is
+/// dropped and every later heavy command blocks forever.
+#[tokio::test]
+async fn a_settled_background_heavy_job_releases_its_slot() {
+    let dir = TempDir::new("heavy-settle");
+    let ws = dir.path().to_path_buf();
+    let gate = HeavySlots::new(1, ["echo heavy"]);
+    let session = heavy_session(&ws, Arc::clone(&gate)).await;
+
+    // A background heavy job that exits on its own holds the only slot until it settles.
+    let id = start_background(&session, "echo heavy settled").await;
+    let status = wait_for_settle(&session, &id).await;
+    assert!(status.contains("[status: exited 0]"), "{status}");
+    assert_eq!(
+        gate.available(),
+        1,
+        "a settled background heavy job must release its slot"
+    );
+
+    // The next heavy command therefore runs without waiting (the missing release would leave
+    // it queued forever, so the timeout makes the mutation fail instead of hang).
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        exec(&session, "shell", json!({ "command": "echo heavy again" })),
+    )
+    .await
+    .expect("a settled heavy job must not block the next heavy command")
+    .expect("the command runs");
+    assert!(
+        text_of(&output).contains("echo heavy again"),
+        "the second heavy command ran"
+    );
+    assert_eq!(
+        gate.available(),
+        1,
+        "the second heavy command released its slot"
+    );
+}
+
+/// The same release happens when the job is stopped with `job_kill` rather than exiting on its
+/// own (the settle path, not the natural-exit path).
+#[tokio::test]
+async fn a_killed_background_heavy_job_releases_its_slot() {
+    let dir = TempDir::new("heavy-kill");
+    let ws = dir.path().to_path_buf();
+    let gate = HeavySlots::new(1, ["echo heavy"]);
+    let session = heavy_session(&ws, Arc::clone(&gate)).await;
+
+    // A long-running heavy job holds the only slot...
+    let id = start_background(&session, "echo heavy start; sleep 600").await;
+    assert_eq!(gate.available(), 0, "the running job holds the heavy slot");
+
+    // ...until `job_kill` stops it.
+    exec(&session, "job_kill", json!({ "job_id": id }))
+        .await
+        .expect("kill the job");
+    let status = wait_for_settle(&session, &id).await;
+    assert!(status.contains("[status: killed]"), "{status}");
+    assert_eq!(
+        gate.available(),
+        1,
+        "a killed background heavy job must release its slot"
+    );
+
+    // So the next heavy command runs without waiting.
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        exec(
+            &session,
+            "shell",
+            json!({ "command": "echo heavy after-kill" }),
+        ),
+    )
+    .await
+    .expect("a killed heavy job must not block the next heavy command")
+    .expect("the command runs");
+    assert!(
+        text_of(&output).contains("echo heavy after-kill"),
+        "the second heavy command ran"
+    );
 }

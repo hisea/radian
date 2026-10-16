@@ -417,3 +417,20 @@ Base：本片 HEAD（`oc/write-diff`，fix 1 提交前）· 就地变异（改 `
 同一变异下 `write_reports_the_overwritten_files_line_count` 仍过：回退只影响进程读不了的文件，
 普通覆盖不受影响。RF1 就是 a035006 的可观测行为，所以 0200 用例在 a035006 上必失败。0200 用例在
 root 下跳过（root 无视 mode 位，构造不出那次拒绝），跳过前先探测能否读一个 0200 文件。
+
+## orch-s6b review fix 1：后台重活 job 在 settle 时释放槽（2026-10-16）
+
+Base `f1be5b1`（本片 HEAD）· 就地变异（改 `jobs.rs` 的 `supervise`），变异前把文件复制到
+`.radian/scratch/mut/jobs.rs.orig`，跑完用**不带 `-p`** 的 `cp` 还原并用 `cmp` 逐字节确认；
+结束时 `git status --short` 只有本片自己的测试改动。每个变异用
+`cargo test -p radian-coding --test heavy --locked --no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SC-3 | 删掉 `supervise` 里的 `cell.heavy = None;`（settle 不释放槽） | `a_settled_background_heavy_job_releases_its_slot`、`a_killed_background_heavy_job_releases_its_slot` | ✅ failed |
+
+这一格是评审补的洞：settle 释放槽原先无测试覆盖。已 settle 的 cell 为 `job_list` 留在注册表里，
+所以删掉那一行后，结束的后台重活 job 一直攥着槽，直到 cell 被 drop，之后每条重活命令都会永远排队：
+两个跑完的 `cargo test` 就能堵死所有后续重活。两个新用例在 settle/`job_kill` 之后断言
+`gate.available() == 1`，并让第二条重活命令在 5 s 超时内跑完（变异下断言先失败，不依赖超时）。
+`cancel`、非重活不占槽、等待可取消由上一节的 SC-1/SC-2 钉住。
