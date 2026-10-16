@@ -9873,3 +9873,97 @@ async fn pty_resume_restores_the_access_tier() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+/// ADR 0038 slice 3: `/mode lead` in the real TUI switches the role layer from the next turn.
+/// The first turn runs the general role, the notice names the switch, and the second turn's
+/// request carries the lead role prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_mode_lead_switches_the_role_prompt_from_the_next_turn() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("mode-switch");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("FIRST-OK"), text_reply("SECOND-OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().join("sessions").to_str().unwrap(),
+            "--session-id",
+            "mode",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 15), "{}", pty.screen());
+
+    pty.send(b"one\r");
+    assert!(
+        pty.wait_for_screen("FIRST-OK", 20),
+        "the first turn did not finish:\n{}",
+        pty.screen()
+    );
+
+    // `/mode` with no argument reports the current mode; `/mode lead` switches it.
+    pty.send(b"/mode\r");
+    assert!(
+        pty.wait_for_screen("mode: general", 10),
+        "the mode must be reported:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/mode lead\r");
+    assert!(
+        pty.wait_for_screen("mode: lead from the next turn", 10),
+        "the switch notice must be shown:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"two\r");
+    assert!(
+        pty.wait_for_screen("SECOND-OK", 20),
+        "the second turn did not finish:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "two turns, two requests");
+    let system = |n: usize| -> String {
+        requests[n].json()["messages"]
+            .as_array()
+            .expect("messages is an array")
+            .iter()
+            .find(|message| message["role"] == "system")
+            .and_then(|message| message["content"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert!(
+        system(0).contains("You are radian, a coding agent"),
+        "turn 1 runs the general role: {}",
+        system(0)
+    );
+    assert!(
+        system(1).contains("You are a radian lead agent"),
+        "turn 2 runs the lead role: {}",
+        system(1)
+    );
+    // Only the role layer moved: everything outside `<role>` is byte-identical.
+    let without_role = |prompt: &str| {
+        let start = prompt.find("<role>\n").expect("a <role> block") + "<role>\n".len();
+        let end = prompt.find("\n</role>").expect("the block's end");
+        format!("{}ROLE{}", &prompt[..start], &prompt[end..])
+    };
+    assert_eq!(
+        without_role(&system(0)),
+        without_role(&system(1)),
+        "only `<role>` may differ across the switch"
+    );
+}

@@ -40,6 +40,7 @@ EXPECT = {
     "permissions-approval.toml": dict(outcome="accept"),
     "skills-extra-paths.toml": dict(outcome="accept"),
     "skills-builtin.toml": dict(outcome="accept"),
+    "memory-injection.toml": dict(outcome="accept"),
     "sandbox-unix-sockets.toml": dict(outcome="accept"),
     "integrations-herdr.toml": dict(outcome="accept"),
     "api-key-removed.toml": dict(outcome="reject"),

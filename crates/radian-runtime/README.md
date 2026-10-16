@@ -46,6 +46,12 @@ input, run one turn, repeat. `Driver::shutdown()` stops it.
   is invisible to that turn, including its later model calls.
 - **Step-safe-point input** (ADR 0011 L5): `steer`/`inject` go to the core's
   `SteeringHandle`, so they land after a tool batch or before a model request.
+- **Per-turn host additions** (ADR 0021): `set_turn_additions` installs a
+  host callback that runs at the start of a turn claimed from a `User`-source input (never for a
+  `System` one, such as a job notification), before the turn's first model call, and returns at
+  most one message; the driver puts it in the inbox's `inject` lane with `InputSource::System`,
+  so it is a durable input with an id that lands right after the user message. A refused inject
+  or an empty answer changes nothing — the addition is context, not a session fact.
 - **No `ActiveRun` escapes**: the driver owns the session and the run; no public signature
   of this crate mentions `ActiveRun` (the type cannot be named by a caller).
 - **Recovery** (ADR 0011 L3): an admitted input is not replayed; every other accepted
@@ -58,7 +64,8 @@ input, run one turn, repeat. `Driver::shutdown()` stops it.
 ## Tests
 
 `tests/queue.rs` (operations, capacity, cancel, wake), `tests/driver.rs` (steer at a safe
-point, durable event order and index correspondence, turn-boundary config), `tests/recovery.rs`
+point, durable event order and index correspondence, turn-boundary config, the per-turn host
+addition), `tests/recovery.rs`
 (the three recovery states, a genuinely half-written line, a traversal over every prefix of
 a real journal), `tests/e2e.rs` (a turn, a restart, and the next turn). `MUTATIONS.md`
 records the mutation checks.

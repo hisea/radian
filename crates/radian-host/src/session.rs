@@ -33,7 +33,10 @@ use radian_session::{SessionCreatedData, SessionJournal};
 use crate::cost::RoutePrice;
 use crate::describe::{Wording, describe, sandbox_word};
 use crate::home::{radian_home, skills_dir, user_home};
-use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
+use crate::memory::{
+    InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState,
+    injection::MemoryInjection,
+};
 use crate::model::SwitchableModel;
 use crate::pending::{
     Answered, PendingQueue, PendingRequest, PendingResponse, QueuedApprover, QueuedPrompter,
@@ -239,6 +242,14 @@ pub trait SessionFacade: Send + Sync {
     /// (`{"access": …}`) is queued for the driver to journal at the turn boundary.
     fn set_access(&self, tier: Preset) -> Result<(), CommandRefused>;
 
+    /// Switch the session's working mode (ADR 0038 decision 1's `/mode`). Layer 1 (the role
+    /// prompt) changes at the **next** model request: the change is queued for the next turn
+    /// boundary and journaled as a `ConfigChanged` (`{"mode": …}`), so a resume restores it.
+    /// Session only — never written to a config file. A task agent's role comes from its brief
+    /// and cannot be switched, and neither can a session whose layer 1 is fixed (`--system`,
+    /// an explicit role).
+    fn set_mode(&self, mode: crate::prompt::Mode) -> Result<(), CommandRefused>;
+
     /// The discovered skills, in discovery order (ADR 0025 S1). The UI lists them (`/skills`)
     /// and completes their names (`/skill:`); the host owns the list because it owns discovery.
     fn skills(&self) -> &[Skill];
@@ -371,6 +382,10 @@ pub struct SessionSetup {
     /// Rebuilds the profile and sandbox for a run-time tier switch (ADR 0038 slice 2). `None`
     /// for a host that has no `/access` command (the CLI): a switch is then refused.
     pub access_builder: Option<AccessBuilder>,
+    /// `true` when this session is a **task agent** (ADR 0030 O2: opened by a lead's
+    /// `spawn_task`, one brief per session). Nothing sets it yet; the orchestration slice will.
+    /// It is the flag `/mode` is refused behind: a task agent's role comes from its brief.
+    pub task_agent: bool,
     /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
     pub memory_root: Option<PathBuf>,
     /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
@@ -381,6 +396,9 @@ pub struct SessionSetup {
     pub skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     pub skills_disabled: Vec<String>,
+    /// The memory injection configuration (ADR 0021). The host builds it
+    /// from `[memory.injection]`; `InjectionConfig::default()` is the documented D6 table.
+    pub memory_injection: InjectionConfig,
     /// `true` to resume
     /// The project-trust state this session starts with (ADR 0031 T3). The host resolves it
     /// before `open_session`; `needs_ask` means an interactive host must ask before the first
@@ -500,6 +518,14 @@ pub struct LocalSession {
     sandbox_slot: SandboxSlot,
     /// Rebuilds the profile and sandbox for a tier switch. `None` refuses `set_access`.
     access_builder: Option<AccessBuilder>,
+    /// Whether this session is a task agent (ADR 0030 O2): `set_mode` refuses then.
+    task_agent: bool,
+    /// Whether layer 1 is fixed for the session (`--system` or an explicit role): `set_mode`
+    /// refuses then.
+    role_fixed: bool,
+    /// Layer 0b's hook (ADR 0038 decision 1): `set_mode` recomputes `<session>` together with
+    /// the layer-1 change, through the same seam `/reload` will use (ADR 0036).
+    facts_hooks: Arc<crate::prompt::SessionFactsHooks>,
     projection: Arc<SessionProjection>,
     /// The pending approvals and questions (ADR 0023 U7).
     queue: Arc<SessionQueue>,
@@ -830,6 +856,48 @@ impl SessionFacade for LocalSession {
         Ok(())
     }
 
+    fn set_mode(&self, mode: crate::prompt::Mode) -> Result<(), CommandRefused> {
+        if !self
+            .capabilities
+            .contains(&SessionCapability::AnswerRequest)
+        {
+            return Err(CommandRefused {
+                command: "set-mode".into(),
+                capability: Some(SessionCapability::AnswerRequest.as_str().to_string()),
+                reason: "this session does not declare the `answer` capability".into(),
+            });
+        }
+        // A task agent is told what to do by its brief; its role is the orchestrator's, not the
+        // user's to switch (ADR 0030 O12, ADR 0038 decision 1).
+        if self.task_agent {
+            return Err(CommandRefused {
+                command: "set-mode".into(),
+                capability: None,
+                reason: "a task agent's role comes from its brief and cannot be switched".into(),
+            });
+        }
+        if self.role_fixed {
+            return Err(CommandRefused {
+                command: "set-mode".into(),
+                capability: None,
+                reason: "this session's role layer is fixed for the whole session".into(),
+            });
+        }
+        // Layer 1 is not swapped here: the hook reads the mode from the config slot, and the
+        // driver applies this queued change at the next turn boundary (ADR 0026 D5,
+        // ADR 0038 slice 3), so the switch takes effect on the next turn's first model request
+        // and never mid-turn. The durable record is that same `ConfigChanged`.
+        self.config_queue
+            .push(serde_json::json!({ "mode": mode.as_str() }));
+        // ADR 0036: the mode switch recomputes `<session>` too. Its bytes do not
+        // name the mode, so this only matters if a live read (the date, the git state) moved;
+        // doing it here is what keeps the ADR's rule (0a/2/3 fixed, 0b recomputed on an
+        // explicit switch) true for `/mode` as it is for `/model`.
+        self.facts_hooks.refresh();
+        self.projection.set_mode(Some(mode.as_str().to_string()));
+        Ok(())
+    }
+
     fn skills(&self) -> &[Skill] {
         &self.skills
     }
@@ -1012,10 +1080,12 @@ pub async fn open_session(
         tier,
         profile,
         access_builder,
+        task_agent,
         memory_root,
         skills_extra_paths,
         skills_builtin,
         skills_disabled,
+        memory_injection,
         trust,
         resume,
         config_snapshot,
@@ -1072,7 +1142,7 @@ pub async fn open_session(
             Arc::new(QueuedPrompter::new(Arc::clone(&queue), origin.clone()));
         radian_coding::AskTools::new(prompter)
     });
-    let injection_config = InjectionConfig::default();
+    let injection_config = memory_injection;
     let memory = memory_root
         .as_ref()
         .map(|root| MemoryService::open(&workspace, root));
@@ -1177,12 +1247,16 @@ pub async fn open_session(
     };
     let shared_skills = Arc::new(skills);
     let skills_hooks = Arc::new(SkillsHooks::new(&shared_skills));
-    let memory_hooks = Arc::new(MemoryHooks::new(
+    // ADR 0021: one injection object per session. The fixed block is computed once
+    // (by whichever of the two seams runs first) and the driver's per-turn seam appends later
+    // turns' new hits as one System message through the inbox's inject lane.
+    let injection = MemoryInjection::new(
         memory.clone(),
         Arc::clone(&journal),
         injection_config,
         memory_warning,
-    ));
+    );
+    let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
     // ADR 0030 R10: pin the repository now, before the model runs. A workspace that is not a
     // git repository does not mount `git_commit` at all.
@@ -1219,7 +1293,8 @@ pub async fn open_session(
         network: workspace_mode,
         unix_sockets_restricted: workspace_mode,
     });
-    let role_layer = match &system_prompt {
+    let role_override = system_prompt.clone();
+    let role_layer = match &role_override {
         Some(system) => system.clone(),
         None => crate::prompt::role_prompt(role.as_deref(), radian_home().as_deref()),
     };
@@ -1228,6 +1303,19 @@ pub async fn open_session(
         &role_layer,
         &context.section,
     ));
+    // ADR 0038 decision 1: `/mode` swaps layer 1 only, at the next turn's first model request.
+    // The hook reads the mode from the same config slot `/model` writes, so the switch is
+    // journaled and replayed by the driver like any other change, and it can never land
+    // mid-turn. Layer 1 is fixed when `--system` (or an explicit role) set it for the session,
+    // and the hook then rebuilds exactly that layer — the same bytes the assemble above made.
+    let role_hooks = Arc::new(crate::prompt::RoleHooks::new(
+        &runtime_layer,
+        &context.section,
+        role_override,
+        role.clone(),
+        Some(Arc::clone(&config_slot)),
+    ));
+    let role_fixed = role_hooks.fixed();
     let agent_config = AgentConfig {
         system_prompt,
         context_budget,
@@ -1237,16 +1325,19 @@ pub async fn open_session(
         ..AgentConfig::default()
     };
     let facts_hooks = Arc::new(crate::prompt::SessionFactsHooks::new(
-        crate::prompt::session_layer(&workspace, &model_name),
+        workspace.clone(),
+        model_name,
+        Some(Arc::clone(&config_slot)),
     ));
     let agent = Arc::new(
         Agent::new(model, tools)
             .with_config(agent_config)
             .with_hooks(session_hooks(
+                Arc::clone(&role_hooks),
                 Arc::clone(&hooks),
                 Arc::clone(&memory_hooks),
                 Arc::clone(&skills_hooks),
-                facts_hooks,
+                Arc::clone(&facts_hooks),
             )),
     );
 
@@ -1294,6 +1385,11 @@ pub async fn open_session(
             .map(std::time::Duration::from_millis),
     );
     driver.set_runtime_events(runtime_events);
+    // ADR 0021: the per-turn memory addition, placed in the inject lane
+    // after the user's turn is claimed and before its first model call.
+    driver.set_turn_additions(crate::memory::injection::addition_seam(Arc::clone(
+        &injection,
+    )));
     if let Some(budget_for) = budget_for.clone() {
         driver.set_budget_for(budget_for);
     }
@@ -1347,6 +1443,14 @@ pub async fn open_session(
             .map(|budget| budget.input_budget_tokens),
     );
     projection.set_tier(Some(tier.as_str().to_string()));
+    // ADR 0038 decision 1: the mode in force, as the slot has it after the resume replay (the
+    // driver applied the journal's last `{"mode": …}` change before this line). `/mode` with no
+    // argument prints it.
+    projection.set_mode(Some(
+        crate::prompt::Mode::of(&config_slot.value())
+            .as_str()
+            .to_string(),
+    ));
     // F3 (ADR 0027): a resumed session folds its journal's usage records back into
     // the projection. The projection's only other writer is the live event sink, so without
     // this `--resume` showed `-` for the tokens and hid `cost` until the next response — the
@@ -1414,6 +1518,9 @@ pub async fn open_session(
         hooks,
         sandbox_slot,
         access_builder,
+        task_agent,
+        role_fixed,
+        facts_hooks,
         projection,
         queue,
         memory,
@@ -1434,21 +1541,22 @@ pub async fn open_session(
     })
 }
 
-/// The agent's hook chain (ADR 0025 S6): the permission rules run first, then the memory section
-/// is appended, then the skills section. The order is a promise — the sections must be
-/// deterministic and memory must precede skills — so it lives in this one function, which
-/// `open_session` calls; `tests/skills_order.rs` builds the three real hooks and asserts the
-/// order on the composed chain. Swapping `memory` and `skills` here is the mutation that test
-/// catches.
+/// The agent's hook chain (ADR 0025 S6, ADR 0038 decision 1): the role hook writes layers 0a, 1
+/// and 2 first, then the permission rules run, then the memory section is appended, then the
+/// skills section. The order is a promise — the role layer comes first, and the sections must be
+/// deterministic with memory before skills — so it lives in this one function, which
+/// `open_session` calls; `tests/skills_order.rs` builds the real hooks and asserts the order on
+/// the composed chain. Swapping `memory` and `skills` here is the mutation that test catches.
 pub fn session_hooks(
+    role: Arc<crate::prompt::RoleHooks>,
     permissions: Arc<PermissionHooks>,
     memory: Arc<MemoryHooks>,
     skills: Arc<SkillsHooks>,
     facts: Arc<crate::prompt::SessionFactsHooks>,
 ) -> impl Hooks {
-    // The order is the promise: permissions, memory, skills, then the volatile <session> facts
-    // (ADR 0025 S6, ADR 0036 D1).
-    (((permissions, memory), skills), facts)
+    // The order is the promise: the role layers, permissions, memory, skills, then the volatile
+    // <session> facts (ADR 0025 S6, ADR 0036 D1).
+    ((((role, permissions), memory), skills), facts)
 }
 
 /// The durable audit event for one trust write (ADR 0031 T2).

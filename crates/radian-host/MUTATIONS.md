@@ -816,3 +816,57 @@ set), `cargo test -p radian-host --locked` and the named tests of the other crat
 | M5 | the writer never computes the fee for a usage record (`set_usage_fee` becomes inert) | ✅ caught (rc=101) | `write::a_usage_record_carries_the_fee_the_writer_computed` |
 
 5/5 caught. In each run only the listed tests failed; the rest of the target stayed green.
+## ADR 0021 + ADR 0036：固定段、追加消息、`<session>`（2026-10-15）
+
+Base `b63ac20`（本 worktree，dogfood/memory-r2）· 变异直接做在本 worktree，每个变异前把文件
+复制到 `/tmp/r2-mut*/`，跑完后从副本还原并 `diff -q` 确认一致；`git status --short` 在跑完后只剩
+本片的正常改动。每个变异用 `--no-fail-fast`；动到宿主代码的那几条先
+`cargo build -p radian-tui --bin radian`（agent-cli 的测试会拒绝过期的二进制）。
+
+**第一次跑法有错**（把 `--no-fail-fast` 放在 `--` 之后当成了过滤器，M1 因此看起来"被抓住"），
+下表是改正后重跑的结果：每条都给出真正失败的测试名与 panic 行。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | 固定段的查询文本改回**最后一条**用户消息，改在 `MemoryHooks::before_model_call` 的 `.fixed(...)` 里 | `radian_host/tests/memory_injection.rs::the_hook_orders_the_block_by_the_first_user_message` | ✅ caught |
+| M1b | 同一变异，改在追加接缝的查询回退（`addition_for_turn` 里的 `first_user_text(transcript)`） | `agent_cli::cli::{a_resumed_session_ranks_the_block_by_its_first_user_message, a_forked_child_ranks_the_block_by_the_parents_first_user_message}` | ✅ caught |
+| M2 | 驱动器用 `InputSource::User` 注入追加消息 | `radian_runtime::tests/driver.rs::a_host_addition_lands_after_the_user_message_and_before_the_first_call` | ✅ caught |
+| M3 | 追加消息改到 `drain_steering` **之后**注入（晚一步到） | 同上（transcript 顺序：追加消息不再紧跟用户消息） | ✅ caught |
+| M4 | 追加候选忽略去重账本（`exclude` 为空） | `radian_host/tests/memory_injection.rs::a_later_turn_appends_its_new_hits_as_one_system_message` | ✅ caught |
+| M5 | 固定段每次调用重算（去掉 `fixed` 的缓存短路） | 宿主：`memory_injection.rs::{the_block_reaches_the_system_prompt_and_the_event_is_written_once, a_later_turn_appends_its_new_hits_as_one_system_message, an_addition_budget_drops_whole_records_and_additions_can_be_off}`；CLI：`the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once` | ✅ caught |
+| M6 | `<session>` 每次请求重算（去掉 key 比较） | `agent_cli::cli::the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once`（write 之后 `git:` 行从 `(clean)` 变成未提交） | ✅ caught |
+| M7 | `/model` 后 `<session>` 不重算（重算分支改成 `let _ = key;`） | `radian_host::prompt::tests::the_session_layer_changes_only_when_the_model_route_does` | ✅ caught |
+
+8/8 caught。M1 与 M1b 是同一个行为的两条代码路径，**必须分开记**：正常一轮里追加接缝先算固定段
+（M1b 那条路径），`MemoryHooks` 自己的查询只在「接缝没算」（`additions = false`，或进程的第一轮不是
+用户轮次）时才生效（M1 那条路径）；只做其中一个变异，另一个不会被任何测试发现。
+
+两条**等价变异**（改掉也不会被任何测试区分）如实记录：
+
+- **追加消息自身的 `meta.source = System`**：`Inbox::inject` 会用它自己的 `source` 参数覆盖
+  `meta.source`（ADR 0011），所以把 `addition_for_turn` 里那行改成 `User` 没有任何可观察差异。
+  可观察的那一半在驱动器的 `inject(message, InputSource::System)`，即 M2。
+- **`fixed()` 查询回退的具体值**（用户轮次开始时用本轮文本）：在 CLI 端到端与单元测试里，第一条用户
+  消息总是在 transcript 里（resume/fork）或就是本轮消息（首轮），两条路给出同一个查询文本，所以把
+  回退值改成 `String::new()` 只有在一个「transcript 里根本没有用户消息、而且这是新会话」的构造下才
+  可区分，本片没有这样的用例。
+
+## mode-cmd：`set_mode` 的入队、journal 与角色层（ADR 0038 切片 ③，2026-10-15）
+
+Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 每个变异就地改完后跑
+`cargo test -p radian-host --lib --test mode_switch --no-fail-fast`，再从 `/tmp/mut/` 的副本还原
+并用 `diff -q` 确认逐字节相同。
+
+| # | 变异（行为） | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MODE-M1 | `RoleHooks` 的 mode 来源从 config slot 改成读 **projection**（`set_mode` 立刻写它）：切换于是同一次 turn 的下一个 model 调用就生效 | `mode_switch::a_switch_inside_a_running_turn_changes_nothing_until_the_next_turn`（turn 1 的第二次 model 调用变成 lead 角色） | ✅ |
+| MODE-M2 | `set_mode` 不再 push `{"mode": …}`（只改 projection：切了、没记） | `mode_switch::{set_mode_queues_the_change_and_the_mode_in_force_waits_for_the_turn, the_role_layer_switches_at_the_next_turn_and_no_other_layer_moves, a_resumed_session_runs_the_mode_the_journal_recorded, a_switch_inside_a_running_turn_changes_nothing_until_the_next_turn}`（4 条 FAILED） | ✅ |
+| MODE-M3 | 重建 base 时把第 2 层换成第 0a 层的字节（`assemble(..., &self.runtime)`，即切换时另一层的字节跟着动） | `prompt::tests::the_role_hook_moves_layer_one_only_when_the_mode_changes`、`mode_switch::{the_role_layer_switches_at_the_next_turn_and_no_other_layer_moves, a_resumed_session_runs_the_mode_the_journal_recorded}` | ✅ |
+
+3/3 抓住。MODE-M2 的 4 条里最强的是 resume 那条：journal 里没有 `{"mode":"lead"}`，新进程第一次请求
+就还是 general。
+
+**一条等价变异（如实记录）**：`set_mode` 里删掉 `self.facts_hooks.refresh()`（`/mode` 的 `<session>`
+那一半）没有任何测试能区分——`<session>` 段里不写 mode，重算与不重算的字节相同（只有 date/git 这类
+活读在两次计算之间变了才有差别，本片的用例都在同一个工作区、同一天、不是 git 仓库）。保留这行是因为
+ADR 0036 明说 `/mode` 与 `/model` 一样重算 0b；它是那个规则的实现，不是可测行为。
