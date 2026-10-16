@@ -498,7 +498,7 @@ fn a_user_message_shows_markup_literally() {
         Some(ratatui::style::Color::Reset),
         "the user block has no band: {bold:?}"
     );
-    let marker = style_of(&terminal, "> ").expect("the user marker");
+    let marker = style_of(&terminal, "❯ ").expect("the user marker");
     assert_eq!(marker.fg, app.theme.user.fg, "the user role: {marker:?}");
     assert_ne!(
         bold.bg, app.theme.md_code.bg,
