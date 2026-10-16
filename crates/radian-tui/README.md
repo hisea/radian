@@ -347,7 +347,7 @@ from slipping in unchecked.
 | `↓` | U+2193 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `~` `✓` `×` | U+007E/2713/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `•` | U+2022 | tool head marker, one-liner (ADR 0035's 2026-10-16 note) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `•` | U+2022 | tool head marker, one-liner (running, empty, or a small tool; ADR 0035's 2026-10-16 note) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `│` | U+2502 | tool block body rail / open frames | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `╭` `╰` | U+256D/70 | open frame corners (ADR 0035/7) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `…` | U+2026 | truncation | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -592,10 +592,11 @@ the rest is sent as an ordinary message.
   `· cancelled`), and its body in `│ `-railed rows below. The head's fold marker is decided only
   by whether a body is drawn under it (ADR 0035's 2026-10-16 "折叠标记统一" note, option A):
   `◻` when a body is (`errors` preview, error body, `Ctrl-O`), `◼` when the head is all that
-  shows a body of more than one line (`collapsed`'s `· N lines`, a multi-line small tool), and
-  `•` for a one-line head (a running call, a one-line `read`/`grep`/`glob`/`list`); ascii
-  `-`/`+`/`*`. A small tool (`read`, `grep`, `glob`, `list`) is that one line until it errors or
-  `Ctrl-O` expands it.
+  shows an explicitly folded body (`collapsed`'s `· N lines`), and `•` for every other head-only
+  block (a running call, an empty result, or a `read`/`grep`/`glob`/`list` result of **any**
+  size); ascii
+  `-`/`+`/`*`. A small tool (`read`, `grep`, `glob`, `list`) is that one line — a `•`, never a
+  fold — until it errors or `Ctrl-O` expands it.
 
 ## Scroll-follow rules
 
@@ -800,8 +801,9 @@ Run a general `workspace` session in a throwaway terminal and get the model to c
    marker `◻`/`◼` the right one, and is the
    `N lines` count right?
 6. **The small tool (`read`)**: call `read` with a path and a range. *Expect* one line
-   `• read <path> <start>-<end> · <duration> ✓` with no body (a one-line result is the `•`
-   one-liner; a multi-line one shows `◼`). Press `Ctrl-O`: the body appears under `◻`;
+   `• read <path> <start>-<end> · <duration> ✓` with no body — a `•` one-liner however many
+   lines the result holds (a `read` never folds under `errors`). Press `Ctrl-O`: the body appears
+   under `◻`;
    make it fail: the body appears with `×`. *Look*: is the one-liner's alignment with the
    other heads right, and is the range (`100-160`) the file's 1-based numbers?
 7. **`patch` with line numbers**: ask for a patch that replaces two separate ranges in one

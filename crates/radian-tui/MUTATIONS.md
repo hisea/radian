@@ -1885,7 +1885,11 @@ source backed up under `.radian/scratch/backup/`, the mutated file restored with
 | FM-2 | a drawn body makes the head `◻`, never `◼` | `blocks.rs::head_marker`: the `body_follows` branch returns `Folded` | `card::the_head_line_is_the_name_the_title_the_meta_and_the_status`, `card::a_failed_call_ends_the_head_with_a_cross_and_shows_the_error_body`, `card::a_cjk_command_and_output_keep_the_marker_column`, `card::the_ascii_glyph_set_draws_ascii_markers_and_status`, `card::a_small_tool_is_one_line_until_it_is_expanded`, `card::the_tool_head_fold_marker_follows_the_drawn_body`, `card::the_fold_modes_decide_the_body_and_the_collapsed_meta`, `card::a_patch_block_shows_its_diff_body`, `card::an_overwrite_write_head_shows_the_removed_count`, `card::a_new_file_write_numbers_each_content_line` | ✅ (10 FAILED) |
 | FM-3 | the ascii one-liner is `* `, not the expanded `- ` | `blocks.rs::HeadMarker::glyph`: `Ascii => "* "` -> `"- "` | `card::the_tool_head_fold_marker_follows_the_drawn_body` | ✅ (1 FAILED) |
 | FM-4 | the expanded thinking header is `◻` (the shared pair), not `▼` | `render.rs`: `REASONING_MARKER` back to `"▼ "` and `reasoning_marker` back to `v`/`▼ ` | `thinking::the_thinking_fold_marker_is_the_shared_pair`, `thinking::the_expanded_thinking_has_a_header_and_a_rail`, `thinking::the_duration_is_shown_for_a_live_entry_and_absent_for_a_resumed_one`, `thinking::streaming_shows_the_spinner_not_the_duration`, `thinking::the_thinking_markers_follow_the_ascii_glyph_tier` | ✅ (5 FAILED) |
+| FM-5 | a compact tool's head is a `•` whatever its result hides (reviewer fix 1) | `blocks.rs::head_marker`: the compact early-return removed and the old `hidden > 1` fold restored, so a `read` hiding 100 lines folds to `◼` | `card::the_tool_head_fold_marker_follows_the_drawn_body` (the 100-line read row: `◼ read a.rs ✓`), `render::the_block_layout_snapshot` (the `list` head) | ✅ (2 FAILED) |
 
-4/4 caught, no misses and no equivalent mutants. FM-3 is pinned by exactly one test (the ascii row
+5/5 caught, no misses and no equivalent mutants. FM-3 is pinned by exactly one test (the ascii row
 of the table); FM-1's one-line-fold mutant also trips the cancelled-call head, which shares the
-`hidden > 0` branch.
+`hidden > 0` branch. FM-5 (reviewer fix 1, base `c2b4abd`) is the one mutation that the original
+suite missed: `a_small_tool_is_one_line_until_it_is_expanded` uses a **one-line** `read`, so the
+old `hidden > 1` clause was never exercised — the new test uses a 100-line result to pin it.
+Files restored with `cp` + `cmp` after the run.

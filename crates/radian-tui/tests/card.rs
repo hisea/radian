@@ -285,6 +285,7 @@ fn the_fold_modes_decide_the_body_and_the_collapsed_meta() {
 /// * a `collapsed` shell (the `· N lines` head) → `◼ ` / `+ `;
 /// * an `errors`-preview shell (the last rows drawn) → `◻ ` / `- `;
 /// * a one-line `read` → `• ` / `* `;
+/// * a `read` hiding a hundred lines → `• ` / `* ` (a compact tool never folds under `errors`);
 /// * the same `read` with `Ctrl-O` (the expanded fold) → `◻ ` / `- `.
 #[test]
 fn the_tool_head_fold_marker_follows_the_drawn_body() {
@@ -341,6 +342,7 @@ fn the_tool_head_fold_marker_follows_the_drawn_body() {
     }
 
     let six = (1..=6).map(|i| format!("line {i}\n")).collect::<String>();
+    let hundred = (1..=100).map(|i| format!("line {i}\n")).collect::<String>();
     for (tier, folded, open, dot) in [("unicode", "◼ ", "◻ ", "• "), ("ascii", "+ ", "- ", "* ")]
     {
         // `collapsed`: only the head shows, the six lines named in `· 6 lines` → folded.
@@ -365,6 +367,17 @@ fn the_tool_head_fold_marker_follows_the_drawn_body() {
         ));
         assert!(head.starts_with(dot), "{tier}: one-line read: {head:?}");
         assert_eq!(body, 0, "{tier}: a one-liner draws no body: {head:?}");
+
+        // A `read` hiding a hundred lines: still the `•` one-liner — a compact tool never folds
+        // under `errors`, however many lines its result hides (ADR 0035's 2026-10-16 note, option
+        // A; reviewer fix 1: this used to fold to `◼` because the result had more than one line).
+        let (head, body) = block(&mut tool_app(tier, ToolFold::Errors, "read", &hundred));
+        assert!(head.starts_with(dot), "{tier}: a 100-line read: {head:?}");
+        assert!(
+            !head.starts_with(folded),
+            "{tier}: a read never folds: {head:?}"
+        );
+        assert_eq!(body, 0, "{tier}: a compact tool draws no body: {head:?}");
 
         // The same `read` under `Ctrl-O` (the expanded fold): the body is drawn → open.
         let (head, body) = block(&mut tool_app(

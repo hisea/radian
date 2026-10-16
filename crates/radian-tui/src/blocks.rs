@@ -309,11 +309,11 @@ pub enum Frame {
 /// [`crate::footer::Glyphs::fold_marker`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadMarker {
-    /// A head-only block: a running call, a successful one-line `read`/`grep`/`glob`/`list`, or
-    /// a body the layout stripped (a cancelled call). `• ` (ascii `* `).
+    /// A head-only block: a running call, a successful `read`/`grep`/`glob`/`list` (one line
+    /// whatever its result hides), or a body the layout stripped (a cancelled call). `• `
+    /// (ascii `* `).
     Dot,
-    /// A fold hides a body of more than one line: `collapsed`'s `· N lines`, and a compact
-    /// tool's multi-line output under `errors`. `◼ ` (ascii `+ `).
+    /// A fold hides the body: `collapsed`'s `· N lines` head. `◼ ` (ascii `+ `).
     Folded,
     /// A body is drawn under the head: the `errors` preview's last rows, an error body, a
     /// `Ctrl-O`/search expansion, an expanded thinking channel. `◻ ` (ascii `- `).
@@ -339,30 +339,35 @@ impl HeadMarker {
 /// only the renderer, walking the transcript, knows whether the result lays out any line
 /// ([`crate::render::visible_lines`] passes the pair's cached count).
 ///
-/// The three cases, in order:
+/// The cases, in order:
 ///
 /// * a body is drawn under the head → [`HeadMarker::Open`] (`◻`);
-/// * the block is explicitly folded (`tui.display.tool_output = "collapsed"`, or a compact
-///   tool's multi-line output under `errors`) → [`HeadMarker::Folded`] (`◼`);
-/// * otherwise it is a one-liner (a running call, a one-line `read`/`grep`/`glob`/`list`, an
-///   empty body) → [`HeadMarker::Dot`] (`•`).
+/// * a compact tool (`read`/`grep`/`glob`/`list`, [`crate::tools::ToolRender::compact`]) with no
+///   body drawn → [`HeadMarker::Dot`] (`•`), however many lines its result hides: the head is
+///   the whole block until an error or `Ctrl-O` draws a body;
+/// * every **other** tool that is explicitly folded (`tui.display.tool_output = "collapsed"`)
+///   with a hidden body → [`HeadMarker::Folded`] (`◼`);
+/// * otherwise it is a one-liner (a running call, an empty or cancelled result) →
+///   [`HeadMarker::Dot`] (`•`).
 pub fn head_marker(entry: &Entry, modes: DisplayModes, body_follows: bool) -> HeadMarker {
     if body_follows {
         return HeadMarker::Open;
+    }
+    let card = entry.tool.as_deref();
+    // A compact tool's successful call is one head line (ADR 0028): its
+    // result is never laid out under `errors`, so the head is a `•` whatever the result's size,
+    // never a fold (ADR 0035's 2026-10-16 note, option A).
+    if card.is_some_and(|card| tools::renderer_for(&card.name).compact) {
+        return HeadMarker::Dot;
     }
     // The head's own `· N lines` (`head_rows`) appears under exactly this condition, so the fold
     // marker is shown exactly when the head names the hidden count.
     let explicitly_folded =
         modes.tools.fold == tools::ToolFold::Collapsed && entry.fold_override != Some(true);
-    // `result_lines` is the paired result's body line count (set at pairing time). It is `None`
-    // while the call runs and the count is the whole content a compact tool hides under
-    // `errors`; a single hidden line is a one-liner, more is a fold.
-    let hidden = entry
-        .tool
-        .as_deref()
-        .and_then(|card| card.result_lines)
-        .unwrap_or(0);
-    if (explicitly_folded && hidden > 0) || hidden > 1 {
+    // `result_lines` is the paired result's body line count (set at pairing time); it is `None`
+    // while the call runs, so a running head is a one-liner.
+    let hidden = card.and_then(|card| card.result_lines).unwrap_or(0);
+    if explicitly_folded && hidden > 0 {
         HeadMarker::Folded
     } else {
         HeadMarker::Dot

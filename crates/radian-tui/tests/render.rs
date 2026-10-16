@@ -2210,9 +2210,10 @@ fn the_block_layout_snapshot() {
         "│ --- stdout ---".to_string(),
         "│ boom".to_string(),
         "".to_string(), // the gap
-        // The `list` block: the head with the fold marker (its two-entry table is hidden under
-        // `errors`, so a body of more than one line folds, ADR 0035's 2026-10-16 note).
-        format!("◼ list src (2 entries) {}", status[1]),
+        // The `list` block: a compact tool, so its head is the `•` one-liner whatever its result
+        // hides (ADR 0035's 2026-10-16 note, option A; its two-entry table is not laid out under
+        // `errors`).
+        format!("• list src (2 entries) {}", status[1]),
         "".to_string(), // the gap
         "* profile: workspace · sandbox macos-seatbelt".to_string(),
         "".to_string(), // the gap above the rule line
