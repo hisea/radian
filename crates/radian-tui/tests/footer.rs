@@ -180,15 +180,17 @@ fn the_context_thresholds_change_the_style() {
         // The default `full` preset uses the text `context`; this test is about the bar, so
         // it asks for `context_bar` explicitly.
         app.apply_footer(&rows(vec![item("context_bar")]));
-        app.projection.set_context_window(Some(1000));
-        app.projection.set_request_started(Some(BudgetReport {
-            source: UsageSource::Estimated,
-            projected_tokens: tokens,
-            input_budget_tokens: 1000,
-            request_bytes: 0,
-            baseline_input_tokens: None,
-            estimated_growth_tokens: None,
-        }));
+        app.session.projection.set_context_window(Some(1000));
+        app.session
+            .projection
+            .set_request_started(Some(BudgetReport {
+                source: UsageSource::Estimated,
+                projected_tokens: tokens,
+                input_budget_tokens: 1000,
+                request_bytes: 0,
+                baseline_input_tokens: None,
+                estimated_growth_tokens: None,
+            }));
         let terminal = render(&mut app, 80, 12);
         // One configured row: the footer is the last line.
         let cell = fg_at(&terminal, 11, "━").expect("the filled bar cell");
@@ -222,15 +224,17 @@ fn the_context_bar_takes_width_fill_and_empty() {
     };
     let mut app = App::new("mock", "s");
     app.apply_footer(&config);
-    app.projection.set_context_window(Some(1000));
-    app.projection.set_request_started(Some(BudgetReport {
-        source: UsageSource::Estimated,
-        projected_tokens: 500,
-        input_budget_tokens: 1000,
-        request_bytes: 0,
-        baseline_input_tokens: None,
-        estimated_growth_tokens: None,
-    }));
+    app.session.projection.set_context_window(Some(1000));
+    app.session
+        .projection
+        .set_request_started(Some(BudgetReport {
+            source: UsageSource::Estimated,
+            projected_tokens: 500,
+            input_budget_tokens: 1000,
+            request_bytes: 0,
+            baseline_input_tokens: None,
+            estimated_growth_tokens: None,
+        }));
     let terminal = render(&mut app, 40, 12);
     assert!(
         row(&terminal, 11).contains("==.."),
@@ -398,7 +402,7 @@ fn publish(app: &App, item: &str, text: &str) {
 #[test]
 fn the_worktree_item_shows_only_when_the_store_has_one() {
     let mut app = App::new("mock", "s");
-    app.git_branch = None;
+    app.session.git_branch = None;
     app.apply_footer(&rows(vec![item("model"), item("worktree")]));
     let before = render(&mut app, 80, 12);
     assert!(
@@ -533,8 +537,9 @@ fn the_speed_and_elapsed_items_use_the_injected_clock() {
     let base = Instant::now();
     let mut app = App::new("mock", "s");
     app.apply_footer(&rows(vec![item("speed"), item("elapsed")]));
-    app.timer.request_started(base);
-    app.timer
+    app.session.timer.request_started(base);
+    app.session
+        .timer
         .response_finished(base + Duration::from_secs(2), Some(100));
     app.set_now(base + Duration::from_secs(9));
     let terminal = render(&mut app, 80, 12);
@@ -544,7 +549,7 @@ fn the_speed_and_elapsed_items_use_the_injected_clock() {
 
     // A live generation ticks `elapsed` but leaves `speed` at the last finished value.
     let start = base + Duration::from_secs(20);
-    app.timer.request_started(start);
+    app.session.timer.request_started(start);
     app.set_now(start + Duration::from_millis(1_500));
     let terminal = render(&mut app, 80, 12);
     let line = row(&terminal, 11);
@@ -568,7 +573,8 @@ fn a_compaction_usage_reaches_the_footer_totals() {
         tiers: Vec::new(),
     }));
     let (tx, _rx) = channel();
-    let sink = radian_tui::events::ProjectionSink::new(tx, std::sync::Arc::clone(&app.projection));
+    let sink =
+        radian_tui::events::ProjectionSink::new(tx, std::sync::Arc::clone(&app.session.projection));
     sink.emit(agent_core::AgentEvent::CompactionUsage {
         revision: 1,
         model: "current".into(),
@@ -581,7 +587,7 @@ fn a_compaction_usage_reaches_the_footer_totals() {
     });
 
     // The projection holds the exact micro-dollars: 50000 x $3 + 2000 x $15 per Mtok = $0.18.
-    assert_eq!(app.projection.read().cost_micros(), Some(180_000));
+    assert_eq!(app.session.projection.read().cost_micros(), Some(180_000));
     let terminal = render(&mut app, 120, 12);
     let line = row(&terminal, 11);
     // The summary's tokens are in the totals (50K in, 2K out) ...
@@ -601,8 +607,12 @@ fn a_compaction_usage_reaches_the_footer_totals() {
             ..Default::default()
         }),
     });
-    assert_eq!(app.projection.read().usage_input(), Some(100_000));
-    assert_eq!(app.projection.read().cost_micros(), Some(330_000), "$0.33");
+    assert_eq!(app.session.projection.read().usage_input(), Some(100_000));
+    assert_eq!(
+        app.session.projection.read().cost_micros(),
+        Some(330_000),
+        "$0.33"
+    );
 }
 
 /// ADR 0027: a call with a non-zero counter the catalog cannot price
@@ -618,14 +628,14 @@ fn an_incomplete_fee_is_marked() {
         cache_write: None, // the catalog lists no cache-write rate
         tiers: Vec::new(),
     }));
-    app.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&agent_core::ModelUsage {
         input: Some(10_000),
         cache_write: Some(10_000),
         input_includes_cache: Some(false),
         ..Default::default()
     });
 
-    assert!(app.projection.read().cost_incomplete());
+    assert!(app.session.projection.read().cost_incomplete());
     let terminal = render(&mut app, 120, 12);
     let line = row(&terminal, 11);
     assert!(line.contains("≥$0.030"), "the incomplete marker: {line:?}");
@@ -645,7 +655,7 @@ fn an_estimated_fee_shows_the_tilde_and_wins_over_incomplete() {
         tiers: Vec::new(),
     };
     // The resume path for an old record: re-priced with today's catalog and marked estimated.
-    app.projection.add_usage_at(
+    app.session.projection.add_usage_at(
         Some(&price),
         &agent_core::ModelUsage {
             input: Some(10_000),
@@ -655,7 +665,7 @@ fn an_estimated_fee_shows_the_tilde_and_wins_over_incomplete() {
         },
     );
 
-    let read = app.projection.read();
+    let read = app.session.projection.read();
     assert!(read.cost_estimated() && read.cost_incomplete());
     drop(read);
     let terminal = render(&mut app, 120, 12);
@@ -683,7 +693,7 @@ fn the_cost_item_uses_the_model_price() {
     let terminal = render(&mut app, 80, 12);
     assert!(!row(&terminal, 11).contains('$'), "{}", row(&terminal, 11));
 
-    app.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&agent_core::ModelUsage {
         input: Some(1_000_000),
         output: Some(100_000),
         input_includes_cache: Some(false),
@@ -695,10 +705,13 @@ fn the_cost_item_uses_the_model_price() {
     // A session with no price at all hides, even with tokens counted.
     let mut unpriced = App::new("mock", "s");
     unpriced.apply_footer(&rows(vec![item("cost")]));
-    unpriced.projection.add_usage(&agent_core::ModelUsage {
-        input: Some(1_000_000),
-        ..Default::default()
-    });
+    unpriced
+        .session
+        .projection
+        .add_usage(&agent_core::ModelUsage {
+            input: Some(1_000_000),
+            ..Default::default()
+        });
     let terminal = render(&mut unpriced, 80, 12);
     assert!(!row(&terminal, 11).contains('$'), "{}", row(&terminal, 11));
 }
@@ -718,7 +731,7 @@ fn a_cache_hit_is_billed_once_at_the_cache_rate() {
         tiers: Vec::new(),
     }));
     app.apply_footer(&rows(vec![item("cost")]));
-    app.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&agent_core::ModelUsage {
         input: Some(200_000),
         output: Some(2_000),
         cache_read: Some(190_000),
@@ -748,7 +761,7 @@ fn a_model_switch_prices_only_the_calls_after_it() {
         input_includes_cache: Some(false),
         ..Default::default()
     };
-    app.projection.add_usage(&cheap);
+    app.session.projection.add_usage(&cheap);
     app.set_model_price(Some(radian_host::ModelPrice {
         input: 3_000_000, // the expensive one: $3 / Mtok
         output: 15_000_000,
@@ -756,7 +769,7 @@ fn a_model_switch_prices_only_the_calls_after_it() {
         cache_write: None,
         tiers: Vec::new(),
     }));
-    app.projection.add_usage(&cheap);
+    app.session.projection.add_usage(&cheap);
 
     let terminal = render(&mut app, 80, 12);
     // $0.15 (at the old price) + $3.00 (at the new one) — not 2M x $3 = $6.00.
@@ -776,7 +789,7 @@ fn an_all_zero_response_hides_the_cost() {
         tiers: Vec::new(),
     }));
     app.apply_footer(&rows(vec![item("cost")]));
-    app.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&agent_core::ModelUsage {
         input: Some(0),
         output: Some(0),
         cache_read: Some(0),
@@ -792,7 +805,7 @@ fn an_all_zero_response_hides_the_cost() {
     );
 
     // Once a real call lands, the fee appears (and the earlier zero added nothing).
-    app.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&agent_core::ModelUsage {
         input: Some(1_000_000),
         input_includes_cache: Some(false),
         ..Default::default()
@@ -806,7 +819,7 @@ fn an_all_zero_response_hides_the_cost() {
 #[test]
 fn the_cache_tokens_are_shown() {
     let mut app = App::new("mock", "s");
-    app.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&agent_core::ModelUsage {
         input: Some(19_000),
         output: Some(760),
         cache_read: Some(33_000),
@@ -820,7 +833,7 @@ fn the_cache_tokens_are_shown() {
     assert!(line.contains("33K"), "the cache total: {line:?}");
 
     let mut none = App::new("mock", "s");
-    none.projection.add_usage(&agent_core::ModelUsage {
+    none.session.projection.add_usage(&agent_core::ModelUsage {
         input: Some(5),
         ..Default::default()
     });
@@ -836,7 +849,7 @@ fn the_cache_tokens_are_shown() {
 #[test]
 fn the_cache_write_tokens_show_only_when_the_format_asks_for_them() {
     let mut app = App::new("mock", "s");
-    app.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&agent_core::ModelUsage {
         input: Some(10_000),
         output: Some(760),
         cache_read: Some(33_000),
@@ -870,7 +883,7 @@ fn the_cache_write_tokens_show_only_when_the_format_asks_for_them() {
 
     // A provider that never reported a write shows `-`, never a fabricated 0.
     let mut none = App::new("mock", "s");
-    none.projection.add_usage(&agent_core::ModelUsage {
+    none.session.projection.add_usage(&agent_core::ModelUsage {
         input: Some(10_000),
         cache_read: Some(33_000),
         ..Default::default()
@@ -919,7 +932,7 @@ fn the_git_branch_item_shows_the_change_counts() {
 #[test]
 fn the_cwd_repo_and_worktree_placeholders() {
     let mut app = App::new("mock", "s");
-    app.cwd = Some(std::path::PathBuf::from("/tmp/my-project"));
+    app.session.cwd = Some(std::path::PathBuf::from("/tmp/my-project"));
     app.apply_footer(&rows(vec![TuiFooterItemConfig {
         id: "cwd".to_string(),
         format: Some("{repo}/{worktree}".to_string()),
@@ -945,15 +958,17 @@ fn the_context_auto_marker_follows_the_switch() {
         format: Some("{percent}%{auto}".to_string()),
         ..Default::default()
     }]));
-    app.projection.set_context_window(Some(1000));
-    app.projection.set_request_started(Some(BudgetReport {
-        source: UsageSource::Estimated,
-        projected_tokens: 100,
-        input_budget_tokens: 1000,
-        request_bytes: 0,
-        baseline_input_tokens: None,
-        estimated_growth_tokens: None,
-    }));
+    app.session.projection.set_context_window(Some(1000));
+    app.session
+        .projection
+        .set_request_started(Some(BudgetReport {
+            source: UsageSource::Estimated,
+            projected_tokens: 100,
+            input_budget_tokens: 1000,
+            request_bytes: 0,
+            baseline_input_tokens: None,
+            estimated_growth_tokens: None,
+        }));
     app.set_auto_compact(true);
     let on = render(&mut app, 80, 12);
     assert!(row(&on, 11).contains('~'), "{}", row(&on, 11));
@@ -984,8 +999,9 @@ fn the_new_items_have_glyphs_in_all_three_sets() {
         app.apply_footer(&config);
         // Give speed/elapsed a value so they render.
         let base = std::time::Instant::now();
-        app.timer.request_started(base);
-        app.timer
+        app.session.timer.request_started(base);
+        app.session
+            .timer
             .response_finished(base + std::time::Duration::from_secs(1), Some(10));
         app.set_now(base + std::time::Duration::from_secs(2));
         let terminal = render(&mut app, 80, 12);
@@ -1272,21 +1288,23 @@ fn the_deck_numbers_row_matches_the_sample() {
         cache_write: None,
         tiers: Vec::new(),
     }));
-    app.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&agent_core::ModelUsage {
         input: Some(15_000_000),
         output: Some(2_600_000),
         cache_read: Some(1_962_000_000),
         ..Default::default()
     });
-    app.projection.set_context_window(Some(1_000_000));
-    app.projection.set_request_started(Some(BudgetReport {
-        source: UsageSource::Estimated,
-        projected_tokens: 413_000,
-        input_budget_tokens: 1_000_000,
-        request_bytes: 0,
-        baseline_input_tokens: None,
-        estimated_growth_tokens: None,
-    }));
+    app.session.projection.set_context_window(Some(1_000_000));
+    app.session
+        .projection
+        .set_request_started(Some(BudgetReport {
+            source: UsageSource::Estimated,
+            projected_tokens: 413_000,
+            input_budget_tokens: 1_000_000,
+            request_bytes: 0,
+            baseline_input_tokens: None,
+            estimated_growth_tokens: None,
+        }));
     let terminal = render(&mut app, 100, 12);
     // The numbers row is right-aligned; the content itself is the sample.
     assert_eq!(
@@ -1313,15 +1331,17 @@ fn the_unicode_footer_snapshot_at_80_and_120_columns() {
             context_line: Some("percentage".to_string()),
             ..Default::default()
         });
-        app.projection.set_context_window(Some(1_000_000));
-        app.projection.set_request_started(Some(BudgetReport {
-            source: UsageSource::Estimated,
-            projected_tokens: 413_000,
-            input_budget_tokens: 1_000_000,
-            request_bytes: 0,
-            baseline_input_tokens: None,
-            estimated_growth_tokens: None,
-        }));
+        app.session.projection.set_context_window(Some(1_000_000));
+        app.session
+            .projection
+            .set_request_started(Some(BudgetReport {
+                source: UsageSource::Estimated,
+                projected_tokens: 413_000,
+                input_budget_tokens: 1_000_000,
+                request_bytes: 0,
+                baseline_input_tokens: None,
+                estimated_growth_tokens: None,
+            }));
         let terminal = render(&mut app, width, 12);
         let identity = row(&terminal, 10);
         let numbers = row(&terminal, 11);
@@ -1360,7 +1380,7 @@ fn the_other_tiers_keep_the_ascii_token_arrows() {
             }],
             ..Default::default()
         });
-        app.projection.add_usage(&agent_core::ModelUsage {
+        app.session.projection.add_usage(&agent_core::ModelUsage {
             input: Some(15_000_000),
             output: Some(2_600_000),
             ..Default::default()
@@ -1429,15 +1449,17 @@ fn the_context_fill_draws_the_usage_in_the_gap() {
         ..Default::default()
     });
     // 250 of 1000 tokens: a quarter of the gap is the used part.
-    app.projection.set_context_window(Some(1_000));
-    app.projection.set_request_started(Some(BudgetReport {
-        source: UsageSource::Estimated,
-        projected_tokens: 250,
-        input_budget_tokens: 1_000,
-        request_bytes: 0,
-        baseline_input_tokens: None,
-        estimated_growth_tokens: None,
-    }));
+    app.session.projection.set_context_window(Some(1_000));
+    app.session
+        .projection
+        .set_request_started(Some(BudgetReport {
+            source: UsageSource::Estimated,
+            projected_tokens: 250,
+            input_budget_tokens: 1_000,
+            request_bytes: 0,
+            baseline_input_tokens: None,
+            estimated_growth_tokens: None,
+        }));
     let terminal = render(&mut app, 60, 8);
     let buffer = terminal.backend().buffer();
     // The footer is the layout's last row (the input box's own rule is `─` too).
@@ -1483,15 +1505,17 @@ fn the_context_fill_is_off_by_default() {
         }],
         ..Default::default()
     });
-    app.projection.set_context_window(Some(1_000));
-    app.projection.set_request_started(Some(BudgetReport {
-        source: UsageSource::Estimated,
-        projected_tokens: 250,
-        input_budget_tokens: 1_000,
-        request_bytes: 0,
-        baseline_input_tokens: None,
-        estimated_growth_tokens: None,
-    }));
+    app.session.projection.set_context_window(Some(1_000));
+    app.session
+        .projection
+        .set_request_started(Some(BudgetReport {
+            source: UsageSource::Estimated,
+            projected_tokens: 250,
+            input_budget_tokens: 1_000,
+            request_bytes: 0,
+            baseline_input_tokens: None,
+            estimated_growth_tokens: None,
+        }));
     let terminal = render(&mut app, 60, 8);
     assert!(!row(&terminal, 7).contains('─'), "no fill by default");
 }

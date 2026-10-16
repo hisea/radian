@@ -79,16 +79,16 @@ fn shift_up_scrolls_the_transcript() {
     let mut app = App::new("m", "s");
     app.set_viewport(4, 40);
     app.scroll_to_bottom();
-    let bottom = app.scroll;
+    let bottom = app.session.scroll;
     app.on_key(shift(KeyCode::Up));
     assert!(
-        app.scroll < bottom,
+        app.session.scroll < bottom,
         "shift-up scrolls the transcript by a line"
     );
     assert!(!app.is_following());
     // A plain Up with an empty input browses history (a no-op here) and never scrolls.
     app.on_key(key(KeyCode::Up));
-    assert_eq!(app.scroll, bottom - 1);
+    assert_eq!(app.session.scroll, bottom - 1);
 }
 
 #[test]
@@ -125,7 +125,10 @@ fn enter_clears_the_input_and_records_every_submitted_line() {
     app.input.set_text("/help");
     assert!(app.on_key(key(KeyCode::Enter)).effects.is_empty());
     assert!(app.input.is_empty());
-    assert_eq!(app.history, vec!["hello".to_string(), "/help".to_string()]);
+    assert_eq!(
+        app.session.history,
+        vec!["hello".to_string(), "/help".to_string()]
+    );
 }
 
 #[test]
@@ -162,5 +165,5 @@ fn resume_prefills_the_history_from_user_messages_only() {
     let user = agent_core::Message::user("from the user");
     let assistant = agent_core::Message::assistant("from the model");
     app.prefill_history(&[user, assistant]);
-    assert_eq!(app.history, vec!["from the user".to_string()]);
+    assert_eq!(app.session.history, vec!["from the user".to_string()]);
 }

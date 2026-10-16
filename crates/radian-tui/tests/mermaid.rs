@@ -38,7 +38,8 @@ fn modes(reasoning: ReasoningMode, mermaid: bool) -> DisplayModes {
 }
 
 fn assistant(app: &mut App, text: &str) {
-    app.entries
+    app.session
+        .entries
         .push(radian_tui::app::Entry::new(EntryKind::Assistant, text));
 }
 
@@ -187,7 +188,7 @@ fn a_width_change_recounts_and_redraws() {
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
     assistant(&mut app, &fenced(FLOW, true));
-    let entry = &app.entries[0];
+    let entry = &app.session.entries[0];
     let blocks = blocks::parse_blocks(entry.text.as_str());
     for width in [80usize, 16] {
         let modes = modes(ReasoningMode::Expanded, true);
@@ -202,7 +203,7 @@ fn a_width_change_recounts_and_redraws() {
     // cache; it must not reuse the 80-column diagram at 16 (the width is in the key). This
     // runs before any 16-column mutable pass, so the cache still holds the wide render.
     let laid_out_16 = blocks::layout(
-        &app.entries[0],
+        &app.session.entries[0],
         &blocks,
         modes(ReasoningMode::Expanded, true),
         16,
@@ -220,7 +221,7 @@ fn a_width_change_recounts_and_redraws() {
     // The **cached** count follows the width too: after the 80-column render filled the
     // diagram cache, the 16-column count must be the narrow layout's, or virtualization
     // would count rows the renderer does not draw.
-    let entry = &mut app.entries[0];
+    let entry = &mut app.session.entries[0];
     let cached_16 = blocks::line_count_cached(entry, modes(ReasoningMode::Expanded, true), 16);
     let laid_out_16 =
         blocks::layout(entry, &blocks, modes(ReasoningMode::Expanded, true), 16).len();

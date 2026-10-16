@@ -47,17 +47,17 @@ fn scrolled_app() -> App {
 fn a_wheel_up_scrolls_and_keeps_the_input_box() {
     let mut app = scrolled_app();
     app.input.set_text("half-written draft");
-    app.history.push("previous command".into());
-    let before = app.scroll;
+    app.session.history.push("previous command".into());
+    let before = app.session.scroll;
     let result = app.mouse_scroll(MouseScrollDirection::Up);
     assert!(result.dirty);
-    assert_eq!(app.scroll, before - MOUSE_WHEEL_LINES);
+    assert_eq!(app.session.scroll, before - MOUSE_WHEEL_LINES);
     assert_eq!(
         app.input.text(),
         "half-written draft",
         "the wheel must not reach the input history"
     );
-    assert_eq!(app.history_cursor, None);
+    assert_eq!(app.session.history_cursor, None);
 }
 
 /// A wheel-down notch scrolls back toward the bottom.
@@ -65,9 +65,9 @@ fn a_wheel_up_scrolls_and_keeps_the_input_box() {
 fn a_wheel_down_scrolls_back() {
     let mut app = scrolled_app();
     app.mouse_scroll(MouseScrollDirection::Up);
-    let up = app.scroll;
+    let up = app.session.scroll;
     app.mouse_scroll(MouseScrollDirection::Down);
-    assert_eq!(app.scroll, up + MOUSE_WHEEL_LINES);
+    assert_eq!(app.session.scroll, up + MOUSE_WHEEL_LINES);
     assert!(app.is_following(), "back at the bottom pins the view again");
 }
 
@@ -76,10 +76,10 @@ fn a_wheel_down_scrolls_back() {
 fn a_modal_swallows_the_wheel() {
     let mut app = scrolled_app();
     app.update(Input::Pending(Some(Box::new(view())), 1));
-    let before = app.scroll;
+    let before = app.session.scroll;
     let result = app.mouse_scroll(MouseScrollDirection::Up);
     assert!(!result.dirty);
-    assert_eq!(app.scroll, before);
+    assert_eq!(app.session.scroll, before);
 }
 
 /// An overlay scrolls itself: the picker's selection moves, and the transcript does not.
@@ -108,7 +108,7 @@ fn a_picker_overlay_scrolls_its_own_selection() {
         app.picker().and_then(Picker::resume_hint).as_deref(),
         Some("--resume alpha")
     );
-    let before = app.scroll;
+    let before = app.session.scroll;
     app.mouse_scroll(MouseScrollDirection::Down);
     assert_eq!(
         app.picker().and_then(Picker::resume_hint).as_deref(),
@@ -116,7 +116,7 @@ fn a_picker_overlay_scrolls_its_own_selection() {
         "the wheel moved the picker's selection"
     );
     assert_eq!(
-        app.scroll, before,
+        app.session.scroll, before,
         "the transcript behind the picker did not move"
     );
 }

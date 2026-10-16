@@ -21,7 +21,8 @@ fn submit(app: &mut App, line: &str) -> Vec<Effect> {
 }
 
 fn notices(app: &App) -> Vec<String> {
-    app.entries
+    app.session
+        .entries
         .iter()
         .filter(|entry| entry.kind == radian_tui::EntryKind::Notice)
         .map(|entry| entry.text.clone())
@@ -85,7 +86,7 @@ fn every_slash_command_produces_its_effect() {
 #[test]
 fn fork_is_refused_while_a_turn_runs() {
     let mut app = App::new("m", "s");
-    app.projection.set_turn(TurnState::Running);
+    app.session.projection.set_turn(TurnState::Running);
     let effects = submit(&mut app, "/fork");
     assert!(effects.is_empty(), "no fork while running: {effects:?}");
     assert!(
@@ -207,11 +208,11 @@ fn an_input_that_changes_nothing_is_not_dirty() {
     let none = app.on_key(key(KeyCode::F(5)));
     assert!(!none.dirty && none.effects.is_empty());
     // Cancel and quit leave the frame alone (the turn state changes when the turn ends).
-    app.projection.set_turn(TurnState::Running);
+    app.session.projection.set_turn(TurnState::Running);
     let cancel = app.on_key(ctrl(KeyCode::Char('c')));
     assert_eq!(cancel.effects, vec![Effect::Cancel]);
     assert!(!cancel.dirty, "cancelling does not repaint");
-    app.projection.set_turn(TurnState::Idle);
+    app.session.projection.set_turn(TurnState::Idle);
     // An idle Ctrl-C now arms the 2 s quit window: that *does* repaint
     // (the hint appears), and the second press quits without repainting.
     let arm = app.on_key(ctrl(KeyCode::Char('c')));
@@ -458,7 +459,7 @@ fn escaping_the_trust_modal_untrusts_this_session_only() {
 #[test]
 fn esc_with_an_empty_input_and_a_running_turn_cancels() {
     let mut app = App::new("m", "s");
-    app.projection.set_turn(TurnState::Running);
+    app.session.projection.set_turn(TurnState::Running);
     let result = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(result.effects.as_slice(), [Effect::Cancel]),
