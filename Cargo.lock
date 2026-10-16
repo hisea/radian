@@ -2354,6 +2354,7 @@ dependencies = [
  "futures-util",
  "libc",
  "radian-coding",
+ "radian-host",
  "radian-memory",
  "radian-permissions",
  "radian-runtime",
