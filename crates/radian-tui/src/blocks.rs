@@ -2017,15 +2017,17 @@ fn cell_width(ch: char) -> usize {
 fn wrap_count(line: &str, first_width: usize, width: usize) -> usize {
     let mut rows = 1usize;
     let mut used = 0usize;
+    let mut any = false;
     let mut limit = first_width.max(1);
     for ch in line.chars() {
         let w = cell_width(ch);
-        if used + w > limit && used > 0 {
+        if used + w > limit && any {
             rows += 1;
             used = 0;
             limit = width.max(1);
         }
         used += w;
+        any = true;
     }
     rows
 }
