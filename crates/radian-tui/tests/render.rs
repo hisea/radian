@@ -12,7 +12,7 @@ use radian_tui::tools::DisplayModes;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 
 /// One streaming chunk the way the loop does it: the projection accumulates the delta, then the
 /// snapshot becomes the live entries (ADR 0023 U2).
@@ -496,7 +496,7 @@ fn a_long_option_list_scrolls_to_keep_the_cursor_visible() {
     // The panel lays the whole list out; the frame clips it to the modal height.
     form.answers[0].cursor = 11;
     let shown = panel_text(&form, 40);
-    assert!(shown.contains("❯ ○ Option 11"), "{shown}");
+    assert!(shown.contains("❯ ☐ Option 11"), "{shown}");
     assert!(shown.contains("Option 0"), "{shown}");
 }
 
@@ -2684,7 +2684,7 @@ fn a_pending_ask_is_one_line_and_becomes_the_block_once_answered() {
         "the same entry draws the block, keeping its marker: {answered}"
     );
     assert!(answered.contains("Pick one"), "{answered}");
-    assert!(answered.contains("◉ Option A"), "{answered}");
+    assert!(answered.contains("☑ Option A"), "{answered}");
     assert!(
         !answered.contains("answering below"),
         "the pending line is gone: {answered}"
@@ -2740,6 +2740,10 @@ fn a_declined_ask_shows_the_status_inside_the_block() {
         "exactly one block: {declined}"
     );
 }
+
+/// `wrap_line_count` (the counting-only path, used to measure every entry on the first frame
+/// and after a resize) must agree with `wrap` for the same corpus, or the transcript's total
+/// line count and the virtualized window disagree.
 #[test]
 fn the_line_count_matches_the_wrap() {
     let corpus = [
@@ -2768,4 +2772,186 @@ fn the_line_count_matches_the_wrap() {
             "{text:?} at {width}"
         );
     }
+}
+
+// ---------- the ask markers (ADR 0024 implementation note) ----------
+
+/// A question of `kind` with `options` and `allow_other`.
+fn ask_question(
+    kind: QuestionKind,
+    options: Vec<radian_coding::QuestionOption>,
+    allow_other: bool,
+) -> radian_coding::Question {
+    radian_coding::Question {
+        id: "q".into(),
+        header: None,
+        prompt: "Pick".into(),
+        kind,
+        options,
+        allow_other,
+        required: true,
+    }
+}
+
+/// A panel over one question, laid out at `width`, as text (the same call the frame makes).
+fn ask_panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> String {
+    text_of(&render::question_panel(
+        form,
+        "session",
+        width,
+        usize::MAX,
+        &radian_tui::theme::Theme::dark(),
+        radian_tui::footer::Glyphs::Unicode,
+    ))
+}
+
+/// The chosen option's marker is drawn in its own span and is never bold: the owner's font
+/// draws a glyph missing from its bold face at a smaller size (ADR 0024 note).
+#[test]
+fn the_ask_panel_marker_is_never_bold() {
+    let mut form = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Chosen"), option("b", "Other option")],
+            true,
+        )],
+    );
+    form.answers[0].selected = vec!["a".into()];
+    let lines = render::question_panel(
+        &form,
+        "session",
+        60,
+        usize::MAX,
+        &radian_tui::theme::Theme::dark(),
+        radian_tui::footer::Glyphs::Unicode,
+    );
+    let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
+    terminal
+        .draw(|frame| {
+            frame.render_widget(ratatui::widgets::Paragraph::new(lines), frame.area());
+        })
+        .unwrap();
+
+    let marker = style_of(&terminal, "☑").expect("the chosen marker cell");
+    assert!(
+        !marker.add_modifier.contains(Modifier::BOLD),
+        "the chosen marker must not be bold: {marker:?}"
+    );
+    let label = style_of(&terminal, "Chosen").expect("the label cell");
+    assert!(
+        label.add_modifier.contains(Modifier::BOLD),
+        "the label keeps its chosen (accent) role: {label:?}"
+    );
+    // The cursor is not bold either.
+    let cursor = style_of(&terminal, "❯").expect("the cursor cell");
+    assert!(
+        !cursor.add_modifier.contains(Modifier::BOLD),
+        "the cursor must not be bold: {cursor:?}"
+    );
+}
+
+/// Single, multi and `Other` all draw the same checkbox pair (ADR 0024 note): the
+/// old circle pair is gone.
+#[test]
+fn the_ask_panel_uses_one_checkbox_pair_for_single_multi_and_other() {
+    let mut single = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Alpha"), option("b", "Beta")],
+            true,
+        )],
+    );
+    single.answers[0].selected = vec!["a".into()];
+    let text = ask_panel_text(&single, 60);
+    assert!(text.contains("☑ Alpha"), "the chosen single option: {text}");
+    assert!(
+        text.contains("☐ Beta"),
+        "the unchosen single option: {text}"
+    );
+    assert!(text.contains("☐ Other (type your own)"), "{text}");
+    assert!(
+        !text.contains('○')
+            && !text.contains('◉')
+            && !text.contains("(*)")
+            && !text.contains("( )"),
+        "no circle markers: {text}"
+    );
+
+    let mut multi = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Multi,
+            vec![option("a", "Alpha"), option("b", "Beta")],
+            false,
+        )],
+    );
+    multi.answers[0].selected = vec!["a".into()];
+    let text = ask_panel_text(&multi, 60);
+    assert!(text.contains("☑ Alpha"), "{text}");
+    assert!(text.contains("☐ Beta"), "{text}");
+    assert!(!text.contains('○') && !text.contains('◉'), "{text}");
+
+    let mut other = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Alpha")],
+            true,
+        )],
+    );
+    other.answers[0].other = true;
+    other.answers[0].cursor = 1;
+    let text = ask_panel_text(&other, 60);
+    assert!(
+        text.contains("☑ Other"),
+        "the chosen Other row uses the checked box, not a circle: {text}"
+    );
+}
+
+/// The panel and the transcript block draw the markers from the same source, so both show the
+/// checkbox pair (ADR 0024 note).
+#[test]
+fn the_ask_panel_and_the_transcript_block_use_the_same_markers() {
+    let mut form = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Alpha"), option("b", "Beta")],
+            false,
+        )],
+    );
+    form.answers[0].selected = vec!["a".into()];
+    let panel = ask_panel_text(&form, 60);
+    assert!(panel.contains('☑') && panel.contains('☐'), "{panel}");
+
+    let mut card = radian_tui::tools::ToolCard::new(
+        "c1",
+        "ask_user",
+        serde_json::json!({"questions":[{"id":"q","kind":"single","options":[
+            {"id":"a","label":"Alpha"},{"id":"b","label":"Beta"}]}]}),
+    );
+    card.structured = Some(serde_json::json!({"answers":[{"id":"q","selected":["a"]}]}));
+    let mut entry = radian_tui::app::Entry::new(radian_tui::app::EntryKind::ToolResult, "result");
+    entry.tool = Some(Box::new(card));
+    let block = radian_tui::blocks::layout(&entry, &[], EXPANDED, 60);
+    let block_text: String = block
+        .iter()
+        .map(|line| line.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        block_text.contains('☑') && block_text.contains('☐'),
+        "the transcript block uses the same pair: {block_text}"
+    );
+    assert!(
+        !block_text.contains('○') && !block_text.contains('◉'),
+        "{block_text}"
+    );
 }

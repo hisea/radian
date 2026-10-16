@@ -1353,25 +1353,27 @@ fn layout_unstripped(
 }
 
 /// The box and mark glyphs of the `ask_user` block (ADR 0024 R1): unicode by
-/// default, pure ASCII under `glyphs = ascii`.
-struct AskGlyphs {
-    top_left: char,
-    top_right: char,
-    bottom_left: char,
-    bottom_right: char,
-    horizontal: char,
-    vertical: char,
-    tee_left: char,
-    tee_right: char,
-    single_on: &'static str,
-    single_off: &'static str,
-    multi_on: &'static str,
-    multi_off: &'static str,
-    desc: &'static str,
+/// default, pure ASCII under `glyphs = ascii`. The one marker source for the transcript block
+/// **and** the panel (ADR 0024 implementation note): single, multi and `Other`
+/// share the checkbox pair.
+pub(crate) struct AskGlyphs {
+    pub(crate) top_left: char,
+    pub(crate) top_right: char,
+    pub(crate) bottom_left: char,
+    pub(crate) bottom_right: char,
+    pub(crate) horizontal: char,
+    pub(crate) vertical: char,
+    pub(crate) tee_left: char,
+    pub(crate) tee_right: char,
+    pub(crate) single_on: &'static str,
+    pub(crate) single_off: &'static str,
+    pub(crate) multi_on: &'static str,
+    pub(crate) multi_off: &'static str,
+    pub(crate) desc: &'static str,
 }
 
 impl AskGlyphs {
-    fn for_glyphs(glyphs: crate::footer::Glyphs) -> Self {
+    pub(crate) fn for_glyphs(glyphs: crate::footer::Glyphs) -> Self {
         match glyphs {
             crate::footer::Glyphs::Ascii => Self {
                 top_left: '+',
@@ -1382,8 +1384,8 @@ impl AskGlyphs {
                 vertical: '|',
                 tee_left: '+',
                 tee_right: '+',
-                single_on: "(*)",
-                single_off: "( )",
+                single_on: "[x]",
+                single_off: "[ ]",
                 multi_on: "[x]",
                 multi_off: "[ ]",
                 desc: "->",
@@ -1397,8 +1399,8 @@ impl AskGlyphs {
                 vertical: '│',
                 tee_left: '├',
                 tee_right: '┤',
-                single_on: "◉",
-                single_off: "○",
+                single_on: "☑",
+                single_off: "☐",
                 multi_on: "☑",
                 multi_off: "☐",
                 desc: "↳",
@@ -3665,7 +3667,7 @@ mod tests {
         assert!(
             unanswered
                 .iter()
-                .any(|t| t.contains("○ Option A (Recommended)")),
+                .any(|t| t.contains("☐ Option A (Recommended)")),
             "{unanswered:?}"
         );
         assert!(
@@ -3674,13 +3676,13 @@ mod tests {
         );
         assert!(unanswered.last().unwrap().ends_with('╯'), "{unanswered:?}");
 
-        // Answered: the chosen option is `◉` and the note shows.
+        // Answered: the chosen option is `☑` and the note shows.
         let mut answered_card = card.clone();
         answered_card.structured =
             Some(json!({"answers":[{"id":"pick","selected":["a"],"note":"go with A"}]}));
         let answered = texts(&answered_card, false, crate::footer::Glyphs::Unicode);
         assert!(
-            answered.iter().any(|t| t.contains("◉ Option A")),
+            answered.iter().any(|t| t.contains("☑ Option A")),
             "{answered:?}"
         );
         assert!(
@@ -3699,7 +3701,7 @@ mod tests {
         let ascii = texts(&card, false, crate::footer::Glyphs::Ascii);
         assert!(ascii[0].starts_with("+- Ask 1 question"), "{ascii:?}");
         assert!(
-            ascii.iter().any(|t| t.contains("( ) Option A")),
+            ascii.iter().any(|t| t.contains("[ ] Option A")),
             "{ascii:?}"
         );
         assert!(
@@ -3801,5 +3803,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// ADR 0024 implementation note: single, multi and `Other` share one marker
+    /// pair - the checkbox `☐`/`☑` under unicode, `[ ]`/`[x]` under ascii.
+    #[test]
+    fn the_ask_glyphs_use_one_checkbox_pair() {
+        let g = AskGlyphs::for_glyphs(crate::footer::Glyphs::Unicode);
+        assert_eq!(g.single_off, "☐");
+        assert_eq!(g.single_on, "☑");
+        assert_eq!(g.multi_off, g.single_off);
+        assert_eq!(g.multi_on, g.single_on);
+        let g = AskGlyphs::for_glyphs(crate::footer::Glyphs::Ascii);
+        assert_eq!(g.single_off, "[ ]");
+        assert_eq!(g.single_on, "[x]");
+        assert_eq!(g.multi_off, g.single_off);
+        assert_eq!(g.multi_on, g.single_on);
     }
 }

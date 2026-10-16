@@ -2153,25 +2153,28 @@ fn option_line(
     let option = &question.options[row];
     let cursor = if row == answer.cursor { "❯ " } else { "  " };
     let chosen = answer.selected.contains(&option.id);
-    let mark = match (question.kind, chosen, glyphs) {
-        (radian_coding::QuestionKind::Multi, true, crate::footer::Glyphs::Ascii) => "[x]",
-        (radian_coding::QuestionKind::Multi, false, crate::footer::Glyphs::Ascii) => "[ ]",
-        (radian_coding::QuestionKind::Multi, true, _) => "☑",
-        (radian_coding::QuestionKind::Multi, false, _) => "☐",
-        (_, true, crate::footer::Glyphs::Ascii) => "(*)",
-        (_, false, crate::footer::Glyphs::Ascii) => "( )",
-        (_, true, _) => "◉",
-        (_, false, _) => "○",
+    // ADR 0024 implementation note: one marker source (`AskGlyphs`), the same
+    // checkbox pair for single and multi.
+    let g = blocks::AskGlyphs::for_glyphs(glyphs);
+    let mark = match (question.kind, chosen) {
+        (radian_coding::QuestionKind::Multi, true) => g.multi_on,
+        (radian_coding::QuestionKind::Multi, false) => g.multi_off,
+        (_, true) => g.single_on,
+        (_, false) => g.single_off,
     };
     let recommended = if option.recommended {
         " (Recommended)"
     } else {
         ""
     };
+    // The cursor and the marker are drawn in their own spans and are never bold: the font's
+    // bold face can lack the glyph and fall back to a different size (the owner's report).
+    let marker = theme.notice_label.remove_modifier(Modifier::BOLD);
     Line::from(vec![
-        Span::styled(cursor, theme.notice_label),
+        Span::styled(cursor, marker),
+        Span::styled(mark, marker),
         Span::styled(
-            format!("{mark} {}{recommended}", option.label),
+            format!(" {}{recommended}", option.label),
             if chosen {
                 theme.notice_label
             } else {
@@ -2193,20 +2196,25 @@ fn other_line(
     } else {
         "  "
     };
-    let mark = match (answer.other, glyphs) {
-        (true, crate::footer::Glyphs::Ascii) => "(*)",
-        (false, crate::footer::Glyphs::Ascii) => "( )",
-        (true, _) => "◉",
-        (false, _) => "○",
+    // ADR 0024 implementation note: `Other` uses the **same** checkbox pair as the
+    // options (it used to always draw a circle, even in a multi question), from `AskGlyphs`.
+    let g = blocks::AskGlyphs::for_glyphs(glyphs);
+    let mark = if answer.other {
+        g.single_on
+    } else {
+        g.single_off
     };
     let text = if answer.other && !answer.text.is_empty() {
         format!("Other: {}", answer.text.text())
     } else {
         "Other (type your own)".to_string()
     };
+    // The marker and the cursor are never bold, like `option_line`.
+    let marker = theme.notice_label.remove_modifier(Modifier::BOLD);
     Line::from(vec![
-        Span::styled(cursor, theme.notice_label),
-        Span::styled(format!("{mark} {text}"), theme.notice_body),
+        Span::styled(cursor, marker),
+        Span::styled(mark, marker),
+        Span::styled(format!(" {text}"), theme.notice_body),
     ])
 }
 

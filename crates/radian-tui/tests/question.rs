@@ -434,7 +434,7 @@ fn render(app: &mut App, width: u16, height: u16) -> String {
     out
 }
 
-/// The panel: a titled box, a tab row (`header` + `Submit`), the options with `❯`/`○`/`☐`, a
+/// The panel: a titled box, a tab row (`header` + `Submit`), the options with `❯`/`☐`/`☑`, a
 /// `↳` description, and the context-dependent key hints in the bottom border.
 #[test]
 fn the_panel_shows_the_tabs_the_options_and_the_hints() {
@@ -454,7 +454,7 @@ fn the_panel_shows_the_tabs_the_options_and_the_hints() {
     assert!(text.contains("Ask"), "{text}");
     assert!(text.contains("Pick"), "{text}");
     assert!(text.contains("Submit"), "{text}");
-    assert!(text.contains("❯ ○ A (Recommended)"), "{text}");
+    assert!(text.contains("❯ ☐ A (Recommended)"), "{text}");
     assert!(text.contains("↳ the second"), "{text}");
     assert!(text.contains("Other (type your own)"), "{text}");
     assert!(
