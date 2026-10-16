@@ -158,8 +158,8 @@ find_close = [\"ctrl-x\"]
     assert!(app.find_state().is_none(), "Ctrl-X closed the box");
 }
 
-/// `tui.input_style`: a known value is applied, an unknown one falls back to the default and
-/// is reported as a skipped key (the `tui.*` rule).
+/// `tui.input_style`: `lines` and `box` are applied; the removed `bar` and any unknown value
+/// warn once and fall back to `lines` (ADR 0035's 2026-10-16 note; the `tui.*` rule).
 #[test]
 fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines() {
     // ADR 0035: `lines` is the default.
@@ -182,10 +182,29 @@ fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines() {
         "{warnings:?}"
     );
 
+    // The removed `bar` warns once with its own message and uses `lines`.
+    let mut app = App::new("m", "s");
+    let warnings = app
+        .apply_config(
+            &config("schema_version = 1\n[tui]\ninput_style = \"bar\"\n"),
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        app.input_style,
+        radian_tui::render::InputStyle::Lines,
+        "the removed bar falls back to lines"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning == "tui.input_style = \"bar\" was removed; using lines"),
+        "{warnings:?}"
+    );
+
     for (spelling, expected) in [
         ("box", radian_tui::render::InputStyle::Box),
         ("lines", radian_tui::render::InputStyle::Lines),
-        ("bar", radian_tui::render::InputStyle::Bar),
     ] {
         let mut app = App::new("m", "s");
         app.apply_config(

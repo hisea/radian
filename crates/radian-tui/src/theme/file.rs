@@ -121,9 +121,6 @@ pub(crate) fn fg_source(role: Role) -> Option<&'static str> {
         Role::ReasoningMax => Some("thinkingMax"),
         Role::Interrupted => Some("warning"),
         Role::User => Some("userMessageText"),
-        // The `bar` input's text keeps the main level; its band is the user message's
-        // background (ADR 0035 V3), so the composer is the same surface as a user block.
-        Role::InputBar => Some("text"),
         Role::ToolCall => Some("toolTitle"),
         Role::ToolResult => Some("toolOutput"),
         Role::ToolResultError => Some("error"),
@@ -197,13 +194,12 @@ pub(crate) fn fg_source(role: Role) -> Option<&'static str> {
 }
 
 /// The pi role feeding a Radian role's **background**: the transcript selection
-/// (`selectedBg`), the `bar` input's band (`userMessageBg`) and the tool cards by state
-/// (`toolPendingBg` / `toolSuccessBg` / `toolErrorBg`, ADR 0029 decision 3 + ADR 0028 R4).
-/// ADR 0029: the `user` line is a **foreground** role now, so
-/// `userMessageBg` no longer paints it — only the `bar` input keeps that band.
+/// (`selectedBg`) and the tool cards by state (`toolPendingBg` / `toolSuccessBg` /
+/// `toolErrorBg`, ADR 0029 decision 3 + ADR 0028 R4). ADR 0029: the
+/// `user` line is a **foreground** role, so `userMessageBg` no longer paints anything (ADR 0035's
+/// 2026-10-16 note removed the `bar` input, its last consumer; pi's key is kept, not drawn).
 pub(crate) fn bg_source(role: Role) -> Option<&'static str> {
     match role {
-        Role::InputBar => Some("userMessageBg"),
         Role::Selection => Some("selectedBg"),
         Role::ToolPendingBg => Some("toolPendingBg"),
         Role::ToolSuccessBg => Some("toolSuccessBg"),
@@ -779,8 +775,9 @@ mod tests {
     }
 
     /// ADR 0029: the user line takes pi's `userMessageText` foreground,
-    /// but it is a **foreground** role now — `userMessageBg` no longer paints it (only the
-    /// `bar` input keeps that band).
+    /// but it is a **foreground** role now — `userMessageBg` no longer paints it. ADR 0035's
+    /// 2026-10-16 note removed the `bar` input, its last consumer, so the pi key is kept in
+    /// `reserved` (not dropped, not warned).
     #[test]
     fn the_user_line_takes_pi_text_but_no_background() {
         let (theme, warnings) = loaded(&theme_json(
@@ -793,28 +790,11 @@ mod tests {
         );
         assert_eq!(fg(theme.user), Some(Color::Rgb(255, 255, 255)));
         assert_eq!(theme.user.bg, None, "the user role has no background now");
-        assert_eq!(
-            theme.input_bar.bg,
-            Some(Color::Rgb(0x22, 0x22, 0x22)),
-            "only the bar input keeps the userMessageBg band"
-        );
-    }
-
-    /// ADR 0035 V3: the `bar` input's band comes from pi's `userMessageBg` (the same band as a
-    /// user message) and its text from pi's `text`; a theme file that has neither still loads
-    /// (the band falls back with the other roles).
-    #[test]
-    fn the_input_bar_takes_pi_text_and_the_user_background() {
-        let (theme, warnings) = loaded(&theme_json(
-            "{}",
-            "{\"text\": \"#ffffff\", \"userMessageBg\": \"#222222\"}",
-        ));
         assert!(
-            warnings.iter().all(|w| w.contains("missing role(s)")),
-            "{warnings:?}"
+            theme.reserved.contains_key("userMessageBg"),
+            "pi's userMessageBg is kept, not dropped: {:?}",
+            theme.reserved.keys()
         );
-        assert_eq!(theme.input_bar.fg, Some(Color::Rgb(255, 255, 255)));
-        assert_eq!(theme.input_bar.bg, Some(Color::Rgb(0x22, 0x22, 0x22)));
     }
 
     #[test]
@@ -1068,12 +1048,13 @@ mod tests {
             "userMessageText → var fg"
         );
         // ADR 0029: `user` is a foreground role; the band from
-        // `userMessageBg` no longer paints it (only the `bar` input keeps it).
+        // `userMessageBg` no longer paints it (ADR 0035's 2026-10-16 note removed the `bar`
+        // input, its last consumer, so the key is kept in `reserved`).
         assert_eq!(theme.user.bg, None, "the user role has no background now");
-        assert_eq!(
-            theme.input_bar.bg,
-            Some(Color::Rgb(0x18, 0x18, 0x20)),
-            "the bar input keeps the userMessageBg band"
+        assert!(
+            theme.reserved.contains_key("userMessageBg"),
+            "the key is kept: {:?}",
+            theme.reserved.keys()
         );
         assert_eq!(theme.model.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
         assert_eq!(theme.find.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
@@ -1082,11 +1063,10 @@ mod tests {
         // `#363646`, background only (the text keeps its own foreground under it).
         assert_eq!(theme.selection.bg, Some(Color::Rgb(0x36, 0x36, 0x46)));
         assert_eq!(theme.selection.fg, None);
-        // The block backgrounds (ADR 0028 R4; ADR 0029 keeps the band
-        // only on the `bar` input): `userMessageBg: "bg_m2"` → `#181820` paints `input_bar`,
+        // The block backgrounds (ADR 0028 R4; ADR 0029; the `bar` input's
+        // `userMessageBg` band went with the style, ADR 0035's 2026-10-16 note):
         // `toolPendingBg: "bg_m3"` → `#16161D`, `toolSuccessBg: "diff_add_bg"` → `#2B3328`,
         // `toolErrorBg: "diff_del_bg"` → `#43242B`.
-        assert_eq!(theme.input_bar.bg, Some(Color::Rgb(0x18, 0x18, 0x20)));
         assert_eq!(theme.tool_pending_bg.bg, Some(Color::Rgb(0x16, 0x16, 0x1D)));
         assert_eq!(theme.tool_success_bg.bg, Some(Color::Rgb(0x2B, 0x33, 0x28)));
         assert_eq!(theme.tool_error_bg.bg, Some(Color::Rgb(0x43, 0x24, 0x2B)));

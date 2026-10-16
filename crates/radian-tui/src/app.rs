@@ -1762,14 +1762,23 @@ impl App {
                 crate::spinner::Kind::default()
             }),
         };
-        // An unknown `tui.input_style` is a skipped key (the reader warns once); the TUI falls
-        // back to the default.
-        self.input_style = config
-            .tui
-            .input_style
-            .as_deref()
-            .and_then(InputStyle::parse)
-            .unwrap_or_default();
+        // `tui.input_style` (ADR 0035; `bar` removed by the 2026-10-16
+        // note): `lines` (the default) or `box`. The removed `bar`, and any other unknown
+        // spelling, warns once and uses `lines` — a display preference, never a refusal
+        // (ADR 0008).
+        self.input_style = match config.tui.input_style.as_deref() {
+            None => InputStyle::default(),
+            Some("bar") => {
+                warnings.push("tui.input_style = \"bar\" was removed; using lines".into());
+                InputStyle::default()
+            }
+            Some(name) => InputStyle::parse(name).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "tui.input_style = {name:?} is not one of lines|box; using lines"
+                ));
+                InputStyle::default()
+            }),
+        };
         // `tui.display.reasoning` (ADR 0028 R3, default collapsed) and
         // `tui.display.tool_output` + `tool_preview_lines` (R4, default errors / 5). An
         // unknown spelling never reaches here (the host reader skips it with a warning).

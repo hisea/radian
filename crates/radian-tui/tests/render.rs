@@ -328,15 +328,14 @@ fn the_status_line_shows_model_and_turn_state() {
     assert!(text.contains("running"), "{text}");
 }
 
-/// ADR 0027 + ADR 0035: the `bar` status row shows the spinner and the
-/// running state while a turn runs (`◜ Working`), and is blank when idle. The dot sits in the
-/// rail's column with **one** cell before the text (which starts at the text column); the
-/// `lines`/`box` rule line keeps revision 2's two spaces (the box test below). `bar` is no
-/// longer the default (ADR 0035), so it is configured explicitly here.
+/// ADR 0027 + ADR 0035's 2026-10-16 note: the `box` frame's top rule carries the
+/// running status where a code block's language label sits — `╭─ <spinner> Working · 12s ·
+/// esc to interrupt ───…` — and is a plain full-width rule when idle. The `lines` style keeps
+/// revision 2's status on its top rule.
 #[test]
 fn the_input_rule_shows_the_spinner_status_while_running() {
     let mut app = App::new("m", "s");
-    app.input_style = radian_tui::render::InputStyle::Bar;
+    app.input_style = radian_tui::render::InputStyle::Box;
     app.spinner_kind = radian_tui::spinner::Kind::Arc;
     // The frame is a function of the injected clock (ADR 0027).
     app.set_now(app.session.spinner_origin);
@@ -346,11 +345,11 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
     assert!(
-        text.contains("◜ Working"),
-        "the spinner on the bar's status row: {text}"
+        text.contains("╭─ ◜ Working"),
+        "the spinner in the box's top border: {text}"
     );
 
-    // Idle: no spinner, no text.
+    // Idle: no spinner, no text; the top rule has no label.
     app.session.projection.set_turn(radian_tui::TurnState::Idle);
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
@@ -358,12 +357,12 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
     assert!(!text.contains('◜'), "{text}");
 }
 
-/// ADR 0018 + ADR 0027: a running compaction shows `Compacting` on the status row
-/// (the `CompactionStarted`/`CompactionFinished` events exist, so this is not invented).
+/// ADR 0018 + ADR 0027: a running compaction shows `Compacting` on the input's top
+/// rule (the `CompactionStarted`/`CompactionFinished` events exist, so this is not invented).
 #[test]
 fn the_input_rule_shows_compacting() {
     let mut app = App::new("m", "s");
-    app.input_style = radian_tui::render::InputStyle::Bar;
+    app.input_style = radian_tui::render::InputStyle::Box;
     app.spinner_kind = radian_tui::spinner::Kind::Arc;
     app.set_now(app.session.spinner_origin);
     app.session
@@ -381,9 +380,13 @@ fn the_input_rule_shows_compacting() {
     assert!(!text.contains("Compacting"), "{text}");
 }
 
-/// ADR 0027: the `box` style puts the same status on the border's top edge.
+/// ADR 0035's 2026-10-16 note: while a turn runs, the `box` frame's top rule carries the status
+/// in the **code-block language label** position (`╭─ <spinner> Working · 12s · esc to
+/// interrupt ───…`), and it is **not bold** (the pulse takes the spinner role, the words the
+/// dim/hint level, ADR 0027).
 #[test]
-fn the_box_style_shows_the_spinner_on_the_border() {
+fn the_box_frame_puts_the_status_in_the_label_position_and_never_bold() {
+    use ratatui::style::Modifier;
     let mut app = App::new("m", "s");
     app.spinner_kind = radian_tui::spinner::Kind::Arc;
     app.set_now(app.session.spinner_origin);
@@ -391,14 +394,34 @@ fn the_box_style_shows_the_spinner_on_the_border() {
     app.session
         .projection
         .set_turn(radian_tui::TurnState::Running);
+    app.session
+        .timer
+        .request_started(app.session.spinner_origin);
+    app.set_now(app.session.spinner_origin + std::time::Duration::from_secs(12));
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
+    // The label sits after `╭─ ` (the code block's label column) and the rule fills to the end.
+    let top = row_of(&terminal, "╭─").expect("the top rule");
+    let top_text = row(&terminal, top as u16);
     assert!(
-        text.contains("◜  Working"),
-        "the box border carries the status: {text}"
+        top_text.starts_with("╭─ ◜ Working · 12s · esc to interrupt ─"),
+        "the status in the label position: {top_text:?}"
     );
-    // The rounded corner is still there (the title starts with a space).
-    assert!(text.contains('╭'), "{text}");
+    // Not bold: neither the spinner nor the words carry BOLD.
+    let spinner = cell_style(&terminal, 3, top as u16);
+    assert!(
+        !spinner.add_modifier.contains(Modifier::BOLD),
+        "the spinner is not bold: {spinner:?}"
+    );
+    let words = cell_style(&terminal, 5, top as u16);
+    assert!(
+        !words.add_modifier.contains(Modifier::BOLD),
+        "the status words are not bold: {words:?}"
+    );
+    assert!(
+        text.contains("╰──"),
+        "the frame keeps its three-cell tail: {text}"
+    );
 }
 
 #[test]
@@ -790,8 +813,7 @@ fn the_input_area_has_rules_and_a_prompt_instead_of_a_box() {
     }
 }
 
-/// The empty input shows the placeholder after the prompt (`lines`, the default), and after the
-/// rail in the explicit `bar` style.
+/// The empty input shows the placeholder after the `❯ ` prompt in both styles.
 #[test]
 fn the_empty_input_shows_the_placeholder_after_the_prompt() {
     let mut app = App::new("m", "s");
@@ -802,42 +824,78 @@ fn the_empty_input_shows_the_placeholder_after_the_prompt() {
         "{text}"
     );
 
-    let mut bar = App::new("m", "s");
-    bar.input_style = radian_tui::render::InputStyle::Bar;
-    let text = screen(&render(&mut bar, 80, 8));
+    let mut boxed = App::new("m", "s");
+    boxed.input_style = radian_tui::render::InputStyle::Box;
+    let text = screen(&render(&mut boxed, 80, 8));
     assert!(
-        text.contains("▌ (type a message, Enter to send, Ctrl-J for a new line)"),
-        "the bar's placeholder follows the rail:\n{text}"
+        text.contains("│ ❯ (type a message, Enter to send, Ctrl-J for a new line)"),
+        "the box's placeholder follows its rail and prompt:\n{text}"
     );
 }
 
-/// `tui.input_style = "box"` is the owner's shape (2026-10-14): a **rounded** border and the
-/// `❯` prompt (which the `lines` style uses too, ).
+/// `tui.input_style = "box"` is the thin half frame (ADR 0035 / the
+/// 2026-10-16 note): the same open frame as a code block. Idle is a full-width top rule with
+/// **no label**, each input row `│ ` plus the `❯ ` prompt (`│   ` for a continuation), and a
+/// three-cell `╰──` tail.
 #[test]
-fn the_box_input_style_draws_the_rounded_box_with_the_prompt() {
+fn the_box_input_style_draws_the_thin_half_frame() {
     let mut app = App::new("m", "s");
     app.input = "first\nsecond".into();
     app.input_style = radian_tui::render::InputStyle::Box;
-    let text = screen(&render(&mut app, 20, 8));
-    assert!(text.contains(" message "), "the box title is back:\n{text}");
+    let terminal = render(&mut app, 20, 8);
+    let text = screen(&terminal);
+    assert!(!text.contains("message"), "no label on the frame:\n{text}");
     assert!(
-        text.contains("│❯ first"),
-        "the text starts after the border and the prompt:\n{text}"
+        !text.contains('╮') && !text.contains('┌'),
+        "no closed box:\n{text}"
     );
-    assert!(
-        !text.contains("> first"),
-        "the old square prompt is gone:\n{text}"
+    let lines: Vec<&str> = text.lines().collect();
+    let top = lines
+        .iter()
+        .position(|line| line.starts_with('╭'))
+        .unwrap_or_else(|| panic!("no top rule:\n{text}"));
+    // The idle top rule is the full input width, `╭` then `─` with no label.
+    assert_eq!(
+        lines[top].trim_end(),
+        format!("╭{}", "─".repeat(19)),
+        "the full-width top rule, no label:\n{text}"
     );
-    assert!(
-        text.contains('╭') && text.contains('╮') && text.contains('╰'),
-        "the box has **rounded** corners:\n{text}"
+    // Each input row: the `│ ` rail, then `❯ ` on the first and two spaces on the continuation.
+    assert_eq!(lines[top + 1].trim_end(), "│ ❯ first", "{text}");
+    assert_eq!(lines[top + 2].trim_end(), "│   second", "{text}");
+    assert_eq!(
+        lines[top + 3].trim_end(),
+        "╰──",
+        "the three-cell tail:\n{text}"
     );
-    assert!(!text.contains('┌'), "no square corners:\n{text}");
 }
 
-// ---------- the `bar` input style (ADR 0035 V3) ----------
+/// A CJK input wraps by display width; every wrapped row keeps the `│ ` rail and the text
+/// starts in the same column.
+#[test]
+fn the_box_frame_wraps_a_cjk_line() {
+    let mut app = App::new("m", "s");
+    app.input_style = radian_tui::render::InputStyle::Box;
+    app.input = "中文中文中文".into();
+    let text = screen(&render(&mut app, 12, 8));
+    let rows: Vec<&str> = text.lines().collect();
+    let top = rows
+        .iter()
+        .position(|line| line.starts_with('╭'))
+        .unwrap_or_else(|| panic!("no top rule:\n{text}"));
+    // Inner width 8: four 2-cell characters on the first row, the rest wrapped (a wide glyph's
+    // skip cell reads as a space, so only the prefix is asserted).
+    assert!(rows[top + 1].starts_with("│ ❯ 中"), "{text:?}");
+    assert!(
+        rows[top + 2].starts_with("│   中"),
+        "the wrapped tail keeps the rail and the text column:\n{text:?}"
+    );
+    assert_eq!(rows[top + 3].trim_end(), "╰──", "{text:?}");
+}
 
-/// Row `y` as a string, trailing cells kept so a band's width is visible.
+// ---------- the `box` input's thin half frame (ADR 0035's 2026-10-16 note) ----------
+
+/// Row `y` as a string, trailing cells kept so the frame's width is visible.
 fn row(terminal: &Terminal<TestBackend>, y: u16) -> String {
     let buffer = terminal.backend().buffer();
     let area = *buffer.area();
@@ -870,269 +928,13 @@ fn cell_style(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> ratatui::styl
         .expect("a cell inside the buffer")
 }
 
-/// Asserts that the band covers row `y` from column 0 to `width`, by **display column**: a wide
-/// glyph's own cell is read (and counted as its two columns), so ratatui's skip cell behind it
-/// — which the terminal paints as part of the glyph — is never mistaken for a hole.
-fn assert_band_across(terminal: &Terminal<TestBackend>, y: u16, band: Option<Color>, width: u16) {
-    use unicode_width::UnicodeWidthStr;
-    let buffer = terminal.backend().buffer();
-    let mut col = 0usize;
-    while col < width as usize {
-        let symbol = buffer
-            .cell((col as u16, y))
-            .map(|cell| cell.symbol())
-            .unwrap_or(" ");
-        assert_eq!(
-            cell_style(terminal, col as u16, y).bg,
-            band,
-            "row {y} column {col} is outside the band: {:?}",
-            row(terminal, y)
-        );
-        col += UnicodeWidthStr::width(symbol).max(1);
-    }
-    assert_eq!(
-        col,
-        width as usize,
-        "the band does not reach the last column: {:?}",
-        row(terminal, y)
-    );
-}
-
-/// ADR 0035 V3: `tui.input_style = "bar"` is one background band per input row with the accent
-/// rail on the left — no border, no rules — and a multi-line input grows the band by its rows.
+/// `tui.footer.glyphs = "ascii"` reaches the box frame's own glyphs (ADR 0027: the
+/// unicode glyphs are only used when the font set has them; ADR 0035 maps
+/// the code frame's `╭─`/`╰──` to `+-`/`+--`).
 #[test]
-fn the_bar_input_style_draws_a_full_width_band_with_the_rail() {
-    use radian_tui::render::InputStyle;
+fn the_box_frame_falls_back_to_ascii() {
     let mut app = App::new("m", "s");
-    app.input_style = InputStyle::Bar;
-    app.input = "first\nsecond".into();
-    let terminal = render(&mut app, 20, 8);
-    let text = screen(&terminal);
-    let band = app.theme.input_bar.bg.expect("the band's background");
-    let first = row_of(&terminal, "▌ first").expect("the first band row");
-    let second = row_of(&terminal, "▌ second").expect("the second band row");
-    assert_eq!(second, first + 1, "one band row per input row:\n{text}");
-    for y in [first as u16, second as u16] {
-        let line = row(&terminal, y);
-        // The band's own rows carry no rule, border or box corner anywhere.
-        assert!(
-            !line.contains(['─', '│', '╭', '╰']),
-            "a band row has no rule or border: {line:?}"
-        );
-        assert_eq!(
-            cell_style(&terminal, 0, y).fg,
-            app.theme.notice_label.fg,
-            "the rail is the accent: row {y}"
-        );
-        // The band covers the whole row, the trailing cells included.
-        assert_band_across(&terminal, y, Some(band), 20);
-        // The text after the rail keeps the main level, not the accent.
-        assert_eq!(
-            cell_style(&terminal, 2, y).fg,
-            app.theme.input_bar.fg,
-            "the text is the band's own foreground: row {y}"
-        );
-    }
-    // A CJK input wraps by display width, and every row of the wrap is banded the same way.
-    let mut wide = App::new("m", "s");
-    wide.input_style = InputStyle::Bar;
-    wide.input = "中文中文中文".into();
-    let terminal = render(&mut wide, 12, 8);
-    // Inner width 10: five 2-cell characters, then the sixth.
-    let first = row_of(&terminal, "▌ 中").expect("the first band row");
-    let wrapped = row(&terminal, (first + 1) as u16);
-    assert!(
-        wrapped.starts_with("▌ ") && wrapped.contains('文'),
-        "the band grew a row for the wrapped tail: {wrapped:?}"
-    );
-    assert_band_across(&terminal, (first + 1) as u16, wide.theme.input_bar.bg, 12);
-}
-
-/// The band reaches the terminal's last column at both widths the brief pins (80 and 120), and
-/// its half-cell pads (ADR 0035/4) do too: the rail's own quadrant (`▖` above, `▘`
-/// below, in the accent) then `▄`/`▀` in the band's color across the rest.
-#[test]
-fn the_bar_band_fills_the_terminal_width() {
-    use radian_tui::render::InputStyle;
-    for width in [80u16, 120] {
-        let mut app = App::new("m", "s");
-        app.input_style = InputStyle::Bar;
-        app.input = "wide".into();
-        let terminal = render(&mut app, width, 8);
-        let y = row_of(&terminal, "▌ wide").expect("the band") as u16;
-        let band = app.theme.input_bar.bg;
-        assert_band_across(&terminal, y, band, width);
-        // ADR 0035: the rail continues into the pad rows as the half-cell-wide
-        // quadrants, so it is as tall as the band; the rest of the row is the band's half cell.
-        assert_eq!(
-            row(&terminal, y - 1),
-            format!("▖{}", "▄".repeat(width as usize - 1)),
-            "{width}"
-        );
-        assert_eq!(
-            row(&terminal, y + 1),
-            format!("▘{}", "▀".repeat(width as usize - 1)),
-            "{width}"
-        );
-        for (y, rail, glyph) in [(y - 1, "▖", "▄"), (y + 1, "▘", "▀")] {
-            let rail_style = cell_style(&terminal, 0, y);
-            assert_eq!(rail_style.fg, app.theme.notice_label.fg, "the {rail} rail");
-            assert_eq!(
-                rail_style.bg,
-                Some(Color::Reset),
-                "the {rail} rail's cell keeps the terminal background"
-            );
-            for col in [1u16, width - 1] {
-                let style = cell_style(&terminal, col, y);
-                assert_eq!(style.fg, band, "the {glyph} pad's color at {col}");
-                assert_eq!(style.bg, Some(Color::Reset), "the {glyph} pad's background");
-            }
-        }
-        // The text rows' rail is the same accent in the same column, and the cell after it is
-        // the band's own (the one cell of padding before the text at `BAR_LEAD`).
-        assert_eq!(cell_style(&terminal, 0, y).fg, app.theme.notice_label.fg);
-        assert_eq!(cell_style(&terminal, 1, y).fg, app.theme.input_bar.fg);
-    }
-}
-
-/// ADR 0035 V3 / decision 1: the status row above the band is **always** one row —
-/// blank while idle, `<spinner>  Working · 12s · esc to interrupt` while a turn runs — so the
-/// band and the transcript never move when a turn starts or ends.
-#[test]
-fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
-    use radian_tui::render::InputStyle;
-    let mut app = App::new("m", "s");
-    app.input_style = InputStyle::Bar;
-    app.spinner_kind = radian_tui::spinner::Kind::Arc;
-    app.set_now(app.session.spinner_origin);
-    app.input = "hello".into();
-    app.push_message(&Message::user("a question"));
-
-    // Wide enough that the whole status row fits: it is asserted on, not clipped.
-    let idle = render(&mut app, 80, 10);
-    let band_row = row_of(&idle, "▌ hello").expect("the band");
-    let transcript_row = row_of(&idle, "a question").expect("the transcript");
-    // The band's half-cell pads are always there (ADR 0035/4): the rail's `▖`
-    // above, `▘` below, then `▄`/`▀` for the rest of the row.
-    assert!(row(&idle, (band_row - 1) as u16).starts_with("▖▄"));
-    assert!(row(&idle, (band_row + 1) as u16).starts_with("▘▀"));
-    // The status row is one above the top pad, and blank (but there) while idle.
-    assert_eq!(row(&idle, (band_row - 2) as u16).trim_end(), "");
-    assert!(!screen(&idle).contains("Working"));
-
-    app.session
-        .projection
-        .set_turn(radian_tui::TurnState::Running);
-    app.session
-        .timer
-        .request_started(app.session.spinner_origin);
-    app.set_now(app.session.spinner_origin + std::time::Duration::from_secs(12));
-    let running = render(&mut app, 80, 10);
-    assert_eq!(
-        row_of(&running, "▌ hello"),
-        Some(band_row),
-        "the band must not move when the turn starts"
-    );
-    assert_eq!(
-        row_of(&running, "a question"),
-        Some(transcript_row),
-        "the transcript must not move either"
-    );
-    let status = row(&running, (band_row - 2) as u16);
-    assert!(
-        status.contains("◜ Working · 12s · esc to interrupt"),
-        "the live status row: {status:?}"
-    );
-    // ADR 0035: the dot is in the rail's column (0) — the same vertical line as the
-    // rail — one cell before the text, which starts at the text column.
-    let cells: Vec<char> = status.chars().collect();
-    assert_eq!(cells[0], '◜', "the dot's column: {status:?}");
-    assert_eq!(
-        cells[1], ' ',
-        "one cell between the dot and the text: {status:?}"
-    );
-    assert_eq!(cells[2], 'W', "the text column: {status:?}");
-    assert_eq!(
-        cell_style(&running, 0, (band_row - 2) as u16).fg,
-        app.theme.notice_label.fg,
-        "the dot takes the accent"
-    );
-
-    // The turn ends: the row is blank again and nothing moved.
-    app.session.projection.set_turn(radian_tui::TurnState::Idle);
-    let after = render(&mut app, 80, 10);
-    assert_eq!(row_of(&after, "▌ hello"), Some(band_row));
-    assert_eq!(row_of(&after, "a question"), Some(transcript_row));
-    assert_eq!(row(&after, (band_row - 2) as u16).trim_end(), "");
-
-    // A running `!` is a status but not a **turn**: its row carries the state without the
-    // turn's interrupt hint (Esc does not cancel a `!` through this path).
-    app.session.bash_running = Some("sleep 1".to_string());
-    let terminal = render(&mut app, 80, 10);
-    let status = row(&terminal, (band_row - 2) as u16);
-    assert!(status.contains("Running a command"), "{status:?}");
-    assert!(
-        !status.contains("esc to interrupt"),
-        "no turn is running: {status:?}"
-    );
-    app.session.bash_running = None;
-}
-
-/// ADR 0035 V3 + revision 3: `bar` spends one row on the status row, one per input row and the
-/// band's two half-cell pad rows (`▄` above, `▀` below) — no rule or border rows and no slack.
-/// The bottom pad is the input area's last row (the `classic` status bar is directly below it),
-/// and a two-row input grows the band by exactly one row.
-#[test]
-fn the_bar_input_takes_the_status_row_the_pad_rows_and_its_text_rows() {
-    use radian_tui::render::InputStyle;
-    let mut app = App::new("m", "s");
-    classic_footer(&mut app);
-    app.input_style = InputStyle::Bar;
-    app.input = "hello".into();
-    // Height 8, the one-row `classic` status bar at row 7: the status row is 3, the top pad 4,
-    // the band 5, the bottom pad 6.
-    let terminal = render(&mut app, 20, 8);
-    assert_eq!(
-        row_of(&terminal, "▌ hello"),
-        Some(5),
-        "the band sits between the two pad rows:\n{}",
-        screen(&terminal)
-    );
-    assert_eq!(row(&terminal, 3).trim_end(), "", "the blank status row");
-    assert!(
-        row(&terminal, 4).starts_with('▖'),
-        "the top pad's rail cell"
-    );
-    assert!(
-        row(&terminal, 6).starts_with('▘'),
-        "the bottom pad's rail cell"
-    );
-
-    app.input = "one\ntwo".into();
-    let terminal = render(&mut app, 20, 8);
-    assert_eq!(
-        row_of(&terminal, "▌ one"),
-        Some(4),
-        "the status row moved up"
-    );
-    assert_eq!(row_of(&terminal, "▌ two"), Some(5));
-    assert!(
-        row(&terminal, 3).starts_with('▖'),
-        "the top pad's rail cell"
-    );
-    assert!(
-        row(&terminal, 6).starts_with('▘'),
-        "the bottom pad's rail cell"
-    );
-}
-
-/// `tui.footer.glyphs = "ascii"` reaches the rail and the status spinner too (ADR 0027
-/// revision 4: the unicode glyphs are only used when the font set has them).
-#[test]
-fn the_bar_rail_and_spinner_fall_back_to_ascii() {
-    use radian_tui::render::InputStyle;
-    let mut app = App::new("m", "s");
-    app.input_style = InputStyle::Bar;
+    app.input_style = radian_tui::render::InputStyle::Box;
     app.input = "hi".into();
     app.apply_footer(&radian_host::config::TuiFooterConfig {
         glyphs: Some("ascii".to_string()),
@@ -1142,17 +944,15 @@ fn the_bar_rail_and_spinner_fall_back_to_ascii() {
     app.session
         .projection
         .set_turn(radian_tui::TurnState::Running);
-    let text = screen(&render(&mut app, 40, 10));
-    assert!(text.contains("| hi"), "the ascii rail:\n{text}");
-    assert!(!text.contains('▌'), "no unicode rail:\n{text}");
-    // ADR 0035: the `ascii` tier gets no half-cell band padding.
+    let text = screen(&render(&mut app, 60, 10));
     assert!(
-        !text.contains('▄') && !text.contains('▀'),
-        "no band padding under ascii:\n{text}"
+        text.contains("+- * Working · esc to interrupt"),
+        "the ascii frame and pulse in the label position:\n{text}"
     );
+    assert!(text.contains("| ❯ hi"), "the ascii rail:\n{text}");
     assert!(
-        text.contains("* Working · esc to interrupt"),
-        "the ascii pulse glyph: \n{text}"
+        !text.contains('╭') && !text.contains('╰'),
+        "no unicode frame under ascii:\n{text}"
     );
 }
 
@@ -1271,8 +1071,8 @@ fn a_user_selection_never_copies_the_marker() {
     assert_eq!(text, "hello", "the marker is not copied");
 }
 
-/// ADR 0035: with no config the compiled default is `lines`; an explicit
-/// `bar` keeps its band and half-cell pads.
+/// ADR 0035: with no config the compiled default is `lines` (a rule above
+/// and below with the `❯ ` prompt); `bar` was removed by the 2026-10-16 note.
 #[test]
 fn the_default_input_style_is_lines() {
     let mut app = App::new("m", "s");

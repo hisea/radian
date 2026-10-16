@@ -12,7 +12,6 @@ reasoning_xhigh = "#d7ff6b"
 reasoning_max = "#d7ff6b"
 interrupted = "#d7ff6b"
 user = "#d7ffd8"
-input_bar = { fg = "", bg = "#06150d" }
 tool_call = "#39ff14"
 tool_result = "#d7ffd8"
 tool_result_error = "#ff355e"
