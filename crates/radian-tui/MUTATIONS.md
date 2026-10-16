@@ -1575,6 +1575,22 @@ Base：本片 HEAD（`dogfood/thin-diff`）· 就地变异：每个变异先把�
 写成 `LineRole::Dim`，没有走 `diff_role`，所以变异 `diff_role` 对带 `@@` 的正文没有影响（只有"无起始行
 退路"那一支会变）。两处改成调用 `diff_role`（结构行的角色只有一个定义处）后立刻抓住。
 
+## thin-ask：问答记录改开口框、标记改圆圈（ADR 0028，2026-10-16）
+
+Base `origin/main` `28f4703`（worktree `.radian-worktrees/thin-ask`）。每个变异就地改完跑
+`cargo test -p radian-tui --lib --no-fail-fast -- <名字>` 与 `--test render ...`，再从
+`.radian/scratch/blocks.rs.new` 写回并 `cmp -s` 逐字节相同。测试先改到新期望、对未改的实现跑过一遍，
+12 条全 FAILED（4 lib + 7 render + 1 question），再动实现。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ASK5-M1 | 开口框又封口（`ask_top` 的延伸段末尾加回 `╮`） | `blocks::tests::the_open_frame_rows_sit_in_the_marker_column`、`blocks::tests::the_ask_bottom_is_the_three_cell_tail` | ✅ |
+| ASK5-M2 | 多选改回 `☐`/`☑`（`AskGlyphs` 的 `multi_on`/`multi_off`） | `blocks::tests::the_ask_glyphs_use_one_circle_pair`、`render::the_ask_panel_uses_one_circle_pair_for_single_multi_and_other` | ✅ |
+| ASK5-M3 | 选项标记又加粗（`ask_body` 的 `{mark} ` 前缀改 `MdStyle::Accent`） | `render::the_transcript_ask_marker_is_never_bold` | ✅ |
+| ASK5-M4 | 正文从第 2 列起（`ask_body` 的 `│ ` 去掉标记后的空格） | `blocks::tests::the_open_frame_rows_sit_in_the_marker_column`、`render::a_declined_ask_shows_the_status_inside_the_block` | ✅ |
+
+4/4 抓住。面板的「标记不加粗」仍由既有的 `the_ask_panel_marker_is_never_bold` 钉住（ASK3-M1）；
+本片把 `AskGlyphs` 的单选/多选/Other 从 `☐`/`☑` 改成 `○`/`◉` 后，这条用例找的格子也从 `☑` 改成 `◉`。
 ## thin ⑥：用户行、默认输入框、压缩线（ADR 0035/9、ADR 0028，2026-10-16）
 
 Base：本片 HEAD（`oc/thin-user`）· 就地变异，每个变异后从 `.radian/scratch/render.rs.orig` /
