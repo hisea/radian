@@ -330,10 +330,21 @@ async fn the_task_events_round_trip_and_are_not_critical() {
     let finished = RuntimeEvent::TaskFinished {
         agent_session_id: "task-1".into(),
         outcome: TurnOutcome::Completed,
+        error: None,
     };
     assert_eq!(finished.name(), "TaskFinished");
     assert!(!finished.critical(), "a task event is audit (ADR 0030 O5)");
     journal.append_runtime_event(finished).await.unwrap();
+    // ADR 0039 decisions 5/7: `error` is optional and written only when the task ended
+    // abnormally (a spawn that rolled back, or an end-of-task commit that failed).
+    journal
+        .append_runtime_event(RuntimeEvent::TaskFinished {
+            agent_session_id: "task-3".into(),
+            outcome: TurnOutcome::Failed,
+            error: Some("the end-of-task commit failed: wrong_branch".into()),
+        })
+        .await
+        .unwrap();
     drop(journal);
 
     let raw = std::fs::read_to_string(&path).unwrap();
@@ -343,6 +354,13 @@ async fn the_task_events_round_trip_and_are_not_critical() {
         .expect("the bare TaskSpawned line");
     assert!(!bare.contains("worktree"), "{bare}");
     assert!(!bare.contains("label"), "{bare}");
+    let clean = raw
+        .lines()
+        .find(|line| {
+            line.contains("\"agent_session_id\":\"task-1\"") && line.contains("TaskFinished")
+        })
+        .expect("the clean TaskFinished line");
+    assert!(!clean.contains("error"), "{clean}");
 
     let session = Session::open(&path).unwrap();
     assert!(session.skipped().is_empty());
@@ -369,20 +387,28 @@ async fn the_task_events_round_trip_and_are_not_critical() {
             ("task-2".to_string(), None, None),
         ]
     );
-    let finished: Vec<(String, TurnOutcome)> = session
+    let finished: Vec<(String, TurnOutcome, Option<String>)> = session
         .events()
         .iter()
         .filter_map(|event| match &event.data {
             EventData::TaskFinished {
                 agent_session_id,
                 outcome,
-            } => Some((agent_session_id.clone(), *outcome)),
+                error,
+            } => Some((agent_session_id.clone(), *outcome, error.clone())),
             _ => None,
         })
         .collect();
     assert_eq!(
         finished,
-        vec![("task-1".to_string(), TurnOutcome::Completed)]
+        vec![
+            ("task-1".to_string(), TurnOutcome::Completed, None),
+            (
+                "task-3".to_string(),
+                TurnOutcome::Failed,
+                Some("the end-of-task commit failed: wrong_branch".to_string()),
+            ),
+        ]
     );
     // Audit only: never a transcript record, so replay/recover see nothing.
     assert!(session.journal_records().is_empty());

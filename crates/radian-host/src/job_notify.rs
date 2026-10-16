@@ -26,8 +26,8 @@ use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};
 
 /// The most output bytes a completion message inlines (ADR 0037 decision 5; omp's
 /// `ASYNC_INLINE_RESULT_MAX_CHARS` idea). 4 KiB is the tail of a failing build between two
-/// tool calls without letting a chatty job flood the context; the full history stays in the
-/// `.out` file and `job_output` reads the rest.
+/// tool calls without letting a chatty job flood the context; the rest is read with
+/// `job_output`, the model's only channel to a job's output (ADR 0039 decision 1).
 pub const NOTIFY_INLINE_BYTES: usize = 4 << 10;
 
 /// How many consecutive wake-started turns are allowed before settles are injected only
@@ -63,10 +63,14 @@ impl JobNotifier {
 
     /// Spawns the subscriber on `runtime`. It ends when the registry is dropped (a session
     /// end), which closes the channel.
+    ///
+    /// The subscription is taken **before** the task is spawned (ADR 0039 decision 6): an event
+    /// sent between `spawn` returning and the task first running would otherwise be lost, and
+    /// the first job of a session is exactly such an event.
     pub fn spawn(self: &Arc<Self>, runtime: &tokio::runtime::Handle) {
+        let mut rx = self.jobs.subscribe();
         let notifier = Arc::clone(self);
         runtime.spawn(async move {
-            let mut rx = notifier.jobs.subscribe();
             loop {
                 match rx.recv().await {
                     Ok(event) => notifier.deliver(event).await,
@@ -142,7 +146,7 @@ impl JobNotifier {
         }
     }
 
-    /// The one System message a settle sends: id, state, duration, output path and the tail of
+    /// The one System message a settle sends: id, state, duration and the tail of
     /// the output (up to [`NOTIFY_INLINE_BYTES`]).
     fn completion_message(
         &self,
@@ -164,7 +168,7 @@ impl JobNotifier {
                     text.push('\n');
                 }
             }
-            text.push_str("Use job_output to read more (the .out file has the full history).");
+            text.push_str("Use job_output to read more.");
         }
         text
     }

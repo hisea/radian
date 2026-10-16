@@ -67,6 +67,11 @@ pub fn skills_dir_for(root: &Path) -> PathBuf {
 pub fn trust_dir_for(root: &Path) -> PathBuf {
     root.join("trust")
 }
+/// The task agents' worktree root (ADR 0039 decision 4): `<radian-home>/worktrees`. Each
+/// repository gets its own directory below it; the registry appends the repo key.
+pub fn worktrees_dir_for(root: &Path) -> PathBuf {
+    root.join("worktrees")
+}
 pub fn access_dir_for(root: &Path) -> PathBuf {
     root.join("access")
 }
@@ -249,6 +254,10 @@ mod tests {
             PathBuf::from("/home/u/.radian/credentials")
         );
         assert_eq!(trust_dir_for(root), PathBuf::from("/home/u/.radian/trust"));
+        assert_eq!(
+            worktrees_dir_for(root),
+            PathBuf::from("/home/u/.radian/worktrees")
+        );
         assert_eq!(
             access_dir_for(root),
             PathBuf::from("/home/u/.radian/access")
