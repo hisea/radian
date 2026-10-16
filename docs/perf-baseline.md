@@ -691,8 +691,8 @@ transcript 全扫一次 → O(n²)。**修法**：`App` 维护 `live_count`（`s
 
 | 项目 | 值 |
 |---|---|
-| `SyntaxSet` 加载（反序列化 `build.rs` 嵌入的合并 dump：默认 75 语法 + vendored TS/TSX/TOML） | **≈ 1.1 ms**（进程一次，`OnceLock`） |
-| `build.rs` 解析 200 KB 的 TypeScript YAML（构建期，一次） | ≈ 2 s/文件（`yaml-rust`；所以放在构建期） |
+| `SyntaxSet` 加载（反序列化合并 dump：默认 75 语法 + vendored TS/TSX/TOML） | **≈ 1.1 ms**（进程一次，`OnceLock`） |
+| 解析 200 KB 的 TypeScript YAML（**只在重新生成 dump 时**，不再是构建期每次都做） | ≈ 5.5 s/文件（`yaml-rust` + syntect 逐条 pattern 的正则校验；见下一节） |
 | 500 行 Rust 代码块首次高亮（含语法正则的惰性编译） | **≈ 125–285 ms** |
 | 同一块之后的高亮（正则已编译） | **≈ 130–270 ms**（5 次取样；每 1000 行 ≈ 0.22 s） |
 | TypeScript 首次解析（`fancy-regex` 编译该语法的全部正则，进程一次） | **≈ 380 ms**；之后 ≈ 0.3 ms |
@@ -793,3 +793,96 @@ R7 的门槛（稳态 < 1 ms、重排后首帧 < 100 ms）两边都在同一带�
 无退化。卡片的额外成本是每个工具条目一次「有没有真正的输出段」和「有没有元信息」的判断；
 前者已从逐行查文本改成整段一次 trim + 扫一遍 plan（`9ad3b73`）。R7 的首帧 < 100 ms 在机器
 安静时两边都满足。
+
+## radian-tui 的 build script：把它从冷构建里去掉（build-script 片，2026-10-15）
+
+**问题**：冷 `cargo test --workspace --no-run` 里最慢的单个单元是 `radian-tui` 的 build script
+（`cargo --timings` 的 `build-script (run)`）：它把 syntect 的默认语法集与 `third_party/syntaxes`
+里 vendor 的 TypeScript/TSX/TOML 合并、落成 `.packdump`。本片先量清楚它花在哪里，再比较三种做法，
+采用测得最好的那个；不改高亮的行为（见下面的冻结测试）。
+
+**方法**（同一台机器；这台机器同时跑着别的 agent 的编译，负载逐条标注，绝对值噪声大）：
+
+- **单独跑那个 build script**：`target/<profile>/build/radian-tui-*/build-script-build`，带
+  `CARGO_MANIFEST_DIR` 与 `OUT_DIR` 直接执行（3 次），阶段计时用 `Instant` 打在自己打的
+  `RADIAN_BUILD_PHASE` 行上（临时仪表，未进提交）。
+- **冷构建**：空 target 目录 + `cargo test --workspace --no-run --timings`，读 `--timings` 的
+  HTML 报告拿每个 unit 的时间线与 `radian-tui build-script (run)`。
+- **增量**：同一 target 目录里交替换 `build.rs`（两种状态只差这一个文件）再 `cargo build -p radian-tui`，
+  这样两次之间的差就是 build script 的真实代价，不受负载漂移影响。
+- 计时用 `time` / `Instant`，不用 sleep。
+
+### 1. 时间花在哪（单独运行，3 次，load 78–90）
+
+| 阶段 | 第 1 次 | 第 2 次 | 第 3 次 |
+|---|---|---|---|
+| `SyntaxSet::load_defaults_newlines()`（反序列化默认集） | 0.30 s | 0.21 s | 0.25 s |
+| parse TypeScript（200 KB YAML） | 5.57 s | 5.10 s | 5.94 s |
+| parse TypeScriptReact | 5.03 s | 5.52 s | 4.92 s |
+| parse TOML | 0.04 s | 0.05 s | 0.04 s |
+| `SyntaxSetBuilder::build()`（重新解析整集的上下文引用） | 0.76 s | 0.75 s | 0.83 s |
+| dump 写盘（431081 B） | 0.01 s | 0.02 s | 0.01 s |
+| **合计** | **11.72 s** | **11.65 s** | **12.00 s** |
+
+`sample(1)` 采到的叶子函数全在 `regex_automata`（Thompson NFA 编译 + `util::determinize`）：syntect 的
+YAML loader 对每条 pattern 调 `Regex::try_compile` 做**校验**，而 `syntect::parsing::Regex` 是懒编译的
+（dump 里存的是 pattern 字符串，运行时才编译），所以这 10.5 s 编译出来的正则**用完就丢**。这是本片
+的真正靶子：它不做任何有用的事，却要求每次冷构建都做一遍。
+
+**它确实在关键路径上**：冷构建（load 118）的时间线里，build script 在 56.5 s 开始、118.8 s 结束，
+而 radian-tui 的 lib/两个 bin/所有测试单元都要等它结束才能编译——整条构建最后完成的 4 个单元全是
+radian-tui 的（总长 166.7 s）。同期 `cargo --timings` 报的 run 是 **62.4 s**（load 118）/ **38.1 s**
+（load ~100）：那是**被抢占的墙钟**，它的 CPU 只有 ~12 s（单独跑就是 11.7 s），剩下的时间是在等核。
+
+### 2. 三种做法的测量
+
+| 做法 | build script run | 冷 wall（load） | user CPU | 采用？ |
+|---|---|---|---|---|
+| main（每次构建都生成） | 38.1 s | 89.7 s（54→108） | 7m09 | — |
+| (a1) `[profile.dev.build-override] opt-level = 3` | 3.4 s | **120.3 s**（41→118） | **10m30** | 否：proc-macro 在内的所有 build 依赖都变成优化编译 |
+| (a2) 只给该 build script 用到的 6 个 crate 设 `opt-level = 3`（`regex-automata`、`regex-syntax`、`regex`、`fancy-regex`、`syntect`、`yaml-rust`；实测包级 override 对 build-dependency 的**副本**也生效） | 6.5 s | 92.5 s（62→124） | 7m51 | 否：省下的 run 被这些 crate 的优化编译吃回去 |
+| **(b) 预生成并提交 dump，build script 只校验 + 拷贝** | **0.2 s** | 88.5 s（75→160） | **6m46** | **是** |
+
+(a2) 的 6 个 crate 及其副本优化编译的代价可以从 unit 表读出来：`regex-automata` 两份（8.5 + 6.4 s）、
+`regex-syntax` 5.2 s、`syntect` 两份（2.5 + 3.2 s）、`fancy-regex` 三份……冷构建的总 CPU 反而涨了
+约 20 s，所以 (a1)/(a2) 都放弃。
+
+**冷 wall 在这台机器上量不出 (b) 的收益**（诚实记录）：成对测了 5 组（A 先、B 后，负载一路上升）
+84.0/110.4、102.4/105.8、110.2/117.0、180.1/200.9、**166.9/167.6**（最后一组负载 ~110–120 基本同档，
+user 503 s → 489 s）。构建的墙钟由「我们拿到多少核 × 总 CPU 工作量」决定，一个 12 s CPU 的单元被
+删掉只值 ~2.8% 的 CPU，落在负载噪声里；而它在**单独**跑、或在 warm 目录里只换 `build.rs` 时看得清清楚楚：
+
+| 只改 `build.rs` 后的增量重建（同一 target，交替，两次负载 91 / 78） | main | 本片 |
+|---|---|---|
+| wall / user CPU | 18.0 s / 14.9 s | **3.1 s / 3.2 s** |
+
+差的正是那 11.7 s。改一行 radian-tui 源码的增量两边一样（2.4 s vs 2.2–2.7 s，两者都不重跑 build script）。
+
+### 3. 采用 (b) 的形态
+
+- 合并后的集合**提交**为 `crates/radian-tui/assets/syntaxes.packdump`（431081 B，
+  md5 `34b85cf9241b1ceb6672355035c27c40`）。它是输入的纯函数：同一个未优化、一个 `opt-level = 3` 的
+  build script 产出**逐字节相同**的 dump，所以「用 digest 判断是否需要重新生成」是可靠的。
+- `crates/radian-tui/assets/syntaxes.packdump.digest` 是三个语法文件（含 recipe 字符串）的 FNV-1a 64。
+  build script 先算 digest：不一致就**构建失败**并给出重新生成的命令——旧的 dump 不可能被静默用掉。
+- build script 还会用**同一个** syntect 把 dump 反序列化一次：syntect 升级导致 dump 格式变化时，
+  失败发生在构建期，而不是第一段代码高亮时。
+- 重新生成是显式的：`RADIAN_REGENERATE_SYNTAXES=1 cargo build -p radian-tui`，它重写两个文件并打
+  `cargo:warning=regenerated …`，提交即可。这条路径保留在 `build.rs` 里，所以 `[build-dependencies]`
+  的 syntect 保持不变（冷构建的**编译**工作量因此与 main 完全相同）；把生成代码挪出构建图（可选
+  build-dependency + feature，或单独一个 crate）能再省下那 10 个 unit 约 23 s 的 unit 墙钟（~12 s CPU），
+  但要多一套机制，本片没有取。
+- 风险与体积：仓库 +431 KB 二进制 +25 B digest（这是仓库里第一个二进制 blob；运行时二进制体积不变，
+  dump 本来就嵌在可执行文件里）。风险是 dump 与语法文件不同步——由构建期 digest 校验 + 「改语法必须
+  重新生成」的命令覆盖；**行为**是否有变，由 `crates/radian-tui/tests/highlight.rs` 新加的冻结测试
+  （TS/TSX/TOML 固定片段的每一段文字与角色）覆盖，变异检查（把 TOML 注释的 scope 改成
+  `constant.numeric.toml` 再重新生成）会让它失败。
+
+### 局限 / 未测
+
+- 绝对值只在这台 M4 / macOS 27 / APFS 上、且这半天负载 36–231（别的 agent 在编译）的时段成立；
+  冷 wall 的 A/B 差落在这个噪声里，本片只声明「run 的 CPU 与其他所有选项」的对比。
+- 没有在空载机器上重测冷构建；按上面的模型（墙钟 = 总 CPU / 拿到的核数），空载时这 11.7 s 会
+  1:1 少在墙钟上，但**未实测**。
+- `aws-lc-sys` 的 build script（C 编译，同一台机器 19.4–46.7 s，本片时段里常是下一个最慢的单元）
+  不属本片范围，未动。

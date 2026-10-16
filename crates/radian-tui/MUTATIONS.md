@@ -1333,3 +1333,18 @@ Base `d8b7688`（worktree `.radian-worktrees/access-cmd`）· 每个变异在就
 
 3/3 抓住。AC-M3 的两半都在同一个 pty 用例里：写 `~/.radian/access/access.json` 时必须生效并带
 `(project)` 标记；把同样内容写进工作区文件、用干净 HOME 启动时**必须不生效**。
+
+## build-script：合并 dump 预先提交、build script 只校验与拷贝（2026-10-15）
+
+Base `39c67ad`（worktree `.radian-worktrees/build-script`）。本片没有改产品行为（新 dump 与 main 的
+build script 产出**逐字节相同**，md5 `34b85cf9241b1ceb6672355035c27c40`），新增的是构建脚本的两道
+校验与一条冻结测试。前两条是**构建期**的负向验证（手工跑，不是 `cargo test`），第三条是新测试的变异
+检查；每条跑完从 `/tmp/bs/` 的副本还原并用 `md5` 确认逐字节相同。
+
+| # | 变异 / 负向场景 | 抓住它的东西 | 结果 |
+|---|---|---|---|
+| BS-M1 | `assets/syntaxes.packdump.digest` 改成别的值（dump 与语法不同步） | `build.rs` 的 digest 校验：构建失败并打印 `RADIAN_REGENERATE_SYNTAXES=1 cargo build -p radian-tui` | ✅（`cargo build -p radian-tui` 报错退出） |
+| BS-M2 | dump 截断到 2000 B（坏文件 / syntect 格式变了的等价物） | `build.rs` 的 `from_uncompressed_dump_file` 校验：构建失败并打印同一命令 | ✅ |
+| BS-M3 | `third_party/syntaxes/TOML.sublime-syntax` 的注释 scope 改成 `constant.numeric.toml`，重新生成 dump | `highlight::the_vendored_grammars_highlight_a_fixed_snippet_identically`（Comment → Number） | ✅（1 FAILED） |
+
+BS-M1/M2 覆盖「旧的 dump 不会被静默用掉」，BS-M3 覆盖「重新生成真的改变了行为时看得见」。
