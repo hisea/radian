@@ -88,10 +88,10 @@ fn style_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::s
     None
 }
 
-/// A closed flowchart on a wide screen draws box drawing and shows its fence (ADR 0035
-/// revision 1: the fence is the code block's title).
+/// A closed flowchart on a wide screen draws box drawing and shows its frame (ADR 0035
+/// revision 6 decision 7: the block's top line is titled with the language).
 #[test]
-fn a_closed_flowchart_is_drawn_and_the_fence_is_shown() {
+fn a_closed_flowchart_is_drawn_and_the_frame_is_shown() {
     let mut app = App::new("m", "s");
     assistant(&mut app, &fenced(FLOW, true));
     let text = screen(&render(&mut app, 80, 20));
@@ -101,8 +101,8 @@ fn a_closed_flowchart_is_drawn_and_the_fence_is_shown() {
     );
     assert!(text.contains("Start"), "a node label is drawn:\n{text}");
     assert!(
-        text.contains("```mermaid"),
-        "the fence line is the block's title:\n{text}"
+        text.contains("╭─ mermaid"),
+        "the frame's top line titles the block:\n{text}"
     );
     assert!(
         !text.contains("flowchart LR"),

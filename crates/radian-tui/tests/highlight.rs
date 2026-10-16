@@ -45,7 +45,9 @@ fn style_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<Style> {
             line.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
         }
         if let Some(col) = line.find(needle) {
-            let x = area.left() + col as u16;
+            // `col` is a byte offset; the buffer column is the display width of the prefix
+            // (the code frame's rail is multi-byte, e.g. `│`).
+            let x = area.left() + unicode_width::UnicodeWidthStr::width(&line[..col]) as u16;
             return buffer.cell((x, y)).map(|c| c.style());
         }
     }
