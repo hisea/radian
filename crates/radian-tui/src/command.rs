@@ -255,7 +255,7 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "mode",
-            description: "show or switch the working mode: general or lead (ADR 0038)",
+            description: "show or switch the working mode (ADR 0038)",
             levels: &[mode_level],
         },
         Command {
