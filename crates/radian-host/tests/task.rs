@@ -9,14 +9,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_core::{NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use radian_host::{
-    HostBindings, Isolation, LocalSession, SessionError, SessionFacade, SessionId,
-    SessionProjection, SessionQueue, SessionSetup, SpawnRequest, TaskBuilder, TaskContext,
-    TaskRegistry, TaskSession, build_model, end_of_task_commit, open_session,
+    CommitGate, HostBindings, Isolation, LocalSession, SessionError, SessionFacade, SessionId,
+    SessionProjection, SessionQueue, SessionSetup, SpawnRequest, SpawnStage, TaskBuilder,
+    TaskContext, TaskRegistry, TaskSeams, TaskSession, build_model, end_of_task_commit,
+    open_session,
 };
 use radian_permissions::{ApprovalPolicy, NoopAudit, Preset, Profile};
 use radian_sandbox::{Sandbox, SandboxPolicy};
@@ -33,6 +34,64 @@ fn scratch(label: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     // Canonical: `/var` -> `/private/var` on macOS, so git's own worktree paths match.
     std::fs::canonicalize(&dir).unwrap()
+}
+
+/// A private `RADIAN_HOME` for this test binary (ADR 0039 decision 4 resolves the task worktree
+/// root through it). `RADIAN_HOME` is process-wide, so it is set once here and never changed;
+/// the real `~/.radian` is never touched. Canonicalized like `scratch`.
+fn isolated_home() -> PathBuf {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("radian-task-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        // SAFETY: `get_or_init` runs this once, and every test in this binary calls
+        // `isolated_home()` before it builds a registry, so no other thread is reading it.
+        unsafe { std::env::set_var("RADIAN_HOME", &dir) };
+        dir
+    })
+    .clone()
+}
+
+/// The Unix mode bits of `path` (`None` off Unix, where there are no such bits).
+fn mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bits = std::fs::metadata(path).ok()?.permissions().mode() & 0o777;
+        Some(bits)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Records the task sessions whose driver ended (their `driver_stopped` binding fired), so a
+/// test can assert a failed spawn left no driver running.
+#[derive(Default)]
+struct DriverStops {
+    stopped: Mutex<Vec<String>>,
+}
+
+impl DriverStops {
+    fn record(&self, session_id: &str) {
+        self.stopped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(session_id.to_owned());
+    }
+
+    fn count(&self, session_id: &str) -> usize {
+        self.stopped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|id| *id == session_id)
+            .count()
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> bool {
@@ -98,12 +157,14 @@ fn model(
 
 /// The host-specific builder a test gives the registry: a mock model and, for a worktree task,
 /// a `workspace` sandbox built with the network **on** (the registry must turn it off).
-fn builder(session_dir: PathBuf, base_url: String) -> TaskBuilder {
+fn builder(session_dir: PathBuf, base_url: String, stops: Arc<DriverStops>) -> TaskBuilder {
     Arc::new(
         move |ctx: &TaskContext<'_>| -> Result<TaskSession, SessionError> {
             let workspace = ctx.workspace.to_path_buf();
             let fail = |error: String| SessionError::Message(error);
             let slot = radian_runtime::ConfigSlot::new(Value::Null);
+            let stopped = Arc::clone(&stops);
+            let session_id = ctx.session_id.to_owned();
             let (sandbox, tier, profile) = match ctx.isolation {
                 Isolation::Shared => (
                     None,
@@ -175,7 +236,7 @@ fn builder(session_dir: PathBuf, base_url: String) -> TaskBuilder {
                     events: Arc::new(NoopSink),
                     projection: Arc::new(SessionProjection::new()),
                     runtime_events: Arc::new(|_event: &radian_session::RuntimeEvent| {}),
-                    driver_stopped: Arc::new(|_| {}),
+                    driver_stopped: Arc::new(move |_| stopped.record(&session_id)),
                     before_driver: None,
                     memory_warning: Arc::new(|_message: &str| {}),
                     memory_notice_line: Arc::new(|_line: &str| {}),
@@ -188,14 +249,21 @@ fn builder(session_dir: PathBuf, base_url: String) -> TaskBuilder {
 /// The pieces a test keeps: the lead's dir, its journal, its queue, and the registry.
 struct Fixture {
     scratch: PathBuf,
+    home: PathBuf,
     lead: PathBuf,
     session_dir: PathBuf,
     queue: Arc<SessionQueue>,
+    stops: Arc<DriverStops>,
     registry: TaskRegistry,
 }
 
 impl Fixture {
     fn new(label: &str, base_url: &str) -> Self {
+        Self::with_seams(label, base_url, TaskSeams::default())
+    }
+
+    fn with_seams(label: &str, base_url: &str, seams: TaskSeams) -> Self {
+        let home = isolated_home();
         let scratch = scratch(label);
         let lead = scratch.join("lead");
         std::fs::create_dir_all(&lead).unwrap();
@@ -225,20 +293,32 @@ impl Fixture {
             .expect("the lead journal"),
         );
         let queue: Arc<SessionQueue> = Arc::new(SessionQueue::new());
+        let stops = Arc::new(DriverStops::default());
         let registry = TaskRegistry::new(
             lead.clone(),
             "lead",
             lead_journal,
             Arc::clone(&queue),
-            builder(session_dir.clone(), base_url.to_owned()),
-        );
+            builder(session_dir.clone(), base_url.to_owned(), Arc::clone(&stops)),
+        )
+        .with_seams(seams);
         Self {
             scratch,
+            home,
             lead,
             session_dir,
             queue,
+            stops,
             registry,
         }
+    }
+
+    /// The directory task worktrees live under (ADR 0039 decision 4).
+    fn worktree_root(&self) -> PathBuf {
+        self.registry
+            .worktree_root()
+            .expect("the lead is a git repository")
+            .to_path_buf()
     }
 
     fn task_journal(&self, id: &str) -> Value {
@@ -280,7 +360,7 @@ async fn a_task_opens_in_a_worktree_on_its_branch_with_a_task_parent() {
 
     // It is a git worktree of the lead repo, on its own branch.
     let worktree = record.worktree.clone().expect("a worktree");
-    assert_eq!(worktree, fixture.lead.join(".radian-worktrees/t1"));
+    assert_eq!(worktree, fixture.worktree_root().join("t1"));
     assert_eq!(record.branch.as_deref(), Some("radian/t1"));
     let list = git_out(&fixture.lead, &["worktree", "list", "--porcelain"]);
     assert!(
@@ -1005,8 +1085,11 @@ fn creating_and_removing_a_worktree_runs_no_filter() {
     ));
     assert!(git(&lead, &["config", "filter.evil.required", "true"]));
 
-    let wt = scratch("wt-filter-work");
-    radian_host::task::create_worktree(&lead, &wt, "radian/wt-filter").expect("worktree add");
+    // ADR 0039 decision 4: the worktree lives below the radian home, which create_worktree vets.
+    let home = scratch("wt-filter-home");
+    let wt = home.join("wt");
+    radian_host::task::create_worktree(&lead, &home, &wt, "radian/wt-filter")
+        .expect("worktree add");
     assert!(
         wt.join("a.txt").exists(),
         "the worktree must be checked out"
@@ -1021,4 +1104,369 @@ fn creating_and_removing_a_worktree_runs_no_filter() {
         !marker.exists(),
         "worktree remove must not run a filter in the host"
     );
+}
+// ---------------------------------------------------------------------------------------------
+// ADR 0039 decision 4: the task worktree root is outside the workspace.
+// ---------------------------------------------------------------------------------------------
+
+/// A task worktree lives under `RADIAN_HOME/worktrees/<repo-key>/`, not inside the lead's
+/// workspace, and the root levels are owner-only (ADR 0039 decision 4).
+#[tokio::test]
+async fn the_task_worktree_is_outside_the_workspace_on_a_per_repository_root() {
+    let fixture = Fixture::new("root", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return; // no sandbox backend here
+    }
+    let record = fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let worktree = record.worktree.clone().expect("a worktree");
+
+    let root = fixture.worktree_root();
+    assert_eq!(worktree, root.join("t1"));
+    assert!(
+        root.starts_with(fixture.home.join("worktrees")),
+        "the root must be under RADIAN_HOME/worktrees: {}",
+        root.display()
+    );
+    assert!(
+        !worktree.starts_with(&fixture.lead),
+        "the worktree must be outside the workspace: {}",
+        worktree.display()
+    );
+    // `<repo-key>` names the repository's directory plus a short hash.
+    let key = root.file_name().unwrap().to_str().unwrap();
+    assert!(key.starts_with("lead-"), "{key}");
+    // The old in-workspace root is not used at all.
+    assert!(!fixture.lead.join(".radian-worktrees").exists());
+    // Every level the host creates is owner-only (0700).
+    if let Some(bits) = mode(&root) {
+        assert_eq!(bits, 0o700, "{}", root.display());
+        assert_eq!(mode(root.parent().unwrap()), Some(0o700));
+    }
+
+    // Git itself knows the worktree, so the task's `git_commit` works from the new location.
+    assert_eq!(
+        git_out(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "radian/t1"
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// The model swaps the old in-workspace `.radian-worktrees` for a symlink pointing outside the
+/// workspace: nothing follows it, because the root is elsewhere now (ADR 0039 decision 4).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_at_the_old_worktree_root_changes_nothing() {
+    let fixture = Fixture::new("old-symlink", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let outside = fixture.scratch.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.lead.join(".radian-worktrees"))
+        .expect("the swapped old root");
+
+    let record = fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+
+    assert_eq!(
+        record.worktree.clone().unwrap(),
+        fixture.worktree_root().join("t1")
+    );
+    assert_eq!(
+        std::fs::read_dir(&outside).unwrap().count(),
+        0,
+        "nothing may be written through the old root's symlink"
+    );
+    assert!(
+        fixture.worktree_root().join("t1").exists(),
+        "the worktree is at the new root"
+    );
+
+    fixture.registry.remove("t1", true).await.expect("remove");
+}
+
+/// A symlink at the `<repo-key>` level of the new root is refused before git runs (ADR 0039
+/// decision 4). The `worktrees/` level itself is per-process, so it is covered by
+/// `tests/task_root.rs`, which owns its own `RADIAN_HOME`.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_under_the_new_root_is_refused() {
+    let fixture = Fixture::new("new-symlink", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let root = fixture.worktree_root();
+    let outside = fixture.scratch.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    // `<home>/worktrees/<repo-key>` is a symlink pointing outside the radian home.
+    // `worktrees/` is shared by every test in this binary (one RADIAN_HOME per process): create
+    // it owner-only like the host does, or a test that checks the level's 0700 mode would see
+    // this test's 0755 when it runs first.
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(root.parent().unwrap())
+            .unwrap();
+    }
+    std::os::unix::fs::symlink(&outside, &root).expect("the swapped root");
+
+    let error = match fixture.registry.spawn(SpawnRequest::new("t1")).await {
+        Ok(_) => panic!("a symlink at a root level must be refused"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("symlink"),
+        "the error must name the symlink: {error}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&outside).unwrap().count(),
+        0,
+        "the symlink target stays empty"
+    );
+    assert!(fixture.registry.get("t1").is_none());
+    // Only a symlink check that runs **before** git can keep git from writing through it.
+    let list = git_out(&fixture.lead, &["worktree", "list", "--porcelain"]);
+    assert!(
+        !list.contains("t1"),
+        "git must not know a worktree:\n{list}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0039 decision 5: spawning is one transaction.
+// ---------------------------------------------------------------------------------------------
+
+/// A failure at any of the four spawn points leaves no worktree, no driver and a consistent
+/// registry, and pairs every `TaskSpawned` with a `TaskFinished` (ADR 0039 decision 5).
+#[tokio::test]
+async fn a_failed_spawn_leaves_nothing_behind_and_pairs_a_task_finished() {
+    for stage in [
+        SpawnStage::TaskSpawned,
+        SpawnStage::Builder,
+        SpawnStage::Enforce,
+        SpawnStage::Brief,
+    ] {
+        a_failed_spawn_at(stage).await;
+    }
+}
+
+async fn a_failed_spawn_at(stage: SpawnStage) {
+    let seams = TaskSeams {
+        spawn: Some(Arc::new(move |at: SpawnStage| {
+            if at == stage {
+                Err(format!("test seam: aborting at {at:?}"))
+            } else {
+                Ok(())
+            }
+        })),
+        commit_gate: None,
+    };
+    let fixture = Fixture::with_seams("fail", "http://127.0.0.1:1/v1", seams);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return; // no sandbox backend here
+    }
+    let root = fixture.worktree_root();
+    let mut request = SpawnRequest::new("t1");
+    if stage == SpawnStage::Brief {
+        // The `Brief` seam only exists when there is a brief to send.
+        request.brief = Some("go".to_owned());
+    }
+    let error = match fixture.registry.spawn(request).await {
+        Ok(_) => panic!("{stage:?}: the seam must abort the spawn"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("test seam"),
+        "{stage:?}: {error}"
+    );
+    // No worktree, in the filesystem or in git.
+    assert!(!root.join("t1").exists(), "{stage:?}: a worktree is left");
+    let list = git_out(&fixture.lead, &["worktree", "list", "--porcelain"]);
+    assert!(
+        !list.contains("t1"),
+        "{stage:?}: git knows a worktree:\n{list}"
+    );
+    // A consistent registry: no entry, no id.
+    assert!(fixture.registry.get("t1").is_none(), "{stage:?}");
+    assert!(fixture.registry.ids().is_empty(), "{stage:?}");
+
+    // No running driver: the session (opened for the `Brief` stage) was stopped and joined.
+    // `driver_stopped` fires before the join resolves, so a count of one is exact.
+    let expected_stops = usize::from(stage == SpawnStage::Brief);
+    assert_eq!(
+        fixture.stops.count("t1"),
+        expected_stops,
+        "{stage:?}: a driver is still running"
+    );
+
+    // The journal pairs every `TaskSpawned` with a `TaskFinished`.
+    let lines = fixture.lead_journal_lines();
+    let spawned = lines.iter().filter(|v| v["event"] == "TaskSpawned").count();
+    let finished: Vec<&Value> = lines
+        .iter()
+        .filter(|v| v["event"] == "TaskFinished")
+        .collect();
+    assert_eq!(
+        finished.len(),
+        spawned,
+        "{stage:?}: {spawned} TaskSpawned but {} TaskFinished",
+        finished.len()
+    );
+    if stage == SpawnStage::TaskSpawned {
+        assert_eq!(spawned, 0, "nothing was recorded before the seam");
+    } else {
+        assert_eq!(spawned, 1, "{stage:?}");
+        assert_eq!(finished[0]["data"]["outcome"], "failed", "{stage:?}");
+        assert!(
+            finished[0]["data"]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("test seam")),
+            "{stage:?}: the failure reason must be recorded: {}",
+            finished[0]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0039 decision 7: the end-of-task commit is awaitable and its failure is task state.
+// ---------------------------------------------------------------------------------------------
+
+/// `remove` waits for a running end-of-task commit (ADR 0039 decision 7). The commit is held in
+/// the gate seam: without the await, `remove` would see the still-uncommitted worktree and
+/// refuse, so the "still running" assertion is what the mutation breaks.
+#[tokio::test]
+async fn remove_waits_for_the_end_of_task_commit() {
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                    "function": {"name": "write", "arguments": "{\"path\":\"made.txt\",\"content\":\"by the task\\n\"}"}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ]),
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "done"}), None),
+            chunk(json!({}), Some("stop")),
+        ]),
+    ])
+    .await;
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let entered_tx = Mutex::new(Some(entered_tx));
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let gate: CommitGate = Arc::new(move || {
+        if let Some(entered) = entered_tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = entered.send(());
+        }
+        // Block the commit until the test releases it: no sleep decides the ordering.
+        let _ = release_rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+    });
+    let fixture = Fixture::with_seams(
+        "remove-wait",
+        &server.base_url,
+        TaskSeams {
+            spawn: None,
+            commit_gate: Some(gate),
+        },
+    );
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let mut request = SpawnRequest::new("t1");
+    request.brief = Some("write made.txt".to_owned());
+    fixture.registry.spawn(request).await.expect("spawn");
+
+    // The turn ended and its commit is now blocked in the gate.
+    entered_rx.await.expect("the end-of-task commit started");
+    let mut remove = Box::pin(fixture.registry.remove("t1", false));
+    let observed = tokio::time::timeout(std::time::Duration::from_millis(500), &mut remove).await;
+    assert!(
+        observed.is_err(),
+        "remove must wait for the end-of-task commit, not read a half-committed worktree"
+    );
+
+    release_tx.send(()).expect("release the commit");
+    remove.await.expect("remove succeeds once the commit lands");
+    assert!(fixture.registry.get("t1").is_none());
+    assert!(
+        !fixture.worktree_root().join("t1").exists(),
+        "the worktree goes after the commit"
+    );
+}
+
+/// A failing end-of-task commit is part of the task's result: it lands in a `TaskFinished`
+/// (ADR 0039 decision 7), so a reader of the lead's journal sees it.
+#[tokio::test]
+async fn a_failing_end_commit_shows_in_task_finished() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": "done"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+    let fixture = Fixture::new("commit-fail", &server.base_url);
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    // Spawn with no brief, so the worktree can leave `radian/t1` before the turn: the end commit
+    // then refuses (`wrong_branch`) and the failure must be recorded.
+    let record = fixture
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let worktree = record.worktree.clone().unwrap();
+    std::fs::write(worktree.join("change.txt"), "a change\n").unwrap();
+    assert!(git(&worktree, &["checkout", "-q", "-b", "other"]));
+    record
+        .session
+        .inbox()
+        .followup(
+            agent_core::Message::user("go"),
+            agent_core::InputSource::Subagent,
+        )
+        .await
+        .expect("the brief");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let finished = loop {
+        let lines = fixture.lead_journal_lines();
+        if let Some(finished) = lines.iter().find(|v| v["event"] == "TaskFinished") {
+            break finished.clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the failed end commit never reached TaskFinished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(finished["data"]["outcome"], "completed");
+    let error = finished["data"]["error"]
+        .as_str()
+        .expect("the commit failure is recorded");
+    assert!(error.contains("radian/t1"), "{error}");
+    assert_eq!(
+        git_out(&worktree, &["status", "--porcelain"]),
+        "?? change.txt",
+        "the failed commit left the change uncommitted"
+    );
+
+    // `remove` waits for the (failed) commit and then refuses the dirty worktree.
+    let refused = fixture.registry.remove("t1", false).await;
+    assert!(refused.is_err(), "a dirty worktree is still refused");
+    fixture
+        .registry
+        .remove("t1", true)
+        .await
+        .expect("force remove");
 }

@@ -24,8 +24,9 @@ pub const SKILL_FILE_NAME: &str = "SKILL.md";
 pub const SECTION_BUDGET_TOKENS: u64 = 1000;
 
 /// Directories discovery never descends into (the same names `mention` ignores; ADR 0025 S1).
-/// `.radian-worktrees/` holds one full worktree per task agent (ADR 0030 O3), so descending
-/// into it would discover every skill once per task.
+/// `.radian-worktrees/` holds one full worktree per checkout (ADR 0030 O7; task agents'
+/// worktrees moved out of the workspace in ADR 0039 decision 4), so descending into it would
+/// discover every skill once per worktree.
 pub const IGNORED_DIRS: &[&str] = &[".git", ".radian-sandbox", ".radian-worktrees"];
 
 /// The longest `name` (Agent Skills spec, via pi; ADR 0025 S1).

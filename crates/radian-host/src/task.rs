@@ -4,9 +4,10 @@
 //! A task agent is an ordinary `open_session` (ADR 0030 O2). What makes it a task agent is
 //! the setup the [`TaskRegistry`] hands it:
 //!
-//! - its own `git worktree` at `<workspace>/.radian-worktrees/<id>` on a fresh `radian/<id>`
-//!   branch (ADR 0030 O3), created host-side, outside the sandbox; or, with `isolation =
-//!   "shared"`, the lead's own workspace forced to the `safe` tier (read-only);
+//! - its own `git worktree` at `~/.radian/worktrees/<repo-key>/<id>` on a fresh `radian/<id>`
+//!   branch (ADR 0030 O3, moved **out of the workspace** by ADR 0039 decision 4), created
+//!   host-side, outside the sandbox, behind a symlink check on every level of the root; or, with
+//!   `isolation = "shared"`, the lead's own workspace forced to the `safe` tier (read-only);
 //! - a `workspace` sandbox rooted at the worktree with the **network off** (ADR 0030 revision
 //!   2 item 2) and `.git` read-only (ADR 0038 decision 5);
 //! - `memory_root = None` (ADR 0030 O8: two sessions writing one memory root would fight over
@@ -23,27 +24,34 @@
 //!   arrival order and the task never appears as its own queue;
 //! - an end-of-task commit: when the task's turn ends, the worktree's uncommitted changes are
 //!   committed by the host with the fixed message `radian: end of task <id> (<outcome>)`
-//!   (ADR 0030 item 1 B). With no changes, no commit is made.
+//!   (ADR 0030 item 1 B). With no changes, no commit is made. The commit is
+//!   **awaitable** (ADR 0039 decision 7): [`TaskRecord::await_end_commit`] resolves it, a
+//!   failure is recorded in a `TaskFinished`, and [`TaskRegistry::remove`] waits for it.
 //!
-//! The lead's journal gets a non-critical `TaskSpawned` before the task session is opened, so
-//! the lead's own file answers "which task agents did I start" (ADR 0030 O5). `TaskFinished`
-//! is written by a later slice when the lead collects the result.
+//! Spawning is one transaction (ADR 0039 decision 5). A [`SpawnGuard`] owns the worktree from
+//! the moment it exists and — after `open_session` — the session's driver; it is disarmed only
+//! once the record is in the registry. A failure after the lead's `TaskSpawned` was written
+//! pairs it with a `TaskFinished { outcome: failed, error }` (ADR 0030 O5, ADR 0039 decision 5);
+//! a failure before that leaves the journal untouched.
 //!
 //! The host-specific parts (which model, which profile, the wording, the audit sink) are the
 //! caller's: it passes a [`TaskBuilder`] and the registry enforces the invariants above on what
-//! the builder returns, so the two hosts and the tests cannot accidentally leave one out.
+//! the builder returns, so the two hosts and the tests cannot accidentally leave one out. The
+//! [`TaskSeams`] the registry can carry exist only for tests.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_core::Message;
 use radian_permissions::{Preset, Profile};
 use radian_sandbox::{GitAccess, Sandbox, SandboxPolicy};
 use radian_session::{ForkParent, RuntimeEvent, SessionJournal, TurnOutcome};
+use tokio::sync::watch;
 
 use crate::git_commit::{Committed, RepoPin, default_allowed_filters};
+use crate::home::{ensure_private_dir, radian_home, worktrees_dir_for};
 use crate::session::{
     ApprovalRouting, HostBindings, LocalSession, SessionError, SessionQueue, SessionSetup,
     open_session,
@@ -113,6 +121,47 @@ pub struct TaskSession {
 pub type TaskBuilder =
     Arc<dyn Fn(&TaskContext<'_>) -> Result<TaskSession, SessionError> + Send + Sync>;
 
+/// Where a spawn can be interrupted, for tests (ADR 0039 decision 5). Production installs no
+/// hook, so no variant ever fires outside a test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnStage {
+    /// Before the lead's `TaskSpawned` is appended: models a write that fails, so nothing is
+    /// recorded and nothing needs pairing.
+    TaskSpawned,
+    /// Before the [`TaskBuilder`] builds the session.
+    Builder,
+    /// Before the task invariants are enforced on the built setup.
+    Enforce,
+    /// Before the brief is sent as a `Subagent` input.
+    Brief,
+}
+
+/// A test seam run at each [`SpawnStage`]; `Err` aborts the spawn there with that message.
+pub type SpawnHook = Arc<dyn Fn(SpawnStage) -> Result<(), String> + Send + Sync>;
+
+/// A test seam run at the start of the end-of-task commit, on the blocking thread, so a test
+/// can hold the commit and prove [`TaskRegistry::remove`] waits for it (ADR 0039 decision 7).
+pub type CommitGate = Arc<dyn Fn() + Send + Sync>;
+
+/// The test seams a registry can carry (ADR 0039 decisions 5 and 7). Both are `None` in
+/// production; the two hosts never install one.
+#[derive(Clone, Default)]
+pub struct TaskSeams {
+    pub spawn: Option<SpawnHook>,
+    pub commit_gate: Option<CommitGate>,
+}
+
+/// How a task's end-of-task commit ended (ADR 0030 item 1 B, ADR 0039 decision 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndCommit {
+    /// The worktree was clean; no commit was made.
+    None,
+    /// The commit landed.
+    Committed(Committed),
+    /// The commit failed; the message is what a `TaskFinished` carries.
+    Failed(String),
+}
+
 /// One live task agent: its session and the facts the lead needs about it (ADR 0030 O2/O3).
 pub struct TaskRecord {
     pub id: String,
@@ -128,6 +177,17 @@ pub struct TaskRecord {
     /// The sandbox policy the task's tools run under (ADR 0030 O3): a `workspace` policy with
     /// the network off and `.git` read-only, or `None` for a host with no sandbox.
     pub sandbox_policy: Option<SandboxPolicy>,
+    /// The awaitable end-of-task commit (ADR 0039 decision 7). Private so only the registry
+    /// builds a record.
+    finisher: Arc<TaskFinisher>,
+}
+
+impl TaskRecord {
+    /// Waits for the end-of-task commit to finish (ADR 0039 decision 7). `None` when no turn
+    /// has ended, so no commit was ever scheduled.
+    pub async fn await_end_commit(&self) -> Option<EndCommit> {
+        self.finisher.await_end_commit().await
+    }
 }
 
 /// What to spawn. The registry fills the rest from its own configuration.
@@ -153,21 +213,32 @@ impl SpawnRequest {
     }
 }
 
+/// The task agents' worktree root (ADR 0039 decision 4): `<radian-home>/worktrees/<repo-key>`,
+/// plus the radian home the symlink check starts from.
+#[derive(Debug, Clone)]
+struct WorktreeRoot {
+    home: PathBuf,
+    root: PathBuf,
+}
+
 /// The registry a lead holds: it keys live task agents by id and owns their worktrees
 /// (ADR 0030 slice 4).
 pub struct TaskRegistry {
     /// The lead's canonical workspace (the repository the worktrees branch from).
     workspace: PathBuf,
-    /// `<workspace>/.radian-worktrees`.
-    worktree_root: PathBuf,
+    /// The task worktree root, or `None` when the workspace is not a git repository (or there is
+    /// no usable `~/.radian`); a `shared`-only lead can still spawn.
+    worktree_root: Option<WorktreeRoot>,
     /// The lead's session id, recorded as every task's `parent.session_id`.
     lead_session_id: String,
-    /// The lead's journal: `TaskSpawned` lands here (ADR 0030 O5).
+    /// The lead's journal: `TaskSpawned`/`TaskFinished` land here (ADR 0030 O5).
     lead_journal: Arc<SessionJournal>,
     /// The lead's pending queue: every task's approvals and questions route here, tagged with
     /// the task's session id (ADR 0030 O2).
     lead_queue: Arc<SessionQueue>,
     builder: TaskBuilder,
+    /// Test seams (ADR 0039 decisions 5 and 7); both are `None` in production.
+    seams: TaskSeams,
     tasks: Mutex<BTreeMap<String, Arc<TaskRecord>>>,
 }
 
@@ -181,10 +252,9 @@ impl TaskRegistry {
         builder: TaskBuilder,
     ) -> Self {
         let workspace = workspace.into();
-        // Canonical, so `<workspace>/.radian-worktrees/<id>` matches what git reports back
-        // (macOS `/var` -> `/private/var`).
+        // Canonical, so the worktree paths git reports back match (macOS `/var` -> `/private/var`).
         let workspace = std::fs::canonicalize(&workspace).unwrap_or(workspace);
-        let worktree_root = workspace.join(".radian-worktrees");
+        let worktree_root = task_worktree_root(&workspace);
         Self {
             workspace,
             worktree_root,
@@ -192,13 +262,26 @@ impl TaskRegistry {
             lead_journal,
             lead_queue,
             builder,
+            seams: TaskSeams::default(),
             tasks: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Installs the test seams (ADR 0039 decisions 5 and 7).
+    pub fn with_seams(mut self, seams: TaskSeams) -> Self {
+        self.seams = seams;
+        self
     }
 
     /// The lead's workspace (the repository task worktrees branch from).
     pub fn workspace(&self) -> &Path {
         &self.workspace
+    }
+
+    /// The directory task worktrees live under (ADR 0039 decision 4), or `None` when this lead
+    /// has no git repository to branch from.
+    pub fn worktree_root(&self) -> Option<&Path> {
+        self.worktree_root.as_ref().map(|root| root.root.as_path())
     }
 
     /// The live task, if one has that id.
@@ -220,11 +303,12 @@ impl TaskRegistry {
             .collect()
     }
 
-    /// Spawns a task agent (ADR 0030 O2/O3).
+    /// Spawns a task agent (ADR 0030 O2/O3) as one transaction (ADR 0039 decision 5).
     ///
     /// Steps, in order: create the worktree, append the lead's `TaskSpawned`, build and open
     /// the task session with the enforced invariants, and (if a brief was given) send it as a
-    /// `Subagent` input. On a failure after the worktree exists, the worktree is removed again.
+    /// `Subagent` input. A failure at any step after the worktree exists removes it again; a
+    /// failure after `TaskSpawned` was written also appends the paired `TaskFinished`.
     pub async fn spawn(&self, request: SpawnRequest) -> Result<Arc<TaskRecord>, TaskError> {
         let SpawnRequest {
             id,
@@ -241,27 +325,77 @@ impl TaskRegistry {
             return Err(TaskError::new(format!("task `{id}` already exists")));
         }
 
+        // The guard owns everything the spawn has built so far; it is disarmed only once the
+        // record is in the registry, so no failure below can leave a worktree or a driver.
+        let mut guard = SpawnGuard::new(self.workspace.clone());
+        match self
+            .spawn_inner(&mut guard, &id, isolation, label, brief)
+            .await
+        {
+            Ok(record) => {
+                guard.disarm();
+                Ok(record)
+            }
+            Err(error) => {
+                // ADR 0039 decision 5: the `TaskSpawned` this spawn wrote needs a pair.
+                if guard.spawned {
+                    let _ = self
+                        .lead_journal
+                        .append_runtime_event(RuntimeEvent::TaskFinished {
+                            agent_session_id: id.clone(),
+                            outcome: TurnOutcome::Failed,
+                            error: Some(error.to_string()),
+                        })
+                        .await;
+                }
+                guard.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// The fallible body of [`TaskRegistry::spawn`]; the caller owns the guard.
+    async fn spawn_inner(
+        &self,
+        guard: &mut SpawnGuard,
+        id: &str,
+        isolation: Isolation,
+        label: Option<String>,
+        brief: Option<String>,
+    ) -> Result<Arc<TaskRecord>, TaskError> {
         // 1. The workspace: a fresh worktree on `radian/<id>`, or the lead's own (shared).
         let (workspace, worktree, branch) = match isolation {
             Isolation::Worktree => {
-                let worktree = self.worktree_root.join(&id);
+                let root = self.worktree_root.as_ref().ok_or_else(|| {
+                    TaskError::new(format!(
+                        "cannot spawn task `{id}` in a worktree: {} is not a git repository, or \
+                         there is no usable ~/.radian",
+                        self.workspace.display()
+                    ))
+                })?;
+                let worktree = root.root.join(id);
                 let lead = self.workspace.clone();
-                let branch = format!("radian/{id}");
+                let home = root.home.clone();
                 let wt = worktree.clone();
-                let br = branch.clone();
-                tokio::task::spawn_blocking(move || create_worktree(&lead, &wt, &br))
-                    .await
-                    .map_err(|error| TaskError::new(format!("worktree task failed: {error}")))??;
-                (worktree.clone(), Some(worktree), Some(branch))
+                let br = format!("radian/{id}");
+                let br_for_git = br.clone();
+                tokio::task::spawn_blocking(move || {
+                    create_worktree(&lead, &home, &wt, &br_for_git)
+                })
+                .await
+                .map_err(|error| TaskError::new(format!("worktree task failed: {error}")))??;
+                guard.worktree = Some(worktree.clone());
+                (worktree.clone(), Some(worktree), Some(br))
             }
             Isolation::Shared => (self.workspace.clone(), None, None),
         };
 
         // 2. The lead's `TaskSpawned`, before the task session exists. `parent.seq` is its seq.
+        self.seam(SpawnStage::TaskSpawned)?;
         let start_seq = self.lead_journal.next_seq();
         self.lead_journal
             .append_runtime_event(RuntimeEvent::TaskSpawned {
-                agent_session_id: id.clone(),
+                agent_session_id: id.to_owned(),
                 worktree: worktree
                     .as_ref()
                     .map(|path| path.to_string_lossy().into_owned()),
@@ -269,12 +403,14 @@ impl TaskRegistry {
             })
             .await
             .map_err(|error| TaskError::new(format!("cannot write TaskSpawned: {error}")))?;
+        guard.spawned = true;
         let parent = ForkParent::task(self.lead_session_id.clone(), start_seq);
 
         // 3. Build and open the session, enforcing the task invariants on what the builder gave.
+        self.seam(SpawnStage::Builder)?;
         let parts = (self.builder)(&TaskContext {
-            id: &id,
-            session_id: &id,
+            id,
+            session_id: id,
             isolation,
             workspace: &workspace,
             branch: branch.as_deref(),
@@ -290,6 +426,7 @@ impl TaskRegistry {
             .allowed_filters
             .clone()
             .unwrap_or_else(default_allowed_filters);
+        self.seam(SpawnStage::Enforce)?;
         enforce_task_setup(
             &mut setup,
             &workspace,
@@ -303,7 +440,8 @@ impl TaskRegistry {
         bindings.shared_queue = Some(Arc::clone(&self.lead_queue));
         bindings.approvals = ApprovalRouting::Queued;
         let finisher = Arc::new(TaskFinisher {
-            id: id.clone(),
+            id: id.to_owned(),
+            lead_journal: Arc::clone(&self.lead_journal),
             worktree: worktree.clone(),
             branch: branch.clone(),
             protected,
@@ -311,7 +449,9 @@ impl TaskRegistry {
             pin: worktree.as_ref().and_then(|path| RepoPin::resolve(path)),
             journal: OnceLock::new(),
             runtime: tokio::runtime::Handle::current(),
-            committed: AtomicBool::new(false),
+            gate: self.seams.commit_gate.clone(),
+            state: Mutex::new(CommitState::Idle),
+            done: watch::channel(false).0,
         });
         let inner = Arc::clone(&bindings.runtime_events);
         bindings.runtime_events = Arc::new(TaskRuntimeEvents {
@@ -325,23 +465,17 @@ impl TaskRegistry {
             .sandbox
             .as_ref()
             .map(|sandbox| sandbox.policy().clone());
-        let session = match open_session(setup, bindings).await {
-            Ok(session) => Arc::new(session),
-            Err(error) => {
-                // The worktree was created before the session; do not leave it orphaned.
-                if let Some(worktree) = &worktree {
-                    let lead = self.workspace.clone();
-                    let wt = worktree.clone();
-                    let _ = tokio::task::spawn_blocking(move || remove_worktree(&lead, &wt, true))
-                        .await;
-                }
-                return Err(TaskError::new(error.to_string()));
-            }
-        };
+        let session = Arc::new(
+            open_session(setup, bindings)
+                .await
+                .map_err(|error| TaskError::new(error.to_string()))?,
+        );
+        guard.session = Some(Arc::clone(&session));
         let _ = finisher.journal.set(Arc::clone(session.journal()));
 
         // 4. The brief, as a `Subagent` input (ADR 0030 O2).
         if let Some(brief) = brief {
+            self.seam(SpawnStage::Brief)?;
             session
                 .inbox()
                 .followup(Message::user(brief), agent_core::InputSource::Subagent)
@@ -350,7 +484,7 @@ impl TaskRegistry {
         }
 
         let record = Arc::new(TaskRecord {
-            id: id.clone(),
+            id: id.to_owned(),
             session,
             isolation,
             worktree,
@@ -358,26 +492,39 @@ impl TaskRegistry {
             label,
             start_seq,
             sandbox_policy,
+            finisher,
         });
         self.tasks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id, Arc::clone(&record));
+            .insert(id.to_owned(), Arc::clone(&record));
         Ok(record)
+    }
+
+    /// Runs the spawn test seam, if this registry has one (ADR 0039 decision 5).
+    fn seam(&self, stage: SpawnStage) -> Result<(), TaskError> {
+        match &self.seams.spawn {
+            Some(hook) => hook(stage).map_err(TaskError::new),
+            None => Ok(()),
+        }
     }
 
     /// Closes a task and removes its worktree (ADR 0030 O3: `remove_task`).
     ///
     /// The session is stopped and its driver joined first, so nothing writes while the worktree
-    /// goes. Then, unless `force`, a dirty worktree is refused (uncommitted changes are the
-    /// user's to look at; after a normal end-of-task commit the worktree is clean). `force`
-    /// removes it regardless. The record is kept when the removal is refused.
+    /// goes; then the end-of-task commit is awaited (ADR 0039 decision 7), so a commit still in
+    /// flight is never removed under. Then, unless `force`, a dirty worktree is refused
+    /// (uncommitted changes are the user's to look at; after a normal end-of-task commit the
+    /// worktree is clean). `force` removes it regardless. The record is kept when the removal
+    /// is refused.
     pub async fn remove(&self, id: &str, force: bool) -> Result<(), TaskError> {
         let record = self
             .get(id)
             .ok_or_else(|| TaskError::new(format!("no task `{id}`")))?;
         record.session.stop();
         let _ = record.session.join().await;
+        // ADR 0039 decision 7: the end-of-task commit lands (or fails) before the worktree goes.
+        let _ = record.await_end_commit().await;
         if let Some(worktree) = &record.worktree {
             if !force && worktree_is_dirty(worktree)? {
                 return Err(TaskError::new(format!(
@@ -397,6 +544,69 @@ impl TaskRegistry {
             .unwrap_or_else(|e| e.into_inner())
             .remove(id);
         Ok(())
+    }
+}
+
+/// Owns a half-built task during [`TaskRegistry::spawn`] (ADR 0039 decision 5): its worktree
+/// from the moment it exists, and — once `open_session` returned — the session's driver. The
+/// registry disarms it only after the record is in the registry; any earlier failure rolls it
+/// back, and a dropped spawn (cancellation) is rolled back by `Drop`.
+struct SpawnGuard {
+    lead: PathBuf,
+    worktree: Option<PathBuf>,
+    session: Option<Arc<LocalSession>>,
+    /// Whether the lead's `TaskSpawned` was written; a later failure pairs a `TaskFinished`.
+    spawned: bool,
+    armed: bool,
+}
+
+impl SpawnGuard {
+    fn new(lead: PathBuf) -> Self {
+        Self {
+            lead,
+            worktree: None,
+            session: None,
+            spawned: false,
+            armed: true,
+        }
+    }
+
+    /// The spawn reached the registry: nothing is ours to clean up any more.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Stops and joins the task's driver, then removes its worktree.
+    async fn rollback(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if let Some(session) = self.session.take() {
+            session.stop();
+            let _ = session.join().await;
+        }
+        if let Some(worktree) = self.worktree.take() {
+            let lead = self.lead.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || remove_worktree(&lead, &worktree, true)).await;
+        }
+    }
+}
+
+impl Drop for SpawnGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // A dropped `spawn` future: the driver is aborted at once and the worktree is removed
+        // with native git (no runtime to await on here).
+        if let Some(session) = self.session.take() {
+            session.abort();
+        }
+        if let Some(worktree) = self.worktree.take() {
+            let _ = remove_worktree(&self.lead, &worktree, true);
+        }
     }
 }
 
@@ -474,6 +684,83 @@ pub fn task_sandbox(lead: &Sandbox, workspace: &Path) -> Result<Sandbox, TaskErr
     Sandbox::from_policy(policy).map_err(|error| TaskError::new(error.to_string()))
 }
 
+/// The task worktree root for `workspace` (ADR 0039 decision 4), or `None` when the workspace
+/// is not a git repository or this process has no usable `~/.radian`.
+fn task_worktree_root(workspace: &Path) -> Option<WorktreeRoot> {
+    let home = radian_home()?;
+    let common = git_common_dir(workspace)?;
+    let root = worktrees_dir_for(&home).join(repo_key(&common));
+    Some(WorktreeRoot { home, root })
+}
+
+/// `<repo-key>`: the repository's directory name plus a short hash of its canonical common dir,
+/// so two repositories never share a worktree directory (ADR 0039 decision 4).
+fn repo_key(common: &Path) -> String {
+    let name = common.file_name().and_then(OsStr::to_str).unwrap_or("");
+    // A normal repository's common dir is `<repo>/.git`; the repository's own name is one up.
+    let name = if name == ".git" {
+        common
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(OsStr::to_str)
+            .unwrap_or("")
+    } else {
+        name
+    };
+    let mut sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        sanitized = "repo".to_owned();
+    }
+    format!(
+        "{sanitized}-{:012x}",
+        // The low 48 bits: a short, stable key a directory name can carry.
+        fnv1a64(common.as_os_str().as_encoded_bytes()) & 0x0000_ffff_ffff_ffff
+    )
+}
+
+/// FNV-1a over the canonical common dir: a stable, dependency-free hash for the directory name.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// `git rev-parse --git-common-dir` for `workspace`, canonicalized; `None` when it is not a git
+/// repository.
+fn git_common_dir(workspace: &Path) -> Option<PathBuf> {
+    let output = radian_coding::host_git::host_git_command(workspace)
+        .ok()?
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = Path::new(&raw);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace.join(path)
+    };
+    std::fs::canonicalize(absolute).ok()
+}
+
 /// A host `git` command in the lead's workspace with the shared no-filter overrides (ADR 0039
 /// decision 3). `git worktree add` checks files out (a smudge filter would run) and
 /// `git worktree remove` reads the clean filter to test dirtiness, so both would otherwise
@@ -482,15 +769,23 @@ fn worktree_git(lead: &Path) -> Result<std::process::Command, TaskError> {
     radian_coding::host_git::host_git_command(lead).map_err(TaskError::new)
 }
 
-/// `git worktree add <worktree> -b <branch>` from the lead's workspace (host-side, ADR 0030
-/// O3). The parent directory is created first: `git worktree add` does not create it. Public so
-/// the integration tests exercise the exact code the registry runs.
-pub fn create_worktree(lead: &Path, worktree: &Path, branch: &str) -> Result<(), TaskError> {
-    if let Some(parent) = worktree.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            TaskError::new(format!("cannot create {}: {error}", parent.display()))
-        })?;
-    }
+/// `git worktree add -b <branch> <worktree>` from the lead's workspace (host-side, ADR 0030
+/// O3). The worktree root is opened one level at a time with `O_NOFOLLOW|O_DIRECTORY`
+/// (ADR 0039 decision 4), so a symlink anywhere refuses before git runs.
+pub fn create_worktree(
+    lead: &Path,
+    home: &Path,
+    worktree: &Path,
+    branch: &str,
+) -> Result<(), TaskError> {
+    let root = worktree.parent().ok_or_else(|| {
+        TaskError::new(format!(
+            "the worktree path {} has no parent directory",
+            worktree.display()
+        ))
+    })?;
+    vet_worktree_root(home, root)?;
+    refuse_existing_worktree(root, worktree)?;
     let path = worktree
         .to_str()
         .ok_or_else(|| TaskError::new("the worktree path is not valid UTF-8"))?;
@@ -505,6 +800,198 @@ pub fn create_worktree(lead: &Path, worktree: &Path, branch: &str) -> Result<(),
         )));
     }
     Ok(())
+}
+
+/// Creates — and checks — every level of `root` below `home` with an `openat` of
+/// `O_NOFOLLOW|O_DIRECTORY` from a directory fd (ADR 0039 decision 4). A symlink at any level
+/// fails with `ELOOP` and refuses the spawn; a missing level is created owner-only (0700).
+#[cfg(unix)]
+fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
+    use std::ffi::CString;
+    use std::os::unix::io::AsFd;
+
+    ensure_private_dir(home)
+        .map_err(|error| TaskError::new(format!("cannot create {}: {error}", home.display())))?;
+    let relative = root.strip_prefix(home).map_err(|_| {
+        TaskError::new(format!(
+            "the task worktree root {} is not below {}",
+            root.display(),
+            home.display()
+        ))
+    })?;
+    let mut dir = open_dir(home)
+        .map_err(|error| TaskError::new(format!("cannot open {}: {error}", home.display())))?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(TaskError::new(format!(
+                "refusing the task worktree root {}: it is not a plain path",
+                root.display()
+            )));
+        };
+        let name = CString::new(name.as_encoded_bytes())
+            .map_err(|_| TaskError::new("the worktree root path is not valid UTF-8"))?;
+        let next = match open_dir_at(dir.as_fd(), &name) {
+            Ok(next) => next,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                make_dir_at(dir.as_fd(), &name).map_err(|error| {
+                    TaskError::new(format!(
+                        "cannot create a level of {}: {error}",
+                        root.display()
+                    ))
+                })?;
+                open_dir_at(dir.as_fd(), &name).map_err(|error| root_error(root, &error))?
+            }
+            Err(error) => return Err(root_error(root, &error)),
+        };
+        dir = next;
+    }
+    Ok(())
+}
+
+/// The non-Unix fallback: no `openat`, so each level is checked with `symlink_metadata`.
+#[cfg(not(unix))]
+fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
+    ensure_private_dir(root)
+        .map_err(|error| TaskError::new(format!("cannot create {}: {error}", root.display())))?;
+    let relative = root.strip_prefix(home).map_err(|_| {
+        TaskError::new(format!(
+            "the task worktree root {} is not below {}",
+            root.display(),
+            home.display()
+        ))
+    })?;
+    let mut level = home.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(TaskError::new(format!(
+                "refusing the task worktree root {}: it is not a plain path",
+                root.display()
+            )));
+        };
+        level.push(name);
+        if std::fs::symlink_metadata(&level).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(TaskError::new(format!(
+                "refusing the task worktree root {}: {} is a symlink",
+                root.display(),
+                level.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a `worktree` that already exists (ADR 0039 decision 4): an existing symlink there
+/// would let `git worktree add` write through it. Checked from the root's directory fd with
+/// `O_NOFOLLOW`, so only a name that does not exist passes.
+#[cfg(unix)]
+fn refuse_existing_worktree(root: &Path, worktree: &Path) -> Result<(), TaskError> {
+    use std::ffi::CString;
+    use std::os::unix::io::AsFd;
+
+    let name = worktree.file_name().ok_or_else(|| {
+        TaskError::new(format!(
+            "the worktree path {} has no name",
+            worktree.display()
+        ))
+    })?;
+    let name = CString::new(name.as_encoded_bytes())
+        .map_err(|_| TaskError::new("the worktree path is not valid UTF-8"))?;
+    let dir = open_dir(root)
+        .map_err(|error| TaskError::new(format!("cannot open {}: {error}", root.display())))?;
+    match open_dir_at(dir.as_fd(), &name) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(TaskError::new(format!(
+            "refusing to create {}: it already exists",
+            worktree.display()
+        ))),
+        // A symlink (`ELOOP` on Linux, `ENOTDIR` on macOS) and a plain file both land here: it
+        // exists and is not a directory, so git must not touch it.
+        Err(error) => Err(TaskError::new(format!(
+            "refusing to create {}: it is a symlink or not a directory ({error})",
+            worktree.display()
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+fn refuse_existing_worktree(_root: &Path, worktree: &Path) -> Result<(), TaskError> {
+    match std::fs::symlink_metadata(worktree) {
+        Err(_) => Ok(()),
+        Ok(meta) if meta.file_type().is_symlink() => Err(TaskError::new(format!(
+            "refusing to create {}: it is a symlink",
+            worktree.display()
+        ))),
+        Ok(_) => Err(TaskError::new(format!(
+            "refusing to create {}: it already exists",
+            worktree.display()
+        ))),
+    }
+}
+
+/// Opens `path` as a directory, following symlinks. Used only for the radian home, which the
+/// host creates and the sandbox cannot write.
+#[cfg(unix)]
+fn open_dir(path: &Path) -> std::io::Result<std::os::unix::io::OwnedFd> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::OwnedFd;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(path)?;
+    Ok(OwnedFd::from(file))
+}
+
+/// `openat` a child directory with `O_NOFOLLOW|O_DIRECTORY`: a symlink at that name fails with
+/// `ELOOP` (ADR 0039 decision 4).
+#[cfg(unix)]
+fn open_dir_at(
+    parent: std::os::unix::io::BorrowedFd<'_>,
+    name: &std::ffi::CStr,
+) -> std::io::Result<std::os::unix::io::OwnedFd> {
+    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// `mkdirat` a child directory owner-only (0700) (ADR 0013, ADR 0039 decision 4).
+#[cfg(unix)]
+fn make_dir_at(
+    parent: std::os::unix::io::BorrowedFd<'_>,
+    name: &std::ffi::CStr,
+) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let rc = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The error for a level of the worktree root that could not be opened: a symlink (`ELOOP`) or
+/// a non-directory (`ENOTDIR`) is a refusal, anything else is an I/O failure.
+#[cfg(unix)]
+fn root_error(root: &Path, error: &std::io::Error) -> TaskError {
+    match error.raw_os_error() {
+        // `O_DIRECTORY|O_NOFOLLOW` on a symlink is `ELOOP` on Linux and `ENOTDIR` on macOS;
+        // both mean "this level is a symlink (or another non-directory)", which is a refusal.
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => TaskError::new(format!(
+            "refusing the task worktree root {}: a component is a symlink or not a directory",
+            root.display()
+        )),
+        _ => TaskError::new(format!(
+            "cannot open the task worktree root {}: {error}",
+            root.display()
+        )),
+    }
 }
 
 /// `git worktree remove [--force] <worktree>` from the lead's workspace. Public so the
@@ -589,10 +1076,22 @@ pub fn end_of_task_commit(
     .map(Some)
 }
 
+/// The state of one task's end-of-task commit, and the `watch` the record waits on.
+enum CommitState {
+    /// No turn has ended; no commit is scheduled.
+    Idle,
+    /// The commit is running; `Done` arrives when it finishes.
+    Running,
+    /// The commit finished (or there was nothing to commit).
+    Done(EndCommit),
+}
+
 /// The per-task end-of-task commit, invoked on a turn boundary. It needs no `LocalSession`
-/// handle (that would be a cycle), only the worktree facts and the task's journal.
+/// handle (that would be a cycle), only the worktree facts, the task's journal and the lead's.
+/// Its result is awaitable (ADR 0039 decision 7).
 struct TaskFinisher {
     id: String,
+    lead_journal: Arc<SessionJournal>,
     worktree: Option<PathBuf>,
     branch: Option<String>,
     protected: Vec<String>,
@@ -602,14 +1101,19 @@ struct TaskFinisher {
     /// finisher only runs on a turn event, which is necessarily after that.
     journal: OnceLock<Arc<SessionJournal>>,
     runtime: tokio::runtime::Handle,
-    /// Guard against two overlapping end commits from two turn events.
-    committed: AtomicBool,
+    /// The test gate at the start of the commit (ADR 0039 decision 7); `None` in production.
+    gate: Option<CommitGate>,
+    state: Mutex<CommitState>,
+    /// `true` once the commit finished; the record's `await_end_commit` waits on it.
+    done: watch::Sender<bool>,
 }
 
 impl TaskFinisher {
     /// On a turn boundary (`TurnFinished`/`TurnFailed`) of a worktree task, run the end-of-task
     /// commit off the runtime thread. `shared` tasks and a second overlapping event do nothing.
-    fn on_turn_event(&self, event: &RuntimeEvent) {
+    /// A failed commit is written to the lead's journal as a `TaskFinished` (ADR 0039 decision
+    /// 7), so it is the task's outcome and not a silent audit line.
+    fn on_turn_event(self: &Arc<Self>, event: &RuntimeEvent) {
         let outcome = match event {
             RuntimeEvent::TurnFinished { outcome, .. } => *outcome,
             RuntimeEvent::TurnFailed { .. } => TurnOutcome::Failed,
@@ -621,16 +1125,25 @@ impl TaskFinisher {
         let Some(pin) = self.pin.clone() else {
             return;
         };
-        if self.committed.swap(true, Ordering::SeqCst) {
-            return;
+        {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !matches!(*state, CommitState::Idle) {
+                return; // a second overlapping event does nothing
+            }
+            *state = CommitState::Running;
         }
         let id = self.id.clone();
         let branch = self.branch.clone();
         let protected = self.protected.clone();
         let filters = self.filters.clone();
         let journal = self.journal.get().cloned();
+        let gate = self.gate.clone();
+        let this = Arc::clone(self);
         self.runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
+                if let Some(gate) = &gate {
+                    gate();
+                }
                 end_of_task_commit(
                     &id,
                     &outcome,
@@ -642,18 +1155,67 @@ impl TaskFinisher {
                 )
             })
             .await;
-            // Audit (best effort): the commit already happened or failed; a write failure is
-            // not the caller's problem, exactly like `git_commit`'s own audit.
-            if let (Ok(Ok(Some(committed))), Some(journal)) = (result, journal) {
-                let _ = journal
-                    .append_runtime_event(RuntimeEvent::GitCommitted {
-                        commit: committed.commit,
-                        branch: committed.branch,
-                        files: committed.files,
+            let end = match result {
+                Ok(Ok(Some(committed))) => {
+                    // Audit (best effort): the commit already happened; a write failure is not
+                    // the caller's problem, exactly like `git_commit`'s own audit.
+                    if let Some(journal) = &journal {
+                        let _ = journal
+                            .append_runtime_event(RuntimeEvent::GitCommitted {
+                                commit: committed.commit.clone(),
+                                branch: committed.branch.clone(),
+                                files: committed.files,
+                            })
+                            .await;
+                    }
+                    EndCommit::Committed(committed)
+                }
+                Ok(Ok(None)) => EndCommit::None,
+                Ok(Err(failure)) => EndCommit::Failed(failure.message),
+                Err(error) => {
+                    EndCommit::Failed(format!("the end-of-task commit task failed: {error}"))
+                }
+            };
+            if let EndCommit::Failed(message) = &end {
+                let _ = this
+                    .lead_journal
+                    .append_runtime_event(RuntimeEvent::TaskFinished {
+                        agent_session_id: this.id.clone(),
+                        outcome,
+                        error: Some(message.clone()),
                     })
                     .await;
             }
+            *this.state.lock().unwrap_or_else(|e| e.into_inner()) = CommitState::Done(end);
+            let _ = this.done.send(true);
         });
+    }
+
+    /// Resolves when the end-of-task commit has finished (ADR 0039 decision 7). `None` when no
+    /// turn has ended, so no commit was ever scheduled.
+    async fn await_end_commit(&self) -> Option<EndCommit> {
+        {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            match &*state {
+                CommitState::Idle => return None,
+                CommitState::Done(end) => return Some(end.clone()),
+                CommitState::Running => {}
+            }
+        }
+        // `Done` is stored before the `watch` sends, so a receiver that arrives late still sees
+        // it: `borrow_and_update` reads the current value, and `changed` is only awaited while
+        // it is still `false`.
+        let mut done = self.done.subscribe();
+        while !*done.borrow_and_update() {
+            if done.changed().await.is_err() {
+                break;
+            }
+        }
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match &*state {
+            CommitState::Done(end) => Some(end.clone()),
+            _ => None,
+        }
     }
 }
 
@@ -667,5 +1229,40 @@ impl radian_runtime::RuntimeEvents for TaskRuntimeEvents {
     fn on_runtime_event(&self, event: &RuntimeEvent) {
         self.inner.on_runtime_event(event);
         self.finisher.on_turn_event(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_repo_key_names_the_repository_and_hashes_the_common_dir() {
+        let key = repo_key(Path::new("/Users/u/Code/my-repo/.git"));
+        assert!(key.starts_with("my-repo-"), "{key}");
+        assert_eq!(key.len(), "my-repo-".len() + 12, "{key}");
+        assert!(
+            key["my-repo-".len()..]
+                .chars()
+                .all(|c| c.is_ascii_hexdigit()),
+            "{key}"
+        );
+        // Stable for the same path, different for another.
+        assert_eq!(key, repo_key(Path::new("/Users/u/Code/my-repo/.git")));
+        assert_ne!(key, repo_key(Path::new("/Users/u/Code/other/.git")));
+        // A bare repository uses its own name; odd characters are folded to `-`.
+        assert!(repo_key(Path::new("/srv/foo bar.git")).starts_with("foo-bar.git-"));
+    }
+
+    #[test]
+    fn the_worktree_root_is_under_the_radian_home_and_not_the_workspace() {
+        let home = Path::new("/home/u/.radian");
+        let root = worktrees_dir_for(home).join(repo_key(Path::new("/work/example/.git")));
+        assert!(root.starts_with(home), "{}", root.display());
+        assert_eq!(
+            root.parent().unwrap(),
+            Path::new("/home/u/.radian/worktrees")
+        );
+        assert!(!root.starts_with("/work/example"));
     }
 }

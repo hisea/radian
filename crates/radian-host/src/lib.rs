@@ -105,6 +105,7 @@ pub use home::{
     legacy_sessions_dirs_for, legacy_sessions_hint, legacy_sessions_hint_for, memory_dir,
     memory_dir_for, radian_home, radian_home_for, sessions_dir, sessions_dir_for, skills_dir,
     skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
+    worktrees_dir_for,
 };
 pub use job_notify::{
     JobNotifier, MAX_CONSECUTIVE_WAKES, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message,
@@ -160,8 +161,9 @@ pub use skills::{
     prompt_section,
 };
 pub use task::{
-    Isolation, SpawnRequest, TaskBuilder, TaskContext, TaskError, TaskRecord, TaskRegistry,
-    TaskSession, end_of_task_commit, task_sandbox,
+    CommitGate, EndCommit, Isolation, SpawnHook, SpawnRequest, SpawnStage, TaskBuilder,
+    TaskContext, TaskError, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
+    task_sandbox,
 };
 pub use tools::{HostSession, HostTools, merge_tool_specs};
 pub use workspace::resolve_workspace;

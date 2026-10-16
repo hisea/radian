@@ -84,8 +84,9 @@ pub(crate) async fn run(
     let listed = crate::safe_fs::read_dir(&dir).map_err(|e| io_failure(requested, e))?;
     let mut entries: Vec<Entry> = Vec::new();
     for entry in listed {
-        // ADR 0030 O3: the task agents' worktrees live under `.radian-worktrees/`, one full
-        // checkout each. `list` omits the entry the same way `glob`/`grep` prune its subtree.
+        // The workspace-local worktree root (ADR 0030 O7) holds one full checkout each;
+        // `list` omits the entry the same way `glob`/`grep` prune its subtree. Task agents'
+        // worktrees are outside the workspace (ADR 0039 decision 4).
         if entry.name == std::ffi::OsStr::new(crate::search::RADIAN_WORKTREES) {
             continue;
         }

@@ -960,3 +960,29 @@ SG-M3 证明它们确实区分「关掉命令」与「没关」。
 从而跑 clean filter；内容大小不同时 git 直接按 stat 判为改动，不跑 filter。所以三个行为测试都用
 「与 index blob 同大小」的改动（`one\n` → `two\n`）。第一次写测试时用了不同大小（`one\ntwo\n`），
 SG-F1-M1 的行为测试假绿（只有守卫抓住）；改成同大小后行为测试也抓住。
+## sec-task：ADR 0039 决定 4/5/7（task worktree 出工作区、spawn 事务、可等待的收尾提交，2026-10-16）
+
+工作树 `.radian-worktrees/build-script`，分支 `dogfood/sec-task`（基线 `origin/main` f72097d；
+变异时 HEAD `f5d5ee38`）。先 `cp` 一份 `crates/radian-host/src/task.rs` 到 `.radian/scratch/`，
+每个变异就地施加后跑一条测试，再 `cp` 还原，最后 `shasum -a 256 -c` 证明与副本逐字节一致。
+命令：`cargo test -p radian-host --test task <测试> --no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S4-1 | `task_worktree_root` 把根放回工作区内（`<ws>/.radian-worktrees`，`home` 也改成工作区） | `the_task_worktree_is_outside_the_workspace_on_a_per_repository_root` | ✅ 抓住 (rc=101) |
+| S4-2 | 新根的每一级都不加 `O_NOFOLLOW`（`open_dir_at` 跟随 symlink） | `a_symlink_under_the_new_root_is_refused` | ✅ 抓住 (rc=101) |
+| S4-3 | spawn 的错误路径不调 `guard.rollback()`（worktree 与 driver 都留下） | `a_failed_spawn_leaves_nothing_behind_and_pairs_a_task_finished` | ✅ 抓住 (rc=101) |
+| S4-4 | 在 `open_session` 之后就 `guard.disarm()`（登记前解除，brief 失败不再回滚） | 同上（`Brief` 那个失败点） | ✅ 抓住 (rc=101) |
+| S4-5 | `remove()` 不等收尾提交（删掉 `await_end_commit`） | `remove_waits_for_the_end_of_task_commit` | ✅ 抓住 (rc=101) |
+| S4-6 | 收尾提交失败被丢掉（finisher 不写 `TaskFinished`） | `a_failing_end_commit_shows_in_task_finished` | ✅ 抓住 (rc=101) |
+
+6/6 全抓。
+
+**S4-4 的第一次尝试（如实记录）**：把 `guard.disarm()` 插在 `let record = Arc::new(TaskRecord …)`
+之前**不**被抓住——那是 brief 之后的最后一句话，四个失败点都已过去，变异不可区分。改成
+`open_session` 之后（brief 之前）立刻解除才被 `Brief` 那个失败点抓住。check 列表里保留了这次
+失败记录，省得后人重复。
+
+**S4-5 的同步方式**：收尾提交被一个 seam（`CommitGate`）卡住，测试用 oneshot 收到「提交已进入」，
+不用 sleep 同步；「仍未被唤醒」用有界 `timeout` 观测。变异（remove 不等）会在提交还卡住时读到
+未提交的工作树并拒绝，因此 `timeout` 返回 Ok，断言失败。
