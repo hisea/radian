@@ -241,6 +241,77 @@ fn the_note_clears_when_the_tools_finish() {
     assert_eq!(app.session.note, None);
 }
 
+/// The note must name a tool that is **still running**. `ToolFinished` is emitted in completion
+/// order, "which may differ from the transcript order" (agent-core's own event contract), so the
+/// call the note names can settle while another call of the same batch is still running. A note
+/// naming a settled tool is the same defect as the owner's stuck "tool shell running".
+#[test]
+fn the_note_names_a_tool_that_is_still_running() {
+    let mut app = App::new("m", "s");
+    app.apply_event(&AgentEvent::ToolStarted {
+        index: 0,
+        call_id: "c1".into(),
+        name: "shell".into(),
+    });
+    app.apply_event(&AgentEvent::ToolStarted {
+        index: 1,
+        call_id: "c2".into(),
+        name: "read".into(),
+    });
+    assert_eq!(app.session.note.as_deref(), Some("tool read running"));
+
+    // `read` (the call the note names) settles first; `shell` is still running.
+    app.apply_event(&AgentEvent::ToolFinished {
+        index: 1,
+        call_id: "c2".into(),
+        is_error: false,
+    });
+    assert_eq!(
+        app.session.note.as_deref(),
+        Some("tool shell running"),
+        "the settled call must not stay named"
+    );
+    // The footer itself (the default preset's chrome line), not only the field behind it.
+    let terminal = render(&mut app, 80, 12);
+    let text = screen(&terminal);
+    assert!(text.contains("tool shell running"), "{text}");
+    assert!(!text.contains("tool read running"), "{text}");
+
+    // When the last call settles the note goes, before the next model request.
+    app.apply_event(&AgentEvent::ToolFinished {
+        index: 0,
+        call_id: "c1".into(),
+        is_error: false,
+    });
+    assert_eq!(app.session.note, None);
+}
+
+/// A tool note may not outlive its batch: the next model request starts only after every call of
+/// the batch settled, so a `ToolStarted` whose `ToolFinished` never came must be forgotten there.
+/// The core does produce that: when a journal append fails, `run_group` discards the results of
+/// the calls already running (`agent-core/src/turn.rs`, the `journal_failed` path), so no
+/// `ToolFinished` is emitted for them.
+#[test]
+fn the_tool_note_does_not_survive_the_next_model_request() {
+    let mut app = App::new("m", "s");
+    app.apply_event(&AgentEvent::ToolStarted {
+        index: 0,
+        call_id: "c1".into(),
+        name: "shell".into(),
+    });
+    assert_eq!(app.session.note.as_deref(), Some("tool shell running"));
+
+    // Its `ToolFinished` was lost; the turn moved on to the next model request.
+    app.apply_event(&AgentEvent::ModelRequestStarted {
+        model_call: 2,
+        budget: None,
+    });
+    assert_eq!(
+        app.session.note, None,
+        "the next request ends the tool phase"
+    );
+}
+
 #[test]
 fn the_status_line_shows_model_and_turn_state() {
     let mut app = App::new("my-model", "s");
