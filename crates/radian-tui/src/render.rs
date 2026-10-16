@@ -2505,7 +2505,13 @@ fn render_frame_row(
                 spans.push(Span::styled(command.to_owned(), patch_band(body, band)));
             } else {
                 spans.extend(body_spans(
-                    entry, row, body, theme, band, first_text, spinner,
+                    entry,
+                    row,
+                    patch_band(body, band),
+                    theme,
+                    band,
+                    first_text,
+                    spinner,
                 ));
             }
             let used = 2 + UnicodeWidthStr::width(row.text.as_str()) + if meta { 2 } else { 0 };
