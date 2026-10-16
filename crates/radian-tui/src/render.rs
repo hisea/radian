@@ -2429,6 +2429,7 @@ fn body_spans(
                 blocks::MdStyle::Accent => theme.notice_label,
                 blocks::MdStyle::Muted => theme.notice_body,
                 blocks::MdStyle::Dim => theme.truncation,
+                blocks::MdStyle::Diff(role) => diff_style(role, body_style, theme),
                 blocks::MdStyle::TableBorder => theme.md_hr,
                 blocks::MdStyle::Plain => body_style,
             };
@@ -2443,18 +2444,7 @@ fn body_spans(
         // style; `Plain` keeps the code block's own style. The text is unchanged, so
         // selection, copy and search are unaffected.
         for (text, role) in syntax {
-            let style = match role {
-                crate::highlight::SyntaxRole::Comment => theme.syntax_comment,
-                crate::highlight::SyntaxRole::Keyword => theme.syntax_keyword,
-                crate::highlight::SyntaxRole::Function => theme.syntax_function,
-                crate::highlight::SyntaxRole::Variable => theme.syntax_variable,
-                crate::highlight::SyntaxRole::String => theme.syntax_string,
-                crate::highlight::SyntaxRole::Number => theme.syntax_number,
-                crate::highlight::SyntaxRole::Type => theme.syntax_type,
-                crate::highlight::SyntaxRole::Operator => theme.syntax_operator,
-                crate::highlight::SyntaxRole::Punctuation => theme.syntax_punctuation,
-                crate::highlight::SyntaxRole::Plain => body_style,
-            };
+            let style = syntax_style(*role, body_style, theme);
             let style = match band {
                 Some(band) => style.patch(band),
                 None => style,
@@ -2629,6 +2619,39 @@ fn body_style_of(entry: &Entry, row: &BodyLine, style: Style, theme: &Theme) -> 
         }
     } else {
         style
+    }
+}
+
+/// The style one highlighted piece takes (ADR 0028 R2): its Radian syntax role's colour, with
+/// `Plain` keeping the row's own body style. Shared by a code block's lines and by a diff row's
+/// code.
+fn syntax_style(role: crate::highlight::SyntaxRole, body_style: Style, theme: &Theme) -> Style {
+    match role {
+        crate::highlight::SyntaxRole::Comment => theme.syntax_comment,
+        crate::highlight::SyntaxRole::Keyword => theme.syntax_keyword,
+        crate::highlight::SyntaxRole::Function => theme.syntax_function,
+        crate::highlight::SyntaxRole::Variable => theme.syntax_variable,
+        crate::highlight::SyntaxRole::String => theme.syntax_string,
+        crate::highlight::SyntaxRole::Number => theme.syntax_number,
+        crate::highlight::SyntaxRole::Type => theme.syntax_type,
+        crate::highlight::SyntaxRole::Operator => theme.syntax_operator,
+        crate::highlight::SyntaxRole::Punctuation => theme.syntax_punctuation,
+        crate::highlight::SyntaxRole::Plain => body_style,
+    }
+}
+
+/// The style one piece of a diff row takes (ADR 0028): the line number is
+/// the weak `diff_line_number` role, the sign carries its own side's colour, a `+`/`-` row's
+/// unhighlighted code is the file's own text colour (so the sign stays the coloured part), and a
+/// highlighted piece goes through the code block's table.
+fn diff_style(role: crate::tools::DiffRole, body_style: Style, theme: &Theme) -> Style {
+    match role {
+        crate::tools::DiffRole::Number => theme.diff_line_number,
+        crate::tools::DiffRole::Added => theme.diff_added,
+        crate::tools::DiffRole::Removed => theme.diff_removed,
+        crate::tools::DiffRole::Context => theme.diff_context,
+        crate::tools::DiffRole::Code => theme.text,
+        crate::tools::DiffRole::Syntax(role) => syntax_style(role, body_style, theme),
     }
 }
 

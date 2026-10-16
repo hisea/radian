@@ -127,6 +127,95 @@ pub enum BodyLine {
     /// A synthesized hint (`[12 more lines]`, `[read: 40 lines, collapsed]`): no source, so
     /// it neither copies nor matches a search.
     Hint(String),
+    /// A unified-diff row (ADR 0028): a synthesized line-number gutter,
+    /// the sign, and the row's own code. One row, three roles — see [`DiffRole`].
+    Diff(DiffRow),
+}
+
+impl BodyLine {
+    /// Whether the line draws content (rather than a synthesized hint): the fold's line count
+    /// and the card's "has an output section" test both ask this.
+    pub fn is_content(&self) -> bool {
+        matches!(self, Self::Text { .. } | Self::Diff(_))
+    }
+}
+
+/// Which side of a unified diff a row is on (ADR 0028).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffKind {
+    Added,
+    Removed,
+    Context,
+}
+
+impl DiffKind {
+    /// The sign the row carries in the entry's text, which the row draws in its sign column.
+    pub fn sign(self) -> char {
+        match self {
+            Self::Added => '+',
+            Self::Removed => '-',
+            Self::Context => ' ',
+        }
+    }
+
+    /// The role the row's **code** takes when it is not highlighted: a `+`/`-` row's code is
+    /// the file's own text (the sign carries the diff colour), a context row's is the context
+    /// colour (ADR 0028).
+    pub fn code_role(self) -> DiffRole {
+        match self {
+            Self::Added | Self::Removed => DiffRole::Code,
+            Self::Context => DiffRole::Context,
+        }
+    }
+
+    /// The role the row's sign takes.
+    pub fn sign_role(self) -> DiffRole {
+        match self {
+            Self::Added => DiffRole::Added,
+            Self::Removed => DiffRole::Removed,
+            Self::Context => DiffRole::Context,
+        }
+    }
+}
+
+/// One diff row's data. The number is synthesized (`number` is not part of the entry's text),
+/// while `source` **is**: the copy of a row is the row's own text, the sign and the code,
+/// without the gutter — the rule the entry-text model has always had.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffRow {
+    /// The 1-based line to draw right-aligned in the 4-cell gutter (`diff_line_number`).
+    /// `None` keeps the sign column only: the numberless form a diff without start lines gets
+    /// (an older journal entry, an MCP tool's text).
+    pub number: Option<u64>,
+    pub kind: DiffKind,
+    /// The row's bytes in the entry's display text: the sign, then the code.
+    pub source: Range<usize>,
+    /// The language the code highlights with — the file's suffix through
+    /// [`crate::highlight::language_for_path`] — or `None` when the path names no language we
+    /// highlight (the code then draws unhighlighted).
+    pub lang: Option<&'static str>,
+}
+
+/// The role one **piece** of a diff row renders with. A diff row carries three at once — the
+/// synthesized line number, the sign and the code — while [`LineRole`] is a whole line's role,
+/// so the diff's parts are per-piece roles like the `ask_user` block's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffRole {
+    /// The 4-cell line-number gutter: `diff_line_number`, one level weaker than the code. It is
+    /// synthesized: drawn, never copied and never searchable.
+    Number,
+    /// The `+` sign (`diff_added`).
+    Added,
+    /// The `-` sign (`diff_removed`).
+    Removed,
+    /// A context row's sign or code (`diff_context`).
+    Context,
+    /// A `+`/`-` row's own code, unhighlighted: the text colour, so the sign stays the only
+    /// coloured part of the row.
+    Code,
+    /// A highlighted piece of the code: the same scope→role table a fenced code block uses
+    /// (ADR 0028 R2).
+    Syntax(crate::highlight::SyntaxRole),
 }
 
 /// A rendered card: the header line (the caller lays it out and truncates it) and the body
@@ -162,7 +251,7 @@ pub fn body_plan(
     // folded modes; `expanded` shows its lines.
     let text_lines: Vec<BodyLine> = lines
         .iter()
-        .filter(|line| matches!(line, BodyLine::Text { .. }))
+        .filter(|line| line.is_content())
         .cloned()
         .collect();
     match fold {
@@ -314,23 +403,16 @@ fn text_body_lines(text: &str, mut role: impl FnMut(&str) -> LineRole) -> Vec<Bo
     out
 }
 
-/// The unified-diff line classifier (ADR 0028 R4): file headers and hunks are structure,
-/// `+`/`-` are added/removed, everything else is context. File headers are checked first,
-/// because `+++`/`---` also start with the add/remove markers.
+/// The unified-diff line classifier for a row the renderer draws **without** line numbers (the
+/// fallback: an older journal entry or an MCP tool's text): structure is weak, `+`/`-` carry the
+/// diff roles, everything else is context. File headers are checked first, because `+++`/`---`
+/// also start with the add/remove markers.
 fn diff_role(line: &str) -> LineRole {
-    if line.starts_with("diff ")
-        || line.starts_with("index ")
-        || line.starts_with("+++")
-        || line.starts_with("---")
-        || line.starts_with("new file")
-        || line.starts_with("deleted file")
-        || line.starts_with("similarity ")
-        || line.starts_with("rename ")
-    {
-        return LineRole::DiffHunk;
-    }
-    if line.starts_with("@@") {
-        return LineRole::DiffHunk;
+    if diff_structure(line) {
+        // `@@` headers and file headers are structure, not content (ADR 0028
+        // decision 5: the `frame` role, the weak level). `frame` has no `LineRole` yet; `Dim`
+        // resolves to the built-in dim value, the colour `frame` and its `md_hr` stand-in take.
+        return LineRole::Dim;
     }
     if line.starts_with('+') {
         return LineRole::DiffAdded;
@@ -339,6 +421,76 @@ fn diff_role(line: &str) -> LineRole {
         return LineRole::DiffRemoved;
     }
     LineRole::DiffContext
+}
+
+/// A unified diff's structural lines: the `@@` hunk headers and the file headers
+/// (`diff --git`, `index`, `---`, `+++`, `new file`, `deleted file`, `similarity`, `rename`).
+fn diff_structure(line: &str) -> bool {
+    line.starts_with("@@")
+        || line.starts_with("diff ")
+        || line.starts_with("index ")
+        || line.starts_with("+++")
+        || line.starts_with("---")
+        || line.starts_with("new file")
+        || line.starts_with("deleted file")
+        || line.starts_with("similarity ")
+        || line.starts_with("rename ")
+}
+
+/// Which side of the diff a row's sign puts it on, or `None` for a structural row (a `@@`
+/// header, a file header, a `\ No newline at end of file` marker): those draw in the structure
+/// role and carry no line number.
+fn diff_kind(line: &str) -> Option<DiffKind> {
+    if diff_structure(line) {
+        return None;
+    }
+    match line.as_bytes().first() {
+        // A blank row (a tool that writes an empty line for an unchanged one) is context too:
+        // git itself writes a single space.
+        None | Some(b' ') => Some(DiffKind::Context),
+        Some(b'+') => Some(DiffKind::Added),
+        Some(b'-') => Some(DiffKind::Removed),
+        _ => None,
+    }
+}
+
+/// The old and new start lines a `@@ -a,b +c,d @@` header names, in that order, or `None` when
+/// the line is not a hunk header. The counts are not read: the rows count themselves.
+fn parse_hunk_header(line: &str) -> Option<(u64, u64)> {
+    let rest = line.strip_prefix("@@")?;
+    let header = &rest[..rest.find("@@")?];
+    let mut fields = header.split_whitespace();
+    let old = fields.next()?.strip_prefix('-')?.split(',').next()?;
+    let new = fields.next()?.strip_prefix('+')?.split(',').next()?;
+    Some((old.parse().ok()?, new.parse().ok()?))
+}
+
+/// The path a file header names, so the rows under it highlight by the file's suffix:
+/// `+++ b/src/main.rs` and `--- a/src/main.rs` give `src/main.rs`, and
+/// `diff --git a/x b/x` gives the new side, `x`.
+fn file_header_path(line: &str) -> Option<&str> {
+    let rest = if let Some(rest) = line.strip_prefix("+++ ") {
+        rest
+    } else if let Some(rest) = line.strip_prefix("--- ") {
+        rest
+    } else {
+        line.strip_prefix("diff --git ")
+            .and_then(|rest| rest.split_whitespace().nth(1))?
+    };
+    Some(
+        rest.strip_prefix("a/")
+            .or_else(|| rest.strip_prefix("b/"))
+            .unwrap_or(rest),
+    )
+}
+
+/// The path a card's call names, for the diff body's language (`patch` knows it from the call).
+fn call_path(card: &ToolCard) -> Option<String> {
+    string_field(&card.arguments, "path").or_else(|| {
+        card.structured
+            .as_ref()
+            .and_then(|value| string_field(value, "path"))
+    })
 }
 
 /// `shell`: the command and the exit code.
@@ -605,11 +757,93 @@ fn memory_head(card: &ToolCard, _text: &str) -> String {
     }
 }
 
-/// The unified-diff body: the entry text's lines with their roles. Used by `patch` (whose
-/// entry text **is** the synthesized `-old`/`+new` diff) and by `git_diff` (whose entry text
-/// is git's own unified diff).
-fn diff_body(_card: &ToolCard, text: &str) -> (Vec<BodyLine>, Option<String>) {
-    (text_body_lines(text, diff_role), None)
+/// The unified-diff body (ADR 0028): one row per line of the entry's
+/// text. Used by `patch` (whose entry text **is** the synthesized `@@`/`-old`/`+new` diff) and
+/// by `git_diff` (whose entry text is git's own unified diff).
+///
+/// A hunk header sets the old and new line counters, and every row under it carries its own
+/// file's number: `+` and context rows the **new** file's, `-` rows the **old** file's (the
+/// unified rule). A diff whose text carries no `@@` header keeps today's numberless form — the
+/// sign column, no gutter (`DiffRow::number` stays `None` → the layout draws no gutter at all).
+fn diff_body(card: &ToolCard, text: &str) -> (Vec<BodyLine>, Option<String>) {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    // The language comes from the file's own path: `patch` and `write` name it in the call,
+    // `git_diff`'s text names it per file (`+++ b/…`).
+    let mut path = call_path(card);
+    let mut in_hunk = false;
+    let (mut old, mut new) = (0u64, 0u64);
+    for line in text.split_inclusive('\n') {
+        let stripped = line.strip_suffix('\n').unwrap_or(line);
+        let source = offset..offset + stripped.len();
+        offset += line.len();
+        if let Some((old_start, new_start)) = parse_hunk_header(stripped) {
+            old = old_start;
+            new = new_start;
+            in_hunk = true;
+            out.push(BodyLine::Text {
+                source,
+                role: LineRole::Dim,
+            });
+            continue;
+        }
+        if diff_structure(stripped) {
+            in_hunk = false;
+            if let Some(header_path) = file_header_path(stripped) {
+                path = Some(header_path.to_owned());
+            }
+            out.push(BodyLine::Text {
+                source,
+                role: LineRole::Dim,
+            });
+            continue;
+        }
+        match (in_hunk, diff_kind(stripped)) {
+            (true, Some(kind)) => {
+                let number = match kind {
+                    DiffKind::Removed => {
+                        let number = old;
+                        old += 1;
+                        number
+                    }
+                    DiffKind::Added => {
+                        let number = new;
+                        new += 1;
+                        number
+                    }
+                    DiffKind::Context => {
+                        let number = new;
+                        old += 1;
+                        new += 1;
+                        number
+                    }
+                };
+                let lang = path
+                    .as_deref()
+                    .and_then(crate::highlight::language_for_path);
+                out.push(BodyLine::Diff(DiffRow {
+                    number: Some(number),
+                    kind,
+                    source,
+                    lang,
+                }));
+            }
+            // Outside a hunk, or a row with no sign at all: the row's whole line takes its
+            // classifier's role, with no gutter (the numberless fallback).
+            _ => out.push(BodyLine::Text {
+                source,
+                role: diff_role(stripped),
+            }),
+        }
+    }
+    // `split_inclusive` yields nothing for an empty body: one empty line, like a code block.
+    if out.is_empty() {
+        out.push(BodyLine::Text {
+            source: 0..0,
+            role: LineRole::Normal,
+        });
+    }
+    (out, None)
 }
 
 /// A plain body: the entry text, every line on the card's own role.
@@ -736,24 +970,61 @@ pub fn result_display_text(card: &ToolCard, tool_text: &str) -> String {
     }
 }
 
-/// A patch's body: the removed lines then the added ones, each prefixed by the marker the
-/// diff roles paint. There are no context lines: the call carries no surrounding text, and
+/// A patch's body: one block per replaced range — the hunk header naming the range's start
+/// lines in both files, then the removed lines and the added ones, each prefixed by the sign
+/// the diff roles paint. There are no context lines: the call carries no surrounding text, and
 /// the renderer must not pretend it does (ADR 0028 R4).
+///
+/// The headers are built from the result's structured `hunks` (`radian-coding`'s `patch`); a
+/// result that carries none (an older journal entry) keeps the numberless form, and the diff
+/// body then draws it without a gutter.
 fn patch_diff_text(card: &ToolCard) -> Option<String> {
     let old = string_field(&card.arguments, "old")?;
     let new = string_field(&card.arguments, "new")?;
+    let hunks = patch_hunks(card);
     let mut out = String::new();
-    for line in old.lines() {
-        out.push('-');
-        out.push_str(line);
-        out.push('\n');
-    }
-    for line in new.lines() {
-        out.push('+');
-        out.push_str(line);
-        out.push('\n');
+    for index in 0..hunks.len().max(1) {
+        if let Some((old_start, old_lines, new_start, new_lines)) = hunks.get(index) {
+            out.push_str(&format!(
+                "@@ -{old_start},{old_lines} +{new_start},{new_lines} @@\n"
+            ));
+        }
+        for line in old.lines() {
+            out.push('-');
+            out.push_str(line);
+            out.push('\n');
+        }
+        for line in new.lines() {
+            out.push('+');
+            out.push_str(line);
+            out.push('\n');
+        }
     }
     Some(out)
+}
+
+/// The result's `hunks`: `(old_start, old_lines, new_start, new_lines)` per replaced range, in
+/// file order (ADR 0028). Empty when the result carries none.
+fn patch_hunks(card: &ToolCard) -> Vec<(u64, u64, u64, u64)> {
+    card.structured
+        .as_ref()
+        .and_then(|value| value.get("hunks"))
+        .and_then(Value::as_array)
+        .map(|hunks| {
+            hunks
+                .iter()
+                .filter_map(|hunk| {
+                    let field = |name: &str| hunk.get(name).and_then(Value::as_u64);
+                    Some((
+                        field("old_start")?,
+                        field("old_lines")?,
+                        field("new_start")?,
+                        field("new_lines")?,
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A compact one-line JSON rendering, for headers.
@@ -839,6 +1110,9 @@ mod tests {
             .map(|line| match line {
                 BodyLine::Text { source, .. } => format!("text {source:?}"),
                 BodyLine::Hint(hint) => hint.clone(),
+                BodyLine::Diff(row) => {
+                    format!("diff {:?} {:?} {:?}", row.number, row.kind, row.source)
+                }
             })
             .collect()
     }
@@ -1060,16 +1334,32 @@ mod tests {
         assert_eq!(git_diff_head(&card("git_diff", json!({})), ""), "git_diff");
     }
 
+    /// The classifier for the numberless fallback: `@@` and file headers are structure (the
+    /// weak role, ADR 0028), the signs carry the diff roles.
     #[test]
     fn the_diff_role_classifies_every_line_kind() {
-        assert_eq!(diff_role("diff --git a/x b/x"), LineRole::DiffHunk);
-        assert_eq!(diff_role("index 111..222 100644"), LineRole::DiffHunk);
-        assert_eq!(diff_role("--- a/x"), LineRole::DiffHunk);
-        assert_eq!(diff_role("+++ b/x"), LineRole::DiffHunk);
-        assert_eq!(diff_role("@@ -1,3 +1,4 @@ fn main"), LineRole::DiffHunk);
+        assert_eq!(diff_role("diff --git a/x b/x"), LineRole::Dim);
+        assert_eq!(diff_role("index 111..222 100644"), LineRole::Dim);
+        assert_eq!(diff_role("--- a/x"), LineRole::Dim);
+        assert_eq!(diff_role("+++ b/x"), LineRole::Dim);
+        assert_eq!(diff_role("@@ -1,3 +1,4 @@ fn main"), LineRole::Dim);
         assert_eq!(diff_role("+added"), LineRole::DiffAdded);
         assert_eq!(diff_role("-removed"), LineRole::DiffRemoved);
         assert_eq!(diff_role(" context"), LineRole::DiffContext);
+    }
+
+    /// The kind a row's sign puts it on, and the structures that have no sign at all.
+    #[test]
+    fn the_diff_kind_reads_the_sign() {
+        assert_eq!(diff_kind("+added"), Some(DiffKind::Added));
+        assert_eq!(diff_kind("-removed"), Some(DiffKind::Removed));
+        assert_eq!(diff_kind(" context"), Some(DiffKind::Context));
+        assert_eq!(diff_kind(""), Some(DiffKind::Context));
+        // `+++`/`---` are file headers, not content, and `\ No newline` is a marker.
+        assert_eq!(diff_kind("+++ b/x"), None);
+        assert_eq!(diff_kind("--- a/x"), None);
+        assert_eq!(diff_kind("@@ -1 +1 @@"), None);
+        assert_eq!(diff_kind("\\ No newline at end of file"), None);
     }
 
     #[test]
@@ -1120,6 +1410,10 @@ mod tests {
             .map(|line| match line {
                 BodyLine::Text { role, .. } => *role,
                 BodyLine::Hint(_) => panic!("no hint"),
+                // No `hunks` in the result: the body keeps today's numberless form.
+                BodyLine::Diff(row) => {
+                    panic!("a diff without start lines must not number: {row:?}")
+                }
             })
             .collect();
         assert_eq!(
@@ -1129,6 +1423,199 @@ mod tests {
                 LineRole::DiffRemoved,
                 LineRole::DiffAdded
             ]
+        );
+    }
+
+    /// The plan's diff rows as `(line number, kind)`, so a test can assert the numbering row by
+    /// row.
+    fn diff_rows(plan: &[BodyLine]) -> Vec<(Option<u64>, DiffKind)> {
+        plan.iter()
+            .filter_map(|line| match line {
+                BodyLine::Diff(row) => Some((row.number, row.kind)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The plan's row at `index` and its `LineRole`, for the rows that are not diff rows.
+    fn text_role(plan: &[BodyLine]) -> Vec<LineRole> {
+        plan.iter()
+            .filter_map(|line| match line {
+                BodyLine::Text { role, .. } => Some(*role),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `patch` result that carries `hunks`: one `@@` block per replaced range, every row
+    /// numbered from its own header, and the **second** range's rows already carry the first
+    /// range's line delta (a two-line replacement that became one line moves them up).
+    #[test]
+    fn a_patch_body_numbers_each_replaced_range() {
+        let mut patch = card(
+            "patch",
+            json!({"path": "src/日本.rs", "old": "a\nb\n", "new": "A\n", "replace_all": true}),
+        );
+        patch.structured = Some(json!({
+            "path": "src/日本.rs",
+            "replaced": 2,
+            "matched": "exact",
+            "hunks": [
+                {"old_start": 2, "old_lines": 2, "new_start": 2, "new_lines": 1},
+                {"old_start": 5, "old_lines": 2, "new_start": 4, "new_lines": 1},
+            ],
+        }));
+        let text = result_display_text(&patch, "replaced 2 occurrences in src/日本.rs");
+        assert_eq!(
+            text,
+            "@@ -2,2 +2,1 @@\n-a\n-b\n+A\n@@ -5,2 +4,1 @@\n-a\n-b\n+A\n"
+        );
+        let (body, _) = diff_body(&patch, &text);
+        assert_eq!(
+            diff_rows(&body),
+            vec![
+                (Some(2), DiffKind::Removed),
+                (Some(3), DiffKind::Removed),
+                (Some(2), DiffKind::Added),
+                (Some(5), DiffKind::Removed),
+                (Some(6), DiffKind::Removed),
+                (Some(4), DiffKind::Added),
+            ]
+        );
+        // The two `@@` headers are structure, not content.
+        assert_eq!(text_role(&body), vec![LineRole::Dim, LineRole::Dim]);
+        // Every row knows the file's language from the call's path.
+        assert!(
+            body.iter().all(
+                |line| matches!(line, BodyLine::Diff(row) if row.lang == Some("rs"))
+                    || matches!(line, BodyLine::Text { .. })
+            ),
+            "{body:?}"
+        );
+    }
+
+    /// `git_diff`: the numbers come from the text's own `@@` headers, file headers and `@@` are
+    /// structure, and a second hunk's counters start from its own header.
+    #[test]
+    fn a_git_diff_body_numbers_from_its_own_hunk_headers() {
+        let text = "diff --git a/src/main.rs b/src/main.rs\n\
+                    index 1..2 100644\n\
+                    --- a/src/main.rs\n\
+                    +++ b/src/main.rs\n\
+                    @@ -10,3 +10,4 @@ fn main() {\n\
+                    \x20let a = 1;\n\
+                    -let b = 2;\n\
+                    +let b = 3;\n\
+                    +let c = 4;\n\
+                    \x20context\n\
+                    @@ -30,2 +31,2 @@\n\
+                    -old tail\n\
+                    +new tail\n\
+                    \x20end\n";
+        let (body, _) = diff_body(&card("git_diff", json!({})), text);
+        assert_eq!(
+            diff_rows(&body),
+            vec![
+                (Some(10), DiffKind::Context),
+                (Some(11), DiffKind::Removed),
+                (Some(11), DiffKind::Added),
+                (Some(12), DiffKind::Added),
+                (Some(13), DiffKind::Context),
+                (Some(30), DiffKind::Removed),
+                (Some(31), DiffKind::Added),
+                (Some(32), DiffKind::Context),
+            ]
+        );
+        // `diff --git`, `index`, `---`, `+++` and the two `@@` headers: six structure rows.
+        assert_eq!(
+            text_role(&body),
+            vec![
+                LineRole::Dim,
+                LineRole::Dim,
+                LineRole::Dim,
+                LineRole::Dim,
+                LineRole::Dim,
+                LineRole::Dim,
+            ]
+        );
+        // `git_diff` names the file per file header, so the rows highlight as Rust.
+        assert!(
+            body.iter()
+                .all(|line| !matches!(line, BodyLine::Diff(row) if row.lang != Some("rs"))),
+            "{body:?}"
+        );
+    }
+
+    /// A diff whose text carries no `@@` header (an MCP tool's text, an older journal entry)
+    /// keeps today's numberless form: the sign column, no gutter, the diff roles on the row.
+    #[test]
+    fn a_diff_without_hunk_headers_keeps_the_sign_column() {
+        let (body, _) = diff_body(&card("git_diff", json!({})), "-gone\n+added\n context\n");
+        assert!(diff_rows(&body).is_empty(), "{body:?}");
+        assert_eq!(
+            text_role(&body),
+            vec![
+                LineRole::DiffRemoved,
+                LineRole::DiffAdded,
+                LineRole::DiffContext
+            ]
+        );
+        // A `+`/`+`-in-a-header pair without a hunk is still structure.
+        let (body, _) = diff_body(&card("git_diff", json!({})), "--- a/x\n+++ b/x\n");
+        assert!(body.iter().all(|line| matches!(
+            line,
+            BodyLine::Text {
+                role: LineRole::Dim,
+                ..
+            }
+        )));
+    }
+
+    /// The hunk header parser: both start lines, with the counts optional (a one-line range
+    /// omits them, as git writes it).
+    #[test]
+    fn a_hunk_header_gives_both_start_lines() {
+        assert_eq!(parse_hunk_header("@@ -2,2 +2,1 @@"), Some((2, 2)));
+        assert_eq!(parse_hunk_header("@@ -1 +1 @@ fn main"), Some((1, 1)));
+        assert_eq!(
+            parse_hunk_header("@@ -10,3 +40,7 @@ fn next"),
+            Some((10, 40))
+        );
+        assert_eq!(parse_hunk_header("@@ nope @@"), None);
+        assert_eq!(parse_hunk_header("-not a header"), None);
+        assert_eq!(parse_hunk_header("+not a header"), None);
+    }
+
+    /// The language a diff row highlights with is the file's suffix: from the call for `patch`,
+    /// from the file header for `git_diff`, and nothing when the suffix names no language.
+    #[test]
+    fn a_diff_row_takes_the_language_from_the_files_suffix() {
+        let mut patch = card(
+            "patch",
+            json!({"path": "notes.txt", "old": "a\n", "new": "b\n"}),
+        );
+        patch.structured = Some(json!({
+            "hunks": [{"old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1}],
+        }));
+        let text = result_display_text(&patch, "replaced 1 occurrence");
+        assert_eq!(text, "@@ -1,1 +1,1 @@\n-a\n+b\n");
+        let (body, _) = diff_body(&patch, &text);
+        assert!(
+            body.iter().all(
+                |line| matches!(line, BodyLine::Diff(row) if row.lang.is_none())
+                    || matches!(line, BodyLine::Text { .. })
+            ),
+            "`txt` is not a language we highlight: {body:?}"
+        );
+        // `git_diff` reads the path out of the file header instead.
+        let text = "diff --git a/x.md b/x.md\n+++ b/x.md\n@@ -1,1 +1,1 @@\n-# t\n+# T\n";
+        let (body, _) = diff_body(&card("git_diff", json!({})), text);
+        assert!(
+            body.iter().all(
+                |line| matches!(line, BodyLine::Diff(row) if row.lang == Some("md"))
+                    || matches!(line, BodyLine::Text { .. })
+            ),
+            "{body:?}"
         );
     }
 
