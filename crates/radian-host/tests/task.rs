@@ -406,10 +406,11 @@ async fn a_task_opens_in_a_worktree_on_its_branch_with_a_task_parent() {
     fixture.registry.remove("t1", true).await.expect("remove");
 }
 
-/// The task's approvals and questions route to the **lead's** queue (ADR 0030 O2), and the
-/// task is a task agent (`/mode` refused) with no memory.
+/// The task is a task agent (`/mode` refused) with no memory, and — ADR 0030 — it
+/// does **not** share the lead's human queue: its asks and questions go to the task-side pending
+/// queue, and only an escalation reaches the human.
 #[tokio::test]
-async fn a_task_shares_the_lead_queue_is_a_task_agent_and_has_no_memory() {
+async fn a_task_is_a_task_agent_with_no_memory_and_no_human_queue() {
     let fixture = Fixture::new("shared-queue", "http://127.0.0.1:1/v1");
     if workspace_sandbox(&fixture.lead).is_none() {
         return;
@@ -421,8 +422,8 @@ async fn a_task_shares_the_lead_queue_is_a_task_agent_and_has_no_memory() {
         .expect("spawn");
 
     assert!(
-        Arc::ptr_eq(record.session.queue(), &fixture.queue),
-        "the task must use the lead's pending queue"
+        !Arc::ptr_eq(record.session.queue(), &fixture.queue),
+        "a task must not route its asks to the human queue (ADR 0030)"
     );
     assert!(
         !record.session.facts().memory_enabled,

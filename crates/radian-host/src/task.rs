@@ -19,9 +19,11 @@
 //!   own branch (ADR 0030 O3);
 //! - `SessionCreated.parent.relation = "task"` naming the lead and its `TaskSpawned` seq
 //!   (ADR 0030 O2);
-//! - a `HostBindings` whose approvals and questions route to the **lead's** pending queue,
-//!   tagged with the task's session id as the origin (ADR 0030 O2), so the human sees one
-//!   arrival order and the task never appears as its own queue;
+//! - a `HostBindings` whose approvals and questions route to the **task-side** pending queue
+//!   ([`crate::task_pending`], ADR 0030 slice 5, revision 6): the task's still-ask approvals and
+//!   its `ask_user` become pending task events the lead resolves (answer / deny / escalate),
+//!   never items in the human's queue. Only an escalation the lead performs reaches the human
+//!   queue, tagged with the task as the origin (ADR 0030 R9);
 //! - an end-of-task commit: when the task's turn ends, the worktree's uncommitted changes are
 //!   committed by the host with the fixed message `radian: end of task <id> (<outcome>)`
 //!   (ADR 0030 item 1 B). With no changes, no commit is made. The commit is
@@ -45,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_core::Message;
-use radian_permissions::{Preset, Profile};
+use radian_permissions::{ApprovalPolicy, Preset, Profile};
 use radian_sandbox::{GitAccess, Sandbox, SandboxPolicy};
 use radian_session::{ForkParent, RuntimeEvent, SessionJournal, TurnOutcome};
 use tokio::sync::watch;
@@ -57,6 +59,9 @@ use crate::session::{
     open_session,
 };
 use crate::session_id::validate_session_id;
+use crate::task_pending::{
+    TaskApprover, TaskPendingError, TaskPendingQueue, TaskPendingView, TaskPrompter,
+};
 
 /// How a spawned task is isolated (ADR 0030 O3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -199,6 +204,19 @@ pub struct SpawnRequest {
     /// The first input, sent as a `followup` with `InputSource::Subagent` (ADR 0030 O2: a task
     /// agent's every input is `Subagent`). `None` opens the session without starting a turn.
     pub brief: Option<String>,
+    /// The task's approval policy after the hard-deny list and the edge policy (ADR 0030
+    /// revision 1 R1): `None` is the task default `auto`; `Some(OnAsk)` sends every ask that
+    /// still reaches the default to the task-side pending queue (ADR 0030 slice 5). `Never` and
+    /// `Always` are refused: a task has no "never ask" and no "always ask" layer of its own.
+    pub approval: Option<ApprovalPolicy>,
+    /// The optional edge policy command (ADR 0030 R1 layer 2). `None` means no edge
+    /// policy: the default in [`SpawnRequest::approval`] decides.
+    ///
+    /// Trust: this command must come from the **user's own config** or a **trusted project
+    /// config** (ADR 0030 slice 9 / ADR 0031), never from a model tool argument — it is a
+    /// program Radian runs for the task. It is only ever run inside the task's sandbox; with no
+    /// sandbox it is skipped and the request goes to the pending queue.
+    pub policy: Option<crate::task_pending::PolicyCommand>,
 }
 
 impl SpawnRequest {
@@ -209,6 +227,8 @@ impl SpawnRequest {
             isolation: Isolation::Worktree,
             label: None,
             brief: None,
+            approval: None,
+            policy: None,
         }
     }
 }
@@ -233,9 +253,9 @@ pub struct TaskRegistry {
     lead_session_id: String,
     /// The lead's journal: `TaskSpawned`/`TaskFinished` land here (ADR 0030 O5).
     lead_journal: Arc<SessionJournal>,
-    /// The lead's pending queue: every task's approvals and questions route here, tagged with
-    /// the task's session id (ADR 0030 O2).
-    lead_queue: Arc<SessionQueue>,
+    /// The task-side pending queue (ADR 0030 slice 5): every task's ask-still-ask and
+    /// `ask_user`, waiting for the lead, plus the human queue an escalation reaches.
+    pending: Arc<TaskPendingQueue>,
     builder: TaskBuilder,
     /// Test seams (ADR 0039 decisions 5 and 7); both are `None` in production.
     seams: TaskSeams,
@@ -255,12 +275,13 @@ impl TaskRegistry {
         // Canonical, so the worktree paths git reports back match (macOS `/var` -> `/private/var`).
         let workspace = std::fs::canonicalize(&workspace).unwrap_or(workspace);
         let worktree_root = task_worktree_root(&workspace);
+        let pending = TaskPendingQueue::new(Some(Arc::clone(&lead_queue)));
         Self {
             workspace,
             worktree_root,
             lead_session_id: lead_session_id.into(),
             lead_journal,
-            lead_queue,
+            pending,
             builder,
             seams: TaskSeams::default(),
             tasks: Mutex::new(BTreeMap::new()),
@@ -303,6 +324,57 @@ impl TaskRegistry {
             .collect()
     }
 
+    /// The task-side pending queue (ADR 0030 slice 5). A lead's `wait_task`/`wait_any` (slice 6)
+    /// takes the next event with [`TaskRegistry::pending_next`].
+    pub fn pending(&self) -> &Arc<TaskPendingQueue> {
+        &self.pending
+    }
+
+    /// Takes the next pending task event (a question or a still-ask approval) and starts its R9
+    /// timeout (ADR 0030). `None` when no task is waiting.
+    pub fn pending_next(&self) -> Option<TaskPendingView> {
+        self.pending.next()
+    }
+
+    /// Sets the R9 timeout applied to each taken event (ADR 0030).
+    pub fn set_pending_timeout(&self, timeout: std::time::Duration) {
+        self.pending.set_timeout(timeout);
+    }
+
+    /// Answers a task's `ask_user` question (ADR 0030 R9 item 1).
+    pub fn answer(
+        &self,
+        task_id: &str,
+        request_id: &str,
+        answers: Vec<radian_coding::QuestionReply>,
+    ) -> Result<(), TaskPendingError> {
+        self.pending.answer(task_id, request_id, answers)
+    }
+
+    /// Refuses a task's pending approval. This only ever narrows (ADR 0030 R9 item 2):
+    /// there is deliberately no operation that approves an approval on the lead's behalf.
+    pub fn deny_approval(
+        &self,
+        task_id: &str,
+        request_id: &str,
+        reason: Option<String>,
+    ) -> Result<(), TaskPendingError> {
+        self.pending.deny_approval(task_id, request_id, reason)
+    }
+
+    /// Hands a task's pending approval to the human queue with the lead's summary and
+    /// recommendation (ADR 0030 R9 item 2). The human's answer resolves the task.
+    pub fn escalate_approval(
+        &self,
+        task_id: &str,
+        request_id: &str,
+        summary: &str,
+        recommendation: &str,
+    ) -> Result<(), TaskPendingError> {
+        self.pending
+            .escalate_approval(task_id, request_id, summary, recommendation)
+    }
+
     /// Spawns a task agent (ADR 0030 O2/O3) as one transaction (ADR 0039 decision 5).
     ///
     /// Steps, in order: create the worktree, append the lead's `TaskSpawned`, build and open
@@ -315,6 +387,8 @@ impl TaskRegistry {
             isolation,
             label,
             brief,
+            approval,
+            policy,
         } = request;
         validate_session_id(&id).map_err(|_| {
             TaskError::new(format!(
@@ -324,12 +398,18 @@ impl TaskRegistry {
         if self.get(&id).is_some() {
             return Err(TaskError::new(format!("task `{id}` already exists")));
         }
+        let approval = approval.unwrap_or(ApprovalPolicy::Auto);
+        if !matches!(approval, ApprovalPolicy::Auto | ApprovalPolicy::OnAsk) {
+            return Err(TaskError::new(
+                "a task's approval is `auto` or `on-ask` (ADR 0030 R1)",
+            ));
+        }
 
         // The guard owns everything the spawn has built so far; it is disarmed only once the
         // record is in the registry, so no failure below can leave a worktree or a driver.
         let mut guard = SpawnGuard::new(self.workspace.clone());
         match self
-            .spawn_inner(&mut guard, &id, isolation, label, brief)
+            .spawn_inner(&mut guard, &id, isolation, label, brief, (approval, policy))
             .await
         {
             Ok(record) => {
@@ -362,6 +442,9 @@ impl TaskRegistry {
         isolation: Isolation,
         label: Option<String>,
         brief: Option<String>,
+        // The task's approval policy and its optional edge policy command (ADR 0030 slice 5),
+        // together: they are only ever read as a pair by the task approver below.
+        (approval, policy): (ApprovalPolicy, Option<crate::task_pending::PolicyCommand>),
     ) -> Result<Arc<TaskRecord>, TaskError> {
         // 1. The workspace: a fresh worktree on `radian/<id>`, or the lead's own (shared).
         let (workspace, worktree, branch) = match isolation {
@@ -433,12 +516,35 @@ impl TaskRegistry {
             isolation,
             branch.clone(),
             parent.clone(),
+            // The hook consults the approver whenever the task's own layers might decide
+            // something: an edge policy runs there, and `on-ask` routes there. Only a plain
+            // `auto` task with no edge policy lets the hook answer `ask` with `allow` itself
+            // (ADR 0030 R1: hard-deny -> edge policy -> auto).
+            if approval == ApprovalPolicy::OnAsk || policy.is_some() {
+                ApprovalPolicy::OnAsk
+            } else {
+                ApprovalPolicy::Auto
+            },
         )?;
 
-        // Route the task's approvals and questions to the lead's queue, and commit the task's
-        // changes when its turn ends.
-        bindings.shared_queue = Some(Arc::clone(&self.lead_queue));
-        bindings.approvals = ApprovalRouting::Queued;
+        // The task's asks and questions go to the task-side pending queue, not the human's; the
+        // task is committed when its turn ends (ADR 0030 slice 5).
+        let task_approver = Arc::new(TaskApprover::new(
+            Arc::clone(&self.pending),
+            id.to_owned(),
+            approval,
+            policy,
+            setup.sandbox.clone(),
+        ));
+        let task_prompter = Arc::new(TaskPrompter::new(Arc::clone(&self.pending), id.to_owned()));
+        bindings.shared_queue = None;
+        bindings.approvals = ApprovalRouting::Task {
+            approver: task_approver,
+            prompter: task_prompter,
+        };
+        // ADR 0030 R9: a task agent's questions go to the lead, so `ask_user` is
+        // advertised for the task even when the lead's own host did not advertise it to itself.
+        bindings.ask_user = true;
         let finisher = Arc::new(TaskFinisher {
             id: id.to_owned(),
             lead_journal: Arc::clone(&self.lead_journal),
@@ -611,13 +717,15 @@ impl Drop for SpawnGuard {
 }
 
 /// Enforces the task-agent invariants on a builder's setup (ADR 0030 O2/O3/O8, ADR 0036,
-/// ADR 0038 decision 4). Split out so a test can pin each rule without a real session.
+/// ADR 0038 decision 4, ADR 0030 R1). Split out so a test can pin each rule without a
+/// real session.
 fn enforce_task_setup(
     setup: &mut SessionSetup,
     workspace: &Path,
     isolation: Isolation,
     branch: Option<String>,
     parent: ForkParent,
+    hook_approval: ApprovalPolicy,
 ) -> Result<(), TaskError> {
     setup.workspace = workspace.to_path_buf();
     setup.coding_root = Some(workspace.to_path_buf());
@@ -658,6 +766,14 @@ fn enforce_task_setup(
             }
         }
     }
+    // ADR 0030 R1: the hard-deny list is added to whatever profile the builder gave,
+    // and the hook's approval policy is `hook_approval` (auto only when nothing else can decide;
+    // `auto` outranks nothing and never downgrades a `deny`).
+    setup.profile = setup
+        .profile
+        .clone()
+        .with_task_hard_deny()
+        .with_approval(hook_approval);
     Ok(())
 }
 

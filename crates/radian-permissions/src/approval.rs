@@ -54,7 +54,19 @@ impl ApprovalRequest {
 pub enum ApprovalOutcome {
     AllowOnce,
     AllowForSession,
-    Deny { reason: Option<String> },
+    Deny {
+        reason: Option<String>,
+    },
+    /// An external edge policy command decided (ADR 0030 R1 layer 2). The hook
+    /// records `approver = "policy"` and this `name` as the audit's `policy` field
+    /// (ADR 0006 §5.9); `allow` selects allow, otherwise deny. A policy command can never grant
+    /// `AllowForSession`: the session grant is the human's alone, and a task edge policy is not
+    /// a human. `name` is the configured policy name and is never empty.
+    Policy {
+        allow: bool,
+        name: String,
+        reason: Option<String>,
+    },
 }
 
 /// The approver itself failed. The hook turns this into `HookError`, which Core treats as a

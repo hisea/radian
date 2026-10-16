@@ -42,6 +42,7 @@ mod session_id;
 pub mod sessions;
 pub mod skills;
 pub mod task;
+pub mod task_pending;
 mod tools;
 pub mod trust;
 mod workspace;
@@ -164,6 +165,11 @@ pub use task::{
     CommitGate, EndCommit, Isolation, SpawnHook, SpawnRequest, SpawnStage, TaskBuilder,
     TaskContext, TaskError, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
     task_sandbox,
+};
+pub use task_pending::{
+    DEFAULT_PENDING_TIMEOUT, DEFAULT_POLICY_TIMEOUT, PolicyCommand, TaskApprover,
+    TaskPendingContent, TaskPendingError, TaskPendingKind, TaskPendingQueue, TaskPendingView,
+    TaskPrompter,
 };
 pub use tools::{HostSession, HostTools, merge_tool_specs};
 pub use workspace::resolve_workspace;

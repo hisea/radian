@@ -71,3 +71,17 @@ Base: `a4a00bf` · 改前把 `src/hooks.rs` 复制到 `/tmp/orch-s1-mut-backup/`
 
 1/1 抓住。审计层的 `record` 现在恒为 `policy: None`（还没有策略命令生产者，ADR 0030 切片 ②），
 所以这条变异只改 `runtime_event` 的映射，测的就是「字段穿过这一层」这一件事。
+
+## ADR 0030 切片 5：task 硬禁止清单（2026-10-16）
+
+Base `63fafba` · 工作树 `.radian-worktrees/orch-s5`。改前把 `src/profile.rs` 复制到
+`.radian/scratch/mut-backup/`，改后 `cp` 还原并以 `cmp` 证明一致（本任务禁 `git checkout --`）。
+命令：`timeout 240 cargo test -p radian-permissions --test task_hard_deny --locked --no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| PM-O2 | `with_task_hard_deny` 变成 no-op（硬禁止清单不再叠到 task profile 上） | `task_hard_deny::{the_hard_deny_list_denies_exactly_what_the_plan_lists, a_hard_deny_command_never_reaches_the_approver}` | ✅ GRABBED (rc=101) |
+
+1/1 抓住。硬禁止是 `deny` 规则（优先级最高，`ApprovalPolicy` 不会降级），所以清单移除后
+`git push` 落到 `ask`，approver 一允许就通过；这条变异同时也说明清单不能被 edge policy 放宽
+（清单在时 approver 根本收不到该调用）。
