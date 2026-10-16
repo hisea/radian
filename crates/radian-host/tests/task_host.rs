@@ -118,6 +118,7 @@ fn host(base_url: &str, workspace: &Path, task_seen: Seen) -> TaskHost {
         wording: radian_host::CLI_WORDING,
         protected_branches: Vec::new(),
         allowed_filters: None,
+        shell_auto_background: None,
         skills_extra_paths: Vec::new(),
         skills_builtin: true,
         skills_disabled: Vec::new(),

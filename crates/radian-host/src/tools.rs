@@ -102,7 +102,9 @@ impl HostTools {
             push("grep", "search file contents with a regex");
             push(
                 "shell",
-                "run a command in the workspace; `background: true` for a long one",
+                "run a command in the workspace; one that runs past the auto-background \
+                 threshold is moved to the background automatically (`background: true` starts \
+                 it there at once)",
             );
             push(
                 "job_output",

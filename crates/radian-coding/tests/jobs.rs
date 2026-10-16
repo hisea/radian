@@ -15,7 +15,7 @@ use agent_core::{
     ToolProvider, ToolSession,
 };
 use common::TempDir;
-use radian_coding::{CodingSession, CodingTools, JobEvent, JobState};
+use radian_coding::{CodingSession, CodingTools, JobEvent, JobState, Limits};
 use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy, SandboxSlot};
 use serde_json::{Value, json};
 
@@ -775,5 +775,333 @@ async fn a_running_background_job_keeps_the_sandbox_it_started_with() {
     assert!(
         !marker.exists(),
         "the running job's confined sandbox must have denied the outside write (job {job_id})"
+    );
+}
+
+// ---------- 10. adopting a running foreground call (ADR 0037) ----------
+
+/// Tools whose foreground calls are adopted once they run past `threshold`.
+fn adopting_tools(ws: &Path, threshold: Duration) -> CodingTools {
+    transparent_tools(ws).with_limits(Limits {
+        auto_background_after: Some(threshold),
+        ..Limits::default()
+    })
+}
+
+/// Asserts `output` is an adoption result and returns `(job_id, text)`.
+fn adopted(output: &ToolOutput) -> (String, String) {
+    let value = structured(output);
+    assert_eq!(value["background"], json!(true), "{value}");
+    assert_eq!(value["adopted"], json!(true), "{value}");
+    (
+        value["job_id"].as_str().expect("a job id").to_owned(),
+        output_text(output),
+    )
+}
+
+/// The acceptance case: a foreground call still running at the threshold is moved to the
+/// background **in place** — the same process (its pid does not change), its pre-adoption
+/// output lands in the job's file, and `job_output` starts after the adoption point. Fails on
+/// the pre-revision code, where the call would run on to the foreground timeout (and, without
+/// one, for the default 60 s).
+#[tokio::test]
+async fn a_long_foreground_command_is_adopted_in_place() {
+    let dir = TempDir::new("auto-adopt");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = adopting_tools(&root, Duration::from_secs(1));
+    let session = tools.open_session().await.expect("session");
+
+    mkfifo(&root.join("gate"));
+    let start_time = Instant::now();
+    let call = exec(
+        &session,
+        "shell",
+        json!({"command": "echo $$ > leader.pid; echo before; cat gate > /dev/null; echo after"}),
+    );
+    let leader_pid = wait_for_pid(&root, "leader.pid");
+    let (result, pid) = tokio::join!(call, leader_pid);
+    let (id, text) = adopted(&result.expect("the call is adopted"));
+
+    assert!(
+        start_time.elapsed() < Duration::from_secs(5),
+        "the call must return near the threshold, not at a foreground timeout: {:?}",
+        start_time.elapsed()
+    );
+    assert!(text.contains("before"), "{text}");
+    assert!(text.contains("moved to the background"), "{text}");
+    assert!(text.contains(&id), "{text}");
+
+    // Never restarted: the pid file is unchanged and the leader is alive.
+    assert_eq!(
+        wait_for_pid(&root, "leader.pid").await,
+        pid,
+        "the command must not be restarted"
+    );
+    assert!(alive(pid), "the adopted process (pid {pid}) must be alive");
+
+    // Registered and running.
+    let list = output_text(&exec(&session, "job_list", json!({})).await.unwrap());
+    assert!(list.contains(&id), "{list}");
+    assert!(list.contains("running"), "{list}");
+
+    // The pre-adoption output is already in the job's file.
+    let path = session.jobs().output_path(&id);
+    wait_for_file(&path, "before").await;
+
+    // Release the command; the job settles.
+    release_fifo(&root.join("gate"));
+    let done = output_text(
+        &exec(
+            &session,
+            "job_output",
+            json!({"job_id": id, "wait": true, "timeout_ms": 10_000}),
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(done.contains("after"), "{done}");
+    assert!(done.contains("[status: exited 0]"), "{done}");
+    // `job_output` starts at the adoption point: the tail already in the result is not
+    // repeated.
+    assert!(!done.contains("before"), "the increment only: {done}");
+
+    // The file has the whole output, before and after adoption.
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("before"), "{content:?}");
+    assert!(content.contains("after"), "{content:?}");
+}
+
+/// A cancel before the threshold kills the foreground call and adopts nothing (decision 6).
+#[tokio::test]
+async fn a_cancel_before_the_threshold_kills_it_and_adopts_nothing() {
+    let dir = TempDir::new("auto-cancel");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    // A long threshold: the cancel is what ends the call, not the timer.
+    let tools = adopting_tools(&root, Duration::from_secs(30));
+    let session = tools.open_session().await.expect("session");
+
+    let token = CancellationToken::new();
+    let call = exec_cancel(
+        &session,
+        "shell",
+        json!({"command": "echo $$ > leader.pid; sleep 600", "timeout_secs": 600}),
+        token.clone(),
+    );
+    let pid = async {
+        let pid = wait_for_pid(&root, "leader.pid").await;
+        token.cancel();
+        pid
+    };
+    let (result, pid) = tokio::join!(call, pid);
+    let value = structured(&result.expect("the call returns"));
+    assert_eq!(value["cancelled"], json!(true), "{value}");
+    assert!(
+        gone_within(pid, Duration::from_secs(10)).await,
+        "a pre-threshold cancel must kill the command (pid {pid})"
+    );
+    assert!(
+        session.jobs().list().is_empty(),
+        "a pre-threshold cancel must adopt nothing"
+    );
+}
+
+/// The explicit `timeout_secs` keeps counting from the command's start after adoption
+/// (decision 3): the job is killed at the original deadline, not at adoption + timeout.
+#[tokio::test]
+async fn an_adopted_job_is_killed_by_the_original_timeout() {
+    let dir = TempDir::new("auto-timeout");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    // Adopt at 2 s, deadline at 3 s: the kill must land near 3 s, not near 5 s (which is
+    // what restarting the clock at adoption would give).
+    let tools = adopting_tools(&root, Duration::from_secs(2));
+    let session = tools.open_session().await.expect("session");
+
+    let start = Instant::now();
+    let (id, _) = adopted(
+        &exec(
+            &session,
+            "shell",
+            json!({"command": "echo $$ > leader.pid; sleep 600", "timeout_secs": 3}),
+        )
+        .await
+        .unwrap(),
+    );
+    let settled = output_text(
+        &exec(
+            &session,
+            "job_output",
+            json!({"job_id": id, "wait": true, "timeout_ms": 15_000}),
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(settled.contains("[status: timed out]"), "{settled}");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(3_800),
+        "the timeout must count from the command's start, not from adoption: {elapsed:?}"
+    );
+}
+
+/// With all four slots busy the call is not adopted: it runs to its foreground timeout and
+/// the result says why (decision 4).
+#[tokio::test]
+async fn four_running_jobs_leave_no_room_and_the_call_is_not_adopted() {
+    let dir = TempDir::new("auto-slotfull");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = adopting_tools(&root, Duration::from_millis(300));
+    let session = tools.open_session().await.expect("session");
+
+    for _ in 0..4 {
+        let (id, _) = start(&session, "sleep 600", None).await;
+        assert!(!id.is_empty());
+    }
+
+    let output = exec(
+        &session,
+        "shell",
+        json!({"command": "echo $$ > fg.pid; sleep 600", "timeout_secs": 2}),
+    )
+    .await
+    .unwrap();
+    let value = structured(&output);
+    assert_eq!(value["adopted"], json!(null), "{value}");
+    assert_eq!(value["timed_out"], json!(true), "{value}");
+    assert_eq!(value["slots_full"], json!(true), "{value}");
+    let text = output_text(&output);
+    assert!(text.contains("slots were busy"), "{text}");
+    assert_eq!(
+        session.jobs().list().len(),
+        4,
+        "no fifth job may be created"
+    );
+
+    session.shutdown_jobs();
+}
+
+/// `auto_background_after = None` (the config's `0`) keeps the foreground rules: the call is
+/// killed at its timeout and never adopted. The same call with a threshold before the timeout
+/// **is** adopted (the test above), so this pins the off switch.
+#[tokio::test]
+async fn auto_background_off_keeps_the_foreground_timeout() {
+    let dir = TempDir::new("auto-off");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root).with_limits(Limits {
+        auto_background_after: None,
+        ..Limits::default()
+    });
+    let session = tools.open_session().await.expect("session");
+
+    let output = exec(
+        &session,
+        "shell",
+        json!({"command": "echo $$ > leader.pid; sleep 600", "timeout_secs": 2}),
+    )
+    .await
+    .unwrap();
+    let value = structured(&output);
+    assert_eq!(value["timed_out"], json!(true), "{value}");
+    assert_eq!(value["adopted"], json!(null), "{value}");
+    assert_eq!(value["slots_full"], json!(false), "{value}");
+    assert!(session.jobs().list().is_empty(), "nothing may be adopted");
+}
+
+/// After adoption the job belongs to the registry, so the turn's cancellation no longer kills
+/// it (decision 6). Fails if the cancel path stayed wired to the adopted job.
+#[tokio::test]
+async fn an_adopted_job_survives_the_turn_cancellation() {
+    let dir = TempDir::new("auto-cancel-after");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = adopting_tools(&root, Duration::from_millis(300));
+    let session = tools.open_session().await.expect("session");
+
+    mkfifo(&root.join("gate"));
+    let token = CancellationToken::new();
+    let (id, _) = adopted(
+        &exec_cancel(
+            &session,
+            "shell",
+            json!({"command": "echo $$ > leader.pid; cat gate > /dev/null"}),
+            token.clone(),
+        )
+        .await
+        .unwrap(),
+    );
+    let leader = wait_for_pid(&root, "leader.pid").await;
+    token.cancel();
+    assert!(
+        !gone_within(leader, Duration::from_secs(1)).await,
+        "a cancelled turn must not kill an adopted job (pid {leader})"
+    );
+    let list = output_text(&exec(&session, "job_list", json!({})).await.unwrap());
+    assert!(list.contains(&id) && list.contains("running"), "{list}");
+
+    // Session end is the way to stop it.
+    session.shutdown_jobs();
+    assert!(
+        gone_within(leader, Duration::from_secs(10)).await,
+        "session shutdown must kill the adopted job (pid {leader})"
+    );
+}
+
+/// Session shutdown kills an adopted job (ADR 0037 decision 4 / 6).
+#[tokio::test]
+async fn session_shutdown_kills_an_adopted_job() {
+    let dir = TempDir::new("auto-shutdown");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = adopting_tools(&root, Duration::from_millis(300));
+    let session = tools.open_session().await.expect("session");
+
+    let (_id, _) = adopted(
+        &exec(
+            &session,
+            "shell",
+            json!({"command": "echo $$ > leader.pid; sleep 600"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let leader = wait_for_pid(&root, "leader.pid").await;
+
+    session.shutdown_jobs();
+    assert!(
+        gone_within(leader, Duration::from_secs(10)).await,
+        "the adopted job (pid {leader}) survived session shutdown"
+    );
+    assert!(!group_alive(leader), "group {leader} still has members");
+}
+
+/// An adopted job's natural completion is notified like any other job (ADR 0037 decision 3):
+/// the model did not wait on it, so `notify` is true.
+#[tokio::test]
+async fn an_adopted_job_completion_is_notified() {
+    let dir = TempDir::new("auto-notify");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = adopting_tools(&root, Duration::from_millis(300));
+    let session = tools.open_session().await.expect("session");
+    let mut events = session.jobs().subscribe();
+
+    mkfifo(&root.join("gate"));
+    let (_id, _) = adopted(
+        &exec(
+            &session,
+            "shell",
+            json!({"command": "cat gate > /dev/null; echo after"}),
+        )
+        .await
+        .unwrap(),
+    );
+    release_fifo(&root.join("gate"));
+    assert!(
+        next_settle_notify(&mut events).await,
+        "an adopted job's natural exit must notify"
     );
 }
