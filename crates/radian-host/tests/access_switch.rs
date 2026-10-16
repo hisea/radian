@@ -115,6 +115,8 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             compaction_settings: serde_json::Value::Null,
 
             compaction_settings_for: None,
+
+            retries: 0,
             sandbox: None,
             tier: Preset::Safe,
             profile: Profile::safe(&workspace).unwrap(),
@@ -139,7 +141,7 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             events: Arc::new(NoopSink),
             projection: Arc::new(SessionProjection::new()),
             runtime_events: Arc::new(|_event: &radian_session::RuntimeEvent| {}),
-            driver_stopped: Arc::new(|| {}),
+            driver_stopped: Arc::new(|_| {}),
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
@@ -244,6 +246,8 @@ async fn a_session_without_a_builder_refuses_set_access() {
             compaction_settings: serde_json::Value::Null,
 
             compaction_settings_for: None,
+
+            retries: 0,
             sandbox: None,
             tier: Preset::Safe,
             profile: Profile::safe(&workspace).unwrap(),
@@ -268,7 +272,7 @@ async fn a_session_without_a_builder_refuses_set_access() {
             events: Arc::new(NoopSink),
             projection: Arc::new(SessionProjection::new()),
             runtime_events: Arc::new(|_event: &radian_session::RuntimeEvent| {}),
-            driver_stopped: Arc::new(|| {}),
+            driver_stopped: Arc::new(|_| {}),
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
