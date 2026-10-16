@@ -1649,6 +1649,12 @@ Base：本片 HEAD（`dogfood/thin-tools`）· 就地变异：脚本 `.radian/sc
 `card::line_count_matches_the_layout_for_a_tool_block`（三种折叠 × 80/24 列）与既有的
 `markdown::line_count_matches_the_layout`、`tests/virtual.rs` 的窗口测试共同钉住。
 
+**「测试先于实现」的核对**：把 `origin/main` 的 `crates/radian-tui/src/{tools,blocks,render,app}.rs`
+拷回来（本片实现先另存，改完 `cmp` 逐字节还原）再跑 `cargo test -p radian-tui --test card`：
+**11 条 FAILED / 12**。唯一通过的是 `line_count_matches_the_layout_for_a_tool_block`，它断言的是
+改前改后都成立的不变量（`line_count` == `layout` 的行数），是本片改动引入的计数镜像的回归钉，
+不声称新行为。
+
 **一处要记录的缺口（不是本片能修的）**：状态符号 `✗`（U+2717）不在 ADR 0027 的六款参考字体
 核对集里（那张表用 `×`，`✓` 在表内）。ADR 0028 与原型 `render-screen.py` 都写 `✗`，
 所以 transcript 用它；`crates/radian-tui/src/footer.rs` 的 `tool_status()`（footer 自己的字形表）没有改，
