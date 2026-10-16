@@ -340,14 +340,17 @@ fn the_flat_model_list_filters_by_provider_and_accepts_the_pair() {
         command::Candidate {
             insert: "opencode-go/deepseek-v4.1-flash".into(),
             description: "opencode-go".into(),
+            current: false,
         },
         command::Candidate {
             insert: "openai/gpt-5".into(),
             description: "openai".into(),
+            current: false,
         },
         command::Candidate {
             insert: "anthropic/claude-4".into(),
             description: "anthropic".into(),
+            current: false,
         },
     ];
     // Typing `opencode` keeps only that provider's rows; a model name still matches.
