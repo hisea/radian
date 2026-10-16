@@ -143,6 +143,27 @@ fn headings_show_no_hash_and_level_attributes() {
     );
 }
 
+/// ADR 0035: bold is the text role plus the bold modifier, uncolored
+/// by the heading role. Distinct theme colors make the two roles distinguishable.
+#[test]
+fn bold_uses_the_text_role() {
+    use ratatui::style::Color;
+    let mut app = App::new("m", "s");
+    app.theme.text = ratatui::style::Style::default().fg(Color::Red);
+    app.theme.md_heading = ratatui::style::Style::default().fg(Color::Blue);
+    assistant(&mut app, "A **bold** word.\n");
+    let terminal = render(&mut app, 60, 6);
+    let bold = style_of(&terminal, "bold").expect("the bold run");
+    assert_eq!(
+        bold.fg, app.theme.text.fg,
+        "bold keeps the text role's color, not the heading role's: {bold:?}"
+    );
+    assert!(
+        bold.add_modifier.contains(Modifier::BOLD),
+        "bold is bold: {bold:?}"
+    );
+}
+
 /// A table draws borders when it fits, wraps a cell that does not, and falls back to the raw
 /// `|` text when there are too many columns.
 #[test]

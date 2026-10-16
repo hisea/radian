@@ -2419,7 +2419,9 @@ fn body_spans(
                     theme.md_list_bullet
                 }
                 blocks::MdStyle::Fence => theme.truncation,
-                blocks::MdStyle::Bold => theme.md_heading.patch(Modifier::BOLD),
+                // ADR 0035: bold is the text role plus the bold
+                // modifier; it never takes the heading role's color.
+                blocks::MdStyle::Bold => theme.text.add_modifier(Modifier::BOLD),
                 blocks::MdStyle::Italic => theme.text.add_modifier(Modifier::ITALIC),
                 blocks::MdStyle::Code => theme.md_code,
                 blocks::MdStyle::Link => theme.md_link,
