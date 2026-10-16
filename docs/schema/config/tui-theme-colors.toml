@@ -1,7 +1,8 @@
 # ADR 0029:主题文件名与逐角色颜色覆盖。`tui.theme` 接受任意名字(先内建、再
-# `~/.radian/themes/<name>.json`);`[tui.colors]` 的键是 Radian 或 pi 的角色名,
-# 值是一个颜色(只前景)或 `{fg,bg,bold,italic,dim,underline}` 表。读者原样携带,
-# 由 TUI 解析;未知角色/写法错误是启动警告,不是拒绝。
+# `~/.radian/themes/<name>.toml`,过渡期再退到 `<name>.json`);`[tui.colors]` 的键是
+# Radian 或 pi 的角色名(过渡期),值是一个颜色(只前景)或
+# `{fg,bg,bold,italic,dim,underline}` 表。读者原样携带,由 TUI 解析;未知角色/写法错误是
+# 启动警告,不是拒绝。
 schema_version = 1
 
 [model]

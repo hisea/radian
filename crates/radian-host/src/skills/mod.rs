@@ -24,8 +24,9 @@ pub const SKILL_FILE_NAME: &str = "SKILL.md";
 pub const SECTION_BUDGET_TOKENS: u64 = 1000;
 
 /// Directories discovery never descends into (the same names `mention` ignores; ADR 0025 S1).
-/// `.radian-worktrees/` holds one full worktree per task agent (ADR 0030 O3), so descending
-/// into it would discover every skill once per task.
+/// `.radian-worktrees/` holds one full worktree per checkout (ADR 0030 O7; task agents'
+/// worktrees moved out of the workspace in ADR 0039 decision 4), so descending into it would
+/// discover every skill once per worktree.
 pub const IGNORED_DIRS: &[&str] = &[".git", ".radian-sandbox", ".radian-worktrees"];
 
 /// The longest `name` (Agent Skills spec, via pi; ADR 0025 S1).
@@ -56,8 +57,13 @@ impl SkillSource {
 }
 
 /// The built-in skills, compiled in (ADR 0025). `(name, SKILL.md text)`.
-pub const BUILTIN: &[(&str, &str)] =
-    &[("diagrams", include_str!("../../skills/diagrams/SKILL.md"))];
+pub const BUILTIN: &[(&str, &str)] = &[
+    ("diagrams", include_str!("../../skills/diagrams/SKILL.md")),
+    (
+        "theme-import",
+        include_str!("../../skills/theme-import/SKILL.md"),
+    ),
+];
 
 /// One discovered skill. `path` is the `SKILL.md` (absolute); `dir` is its directory, the base
 /// for relative paths in the body (ADR 0025 S3). For a built-in skill `body` is the embedded
@@ -960,9 +966,40 @@ mod tests {
                 .is_empty()
         );
         assert!(
-            discover_with_extras(None, &[], true, &["diagrams".to_owned()])
-                .skills
-                .is_empty()
+            discover_with_extras(
+                None,
+                &[],
+                true,
+                &["diagrams".to_owned(), "theme-import".to_owned()]
+            )
+            .skills
+            .is_empty()
+        );
+    }
+
+    /// ADR 0029: the compiled-in `theme-import` skill is discovered,
+    /// marked `builtin`, and listed by `/skills`.
+    #[test]
+    fn the_builtin_theme_import_skill_is_discovered_and_listed() {
+        let discovery = discover_with_extras(None, &[], true, &[]);
+        let skill = discovery
+            .skills
+            .iter()
+            .find(|skill| skill.name == "theme-import")
+            .expect("the built-in theme-import skill");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert!(skill.body.is_some(), "the body is embedded");
+        assert!(
+            skill.description.contains("pi theme"),
+            "{}",
+            skill.description
+        );
+        assert!(
+            notices(&discovery.skills)
+                .iter()
+                .any(|line| line.contains("theme-import") && line.contains("[builtin]")),
+            "{:?}",
+            notices(&discovery.skills)
         );
     }
 

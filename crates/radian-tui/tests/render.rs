@@ -1484,7 +1484,7 @@ fn a_code_block_does_not_wrap_and_truncates_with_an_ellipsis() {
     // transcript, and the prose above and below the block must stay on screen.
     let terminal = render(&mut app, 80, 16);
     let buffer = terminal.backend().buffer();
-    // Find the long line's row: it starts with 79 'x' and ends with '…' on the same row.
+    // Find the long line's row: the rail, then 77 'x' and '…' filling the rest of the row.
     let mut found = None;
     for row in 0..16u16 {
         let text: String = (0..80u16)
@@ -1496,13 +1496,13 @@ fn a_code_block_does_not_wrap_and_truncates_with_an_ellipsis() {
                     .to_string()
             })
             .collect();
-        if text.starts_with("xxxx") {
+        if text.starts_with("│ ") && text.contains('x') {
             found = Some((row, text));
             break;
         }
     }
     let (row, text) = found.expect("the long code line is on screen");
-    assert_eq!(text.chars().filter(|&c| c == 'x').count(), 79, "{text:?}");
+    assert_eq!(text.chars().filter(|&c| c == 'x').count(), 77, "{text:?}");
     assert!(text.ends_with('…'), "the truncation marker: {text:?}");
     // The next source line is its own row (no soft wrap pushed it down).
     let next: String = (0..80u16)
@@ -1515,7 +1515,7 @@ fn a_code_block_does_not_wrap_and_truncates_with_an_ellipsis() {
         })
         .collect();
     assert!(
-        next.starts_with("second"),
+        next.starts_with("│ second"),
         "no wrap between code lines: {next:?}"
     );
     assert!(screen(&terminal).contains("before"), "the prose before it");

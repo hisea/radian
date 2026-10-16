@@ -20,7 +20,7 @@ const SNIFF_BYTES: usize = 8 << 10;
 /// A single line is read, matched and reported on at most this many bytes. A longer line is
 /// matched on its prefix and its reported text carries a `[truncated]` marker, so one enormous
 /// line cannot grow the result without bound. The rest of the line is consumed, never stored.
-const MAX_LINE_BYTES: usize = 8 << 10;
+pub(crate) const MAX_LINE_BYTES: usize = 8 << 10;
 
 #[derive(Deserialize)]
 struct GrepArgs {
@@ -375,7 +375,7 @@ impl Emitter {
 
 /// A line's text without its terminator, lossy-decoded so a non-UTF-8 byte cannot fail the
 /// whole search.
-fn strip_line_end(buf: &[u8]) -> String {
+pub(crate) fn strip_line_end(buf: &[u8]) -> String {
     let mut end = buf.len();
     if end > 0 && buf[end - 1] == b'\n' {
         end -= 1;
@@ -387,7 +387,7 @@ fn strip_line_end(buf: &[u8]) -> String {
 }
 
 /// What [`read_line_capped`] did.
-enum LineRead {
+pub(crate) enum LineRead {
     /// A complete line (ending in `\n`, or the last line at EOF) is in the buffer.
     Complete,
     /// No more bytes: the buffer is empty.
@@ -399,7 +399,7 @@ enum LineRead {
 
 /// Reads one line into `buf`, never holding more than `cap` bytes. The remainder of an
 /// over-long line is consumed and dropped, so the next call reads the following line.
-fn read_line_capped<R: BufRead>(
+pub(crate) fn read_line_capped<R: BufRead>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     cap: usize,

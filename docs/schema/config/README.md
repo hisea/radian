@@ -10,7 +10,7 @@
 | `v1-unknown-fields.toml` | `schema_version = 1`，带未知顶层字段 `future_top_level` 与未知嵌套字段 `model.future_option`。 | **接受**（解释时忽略）；写回必须保真（保留未知字段）或拒绝写回——“忽略但写回时丢弃”被禁止（它会悄悄删掉用户为新版本写的配置）。 | §5.3 / §5.4 |
 | `schema-version-newer.toml` | `schema_version = 99`（高于 v1）。 | **只读打开或拒绝打开**，**绝不能以 v1 语义写入**。 | §5.2 |
 | `schema-version-lower.toml` | `schema_version = 0`（低于 v1，无 v0→v1 注册迁移路径）。 | **拒绝**；**绝不静默改写用户文件**；迁移只能由显式入口发起。 | §5.3 |
-| `tui-theme-colors.toml` | ADR 0029:`tui.theme` 为主题文件名(内建之外的名字指向 `~/.radian/themes/<name>.json`),`[tui.colors]` 逐角色覆盖(颜色、色号、表三种写法,含 pi 角色名)。 | **接受**,0 拒绝;读者原样携带,由 TUI 解析;无明文密钥样字符串。 | §2 / ADR 0029 |
+| `tui-theme-colors.toml` | ADR 0029:`tui.theme` 为主题文件名(内建之外的名字指向 `~/.radian/themes/<name>.toml`,过渡期再退到 `<name>.json`),`[tui.colors]` 逐角色覆盖(颜色、色号、表三种写法,含 pi 角色名)。 | **接受**,0 拒绝;读者原样携带,由 TUI 解析;无明文密钥样字符串。 | §2 / ADR 0029 |
 | `tui-display.toml` | ADR 0028 R2/R3/R4/R8:`[tui.display]` 的 `reasoning`/`tool_output`/`tool_preview_lines`/`mermaid`/`highlight`。 | **接受**,0 拒绝;未知值/未知键是警告(展示偏好)。 | §2 / ADR 0028 |
 | `tui-tips-banner.toml` | ADR 0008：`tui.tips`/`tui.banner`（布尔，默认都开）关闭启动画面的 Tip 行与字标。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 |
 | `tui-brand.toml` | ADR 0027：`tui.brand` 是品牌文字（≤ 4 显示宽度），footer 的 `brand` 条目与启动画面一行回退共用；不写时用 glyphs 档默认；超出是配置错误。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0027 |

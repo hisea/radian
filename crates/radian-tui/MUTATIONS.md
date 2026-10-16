@@ -1557,6 +1557,25 @@ Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个�
 owner 反馈的两个按键问题的回归钉：←/→ 切题（无字段时）与底边提示跟随聚焦状态。`check-glyph-coverage.py`
 的结果（☐/☑ 缺 SF Mono / JetBrains Mono Nerd / Cascadia Code）写在 ADR 0024 的「实施补充」里。
 
+## markdown-③：标题不画 `#`、加粗不上色、代码块线框、表格表头与单元格行内样式（ADR 0035/6/7/8、ADR 0028；2026-10-16）
+
+Base `origin/main` `28f4703`（worktree `.radian-worktrees/thin-md`，branch `oc/thin-md`）。每个变异就地改完
+`blocks.rs` / `render.rs` 后跑 `cargo test -p radian-tui --locked --no-fail-fast --lib <名字>`
+与 `--test markdown <名字>`，再从 `.radian/scratch/blocks.rs.orig`、`.radian/scratch/render.rs.orig`
+的副本写回并用 `cmp` 确认逐字节相同（每个变异都打印 `RESTORED IDENTICAL`）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MD3-M1 | 标题又画回 `# ` 前缀（`md_blocks` 的 `Heading` 分支恢复合成前缀） | `blocks::tests::headings_have_no_hash_and_three_roles`、`markdown::headings_show_no_hash_and_level_attributes` | ✅ 两条都 FAILED |
+| MD3-M2 | 加粗又借 `md_heading` 的颜色（`MdStyle::Bold` 回到 `theme.md_heading.patch(BOLD)`） | `markdown::bold_uses_the_text_role` | ✅ FAILED |
+| MD3-M3 | 代码块又画围栏行（`code_frame_top` 顶线改回原文 ```lang） | `markdown::a_code_block_draws_a_frame`、`blocks::tests::a_code_block_draws_an_open_frame` | ✅ 两条都 FAILED |
+| MD3-M4 | 表格单元格丢掉行内样式（单元格又用一段平文本拼平） | `markdown::table_header_and_body_cells_keep_their_roles` | ✅ FAILED（行内代码格不是 `md_code` 色） |
+| MD3-M5 | 代码块的行数记账不含线框（`code_line_count` 的 `frame` 置 0） | `markdown::line_count_matches_the_layout` | ✅ FAILED |
+
+5/5 抓住。MD3-M5 起初没有抓住：`line_count_matches_the_layout` 的正文以 `\n` 收尾，`has_blank_edge`
+为真，`line_count` 于是走「整段排版后取行数」的退路，压根没碰 `code_line_count`。去掉正文末尾的换行
+（并保留 `code_line_matches_the_layout` 里那块代码）后，该用例走逐块计数，变异即失败；这一处测试修正
+作为第 5 个提交（`2dfc4e1`）落盘，不改前面的四个提交。
 ## thin ④：diff 正文的行号、符号、高亮（ADR 0028）
 
 Base：本片 HEAD（`dogfood/thin-diff`）· 就地变异：每个变异先把文件复制到
@@ -1636,3 +1655,25 @@ Base：本片 HEAD（`dogfood/thin-tools`）· 就地变异：脚本 `.radian/sc
 `unicode_tier_glyphs_are_all_verified_covered` 也不检查 transcript 的字形——`✗` 因此不受那条覆盖检查约束。
 若要收紧，应在 `footer.rs` 的参考集里补 `✗`（或改成 `×`），那是 ⓪/字形片的范围。
 
+## Theme format：TOML 主题、一次性 pi 导入、过渡期（ADR 0029/3/4，2026-10-16）
+
+Base：本片 HEAD（`oc/theme-format`；决定 1 = `cff5d35`，决定 4 = `e9f29ef`，决定 3 = 本提交）·
+就地变异，每个变异前把 `file.rs`/`importer.rs`/`toml_file.rs` 复制到 `.radian/scratch/mut-bak/`，
+变异后跑对应测试、从副本还原并用 `cmp` 逐字节确认（脚本 `.radian/scratch/mutate.sh`）。测试都
+`--no-fail-fast`，只跑命中的那条（`cargo test -p radian-tui [--lib|--test …] <name>`）。
+
+| # | 需求 | 变异 | 抓住它的测试 |
+|---|---|---|---|
+| TH-M1 | importer 把 pi 键映射到**正确的** Radian 角色 | `file.rs` 的 `fg_source` 把 `Role::User => Some("userMessageText")` 改成 `Some("toolTitle")` | `theme::importer::tests::every_fixture_converts_to_its_committed_golden`（golden 里 `user = "#dcd7ba"` 变成 `tool_call` 的 `#938aa9`） |
+| TH-M2 | `<name>.toml` 优先于 `<name>.json` | `file.rs` 的 `load_file` 把 `.toml` 分支的判据改成 `if false && toml_path.is_file()`（等于永远先读 `.json`） | `theme::file::tests::a_toml_theme_wins_over_a_json_one_and_the_json_fallback_hints`（「the .toml must win」失败） |
+| TH-M3a | 覆盖已有 `<name>.toml` 必须 `--force` | `importer.rs` 的 `write` 把 `if force {` 改成 `if true {`（永远走覆盖分支，不再 `create_new`） | `theme::importer::tests::write_refuses_an_existing_file_without_force` |
+| TH-M3b | 同上，走 `radian theme import` 的整条路 | 同 TH-M3a | `theme_import::import_refuses_to_overwrite_without_force_and_force_wins`（第二次导入退出码 0，期望 1） |
+| TH-M4 | 变量循环只让相关角色退回内建 | `toml_file.rs` 的 `Variables::resolve_var` 把循环的 `return Err(VarError::Cycle(..))` 改成 `return Ok(ColorValue::Default)`（循环不再报错、角色拿到终端默认色） | `theme::toml_file::tests::a_cycle_only_breaks_its_own_roles`（工具行的颜色与警告条数都不符） |
+
+5 条运行全部抓住（TH-M3 的变异同时打中 a、b 两条测试），无等价变异。
+
+**诚实补充（TH-M1 的边界）**：round-trip 测试
+`an_imported_fixture_round_trips_to_the_json_loader_role_by_role` **抓不住**映射错位——它比较的是
+JSON loader 与 TOML loader，而两者共用 `fg_source`/`bg_source` 同一张表，映射一起错、两者照样相等。
+钉住映射的是金标准（golden）那条：它是「转换器的输出」而不是「两个 loader 互相一致」。这正是决定 3
+把映射放进 importer、又把转换结果入库为 golden 的原因。

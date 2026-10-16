@@ -2419,14 +2419,16 @@ fn body_spans(
             let style = md_style(piece.style, body_style, theme);
             out.push(Span::styled(piece.text.clone(), style));
         }
+        // A code row carries its rail (a `Frame` piece) **and** its highlighted code, so the
+        // two render in order (ADR 0035).
+        if let Some(syntax) = &row.syntax {
+            push_syntax(&mut out, syntax, body_style, theme);
+        }
     } else if let Some(syntax) = &row.syntax {
         // A syntax-highlighted code line (ADR 0028 R2): each piece takes its Radian role's
         // style; `Plain` keeps the code block's own style. The text is unchanged, so
         // selection, copy and search are unaffected.
-        for (text, role) in syntax {
-            let style = syntax_style(*role, body_style, theme);
-            out.push(Span::styled(text.clone(), style));
-        }
+        push_syntax(&mut out, syntax, body_style, theme);
     } else if let Some(diagram) = &row.diagram {
         // A rendered diagram (ADR 0028 R8): each piece takes its own role's style.
         for (piece, role) in diagram {
@@ -2451,18 +2453,40 @@ fn body_spans(
     out
 }
 
+/// Pushes one code line's highlighted pieces (ADR 0028 R2): each takes its Radian role's
+/// style, `Plain` keeps the code block's own style. Shared by a plain syntax row and a code
+/// row that also carries its frame rail.
+fn push_syntax(
+    out: &mut Vec<Span<'static>>,
+    syntax: &crate::highlight::HighlightedLine,
+    body_style: Style,
+    theme: &Theme,
+) {
+    for (text, role) in syntax {
+        out.push(Span::styled(
+            text.clone(),
+            syntax_style(*role, body_style, theme),
+        ));
+    }
+}
+
 /// The style one per-piece role takes (ADR 0028 R2's Markdown roles, ADR 0029's thin roles):
-/// the tool head's name and status glyphs included. One definition for the head and for every
-/// Markdown line.
+/// the code/diff frames, the tool head's name and its status glyphs included. One definition
+/// for the head and for every Markdown line.
 fn md_style(style: blocks::MdStyle, body_style: Style, theme: &Theme) -> Style {
     match style {
         blocks::MdStyle::Heading => theme.md_heading,
         blocks::MdStyle::Heading1 => theme.md_heading.add_modifier(Modifier::UNDERLINED),
-        blocks::MdStyle::HeadingMark => theme.md_heading_mark,
+        // ADR 0035: level 3 and below are the text role plus bold, and
+        // the `#` mark (`md_heading_mark`) is no longer drawn.
+        blocks::MdStyle::HeadingMinor => theme.text.add_modifier(Modifier::BOLD),
         blocks::MdStyle::Strikethrough => theme.text.add_modifier(Modifier::CROSSED_OUT),
         blocks::MdStyle::TaskUnchecked | blocks::MdStyle::TaskChecked => theme.md_list_bullet,
-        blocks::MdStyle::Fence => theme.truncation,
-        blocks::MdStyle::Bold => theme.md_heading.patch(Modifier::BOLD),
+        // ADR 0035/7: bold is the text role plus bold (it never takes
+        // the heading role's colour); a code block's frame line, its rail and the `ask_user`
+        // record's open frame are the structural `frame` role (ADR 0029).
+        blocks::MdStyle::Bold => theme.text.add_modifier(Modifier::BOLD),
+        blocks::MdStyle::Frame => theme.frame,
         blocks::MdStyle::Italic => theme.text.add_modifier(Modifier::ITALIC),
         blocks::MdStyle::Code => theme.md_code,
         blocks::MdStyle::Link => theme.md_link,
@@ -2476,9 +2500,7 @@ fn md_style(style: blocks::MdStyle, body_style: Style, theme: &Theme) -> Style {
         blocks::MdStyle::Dim => theme.truncation,
         blocks::MdStyle::Diff(role) => diff_style(role, body_style, theme),
         blocks::MdStyle::TableBorder => theme.md_hr,
-        // The `ask_user` record's open frame and the tool head's tool name (ADR 0028
-        // decision 1/2).
-        blocks::MdStyle::Frame => theme.frame,
+        // The tool head's own pieces (ADR 0028).
         blocks::MdStyle::ToolName => theme.tool_name,
         blocks::MdStyle::StatusOk => theme.status_ok,
         blocks::MdStyle::StatusError => theme.status_error,

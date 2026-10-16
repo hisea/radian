@@ -233,8 +233,10 @@ pub struct GitConfig {
     /// `protected_branches = ["release"]`: branches `git_commit` refuses besides
     /// `main`/`master`.
     pub protected_branches: Vec<String>,
-    /// `allowed_filters = ["lfs"]` (ADR 0030): the `filter.<name>` drivers `git add`
-    /// may run. `None` means the default (`["lfs"]`); an empty list allows none.
+    /// `allowed_filters = ["lfs"]` (ADR 0030, ADR 0039 decision 3): the filter
+    /// drivers `git_commit` may run **itself**, with a fixed command — only `lfs` is known. Any
+    /// other driver, named here or not, is refused, and no command is ever read from the
+    /// repository config. `None` means the default (`["lfs"]`); an empty list allows none.
     pub allowed_filters: Option<Vec<String>>,
 }
 
@@ -304,6 +306,61 @@ pub struct TuiColorOverride {
     pub italic: Option<bool>,
     pub dim: Option<bool>,
     pub underline: Option<bool>,
+}
+
+impl TuiColorOverride {
+    /// Parses one color entry (ADR 0029 decisions 1 and 5): a bare string or a 0–255 index is
+    /// the foreground; a table carries `fg`/`bg` and the `bold`/`italic`/`dim`/`underline`
+    /// forces. `Err(reason)` names the first wrong field, so the caller can warn and skip.
+    ///
+    /// This is the **one** value-shape parser: `[tui.colors]` (ADR 0029 decision 5) and a theme
+    /// file's `[roles]` (ADR 0029) both go through it, so the two cannot
+    /// drift. The color grammar inside a value (`#hex`, `oklch()`, `okhsl()`, `""`, a variable)
+    /// belongs to the TUI and is resolved after this shape is parsed.
+    pub fn from_toml(value: &Value) -> Result<Self, String> {
+        let mut parsed = Self::default();
+        match value {
+            Value::String(text) => {
+                parsed.fg = Some(TuiColorValue::Text(text.clone()));
+            }
+            Value::Integer(index) if (0..=255).contains(index) => {
+                parsed.fg = Some(TuiColorValue::Index(*index as u8));
+            }
+            Value::Table(spec) => {
+                for (field, field_value) in spec {
+                    match (field.as_str(), field_value) {
+                        ("fg" | "bg", Value::String(text)) => {
+                            let value = TuiColorValue::Text(text.clone());
+                            if field == "fg" {
+                                parsed.fg = Some(value);
+                            } else {
+                                parsed.bg = Some(value);
+                            }
+                        }
+                        ("fg" | "bg", Value::Integer(index)) if (0..=255).contains(index) => {
+                            let value = TuiColorValue::Index(*index as u8);
+                            if field == "fg" {
+                                parsed.fg = Some(value);
+                            } else {
+                                parsed.bg = Some(value);
+                            }
+                        }
+                        ("bold", Value::Boolean(flag)) => parsed.bold = Some(*flag),
+                        ("italic", Value::Boolean(flag)) => parsed.italic = Some(*flag),
+                        ("dim", Value::Boolean(flag)) => parsed.dim = Some(*flag),
+                        ("underline", Value::Boolean(flag)) => parsed.underline = Some(*flag),
+                        _ => return Err(format!("`{field}` is not a color field")),
+                    }
+                }
+            }
+            _ => {
+                return Err(
+                    "not a color or a `{ fg, bg, bold, italic, dim, underline }` table".into(),
+                );
+            }
+        }
+        Ok(parsed)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1127,79 +1184,18 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
     for (key, value) in table {
         match (key.as_str(), value) {
             // Any name is accepted (ADR 0029 decision 1): built-in names resolve directly,
-            // anything else is looked up in `~/.radian/themes/<name>.json` by the TUI, which
+            // anything else is looked up in `~/.radian/themes/<name>.toml` by the TUI, which
             // warns and falls back when neither exists. A display preference never refuses
             // the file.
             ("theme", Value::String(theme)) => config.tui.theme = Some(theme.clone()),
             ("theme", _) => config.skipped.push("tui.theme".into()),
             ("colors", Value::Table(colors)) => {
                 for (key, value) in colors {
-                    match value {
-                        // A bare value is the foreground color.
-                        Value::String(text) => config.tui.colors.push((
-                            key.clone(),
-                            TuiColorOverride {
-                                fg: Some(TuiColorValue::Text(text.clone())),
-                                ..TuiColorOverride::default()
-                            },
-                        )),
-                        Value::Integer(index) if *index >= 0 && *index <= 255 => {
-                            config.tui.colors.push((
-                                key.clone(),
-                                TuiColorOverride {
-                                    fg: Some(TuiColorValue::Index(*index as u8)),
-                                    ..TuiColorOverride::default()
-                                },
-                            ))
-                        }
-                        Value::Table(spec) => {
-                            let mut override_value = TuiColorOverride::default();
-                            let mut malformed = false;
-                            for (field, field_value) in spec {
-                                match (field.as_str(), field_value) {
-                                    ("fg" | "bg", Value::String(text)) => {
-                                        let value = TuiColorValue::Text(text.clone());
-                                        if field == "fg" {
-                                            override_value.fg = Some(value);
-                                        } else {
-                                            override_value.bg = Some(value);
-                                        }
-                                    }
-                                    ("fg" | "bg", Value::Integer(index))
-                                        if *index >= 0 && *index <= 255 =>
-                                    {
-                                        let value = TuiColorValue::Index(*index as u8);
-                                        if field == "fg" {
-                                            override_value.fg = Some(value);
-                                        } else {
-                                            override_value.bg = Some(value);
-                                        }
-                                    }
-                                    ("bold", Value::Boolean(flag)) => {
-                                        override_value.bold = Some(*flag)
-                                    }
-                                    ("italic", Value::Boolean(flag)) => {
-                                        override_value.italic = Some(*flag)
-                                    }
-                                    ("dim", Value::Boolean(flag)) => {
-                                        override_value.dim = Some(*flag)
-                                    }
-                                    ("underline", Value::Boolean(flag)) => {
-                                        override_value.underline = Some(*flag)
-                                    }
-                                    // An unknown field or a wrong-typed one makes the whole
-                                    // entry a display preference: ignore it (and say so).
-                                    _ => malformed = true,
-                                }
-                            }
-                            if malformed {
-                                config.skipped.push(format!("tui.colors.{key}"));
-                            } else {
-                                config.tui.colors.push((key.clone(), override_value));
-                            }
-                        }
-                        // A non-string, non-table color is a display preference.
-                        _ => config.skipped.push(format!("tui.colors.{key}")),
+                    // The one value-shape parser (ADR 0029 decisions 1/5); a malformed entry is
+                    // a display preference: skipped by name, never a refusal.
+                    match TuiColorOverride::from_toml(value) {
+                        Ok(parsed) => config.tui.colors.push((key.clone(), parsed)),
+                        Err(_) => config.skipped.push(format!("tui.colors.{key}")),
                     }
                 }
             }
@@ -2018,7 +2014,7 @@ theme = "light"
         );
 
         // ADR 0029: any theme name is carried; whether it resolves (built-in or
-        // `~/.radian/themes/<name>.json`) is the TUI's finding, a startup warning.
+        // `~/.radian/themes/<name>.toml`) is the TUI's finding, a startup warning.
         let config = parse_str("schema_version = 1\n[tui]\ntheme = \"future\"\n").unwrap();
         assert_eq!(config.tui.theme.as_deref(), Some("future"));
         assert!(config.skipped.is_empty());

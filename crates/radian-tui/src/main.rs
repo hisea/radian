@@ -301,12 +301,36 @@ enum RadianCommand {
         command: agent_cli::ConfigCommand,
     },
 
+    /// Theme tools (ADR 0029): `radian theme import <pi-theme.json>`
+    /// converts a pi theme to a Radian TOML theme under `~/.radian/themes/`.
+    Theme {
+        #[command(subcommand)]
+        command: ThemeCommand,
+    },
+
     /// Reserved for ADR 0030's control port: a named agent serving its session over a local
     /// endpoint. Not implemented yet - it refuses with a usage-class exit code.
     Serve,
     /// Reserved for ADR 0030's MCP server mode. Not implemented yet - it refuses with a
     /// usage-class exit code.
     Mcp,
+}
+
+/// The `radian theme` subcommands (ADR 0029).
+#[derive(clap::Subcommand, Debug)]
+enum ThemeCommand {
+    /// Convert a pi theme JSON to a Radian TOML theme under `~/.radian/themes/`.
+    Import {
+        /// The pi theme JSON file to convert.
+        #[arg(value_name = "PI-THEME.json")]
+        path: PathBuf,
+        /// The Radian theme name; default: the file's own `name`, else the file stem.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Overwrite an existing `<name>.toml`.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Runs a non-TUI subcommand and returns its exit code (ADR 0032 A3: 0 ok, 1 the run failed,
@@ -345,10 +369,57 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
                 command,
             }))
         }
+        RadianCommand::Theme { command } => run_theme(command),
         // Reserved names (ADR 0032): the shape is fixed now so scripts and docs can use it,
         // the implementation is ADR 0030's. A usage-class refusal (2), never a silent no-op.
         RadianCommand::Serve => reserved("serve"),
         RadianCommand::Mcp => reserved("mcp"),
+    }
+}
+
+/// Runs `radian theme import` (ADR 0029): a one-time pi → Radian TOML
+/// conversion. Exit codes follow ADR 0032 A3 (0 ok, 1 the run failed, 2 usage).
+fn run_theme(command: ThemeCommand) -> ExitCode {
+    match command {
+        ThemeCommand::Import { path, name, force } => {
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) => {
+                    eprintln!("radian: cannot read {}: {error}", path.display());
+                    return ExitCode::from(1);
+                }
+            };
+            let fallback = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let converted =
+                match radian_tui::theme::importer::convert(&text, name.as_deref(), &fallback) {
+                    Ok(converted) => converted,
+                    Err(error) => {
+                        eprintln!("radian: {}: {error}", path.display());
+                        return ExitCode::from(1);
+                    }
+                };
+            let Some(dir) = radian_host::themes_dir() else {
+                eprintln!("radian: no themes directory (set RADIAN_HOME or HOME)");
+                return ExitCode::from(1);
+            };
+            match radian_tui::theme::importer::write(&dir, &converted.name, &converted.toml, force)
+            {
+                Ok(written) => {
+                    println!("wrote {}", written.display());
+                    for line in &converted.report {
+                        println!("{line}");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("radian: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
     }
 }
 

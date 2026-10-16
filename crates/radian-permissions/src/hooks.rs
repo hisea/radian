@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use agent_core::{HookContext, HookError, Hooks, InputSource, ToolCall, ToolDecision};
@@ -28,6 +28,12 @@ pub struct PermissionHooks {
     /// profile's copy is only the starting value.
     approval: RwLock<ApprovalPolicy>,
     approver: Option<Arc<dyn Approver>>,
+    /// `true` for a task agent (ADR 0030 slice 5): its asks are answered by the task's own
+    /// `Approver` (the three-layer resolver), not by a human. This is the **only** thing that
+    /// lets a non-human turn reach the approver; every other non-human source is still denied
+    /// before it (ADR 0012). A task can never borrow a human session grant, so this widens
+    /// nothing beyond the task's own resolver.
+    task_approver: AtomicBool,
     audit: Arc<dyn AuditSink>,
     /// "Allow for this session", consulted on every call (ADR 0004: real-time state).
     grants: Mutex<HashSet<GrantKey>>,
@@ -48,6 +54,7 @@ impl PermissionHooks {
             profile: RwLock::new(profile),
             approval: RwLock::new(approval),
             approver,
+            task_approver: AtomicBool::new(false),
             audit,
             grants: Mutex::new(HashSet::new()),
             source: Mutex::new(None),
@@ -90,6 +97,15 @@ impl PermissionHooks {
     /// as non-human, so forgetting it fails closed rather than granting user rights.
     pub fn set_turn_source(&self, source: Option<InputSource>) {
         *self.source.lock().unwrap() = source;
+    }
+
+    /// Marks this instance as a **task agent** (ADR 0030 slice 5): a non-human `ask` is then
+    /// handed to the task's own `Approver` (the auto / edge-policy / pending-queue resolver)
+    /// instead of being denied outright. It is set by `open_session` only for the task routing;
+    /// every other session keeps the fail-closed non-human denial. It never lets a task borrow a
+    /// human session grant and never lets the approver answer as a human.
+    pub fn set_task_approver(&self, task_approver: bool) {
+        self.task_approver.store(task_approver, Ordering::SeqCst);
     }
 
     pub fn turn_source(&self) -> Option<InputSource> {
@@ -180,7 +196,7 @@ impl PermissionHooks {
             );
             return Ok(ToolDecision::Allow);
         }
-        if !human {
+        if !human && !self.task_approver.load(Ordering::SeqCst) {
             let reason = if self.turn_source().is_none() {
                 "no turn source is set, so this is treated as a non-human turn; deny".to_string()
             } else {
@@ -275,6 +291,36 @@ impl PermissionHooks {
                 );
                 Ok(ToolDecision::Deny { reason })
             }
+            ApprovalOutcome::Policy {
+                allow,
+                name,
+                reason,
+            } => {
+                // ADR 0030 R1 layer 2 / ADR 0006 §5.9: a policy-command decision is
+                // audited as `approver = "policy"` with the policy's own name. It is not a human
+                // answer, so it can never mint a session grant.
+                let decision = if allow {
+                    ResolvedDecision::Allow
+                } else {
+                    ResolvedDecision::Deny
+                };
+                self.record_named(
+                    &request_id,
+                    &call_id,
+                    decision,
+                    AuditApprover::Policy,
+                    reason.clone(),
+                    Some(name.clone()),
+                );
+                if allow {
+                    Ok(ToolDecision::Allow)
+                } else {
+                    Ok(ToolDecision::Deny {
+                        reason: reason
+                            .unwrap_or_else(|| format!("denied by the edge policy `{name}`")),
+                    })
+                }
+            }
         }
     }
 
@@ -297,15 +343,28 @@ impl PermissionHooks {
         approver: AuditApprover,
         reason: Option<String>,
     ) {
+        self.record_named(request_id, call_id, decision, approver, reason, None);
+    }
+
+    /// [`PermissionHooks::record`] with an explicit policy name (ADR 0030 R1 layer 2):
+    /// set only when `approver = policy` and an edge policy command decided, so the audit names
+    /// which policy (ADR 0006 §5.9). Built-in rules, `auto` and a human leave it unset.
+    fn record_named(
+        &self,
+        request_id: &str,
+        call_id: &str,
+        decision: ResolvedDecision,
+        approver: AuditApprover,
+        reason: Option<String>,
+        policy: Option<String>,
+    ) {
         self.audit.record(&PermissionResolved {
             request_id: request_id.to_owned(),
             call_id: call_id.to_owned(),
             decision,
             approver,
             reason,
-            // No policy-command producer exists yet (ADR 0030 Slice 5). Built-in rules and
-            // `auto` never name a policy, so this layer leaves it unset.
-            policy: None,
+            policy,
         });
     }
 }

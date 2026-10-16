@@ -67,6 +67,11 @@ pub fn skills_dir_for(root: &Path) -> PathBuf {
 pub fn trust_dir_for(root: &Path) -> PathBuf {
     root.join("trust")
 }
+/// The task agents' worktree root (ADR 0039 decision 4): `<radian-home>/worktrees`. Each
+/// repository gets its own directory below it; the registry appends the repo key.
+pub fn worktrees_dir_for(root: &Path) -> PathBuf {
+    root.join("worktrees")
+}
 pub fn access_dir_for(root: &Path) -> PathBuf {
     root.join("access")
 }
@@ -111,7 +116,8 @@ pub fn credentials_dir() -> Option<PathBuf> {
 }
 
 /// The themes directory for this process, created 0700. Sandbox-readable (ADR 0020): theme
-/// files are user UI data, like the config (ADR 0029 decision 1: `~/.radian/themes/<name>.json`).
+/// files are user UI data, like the config (ADR 0029:
+/// `~/.radian/themes/<name>.toml`).
 pub fn themes_dir() -> Option<PathBuf> {
     Some(private(themes_dir_for(&radian_home()?)))
 }
@@ -248,6 +254,10 @@ mod tests {
             PathBuf::from("/home/u/.radian/credentials")
         );
         assert_eq!(trust_dir_for(root), PathBuf::from("/home/u/.radian/trust"));
+        assert_eq!(
+            worktrees_dir_for(root),
+            PathBuf::from("/home/u/.radian/worktrees")
+        );
         assert_eq!(
             access_dir_for(root),
             PathBuf::from("/home/u/.radian/access")
