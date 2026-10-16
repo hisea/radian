@@ -633,6 +633,8 @@ fn is_user_input(input: &Input) -> bool {
         | Input::PickerOpened(_)
         | Input::LoginVerified { .. }
         | Input::LoginSaved { .. }
+        | Input::LoginOAuthUrlReady { .. }
+        | Input::LoginOAuthDeviceReady { .. }
         | Input::LogoutDone { .. }
         | Input::ClipboardDone(_)
         | Input::ThemeReady { .. }
@@ -860,10 +862,21 @@ pub enum Input {
         result: Result<(), String>,
     },
     /// The `auth.json` write of a `/login` finished: the wizard closes either way. The
-    /// success notice names the provider and the way to switch to it (D3).
+    /// success notice names the provider and the way to switch to it (D3). Shared by the
+    /// API-key `Save` path and both ChatGPT OAuth flows.
     LoginSaved {
         name: String,
         result: Result<(), String>,
+    },
+    /// [`Effect::LoginOAuthBrowser`] bound its listener and has the authorize URL. Applied
+    /// only while the wizard is still in `OAuthBrowserWaiting` (the same "late answer" rule
+    /// as `LoginVerified`).
+    LoginOAuthUrlReady { url: String },
+    /// [`Effect::LoginOAuthDevice`] has the user code to show. Applied only while the wizard
+    /// is still in `OAuthDeviceWaiting`.
+    LoginOAuthDeviceReady {
+        user_code: String,
+        verification_url: String,
     },
     /// The hardcoded answer to a `/logout` confirmation (`true` = remove).
     ConfirmLogout(bool),
@@ -1017,6 +1030,14 @@ pub enum Effect {
     /// Remove one stored credential (`/logout`, after the confirmation). The answer is
     /// [`Input::LogoutDone`].
     Logout { provider: String },
+    /// Sign in with ChatGPT, browser flow (ADR 0026): bind the loopback listener,
+    /// try to open the authorize URL (and report it either way, as
+    /// [`Input::LoginOAuthUrlReady`]), wait for the redirect, exchange, save. The terminal
+    /// outcome is [`Input::LoginSaved`] — the same event the API-key `Save` path ends on.
+    LoginOAuthBrowser,
+    /// Sign in with ChatGPT, device-code flow: ask for a user code, report it
+    /// ([`Input::LoginOAuthDeviceReady`]), poll, exchange, save. Ends on [`Input::LoginSaved`].
+    LoginOAuthDevice,
     /// Switch the session's auto-approval (ADR 0026 D9). The loop applies it through the
     /// facade, which flips the hooks' live policy, audits the switch and queues the durable
     /// `ConfigChanged` record for the next resume.
@@ -1168,6 +1189,7 @@ impl PartialEq for Effect {
                     env: be,
                 },
             ) => an == bn && ak == bk && ae == be,
+            (LoginOAuthBrowser, LoginOAuthBrowser) | (LoginOAuthDevice, LoginOAuthDevice) => true,
             (Logout { provider: a }, Logout { provider: b }) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
             (SetTrust { choice: a }, SetTrust { choice: b }) => a == b,
@@ -3114,6 +3136,21 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            Input::LoginOAuthUrlReady { url } => {
+                if let Some(wizard) = self.login_modal_mut() {
+                    wizard.oauth_browser_url_ready(&url);
+                }
+                UpdateResult::dirty()
+            }
+            Input::LoginOAuthDeviceReady {
+                user_code,
+                verification_url,
+            } => {
+                if let Some(wizard) = self.login_modal_mut() {
+                    wizard.oauth_device_ready(&user_code, &verification_url);
+                }
+                UpdateResult::dirty()
+            }
             Input::ConfirmLogout(confirmed) => {
                 let Some(provider) = self.pending_logout().map(str::to_owned) else {
                     return UpdateResult::none();
@@ -4154,6 +4191,12 @@ impl App {
             LoginOutcome::Save { name, key, env } => {
                 return UpdateResult::effect(Effect::LoginSave { name, key, env });
             }
+            LoginOutcome::BeginOAuthBrowser => {
+                return UpdateResult::effect(Effect::LoginOAuthBrowser);
+            }
+            LoginOutcome::BeginOAuthDevice => {
+                return UpdateResult::effect(Effect::LoginOAuthDevice);
+            }
         }
         UpdateResult::dirty()
     }
@@ -4305,6 +4348,25 @@ impl App {
                              `custom`"
                         ));
                         return UpdateResult::dirty();
+                    }
+                    // The two ChatGPT OAuth choices (ADR 0026) are not descriptors,
+                    // so they do not go through `for_provider`: pushing the modal and kicking
+                    // off the effect happens together, exactly as choosing them from the
+                    // picker does in `LoginWizard::on_key`.
+                    Some(id) if id == radian_host::CHATGPT_PROVIDER_ID => {
+                        self.push_modal(Modal::Login(Box::new(LoginWizard::new(
+                            crate::login::LoginStep::OAuthBrowserWaiting { url: None },
+                        ))));
+                        return UpdateResult::effect(Effect::LoginOAuthBrowser);
+                    }
+                    Some(id) if id == radian_host::CHATGPT_DEVICE_LOGIN => {
+                        self.push_modal(Modal::Login(Box::new(LoginWizard::new(
+                            crate::login::LoginStep::OAuthDeviceWaiting {
+                                user_code: String::new(),
+                                verification_url: String::new(),
+                            },
+                        ))));
+                        return UpdateResult::effect(Effect::LoginOAuthDevice);
                     }
                     Some(id) => {
                         // for_provider builds the matching first step (D3).

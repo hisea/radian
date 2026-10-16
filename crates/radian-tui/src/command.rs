@@ -1085,7 +1085,10 @@ fn login_provider(args: &[String]) -> Option<String> {
     match args {
         [] => None,
         [one] => {
-            let valid = one == crate::login::CUSTOM || radian_host::descriptor(one).is_some();
+            let valid = one == crate::login::CUSTOM
+                || one == radian_host::CHATGPT_PROVIDER_ID
+                || one == radian_host::CHATGPT_DEVICE_LOGIN
+                || radian_host::descriptor(one).is_some();
             if valid {
                 Some(one.clone())
             } else {

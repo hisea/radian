@@ -389,6 +389,8 @@ fn login_completion_lists_the_builtins_and_custom() {
                     "anthropic",
                     "openai",
                     "openai-compatible",
+                    "chatgpt",
+                    "chatgpt-device",
                     "custom"
                 ]
             );
@@ -414,4 +416,102 @@ fn logout_completion_needs_the_host() {
         Level::Needs(fetch) => assert!(matches!(fetch, command::Fetch::LoggedInProviders { .. })),
         other => panic!("expected Needs, got {other:?}"),
     }
+}
+
+/// `/login chatgpt` (ADR 0026) opens the browser-waiting step and returns
+/// `Effect::LoginOAuthBrowser` directly — no key is ever asked for. The loop's reported URL
+/// lands in the wizard; it is dropped once the wizard has moved on.
+#[test]
+fn login_chatgpt_begins_the_browser_flow_and_the_url_lands_in_the_wizard() {
+    let mut app = App::new("m", "s");
+    let effects = submit(&mut app, "/login chatgpt");
+    assert_eq!(effects, vec![Effect::LoginOAuthBrowser]);
+    assert!(matches!(
+        top_login(&app).step,
+        LoginStep::OAuthBrowserWaiting { url: None }
+    ));
+
+    app.update(Input::LoginOAuthUrlReady {
+        url: "https://auth.openai.com/oauth/authorize?client_id=…".to_owned(),
+    });
+    match &top_login(&app).step {
+        LoginStep::OAuthBrowserWaiting { url: Some(u) } => {
+            assert!(u.starts_with("https://auth.openai.com/"), "{u}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // Esc cancels the wizard; a URL reported afterwards (the background task finishing its
+    // bind) is a no-op — there is no modal to update.
+    app.update(Input::LoginKey(LoginKey::Esc));
+    assert!(app.top_modal().is_none());
+    app.update(Input::LoginOAuthUrlReady {
+        url: "https://late.example".to_owned(),
+    });
+    assert!(app.top_modal().is_none());
+}
+
+/// `/login chatgpt-device` opens the device-waiting step and returns `Effect::LoginOAuthDevice`
+/// directly; the loop's reported code lands in the wizard.
+#[test]
+fn login_chatgpt_device_begins_the_device_flow_and_the_code_lands_in_the_wizard() {
+    let mut app = App::new("m", "s");
+    let effects = submit(&mut app, "/login chatgpt-device");
+    assert_eq!(effects, vec![Effect::LoginOAuthDevice]);
+    assert!(matches!(
+        top_login(&app).step,
+        LoginStep::OAuthDeviceWaiting { .. }
+    ));
+
+    app.update(Input::LoginOAuthDeviceReady {
+        user_code: "ABCD-1234".to_owned(),
+        verification_url: "https://auth.openai.com/codex/device".to_owned(),
+    });
+    match &top_login(&app).step {
+        LoginStep::OAuthDeviceWaiting {
+            user_code,
+            verification_url,
+        } => {
+            assert_eq!(user_code, "ABCD-1234");
+            assert_eq!(verification_url, "https://auth.openai.com/codex/device");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Either ChatGPT flow ends on `Input::LoginSaved` (not a separate event) — the wizard closes
+/// and the notice names the provider, exactly like the API-key path.
+#[test]
+fn a_chatgpt_oauth_flow_closes_on_login_saved_like_the_api_key_path() {
+    let mut app = App::new("m", "s");
+    assert_eq!(
+        submit(&mut app, "/login chatgpt"),
+        vec![Effect::LoginOAuthBrowser]
+    );
+    app.update(Input::LoginSaved {
+        name: "chatgpt".to_owned(),
+        result: Ok(()),
+    });
+    assert!(app.top_modal().is_none());
+    assert!(
+        notices(&app).iter().any(|n| n.contains("chatgpt")),
+        "{:?}",
+        notices(&app)
+    );
+
+    let mut app = App::new("m", "s");
+    assert_eq!(
+        submit(&mut app, "/login chatgpt-device"),
+        vec![Effect::LoginOAuthDevice]
+    );
+    app.update(Input::LoginSaved {
+        name: "chatgpt".to_owned(),
+        result: Err("port 1455 is already in use".to_owned()),
+    });
+    assert!(app.top_modal().is_none());
+    assert!(
+        notices(&app).iter().any(|n| n.contains("port 1455")),
+        "{:?}",
+        notices(&app)
+    );
 }

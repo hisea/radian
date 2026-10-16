@@ -935,6 +935,32 @@ pub fn login_panel(
                 .row(label("save anyway?"));
             panel = panel.hint("y", "save").hint("n/esc", "cancel");
         }
+        LoginStep::OAuthBrowserWaiting { url } => {
+            panel = panel.row(label("signing in with ChatGPT…"));
+            match url {
+                Some(url) => {
+                    panel = panel
+                        .row(label("opening your browser; if it did not open, visit:"))
+                        .row(value(url.clone()));
+                }
+                None => panel = panel.row(label("starting the local sign-in listener…")),
+            }
+            panel = panel.hint("esc", "cancel");
+        }
+        LoginStep::OAuthDeviceWaiting {
+            user_code,
+            verification_url,
+        } => {
+            panel = panel.row(label("signing in with ChatGPT (device code)…"));
+            if user_code.is_empty() {
+                panel = panel.row(label("requesting a code…"));
+            } else {
+                panel = panel
+                    .row(label(&format!("go to {verification_url} and enter:")))
+                    .row(Line::from(Span::styled(user_code.clone(), theme.text)));
+            }
+            panel = panel.hint("esc", "cancel");
+        }
     }
     if let Some(error) = &wizard.error {
         panel = panel.row(Line::from(Span::styled(

@@ -26,9 +26,10 @@ pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 /// The loopback port OpenAI's authorization server allowlists. **Fixed** for the real flow —
 /// a different port's redirect URI is rejected server-side, so there is no fallback to try
-/// another port (unlike a generic OAuth client). [`login_browser`] always binds this port;
-/// [`wait_for_callback`] takes an explicit address so a test can bind an ephemeral one instead
-/// and exercise the listener's logic without colliding with another test or a real login.
+/// another port (unlike a generic OAuth client). [`BrowserLogin::start`] always binds this
+/// port; [`wait_for_callback`] takes an explicit address so a test can bind an ephemeral one
+/// instead and exercise the listener's logic without colliding with another test or a real
+/// login.
 pub const CALLBACK_PORT: u16 = 1455;
 pub const CALLBACK_PATH: &str = "/auth/callback";
 
@@ -966,6 +967,35 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
         .filter_map(|pair| pair.split_once('='))
         .map(|(name, value)| (percent_decode(name), percent_decode(value)))
         .collect()
+}
+
+/// Best-effort opens `url` in the default browser. Returns whether a launcher process was
+/// *started*, not whether a browser actually showed anything — there is no portable way to
+/// know that, so a caller must always also show `url` as a fallback (ADR 0026
+/// decision 3: "print the URL and try to open it").
+pub fn try_open_browser(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    let command = ("open", Vec::<&str>::new());
+    #[cfg(target_os = "linux")]
+    let command = ("xdg-open", Vec::<&str>::new());
+    #[cfg(target_os = "windows")]
+    let command = ("cmd", vec!["/C", "start", ""]);
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = url;
+        return false;
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    {
+        std::process::Command::new(command.0)
+            .args(command.1)
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+    }
 }
 
 #[cfg(test)]
