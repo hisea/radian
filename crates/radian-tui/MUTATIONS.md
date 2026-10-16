@@ -1784,3 +1784,17 @@ restored to a different byte.
 8/8 caught, no misses and no equivalent mutants. Each mutation is a real behaviour change (the
 script asserts its anchor, so a `cargo fmt` shift or a no-op patch fails loudly rather than
 passing as "caught" — the U3/U4 trap); the restoring `cmp` is the guard that nothing leaked.
+
+## ADR 0030 片 6b2：TUI 的任务视图（2026-10-16）
+
+Base `2f41f69` · 直接改源码、跑单个测试、从 `.radian/scratch/mut/` 副本 `cp` 还原，
+`git status --short` 跑完为空。
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| S6B2-1 | 宿主不再传 builder，lead tools 不挂载 | `cli.rs` 的 `task_builder: Some(task_builder)` 改回 `None` | `pty_the_tui_mounts_the_task_tools` | ✅ |
+| S6B2-2 | 没有 task 时不显示计数 | `footer.rs` 的 `tasks` item 从 `task_counts().map(..)` 改成恒 `Some(0/0)` | `task_events_become_notices_and_move_the_count`（无 task 时屏幕出现 `tasks`） | ✅ |
+| S6B2-3 | `/tasks cancel` 要真的 cancel | `command.rs` 的 `cancel` 分支返回 `TasksRequest::List` | `tasks_parses_list_cancel_and_kill`、`a_submitted_tasks_line_is_the_loop_effect` | ✅ |
+
+3/3 抓住。S6B2-1 的 pty 测试会重编 `radian` 二进制并检查第一次模型请求的 tools 含全部
+`LEAD_TOOL_NAMES`。

@@ -7354,13 +7354,16 @@ async fn the_startup_line_says_ask_user_is_off() {
         stderr.contains("ask_user: off (no interactive user)"),
         "the startup line must say ask_user is off: {stderr}"
     );
-    // The model was never offered the tool: the request's tool list has no `ask_user`.
+    // The model was never offered the tool: the request's tool list has no tool **named**
+    // `ask_user`. (The name still appears inside the lead tools' own descriptions — an
+    // `answer_task` answers a task's `ask_user` question — so the check is on the tool list,
+    // not the raw body.)
     let requests = server.requests();
     assert_eq!(requests.len(), 1, "{stderr}");
+    let names = advertised_tools(&server, 0);
     assert!(
-        !requests[0].body.contains("ask_user"),
-        "agent must not advertise ask_user: {}",
-        requests[0].body
+        !names.iter().any(|name| name == "ask_user"),
+        "the CLI must not advertise the ask_user tool: {names:?}"
     );
 }
 
