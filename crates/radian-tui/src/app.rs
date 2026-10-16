@@ -1040,6 +1040,9 @@ pub enum Effect {
     /// `/jobs` (ADR 0037 decision 4): list the session's background jobs, or stop one/all. The
     /// loop runs it (the registry lives in the host) and answers with [`Input::SessionDone`].
     Jobs(command::JobsRequest),
+    /// `/tasks` (ADR 0030 O10/O12): list the live task agents, or cancel/kill one. The loop runs
+    /// it (the task registry lives in the host) and answers with [`Input::SessionDone`].
+    Tasks(command::TasksRequest),
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
@@ -1170,6 +1173,7 @@ impl PartialEq for Effect {
             ) => an == bn && aa == ba && as_ == bs,
             (ListSkills, ListSkills) => true,
             (Jobs(a), Jobs(b)) => a == b,
+            (Tasks(a), Tasks(b)) => a == b,
             (Theme { name: a }, Theme { name: b }) => a == b,
             (Inject(a), Inject(b)) => a == b,
             (CancelBash, CancelBash) => true,
@@ -1396,6 +1400,11 @@ pub struct SessionView {
     /// The last `CompactionFinished`'s numbers, handed to the summary message that follows it
     /// (ADR 0018). `(revision, tokens_before, tokens_after, deterministic, dropped)`.
     pending_compaction: Option<(u64, u64, u64, bool, u64)>,
+    /// The live task agents the lead has spawned (ADR 0030 O10), keyed by task id; the value is
+    /// whether the task's current turn is running. Updated from the lead's `TaskSpawned`/
+    /// `TaskFinished` runtime events, and refreshed from the registry by the host loop. Empty
+    /// when there are no tasks, so the status-bar count is absent then.
+    pub tasks: std::collections::BTreeMap<String, bool>,
 }
 
 /// The whole TUI's state: the global chrome every session view shares, plus exactly one
@@ -1541,6 +1550,16 @@ impl SessionView {
     fn note_for_running_tools(&mut self) {
         self.note = self.tool_note();
     }
+
+    /// The task-agent count `(running, total)` for the status bar (ADR 0030 O10), or `None` when
+    /// there are no tasks — and then the item is absent.
+    pub fn task_counts(&self) -> Option<(usize, usize)> {
+        if self.tasks.is_empty() {
+            return None;
+        }
+        let running = self.tasks.values().filter(|running| **running).count();
+        Some((running, self.tasks.len()))
+    }
 }
 
 impl App {
@@ -1622,6 +1641,7 @@ impl App {
                 selecting: None,
                 last_click: None,
                 pending_compaction: None,
+                tasks: std::collections::BTreeMap::new(),
             },
         }
     }
@@ -3733,6 +3753,46 @@ impl App {
 
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
     fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
+        // ADR 0030 O10: a lead's `TaskSpawned`/`TaskFinished` becomes a notice line, and the
+        // status-bar count follows the first and the last.
+        if let RuntimeEvent::TaskSpawned {
+            agent_session_id,
+            worktree,
+            label,
+        } = event
+        {
+            self.session.tasks.insert(agent_session_id.clone(), true);
+            let where_ = worktree
+                .as_deref()
+                .unwrap_or("the shared workspace")
+                .to_owned();
+            let name = match label {
+                Some(label) => format!("{agent_session_id} ({label})"),
+                None => agent_session_id.clone(),
+            };
+            self.session.entries.push(Entry::new(
+                EntryKind::Notice,
+                format!("task `{name}` spawned at {where_}"),
+            ));
+            return UpdateResult::dirty();
+        }
+        if let RuntimeEvent::TaskFinished {
+            agent_session_id,
+            outcome,
+            error,
+        } = event
+        {
+            self.session.tasks.remove(agent_session_id);
+            let suffix = match error {
+                Some(error) => format!(" ({outcome:?}): {error}"),
+                None => format!(" ({outcome:?})"),
+            };
+            self.session.entries.push(Entry::new(
+                EntryKind::Notice,
+                format!("task `{agent_session_id}` finished{suffix}"),
+            ));
+            return UpdateResult::dirty();
+        }
         if let RuntimeEvent::TurnFinished { .. } = event {
             // The turn boundary is on disk: a `/fork` that was waiting for it can run now.
             self.session.turn_committed = true;
@@ -4344,6 +4404,7 @@ impl App {
             // `/skills`: the host lists the discovered skills as notices.
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
             command::Outcome::Jobs(request) => UpdateResult::effect(Effect::Jobs(request)),
+            command::Outcome::Tasks(request) => UpdateResult::effect(Effect::Tasks(request)),
             command::Outcome::Message => UpdateResult::none(),
         }
     }
@@ -5076,6 +5137,7 @@ impl App {
                 .map(|candidate| crate::command::Candidate {
                     insert: candidate.clone(),
                     description: String::new(),
+                    current: false,
                 })
                 .collect(),
         );
@@ -5124,7 +5186,7 @@ mod tests {
         assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_ACCENT_STEP);
         app.set_now(base + std::time::Duration::from_millis(500));
         assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_DIM_STEP);
-        // An RGB theme breathes instead: the step advances every ~117 ms.
+        // An RGB theme breathes instead: the step advances every 125 ms.
         app.theme = crate::theme::Theme::dark();
         app.set_now(base);
         assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_DIM_STEP);

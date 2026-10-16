@@ -654,7 +654,7 @@ pub fn transcript_lines_with(
         // The container owns the blank line between blocks (ADR 0028 rule 1).
         out.extend(std::iter::repeat_n(
             Line::from(""),
-            blocks::block_gap(entries.get(index.wrapping_sub(1)), entry),
+            blocks::gap_at(entries, index),
         ));
         out.extend(entry_lines(entry, modes, width, theme, spinner));
     }
@@ -713,7 +713,7 @@ pub fn visible_lines_with(
     // (this is the 50k-entry frame path).
     let mut total: usize = counts.iter().sum::<usize>();
     for index in 1..entries.len() {
-        total += blocks::block_gap(entries.get(index - 1), &entries[index]);
+        total += blocks::gap_at(entries, index);
     }
     let mut out = Vec::with_capacity(height);
     let mut line = 0usize;
@@ -721,7 +721,7 @@ pub fn visible_lines_with(
         if out.len() >= height {
             break;
         }
-        let gap = blocks::block_gap(entries.get(index.wrapping_sub(1)), &entries[index]);
+        let gap = blocks::gap_at(entries, index);
         let count = counts[index];
         let entry = &mut entries[index];
         let next = line + gap + count;
@@ -1407,6 +1407,14 @@ fn status_segments(app: &App) -> Vec<Segment> {
     if app.pending > 0 {
         segments.push(Segment {
             text: format!("{} pending", app.pending),
+            style: app.theme.turn_running,
+        });
+    }
+    // ADR 0030 O10: the task-agent count `running/total`, shown only when there is a task, so
+    // an idle status bar does not carry a constant `0/0`.
+    if let Some((running, total)) = app.session.task_counts() {
+        segments.push(Segment {
+            text: format!("tasks {running}/{total}"),
             style: app.theme.turn_running,
         });
     }
@@ -2412,8 +2420,13 @@ pub fn completion_rows(app: &App, width: usize, visible: usize) -> Vec<Line<'sta
     let items: Vec<crate::select_list::Item> = candidates
         .iter()
         .map(|candidate| {
-            crate::select_list::Item::new(candidate.insert.clone())
-                .description(candidate.description.clone())
+            let item = crate::select_list::Item::new(candidate.insert.clone())
+                .description(candidate.description.clone());
+            if candidate.current {
+                item.current()
+            } else {
+                item
+            }
         })
         .collect();
     crate::select_list::view(

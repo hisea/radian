@@ -1108,8 +1108,8 @@ fn run(
         include_usage: None,
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking: thinking_of,
-        reasoning_effort,
-        reasoning_replay,
+        reasoning_effort: reasoning_effort.clone(),
+        reasoning_replay: reasoning_replay.clone(),
     })?;
     // ADR 0026 D5: the model is switchable. The slot is shared with the driver (open_session
     // wires it), so a `/model` change reaches the next request without touching the key.
@@ -1124,7 +1124,7 @@ fn run(
             user_headers: user_headers.clone(),
             include_usage: None,
             max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            thinking,
+            thinking: thinking.clone(),
             thinking_budget,
         },
     );
@@ -1358,6 +1358,95 @@ fn run(
     }
     eprintln!("{}", radian_host::trust::status_line(&trust_setup));
 
+    // ADR 0030 slice 6b2: the production task builder. Both hosts hand `radian-host` the same
+    // builder, so a `spawn_task` opens a real task session (a fresh model on the lead's route,
+    // a workspace-write tier, MCP off, the lead's retries/compaction/budget/skills). The
+    // registry still owns the worktree, the network-off sandbox, no memory and the `task` role.
+    let task_builder = {
+        let provider = route.adapter();
+        let base_url = route.base_url.clone();
+        let model_id = model_name.clone();
+        let api_key = credential.as_ref().map(|credential| credential.key.clone());
+        let headers = route.headers.clone();
+        let max_tokens = cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let providers = config.providers.clone();
+        let route_provider = provider_name.clone();
+        let route_model = model_name.clone();
+        let route_user_headers = user_headers.clone();
+        let route_thinking = thinking.clone();
+        let task_model: radian_host::TaskModelFactory = std::sync::Arc::new(
+            move |session_id: &str, slot: std::sync::Arc<radian_runtime::ConfigSlot>| {
+                let initial = build_model(ModelArgs {
+                    provider,
+                    base_url: base_url.clone(),
+                    model: model_id.clone(),
+                    api_key: api_key.clone(),
+                    headers: headers.clone(),
+                    include_usage: None,
+                    max_tokens,
+                    thinking: thinking_of,
+                    reasoning_effort: reasoning_effort.clone(),
+                    reasoning_replay: reasoning_replay.clone(),
+                })
+                .map_err(|error| error.to_string())?;
+                Ok(radian_host::SwitchableModel::new(
+                    initial,
+                    radian_host::ModelRoute::new(&route_provider, &route_model),
+                    slot,
+                    radian_host::RouteContext {
+                        providers: providers.clone(),
+                        session_id: session_id.to_owned(),
+                        user_headers: route_user_headers.clone(),
+                        include_usage: None,
+                        max_tokens,
+                        thinking: route_thinking.clone(),
+                        thinking_budget,
+                    },
+                ))
+            },
+        );
+        let task_skills = radian_host::config::resolve_extra_paths(
+            &config.skills.extra_paths,
+            config.source.as_deref().and_then(std::path::Path::parent),
+            radian_host::user_home().as_deref(),
+        );
+        radian_host::task_builder(radian_host::TaskHost {
+            session_dir: dir.clone(),
+            model: task_model,
+            route: (provider_name.clone(), model_name.clone()),
+            sandbox: sandbox.clone(),
+            sandbox_deny_read: sandbox_deny_read.clone(),
+            allow_unix_sockets: allow_unix_sockets.clone(),
+            retries: config
+                .model
+                .retries
+                .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
+            context_budget: window
+                .budget
+                .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
+            auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
+            compaction_settings: compaction_settings.clone(),
+            compaction_settings_for: Some(compaction_settings_for.clone()),
+            turn_options: TurnOptions {
+                max_model_calls: Some(cli.max_model_calls),
+                ..TurnOptions::default()
+            },
+            turn_timeout: None,
+            wording: radian_host::TUI_WORDING,
+            protected_branches: config.git.protected_branches.clone(),
+            allowed_filters: Some(config.git.allowed_filters()),
+            skills_extra_paths: task_skills,
+            skills_builtin: config.skills.builtin.unwrap_or(true),
+            skills_disabled: config.skills.disabled.clone(),
+            memory_injection: config.memory.injection(),
+            capabilities: radian_host::SessionCapability::ALL.to_vec(),
+            audit: Arc::clone(&audit),
+            // A task's own stream must not reach the lead's live view (ADR 0030 O10); the
+            // status-bar count and the notice lines come from the registry and the projection.
+            task_events: Arc::new(|_: &radian_session::RuntimeEvent| {}),
+        })
+    };
+
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
     // first thing that creates durable state.
@@ -1436,9 +1525,9 @@ fn run(
                 before_driver,
                 memory_warning,
                 memory_notice_line,
-                // The orchestration host wiring (a real task builder) is slice 6b; this
-                // session mounts no lead tools yet.
-                task_builder: None,
+                // ADR 0030 slice 6b2: the lead's task tools are mounted and can open real task
+                // sessions; the mode gate still refuses them outside `/mode lead`.
+                task_builder: Some(task_builder),
             },
         ))
         .map_err(|error| error.to_string())?;
@@ -1908,6 +1997,7 @@ fn run(
         config_read_only: config.read_only,
     };
     mark("startup-set");
+    let lead_tasks = session.lead_tasks().cloned();
     let session = Arc::new(session);
     let facade: Arc<dyn radian_host::SessionFacade> =
         Arc::clone(&session) as Arc<dyn radian_host::SessionFacade>;
@@ -1923,6 +2013,7 @@ fn run(
             session: &facade,
             host: &session_host,
             memory: &memory_service,
+            lead_tasks,
         },
         (provider_name.clone(), model_name.clone()),
         Arc::clone(&route_price),
@@ -2417,7 +2508,7 @@ fn terminal_gone(error: &std::io::Error) -> bool {
 /// Advances the spinner's clock and returns the new frame when a spinner is visible and the
 /// frame changed since `last` (ADR 0027/13). The idle tick calls this, so an idle
 /// app still makes no frame and a visible spinner redraws on its interval — the breath's step
-/// (about 117 ms) while it interpolates, the two-colour switch or the rotating frames otherwise.
+/// (about 125 ms) while it interpolates, the two-colour switch or the rotating frames otherwise.
 fn spinner_tick(
     app: &mut App,
     last: &mut Option<radian_tui::spinner::Frame>,
@@ -2674,6 +2765,8 @@ struct LoopContext<'a> {
     session: &'a Arc<dyn radian_host::SessionFacade>,
     memory: &'a Option<MemoryService>,
     host: &'a SessionHost,
+    /// The lead's task registry (ADR 0030 slice 6b2), when this session mounted the lead tools.
+    lead_tasks: Option<Arc<radian_host::TaskRegistry>>,
     tx: &'a Sender<UiEvent>,
     /// The pending queue (ADR 0023 U7): the loop reads the head and the count when it is told
     /// something changed, and the facade answers it.
@@ -2792,8 +2885,25 @@ impl LoopContext<'_> {
         if let Some(level) = app.session.thinking_level.clone() {
             self.current_thinking = level;
         }
+        // ADR 0030 O10: the registry is the authority for the status-bar task count (a task
+        // removed or killed leaves it at once, and a normal finish stops counting it as
+        // running). The event handlers above already cover the app-level view; this keeps the
+        // live count in step even when the only change is a task's turn boundary.
+        let mut dirty = result.dirty;
+        if let Some(registry) = &self.lead_tasks {
+            let tasks: std::collections::BTreeMap<String, bool> = registry
+                .ids()
+                .iter()
+                .filter_map(|id| registry.get(id))
+                .map(|record| (record.id.clone(), record.running()))
+                .collect();
+            if app.session.tasks != tasks {
+                app.session.tasks = tasks;
+                dirty = true;
+            }
+        }
         effects.extend(result.effects);
-        result.dirty
+        dirty
     }
 
     /// Runs one effect. Its result is an event on the channel (ADR 0023 U2), so the caller
@@ -2988,8 +3098,7 @@ impl LoopContext<'_> {
                             .into_iter()
                             .map(|mut candidate| {
                                 if Some(&candidate.insert) == current.as_ref() {
-                                    candidate.description =
-                                        format!("● current · {}", candidate.description);
+                                    candidate.current = true;
                                 }
                                 candidate
                             })
@@ -3011,8 +3120,7 @@ impl LoopContext<'_> {
                                 == format!("{current_provider}/{current_model}")
                                 || candidate.insert == format!("{current_provider}/");
                             if is_current {
-                                candidate.description =
-                                    format!("● current · {}", candidate.description);
+                                candidate.current = true;
                             }
                             candidate
                         })
@@ -3045,6 +3153,7 @@ impl LoopContext<'_> {
                             .map(|(name, description)| radian_tui::command::Candidate {
                                 insert: name,
                                 description,
+                                current: false,
                             })
                             .collect()
                     }
@@ -3060,12 +3169,14 @@ impl LoopContext<'_> {
                                         "api_key" => "stored (unusable here)".to_owned(),
                                         other => format!("stored {other} entry"),
                                     },
+                                    current: false,
                                 })
                                 .collect(),
                             Err(error) => {
                                 vec![radian_tui::command::Candidate {
                                     insert: String::new(),
                                     description: format!("cannot read auth.json: {error}"),
+                                    current: false,
                                 }]
                             }
                         }
@@ -3154,6 +3265,44 @@ impl LoopContext<'_> {
                         self.session.kill_all_jobs();
                         vec![format!("stopping {running} background job(s)")]
                     }
+                };
+                self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
+            // ADR 0030 O10/O12: `/tasks` lists the live task agents, or cancels/kills one. The
+            // registry lives in the host, so the loop runs it and shows the result as notices.
+            // A session with no lead tools has no registry.
+            Effect::Tasks(request) => {
+                let notices = match &self.lead_tasks {
+                    None => vec!["this session has no task agents".to_owned()],
+                    Some(registry) => match request {
+                        radian_tui::command::TasksRequest::List => {
+                            let lines = radian_host::task_lines(registry);
+                            if lines.is_empty() {
+                                vec!["no task agents in this session".to_owned()]
+                            } else {
+                                lines
+                            }
+                        }
+                        radian_tui::command::TasksRequest::Cancel(id) => match registry.get(&id) {
+                            Some(record) => match record
+                                .session
+                                .command(radian_host::SessionCommand::Cancel)
+                            {
+                                Ok(()) => vec![format!("cancelled task `{id}`")],
+                                Err(error) => vec![format!("cannot cancel task `{id}`: {error}")],
+                            },
+                            None => vec![format!("no task `{id}`")],
+                        },
+                        radian_tui::command::TasksRequest::Kill(id) => {
+                            match self.runtime.block_on(registry.kill(&id)) {
+                                Ok(()) => {
+                                    vec![format!("killed task `{id}` (its worktree is kept)")]
+                                }
+                                Err(error) => vec![format!("cannot kill task `{id}`: {error}")],
+                            }
+                        }
+                    },
                 };
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
@@ -3409,6 +3558,9 @@ enum Phase<'a> {
         session: &'a Arc<dyn radian_host::SessionFacade>,
         host: &'a SessionHost,
         memory: &'a Option<MemoryService>,
+        /// The lead's task registry (ADR 0030 slice 6b2), when this session mounted the lead
+        /// tools; `/tasks` and the status-bar count read it.
+        lead_tasks: Option<Arc<radian_host::TaskRegistry>>,
     },
 }
 
@@ -3518,6 +3670,7 @@ fn ui_loop(
             session,
             host,
             memory,
+            lead_tasks,
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
             route_price: Arc::clone(&route_price),
@@ -3530,6 +3683,7 @@ fn ui_loop(
             session,
             memory,
             host,
+            lead_tasks,
             tx,
             queue: session.pending(),
             signal: None,
@@ -3800,6 +3954,7 @@ fn model_route_candidates(
             candidates.push(radian_tui::command::Candidate {
                 insert: format!("{name}/{model}"),
                 description: name.clone(),
+                current: false,
             });
         }
     }
@@ -3894,6 +4049,7 @@ fn memory_record_candidates(
                 record.kind.as_str(),
                 record_snippet(&record.content)
             ),
+            current: false,
         })
         .collect()
 }
@@ -4279,8 +4435,8 @@ mod tests {
 
     /// ADR 0027 + ADR 0023 U2: the breath redraws **once per step**, and only while a
     /// spinner is visible. The test walks the injected clock in 50 ms wakes — no wall clock — and
-    /// counts the frames the loop's own tick hands out over two breath periods: 24 for an RGB
-    /// theme (12 steps each), 6 for a theme that can only switch (one every 500 ms), none idle.
+    /// counts the frames the loop's own tick hands out over two breath periods: 32 for an RGB
+    /// theme (16 steps each), 8 for a theme that can only switch (one every 500 ms), none idle.
     #[test]
     fn the_breath_redraws_once_per_step_and_only_when_a_spinner_is_visible() {
         /// The frames `spinner_tick` hands the loop while the clock walks two periods in 50 ms
@@ -4308,7 +4464,7 @@ mod tests {
         assert_eq!(
             frames(&mut app),
             usize::from(radian_tui::spinner::PULSE_STEPS) * 2,
-            "one frame per step, 12 steps in every 1.4 s period"
+            "one frame per step, 16 steps in every 2.0 s period"
         );
         assert_eq!(
             wait_for_an_event(&app),
@@ -4319,13 +4475,13 @@ mod tests {
         app.theme = radian_tui::theme::Theme::mono();
         assert_eq!(
             frames(&mut app),
-            6,
-            "a theme that cannot interpolate switches every 500 ms (two colours over 2.8 s)"
+            8,
+            "a theme that cannot interpolate switches every 500 ms (two colours over 4.0 s)"
         );
         assert_eq!(wait_for_an_event(&app), TTY_CHECK_TICK);
         assert_eq!(
             frames(&mut app),
-            6,
+            8,
             "the walk is a pure function of the clock: the same count again, no wall clock"
         );
 
@@ -4361,6 +4517,7 @@ mod tests {
         let candidate = |insert: &str, provider: &str| radian_tui::command::Candidate {
             insert: insert.to_owned(),
             description: provider.to_owned(),
+            current: false,
         };
         let mut candidates = vec![
             candidate("openai/gpt-5", "openai"),

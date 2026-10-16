@@ -35,6 +35,8 @@ pub const HELP: &str = "\
 /skill:<name> [args]  run a skill: read its body into the message (ADR 0025)
 /skills               list the discovered skills
 /jobs [kill <id|all>] list this session's background jobs, or stop one/all (ADR 0037)
+/tasks [cancel|kill <id>]
+                      list the task agents, or cancel/kill one (ADR 0030)
 /login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
@@ -64,6 +66,19 @@ pub enum JobsRequest {
     Kill(String),
     /// `/jobs kill all`: stop every running job.
     KillAll,
+}
+
+/// What `/tasks` asked for (ADR 0030 O10/O12). The task registry lives in the host, so the
+/// command is an effect the loop runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TasksRequest {
+    /// `/tasks`: list every live task agent.
+    List,
+    /// `/tasks cancel <id>`: cancel the task's current turn (its worktree is kept).
+    Cancel(String),
+    /// `/tasks kill <id>`: close the task's session and abandon its pending requests, keeping
+    /// its worktree (ADR 0030 O12).
+    Kill(String),
 }
 
 /// What one submitted `/…` line meant. Parsing only: running the command is the loop's job
@@ -114,6 +129,9 @@ pub enum Outcome {
     Skills,
     /// `/jobs`: list the session's background jobs, or stop one/all (ADR 0037 decision 4).
     Jobs(JobsRequest),
+    /// `/tasks`: list the live task agents, or cancel/kill one (ADR 0030 O10/O12). The registry
+    /// lives in the host, so the loop runs it and answers with [`Outcome::Notices`]-style lines.
+    Tasks(TasksRequest),
     /// A user's `!`/`!!` shell command (ADR 0033). The command string runs in the sandbox
     /// (the tier's shell); `exclude_from_context` (`!!`) keeps its output out of the model's
     /// context. Execution is the loop's effect.
@@ -127,11 +145,14 @@ pub enum Outcome {
 
 // ---------- the command tree and its per-level completion (ADR 0023 U4) ----------
 
-/// One completion candidate: what to insert and the one-line description shown beside it.
+/// One completion candidate: what to insert and the one-line description shown beside it. The
+/// item in effect carries `current`, drawn as ` ✓` after its label (ASCII ` *`); the marker is
+/// never part of `description`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub insert: String,
     pub description: String,
+    pub current: bool,
 }
 
 /// What a level needs from the host when it cannot list its candidates by itself. `update` never
@@ -289,6 +310,11 @@ pub fn tree() -> &'static [Command] {
             description: "remove a stored credential (asks first)",
             levels: &[logout_level],
         },
+        Command {
+            name: "tasks",
+            description: "list the task agents, or cancel/kill one",
+            levels: &[tasks_level, tasks_level],
+        },
     ];
     TREE
 }
@@ -302,6 +328,7 @@ fn login_level(typed: &[&str], _partial: &str) -> Level {
                 .map(|(id, description)| Candidate {
                     insert: id,
                     description,
+                    current: false,
                 })
                 .collect(),
         ),
@@ -368,6 +395,7 @@ fn memory_level(typed: &[&str], partial: &str) -> Level {
                 .map(|(name, description)| Candidate {
                     insert: (*name).to_owned(),
                     description: (*description).to_owned(),
+                    current: false,
                 })
                 .collect(),
         ),
@@ -414,8 +442,8 @@ pub fn effective_thinking_level(
 }
 
 /// `/thinking`'s completion rows (ADR 0026 D11): only the levels the route supports, each with
-/// the wire value it sends (`enabled:4096` for Anthropic, `high` for openai-compatible), and
-/// the applied level marked with `● current`.
+/// the wire value it sends (`enabled:4096` for Anthropic, `high` for openai-compatible); the
+/// applied level carries `current` (drawn as ` ✓` after its name, ).
 pub fn thinking_candidates(
     provider: &radian_host::ProviderRef,
     model: &str,
@@ -431,11 +459,8 @@ pub fn thinking_candidates(
                 .unwrap_or("off");
             Candidate {
                 insert: level.to_owned(),
-                description: if level == current {
-                    format!("● current · sends {wire}")
-                } else {
-                    format!("sends {wire}")
-                },
+                description: format!("sends {wire}"),
+                current: level == current,
             }
         })
         .collect()
@@ -449,6 +474,7 @@ pub fn theme_candidates(themes_dir: Option<&std::path::Path>) -> Vec<Candidate> 
         .map(|name| Candidate {
             insert: name.to_string(),
             description: "built-in theme".to_string(),
+            current: false,
         })
         .collect();
     if let Some(dir) = themes_dir
@@ -466,6 +492,7 @@ pub fn theme_candidates(themes_dir: Option<&std::path::Path>) -> Vec<Candidate> 
                 out.push(Candidate {
                     insert: stem.to_string(),
                     description: "theme file".to_string(),
+                    current: false,
                 });
             }
         }
@@ -481,10 +508,12 @@ fn auto_level(_typed: &[&str], _partial: &str) -> Level {
         Candidate {
             insert: "on".to_owned(),
             description: "approve tool asks without asking, this session".to_owned(),
+            current: false,
         },
         Candidate {
             insert: "off".to_owned(),
             description: "ask again (back to on-ask)".to_owned(),
+            current: false,
         },
     ])
 }
@@ -495,14 +524,17 @@ fn access_level(_typed: &[&str], _partial: &str) -> Level {
         Candidate {
             insert: "safe".to_owned(),
             description: "read-only; no shell, no network".to_owned(),
+            current: false,
         },
         Candidate {
             insert: "workspace".to_owned(),
             description: "write the workspace; sandboxed shell".to_owned(),
+            current: false,
         },
         Candidate {
             insert: "full".to_owned(),
             description: "no sandbox; asks for confirmation".to_owned(),
+            current: false,
         },
     ])
 }
@@ -513,12 +545,35 @@ fn mode_level(_typed: &[&str], _partial: &str) -> Level {
         Candidate {
             insert: "general".to_owned(),
             description: "the default role: a coding agent in this workspace".to_owned(),
+            current: false,
         },
         Candidate {
             insert: "lead".to_owned(),
             description: "the lead role: turn goals into work for task agents".to_owned(),
+            current: false,
         },
     ])
+}
+
+/// `/tasks`: the two subcommands (ADR 0030 O12). The task id is free text (the loop resolves
+/// it against the registry).
+fn tasks_level(typed: &[&str], _partial: &str) -> Level {
+    if typed.is_empty() {
+        Level::Ready(vec![
+            Candidate {
+                insert: "cancel".to_owned(),
+                description: "cancel a task's current turn (keeps its worktree)".to_owned(),
+                current: false,
+            },
+            Candidate {
+                insert: "kill".to_owned(),
+                description: "close a task's session (keeps its worktree)".to_owned(),
+                current: false,
+            },
+        ])
+    } else {
+        Level::Free
+    }
 }
 
 /// `/export`: the format, then the path (with `--force` offered as a candidate).
@@ -528,15 +583,18 @@ fn export_level(typed: &[&str], _partial: &str) -> Level {
             Candidate {
                 insert: "md".to_owned(),
                 description: "markdown: the readable transcript".to_owned(),
+                current: false,
             },
             Candidate {
                 insert: "json".to_owned(),
                 description: "json: the event document".to_owned(),
+                current: false,
             },
         ]),
         Some(_) => Level::Ready(vec![Candidate {
             insert: "--force".to_owned(),
             description: "overwrite an existing file".to_owned(),
+            current: false,
         }]),
     }
 }
@@ -680,6 +738,7 @@ pub fn complete_in(tree: &[Command], line: &str, cursor: usize) -> Option<SlashC
         level_result: Level::Ready(vec![Candidate {
             insert,
             description: matches[0].description.clone(),
+            current: matches[0].current,
         }]),
     })
 }
@@ -718,6 +777,7 @@ fn command_candidates(tree: &[Command]) -> Vec<Candidate> {
         .map(|command| Candidate {
             insert: format!("/{}", command.name),
             description: command.description.to_owned(),
+            current: false,
         })
         .collect()
 }
@@ -928,6 +988,7 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/skills") if tokens.len() == 1 => Outcome::Skills,
         Some("/skills") => Outcome::Notices(vec!["usage: /skills (no arguments)".to_owned()]),
         Some("/jobs") => jobs_request(&tokens[1..]),
+        Some("/tasks") => tasks_request(&tokens[1..]),
         Some(other) if other.starts_with("/skill:") => skill_command(other, line),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
@@ -943,6 +1004,21 @@ fn jobs_request(args: &[String]) -> Outcome {
             Outcome::Jobs(JobsRequest::Kill(id.clone()))
         }
         _ => Outcome::Notices(vec!["usage: /jobs [kill <id|all>]".to_owned()]),
+    }
+}
+
+/// `/tasks [cancel|kill <id>]` (ADR 0030 O10/O12). No argument lists the tasks; anything else
+/// is a usage notice.
+fn tasks_request(args: &[String]) -> Outcome {
+    match args {
+        [] => Outcome::Tasks(TasksRequest::List),
+        [verb, id] if verb == "cancel" && !id.is_empty() => {
+            Outcome::Tasks(TasksRequest::Cancel(id.clone()))
+        }
+        [verb, id] if verb == "kill" && !id.is_empty() => {
+            Outcome::Tasks(TasksRequest::Kill(id.clone()))
+        }
+        _ => Outcome::Notices(vec!["usage: /tasks [cancel|kill <id>]".to_owned()]),
     }
 }
 
@@ -1341,10 +1417,12 @@ mod tests {
                 Candidate {
                     insert: "/memory".into(),
                     description: String::new(),
+                    current: false,
                 },
                 Candidate {
                     insert: "/compact".into(),
                     description: String::new(),
+                    current: false,
                 },
             ],
             "co",
@@ -1439,6 +1517,7 @@ mod tests {
             Level::Ready(vec![Candidate {
                 insert: "anthropic".into(),
                 description: "the Messages API".into(),
+                current: false,
             }])
         }
         static FAKE: &[Command] = &[Command {

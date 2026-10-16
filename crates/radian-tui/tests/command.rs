@@ -417,15 +417,14 @@ fn thinking_candidates_name_the_wire_value_and_mark_the_current_level() {
     assert_eq!(inserts, ["low", "high", "max"], "{rows:?}");
     let high = rows.iter().find(|row| row.insert == "high").unwrap();
     assert!(
-        high.description.contains("● current"),
-        "{}",
-        high.description
+        high.current,
+        "the applied level carries `current`: {high:?}"
     );
     let low = rows.iter().find(|row| row.insert == "low").unwrap();
+    assert!(!low.current, "only the applied level is current: {low:?}");
     assert!(
-        !low.description.contains("● current"),
-        "{}",
-        low.description
+        !rows.iter().any(|row| row.description.contains("● current")),
+        "the marker is never in the description: {rows:?}"
     );
 
     let anthropic =
@@ -438,4 +437,5 @@ fn thinking_candidates_name_the_wire_value_and_mark_the_current_level() {
         "the Anthropic wire value is the budget: {}",
         high.description
     );
+    assert!(high.current, "{high:?}");
 }

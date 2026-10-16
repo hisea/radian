@@ -774,6 +774,11 @@ struct Setup {
     secrets: Vec<String>,
     /// The resolved model name (CLI or config), for the session's config snapshot.
     model_name: String,
+    /// The resolved provider/model names for the route, used as the task builder's snapshot
+    /// label (ADR 0030 slice 6b2).
+    route: (String, String),
+    /// Builds a fresh model per task off the same resolved route (ADR 0030 slice 6b2).
+    task_model: radian_host::TaskModelFactory,
     /// The resolved permission profile (CLI flag, config, or the default).
     profile: profile::ProfileArg,
     /// The resolved approval policy and its startup record (ADR 0026 D9).
@@ -1074,10 +1079,60 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         include_usage: cli.include_usage,
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking: thinking_of,
-        reasoning_effort,
-        reasoning_replay,
+        reasoning_effort: reasoning_effort.clone(),
+        reasoning_replay: reasoning_replay.clone(),
     })
     .map_err(SetupError)?;
+    // ADR 0030 slice 6b2: the model factory the task builder uses. It captures the same
+    // resolved route the lead's model used, so a task's model is that route built again
+    // through the same `build_model` path (no credential is copied anywhere new).
+    let task_model: radian_host::TaskModelFactory = {
+        let provider = route.adapter();
+        let base_url = route.base_url.clone();
+        let model_id = model_name.clone();
+        let api_key = credential.as_ref().map(|key| key.key.clone());
+        let model_headers = route.headers.clone();
+        let user_headers = headers.clone();
+        let include_usage = cli.include_usage;
+        let max_tokens = cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let providers = config.providers.clone();
+        let route_provider = provider_name.clone();
+        let route_model = model_name.clone();
+        let route_thinking = thinking.clone();
+        let reasoning_effort = reasoning_effort.clone();
+        let reasoning_replay = reasoning_replay.clone();
+        std::sync::Arc::new(
+            move |session_id: &str, slot: std::sync::Arc<radian_runtime::ConfigSlot>| {
+                let initial = build_model(ModelArgs {
+                    provider,
+                    base_url: base_url.clone(),
+                    model: model_id.clone(),
+                    api_key: api_key.clone(),
+                    headers: model_headers.clone(),
+                    include_usage,
+                    max_tokens,
+                    thinking: thinking_of,
+                    reasoning_effort: reasoning_effort.clone(),
+                    reasoning_replay: reasoning_replay.clone(),
+                })
+                .map_err(|error| error.to_string())?;
+                Ok(radian_host::SwitchableModel::new(
+                    initial,
+                    radian_host::ModelRoute::new(&route_provider, &route_model),
+                    slot,
+                    radian_host::RouteContext {
+                        providers: providers.clone(),
+                        session_id: session_id.to_owned(),
+                        user_headers: user_headers.clone(),
+                        include_usage,
+                        max_tokens,
+                        thinking: route_thinking.clone(),
+                        thinking_budget,
+                    },
+                ))
+            },
+        )
+    };
     // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can
     // still carry a change the TUI wrote, so resume restores the right model (D8).
     let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
@@ -1192,6 +1247,8 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     Ok(Setup {
         model,
         provider_id: provider_name.clone(),
+        route: (provider_name.clone(), model_name.clone()),
+        task_model,
         config_slot,
         config_queue,
         budget_for,
@@ -1560,6 +1617,35 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let runtime_events = {
         let secrets = Arc::new(setup.secrets.clone());
         Arc::new(move |event: &radian_session::RuntimeEvent| {
+            // ADR 0030 O10: a task agent's spawn and finish are one stderr line each — a
+            // headless lead has no transcript to put them in.
+            match event {
+                radian_session::RuntimeEvent::TaskSpawned {
+                    agent_session_id,
+                    worktree,
+                    ..
+                } => {
+                    let where_ = worktree.as_deref().unwrap_or("the shared workspace");
+                    eprintln!("radian: task `{agent_session_id}` spawned at {where_}");
+                    return;
+                }
+                radian_session::RuntimeEvent::TaskFinished {
+                    agent_session_id,
+                    outcome,
+                    error,
+                } => {
+                    match error {
+                        Some(error) => eprintln!(
+                            "radian: task `{agent_session_id}` finished ({outcome:?}): {error}"
+                        ),
+                        None => {
+                            eprintln!("radian: task `{agent_session_id}` finished ({outcome:?})")
+                        }
+                    }
+                    return;
+                }
+                _ => {}
+            }
             if let radian_session::RuntimeEvent::TurnFailed { message, .. } = event {
                 let message = redact(message, &secrets);
                 eprintln!("radian: {message}");
@@ -1609,6 +1695,40 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         eprintln!("{}", radian_host::trust::untrusted_notice(&workspace_path));
     }
     eprintln!("{}", radian_host::trust::status_line(&trust_setup));
+
+    // ADR 0030 slice 6b2: the production task builder, so a headless lead (`radian exec`) can
+    // spawn real task sessions. A task mounts no MCP servers (ADR 0030 O8) and inherits the
+    // lead's sandbox deny-read/Unix-socket lists, retries, compaction and budget settings.
+    let task_builder = radian_host::task_builder(radian_host::TaskHost {
+        session_dir: sessions_for_deny.clone(),
+        model: setup.task_model.clone(),
+        route: setup.route.clone(),
+        sandbox: sandbox.clone(),
+        sandbox_deny_read: sandbox_deny_read.clone(),
+        allow_unix_sockets: setup.allow_unix_sockets.clone(),
+        retries: setup.retries,
+        context_budget: setup.context_budget,
+        auto_compact: setup.auto_compact,
+        compaction_settings: setup.compaction_settings.clone(),
+        compaction_settings_for: Some(setup.compaction_settings_for.clone()),
+        turn_options: TurnOptions {
+            max_model_calls: setup.max_model_calls,
+            ..TurnOptions::default()
+        },
+        turn_timeout: setup.turn_timeout_secs.map(Duration::from_secs),
+        wording: radian_host::CLI_WORDING,
+        protected_branches: Vec::new(),
+        allowed_filters: None,
+        skills_extra_paths: setup.skills_extra_paths.clone(),
+        skills_builtin: setup.skills_builtin,
+        skills_disabled: setup.skills_disabled.clone(),
+        memory_injection: setup.memory_injection,
+        capabilities: radian_host::SessionCapability::ALL.to_vec(),
+        audit: Arc::clone(&audit),
+        // A task's own stream must not reach the lead's live view (ADR 0030 O10); the CLI prints
+        // its own one-line notices for spawn/finish, not the task's stream.
+        task_events: Arc::new(|_: &radian_session::RuntimeEvent| {}),
+    });
 
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
     // with its own bindings.
@@ -1679,8 +1799,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             before_driver: None,
             memory_warning: Arc::new(|message: &str| eprintln!("[memory] {message}")),
             memory_notice_line: Arc::new(|line: &str| eprintln!("[memory] {line}")),
-            // The orchestration host wiring (a real task builder) is slice 6b.
-            task_builder: None,
+            // ADR 0030 slice 6b2: a headless lead mounts the task tools and can spawn tasks.
+            task_builder: Some(task_builder),
         },
     )
     .await

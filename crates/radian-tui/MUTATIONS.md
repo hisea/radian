@@ -1087,7 +1087,7 @@ Base `8789877` · 一次性 worktree `/tmp/radian-cm-mut`，每个变异跑完 `
 | CM-M3 | `effective_thinking_level` 直接返回请求值（footer 显示配置值而非钳制值） | `command::the_footer_thinking_level_is_the_clamped_one` | ✅ |
 | CM-M4 | 去掉 `completion_set` 里的高亮重置（打字后高亮不回到第一行） | `update::typing_filters_the_slash_menu_and_resets_the_highlight` | ✅ |
 | CM-M5 | `accept_slash_candidate` 固定取第 0 行（忽略高亮） | `update::the_slash_menu_moves_its_highlight_and_enter_accepts_it` | ✅ |
-| CM-M6 | `thinking_candidates` 的 description 丢掉 wire 值与 `● current` | `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level` | ✅ |
+| CM-M6 | `thinking_candidates` 的 description 丢掉 wire 值，或 `current` 不按等级设置 | `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level` | ✅ |
 
 6/6 抓住。
 ## trust-Esc：Esc 不得信任（2026-10-14）
@@ -1746,6 +1746,31 @@ Base：本片 HEAD（`oc/thin-think`）· 就地变异，每个变异先把文�
 2/2 抓住。测试正文**不带**结尾换行，所以 `line_count` 走镜像分支而不是 `has_blank_edge` 的 layout
 兜底（第一版带了结尾换行，TH7 没抓住：兜底直接返回 layout 的长度，绕过镜像）。
 
+## 空回合：一条只有 reasoning/tool call 的回复不再留两行空白（ADR 0028 规则 1，ADR 0035，2026-10-16）
+
+Base：本片 HEAD（`dogfood/empty-turn`，父提交 `3d44139`）· 就地变异：先把 `crates/radian-tui/src/blocks.rs`
+用 `cp` 存到 `.radian/scratch/mut/blocks.rs.orig`，用 `python3` 做带 `assert` 的精确文本替换，跑命名的测试
+（`--no-fail-fast`），再用 `cp` 从副本写回并 `cmp` 逐字节确认相同（脚本内联，不提交；`git status --short`
+只剩本片改动）。
+
+**先核对的事实**：空（或纯空白）的已提交 assistant 条目在当前代码上**已经**排成 0 行（`strip_edge_blanks`
+删掉了那段无背景空白边缘行；探针在 `blocks.rs` 里临时加了一条 `eprintln!`，看完即删：`layout("") = 0`、
+`layout(" ") = 0`、`layout("  \n ") = 0`）。所以本片的实现只改**间隙**：`is_empty_assistant` + `gap_at`。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| EM-M1 | 已提交的空回复被间隙跳过（零行保持不变，间隙不再多一行） | `blocks.rs::is_empty_assistant` 恒返回 `false`（等于回到旧几何，零行仍在） | `blocks::tests::an_empty_committed_assistant_is_skipped_by_the_gaps`、`render::a_text_less_assistant_reply_leaves_one_blank_row`、`render::a_skipped_reply_does_not_shift_the_selection_or_find_rows`、`render::thinking_has_one_blank_line_on_both_sides`（改成真实流程后的下半段）、`render::collapsed_and_errors_differ_for_a_successful_card`、`selection::a_selection_over_a_tool_head_copies_its_text` | ✅ |
+| EM-M2 | **live** 的空回复**不**被跳过 | `blocks.rs::is_empty_assistant` 去掉 `!entry.live` 守卫（live 也被跳过） | `blocks::tests::an_empty_committed_assistant_is_skipped_by_the_gaps`、`render::a_live_empty_assistant_keeps_its_blank_line` | ✅ |
+
+2/2 抓住，无等价变异。EM-M1 下上述 6 条一起 FAILED（`--no-fail-fast` 全跑：
+`blocks.rs` 那条在 `assert_eq!(gap_at(&entries, 2), 0)`，`render.rs` 各条在「一行空白」的绝对行号上）。
+EM-M2 下 `a_live_empty_assistant_keeps_its_blank_line` 在 `gap_at(...) == 1` 上 FAILED。
+
+**旧代码上先跑过的核对**：本片新增/改写的断言在旧实现（EM-M1 的语义）上失败；只有
+`a_live_empty_assistant_keeps_its_blank_line` 按设计在旧代码上**通过**（它钉的就是「live 不变」的今天行为）。
+两条既有测试（`render::collapsed_and_errors_differ_for_a_successful_card` 的 `[22,7,2]`、
+`selection::a_selection_over_a_tool_head_copies_its_text` 的第 1 行 head）承载的是旧几何，本片随实现一起
+更新到 `[21,6,1]` / 第 0 行——它们各自也被 EM-M1 抓住，说明改动后仍有效。
 ## thin ④ × `write`：`write` 正文按行编号的 diff（ADR 0028，2026-10-16）
 
 Base：本片 HEAD（`oc/write-diff`）· 就地变异（改 `tools.rs`），每个变异前把文件复制到
@@ -1784,3 +1809,65 @@ restored to a different byte.
 8/8 caught, no misses and no equivalent mutants. Each mutation is a real behaviour change (the
 script asserts its anchor, so a `cargo fmt` shift or a no-op patch fails loudly rather than
 passing as "caught" — the U3/U4 trap); the restoring `cmp` is the guard that nothing leaked.
+
+## empty-turn review fix 1：被中断的空回复保留 `[interrupted]` 标记（ADR 0003，2026-10-16）
+
+Base：`ed858d8`（评审已接受的 head）· 就地变异：先把 `crates/radian-tui/src/blocks.rs` 用 `cp` 存到
+`.radian/scratch/mut/blocks.rs.fix1orig`，用 `python3` 做带 `assert` 的精确文本替换，跑命名的测试
+（`--no-fail-fast`），再 `cp` 写回并 `cmp` 逐字节确认。`--no-fail-fast`。
+
+事实核对：`[interrupted]` 标记画在条目的**最后一行** body 上（`render.rs` 的 `entry_lines` /
+`visible_lines`）。空文本的已提交 assistant 条目 body 本来就是 0 行，所以即使在 skip 之前，这个标记也
+画不出来（没有「最后一行」）。因此修复不能只是「不跳过」：`is_empty_assistant` 排除 interrupted 之外，
+`layout_with` 还要给这种条目留一行（否则它仍然是 0 行、标记无处可画）。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| FX1-M1 | 被中断的空回复不被跳过（保留它的空白行） | `blocks.rs::is_empty_assistant` 去掉 `!entry.interrupted` | `render::an_interrupted_reply_with_no_text_still_shows_the_marker`（标记行的行号 `left: 4, right: 5`）、`blocks::tests::an_empty_committed_assistant_is_skipped_by_the_gaps`（`!is_empty_assistant(&interrupted)`） | ✅ |
+| FX1-M2 | 被中断的空回复留一行给标记 | `blocks.rs::layout_with` 去掉那段 `lines.push(BodyLine::prose(...))`（保留 interrupted 条件） | `render::an_interrupted_reply_with_no_text_still_shows_the_marker`（屏幕没有 `[interrupted]`）、`blocks::tests::an_empty_committed_assistant_is_skipped_by_the_gaps`（`line_count == 1`） | ✅ |
+
+2/2 抓住。新测试在 `ed858d8`（未修复）上先跑过：`contains("[interrupted]")` FAILED。
+## ADR 0030 片 6b2：TUI 的任务视图（2026-10-16）
+
+Base `2f41f69` · 直接改源码、跑单个测试、从 `.radian/scratch/mut/` 副本 `cp` 还原，
+`git status --short` 跑完为空。
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| S6B2-1 | 宿主不再传 builder，lead tools 不挂载 | `cli.rs` 的 `task_builder: Some(task_builder)` 改回 `None` | `pty_the_tui_mounts_the_task_tools` | ✅ |
+| S6B2-2 | 没有 task 时不显示计数 | `footer.rs` 的 `tasks` item 从 `task_counts().map(..)` 改成恒 `Some(0/0)` | `task_events_become_notices_and_move_the_count`（无 task 时屏幕出现 `tasks`） | ✅ |
+| S6B2-3 | `/tasks cancel` 要真的 cancel | `command.rs` 的 `cancel` 分支返回 `TasksRequest::List` | `tasks_parses_list_cancel_and_kill`、`a_submitted_tasks_line_is_the_loop_effect` | ✅ |
+
+3/3 抓住。S6B2-1 的 pty 测试会重编 `radian` 二进制并检查第一次模型请求的 tools 含全部
+`LEAD_TOOL_NAMES`。
+## pulse-slow: the breath's period 1.4 s -> 2.0 s and 12 -> 16 samples
+
+Worktree `.radian-worktrees/pulse-slow`, branch `oc/pulse-slow`. In-place mutation: `cp` the file
+to `.radian/scratch/spinner.rs.fixed` first, then a `python3` patch replaces the const line (with
+an `assert` that the anchor occurs once and `assert old in s`, so a no-op patch fails loudly), the
+suite runs `cargo test -p radian-tui --lib --locked --no-fail-fast`, and finally the file is
+restored with a plain `cp` (no `-p`, so the mtime is "now" and cargo rebuilds) and `cmp` reports it
+byte-identical (`git status --short` empty).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| PS-M1 | `PULSE_PERIOD` 2_000 -> 1_400 (the period back to the old value, samples left at 16) | `spinner::tests::the_breath_walks_one_sine_period_in_sixteen_steps` (the pinned `2_000 ms`), `spinner::tests::a_pulse_that_cannot_interpolate_keeps_the_two_colour_switch` (one 87.5 ms step is outside the `100..130` ms assertion), `cli::tests::the_breath_redraws_once_per_step_and_only_when_a_spinner_is_visible` (the two-colour switch counts 6 frames over the now 2.8 s window, not the asserted 8) | ✅ (3 FAILED) |
+
+1/1 caught. The three different tests fail for three different reasons — the pinned constant, the
+step length, and the frame count over two periods — so the slower period is not pinned by a single
+assertion. After the plain-`cp` restore the whole lib suite is green again (272 passed).
+## current-mark: the current menu row carries ` ✓` after its name
+
+Base `01e7b40` (the code and its tests; the docs follow in `c6c0ea0`). In-place mutations: each
+file backed up under `.radian/scratch/`, the mutated source restored with a plain `cp` and
+`cmp`ed byte-for-byte, `git status --short` empty after each one.
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| CMK-1 | the description never carries the marker | `command.rs::thinking_candidates` prefixes the current level's description with `● current · ` and clears `current` | `render::the_theme_model_and_thinking_menus_mark_the_current_row` (no row may contain `current`) | ✅ |
+| CMK-2 | the ` ✓` must not push the description column | `select_list.rs::row_line` drops `used +=` around the `draw_marker` call (the mark is drawn but not counted before the padding) | `select_list::tests::the_current_item_is_marked_after_its_label` (the description columns differ) | ✅ |
+| CMK-3 | a truncated label keeps its ` ✓` | `row_line` truncates the label without reserving the mark (`used + marker_width + 1` → `used + 1`) and passes `label_column` to `draw_marker` | `select_list::tests::a_long_current_label_is_truncated_before_its_mark` (the mark is gone) | ✅ |
+
+3/3 caught. CMK-1 also fails `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level`;
+CMK-2 and CMK-3 fail only their `select_list` test. The mark is new behaviour, so these are its
+first mutations.

@@ -550,16 +550,16 @@ fn a_selection_over_a_tool_head_copies_its_text() {
     });
     app.set_viewport(6, 6);
     app.set_transcript_width(60);
-    // The assistant message is empty, so it contributes no line (its blank line is stripped).
-    // The container's gap line is line 0 and the block's head row line 1 (ADR 0028
-    // decision 1). The `• ` marker sits in the marker column, so the head's own text starts at
-    // column 2: a selection over it copies `shell $ make test` — the name and the title, never
-    // the marker, the meta or the status glyph.
+    // The assistant message is empty and skipped, so the tool block is the transcript's first
+    // one: its head row is line 0 (ADR 0028). The `• ` marker sits in the
+    // marker column, so the head's own text starts at column 2: a selection over it copies
+    // `shell $ make test` — the name and the title, never the marker, the meta or the status
+    // glyph.
     let head = "shell $ make test";
     let end_col = 2 + head.chars().count() as u16 - 1;
-    press(&mut app, 1, 2);
-    drag(&mut app, 1, end_col);
-    let result = release(&mut app, 1, end_col);
+    press(&mut app, 0, 2);
+    drag(&mut app, 0, end_col);
+    let result = release(&mut app, 0, end_col);
     assert_eq!(
         result.effects,
         vec![Effect::Copy {
