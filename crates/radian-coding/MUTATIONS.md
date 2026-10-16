@@ -285,3 +285,25 @@ Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 变异就地改完�
 | # | 变异（行为） | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | SD-1 | 删掉描述里的 `Read files with read and list, and search with grep and glob … while shell runs alone`（回到只提 "Use `shell` to run programs"） | `the_shell_description_points_file_reading_and_searching_at_the_read_only_tools`（三段关键句都断言） | ✅ |
+
+## ADR 0039 决定 1/6：后台任务输出移出工作区、事件有序（2026-10-16）
+
+工作树 `oc/sec-jobs`（base `0e9baef`）· 变异就地改源码、跑完从
+`.radian/scratch/mut/` 的副本还原并 `diff -q` 确认，`git status --short` 只剩本片自己的改动。
+每个变异跑对应的测试目标（`--no-fail-fast`）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SJ1 | `open_job_output` 的 `create_new(true)` 改成 `create(true)`（保留 `O_NOFOLLOW`） | `job_output_security::an_existing_output_file_at_the_next_id_is_not_appended_to`（往已存在的文件里追加） | ✅ failed |
+| SJ2 | 去掉 `custom_flags(O_NOFOLLOW)`（保留 `create_new`） | —（等价变异，见下） | ❌ 未抓住 |
+| SJ3 | 同时去掉 O_EXCL 与 O_NOFOLLOW（ADR 的「去掉 O_EXCL/O_NOFOLLOW」） | `job_output_security::a_planted_symlink_at_the_next_output_file_is_not_followed`（`start` 顺着 symlink 打开，输出落在外部文件） | ✅ failed |
+| SJ4 | 宿主把 jobs 目录改回工作区内（`dir.join(".radian/jobs")`） | `radian-host::session::tests::the_jobs_directory_is_the_sessions_own_and_owner_only` | ✅ failed |
+
+**SJ2（等价变异，诚实记录）**：`O_CREAT|O_EXCL` 在 macOS 与 Linux 上都先把「已存在的路径
+（含 symlink）」判为 `EEXIST`，所以只留 `create_new` 时 `O_NOFOLLOW` 无可观察后果（本机实测：
+`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` 与 `O_WRONLY|O_CREAT|O_EXCL` 对 symlink 都返回 `EEXIST`；
+`O_NOFOLLOW` 只在 `O_CREAT|O_APPEND`（无 `O_EXCL`）时才把 symlink 变成 `ELOOP`）。ADR 0039 把
+`O_EXCL/O_NOFOLLOW` 当一个变异（SJ3 抓住）；单独去掉 `O_NOFOLLOW` 是纵深防御，没有确定性测试能
+区分它，与上面 M7（`write` 的 `O_NOFOLLOW`）同理。
+
+SJ5（supervisor 在 `Started` 之前 spawn）见下方「决定 6」小节。

@@ -2,10 +2,17 @@
 //!
 //! A background command runs under the **same sandbox and environment** as a foreground one
 //! ([`crate::shell::sandboxed_command`]), in its own session and process group (`setsid`), but
-//! the tool returns at once. Its output streams to `<workspace>/.radian/jobs/<id>.out` (the
-//! full history) and into a bounded in-memory ring (`job_output`'s increments). The registry
-//! is per session, owned by [`crate::provider::CodingSession`]; at most
+//! the tool returns at once. Its output streams to `<id>.out` in the registry's jobs
+//! directory (the full history) and into a bounded in-memory ring (`job_output`'s increments).
+//! The registry is per session, owned by [`crate::provider::CodingSession`]; at most
 //! [`MAX_RUNNING_JOBS`] run at once.
+//!
+//! The jobs directory is a **parameter**, never derived from the workspace (ADR 0039 decision
+//! 1): the host passes the session's own directory (`<sessions_dir>/<session-id>.jobs/`,
+//! 0700, on the sandbox's deny-read list), so a model that can write the workspace cannot
+//! pre-plant a symlink the host would follow. The output file is opened
+//! `O_CREAT|O_EXCL|O_NOFOLLOW` with mode 0600, and the model reads it only through
+//! `job_output`; the fields that used to carry a path carry [`OUTPUT_HINT`] instead.
 //!
 //! The process-group invariant is the same one [`crate::shell`] uses: the leader is kept
 //! **unreaped** while its group is reserved, and every signal is sent under the `reaped`
@@ -45,7 +52,8 @@ pub const MAX_RUNNING_JOBS: usize = 4;
 
 /// The in-memory ring per job, in bytes, for `job_output` increments. 64 KiB is enough for the
 /// interesting tail of a build log between two tool calls; four jobs hold at most 256 KiB. The
-/// full history is in the `.out` file, so the ring only has to cover one read gap.
+/// `.out` file keeps the full history for the host, but the model reads only through
+/// `job_output`, so the ring is the read window and only has to cover one read gap.
 pub const JOB_RING_BYTES: usize = 64 << 10;
 
 /// SIGTERM, then SIGKILL after this grace (ADR 0037 decision 2).
@@ -57,6 +65,15 @@ const MAX_WAIT_MS: u64 = 600_000;
 
 /// How long the supervisor waits for the output readers after the group is killed.
 const READER_GRACE: Duration = Duration::from_secs(2);
+
+/// What the model sees where the output file's path used to be (ADR 0039 decision 1).
+///
+/// The output file lives in the session directory, outside the workspace and on the sandbox's
+/// deny-read list, so the model can neither open it nor be told a path it could use. Every
+/// field that once carried a workspace-relative path (`StartInfo::output`,
+/// `JobEvent::Started::output`, `JobSummary::output`, `OutputResult::output`) carries this
+/// sentence instead, which names the one channel that still reaches the output.
+pub const OUTPUT_HINT: &str = "available through job_output";
 
 /// The `job_settled` broadcast capacity. A subscriber that falls this far behind loses old
 /// notices; slice 3 re-reads the state instead of trusting the channel alone.
@@ -122,7 +139,6 @@ struct JobCell {
     ring: Ring,
     /// The model's read cursor: an absolute byte offset into everything the job produced.
     read_offset: u64,
-    output: PathBuf,
     /// The process group id (the leader's pid).
     pgid: u32,
     /// How many `job_output wait=true` calls are blocked on this job right now. A settle with
@@ -142,7 +158,7 @@ pub struct JobSummary {
     pub command: String,
     pub state: JobState,
     pub elapsed: Duration,
-    /// The workspace-relative output path.
+    /// [`OUTPUT_HINT`]; the output file is not readable by the model (ADR 0039 decision 1).
     pub output: String,
 }
 
@@ -154,7 +170,8 @@ pub enum JobEvent {
         id: String,
         /// The command's first line.
         command: String,
-        /// The workspace-relative output path.
+        /// [`OUTPUT_HINT`] (ADR 0039 decision 1): the output file is outside the workspace and
+        /// unreadable by the sandbox, so this is not a path.
         output: String,
     },
     Settled {
@@ -173,7 +190,8 @@ pub struct Jobs {
 }
 
 struct JobsInner {
-    workspace: PathBuf,
+    /// The session-owned jobs directory (ADR 0039 decision 1). Every registry is given one;
+    /// it is never derived from a workspace.
     dir: PathBuf,
     state: Mutex<JobsState>,
     events: tokio::sync::broadcast::Sender<JobEvent>,
@@ -187,18 +205,30 @@ struct JobsState {
 }
 
 impl Jobs {
-    /// A registry for `workspace`. No I/O: the jobs directory is created by the first
+    /// A registry whose output files live in `dir` (ADR 0039 decision 1). The caller owns the
+    /// directory choice: the host passes the session's own jobs directory, so the registry
+    /// never computes a workspace path. The directory is created 0700 on the first
     /// [`Jobs::start`], so opening a session never touches the disk.
-    pub fn new(workspace: &Path) -> Self {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
         let (events, _) = tokio::sync::broadcast::channel(SETTLED_CAPACITY);
         Self {
             inner: Arc::new(JobsInner {
-                workspace: workspace.to_path_buf(),
-                dir: workspace.join(".radian").join("jobs"),
+                dir: dir.into(),
                 state: Mutex::new(JobsState::default()),
                 events,
             }),
         }
+    }
+
+    /// The directory this registry writes its output files to.
+    pub fn dir(&self) -> &Path {
+        &self.inner.dir
+    }
+
+    /// The output file for `id`. The model never sees this path (it cannot read the file); it
+    /// is here for the host and for tests.
+    pub fn output_path(&self, id: &str) -> PathBuf {
+        self.inner.dir.join(format!("{id}.out"))
     }
 
     /// Subscribe to job lifecycle notices (ADR 0037 slices 3-4). Each receiver sees every
@@ -234,7 +264,7 @@ impl Jobs {
             ));
         }
 
-        std::fs::create_dir_all(&self.inner.dir).map_err(|e| {
+        ensure_jobs_dir(&self.inner.dir).map_err(|e| {
             fail(
                 "jobs_dir",
                 format!(
@@ -244,17 +274,13 @@ impl Jobs {
             )
         })?;
         let id = next_job_id();
-        let output = self.inner.dir.join(format!("{id}.out"));
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&output)
-            .map_err(|e| {
-                fail(
-                    "jobs_output",
-                    format!("could not create {}: {e}", output.display()),
-                )
-            })?;
+        let output = self.output_path(&id);
+        let file = open_job_output(&output).map_err(|e| {
+            fail(
+                "jobs_output",
+                format!("could not create {}: {e}", output.display()),
+            )
+        })?;
 
         let mut process = sandboxed_command(sandbox, cwd, command)?;
         configure_group(&mut process);
@@ -276,7 +302,6 @@ impl Jobs {
             termination: None,
             ring: Ring::default(),
             read_offset: 0,
-            output: output.clone(),
             pgid: pid,
             reaped: Arc::new(Mutex::new(false)),
             waiters: 0,
@@ -306,6 +331,7 @@ impl Jobs {
                 let _ = done.send(());
             });
         }
+
         {
             let supervisor_cell = Arc::clone(&cell);
             let events = self.inner.events.clone();
@@ -320,15 +346,23 @@ impl Jobs {
             });
         }
 
+        // ADR 0039 decision 6: register the job and publish `Started` **before** the supervisor
+        // can publish a `Settled`. An instant command's leader can be reaped the moment the
+        // supervisor starts, so starting it any earlier lets `Settled` overtake `Started` in
+        // the journal. The readers are already running, so nothing is lost by the wait.
         state.order.push(id.clone());
         state.jobs.insert(id.clone(), Arc::clone(&cell));
         drop(state);
         let _ = self.inner.events.send(JobEvent::Started {
             id: id.clone(),
             command: first_line(command),
-            output: self.relative(&output),
+            output: OUTPUT_HINT.to_owned(),
         });
-        Ok(StartInfo { id, output })
+
+        Ok(StartInfo {
+            id,
+            output: OUTPUT_HINT.to_owned(),
+        })
     }
 
     /// `job_output`: the increment since the last call, plus the state. `wait` blocks until
@@ -368,7 +402,7 @@ impl Jobs {
             increment,
             waited_out,
             wait_cancelled,
-            output: self.relative(&cell.output),
+            output: OUTPUT_HINT.to_owned(),
         };
         drop(cell);
         Ok(result)
@@ -388,7 +422,7 @@ impl Jobs {
                     command: cell.command.clone(),
                     state: cell.state.clone(),
                     elapsed: cell.started.elapsed(),
-                    output: self.relative(&cell.output),
+                    output: OUTPUT_HINT.to_owned(),
                 })
             })
             .collect()
@@ -430,7 +464,7 @@ impl Jobs {
         let cell = lock(&cell);
         Some((
             cell.state.clone(),
-            self.relative(&cell.output),
+            OUTPUT_HINT.to_owned(),
             cell.ring.tail(max),
         ))
     }
@@ -474,12 +508,6 @@ impl Jobs {
     fn lock_state(&self) -> std::sync::MutexGuard<'_, JobsState> {
         self.inner.state.lock().unwrap_or_else(|e| e.into_inner())
     }
-
-    fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.inner.workspace)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| path.to_string_lossy().into_owned())
-    }
 }
 
 impl Drop for Jobs {
@@ -491,9 +519,11 @@ impl Drop for Jobs {
 }
 
 /// What `start` returns.
+#[derive(Debug)]
 pub struct StartInfo {
     pub id: String,
-    pub output: PathBuf,
+    /// [`OUTPUT_HINT`]: the model reads the output through `job_output` (ADR 0039 decision 1).
+    pub output: String,
 }
 
 /// What `job_output` returns.
@@ -506,6 +536,7 @@ pub(crate) struct OutputResult {
     pub waited_out: bool,
     /// The turn was cancelled while waiting: the job is untouched.
     pub wait_cancelled: bool,
+    /// [`OUTPUT_HINT`] (ADR 0039 decision 1).
     pub output: String,
 }
 
@@ -513,6 +544,51 @@ pub(crate) struct OutputResult {
 pub(crate) enum KillResult {
     Requested,
     AlreadySettled(JobState),
+}
+
+// ---------- output files ----------
+
+/// Creates the jobs directory 0700 if it is missing. The host normally creates it with
+/// `radian_session::ensure_private_dir` (ADR 0020) before the sandbox is built; this mirrors
+/// that for a registry used without a host (tests, an embedded tool set) so the output is
+/// owner-only either way.
+fn ensure_jobs_dir(dir: &Path) -> std::io::Result<()> {
+    if dir.exists() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    let created = {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    };
+    #[cfg(not(unix))]
+    let created = std::fs::create_dir_all(dir);
+    match created {
+        // Another thread or process won the race; the directory is there.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        other => other,
+    }
+}
+
+/// Opens a job's output file for appending, creating it **exclusively** and refusing to follow
+/// a symlink at the destination (ADR 0039 decision 1): `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600.
+///
+/// `create_new` alone already refuses any existing path (including a symlink), so `O_NOFOLLOW`
+/// is defence in depth for the platforms where the two are not equivalent; on macOS and Linux
+/// the kernel reports `EEXIST` for both. The pair is what the ADR asks for.
+fn open_job_output(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.append(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 // ---------- output ----------
@@ -774,9 +850,9 @@ pub(crate) fn output_spec() -> ToolSpec {
                       signal n / killed / timed out). Do not sleep or poll: pass `wait: true` \
                       to block until the job ends (or `timeout_ms` elapses; the default is \
                       30000, the maximum 600000). A wait timeout returns `[status: running]` \
-                      and does **not** kill the job. The job's full history is in the `.out` \
-                      file named when it started; read that with the `read` tool for anything \
-                      the ring dropped."
+                      and does **not** kill the job. This is the only way to read a background \
+                      job's output: its file is outside the workspace and not readable from \
+                      inside the sandbox, so `job_output` is what delivers it."
             .into(),
         input_schema: output_schema(),
         concurrency: ToolConcurrency::Shared,
@@ -788,9 +864,9 @@ pub(crate) fn list_spec() -> ToolSpec {
     ToolSpec {
         name: "job_list".into(),
         description: "List this session's background `shell` jobs: id, the command's first \
-                      line, its state (running / exited n / signal n / killed / timed out), how \
-                      long it has run, and its output file. Use `job_output` to read one and \
-                      `job_kill` to stop one."
+                      line, its state (running / exited n / signal n / killed / timed out), and \
+                      how long it has run. Use `job_output` to read one and `job_kill` to stop \
+                      one."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -871,8 +947,8 @@ pub(crate) async fn run_output(
     }
     if result.dropped > 0 {
         text.push_str(&format!(
-            "[{} bytes dropped from the ring; read {} for the full history]\n",
-            result.dropped, result.output
+            "[{} bytes dropped before this read; only the most recent output is available]\n",
+            result.dropped
         ));
     }
     if result.waited_out {

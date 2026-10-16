@@ -250,7 +250,9 @@ pub enum RuntimeEvent {
         job_id: String,
         /// The command's first line (the summary `job_list` shows).
         command: String,
-        /// The workspace-relative output path.
+        /// The `job_output` hint, not a path (ADR 0039 decision 1): the output file lives in
+        /// the session directory and is unreadable by the model, so this field names the tool
+        /// that reads it. The shape is kept from ADR 0037 decision 5.
         output: String,
     },
     /// A background `shell` job settled (ADR 0037 decision 5). Audit only: `critical =

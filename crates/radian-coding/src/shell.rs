@@ -84,16 +84,17 @@ pub(crate) fn schema() -> serde_json::Value {
                                 replaced by a marker; the end is always kept, because \
                                 that is where a failing command's error is. Clamped to \
                                 the configured maximum. Ignored for `background: true` \
-                                (the ring is fixed; the .out file is the full history)."
+                                (the `job_output` ring is fixed)."
             },
             "background": {
                 "type": "boolean",
                 "description": "Run the command in the background and return at once \
                                 (default false). It keeps running under the same sandbox; \
-                                its output streams to a workspace file. Read it with \
-                                `job_output` (pass `wait: true` to wait for the end), \
-                                list jobs with `job_list`, stop one with `job_kill`. No \
-                                default timeout. Do not sleep or poll."
+                                its output goes outside the workspace and is not readable \
+                                from inside the sandbox. Read it with `job_output` (pass \
+                                `wait: true` to wait for the end), list jobs with \
+                                `job_list`, stop one with `job_kill`. No default timeout. \
+                                Do not sleep or poll."
             }
         },
         "required": ["command"],
@@ -154,8 +155,8 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
              maximum (600 s by default); for a command that needs longer use `background: \
              true`, which has no default timeout. Use `cwd` (workspace-relative) to run \
              somewhere other than the workspace root. Set `background: true` for a command \
-             that outlives the foreground timeout: it returns at once with a job id and an \
-             output file, and the three `job_*` tools read, list and stop it. Background jobs \
+             that outlives the foreground timeout: it returns at once with a job id, and the \
+             three `job_*` tools read, list and stop it. Background jobs \
              have no default timeout. Do not sleep or poll; use `job_output` with `wait: \
              true` to wait for the end."
         ),
@@ -282,7 +283,7 @@ pub(crate) async fn run(
 }
 
 /// Starts `command` as a background job (ADR 0037) and returns the one-line acknowledgement:
-/// the job id, the output file and the three tools. No default timeout; an explicit
+/// the job id, the `job_output` hint and the three tools. No default timeout; an explicit
 /// `timeout_secs` kills the job like `job_kill` and settles it as timed out.
 fn start_background(
     root: &WorkspaceRoot,
@@ -295,11 +296,6 @@ fn start_background(
         .timeout_secs
         .map(|secs| Duration::from_secs(secs.max(1)));
     let info = jobs.start(sandbox, cwd, &args.command, timeout)?;
-    let output = info
-        .output
-        .strip_prefix(root.root())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| info.output.to_string_lossy().into_owned());
     let cwd_relative = cwd
         .strip_prefix(root.root())
         .ok()
@@ -308,19 +304,19 @@ fn start_background(
         .unwrap_or_else(|| ".".into());
     let text = format!(
         "started background job {id}\n\
-         output: {output}\n\
+         its output is {output}\n\
          read it with `job_output` (pass `wait: true` to wait for the end); `job_list` lists \
          this session's jobs; `job_kill` stops one.\n\
-         Do not sleep or poll: use `job_output` with `wait: true` to wait for the end. The full \
-         history stays in the output file.\n",
+         Do not sleep or poll: use `job_output` with `wait: true` to wait for the end.\n",
         id = info.id,
+        output = info.output,
     );
     Ok(ToolOutput {
         content: vec![ContentPart::text(text)],
         structured: Some(json!({
             "background": true,
             "job_id": info.id,
-            "output": output,
+            "output": info.output,
             "command": args.command,
             "cwd": cwd_relative,
             "sandbox_mode": sandbox.mode().as_str(),

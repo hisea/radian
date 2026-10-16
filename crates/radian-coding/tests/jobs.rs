@@ -70,7 +70,7 @@ fn structured(output: &ToolOutput) -> Value {
     output.structured.clone().expect("structured output")
 }
 
-/// Starts a background job and returns `(job_id, workspace-relative output)`.
+/// Starts a background job and returns `(job_id, the output hint)`.
 async fn start(
     session: &CodingSession,
     command: &str,
@@ -85,7 +85,10 @@ async fn start(
     assert_eq!(value["background"], json!(true), "{value}");
     (
         value["job_id"].as_str().expect("a job id").to_owned(),
-        value["output"].as_str().expect("an output path").to_owned(),
+        value["output"]
+            .as_str()
+            .expect("the output hint")
+            .to_owned(),
     )
 }
 
@@ -186,7 +189,7 @@ async fn a_background_job_returns_at_once_and_job_output_returns_increments() {
 
     mkfifo(&root.join("gate"));
     let start_time = Instant::now();
-    let (id, output) = start(
+    let (id, _) = start(
         &session,
         "echo first; cat gate > /dev/null; echo second",
         None,
@@ -197,7 +200,7 @@ async fn a_background_job_returns_at_once_and_job_output_returns_increments() {
         "start must not wait for the command: {:?}",
         start_time.elapsed()
     );
-    let output_path = root.join(&output);
+    let output_path = session.jobs().output_path(&id);
 
     // The command is blocked on the fifo; "first" is already in the file and the ring.
     wait_for_file(&output_path, "first").await;
@@ -687,10 +690,12 @@ async fn job_list_reports_the_states() {
     let list = output_text(&exec(&session, "job_list", json!({})).await.unwrap());
     assert!(list.contains(&done_id), "{list}");
     assert!(list.contains("exited 0"), "{list}");
-    assert!(list.contains(&done_output), "{list}");
     assert!(list.contains(&run_id), "{list}");
     assert!(list.contains("running"), "{list}");
-    assert!(list.contains(&run_output), "{list}");
+    // The list names `job_output` where the output path used to be (ADR 0039 decision 1).
+    assert_eq!(done_output, radian_coding::OUTPUT_HINT, "{done_output}");
+    assert_eq!(run_output, radian_coding::OUTPUT_HINT, "{run_output}");
+    assert!(list.contains(radian_coding::OUTPUT_HINT), "{list}");
 
     let value = structured(&exec(&session, "job_list", json!({})).await.unwrap());
     assert_eq!(value["count"], json!(2), "{value}");
