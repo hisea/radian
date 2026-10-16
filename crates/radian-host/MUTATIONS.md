@@ -1034,3 +1034,58 @@ SG-F1-M1 的行为测试假绿（只有守卫抓住）；改成同大小后行�
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | SJ6 | `JobNotifier::spawn` 把 `self.jobs.subscribe()` 放回 `runtime.spawn(async move { … })` 内部 | `job_notify::the_first_job_events_are_not_lost`（首个 job 的 `Started`/`Settled` 都不在 journal 里） | ✅ failed |
+
+## ADR 0030 切片 6 part a：lead 的工具（2026-10-16）
+
+工作树 `.radian-worktrees/orch-s6a`（分支 `oc/orch-s6a`）；每条变异就地改，跑完从
+`.radian/scratch/` 下的副本还原并 `cmp` 确认，结束时 `git status --short` 只剩测试文件。
+命令 `cargo test -p radian-host --test lead_tools --no-fail-fast`（gate 的来源/顺序则由
+`cargo test -p radian-permissions` 的 `the_tool_gate_denies_before_the_rules_and_the_approver` 钉住）。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S6A-1 | `wait_task` 超时时取消 task（timeout 分支里加 `record.session.stop()`） | ✅ failed | `a_timeout_returns_still_running_and_keeps_the_task` |
+| S6A-2 | 摘要永不截断（`truncate_chars` 短路成「不截」） | ✅ failed | `a_long_summary_is_cut_and_says_so` |
+| S6A-3 | `lead_mode_gate` 恒返回 `None`（general 也放行每个 lead 工具） | ✅ failed | `the_mode_gate_denies_in_general_and_allows_in_lead_with_one_tool_list` |
+| S6A-4 | `lead_mounted` 去掉 `!task_agent`（任务会话也挂上 lead 工具） | ✅ failed | `a_task_session_gets_no_lead_tools` |
+| S6A-5 | `SpawnArgs` 加一个 `policy` 字段（模型可传边缘策略命令） | ✅ failed | `spawn_task_refuses_bad_arguments_and_has_no_policy_field` |
+| S6A-6 | 任务会话的 hook turn source 不设成 `Subagent`（留空） | ✅ failed | `a_lead_turn_stays_user_and_a_task_turn_is_subagent` |
+| S6A-7 | profile 里给 lead 工具名的 `allow` 规则被去掉（`with_allowed_tools` 删掉） | ✅ failed（30 s 超时：lead 模式的 `list_tasks` 卡在审批上） | `the_mode_gate_denies_in_general_and_allows_in_lead_with_one_tool_list` |
+
+7/7 抓住。
+
+**S6A-1 的第一次尝试（如实记录）**：最初超时测试只断言 `!record.running()` 与
+`last_outcome().is_none()`——`session.stop()` 之后这两条都还成立，变异**没被抓住**。改成超时后
+再给任务一条 `Subagent` 输入并等它跑出一次模型请求（`wait_requests(&server, 1)`），被 stop 的
+会话不再驱动任何回合，测试才抓住。
+
+**S6A-8 / S6A-9（part a 里没有对应代码，如实记录）**：brief 里的两条变异「任务事件写进 lead 的
+inbox」与「lead 的回合来源被任务事件降低」在 part a 里**不可施加**——lead 的工具根本不持有 lead
+的 inbox 句柄，任务的事件只经过 `TaskPendingQueue`（切片 5）。这两条性质由
+`a_lead_turn_stays_user_and_a_task_turn_is_subagent` 的两条断言钉住（lead 日志里没有任何
+`"subagent"` 输入；`hooks().turn_source() == Some(User)`）。能把任务事件塞进 lead 的 inbox 的近似
+变异在运行时/切片 4-5 的代码里，由那些切片的 inbox-来源测试抓住。
+
+### orch-s6a review fix 1（2026-10-16）：`timeout_secs` 与 `wait_any { ids }`
+
+`wait_task`/`wait_any` 按 ADR 0030 O4 / 修订 1 R3 的签名改成 `timeout_secs`（秒，接受小数，负数/非有限拒绝）
+与 `wait_any { ids }`（必填、非空；每个 id 必须存在才等待）。新增一条变异：
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S6A-10 | `wait_any` 去掉 ids 过滤（`self.registry.pending_next_in(&args.ids)` 换回 `self.registry.pending_next()`，取队首任意任务） | ✅ failed | `wait_any_ignores_a_task_not_in_ids`（不属于 ids 的 t2 的提问被 t1 的等待取走，等待不再超时） |
+
+1/1 抓住。跑法：把 `wait_any` 里那一行换成 `pending_next()`，`cargo test -p radian-host --test lead_tools wait_any_ignores_a_task_not_in_ids`。
+
+### orch-s6a review fix 2（2026-10-16）：`timeout_secs` 上限（`Instant` 溢出）
+
+`wait_timeout` 把 `timeout_secs` 夹到 24 小时（`MAX_WAIT_TIMEOUT_SECS`），所以 `Instant::now() + timeout`
+不会溢出；`still_running` 报的是夹取后的值。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S6A-11 | 去掉夹取（`let secs = secs.min(MAX_WAIT_TIMEOUT_SECS);` 换成 `let secs = secs;`） | ✅ failed | `a_huge_timeout_is_clamped_and_does_not_panic`（旧代码在 `tokio::time::Instant` 上 panic：`overflow when adding duration to instant`）；单元测试 `a_huge_timeout_is_clamped_to_a_day` 也失败（`1e15` 未被夹到 `86400`） |
+
+**平台说明（如实记录）**：reviewer 给的例子是 `1e15`，但 macOS 上 `Instant` 用 `i64` 秒存，`1e15` 秒加得下、不 panic
+（集成测试在变异下仍通过）。真正 panic 的是 `1e19`（`i64` 秒溢出、但仍是合法 `Duration`），所以测试用
+`1e19`；夹取去掉后集成测试确实 panic。单元测试与平台无关，两种值下都抓住夹取被去掉。
