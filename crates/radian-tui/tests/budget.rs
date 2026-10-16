@@ -84,15 +84,15 @@ fn a_request_started_event_sets_the_status_bar_report() {
     use std::sync::mpsc::channel;
 
     let app = App::new("m", "s");
-    app.projection.set_context_window(Some(16_000));
+    app.session.projection.set_context_window(Some(16_000));
     let report = report(UsageSource::ReportedPlusEstimate);
     let (tx, _rx) = channel();
-    let sink = radian_tui::events::ProjectionSink::new(tx, Arc::clone(&app.projection));
+    let sink = radian_tui::events::ProjectionSink::new(tx, Arc::clone(&app.session.projection));
     sink.emit(AgentEvent::ModelRequestStarted {
         model_call: 1,
         budget: Some(report.clone()),
     });
-    let session = app.projection.read();
+    let session = app.session.projection.read();
     assert_eq!(session.budget(), Some(&report));
     assert_eq!(session.turn(), radian_tui::TurnState::Running);
     let text = budget_status_text(session.context_window(), session.budget());

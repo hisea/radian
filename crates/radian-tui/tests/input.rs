@@ -45,7 +45,7 @@ fn enter_expands_then_sends_a_followup_when_idle_and_a_steer_while_running() {
         vec![Effect::SendFollowup(agent_core::Message::user("hello"))]
     );
 
-    app.projection.set_turn(TurnState::Running);
+    app.session.projection.set_turn(TurnState::Running);
     app.input = "change of plan".into();
     assert_eq!(
         press(&mut app, key(KeyCode::Enter)),
@@ -81,7 +81,8 @@ fn a_failed_expansion_puts_the_input_back_and_sends_nothing() {
     assert!(result.effects.is_empty(), "nothing is sent");
     assert_eq!(app.input, "look @missing.txt", "the text is back");
     assert!(
-        app.entries
+        app.session
+            .entries
             .iter()
             .any(|entry| entry.text.contains("not sent")),
         "the failure is shown"
@@ -142,7 +143,7 @@ fn shift_enter_inserts_a_newline() {
 #[test]
 fn ctrl_c_cancels_a_running_turn_and_quits_when_idle_after_a_second_press() {
     let mut app = App::new("m", "s");
-    app.projection.set_turn(TurnState::Running);
+    app.session.projection.set_turn(TurnState::Running);
     assert_eq!(
         press(
             &mut app,
@@ -154,7 +155,7 @@ fn ctrl_c_cancels_a_running_turn_and_quits_when_idle_after_a_second_press() {
 
     // Idle and empty, the first press only arms the 2 s quit window;
     // the second inside it quits.
-    app.projection.set_turn(TurnState::Idle);
+    app.session.projection.set_turn(TurnState::Idle);
     assert!(
         press(
             &mut app,

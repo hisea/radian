@@ -148,11 +148,14 @@ fn a_transcript_past_u16_lines_scrolls_to_its_real_bottom() {
         .draw(|frame| render::draw(frame, &mut app))
         .unwrap();
     assert!(
-        app.total_lines > usize::from(u16::MAX),
+        app.session.total_lines > usize::from(u16::MAX),
         "the fixture must pass u16::MAX lines: {}",
-        app.total_lines
+        app.session.total_lines
     );
-    assert_eq!(app.scroll, app.max_scroll, "following the bottom");
+    assert_eq!(
+        app.session.scroll, app.session.max_scroll,
+        "following the bottom"
+    );
     let screen: String = terminal
         .backend()
         .buffer()

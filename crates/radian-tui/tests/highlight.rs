@@ -65,7 +65,9 @@ fn screen(terminal: &Terminal<TestBackend>) -> String {
 }
 
 fn assistant(app: &mut App, text: &str) {
-    app.entries.push(Entry::new(EntryKind::Assistant, text));
+    app.session
+        .entries
+        .push(Entry::new(EntryKind::Assistant, text));
 }
 
 const RUST: &str = "```rust\nfn main() {\n    let s = \"hi\";\n    // note\n}\n```\n";
@@ -393,7 +395,7 @@ fn appending_a_line_rehighlights_it() {
     let mut app = App::new("m", "s");
     assistant(&mut app, "```rust\nfn a() {}\n```\n");
     let _ = render(&mut app, 60, 20);
-    app.entries[0].text = "```rust\nfn a() {}\nfn b() {}\n```\n".to_owned();
+    app.session.entries[0].text = "```rust\nfn a() {}\nfn b() {}\n```\n".to_owned();
     let terminal = render(&mut app, 60, 20);
     assert_eq!(
         style_of(&terminal, "fn b").and_then(|s| s.fg),

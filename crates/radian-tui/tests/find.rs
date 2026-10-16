@@ -33,7 +33,9 @@ fn fill(app: &mut App, needle_entries: &[usize]) {
         } else {
             format!("entry {i} is filler")
         };
-        app.entries.push(Entry::new(EntryKind::Notice, text));
+        app.session
+            .entries
+            .push(Entry::new(EntryKind::Notice, text));
     }
 }
 
@@ -43,10 +45,10 @@ fn entry_line(app: &App, entry: usize) -> usize {
     // the geometry the finder uses includes them.
     let mut line = 0usize;
     for index in 0..=entry {
-        let Some(item) = app.entries.get(index) else {
+        let Some(item) = app.session.entries.get(index) else {
             break;
         };
-        line += radian_tui::blocks::block_gap(app.entries.get(index.wrapping_sub(1)), item);
+        line += radian_tui::blocks::block_gap(app.session.entries.get(index.wrapping_sub(1)), item);
         if index < entry {
             line += render::display_lines(item, EXPANDED, WIDTH).len();
         }
@@ -79,9 +81,9 @@ fn ctrl_f_opens_and_typing_jumps_to_the_nearest_match_above() {
     assert_eq!(app.input.text(), "draft", "the message draft is untouched");
     // The match line is centered: it is inside the viewport.
     assert!(
-        app.scroll <= entry_line(&app, 25),
+        app.session.scroll <= entry_line(&app, 25),
         "scroll {} is past the match",
-        app.scroll
+        app.session.scroll
     );
 }
 
@@ -147,10 +149,13 @@ fn escape_closes_and_leaves_the_viewport_where_it_is() {
         app.on_key(key(KeyCode::Char(c)));
     }
     app.on_key(key(KeyCode::Enter)); // jump to the earlier match
-    let scroll = app.scroll;
+    let scroll = app.session.scroll;
     app.on_key(key(KeyCode::Esc));
     assert!(app.find_state().is_none(), "Esc closes the box");
-    assert_eq!(app.scroll, scroll, "the viewport stays where it was");
+    assert_eq!(
+        app.session.scroll, scroll,
+        "the viewport stays where it was"
+    );
     assert_eq!(app.input.text(), "unchanged");
     // The next message key types into the input again.
     app.on_key(key(KeyCode::Char('x')));
@@ -162,7 +167,7 @@ fn a_query_with_no_match_says_no_match_and_does_not_move() {
     let mut app = App::new("m", "s");
     fill(&mut app, &[5, 25]);
     render(&mut app);
-    let scroll = app.scroll;
+    let scroll = app.session.scroll;
     app.on_key(ctrl('f'));
     // No prefix of "zzz" matches anything, so no intermediate query moved the viewport.
     for c in "zzz".chars() {
@@ -172,7 +177,10 @@ fn a_query_with_no_match_says_no_match_and_does_not_move() {
         app.find_state().unwrap().status().as_deref(),
         Some("no match")
     );
-    assert_eq!(app.scroll, scroll, "no match must not move the viewport");
+    assert_eq!(
+        app.session.scroll, scroll,
+        "no match must not move the viewport"
+    );
     assert!(app.is_following(), "and follow is untouched");
 }
 
@@ -246,7 +254,9 @@ fn fifty_thousand_entries() -> App {
         } else {
             format!("filler line {i}")
         };
-        app.entries.push(Entry::new(EntryKind::Notice, text));
+        app.session
+            .entries
+            .push(Entry::new(EntryKind::Notice, text));
     }
     render(&mut app);
     app
@@ -268,7 +278,9 @@ fn a_search_over_fifty_thousand_entries_is_fast() {
             } else {
                 format!("filler line {i}")
             };
-            app.entries.push(Entry::new(EntryKind::Notice, text));
+            app.session
+                .entries
+                .push(Entry::new(EntryKind::Notice, text));
         }
         render(&mut app);
         app
@@ -375,7 +387,7 @@ fn a_folded_tool_body_is_still_found() {
     });
     // The displayed body is folded to the preview: the marker is not among the laid-out
     // lines (`display_lines` is the display geometry the renderer uses).
-    let shown = radian_tui::render::display_lines(&app.entries[1], app.display_modes(), 80);
+    let shown = radian_tui::render::display_lines(&app.session.entries[1], app.display_modes(), 80);
     assert!(
         !shown.iter().any(|line| line.contains("need1e")),
         "folded out of the display: {shown:?}"
@@ -427,7 +439,7 @@ fn a_hit_in_a_folded_tool_body_expands_only_that_entry() {
     }
     render(&mut app);
     // Folded: neither body shows anything but its one-line hint.
-    let folded_total = app.total_lines;
+    let folded_total = app.session.total_lines;
     app.on_key(ctrl('f'));
     for c in "needle".chars() {
         app.on_key(key(KeyCode::Char(c)));
@@ -440,6 +452,7 @@ fn a_hit_in_a_folded_tool_body_expands_only_that_entry() {
     );
     // Exactly one entry opened, and the note says so.
     let overridden: Vec<usize> = app
+        .session
         .entries
         .iter()
         .enumerate()
@@ -448,31 +461,33 @@ fn a_hit_in_a_folded_tool_body_expands_only_that_entry() {
         .collect();
     assert_eq!(overridden.len(), 1, "one entry at a time");
     assert_eq!(
-        app.note.as_deref(),
+        app.session.note.as_deref(),
         Some("expanded 1 folded entry for the match")
     );
     render(&mut app);
     assert_eq!(
-        app.total_lines,
+        app.session.total_lines,
         folded_total + 4,
         "the hit entry's four body lines replace its one-line hint, and its Output divider \
          comes back (a real section, ADR 0028)"
     );
     // The match line is on screen, centered: the jump mapped it through the display geometry.
-    let display_line: usize = app.entries[..match_line.entry]
+    let display_line: usize = app.session.entries[..match_line.entry]
         .iter()
         .map(|entry| radian_tui::render::display_lines(entry, app.display_modes(), 40).len())
         .sum::<usize>()
         + match_line.line;
     assert!(
-        display_line >= app.scroll && display_line < app.scroll + usize::from(app.view_height),
+        display_line >= app.session.scroll
+            && display_line < app.session.scroll + usize::from(app.session.view_height),
         "display line {display_line} is outside the viewport (scroll {})",
-        app.scroll
+        app.session.scroll
     );
     // A global toggle drops the override.
     app.on_key(ctrl('o'));
     assert!(
-        app.entries
+        app.session
+            .entries
             .iter()
             .all(|entry| entry.fold_override.is_none())
     );
@@ -500,7 +515,7 @@ fn a_hit_in_folded_thinking_and_a_summary_expands_them() {
     let history = compacted_history("the compacted SUMMARY body", &[], &[]).expect("valid");
     app.push_message(&history[0]);
     render(&mut app);
-    let folded = app.total_lines;
+    let folded = app.session.total_lines;
     // Search for the thinking text.
     app.on_key(ctrl('f'));
     for c in "thought".chars() {
@@ -508,13 +523,14 @@ fn a_hit_in_folded_thinking_and_a_summary_expands_them() {
     }
     assert_eq!(app.find_state().unwrap().matches.len(), 1);
     let thinking = app
+        .session
         .entries
         .iter()
         .position(|entry| entry.fold_override == Some(true))
         .expect("the thinking entry opened");
     render(&mut app);
     assert!(
-        app.total_lines > folded,
+        app.session.total_lines > folded,
         "the thinking text is laid out now"
     );
     // Now search for the summary's text: the override moves to that entry.
@@ -526,6 +542,7 @@ fn a_hit_in_folded_thinking_and_a_summary_expands_them() {
     }
     assert_eq!(app.find_state().unwrap().matches.len(), 1);
     let now: Vec<usize> = app
+        .session
         .entries
         .iter()
         .enumerate()

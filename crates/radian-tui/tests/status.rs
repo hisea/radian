@@ -35,7 +35,7 @@ fn screen(app: &mut App, width: u16, height: u16) -> String {
 /// Records one provider-reported usage the way the event sink does (ADR 0023 U5): the fact is
 /// written to the session projection, not to `App`.
 fn record_usage(app: &App, input: Option<u64>, output: Option<u64>) {
-    app.projection.add_usage(&ModelUsage {
+    app.session.projection.add_usage(&ModelUsage {
         input,
         output,
         ..Default::default()
@@ -194,7 +194,8 @@ fn applying_a_theme_changes_the_rendered_colors() {
     );
     assert_ne!(dark, light, "the switch must change the rendered color");
     assert!(
-        app.entries
+        app.session
+            .entries
             .iter()
             .any(|entry| entry.text.contains("theme saved to /tmp/config.toml")),
         "the notice is shown"

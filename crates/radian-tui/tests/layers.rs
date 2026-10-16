@@ -59,7 +59,7 @@ fn ctrl_c_cancels_while_an_approval_modal_is_open() {
     let mut app = App::new("m", "s");
     // The turn state is a session fact written by the event sink (ADR 0023 U5), so the test
     // sets it on the projection the way the sink would.
-    app.projection.set_turn(TurnState::Running);
+    app.session.projection.set_turn(TurnState::Running);
     app.update(Input::Pending(Some(Box::new(approval_view())), 1));
     assert!(app.pending_approval().is_some());
     assert_tiers(&app);
@@ -183,7 +183,7 @@ fn a_rebound_escape_still_reaches_the_transcript() {
     assert_eq!(app.input.text(), "");
     // The state is running so an empty input would cancel; it is empty only after the clear.
     // The turn state is a session fact, read from the projection (ADR 0023 U5).
-    let _ = app.projection.read().turn() == TurnState::Idle;
+    let _ = app.session.projection.read().turn() == TurnState::Idle;
 }
 
 /// Unconsumed input falls toward the surface: while the find overlay is open, PageUp still
@@ -198,13 +198,13 @@ fn the_find_overlay_passes_navigation_to_the_transcript() {
     app.scroll_to_bottom();
     app.find_open();
     assert!(app.find_state().is_some());
-    let before = app.scroll;
+    let before = app.session.scroll;
     app.on_key(key(KeyCode::PageUp));
     assert!(
-        app.scroll < before,
+        app.session.scroll < before,
         "PageUp must reach the transcript through the find overlay ({} -> {})",
         before,
-        app.scroll
+        app.session.scroll
     );
     assert!(
         app.find_state().is_some(),

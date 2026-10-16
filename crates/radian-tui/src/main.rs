@@ -900,7 +900,7 @@ fn run(
     // OpenAI-compatible sends none.
     // The app was built before the model was resolved (review M1): the status bar's model name
     // is set here, once, from the effective route.
-    app.model_name = model_name.clone();
+    app.session.model_name = model_name.clone();
     let request_max_output = match provider {
         Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
         Provider::OpenAiCompatible => None,
@@ -948,7 +948,7 @@ fn run(
         (None, None) => radian_host::generate_session_id(),
     };
     validate_session_id(&session_id)?;
-    app.session_id = session_id.clone();
+    app.session.session_id = session_id.clone();
     let user_headers = parse_headers(&header_args, &session_id)?;
     // Header values and **every** key in `auth.json` must not reach the panic log or an export
     // (dogfooding D4; ADR 0013 T4). The startup provider's key alone is not enough: a session
@@ -2510,7 +2510,7 @@ fn coalesce_resize(rows: u16, cols: u16) -> InputEvent {
 /// streaming buffer still changes what is on screen. `false` means another `Dirty` is already
 /// in flight, so this one is coalesced away.
 fn apply_dirty(app: &mut App) -> bool {
-    match app.projection.take_snapshot() {
+    match app.session.projection.take_snapshot() {
         Some(snapshot) => {
             app.update(AppInput::Stream(snapshot));
             true
@@ -2670,11 +2670,11 @@ impl LoopContext<'_> {
                         format!("driver panicked: {message}")
                     }
                 };
-                app.session_ended = Some(reason.clone());
-                app.pending_fork = None;
-                app.projection.set_turn(radian_tui::TurnState::Idle);
-                app.note = Some(reason.clone());
-                app.entries.push(radian_tui::Entry::new(
+                app.session.session_ended = Some(reason.clone());
+                app.session.pending_fork = None;
+                app.session.projection.set_turn(radian_tui::TurnState::Idle);
+                app.session.note = Some(reason.clone());
+                app.session.entries.push(radian_tui::Entry::new(
                     radian_tui::EntryKind::Notice,
                     format!("the session ended: {reason}"),
                 ));
@@ -2683,7 +2683,7 @@ impl LoopContext<'_> {
         };
         // The completion menu's current-value markers read these; keep them in step with the
         // app (the footer's `reasoning` item is the same value).
-        if let Some(level) = app.thinking_level.clone() {
+        if let Some(level) = app.session.thinking_level.clone() {
             self.current_thinking = level;
         }
         effects.extend(result.effects);
@@ -3416,7 +3416,7 @@ fn ui_loop(
             startup_route: startup_route.clone(),
             route_price: Arc::clone(&route_price),
             config_providers: config_providers.clone(),
-            current_thinking: app.thinking_level.clone().unwrap_or_default(),
+            current_thinking: app.session.thinking_level.clone().unwrap_or_default(),
             current_theme,
             thinking_max_tokens,
             workspace,
@@ -3471,6 +3471,7 @@ fn ui_loop(
                 .map(|deadline| deadline.saturating_duration_since(now));
             // A `/fork` waiting for the turn boundary has its own deadline (FORK_COMMIT_WAIT).
             let fork_remaining = app
+                .session
                 .pending_fork
                 .map(|deadline| deadline.saturating_duration_since(now));
             let wait_remaining = match (quit_remaining, fork_remaining) {
@@ -3502,6 +3503,7 @@ fn ui_loop(
                         // A `/fork` waiting for the journaled turn boundary: give up at its
                         // deadline with a notice, never an empty child session.
                         if app
+                            .session
                             .pending_fork
                             .is_some_and(|d| std::time::Instant::now() >= d)
                             && app.update(AppInput::ForkDeadline).dirty

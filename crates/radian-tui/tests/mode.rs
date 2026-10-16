@@ -14,7 +14,8 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 fn notices(app: &App) -> Vec<String> {
-    app.entries
+    app.session
+        .entries
         .iter()
         .filter(|entry| entry.kind == radian_tui::EntryKind::Notice)
         .map(|entry| entry.text.clone())
@@ -24,7 +25,7 @@ fn notices(app: &App) -> Vec<String> {
 /// The app with the mode the host would have written into the projection.
 fn app_with(mode: &str) -> App {
     let app = App::new("m", "s");
-    app.projection.set_mode(Some(mode.to_owned()));
+    app.session.projection.set_mode(Some(mode.to_owned()));
     app
 }
 
@@ -86,7 +87,7 @@ fn an_applied_switch_moves_the_projection_and_notices() {
         result: Ok(()),
     });
     assert!(result.effects.is_empty(), "{:?}", result.effects);
-    assert_eq!(app.projection.read().mode(), Some("lead"));
+    assert_eq!(app.session.projection.read().mode(), Some("lead"));
     assert!(
         notices(&app)
             .iter()
@@ -106,7 +107,7 @@ fn a_refused_switch_is_a_notice_and_changes_nothing() {
         result: Err("a task agent's role comes from its brief and cannot be switched".into()),
     });
     assert!(result.effects.is_empty(), "{:?}", result.effects);
-    assert_eq!(app.projection.read().mode(), Some("general"));
+    assert_eq!(app.session.projection.read().mode(), Some("general"));
     assert!(
         notices(&app)
             .iter()

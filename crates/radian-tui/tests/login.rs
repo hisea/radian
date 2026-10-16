@@ -23,7 +23,8 @@ fn submit(app: &mut App, line: &str) -> Vec<Effect> {
 }
 
 fn notices(app: &App) -> Vec<String> {
-    app.entries
+    app.session
+        .entries
         .iter()
         .filter(|entry| entry.kind == radian_tui::app::EntryKind::Notice)
         .map(|entry| entry.text.clone())

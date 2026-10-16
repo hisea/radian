@@ -121,7 +121,7 @@ fn markdown_entries(n: usize) -> Vec<Entry> {
 
 fn new_app(n: usize) -> App {
     let mut app = App::new("mock", "perf");
-    app.entries = entries(n);
+    app.session.entries = entries(n);
     app
 }
 
@@ -263,7 +263,7 @@ fn perf_render_scroll_50k() {
         .draw(|frame| render::draw(frame, &mut app))
         .unwrap();
     let ctrl_home = start.elapsed();
-    assert_eq!(app.scroll, 0, "Ctrl-Home must reach the top");
+    assert_eq!(app.session.scroll, 0, "Ctrl-Home must reach the top");
     assert!(!app.is_following(), "the top is not the bottom");
     let mut to_top = vec![ctrl_home];
     for _ in 0..4 {
@@ -277,7 +277,7 @@ fn perf_render_scroll_50k() {
             .draw(|frame| render::draw(frame, &mut app))
             .unwrap();
         to_top.push(start.elapsed());
-        assert_eq!(app.scroll, 0, "Ctrl-Home must reach the top");
+        assert_eq!(app.session.scroll, 0, "Ctrl-Home must reach the top");
     }
     let (home50, home95, home_max) = percentiles(to_top);
 
@@ -314,7 +314,7 @@ fn perf_render_streaming() {
     let mut apps: Vec<App> = (0..4)
         .map(|_| {
             let app = new_app(1_000);
-            app.projection.set_turn(TurnState::Running);
+            app.session.projection.set_turn(TurnState::Running);
             app
         })
         .collect();
@@ -404,7 +404,7 @@ fn perf_render_markdown() {
     for n in [1_000usize, 10_000, 50_000] {
         let mut terminal = test_terminal();
         let mut app = App::new("mock", "perf");
-        app.entries = markdown_entries(n);
+        app.session.entries = markdown_entries(n);
         let (p50, p95, _max) = measure_draws(&mut app, &mut terminal, 30);
         // The global toggle re-lays every entry out: the first frame after it.
         app.reasoning_mode = ReasoningMode::Expanded;
@@ -801,7 +801,7 @@ fn dbg_render_costs() {
         .map(|i| format!("fn f{i}(x: &str) -> usize {{ x.len() + {i} }}\n"))
         .collect();
     let mut app = App::new("m", "s");
-    app.entries.push(Entry::new(
+    app.session.entries.push(Entry::new(
         EntryKind::Assistant,
         format!("```rust\n{code}```\n"),
     ));
