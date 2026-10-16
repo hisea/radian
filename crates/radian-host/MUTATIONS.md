@@ -1333,3 +1333,18 @@ cargo test -p radian-host --test named --locked --no-fail-fast -- a_queued_send_
 再在两个 turn 各由一个**人工审批闸门**扣住（无 sleep）的情况下断言 wait 在 turn 2 运行期间返回
 `still_running`、释放 turn 2 后返回 turn 2 的回复「two」（从不是 turn 1 的「one」）。
 
+## ADR 0030 片 8：进程控制口（Unix socket、JSON lines，2026-10-16）
+
+Base `a3eb856`（分支 `oc/orch-s8`）· 就地改 `src/control.rs`，每次从 `/tmp/control.rs.bak`
+`cp` 还原并用 `cmp` 确认逐字节相同；每个变异跑
+`cargo test -p radian-host --test control --no-fail-fast <测试名>`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| CTL-1 | `parse_source` 接受 `"user"`（`"user" => Ok(InputSource::User)`） | ✅ failed | `sources_are_fixed_by_the_port_and_an_approval_verb_does_not_exist`（`source: user` 得到 `ok: true` 而不是拒绝） |
+| CTL-2 | 扇出改成 `client.tx.blocking_send(...)`（在运行时线程上等慢客户端） | ✅ failed（进程 SIGABRT：`blocking_send` 在运行时线程上 panic） | `a_slow_subscriber_is_disconnected_and_turns_still_finish` |
+| CTL-3 | `bind_unix` 去掉 `clean_stale_sockets(&dir)` | ✅ failed | `the_socket_is_private_cleans_stale_files_and_is_removed_on_drop`（死 pid 的 `2147483647.sock` 仍在） |
+| CTL-4 | socket 模式写成 `0o644` | ✅ failed | 同上（mode 断言 `0o600`） |
+
+4/4 抓住。CTL-2 的「抓住」表现为 panic/abort（tokio 禁止在运行时线程上 `blocking_send`），
+这正是变异要证明的：扇出绝不能在生产事件的线程上等待客户端。

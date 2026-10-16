@@ -1284,8 +1284,35 @@ fn run(
     // The renderer reads the session facts from the host's projection, not a private copy
     // (ADR 0023 U5). Set here because the app is created before the session exists (`--pick`).
     app.set_projection(Arc::clone(&projection));
-    let live: Arc<dyn EventSink> =
+    // ADR 0030 slice 8: the process control port. Bound before the session so its fan-out can
+    // wrap the host's own sinks; the startup line names the path. A bind failure is a warning,
+    // never a startup refusal. The bind creates a tokio listener, and this setup runs outside
+    // the async `run` (sessions are opened with `runtime.block_on`), so enter the runtime first.
+    let control = {
+        let _guard = runtime.enter();
+        match radian_host::ControlServer::bind_if(
+            config.control.enabled,
+            radian_host::radian_home().as_deref(),
+        ) {
+            Ok(server) => server,
+            Err(error) => {
+                eprintln!("[control] disabled: {error}");
+                None
+            }
+        }
+    };
+    if let Some(server) = &control {
+        eprintln!("[control] {}", server.path().display());
+    }
+    // Held for the whole session: the socket is removed on the normal return and on the panic
+    // unwind, even while the driver task still holds a reference to the server (ADR 0030 O6).
+    let _control_guard = control.as_ref().map(|server| server.guard());
+    let live_inner: Arc<dyn EventSink> =
         Arc::new(ProjectionSink::new(tx.clone(), Arc::clone(&projection)));
+    let live: Arc<dyn EventSink> = match &control {
+        Some(server) => server.events(live_inner),
+        None => live_inner,
+    };
     // ADR 0023 U7: approvals go through the session's pending queue, so the UI shows one
     // arrival order and never supersedes a request. An `auto` policy (ADR 0026 D9) answers
     // an `ask` before any approver is consulted, so nothing reaches the queue under it.
@@ -1301,7 +1328,7 @@ fn run(
             })
         })
     };
-    let runtime_events = {
+    let runtime_events_inner = {
         let tx = tx.clone();
         let secrets = Arc::clone(&secrets);
         Arc::new(move |event: &radian_session::RuntimeEvent| {
@@ -1317,6 +1344,10 @@ fn run(
             };
             let _ = tx.send(UiEvent::Runtime(redacted));
         })
+    };
+    let runtime_events: Arc<dyn radian_runtime::RuntimeEvents> = match &control {
+        Some(server) => server.runtime_events(runtime_events_inner),
+        None => runtime_events_inner,
     };
     let driver_stopped = {
         let tx = tx.clone();
@@ -1567,6 +1598,10 @@ fn run(
         ))
         .map_err(|error| error.to_string())?;
     mark("open-session-done");
+    // ADR 0030 O6: start accepting control requests for this session.
+    if let Some(server) = &control {
+        server.serve(runtime.handle(), radian_host::ControlTarget::of(&session));
+    }
     // The providers worth refreshing now: the one this run started with. `/model`'s other
     // targets refresh on their next use (the fetch itself is on the loop's runtime).
     let refresh_targets = vec![key_id.clone()];
