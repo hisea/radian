@@ -56,6 +56,7 @@ mod list;
 mod patch;
 mod provider;
 mod read;
+pub mod safe_fs;
 mod search;
 mod shell;
 mod workspace;

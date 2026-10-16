@@ -62,22 +62,13 @@ pub(crate) async fn run(
         ));
     }
 
-    let target = root.resolve_parent_for_write(&args.path)?;
-    root.guard_mutation_target(&args.path, &target)?;
-
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    // Never follow a symlink at the destination. The guard above already refuses links, so
-    // this is defence in depth against the destination being swapped for a link between the
-    // guard and this open.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(&target)
-        .map_err(|e| write_error(&args.path, e))?;
+    // ADR 0039 decision 2: parents are walked by fd with `O_NOFOLLOW | O_DIRECTORY`, the
+    // destination is opened with `O_CREAT | O_NOFOLLOW` relative to its parent's fd, and the
+    // regular-file and hard-link checks run on the open fd **before** it is truncated. Nothing
+    // is re-opened by path, so a parent swapped for a link mid-call is refused, not followed.
+    let opened = root.open_write(&args.path, true)?;
+    let mut file = opened.file;
+    crate::safe_fs::truncate(&file).map_err(|e| io_failure(&args.path, e))?;
     file.write_all(args.content.as_bytes())
         .and_then(|()| file.flush())
         .map_err(|e| io_failure(&args.path, e))?;
@@ -93,17 +84,4 @@ pub(crate) async fn run(
             "bytes_written": args.content.len(),
         })),
     })
-}
-
-/// `ELOOP` here means the destination grew a symlink between the guard and the open; report
-/// it as the symlink rule rather than a generic io error.
-pub(crate) fn write_error(user: &str, error: std::io::Error) -> ToolFailure {
-    #[cfg(unix)]
-    if error.raw_os_error() == Some(libc::ELOOP) {
-        return fail(
-            "path_is_symlink",
-            format!("`{user}` is a symlink; this tool never writes through a link"),
-        );
-    }
-    io_failure(user, error)
 }

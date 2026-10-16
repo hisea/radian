@@ -94,15 +94,17 @@ pub(crate) async fn diff(
         && path != "."
         && path != "./"
     {
-        // The pathspec is resolved (parent canonicalized) and must stay inside the root;
-        // it is passed to git relative to the repository, after `--`.
-        let target = root.resolve_parent_for_write(path)?;
-        let relative = target.strip_prefix(root.root()).map_err(|_| {
-            fail(
+        // The pathspec is checked through the root's directory fd (ADR 0039 decision 2: the
+        // parents are walked with `O_NOFOLLOW`, the leaf is `lstat`ed and must not be a
+        // link) and passed to git relative to the repository, after `--`. git opens the
+        // tracked content itself.
+        let relative = root.relative_checked(path)?;
+        if relative.as_os_str().is_empty() {
+            return Err(fail(
                 "path_outside_workspace",
-                format!("`{path}` is outside the workspace"),
-            )
-        })?;
+                format!("`{path}` does not name a file or directory"),
+            ));
+        }
         argv.push("--".into());
         argv.push(relative.to_string_lossy().into_owned());
     }
