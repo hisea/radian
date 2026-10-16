@@ -1007,3 +1007,74 @@ fn staging_covers_deletions_and_a_new_directory() {
         "the deletion must be staged: {tree}"
     );
 }
+
+/// ADR 0039 decision 3 (review fix 1): a moved gitlink is staged as mode 160000 with the
+/// submodule's HEAD, and nothing inside the submodule runs a filter during the commit (only
+/// `git rev-parse HEAD` runs there, with the shared no-filter overrides).
+#[test]
+fn a_moved_submodule_is_staged_as_a_gitlink_without_running_a_filter() {
+    // The submodule's own repository, with two commits.
+    let sub = temp("submodule-src");
+    assert!(git(&sub, &["init", "-q", "-b", "main"]));
+    assert!(git(&sub, &["config", "user.email", "t@example.com"]));
+    assert!(git(&sub, &["config", "user.name", "t"]));
+    std::fs::write(sub.join("s.txt"), "s1\n").unwrap();
+    assert!(git(&sub, &["add", "-A"]));
+    assert!(git(&sub, &["commit", "-q", "-m", "s1"]));
+    let first = git_text(&sub, &["rev-parse", "HEAD"]);
+    std::fs::write(sub.join("s.txt"), "s2\n").unwrap();
+    assert!(git(&sub, &["commit", "-qam", "s2"]));
+
+    // The superproject, with the submodule at its second commit.
+    let dir = temp("submodule-super");
+    assert!(git(&dir, &["init", "-q", "-b", "feature/x"]));
+    assert!(git(&dir, &["config", "user.email", "t@example.com"]));
+    assert!(git(&dir, &["config", "user.name", "t"]));
+    std::fs::write(dir.join("top.txt"), "top\n").unwrap();
+    assert!(git(&dir, &["add", "-A"]));
+    assert!(git(&dir, &["commit", "-q", "-m", "init"]));
+    assert!(git(
+        &dir,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            sub.to_str().unwrap(),
+            "sub",
+        ]
+    ));
+    assert!(git(&dir, &["commit", "-q", "-m", "add sub"]));
+
+    // Move the gitlink back to the first commit, and arm a marker filter in the submodule.
+    let checkout = dir.join("sub");
+    assert!(git(&checkout, &["checkout", "-q", first.as_str()]));
+    let marker = temp("submodule-marker").join("FILTER-RAN");
+    let script = checkout.join("evil-clean.sh");
+    write_executable(
+        &script,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    );
+    assert!(git(
+        &checkout,
+        &["config", "filter.evil.clean", script.to_str().unwrap()]
+    ));
+    assert!(git(&checkout, &["config", "filter.evil.required", "true"]));
+    std::fs::write(checkout.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    // Stat-dirty inside the submodule.
+    std::fs::write(checkout.join("s.txt"), "s1-changed\n").unwrap();
+
+    let committed = commit_in(&dir, "move the submodule", &[], None, &[]).expect("the commit");
+    assert!(committed.files >= 1, "{committed:?}");
+    let staged = git_text(&dir, &["ls-tree", "HEAD", "sub"]);
+    assert!(
+        staged.starts_with("160000") && staged.contains(first.as_str()),
+        "the moved submodule must be staged as a 160000 gitlink at {first}: {staged}"
+    );
+    assert!(
+        !marker.exists(),
+        "nothing inside the submodule may run a filter in the host"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

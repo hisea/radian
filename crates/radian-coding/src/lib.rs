@@ -50,6 +50,7 @@ mod ask;
 mod git;
 mod glob;
 mod grep;
+pub mod host_git;
 mod jobs;
 mod list;
 mod patch;

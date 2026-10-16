@@ -326,11 +326,14 @@ fn shell() -> String {
 }
 
 /// The git branch and whether the working tree has changes, when `cwd` is in a repository.
+/// A host `git` call: it carries the shared no-filter overrides (ADR 0039 decision 3), because
+/// `git status` reads the clean filter of a stat-dirty file. Without them the read is skipped
+/// rather than run unguarded.
 fn git_state(cwd: &Path) -> Option<(String, bool)> {
     let run = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
+        let mut command = radian_coding::host_git::host_git_command(cwd).ok()?;
+        command.args(args);
+        command
             .output()
             .ok()
             .filter(|output| output.status.success())
@@ -718,5 +721,67 @@ mod tests {
         assert!(hooks.refresh().contains("model: m-1"));
         *slot.lock().unwrap() = json!({"model": {"provider": "p", "model": "m-3"}});
         assert!(hooks.refresh().contains("model: m-3"));
+    }
+    /// ADR 0039 decision 3: `session_layer` reads the branch and dirtiness with the shared
+    /// no-filter overrides, so a stat-dirty file with a filter attribute never runs the clean
+    /// filter in the host.
+    #[test]
+    fn the_session_layer_reads_git_state_without_running_a_filter() {
+        let dir =
+            std::env::temp_dir().join(format!("radian-prompt-gitfilter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&dir)
+                    .args(args)
+                    .status()
+                    .expect("git")
+                    .success(),
+                "git {args:?}"
+            );
+        };
+        run(&["init", "-q", "-b", "feature"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("tracked.txt"), "one\n").unwrap();
+        run(&["add", "tracked.txt"]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        let marker = std::env::temp_dir().join(format!(
+            "radian-prompt-gitfilter-marker-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let script = dir.join("evil-clean.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        run(&["config", "filter.evil.clean", script.to_str().unwrap()]);
+        std::fs::write(dir.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+        // Stat-dirty against the index, same size (git then hashes the content and runs the
+        // clean filter).
+        std::fs::write(dir.join("tracked.txt"), "two\n").unwrap();
+
+        let layer = session_layer(&dir, "m-1");
+        assert!(
+            layer.contains("git: feature (uncommitted changes)"),
+            "{layer}"
+        );
+        assert!(
+            !marker.exists(),
+            "the prompt git_state must not run a repository filter"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&marker);
     }
 }

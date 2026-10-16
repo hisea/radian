@@ -939,3 +939,24 @@ allowed_branch=None)` 在 `main` 上，此时只有 `refuse_main` 在起作用�
 filter 名字 + 对每个名字 `-c filter.<name>.{clean,smudge,process}=` 与 `required=false`」。这一层
 的测试是 `a_driver_in_info_attributes_never_runs` 与 `a_driver_in_core_attributes_file_never_runs`；
 SG-M3 证明它们确实区分「关掉命令」与「没关」。
+
+## sec-git 复核修订 1：每个宿主 git 调用都走共享 helper（2026-10-16）
+
+工作树 `.radian-worktrees/sec-git`，基线 `c33feca`。变异就地施加，用 `.radian/scratch/mut2/`
+的副本还原（每个变异后 `cmp` 证明与副本一致）；每个变异跑对应的测试。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SG-F1-M1 | 页脚的 `background_git` 退回裸 `Command::new("git") -C dir`（丢掉 no-filter 覆盖） | `contrib::tests::the_git_contributor_never_runs_a_repository_filter`（页脚读跑了 clean filter）；守卫 `every_host_git_call_is_built_from_the_shared_helper`（`contrib.rs` 出现生产裸 git 调用） | ✅ 2 FAILED |
+| SG-F1-M2 | `radian-coding` 的 `git_status`/`git_diff` 退回裸 git（丢掉覆盖） | `the_git_tools_never_run_a_repository_filter`（工具跑了 clean filter） | ✅ 1 FAILED |
+| SG-F1-M3 | gitlink 用 100644 而不是 160000 暂存 | `a_moved_submodule_is_staged_as_a_gitlink_without_running_a_filter`（模式不对） | ✅ 1 FAILED |
+
+3/3 全抓。守卫测试（`crates/radian-coding/tests/host_git.rs`）遍历 `crates/*/src` 里 `#[cfg(test)]`
+之前的部分，`Command::new("git")` 只允许出现在 helper 自己（`host_git.rs`）与沙箱测试 harness
+（`radian-sandbox/src/harness.rs`，其唯一的裸 git 只建测试仓库）；新增一个生产裸 git 调用会让它
+失败，SG-F1-M1 的守卫那条就是证明。
+
+**如实记录（测试的触发条件）**：`git status` 只在**大小相同**的 stat-dirty 文件上才哈希内容、
+从而跑 clean filter；内容大小不同时 git 直接按 stat 判为改动，不跑 filter。所以三个行为测试都用
+「与 index blob 同大小」的改动（`one\n` → `two\n`）。第一次写测试时用了不同大小（`one\ntwo\n`），
+SG-F1-M1 的行为测试假绿（只有守卫抓住）；改成同大小后行为测试也抓住。

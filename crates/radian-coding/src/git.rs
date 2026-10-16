@@ -120,12 +120,12 @@ async fn run_git(
     limits: &Limits,
     argv: &[String],
 ) -> Result<String, ToolFailure> {
-    let mut command = tokio::process::Command::new("git");
-    command
-        .arg("--no-optional-locks")
-        .arg("--no-pager")
-        .arg("-C")
-        .arg(root.root());
+    // ADR 0039 decision 3: a host git call carries the shared no-filter overrides.
+    let mut command = tokio::process::Command::from(
+        crate::host_git::host_git_command(root.root())
+            .map_err(|error| fail("git_unavailable", error))?,
+    );
+    command.arg("--no-optional-locks").arg("--no-pager");
     command.args(argv);
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
