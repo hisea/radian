@@ -116,7 +116,8 @@ pub struct AuthEntry {
     pub provider_id: String,
     /// The entry's `type` (`api_key`, `oauth`, or an unknown string).
     pub kind: String,
-    /// True only for an `api_key` entry whose key resolves (not `!`, its env vars are set).
+    /// True for an `api_key` entry whose key resolves (not `!`, its env vars are set), or
+    /// (ADR 0026, `chatgpt` only) an `oauth` entry. See [`AuthStore::is_usable`].
     pub usable: bool,
 }
 
@@ -370,14 +371,30 @@ impl AuthStore {
                     .and_then(Value::as_str)
                     .unwrap_or("unknown")
                     .to_owned();
-                let usable = self.resolve_key(provider_id).ok().flatten().is_some();
                 AuthEntry {
                     provider_id: provider_id.clone(),
                     kind,
-                    usable,
+                    usable: self.is_usable(provider_id),
                 }
             })
             .collect()
+    }
+
+    /// Whether `provider_id` has **any** login a host can actually use: an `api_key` entry
+    /// that resolves, or (ADR 0026, scoped to `chatgpt` only) an `oauth` entry.
+    /// These are different shapes — `resolve_key` only ever returns the former, since an
+    /// oauth entry carries no single static key, only an access/refresh pair a host refreshes
+    /// itself — so a caller that only wants "is this provider logged in" (not the key itself)
+    /// uses this instead.
+    ///
+    /// The oauth exception is scoped to `chatgpt` by id, not "any provider with an oauth
+    /// entry": a stray oauth entry under, say, `anthropic` (copied from pi, or a future
+    /// import) must not make that provider look logged-in when nothing in this build knows
+    /// how to use an oauth credential there.
+    pub fn is_usable(&self, provider_id: &str) -> bool {
+        self.resolve_key(provider_id).ok().flatten().is_some()
+            || (provider_id == crate::oauth_chatgpt::PROVIDER_ID
+                && self.oauth_entry(provider_id).is_some())
     }
 
     /// Atomically writes the store: a temp file in the same directory, `0600`, then rename.
@@ -448,6 +465,13 @@ pub fn remove(provider_id: &str) -> Result<(), AuthError> {
 /// [`AuthStore::list`] for the process's store.
 pub fn list() -> Result<Vec<AuthEntry>, AuthError> {
     Ok(AuthStore::open()?.list())
+}
+
+/// [`AuthStore::is_usable`] for the process's store. A read failure (no home, a corrupt or
+/// too-wide file) is **not** a login — a host deciding whether to refuse startup must see the
+/// same "no" a missing entry gives, not silently treat a broken store as logged in.
+pub fn has_login(provider_id: &str) -> bool {
+    AuthStore::open().is_ok_and(|store| store.is_usable(provider_id))
 }
 
 /// Every usable key in this process's `auth.json`, sorted and deduplicated (ADR 0013 T4).
@@ -997,6 +1021,36 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(scratch.path()).unwrap()).unwrap();
         assert!(after.get("a").is_none());
         assert_eq!(after["b"]["key"], "kb");
+    }
+
+    /// ADR 0026 slice 3: a `chatgpt` oauth entry is usable (unlike slice ①, which
+    /// only stored it); the same oauth *type* under a different provider id is still not —
+    /// the exception is scoped to the one id that knows how to use it.
+    #[test]
+    fn chatgpt_oauth_is_usable_but_the_same_shape_elsewhere_is_not() {
+        let scratch = Scratch::new("oauth-usable");
+        write_auth(
+            &scratch,
+            r#"{
+                "chatgpt": {"type": "oauth", "access": "a", "refresh": "r", "expires": 1},
+                "anthropic": {"type": "oauth", "access": "a", "refresh": "r", "expires": 1}
+            }"#,
+        );
+        let store = scratch.open().unwrap();
+        assert!(store.is_usable("chatgpt"));
+        assert!(!store.is_usable("anthropic"));
+        assert!(!store.is_usable("no-such-entry"));
+        let listed = store.list();
+        assert!(
+            listed
+                .iter()
+                .any(|e| e.provider_id == "chatgpt" && e.kind == "oauth" && e.usable)
+        );
+        assert!(
+            listed
+                .iter()
+                .any(|e| e.provider_id == "anthropic" && e.kind == "oauth" && !e.usable)
+        );
     }
 
     #[test]

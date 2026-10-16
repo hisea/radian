@@ -13,6 +13,7 @@ pub mod approval;
 pub mod atomic_write;
 pub mod auth;
 mod catalog;
+pub mod chatgpt_usage;
 pub mod config;
 pub mod context;
 pub mod contrib;
@@ -63,8 +64,8 @@ pub use agents::{
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
     AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, OAuthEntry, RADIAN_BASE_URL, ResolvedKey,
-    auth_path, list as list_auth, remove as remove_auth, resolve_key, resolve_note, resolved_keys,
-    upsert_api_key as upsert_auth_api_key,
+    auth_path, has_login, list as list_auth, remove as remove_auth, resolve_key, resolve_note,
+    resolved_keys, upsert_api_key as upsert_auth_api_key,
 };
 /// The machine's hostname (ADR 0027 `host`), read once at startup. `HOSTNAME` is
 /// set by most shells (and by BSD's `login`); the `hostname` command is the portable fallback.
@@ -93,6 +94,7 @@ pub use catalog::{
     provider_models_cache, provider_models_stale, read_provider_models, resolve, resolve_offline,
     write_provider_models,
 };
+pub use chatgpt_usage::{ChatGptUsage, USAGE_BASE as CHATGPT_USAGE_BASE};
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{

@@ -17,6 +17,9 @@ use radian_runtime::{ConfigSlot, ModelRoute};
 use agent_core::{Model, ModelContext, ModelError, ModelRequest, ModelResponse};
 use agent_provider_anthropic::{Anthropic, AnthropicConfig, ThinkingConfig};
 use agent_provider_openai_compatible::{OpenAiCompatible, OpenAiCompatibleConfig};
+use agent_provider_openai_responses::{OpenAiResponses, OpenAiResponsesConfig};
+
+use crate::oauth_chatgpt;
 
 /// The `max_tokens` sent to Anthropic when `--max-tokens` is not given. The Messages API
 /// requires the field and defines no server-side default, so the host must pick one. It
@@ -37,6 +40,10 @@ pub const MIN_THINKING_BUDGET: u32 = 1024;
 pub enum Provider {
     OpenAiCompatible,
     Anthropic,
+    /// The `chatgpt` descriptor's protocol (ADR 0026 slice 3): OpenAI's Responses
+    /// API, with the OAuth access token and account id resolved fresh per request rather than
+    /// a fixed key (see [`ChatGptModel`]).
+    ChatGpt,
 }
 
 impl Provider {
@@ -45,15 +52,17 @@ impl Provider {
         match self {
             Self::OpenAiCompatible => "openai-compatible",
             Self::Anthropic => "anthropic",
+            Self::ChatGpt => "openai-responses",
         }
     }
 
     /// The public endpoint used when `--base-url` is omitted. For Anthropic this is
-    /// everything before `/v1/messages`.
+    /// everything before `/v1/messages`; for ChatGpt, everything before `/responses`.
     pub fn default_base_url(self) -> &'static str {
         match self {
             Self::OpenAiCompatible => "https://api.openai.com/v1",
             Self::Anthropic => "https://api.anthropic.com",
+            Self::ChatGpt => "https://chatgpt.com/backend-api/codex",
         }
     }
 
@@ -62,8 +71,10 @@ impl Provider {
         match name {
             "openai-compatible" => Ok(Self::OpenAiCompatible),
             "anthropic" => Ok(Self::Anthropic),
+            "openai-responses" => Ok(Self::ChatGpt),
             other => Err(format!(
-                "--provider {other:?} is not one of openai-compatible, anthropic"
+                "--provider {other:?} is not one of openai-compatible, anthropic, \
+                 openai-responses"
             )),
         }
     }
@@ -140,6 +151,7 @@ pub struct ModelArgs {
 pub enum HostModel {
     OpenAi(OpenAiCompatible),
     Anthropic(Anthropic),
+    ChatGpt(ChatGptModel),
 }
 
 impl Model for HostModel {
@@ -151,7 +163,61 @@ impl Model for HostModel {
         match self {
             Self::OpenAi(model) => model.complete(request, cx).await,
             Self::Anthropic(model) => model.complete(request, cx).await,
+            Self::ChatGpt(model) => model.complete(request, cx).await,
         }
+    }
+}
+
+/// The `chatgpt` descriptor's model (ADR 0026). Unlike the other two
+/// variants, this does **not** wrap a single pre-built adapter: the access token can expire
+/// mid-session, so every `complete()` call resolves a fresh token (refreshing it first if
+/// it is within [`oauth_chatgpt::REFRESH_MARGIN`] of expiring — slice ①'s `ensure_fresh`),
+/// decodes the account id from it (slice ①'s `decode_account_id`, also done fresh each call,
+/// per ADR 0026: it is never stored), and only then builds the
+/// short-lived [`OpenAiResponses`] adapter that actually sends the request.
+///
+/// Building that adapter is cheap (URL parsing and a `reqwest::Client::builder()`, no I/O —
+/// see `OpenAiResponses::new`), so doing it per call costs nothing a long-lived instance
+/// would have saved; the alternative (mutating a cached adapter's headers in place) is not
+/// available, since the adapter stores them in an already-built, immutable `HeaderMap`.
+pub struct ChatGptModel {
+    /// Everything before `/responses` (the same convention [`OpenAiResponsesConfig::base_url`]
+    /// documents). Overridable so a test points it at a local mock; production always uses
+    /// the descriptor's fixed endpoint.
+    pub base_url: String,
+    pub model: String,
+    /// The descriptor's static headers only (`OpenAI-Beta`, `originator`, `session_id` —
+    /// `chatgpt_headers` in `provider.rs`), **not** `Authorization`/`chatgpt-account-id`.
+    pub static_headers: Vec<(String, String)>,
+    pub reasoning_effort: Option<String>,
+    /// Where the OAuth refresh/token calls go; a test points this at a local fake server too
+    /// (production always uses [`oauth_chatgpt::Endpoints::default`]).
+    pub endpoints: oauth_chatgpt::Endpoints,
+}
+
+impl Model for ChatGptModel {
+    async fn complete(
+        &self,
+        request: ModelRequest,
+        cx: ModelContext<'_>,
+    ) -> Result<ModelResponse, ModelError> {
+        let access = oauth_chatgpt::ensure_fresh(&self.endpoints)
+            .await
+            .map_err(|error| ModelError::Protocol(error.to_string()))?;
+        let account_id = oauth_chatgpt::decode_account_id(&access)
+            .map_err(|error| ModelError::Protocol(error.to_string()))?;
+        let mut config = OpenAiResponsesConfig::new(&self.base_url, &self.model);
+        for (name, value) in &self.static_headers {
+            config = config.with_header(name.clone(), value.clone());
+        }
+        config = config
+            .with_header("Authorization", format!("Bearer {access}"))
+            .with_header("chatgpt-account-id", account_id);
+        config.reasoning_effort = self.reasoning_effort.clone();
+        let model = OpenAiResponses::new(config).map_err(|error| {
+            ModelError::Protocol(format!("could not build the ChatGPT request: {error}"))
+        })?;
+        model.complete(request, cx).await
     }
 }
 
@@ -232,7 +298,10 @@ fn resolve_thinking_map(
         return (Thinking::Enabled { budget_tokens }, None);
     }
     match crate::clamp_thinking_with(map, level, max_tokens) {
-        Some((_, wire)) if adapter == Provider::OpenAiCompatible => {
+        // ChatGPT's `reasoning.effort` is the same plain-string shape as `reasoning_effort`
+        // (the adapter sends the wire value as-is, ADR 0026 slice 3) — it must not
+        // fall into the Anthropic-shaped branch below.
+        Some((_, wire)) if matches!(adapter, Provider::OpenAiCompatible | Provider::ChatGpt) => {
             (Thinking::Off, Some(wire.to_owned()))
         }
         Some((_, wire)) => {
@@ -321,10 +390,14 @@ pub fn compaction_settings_for(
     let applied = crate::clamp_thinking_with(map, level, Some(max_tokens)).map(|(level, _)| level);
     let (thinking, effort) = resolve_thinking_map(map, level, None, adapter, Some(max_tokens));
     let settings = match adapter {
-        Provider::OpenAiCompatible => match effort.filter(|wire| !wire.is_empty()) {
-            Some(wire) => serde_json::json!({ "reasoning_effort": wire }),
-            None => serde_json::Value::Null,
-        },
+        // The Responses adapter reads the same `reasoning_effort` request-level key
+        // (`agent-provider-openai-responses/src/request.rs`), so this is one branch, not two.
+        Provider::OpenAiCompatible | Provider::ChatGpt => {
+            match effort.filter(|wire| !wire.is_empty()) {
+                Some(wire) => serde_json::json!({ "reasoning_effort": wire }),
+                None => serde_json::Value::Null,
+            }
+        }
         Provider::Anthropic => match thinking {
             Thinking::Off => serde_json::Value::Null,
             Thinking::Adaptive => serde_json::json!({ "thinking": { "type": "adaptive" } }),
@@ -448,6 +521,19 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
                 .map(HostModel::Anthropic)
                 .map_err(|e| format!("--base-url {shown_url}: {e}"))
         }
+        Provider::ChatGpt => {
+            // No network or file I/O here (ADR 0026): the access token
+            // and account id are resolved fresh on every `complete()` call, never at build
+            // time — see `ChatGptModel`'s doc comment for why that is the right place and
+            // costs nothing extra.
+            Ok(HostModel::ChatGpt(ChatGptModel {
+                base_url: args.base_url,
+                model: args.model,
+                static_headers: args.headers,
+                reasoning_effort: args.reasoning_effort,
+                endpoints: oauth_chatgpt::Endpoints::default(),
+            }))
+        }
     }
 }
 
@@ -531,7 +617,11 @@ impl RouteContext {
         let (provider_ref, _warning) =
             crate::resolve_provider(provider_name, &self.providers, auth_env.as_ref())?;
         let credential = crate::auth::resolve_key(provider_name).map_err(|e| e.to_string())?;
-        if credential.is_none() {
+        // `resolve_key` only ever resolves an `api_key` entry; `chatgpt`'s login is the oauth
+        // entry slice ① wrote (ADR 0026), which has no single static key to
+        // return here (`credential` stays `None` for it either way — `ChatGptModel` reads
+        // `auth.json` itself, per call). `has_login` is the presence check both shapes share.
+        if credential.is_none() && !crate::auth::has_login(provider_name) {
             return Err(format!(
                 "no credential for `{provider_name}`: run /login {provider_name} (or add an entry \
                  to ~/.radian/credentials/auth.json)"

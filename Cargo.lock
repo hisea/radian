@@ -2309,6 +2309,7 @@ dependencies = [
  "agent-extensions",
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
+ "agent-provider-openai-responses",
  "chrono",
  "clap",
  "futures-util",

@@ -125,8 +125,12 @@ impl LoginWizard {
     /// duplication (`radian login`'s numbered list builds the same list independently) this
     /// change does not introduce.
     pub fn choices() -> Vec<(String, String)> {
+        // `chatgpt` is now a real descriptor (ADR 0026 slice 3: so `/model` lists
+        // its models), but its login is the two OAuth entries pushed below, not the generic
+        // "ask for an API key" flow every other descriptor gets from this loop.
         let mut choices: Vec<(String, String)> = radian_host::descriptors()
             .iter()
+            .filter(|d| d.id != radian_host::CHATGPT_PROVIDER_ID)
             .map(|d| (d.id.to_owned(), d.display_name.to_owned()))
             .collect();
         choices.push((
