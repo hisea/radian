@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -170,12 +171,31 @@ fn add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 /// test below, so the two cannot drift.
 pub const CONTEXT_OVERFLOW_PREFIX: &str = "model context overflow:";
 
+/// The exact message every adapter returns when the caller cancelled the request
+/// ([`ModelError::Transport`]). It is built from this constant so the retry classifier
+/// cannot drift from the adapters: a cancellation is not a provider failure, so it is
+/// **never** transient and never retried (ADR 0017).
+pub const CANCELLATION_MESSAGE: &str = "the request was cancelled";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
     #[error("model transport error: {0}")]
     Transport(String),
     #[error("model protocol error: {0}")]
     Protocol(String),
+    /// The provider is **temporarily** unavailable: an HTTP 408/429/500/502/503/504/529, or an
+    /// error the provider explicitly marked as overloaded. The request never reached a decision
+    /// point, so retrying it is safe (ADR 0017). Connection and stream failures stay
+    /// [`ModelError::Transport`] — they are transient too — while a bad request (400/401/403/404)
+    /// stays [`ModelError::Protocol`] and is not retried.
+    ///
+    /// `retry_after` is the provider's `Retry-After` header, already parsed to a duration; the
+    /// core honours it (capped) instead of its own backoff. `None` means the provider sent none.
+    #[error("model unavailable: {message}")]
+    Unavailable {
+        message: String,
+        retry_after: Option<Duration>,
+    },
     /// The provider refused the request because the input is over its context window.
     ///
     /// An adapter returns this **only** when it can recognize the provider's own overflow
@@ -186,6 +206,33 @@ pub enum ModelError {
     /// turn ends `failed`); the automatic-compaction retry is a later slice.
     #[error("model context overflow: {0}")]
     ContextOverflow(String),
+}
+
+impl ModelError {
+    /// Whether the **same** request could succeed if it were sent again (ADR 0017).
+    ///
+    /// - [`ModelError::Unavailable`]: yes (408/429/5xx/529 and explicit overload).
+    /// - [`ModelError::Transport`]: yes for a connection failure, a stream that ended early or
+    ///   an idle timeout — **unless** it is the cancellation sentinel, which is never transient.
+    /// - [`ModelError::Protocol`], [`ModelError::ContextOverflow`]: no. A 400/401/403/404, a
+    ///   malformed stream and a provider-recognized context overflow are the request's fault,
+    ///   not the provider's mood; the overflow has its own path (ADR 0018).
+    pub fn is_transient(&self) -> bool {
+        match self {
+            ModelError::Unavailable { .. } => true,
+            ModelError::Transport(message) => message != CANCELLATION_MESSAGE,
+            ModelError::Protocol(_) | ModelError::ContextOverflow(_) => false,
+        }
+    }
+
+    /// The provider's requested wait before a retry, if it sent one. Only
+    /// [`ModelError::Unavailable`] can carry it.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            ModelError::Unavailable { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
 }
 
 pub struct ModelContext<'a> {
@@ -232,6 +279,52 @@ mod tests {
             !ModelError::Transport("HTTP 400: bad request".into())
                 .to_string()
                 .starts_with(CONTEXT_OVERFLOW_PREFIX)
+        );
+    }
+
+    /// ADR 0017: only the temporary failures are transient. Cancellation is the one
+    /// `Transport` that must never be retried.
+    #[test]
+    fn only_temporary_errors_are_transient() {
+        assert!(
+            ModelError::Unavailable {
+                message: "HTTP 429: slow down".into(),
+                retry_after: Some(Duration::from_secs(1)),
+            }
+            .is_transient()
+        );
+        assert!(ModelError::Transport("request failed: connection refused".into()).is_transient());
+        assert!(
+            ModelError::Transport("the stream ended before the response was complete".into())
+                .is_transient()
+        );
+        assert!(!ModelError::Transport(CANCELLATION_MESSAGE.into()).is_transient());
+        assert!(!ModelError::Protocol("HTTP 400: bad request".into()).is_transient());
+        assert!(!ModelError::ContextOverflow("HTTP 400: prompt is too long".into()).is_transient());
+    }
+
+    /// Only a provider that sent `Retry-After` can ask for a specific wait.
+    #[test]
+    fn retry_after_is_only_carried_by_unavailable() {
+        assert_eq!(
+            ModelError::Unavailable {
+                message: "HTTP 429".into(),
+                retry_after: Some(Duration::from_secs(7)),
+            }
+            .retry_after(),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(
+            ModelError::Unavailable {
+                message: "HTTP 500".into(),
+                retry_after: None,
+            }
+            .retry_after(),
+            None
+        );
+        assert_eq!(
+            ModelError::Transport("request failed".into()).retry_after(),
+            None
         );
     }
 }

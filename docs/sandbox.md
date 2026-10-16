@@ -30,6 +30,19 @@ controlling-terminal 检查堵住 `TIOCSTI`（矩阵新增 `tiocsti_outside_term
 macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在一个临时 workspace 里同时验证
 "工作区外写被拒"和"工作区内写成功"，两者缺一即失败。
 
+## 运行中切换档位（ADR 0038 切片 ②，2026-10-15）
+
+档位不再固定：`/access safe|workspace|full` 可以在会话里切换，从**下一次工具调用**起生效。
+
+- `radian-sandbox` 的 `SandboxSlot` 是共享的 `Arc<RwLock<Option<Arc<Sandbox>>>>`。`shell` 与后台
+  任务工具在每次调用开始时取出 `Arc<Sandbox>` 并持有整次调用，所以切换只影响**下一次**调用；
+  **已经在跑的命令保持它启动时的沙箱**（它拿的是旧的 `Arc`）。
+- 切到 `full` 必须由人确认（`full` 等于没有沙箱）。切换由宿主重建 profile 与 sandbox；**新档位的
+  沙箱探测失败即拒绝切换，绝不降级**（与启动路径同一条硬规则）。
+- 每次切换写一条 `ConfigChanged {access}`，resume 时恢复会话当时的档位。
+- 按项目记住的档位在 `~/.radian/access/access.json`（ADR 0021 的项目身份作键），**沙箱禁读**，
+  与 `trust/`、`sessions/`、`memory/`、`credentials/` 同类。仓库里的任何文件都不能设置它。
+
 ## 后端与策略
 
 - `SandboxMode::{Safe, WorkspaceWrite, FullAccess}` 是产品概念；SBPL / bwrap 的参数只是实现。

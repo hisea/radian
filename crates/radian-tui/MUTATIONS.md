@@ -1218,6 +1218,16 @@ Base `e157bfb` · 一次性 worktree `.radian-worktrees/sf2-mut`（detached，�
 SF2（高亮计数改线程局部）与 SF3（build.rs 用运行时 `CARGO_MANIFEST_DIR`）没有常规变异测试：
 SF2 是把测试自身的干扰源去掉，SF3 是编译期路径问题；两者的证据分别是「高亮测试单独跑 5/5」
 与「把 worktree 改名后 build script 仍找得到 `third_party/syntaxes`」。
+## fork-commit（/fork 等落盘, 2026-10-15）
+
+Base `52265c1` · 一次性 worktree `/tmp/radian-fc-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| FC-M1 | `/fork` 不看 `turn_committed`（间隙下立即 fork, 空历史） | `pty_a_fork_waits_for_the_turn_to_be_committed` | ✅ |
+| FC-M2 | `ForkDeadline` 超时也执行 fork（生成空子会话） | `pty_a_fork_gives_up_when_the_turn_is_still_being_written` | ✅ |
+
+2/2 抓住。
 ## spinner（运行指示一处定义 + 输入框上沿状态线，ADR 0027/9/10，2026-10-15）
 
 Base `c0ae44c` · 一次性 worktree `/tmp/radian-sp-mut2`，还原后 `git status --short` 为空。
@@ -1281,6 +1291,22 @@ Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktr
 3/3 抓住。三个变异都是**原有行为测试**，证明这次外观迁移没有削弱它们（审批的 `y`、信任 Esc
 只限本次不写盘、选择器按 id 或 summary 过滤）。外观本身由新的 TestBackend 快照覆盖。
 
+## glyphs2: ADR 0027 items 1/2/4/5 (2026-10-15)
+
+Base `1155b98` · one-shot worktree `/tmp/g2-mut` (from HEAD, deleted after) · each mutation
+applied by a patch with an anchor assertion, then `cargo test -p radian-tui --test footer
+<name>` / `--test render <name>` / `--lib <name>` (one positional filter at a time) under
+`timeout 300`; files restored after each; `git status --short` empty at the end.
+
+| # | Rule mutated | Mutation | Caught by |
+|---|---|---|---|
+| G1 | 2: the unicode token arrows | `Glyphs::token_arrows` returns `^`/`v` for unicode | `footer.rs::the_unicode_footer_snapshot_at_80_and_120_columns` FAILED |
+| G2 | 2: the unicode fold marker | `Glyphs::fold_marker` returns `>` for unicode | `render.rs::the_block_layout_snapshot` and `render.rs::thinking_folds_to_one_line_and_ctrl_t_expands_it` FAILED |
+| G3 | 5: transparent clears the background | the post-pass is skipped (`if false && self.transparent`) | `footer.rs::transparent_clears_the_footer_background` FAILED |
+| G4 | 1/2: the coverage rule | the unicode `reasoning` icon becomes `◐` (no reference font has it) | `footer::tests::unicode_tier_glyphs_are_all_verified_covered` FAILED |
+
+4/4 caught. G2's glyph is drawn in the transcript (the folded-reasoning marker), so its
+catching tests are the render snapshots, not the footer ones.
 ## md-test-speed：中文 Markdown 选区测试从 N² 改成每格 4 次（2026-10-15）
 
 `a_chinese_markdown_selection_does_not_panic` 原来对每两个格子都做一次选区（N²，每次重新排版），在工作区测试里约占 700 s；
@@ -1314,3 +1340,17 @@ Base `oc/resume-perf2` · 就地变异：改前 `cp` 到 `.radian/mut/`，改后
 - RP2-M1 的变异保留了配对的正确性（前端扫也找到同一个 call id），只放大扫描量；测试断言的是
   「走过的条目数」，不是结果，所以抓住了「修复后的算法没被还原」这层回归。
 
+## access-cmd：`/access` 确认、按项目记住、resume（ADR 0038 切片 ②，2026-10-15）
+
+Base `d8b7688`（worktree `.radian-worktrees/access-cmd`）· 每个变异在就地改完后跑
+`cargo test -p radian-tui --test <file> --no-fail-fast`，再从 `/tmp/access-mut/` 的副本还原并用
+`diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| AC-M1 | `run_slash_command` 的 `/access full` 不再弹确认（条件改 `false && …`，直接切） | `access::access_full_asks_first_and_the_default_is_cancel`、`esc_cancels_the_full_confirmation`、`access_full_choices_switch_with_the_right_remember_flag` | ✅（3 条 FAILED） |
+| AC-M3 | `radian_host::access::remembered_for` 从**工作区**读 `access.json`（而不是 `~/.radian/access/`） | `pty::pty_a_remembered_full_applies_at_start_with_the_project_marker` | ✅（home 里记住的 full 不再生效，首屏是 `workspace`） |
+| AC-M4 | `resumed_access` 直接返回 `None`（resume 忽略 journal 里的档位） | `pty::pty_resume_restores_the_access_tier`、`radian_host::access_switch::resumed_access_reads_the_last_change` | ✅ |
+
+3/3 抓住。AC-M3 的两半都在同一个 pty 用例里：写 `~/.radian/access/access.json` 时必须生效并带
+`(project)` 标记；把同样内容写进工作区文件、用干净 HOME 启动时**必须不生效**。

@@ -311,6 +311,69 @@ pub enum Modal {
     /// like the approval's: a startup decision must not depend on the keymap. Boxed, like the
     /// other payload modals.
     Trust(Box<TrustWizard>),
+    /// The `/access full` confirmation (ADR 0038 slice 2): switching to `full` means no
+    /// sandbox, so a human must confirm. A small list whose keys are hardcoded; the default
+    /// focus is `cancel`, so Enter does not open the sandbox. Boxed like the trust prompt.
+    AccessFull(Box<AccessWizard>),
+}
+
+/// What the `/access full` confirmation offers (ADR 0038 decision 2/3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessChoice {
+    /// Switch to `full` for this session only (still journaled).
+    Session,
+    /// Switch to `full` and remember it for this project (`~/.radian/access/`).
+    Remember,
+    /// Leave the tier unchanged.
+    Cancel,
+}
+
+impl AccessChoice {
+    /// The three options in display order; `cancel` last so the default focus is fail-safe.
+    pub const ALL: [AccessChoice; 3] = [
+        AccessChoice::Session,
+        AccessChoice::Remember,
+        AccessChoice::Cancel,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Session => "this session only",
+            Self::Remember => "remember for this project",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
+/// The `/access full` confirmation's state: the highlighted option. The default is `cancel`
+///.
+pub struct AccessWizard {
+    pub cursor: usize,
+}
+
+impl AccessWizard {
+    pub fn new() -> Self {
+        let cursor = AccessChoice::ALL
+            .iter()
+            .position(|choice| *choice == AccessChoice::Cancel)
+            .unwrap_or(AccessChoice::ALL.len() - 1);
+        Self { cursor }
+    }
+
+    pub fn selected(&self) -> AccessChoice {
+        AccessChoice::ALL[self.cursor]
+    }
+
+    pub fn move_cursor(&mut self, delta: i32) {
+        let len = AccessChoice::ALL.len() as i32;
+        self.cursor = (self.cursor as i32 + delta).rem_euclid(len) as usize;
+    }
+}
+
+impl Default for AccessWizard {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The startup trust modal's state (ADR 0031 T3): the workspace and the highlighted option.
@@ -394,6 +457,12 @@ pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_m
 /// 2026-10-14). A second Ctrl-C inside the window quits; the window closing, or any other
 /// key, disarms it and the hint disappears.
 pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
+
+/// How long a `/fork` waits for the last turn's boundary to reach the journal (the runtime
+/// `TurnFinished`) before giving up. The fork reads the parent file, so forking before the
+/// append would copy an empty history. Long enough for an fsync, short enough to tell the
+/// user the session is still writing.
+pub const FORK_COMMIT_WAIT: Duration = Duration::from_secs(5);
 
 /// Whether an [`Input`] is something the **user** did — a key, a paste, a mouse action, an
 /// approval answer — as opposed to a host fact or an asynchronous result. Only user input
@@ -500,10 +569,13 @@ fn is_user_input(input: &Input) -> bool {
         | Input::ConfirmLogout(_)
         | Input::TrustMove(_)
         | Input::TrustChosen(_)
+        | Input::AccessMove(_)
+        | Input::AccessChosen(_)
         | Input::MouseDown { .. }
         | Input::MouseDrag { .. }
         | Input::MouseUp { .. } => true,
         Input::QuitDeadline
+        | Input::ForkDeadline
         | Input::Resize { .. }
         | Input::Stream(_)
         | Input::Event(_)
@@ -520,6 +592,7 @@ fn is_user_input(input: &Input) -> bool {
         | Input::SwitchCompacted { .. }
         | Input::SessionDone(_)
         | Input::TrustResolved(_)
+        | Input::AccessApplied { .. }
         | Input::CommandRefused(_)
         | Input::PickerOpened(_)
         | Input::LoginVerified { .. }
@@ -641,6 +714,8 @@ pub enum Input {
     /// The armed quit window closed: disarm and redraw, so the hint goes away. Sent by the
     /// loop on its `recv_timeout` (ADR 0023 U2: a time-driven display takes the timeout).
     QuitDeadline,
+    /// The deadline of a `/fork` waiting for the turn boundary to reach the journal.
+    ForkDeadline,
     /// A printable character typed into the focused text field.
     Char(char),
     /// The find box's backspace (not keymap-driven).
@@ -762,6 +837,17 @@ pub enum Input {
     TrustChosen(radian_host::trust::Choice),
     /// The trust choice was applied: the session's new state, for the startup notice.
     TrustResolved(radian_host::trust::Setup),
+    /// The `/access full` confirmation's cursor moved (ADR 0038 slice 2).
+    AccessMove(i32),
+    /// The `/access full` confirmation chose an option.
+    AccessChosen(AccessChoice),
+    /// A tier switch finished (the result of [`Effect::SetAccess`]): the tier, whether it was
+    /// remembered, and the outcome (a failed sandbox probe is a refusal that changes nothing).
+    AccessApplied {
+        tier: crate::profile::Tier,
+        remember: bool,
+        result: Result<(), String>,
+    },
     /// The left button went down at a screen cell: the press that may start a transcript
     /// selection (and that clears the previous one). Only arrives when mouse reporting is on.
     MouseDown { row: u16, col: u16 },
@@ -887,6 +973,14 @@ pub enum Effect {
     /// facade, which flips the hooks' live policy, audits the switch and queues the durable
     /// `ConfigChanged` record for the next resume.
     SetApprovalPolicy { on: bool },
+    /// Switch the session's permission tier (ADR 0038 slice 2). The loop calls the facade
+    /// (`set_access`), which rebuilds the profile and the sandbox through the host's builder;
+    /// a failed probe is a refusal. `remember` also writes the per-project record. The answer
+    /// is [`Input::AccessApplied`].
+    SetAccess {
+        tier: crate::profile::Tier,
+        remember: bool,
+    },
     /// Expand `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and the loop sends
     /// the folded `<skill …>` text as one user message (`steer` picks steer vs follow-up). The
     /// answer is [`Input::SkillExpanded`].
@@ -942,6 +1036,16 @@ impl PartialEq for Effect {
             (SendFollowup(a), SendFollowup(b)) | (Steer(a), Steer(b)) => a == b,
             (Cancel, Cancel) | (Quit, Quit) => true,
             (SetApprovalPolicy { on: a }, SetApprovalPolicy { on: b }) => a == b,
+            (
+                SetAccess {
+                    tier: at,
+                    remember: ar,
+                },
+                SetAccess {
+                    tier: bt,
+                    remember: br,
+                },
+            ) => at == bt && ar == br,
             (
                 AnswerRequest {
                     request_id: a,
@@ -1190,6 +1294,16 @@ pub struct App {
     /// batch can run several; the note clears only when the last one finishes, so the footer
     /// does not say "tool shell running" while the next model request is already in flight.
     running_tools: std::collections::HashSet<String>,
+    /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
+    /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
+    /// reason is readable; the user quits with the ordinary keys.
+    pub session_ended: Option<String>,
+    /// Whether the last turn's boundary is on disk (the runtime `TurnFinished` was seen). A
+    /// `/fork` requested while a turn is still being written waits for it (see
+    /// [`App::pending_fork`]).
+    pub turn_committed: bool,
+    /// A `/fork` waiting for the turn boundary to reach the journal, with its deadline.
+    pub pending_fork: Option<Instant>,
     /// A compaction is running (ADR 0018): the input rule's status line shows `Compacting`
     /// (ADR 0027). Set on `CompactionStarted`, cleared when it finishes, fails or
     /// is skipped.
@@ -1211,6 +1325,11 @@ pub struct App {
     /// is the hooks' — the loop applies it through [`Effect::SetApprovalPolicy`] — this is
     /// the UI's mirror, so `update` stays pure.
     pub auto: bool,
+    /// Where the tier in force came from (ADR 0038 decision 3), for `/access` with no argument
+    /// and the footer's `(project)` marker. Set at startup from the resolution, and updated by
+    /// a run-time switch. A UI/startup label, not a session fact (the tier itself is in the
+    /// projection).
+    pub access_source: crate::profile::AccessSource,
     /// The last request the UI answered: the queue's head stays that request for a moment, and
     /// re-showing it would flash a form the user just submitted.
     last_answered: Option<u64>,
@@ -1339,12 +1458,16 @@ impl App {
             quit: false,
             note: None,
             running_tools: std::collections::HashSet::new(),
+            session_ended: None,
+            turn_committed: true,
+            pending_fork: None,
             compacting: false,
             pending: 0,
             startup_screen: None,
             startup_len: 0,
             quit_pending: None,
             auto: false,
+            access_source: crate::profile::AccessSource::Default,
             last_answered: None,
             layers: vec![Layer::Surface],
             memory_enabled: false,
@@ -1446,6 +1569,12 @@ impl App {
     /// policy and afterwards only by the switch itself.
     pub fn set_auto(&mut self, auto: bool) {
         self.auto = auto;
+    }
+
+    /// Where the tier in force came from (ADR 0038 decision 3): the startup resolution, or the
+    /// run-time switch's own record. `/access` with no argument prints it.
+    pub fn set_access_source(&mut self, source: crate::profile::AccessSource) {
+        self.access_source = source;
     }
 
     /// Applies the wired `tui.*` configuration. A bad keymap (a key bound to two actions) is
@@ -2533,6 +2662,14 @@ impl App {
                 self.quit_pending = None;
                 UpdateResult::dirty()
             }
+            Input::ForkDeadline => {
+                // The wait for the turn boundary ran out: say so and drop the fork, so no
+                // empty child session is created.
+                if self.pending_fork.take().is_some() {
+                    self.push_notice("still writing the turn; try again");
+                }
+                UpdateResult::dirty()
+            }
             Input::Action(action) => {
                 // A completion menu is a selectable list: while it is up,
                 // Up/Down (and Ctrl-N) move the highlight and wrap, Enter and Tab accept the
@@ -2669,6 +2806,65 @@ impl App {
             }
             Input::TrustResolved(setup) => {
                 self.push_notice(radian_host::trust::status_line(&setup));
+                UpdateResult::dirty()
+            }
+            Input::AccessMove(delta) => {
+                if let Some(Modal::AccessFull(wizard)) =
+                    self.layers.iter_mut().rev().find_map(|layer| match layer {
+                        Layer::Modal(modal) => Some(modal),
+                        _ => None,
+                    })
+                {
+                    wizard.move_cursor(delta);
+                }
+                UpdateResult::dirty()
+            }
+            Input::AccessChosen(choice) => {
+                self.remove_modal(|modal| matches!(modal, Modal::AccessFull(_)));
+                match choice {
+                    AccessChoice::Cancel => {
+                        self.push_notice("access unchanged");
+                        UpdateResult::dirty()
+                    }
+                    AccessChoice::Session => UpdateResult::effect(Effect::SetAccess {
+                        tier: crate::profile::Tier::FullAccess,
+                        remember: false,
+                    }),
+                    AccessChoice::Remember => UpdateResult::effect(Effect::SetAccess {
+                        tier: crate::profile::Tier::FullAccess,
+                        remember: true,
+                    }),
+                }
+            }
+            Input::AccessApplied {
+                tier,
+                remember,
+                result,
+            } => {
+                match result {
+                    Ok(()) => {
+                        // The startup source is spent: this is a run-time switch, remembered or
+                        // not. The footer's tier item reads the projection, so re-mark it.
+                        self.access_source = if remember {
+                            crate::profile::AccessSource::Project
+                        } else {
+                            crate::profile::AccessSource::Session
+                        };
+                        self.set_tier(format!("{}{}", tier.as_str(), self.access_source.suffix()));
+                        // `!`/`!!` exist whenever the new tier has a sandbox (`full` and
+                        // `workspace`; not `safe`).
+                        self.set_bash_available(tier != crate::profile::Tier::Safe);
+                        if remember {
+                            self.push_notice(format!(
+                                "access: {} for this session, and remembered for this project",
+                                tier.as_str()
+                            ));
+                        } else {
+                            self.push_notice(format!("access: {} for this session", tier.as_str()));
+                        }
+                    }
+                    Err(reason) => self.push_notice(format!("cannot switch access: {reason}")),
+                }
                 UpdateResult::dirty()
             }
             Input::SkillExpanded { result, steer } => self.skill_expanded(result, steer),
@@ -2958,6 +3154,16 @@ impl App {
                 KeyCode::Esc => Some(Input::TrustChosen(
                     radian_host::trust::Choice::UntrustSession,
                 )),
+                _ => None,
+            },
+            // The `/access full` confirmation's keys are hardcoded (ADR 0038 slice 2): a tier
+            // switch to "no sandbox" must not depend on the keymap. Enter takes the highlighted
+            // option (default `cancel`); Esc is `cancel`.
+            Modal::AccessFull(wizard) => match key.code {
+                KeyCode::Up => Some(Input::AccessMove(-1)),
+                KeyCode::Down => Some(Input::AccessMove(1)),
+                KeyCode::Enter => Some(Input::AccessChosen(wizard.selected())),
+                KeyCode::Esc => Some(Input::AccessChosen(AccessChoice::Cancel)),
                 _ => None,
             },
             // The `/login` wizard's keys are hardcoded too: a login prompt is sensitive, and
@@ -3366,6 +3572,13 @@ impl App {
 
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
     fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
+        if let RuntimeEvent::TurnFinished { .. } = event {
+            // The turn boundary is on disk: a `/fork` that was waiting for it can run now.
+            self.turn_committed = true;
+            if self.pending_fork.take().is_some() {
+                return UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork));
+            }
+        }
         if matches!(event, RuntimeEvent::ConfigChanged { .. }) {
             // The driver applied the queued change: the status bar's `next:` promise is done.
             self.next_model = None;
@@ -3792,10 +4005,24 @@ impl App {
             command::Outcome::Fork => {
                 // ADR 0022 §1: fork only when the session is idle. The decision is app state,
                 // so it is made here rather than in the loop.
+                if self.session_ended.is_some() {
+                    self.push_notice(
+                        "the session has ended; there is nothing to fork (`/fork` needs a live \
+                         session)",
+                    );
+                    return UpdateResult::dirty();
+                }
                 if self.turn() == TurnState::Running {
                     self.push_notice(
                         "finish the current turn before forking (`/fork` needs an idle session)",
                     );
+                    return UpdateResult::dirty();
+                }
+                // The turn ended (idle) but its boundary may not be on disk yet: the fork
+                // reads the parent file, so it would copy an empty history. Wait for the
+                // journaled `TurnFinished` (bounded by `FORK_COMMIT_WAIT`).
+                if !self.turn_committed {
+                    self.pending_fork = Some(self.now + FORK_COMMIT_WAIT);
                     return UpdateResult::dirty();
                 }
                 UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork))
@@ -3864,6 +4091,55 @@ impl App {
                 }
                 UpdateResult::effect(Effect::SetApprovalPolicy { on })
             }
+            // `/access` (ADR 0038 slice 2): a query with no argument, otherwise a switch. Only
+            // `full` needs confirmation (it is "no sandbox"); the model has no tool for this.
+            command::Outcome::Access(name) => match name {
+                None => {
+                    let current = self
+                        .projection
+                        .read()
+                        .tier()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| "unknown".to_owned());
+                    self.push_notice(format!(
+                        "access: {current} (from {})",
+                        self.access_source.label()
+                    ));
+                    UpdateResult::dirty()
+                }
+                Some(name) => {
+                    let tier = match crate::profile::parse_tier(&name) {
+                        Ok(tier) => tier,
+                        Err(message) => {
+                            self.push_notice(message);
+                            return UpdateResult::dirty();
+                        }
+                    };
+                    // The projection's tier may carry a source suffix (`full (project)`); the
+                    // tier name is the first word.
+                    let current = self
+                        .projection
+                        .read()
+                        .tier()
+                        .map(str::to_owned)
+                        .unwrap_or_default();
+                    let current_tier = current.split_whitespace().next().unwrap_or("");
+                    if current_tier == tier.as_str() {
+                        self.push_notice(format!("access is already {}", tier.as_str()));
+                        return UpdateResult::dirty();
+                    }
+                    if tier == crate::profile::Tier::FullAccess {
+                        // `full` means no sandbox: confirm before opening it (ADR 0038
+                        // decision 2). The panel's default focus is `cancel`.
+                        self.push_modal(Modal::AccessFull(Box::default()));
+                        return UpdateResult::dirty();
+                    }
+                    UpdateResult::effect(Effect::SetAccess {
+                        tier,
+                        remember: false,
+                    })
+                }
+            },
             // `/skill:` (ADR 0025 S3): the host reads the body and the expanded text becomes a
             // user message. Whether it steers is decided here, like a typed send.
             command::Outcome::Skill { name, args } => {
@@ -3988,13 +4264,30 @@ impl App {
             // ADR 0023 U5: the turn, budget, usage and tool facts are written to the session
             // projection by the event sink (`ProjectionSink`), never here. `App` handles only
             // the transcript, the note and the effects.
-            AgentEvent::TurnStarted => {}
+            AgentEvent::TurnStarted => {
+                // The turn is being written now; a `/fork` must wait for its `TurnFinished`.
+                self.turn_committed = false;
+            }
             // ADR 0027: the local turn timer starts with the model request and
             // stops with its response. The token count is the model's reported output.
             AgentEvent::ModelRequestStarted { .. } => self.timer.request_started(self.now),
             AgentEvent::ModelResponseReceived { usage, .. } => {
                 self.timer
                     .response_finished(self.now, usage.as_ref().and_then(|usage| usage.output));
+            }
+            // ADR 0017: a transient failure is being retried. The failed attempt's
+            // streamed text is discarded (it was live-only), and the status line names the retry.
+            AgentEvent::ModelRetrying {
+                attempt,
+                max,
+                delay,
+                reason,
+            } => {
+                self.drop_live();
+                self.note = Some(format!(
+                    "retrying {attempt}/{max} in {}s: {reason}",
+                    delay.as_secs()
+                ));
             }
             AgentEvent::ToolStarted { call_id, name, .. } => {
                 self.running_tools.insert(call_id.clone());
@@ -4084,15 +4377,10 @@ impl App {
         }
     }
 
-    /// Appends a committed message as transcript entries. Used for live commits and for the
-    /// history of a resumed session.
-    pub fn push_message(&mut self, message: &Message) {
-        // The committed message is the truth; discard the partial live view of it. The scan
-        // runs **only when a live entry exists**: a resume pushes every message before any
-        // stream has started, and an unconditional `retain` over a 66k-entry transcript per
-        // message was O(n^2) (resume-perf A). The count is the number of live entries, so a
-        // live entry is dropped wherever it sits - the stream can leave one behind a
-        // compaction notice (they are not always a suffix of `entries`).
+    /// Discards every live (streaming) entry. A committed message replaces them
+    /// (`push_message`), and so does a retry: the failed attempt's deltas are live-only
+    /// (ADR 0010/0017 revision 1). The scan runs only when one exists (resume-perf A).
+    fn drop_live(&mut self) {
         if self.live_count > 0 {
             let mut scanned = 0u64;
             self.entries.retain(|entry| {
@@ -4103,6 +4391,18 @@ impl App {
             #[cfg(test)]
             LIVE_SCANS.with(|count| count.set(count.get() + scanned));
         }
+    }
+
+    /// Appends a committed message as transcript entries. Used for live commits and for the
+    /// history of a resumed session.
+    pub fn push_message(&mut self, message: &Message) {
+        // The committed message is the truth; discard the partial live view of it. The scan
+        // runs **only when a live entry exists**: a resume pushes every message before any
+        // stream has started, and an unconditional `retain` over a 66k-entry transcript per
+        // message was O(n^2) (resume-perf A). The count is the number of live entries, so a
+        // live entry is dropped wherever it sits - the stream can leave one behind a
+        // compaction notice (they are not always a suffix of `entries`).
+        self.drop_live();
         // ADR 0033: a `!` command's `Ran \`cmd\`` context message is a Bash block, not user
         // prose. The one we already drew live is skipped so it is not shown twice; a resumed
         // one (no pending text) is drawn as a block.
@@ -4585,6 +4885,32 @@ mod tests {
             reason: "already fits".to_string(),
         });
         assert_eq!(app.spinner_status(), Some("Working"));
+    }
+
+    /// ADR 0017: a retry names the attempt on the status line and discards the
+    /// failed attempt's partial stream.
+    #[test]
+    fn a_retrying_event_drops_the_live_block_and_names_the_attempt() {
+        let mut app = App::new("m", "s");
+        app.set_live(EntryKind::Assistant, "half an answer");
+        assert_eq!(app.live_count, 1);
+
+        app.apply_event(&AgentEvent::ModelRetrying {
+            attempt: 1,
+            max: 3,
+            delay: std::time::Duration::from_secs(4),
+            reason: "the stream ended before the response was complete".into(),
+        });
+
+        assert_eq!(
+            app.live_count, 0,
+            "the failed attempt's partial text must be gone"
+        );
+        assert!(app.entries.iter().all(|entry| !entry.live));
+        assert_eq!(
+            app.note.as_deref(),
+            Some("retrying 1/3 in 4s: the stream ended before the response was complete")
+        );
     }
 
     fn a_run(exit_code: Option<i32>, stdout: &str) -> radian_coding::UserBash {
