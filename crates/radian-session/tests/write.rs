@@ -8,7 +8,7 @@ use agent_core::{
     TranscriptJournal,
 };
 use common::TempDir;
-use radian_session::{Session, SessionCreatedData, SessionJournal};
+use radian_session::{EventData, Session, SessionCreatedData, SessionJournal, UsageFee};
 use serde_json::json;
 
 fn created() -> SessionCreatedData {
@@ -84,6 +84,78 @@ async fn a_session_file_has_the_v1_envelope_and_sequential_seqs() {
             "ModelUsageRecorded"
         ]
     );
+}
+
+/// ADR 0027: once the host installs a fee recorder, the writer writes
+/// the fee it computes beside each usage record; a journal without one writes the usage alone.
+#[tokio::test]
+async fn a_usage_record_carries_the_fee_the_writer_computed() {
+    let dir = TempDir::new("usage-fee");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, "sid-fee", created()).unwrap();
+    journal.set_usage_fee(std::sync::Arc::new(|usage: &ModelUsage| {
+        usage
+            .input
+            .map(|input| UsageFee::new(input, usage.cache_write.is_some_and(|w| w > 0)))
+    }));
+
+    journal
+        .append(JournalRecord::Message {
+            index: 0,
+            message: Message::user("hi"),
+        })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::ModelUsage {
+            usage: ModelUsage {
+                input: Some(42),
+                input_includes_cache: Some(false),
+                ..ModelUsage::default()
+            },
+        })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::CompactionUsage {
+            revision: 1,
+            model: "current".into(),
+            usage: ModelUsage {
+                input: Some(7),
+                cache_write: Some(1),
+                input_includes_cache: Some(false),
+                ..ModelUsage::default()
+            },
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<serde_json::Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    // `SessionCreated` and the message carry no fee; both usage records do.
+    assert!(lines[0]["data"].get("fee").is_none());
+    assert!(lines[1]["data"].get("fee").is_none());
+    assert_eq!(lines[2]["data"]["fee"], json!({"micros": 42}));
+    assert_eq!(
+        lines[3]["data"]["fee"],
+        json!({"micros": 7, "incomplete": true})
+    );
+
+    // And it reads back on the event, so a resume uses it instead of re-pricing.
+    let session = Session::open(&path).unwrap();
+    let fee = session
+        .events()
+        .iter()
+        .find_map(|event| match &event.data {
+            EventData::ModelUsageRecorded { fee, .. } => Some(*fee),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(fee, Some(UsageFee::new(42, false)));
 }
 
 #[tokio::test]

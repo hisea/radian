@@ -1074,7 +1074,7 @@ fn reported_baseline(session: &Session) -> Option<(usize, u64)> {
                     _ => None,
                 };
             }
-            EventData::ModelUsageRecorded { usage } => {
+            EventData::ModelUsageRecorded { usage, .. } => {
                 if let (Some(input), Some(prefix_len)) = (usage.prompt_total(), last_assistant) {
                     baseline = Some((prefix_len, input));
                 }

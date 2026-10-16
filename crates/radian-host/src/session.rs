@@ -17,13 +17,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Hooks, Message, TurnOptions};
+use agent_core::{
+    Agent, AgentConfig, ContextBudget, EventSink, Hooks, Message, ModelUsage, TurnOptions,
+};
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use radian_coding::CodingTools;
 use radian_permissions::{ApprovalPolicy, Approver, AuditSink, PermissionHooks, Preset, Profile};
 use radian_runtime::{
     BudgetFor, CancelCause, CompactionSettingsFor, ConfigQueue, ConfigSlot, Driver, Inbox,
-    RuntimeEvents,
+    ModelRoute, RuntimeEvents,
 };
 use radian_sandbox::{Sandbox, SandboxSlot};
 use radian_session::{SessionCreatedData, SessionJournal};
@@ -1125,6 +1127,22 @@ pub async fn open_session(
         )
     };
     radian_session::trace::took("open/journal", t0);
+    // ADR 0027: the journal records each call's fee, computed at the
+    // price in force when the call ran, so a resume does not have to re-price history with
+    // whatever the catalog says later. The writer asks this closure per usage record; it
+    // resolves the route from the same slot the model reads, so the journal and the live
+    // footer agree (both use `cost_micros`). No `price_for`, or a catalog miss, means no fee on
+    // the record — never an invented number.
+    if let Some(price_for) = price_for.as_ref() {
+        let slot = Arc::clone(&config_slot);
+        let initial = model.current_route();
+        let price_for = Arc::clone(price_for);
+        journal.set_usage_fee(Arc::new(move |usage: &ModelUsage| {
+            let route = ModelRoute::from_value(&slot.value()).unwrap_or_else(|| initial.clone());
+            let price = price_for(&route.provider, &route.model)?;
+            crate::cost::cost_micros(&price, usage)
+        }));
+    }
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
     // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line

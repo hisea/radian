@@ -799,3 +799,20 @@ cli -- memory` after `cargo build -p radian-tui --bin radian`, and `cargo test -
 6/6 caught. In each run only the tests listed above failed (the rest of the `memory::` filter
 stayed green); AC-1 also reds the three CLI tests and the pty test above, which is what the two
 end-to-end tests are for.
+
+## cost-marks: ADR 0027 / ADR 0007 (incomplete fee marked, each call's fee recorded)
+
+Base `df6856d` · in-place in this worktree, each mutation applied with `python3` from a copy and
+restored from it afterwards (`cmp` compared identical, `git status --short` back to the same
+set), `cargo test -p radian-host --locked` and the named tests of the other crates, no
+`--no-fail-fast` needed for these single-target runs.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| M1 | `cost_micros` drops the `incomplete` mark (a non-zero counter with no rate is silently skipped) | ✅ caught (rc=101) | `cost::tests::a_non_zero_counter_with_no_rate_marks_the_known_sum_incomplete`, `cost::tests::an_incomplete_call_makes_the_running_total_incomplete`, `footer::an_incomplete_fee_is_marked` |
+| M2 | `restore_usage` ignores the recorded fee and re-prices every record (the pre-revision-12 behaviour) | ✅ caught (rc=101) | `a_recorded_fee_is_restored_as_it_stands_when_the_catalog_moves`, `a_recorded_incomplete_fee_keeps_the_total_incomplete` |
+| M3 | `SessionProjection::add_usage_at` does not set `cost_estimated` (old records are not marked `~`) | ✅ caught (rc=101) | `an_old_record_without_a_fee_is_repriced_and_marks_the_total_an_estimate`, `footer::an_estimated_fee_shows_the_tilde_and_wins_over_incomplete` |
+| M4 | `parse_tiers` sorts **descending** (`Reverse`), the tier hole research F5 left open | ✅ caught (rc=101) | `catalog::tests::the_tiers_are_parsed_ascending_whatever_the_catalog_order` |
+| M5 | the writer never computes the fee for a usage record (`set_usage_fee` becomes inert) | ✅ caught (rc=101) | `write::a_usage_record_carries_the_fee_the_writer_computed` |
+
+5/5 caught. In each run only the listed tests failed; the rest of the target stayed green.
