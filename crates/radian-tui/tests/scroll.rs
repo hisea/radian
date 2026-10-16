@@ -41,15 +41,18 @@ fn new_content_follows_while_at_the_bottom() {
     fill(&mut app, 40);
     render(&mut app);
     assert!(app.is_following());
-    assert_eq!(app.scroll, app.max_scroll);
-    assert!(app.max_scroll > 0, "the transcript must overflow the view");
+    assert_eq!(app.session.scroll, app.session.max_scroll);
+    assert!(
+        app.session.max_scroll > 0,
+        "the transcript must overflow the view"
+    );
 
     // New content arrives: still pinned to the bottom.
     let projection = radian_tui::projection::SessionProjection::new();
     stream(&mut app, &projection, StreamKind::Assistant, "more");
     render(&mut app);
     assert!(app.is_following());
-    assert_eq!(app.scroll, app.max_scroll);
+    assert_eq!(app.session.scroll, app.session.max_scroll);
 }
 
 #[test]
@@ -57,13 +60,13 @@ fn scrolling_up_pauses_following_and_new_content_does_not_drag_back() {
     let mut app = App::new("m", "s");
     fill(&mut app, 40);
     render(&mut app);
-    let bottom = app.max_scroll;
+    let bottom = app.session.max_scroll;
 
     // Page up.
     app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
     render(&mut app);
     assert!(!app.is_following(), "scrolling up pauses follow");
-    let paused_at = app.scroll;
+    let paused_at = app.session.scroll;
     assert!(paused_at < bottom);
 
     // New content arrives while paused: the viewport must stay on the same lines.
@@ -75,8 +78,11 @@ fn scrolling_up_pauses_following_and_new_content_does_not_drag_back() {
     }
     render(&mut app);
     assert!(!app.is_following(), "new content must not un-pause");
-    assert_eq!(app.scroll, paused_at, "the view must not be dragged down");
-    assert!(app.max_scroll > bottom, "new lines were appended");
+    assert_eq!(
+        app.session.scroll, paused_at,
+        "the view must not be dragged down"
+    );
+    assert!(app.session.max_scroll > bottom, "new lines were appended");
 }
 
 #[test]
@@ -92,12 +98,12 @@ fn scrolling_back_to_the_bottom_resumes_following() {
     app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
     render(&mut app);
     assert!(app.is_following());
-    assert_eq!(app.scroll, app.max_scroll);
+    assert_eq!(app.session.scroll, app.session.max_scroll);
 
     stream(&mut app, &projection, StreamKind::Assistant, "x");
     render(&mut app);
     assert!(app.is_following());
-    assert_eq!(app.scroll, app.max_scroll);
+    assert_eq!(app.session.scroll, app.session.max_scroll);
 }
 
 #[test]
@@ -111,13 +117,13 @@ fn page_down_stops_at_the_bottom_and_resumes_following() {
         app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
     }
     render(&mut app);
-    assert_eq!(app.scroll, 0, "page up stops at the top");
+    assert_eq!(app.session.scroll, 0, "page up stops at the top");
     assert!(!app.is_following());
 
     for _ in 0..100 {
         app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
     }
     render(&mut app);
-    assert_eq!(app.scroll, app.max_scroll);
+    assert_eq!(app.session.scroll, app.session.max_scroll);
     assert!(app.is_following(), "reaching the bottom resumes follow");
 }

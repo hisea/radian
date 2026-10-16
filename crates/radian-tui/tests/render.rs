@@ -204,13 +204,13 @@ fn the_note_clears_when_the_tools_finish() {
         call_id: "c1".into(),
         name: "shell".into(),
     });
-    assert_eq!(app.note.as_deref(), Some("tool shell running"));
+    assert_eq!(app.session.note.as_deref(), Some("tool shell running"));
     app.apply_event(&AgentEvent::ToolFinished {
         index: 0,
         call_id: "c1".into(),
         is_error: false,
     });
-    assert_eq!(app.note, None, "the tool finished");
+    assert_eq!(app.session.note, None, "the tool finished");
 
     // A batch: the note stays until the last tool of the batch finishes.
     for (index, (call_id, name)) in [("c2", "shell"), ("c3", "read")].into_iter().enumerate() {
@@ -225,20 +225,20 @@ fn the_note_clears_when_the_tools_finish() {
         call_id: "c2".into(),
         is_error: false,
     });
-    assert!(app.note.is_some(), "one tool is still running");
+    assert!(app.session.note.is_some(), "one tool is still running");
     app.apply_event(&AgentEvent::ToolFinished {
         index: 1,
         call_id: "c3".into(),
         is_error: false,
     });
-    assert_eq!(app.note, None, "the last tool finished");
+    assert_eq!(app.session.note, None, "the last tool finished");
 
     // The next model request starts with the note cleared.
     app.apply_event(&AgentEvent::ModelRequestStarted {
         model_call: 1,
         budget: None,
     });
-    assert_eq!(app.note, None);
+    assert_eq!(app.session.note, None);
 }
 
 #[test]
@@ -247,8 +247,10 @@ fn the_status_line_shows_model_and_turn_state() {
     classic_footer(&mut app);
     // The turn state is a session fact: the event sink writes it to the projection
     // (ADR 0023 U5), so the test writes it there too.
-    app.projection.set_turn(radian_tui::TurnState::Running);
-    app.entries.push(Entry::new(EntryKind::User, "hi"));
+    app.session
+        .projection
+        .set_turn(radian_tui::TurnState::Running);
+    app.session.entries.push(Entry::new(EntryKind::User, "hi"));
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
     assert!(text.contains("my-model"), "{text}");
@@ -263,8 +265,10 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
     let mut app = App::new("m", "s");
     app.spinner_kind = radian_tui::spinner::Kind::Arc;
     // The frame is a function of the injected clock (ADR 0027).
-    app.set_now(app.spinner_origin);
-    app.projection.set_turn(radian_tui::TurnState::Running);
+    app.set_now(app.session.spinner_origin);
+    app.session
+        .projection
+        .set_turn(radian_tui::TurnState::Running);
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
     assert!(
@@ -273,7 +277,7 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
     );
 
     // Idle: no spinner, no text.
-    app.projection.set_turn(radian_tui::TurnState::Idle);
+    app.session.projection.set_turn(radian_tui::TurnState::Idle);
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
     assert!(!text.contains("Working"), "an idle rule is plain: {text}");
@@ -286,15 +290,17 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
 fn the_input_rule_shows_compacting() {
     let mut app = App::new("m", "s");
     app.spinner_kind = radian_tui::spinner::Kind::Arc;
-    app.set_now(app.spinner_origin);
-    app.projection.set_turn(radian_tui::TurnState::Running);
-    app.compacting = true;
+    app.set_now(app.session.spinner_origin);
+    app.session
+        .projection
+        .set_turn(radian_tui::TurnState::Running);
+    app.session.compacting = true;
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
     assert!(text.contains("◜  Compacting"), "{text}");
 
     // The flag clears when the compaction ends.
-    app.compacting = false;
+    app.session.compacting = false;
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
     assert!(!text.contains("Compacting"), "{text}");
@@ -305,9 +311,11 @@ fn the_input_rule_shows_compacting() {
 fn the_box_style_shows_the_spinner_on_the_border() {
     let mut app = App::new("m", "s");
     app.spinner_kind = radian_tui::spinner::Kind::Arc;
-    app.set_now(app.spinner_origin);
+    app.set_now(app.session.spinner_origin);
     app.input_style = radian_tui::render::InputStyle::Box;
-    app.projection.set_turn(radian_tui::TurnState::Running);
+    app.session
+        .projection
+        .set_turn(radian_tui::TurnState::Running);
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
     assert!(
@@ -325,13 +333,14 @@ fn live_deltas_are_replaced_by_the_committed_message_not_duplicated() {
     let projection = radian_tui::projection::SessionProjection::new();
     stream(&mut app, &projection, StreamKind::Assistant, "hel");
     stream(&mut app, &projection, StreamKind::Assistant, "lo");
-    assert_eq!(app.entries.len(), 1);
-    assert_eq!(app.entries[0].text, "hello");
+    assert_eq!(app.session.entries.len(), 1);
+    assert_eq!(app.session.entries[0].text, "hello");
     app.apply_event(&AgentEvent::TranscriptAppended {
         index: 1,
         message: assistant_with("hello", "", false, vec![]),
     });
     let assistant: Vec<&Entry> = app
+        .session
         .entries
         .iter()
         .filter(|e| e.kind == EntryKind::Assistant)
@@ -345,7 +354,7 @@ fn live_deltas_are_replaced_by_the_committed_message_not_duplicated() {
 #[test]
 fn a_user_file_attachment_is_folded_to_one_line() {
     let mut app = App::new("mock", "s");
-    app.entries.push(Entry::new(
+    app.session.entries.push(Entry::new(
         EntryKind::User,
         "look\n\n<file path=\"notes.txt\">\nhello\nworld\n</file>",
     ));
@@ -357,7 +366,7 @@ fn a_user_file_attachment_is_folded_to_one_line() {
     );
     assert!(text.contains("look"), "{text}");
     assert_eq!(
-        app.entries[0].text, "look\n\n<file path=\"notes.txt\">\nhello\nworld\n</file>",
+        app.session.entries[0].text, "look\n\n<file path=\"notes.txt\">\nhello\nworld\n</file>",
         "the entry text is the full message"
     );
 }
@@ -793,7 +802,7 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     let mut app = App::new("m", "s");
     app.input_style = InputStyle::Bar;
     app.spinner_kind = radian_tui::spinner::Kind::Arc;
-    app.set_now(app.spinner_origin);
+    app.set_now(app.session.spinner_origin);
     app.input = "hello".into();
     app.push_message(&Message::user("a question"));
 
@@ -808,9 +817,13 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     assert_eq!(row(&idle, (band_row - 2) as u16).trim_end(), "");
     assert!(!screen(&idle).contains("Working"));
 
-    app.projection.set_turn(radian_tui::TurnState::Running);
-    app.timer.request_started(app.spinner_origin);
-    app.set_now(app.spinner_origin + std::time::Duration::from_secs(12));
+    app.session
+        .projection
+        .set_turn(radian_tui::TurnState::Running);
+    app.session
+        .timer
+        .request_started(app.session.spinner_origin);
+    app.set_now(app.session.spinner_origin + std::time::Duration::from_secs(12));
     let running = render(&mut app, 80, 10);
     assert_eq!(
         row_of(&running, "▎ hello"),
@@ -829,7 +842,7 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     );
 
     // The turn ends: the row is blank again and nothing moved.
-    app.projection.set_turn(radian_tui::TurnState::Idle);
+    app.session.projection.set_turn(radian_tui::TurnState::Idle);
     let after = render(&mut app, 80, 10);
     assert_eq!(row_of(&after, "▎ hello"), Some(band_row));
     assert_eq!(row_of(&after, "a question"), Some(transcript_row));
@@ -837,7 +850,7 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
 
     // A running `!` is a status but not a **turn**: its row carries the state without the
     // turn's interrupt hint (Esc does not cancel a `!` through this path).
-    app.bash_running = Some("sleep 1".to_string());
+    app.session.bash_running = Some("sleep 1".to_string());
     let terminal = render(&mut app, 80, 10);
     let status = row(&terminal, (band_row - 2) as u16);
     assert!(status.contains("Running a command"), "{status:?}");
@@ -845,7 +858,7 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
         !status.contains("esc to interrupt"),
         "no turn is running: {status:?}"
     );
-    app.bash_running = None;
+    app.session.bash_running = None;
 }
 
 /// ADR 0035 V3 + revision 3: `bar` spends one row on the status row, one per input row and the
@@ -896,8 +909,10 @@ fn the_bar_rail_and_spinner_fall_back_to_ascii() {
         glyphs: Some("ascii".to_string()),
         ..Default::default()
     });
-    app.set_now(app.spinner_origin);
-    app.projection.set_turn(radian_tui::TurnState::Running);
+    app.set_now(app.session.spinner_origin);
+    app.session
+        .projection
+        .set_turn(radian_tui::TurnState::Running);
     let text = screen(&render(&mut app, 40, 10));
     assert!(text.contains("| hi"), "the ascii rail:\n{text}");
     assert!(!text.contains('▎'), "no unicode rail:\n{text}");
@@ -1012,15 +1027,15 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
     let (total, _) =
-        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 40, 0, 0, &app.theme);
+        radian_tui::render::visible_lines(&mut app.session.entries, EXPANDED, 40, 0, 0, &app.theme);
     app.set_viewport(u16::try_from(total).unwrap(), total);
     // Select "selection" on the block's text line (a user block is pad / text / pad): body
     // columns 6..15 → screen columns 8..17.
     let selection = Selection {
-        anchor: locate(&app.entries, EXPANDED, 40, 1, 8).expect("anchor"),
-        head: locate(&app.entries, EXPANDED, 40, 1, 17).expect("head"),
+        anchor: locate(&app.session.entries, EXPANDED, 40, 1, 8).expect("anchor"),
+        head: locate(&app.session.entries, EXPANDED, 40, 1, 17).expect("head"),
     };
-    app.selection = Some(selection);
+    app.session.selection = Some(selection);
     // Tall enough that the whole three-row user block is on screen (the `bar` input is four
     // rows with the half-cell pads, ADR 0035).
     let terminal = render(&mut app, 40, 10);
@@ -1051,11 +1066,11 @@ fn the_mono_selection_is_reversed_not_colored() {
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
     let (total, _) =
-        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 40, 0, 0, &app.theme);
+        radian_tui::render::visible_lines(&mut app.session.entries, EXPANDED, 40, 0, 0, &app.theme);
     app.set_viewport(u16::try_from(total).unwrap(), total);
-    app.selection = Some(Selection {
-        anchor: locate(&app.entries, EXPANDED, 40, 1, 8).expect("anchor"),
-        head: locate(&app.entries, EXPANDED, 40, 1, 17).expect("head"),
+    app.session.selection = Some(Selection {
+        anchor: locate(&app.session.entries, EXPANDED, 40, 1, 8).expect("anchor"),
+        head: locate(&app.session.entries, EXPANDED, 40, 1, 17).expect("head"),
     });
     let terminal = render(&mut app, 40, 10);
     let word = style_of(&terminal, "selection").expect("on screen");
@@ -1075,10 +1090,10 @@ fn an_empty_selection_draws_nothing() {
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
     let (total, _) =
-        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 40, 0, 0, &app.theme);
+        radian_tui::render::visible_lines(&mut app.session.entries, EXPANDED, 40, 0, 0, &app.theme);
     app.set_viewport(u16::try_from(total).unwrap(), total);
-    let at = locate(&app.entries, EXPANDED, 40, 1, 8).expect("anchor");
-    app.selection = Some(Selection {
+    let at = locate(&app.session.entries, EXPANDED, 40, 1, 8).expect("anchor");
+    app.session.selection = Some(Selection {
         anchor: at,
         head: at,
     });
@@ -1332,14 +1347,14 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     // errors (the default): a success folds to the preview + one hint.
     assert_eq!(app.tool_display.fold, ToolFold::Errors);
     let _ = render(&mut app, 60, 30);
-    let folded = app.total_lines;
+    let folded = app.session.total_lines;
     // The card's frame (top, the Command divider, the bottom) is constant across the folds.
     assert!(folded < 14, "folded: {folded} lines");
     // Ctrl-O: errors -> expanded -> collapsed -> errors.
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(app.tool_display.fold, ToolFold::Expanded);
     let _ = render(&mut app, 60, 30);
-    let expanded = app.total_lines;
+    let expanded = app.session.total_lines;
     assert_eq!(
         expanded,
         folded + 14,
@@ -1351,7 +1366,7 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     // `collapsed` keeps the header only: the five preview lines `errors` showed are gone, and
     // with them the Output divider (a folded hint is not a section, ADR 0028).
     assert_eq!(
-        app.total_lines,
+        app.session.total_lines,
         folded - 6,
         "collapsed shows the header only"
     );
@@ -1828,11 +1843,13 @@ fn a_compaction_summary_is_one_line_that_expands() {
     );
     // The two paths differ only in that line: the entries' data is otherwise the same.
     let resumed_info = resumed
+        .session
         .entries
         .iter()
         .find_map(|entry| entry.compaction.as_deref())
         .expect("the summary entry");
     let live_info = live
+        .session
         .entries
         .iter()
         .find_map(|entry| entry.compaction.as_deref())
@@ -1855,14 +1872,14 @@ fn the_summary_fold_changes_the_line_count() {
     let mut app = App::new("m", "s");
     app.push_message(&history[0]);
     let _ = render(&mut app, 70, 20);
-    let folded = app.total_lines;
+    let folded = app.session.total_lines;
     assert_eq!(folded, 1);
     app.tool_display.fold = ToolFold::Expanded;
     let _ = render(&mut app, 70, 20);
-    assert_eq!(app.total_lines, 4, "the summary's four lines");
+    assert_eq!(app.session.total_lines, 4, "the summary's four lines");
     app.tool_display.fold = ToolFold::Collapsed;
     let _ = render(&mut app, 70, 20);
-    assert_eq!(app.total_lines, 1, "folded again");
+    assert_eq!(app.session.total_lines, 1, "folded again");
 }
 
 /// An MCP tool's alias (`server__tool`) never reaches a built-in renderer: its arguments and
@@ -2004,6 +2021,7 @@ fn a_batch_of_calls_pairs_its_results_by_id_in_any_order() {
 
     for app in [&mut live, &mut resumed] {
         let calls: Vec<&Entry> = app
+            .session
             .entries
             .iter()
             .filter(|entry| entry.kind == EntryKind::ToolCall)
@@ -2021,6 +2039,7 @@ fn a_batch_of_calls_pairs_its_results_by_id_in_any_order() {
         assert_eq!(b.result, Some(true), "b is the failure");
         // The result entries carry their own call's data too.
         let result_b = app
+            .session
             .entries
             .iter()
             .find(|entry| {
@@ -2030,6 +2049,7 @@ fn a_batch_of_calls_pairs_its_results_by_id_in_any_order() {
             .expect("b's result entry");
         assert!(result_b.is_error);
         let result_a = app
+            .session
             .entries
             .iter()
             .find(|entry| {
@@ -2081,7 +2101,7 @@ fn collapsed_and_errors_differ_for_a_successful_card() {
         let mut app = app_with(false);
         app.tool_display.fold = fold;
         let _ = render(&mut app, 60, 30);
-        counts.push(app.total_lines);
+        counts.push(app.session.total_lines);
     }
     // The empty assistant entry contributes nothing (its blank line is stripped, rule 1) and
     // the container's gap before the card is one line. The card (ADR 0028) is the
@@ -2244,10 +2264,10 @@ fn folding_changes_the_transcript_line_count() {
         message: assistant_with("ANSWER", "one\ntwo\nthree", false, vec![]),
     });
     let _ = render(&mut app, 60, 10);
-    let expanded = app.total_lines;
+    let expanded = app.session.total_lines;
     app.reasoning_mode = radian_tui::blocks::ReasoningMode::Collapsed;
     let _ = render(&mut app, 60, 10);
-    let collapsed = app.total_lines;
+    let collapsed = app.session.total_lines;
     assert_eq!(
         expanded,
         collapsed + 2,
@@ -2376,7 +2396,7 @@ fn a_tool_card_paints_the_state_band() {
         let mut app = App::new("m", "s");
         let mut call = Entry::new(EntryKind::ToolCall, "shell({\"command\": \"ls\"})");
         call.result = result;
-        app.entries.push(call);
+        app.session.entries.push(call);
         let terminal = render(&mut app, 40, 10);
         let buffer = terminal.backend().buffer();
         assert_eq!(
@@ -2396,7 +2416,7 @@ fn a_tool_card_paints_the_state_band() {
     classic_footer(&mut app);
     let mut result = Entry::new(EntryKind::ToolResult, "line one\nline two");
     result.is_error = true;
-    app.entries.push(result);
+    app.session.entries.push(result);
     let terminal = render(&mut app, 40, 10);
     let buffer = terminal.backend().buffer();
     for row in 0..2u16 {

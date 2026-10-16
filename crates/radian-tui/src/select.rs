@@ -626,7 +626,7 @@ mod tests {
             meta: MessageMeta::default(),
         };
         app.push_message(&message);
-        let entries = &app.entries;
+        let entries = &app.session.entries;
         // One user entry: "look at this\n\n[file: notes.txt, 3 lines]" — the fold plus its
         // padding rows. Line 1 is the text, line 3 the fold; selecting both copies them.
         let sel = Selection {

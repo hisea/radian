@@ -33,7 +33,8 @@ fn modes(reasoning: ReasoningMode) -> DisplayModes {
 }
 
 fn assistant(app: &mut App, text: &str) {
-    app.entries
+    app.session
+        .entries
         .push(radian_tui::app::Entry::new(EntryKind::Assistant, text));
 }
 
@@ -157,12 +158,27 @@ fn a_selection_copies_the_source_it_covers() {
     app.set_transcript_width(60);
     // Row 0 is the paragraph: cells 2..=9 are `bold** [l` (the display text is
     // `A bold link (https://x) tail`).
-    let anchor =
-        select::locate(&app.entries, modes(ReasoningMode::Expanded), 60, 0, 2).expect("anchor");
-    let head =
-        select::locate(&app.entries, modes(ReasoningMode::Expanded), 60, 0, 9).expect("head");
-    app.selection = Some(select::Selection { anchor, head });
-    let text = radian_tui::select::logical_text(&app.entries, &app.selection.expect("a selection"));
+    let anchor = select::locate(
+        &app.session.entries,
+        modes(ReasoningMode::Expanded),
+        60,
+        0,
+        2,
+    )
+    .expect("anchor");
+    let head = select::locate(
+        &app.session.entries,
+        modes(ReasoningMode::Expanded),
+        60,
+        0,
+        9,
+    )
+    .expect("head");
+    app.session.selection = Some(select::Selection { anchor, head });
+    let text = radian_tui::select::logical_text(
+        &app.session.entries,
+        &app.session.selection.expect("a selection"),
+    );
     assert!(
         text.contains("**bold**"),
         "the copy includes the markup: {text:?}"
@@ -174,11 +190,19 @@ fn a_selection_copies_the_source_it_covers() {
 fn find_matches_the_displayed_text() {
     let mut app = App::new("m", "s");
     assistant(&mut app, "A **bold** and a [link](https://x).\n");
-    let (matches, _) =
-        radian_tui::find::compute(&app.entries, modes(ReasoningMode::Expanded), 60, "bold");
+    let (matches, _) = radian_tui::find::compute(
+        &app.session.entries,
+        modes(ReasoningMode::Expanded),
+        60,
+        "bold",
+    );
     assert_eq!(matches.len(), 1, "the displayed word matches");
-    let (matches, _) =
-        radian_tui::find::compute(&app.entries, modes(ReasoningMode::Expanded), 60, "**bold**");
+    let (matches, _) = radian_tui::find::compute(
+        &app.session.entries,
+        modes(ReasoningMode::Expanded),
+        60,
+        "**bold**",
+    );
     assert!(matches.is_empty(), "the markup is not displayed");
 }
 
@@ -190,7 +214,7 @@ fn line_count_matches_the_layout() {
         &mut app,
         "# Title\n\nA paragraph that is long enough to wrap at a narrow width for sure.\n\n- one\n- two\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n",
     );
-    let entry = &app.entries[0];
+    let entry = &app.session.entries[0];
     let blocks = blocks::parse_blocks(entry.text.as_str());
     for width in [60usize, 20] {
         let count = blocks::line_count(entry, modes(ReasoningMode::Expanded), width);
@@ -233,14 +257,15 @@ fn every_cell_maps_to_its_source_offset() {
             assistant(&mut app, body);
             let modes = modes(ReasoningMode::Expanded);
             let blocks = blocks::parse_blocks(body);
-            let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+            let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
             let cells: usize = lines.iter().map(|line| line.chars.len()).sum();
             for cell in 0..cells {
                 let (line_index, column) = cell_of(&lines, cell).expect("a cell");
                 // `layout` is body-relative; `locate` takes screen columns (the assistant
                 // prefix is two cells).
-                let hit = select::locate_hit(&app.entries, modes, width, line_index, column + 2)
-                    .expect("an anchor");
+                let hit =
+                    select::locate_hit(&app.session.entries, modes, width, line_index, column + 2)
+                        .expect("an anchor");
                 match lines[line_index].chars[column] {
                     Some(offset) => {
                         assert_eq!(
@@ -273,17 +298,17 @@ fn a_selection_across_a_soft_wrap_keeps_the_source_space() {
     app.set_transcript_width(20);
     let modes = modes(ReasoningMode::Expanded);
     let blocks = blocks::parse_blocks(body);
-    let lines = blocks::layout(&app.entries[0], &blocks, modes, 20);
+    let lines = blocks::layout(&app.session.entries[0], &blocks, modes, 20);
     assert!(lines.len() > 1, "the paragraph wraps: {lines:?}");
     // From 'b' in "beta" to 'g' in "gamma" (display positions 6..11).
     let (sl, sc) = cell_of(&lines, 6).expect("start cell");
     let (el, ec) = cell_of(&lines, 11).expect("end cell");
-    let anchor = select::locate(&app.entries, modes, 20, sl, sc + 2).expect("anchor");
+    let anchor = select::locate(&app.session.entries, modes, 20, sl, sc + 2).expect("anchor");
     // The head is the cell after 'g': the copy then covers `beta gamma`.
-    let head = select::locate(&app.entries, modes, 20, el, ec + 1 + 2).expect("head");
+    let head = select::locate(&app.session.entries, modes, 20, el, ec + 1 + 2).expect("head");
     assert_eq!(anchor.offset, 6, "'b' is byte 6 in the source");
     assert_eq!(head.offset, 12, "the 'a' after 'g' is byte 12");
-    let copied = select::logical_text(&app.entries, &select::Selection { anchor, head });
+    let copied = select::logical_text(&app.session.entries, &select::Selection { anchor, head });
     assert_eq!(
         copied, "beta g",
         "the source's space survives the soft wrap"
@@ -302,13 +327,14 @@ fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_entry() {
     let mut app = App::new("m", "s");
     // A reasoning channel above: twenty lines expanded, one line folded.
     let thinking: String = (1..=20).map(|i| format!("thinking {i}\n")).collect();
-    app.entries
+    app.session
+        .entries
         .push(radian_tui::app::Entry::new(EntryKind::Reasoning, &thinking));
     assistant(&mut app, "A **bold** paragraph here\n");
     // Filler below, so the transcript is longer than the viewport and the jump's scroll is
     // not clamped to zero: an expanded jump would scroll the paragraph off the top.
     for i in 0..30 {
-        app.entries.push(radian_tui::app::Entry::new(
+        app.session.entries.push(radian_tui::app::Entry::new(
             EntryKind::Notice,
             format!("filler {i}"),
         ));
@@ -317,8 +343,8 @@ fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_entry() {
     let _ = render(&mut app, width as u16, 12);
     let modes = app.display_modes();
     let search = blocks::search_modes(modes);
-    let folded = render::display_lines(&app.entries[0], modes, width).len();
-    let expanded = render::display_lines(&app.entries[0], search, width).len();
+    let folded = render::display_lines(&app.session.entries[0], modes, width).len();
+    let expanded = render::display_lines(&app.session.entries[0], search, width).len();
     assert!(folded < expanded, "folded {folded} vs expanded {expanded}");
     app.on_key(ctrl('f'));
     for c in "bold".chars() {
@@ -332,7 +358,7 @@ fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_entry() {
     // the display line with the channel folded.
     // The container's gap line before the assistant entry is part of both geometries
     // (ADR 0028 rule 1).
-    let gap = blocks::block_gap(Some(&app.entries[0]), &app.entries[1]);
+    let gap = blocks::block_gap(Some(&app.session.entries[0]), &app.session.entries[1]);
     assert_eq!(find.current_line(), Some(expanded + gap + m.line));
     assert!(!app.is_following(), "a jump closes follow");
     let hit_line = folded + gap + m.line;
@@ -345,23 +371,23 @@ fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_entry() {
         "the paragraph is on screen after the jump:\n{}",
         screen(&terminal)
     );
-    let lines = render::display_lines(&app.entries[1], modes, width);
+    let lines = render::display_lines(&app.session.entries[1], modes, width);
     assert!(
         lines[m.line].contains("bold"),
         "the match is the paragraph line: {:?}",
         lines[m.line]
     );
     // The selection at that display line copies the paragraph's source (styles included).
-    let anchor = select::locate(&app.entries, modes, width, hit_line, 0).expect("anchor");
+    let anchor = select::locate(&app.session.entries, modes, width, hit_line, 0).expect("anchor");
     let head = select::locate(
-        &app.entries,
+        &app.session.entries,
         modes,
         width,
         hit_line,
         lines[m.line].chars().count() + 2,
     )
     .expect("head");
-    let copied = select::logical_text(&app.entries, &select::Selection { anchor, head });
+    let copied = select::logical_text(&app.session.entries, &select::Selection { anchor, head });
     assert!(
         copied.contains("**bold**"),
         "the copy is the paragraph's source: {copied:?}"
@@ -382,13 +408,14 @@ fn a_whole_line_selection_copies_the_source_line() {
         assistant(&mut app, body);
         let modes = modes(ReasoningMode::Expanded);
         let blocks = blocks::parse_blocks(body);
-        let lines = blocks::layout(&app.entries[0], &blocks, modes, 80);
+        let lines = blocks::layout(&app.session.entries[0], &blocks, modes, 80);
         // Padding rows (if any) come along; the copy still has to be the source.
         let last = lines.len() - 1;
         let cells = lines[last].chars.len();
-        let anchor = select::locate(&app.entries, modes, 80, 0, 0).expect("anchor");
-        let head = select::locate(&app.entries, modes, 80, last, cells + 2).expect("head");
-        let copied = select::logical_text(&app.entries, &select::Selection { anchor, head });
+        let anchor = select::locate(&app.session.entries, modes, 80, 0, 0).expect("anchor");
+        let head = select::locate(&app.session.entries, modes, 80, last, cells + 2).expect("head");
+        let copied =
+            select::logical_text(&app.session.entries, &select::Selection { anchor, head });
         // A trailing newline in the source is a blank **edge** line, which the layout strips
         // (ADR 0028 rule 1): the display's last line is the line itself, and the
         // copy is what is displayed.
@@ -418,7 +445,7 @@ fn every_displayed_source_char_is_at_its_offset() {
             assistant(&mut app, body);
             let modes = modes(ReasoningMode::Expanded);
             let blocks = blocks::parse_blocks(body);
-            let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+            let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
             let cells: usize = lines.iter().map(|line| line.chars.len()).sum();
             for cell in 0..cells {
                 let (line, column) = cell_of(&lines, cell).expect("a cell");
@@ -430,7 +457,7 @@ fn every_displayed_source_char_is_at_its_offset() {
                 if !display.is_alphanumeric() {
                     continue;
                 }
-                let anchor = select::locate(&app.entries, modes, width, line, column + 2)
+                let anchor = select::locate(&app.session.entries, modes, width, line, column + 2)
                     .expect("an anchor");
                 assert!(
                     body[anchor.offset..].starts_with(display),
@@ -450,7 +477,7 @@ fn every_displayed_source_char_is_at_its_offset() {
 #[test]
 fn a_user_message_shows_markup_literally() {
     let mut app = App::new("m", "s");
-    app.entries.push(radian_tui::app::Entry::new(
+    app.session.entries.push(radian_tui::app::Entry::new(
         EntryKind::User,
         "**bold**\n# heading\n`code`\n",
     ));
@@ -491,7 +518,9 @@ fn a_chinese_markdown_selection_does_not_panic() {
         // Every display cell, synthesized cells and each line's end gap included, located once.
         let points: Vec<_> = display_cells(&app, modes, width)
             .into_iter()
-            .filter_map(|(line, col)| select::locate(&app.entries, modes, width, line, col + 2))
+            .filter_map(|(line, col)| {
+                select::locate(&app.session.entries, modes, width, line, col + 2)
+            })
             .collect();
         assert!(!points.is_empty(), "the body lays out at width {width}");
         let (first, last) = (points[0], points[points.len() - 1]);
@@ -503,8 +532,9 @@ fn a_chinese_markdown_selection_does_not_panic() {
                 (point, point),
             ] {
                 let selection = select::Selection { anchor, head };
-                let _ = select::logical_text(&app.entries, &selection);
-                let _ = select::highlight_rows(&app.entries, modes, width, 0, 60, &selection);
+                let _ = select::logical_text(&app.session.entries, &selection);
+                let _ =
+                    select::highlight_rows(&app.session.entries, modes, width, 0, 60, &selection);
             }
         }
     }
@@ -513,8 +543,8 @@ fn a_chinese_markdown_selection_does_not_panic() {
 /// Every `(line, column)` of the entry's laid-out body, including one column past each line's
 /// last cell (the end gap) and the synthesized cells.
 fn display_cells(app: &App, modes: DisplayModes, width: usize) -> Vec<(usize, usize)> {
-    let blocks = blocks::parse_blocks(&app.entries[0].text);
-    let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+    let blocks = blocks::parse_blocks(&app.session.entries[0].text);
+    let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
     let mut out = Vec::new();
     for (line, body) in lines.iter().enumerate() {
         for column in 0..=body.chars.len() {
@@ -532,8 +562,8 @@ fn a_chinese_selection_copies_the_source() {
     assistant(&mut app, "## 标题\n\n- 所以我逐张核对\n");
     let modes = modes(ReasoningMode::Expanded);
     let width = 40;
-    let blocks = blocks::parse_blocks(&app.entries[0].text);
-    let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+    let blocks = blocks::parse_blocks(&app.session.entries[0].text);
+    let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
     let line = lines
         .iter()
         .position(|l| l.text.contains("所以我逐张核对"))
@@ -546,10 +576,12 @@ fn a_chinese_selection_copies_the_source() {
         .collect();
     let first = sources[0];
     let line_width = unicode_width::UnicodeWidthStr::width(lines[line].text.as_str());
-    let anchor = select::locate(&app.entries, modes, width, line, first + 2).expect("anchor");
+    let anchor =
+        select::locate(&app.session.entries, modes, width, line, first + 2).expect("anchor");
     // One screen column past the line's last cell: the line's end gap.
-    let head = select::locate(&app.entries, modes, width, line, line_width + 2).expect("head");
-    let copied = select::logical_text(&app.entries, &select::Selection { anchor, head });
+    let head =
+        select::locate(&app.session.entries, modes, width, line, line_width + 2).expect("head");
+    let copied = select::logical_text(&app.session.entries, &select::Selection { anchor, head });
     assert_eq!(copied, "所以我逐张核对", "the item's source text");
 }
 
@@ -573,7 +605,7 @@ fn every_chinese_line_fits_the_width() {
             assistant(&mut app, body);
             let modes = modes(ReasoningMode::Expanded);
             let blocks = blocks::parse_blocks(body);
-            let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+            let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
             for line in &lines {
                 assert!(
                     unicode_width::UnicodeWidthStr::width(line.text.as_str()) <= width,
@@ -598,7 +630,7 @@ fn a_long_ordered_list_item_wraps_in_a_wide_window() {
         assistant(&mut app, body);
         let modes = modes(ReasoningMode::Expanded);
         let blocks = blocks::parse_blocks(body);
-        let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+        let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
         for line in &lines {
             assert!(
                 unicode_width::UnicodeWidthStr::width(line.text.as_str()) <= width,
