@@ -20,8 +20,11 @@
 //!   is deliberately no `approve` (ADR 0030 R9).
 //! - `task_status`, `list_tasks` — the read-only observer (ADR 0023 U6).
 //! - `cancel_task`, `remove_task`.
+//! - `integrate_task { id }` — the host-side merge of one task branch into the lead's integration
+//!   branch (ADR 0030); it is not a control-port verb (decision 10).
 //!
-//! `spawn_task` and `remove_task` are `Exclusive`; the rest are `Shared` (ADR 0030 O4).
+//! `spawn_task`, `remove_task` and `integrate_task` are `Exclusive`; the rest are `Shared`
+//! (ADR 0030 O4).
 //!
 //! **Part b1 (this slice):** `spawn_task` past `max_tasks` (default 4) queues the task FIFO with
 //! a queue position (ADR 0030 O4/O8); a queued task waits through the queue in `wait_task`/
@@ -29,7 +32,8 @@
 //! position. The registry also owns the process heavy gate and the `stalled` watch; those are the
 //! registry's, not a tool.
 //!
-//! **What is not here (part b2):** `send_agent`, `steer_task` and the verify runner.
+//! **What is not here (later slices):** `steer_task`; the verify runner is the registry's
+//! (slice 9) and reaches the model through `wait_task`/`task_status`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -90,7 +94,7 @@ fn wait_timeout(secs: Option<f64>) -> Result<(Duration, f64), ToolFailure> {
 /// The lead tool names, in the order the provider advertises them. The host adds these to the
 /// session profile as `allow` rules (ADR 0030 slice 6); the mode gate decides whether they run.
 /// `send_agent`/`wait_agent` are the named-agent pair of slice 7 part b (ADR 0030 O4/O12).
-pub const LEAD_TOOL_NAMES: [&str; 12] = [
+pub const LEAD_TOOL_NAMES: [&str; 13] = [
     "spawn_task",
     "send_agent",
     "wait_task",
@@ -103,7 +107,43 @@ pub const LEAD_TOOL_NAMES: [&str; 12] = [
     "list_tasks",
     "cancel_task",
     "remove_task",
+    "integrate_task",
 ];
+
+/// The command the lead reports to the human for moving the user's branch onto the integration
+/// branch (ADR 0030; ADR 0030 O7). The lead never runs it.
+pub fn human_merge_command(integration_branch: &str) -> String {
+    format!("git merge --ff-only {integration_branch}")
+}
+
+/// The lead profile's allowed tool names (ADR 0030): every lead tool
+/// **except** `integrate_task` while `merge_needs_human` is `true`. The rules then leave
+/// `integrate_task` unmatched, so it resolves to `ask` — a human approval with this session as the
+/// origin, and a refusal for a non-`User` turn (ADR 0012). With `merge_needs_human = false` it is
+/// added to the allow list and does not ask.
+pub fn lead_allowed_tools(merge_needs_human: bool) -> Vec<&'static str> {
+    LEAD_TOOL_NAMES
+        .iter()
+        .copied()
+        .filter(|name| !(*name == "integrate_task" && merge_needs_human))
+        .collect()
+}
+
+/// A short note about the integration verify results for the tool text (ADR 0030
+/// decision 9). Empty when no verify ran.
+fn verify_note(results: &[crate::orchestration::VerifyResult]) -> String {
+    if results.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = results
+        .iter()
+        .map(|result| match result.exit_code {
+            Some(code) => format!("`{}` {} (exit {code})", result.command, result.status),
+            None => format!("`{}` {}", result.command, result.status),
+        })
+        .collect();
+    format!(" Integration verify: {}.", parts.join("; "))
+}
 
 fn fail(code: &str, message: impl Into<String>) -> ToolFailure {
     ToolFailure::new(code, message)
@@ -191,6 +231,10 @@ pub fn specs() -> Vec<ToolSpec> {
                         "type": "string",
                         "enum": ["safe", "workspace"],
                         "description": "A tier that overrides the definition's `profile`; a task may only narrow (`safe` or `workspace`)."
+                    },
+                    "base": {
+                        "type": "string",
+                        "description": "The commit-ish the task branch is created from. Omit for the default: `radian/integration` once it exists, so the task sees earlier merged tasks, else your current HEAD."
                     }
                 },
                 "required": ["brief"],
@@ -371,6 +415,22 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
             concurrency: ToolConcurrency::Exclusive,
         },
+        ToolSpec {
+            name: "integrate_task".into(),
+            description: "Merge a task's branch into your integration branch and rerun the \
+                          project's verify there. Only that task's `radian/<id>` branch is \
+                          merged; the user's branch is never touched. A conflict aborts the \
+                          merge and returns the conflicted paths. Your delivery ends at the \
+                          integration branch."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "The task to merge." } },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            concurrency: ToolConcurrency::Exclusive,
+        },
     ]
 }
 
@@ -538,6 +598,7 @@ pub async fn run(
         "list_tasks" => lead.list_tasks(call),
         "cancel_task" => lead.cancel_task(call),
         "remove_task" => lead.remove_task(call).await,
+        "integrate_task" => lead.integrate_task(call).await,
         other => Err(fail(
             "unknown_tool",
             format!("`{other}` is not one of the lead tools"),
@@ -559,6 +620,10 @@ struct SpawnArgs {
     model: Option<String>,
     /// A tier name that overrides the definition's `profile`. A task may only narrow.
     profile: Option<String>,
+    /// The commit-ish the task branch is created from (ADR 0030). Omit for
+    /// the default: `radian/integration` once the lead's integration worktree exists, else the
+    /// lead's current HEAD.
+    base: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -640,6 +705,12 @@ struct RemoveArgs {
     force: Option<bool>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntegrateArgs {
+    id: String,
+}
+
 impl LeadSession {
     async fn spawn(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
         let args: SpawnArgs = parse(call)?;
@@ -684,6 +755,7 @@ impl LeadSession {
         request.agent = args.agent;
         request.model = args.model;
         request.profile = args.profile;
+        request.base = args.base;
         // ADR 0030 item 3: the edge policy command is never a model argument, so
         // `spawn_task` has no way to set one and refuses the field (deny_unknown_fields).
         request.policy = None;
@@ -1044,6 +1116,80 @@ impl LeadSession {
         Ok(ToolOutput::text(format!("removed task `{}`", args.id)))
     }
 
+    /// `integrate_task { id }` (ADR 0030): merge the task's branch into the
+    /// lead's integration branch. A `shared` task (no branch) and an existing integration branch
+    /// are refused. The result always names the command the human runs to move the user's branch.
+    async fn integrate_task(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
+        let args: IntegrateArgs = parse(call)?;
+        let integrated = self
+            .registry
+            .integrate(&args.id)
+            .await
+            .map_err(|error| fail("integrate_failed", error.to_string()))?;
+        let branch = integrated.integration.branch.clone();
+        let command = human_merge_command(&branch);
+        // ADR 0030: the integration verify facts, in their own field.
+        let verify = serde_json::to_value(&integrated.verify).unwrap_or(Value::Null);
+        let verify_note = verify_note(&integrated.verify);
+        let (mut structured, content) = match &integrated.outcome {
+            crate::integration::MergeOutcome::Merged(committed) => (
+                json!({
+                    "task": args.id,
+                    "event": "merged",
+                    "branch": branch,
+                    "commit": committed.commit,
+                    "files": committed.files,
+                    "human_command": command,
+                }),
+                format!(
+                    "merged task `{}` into `{branch}` (commit {}).{verify_note} Your delivery \
+                     ends at `{branch}`; the user's branch moves only when they run `{command}`.",
+                    args.id, committed.commit
+                ),
+            ),
+            crate::integration::MergeOutcome::AlreadyUpToDate => (
+                json!({
+                    "task": args.id,
+                    "event": "already_up_to_date",
+                    "branch": branch,
+                    "human_command": command,
+                }),
+                format!("task `{}` is already merged into `{branch}`.", args.id),
+            ),
+            crate::integration::MergeOutcome::Conflict {
+                paths,
+                status,
+                stderr,
+            } => (
+                json!({
+                    "task": args.id,
+                    "event": "conflict",
+                    "branch": branch,
+                    "paths": paths,
+                    "status": status,
+                    "stderr": stderr,
+                    "human_command": command,
+                }),
+                format!(
+                    "merging task `{}` conflicted and was aborted; the integration worktree is \
+                     left clean. Conflicted paths: {}. Resolve them with a task based on \
+                     `{branch}`, or report to the user.",
+                    args.id,
+                    if paths.is_empty() {
+                        "(none reported)".to_owned()
+                    } else {
+                        paths.join(", ")
+                    }
+                ),
+            ),
+        };
+        structured["verify"] = verify;
+        Ok(ToolOutput {
+            content: vec![agent_core::ContentPart::text(content)],
+            structured: Some(structured),
+        })
+    }
+
     /// Builds the `finished` result: the committed summary (bounded) plus the host-side facts
     /// the runtime fills (ADR 0030 R2): the end-of-task commit, HEAD and cleanliness.
     async fn finish(&self, record: &Arc<TaskRecord>) -> Result<ToolOutput, ToolFailure> {
@@ -1071,6 +1217,12 @@ impl LeadSession {
             Some(EndCommit::Failed(message)) => Some(message.clone()),
             _ => None,
         };
+        // ADR 0030 R2 / slice 9: the runtime's verify facts, in their own field, separate from
+        // the model's `summary`.
+        let verify = record
+            .verify_results()
+            .map(|results| serde_json::to_value(results).unwrap_or(Value::Null))
+            .unwrap_or(Value::Null);
         let mut structured = json!({
             "task": record.id,
             "event": "finished",
@@ -1085,6 +1237,7 @@ impl LeadSession {
             "summary_truncated": summary_truncated,
             "status": status,
             "status_truncated": status_truncated,
+            "verify": verify,
         });
         if let Some(error) = end_error {
             structured["end_commit_error"] = Value::String(error);
@@ -1199,6 +1352,11 @@ fn observed_status(record: &Arc<TaskRecord>) -> Value {
         Some(text) if !text.is_empty() => bounded_field(&text, TASK_DETAIL_LIMIT_CHARS),
         _ => (Value::Null, false),
     };
+    // ADR 0030 R2 / slice 9: the verify facts, in their own field.
+    let verify = record
+        .verify_results()
+        .map(|results| serde_json::to_value(results).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
     json!({
         "task": record.id,
         "state": observed.state,
@@ -1215,6 +1373,7 @@ fn observed_status(record: &Arc<TaskRecord>) -> Value {
         "label": record.label,
         "diff_stat": diff_stat,
         "diff_stat_truncated": diff_truncated,
+        "verify": verify,
     })
 }
 
@@ -1379,13 +1538,35 @@ mod tests {
         let names: Vec<&str> = specs.iter().map(|spec| spec.name.as_str()).collect();
         assert_eq!(names, LEAD_TOOL_NAMES);
         for spec in &specs {
-            let expected = if matches!(spec.name.as_str(), "spawn_task" | "remove_task") {
+            let expected = if matches!(
+                spec.name.as_str(),
+                "spawn_task" | "remove_task" | "integrate_task"
+            ) {
                 ToolConcurrency::Exclusive
             } else {
                 ToolConcurrency::Shared
             };
             assert_eq!(spec.concurrency, expected, "{}", spec.name);
         }
+    }
+
+    /// ADR 0030: `integrate_task` is left out of the allow list while
+    /// `merge_needs_human` is `true` (so the rules resolve it to `ask`), and included when it is
+    /// `false`.
+    #[test]
+    fn integrate_task_is_left_to_ask_while_merge_needs_human() {
+        let with_human = lead_allowed_tools(true);
+        assert!(!with_human.contains(&"integrate_task"), "{with_human:?}");
+        assert_eq!(with_human.len(), LEAD_TOOL_NAMES.len() - 1);
+        for name in LEAD_TOOL_NAMES
+            .iter()
+            .filter(|name| **name != "integrate_task")
+        {
+            assert!(with_human.contains(name), "missing {name}");
+        }
+        let without_human = lead_allowed_tools(false);
+        assert!(without_human.contains(&"integrate_task"));
+        assert_eq!(without_human.len(), LEAD_TOOL_NAMES.len());
     }
 
     #[test]

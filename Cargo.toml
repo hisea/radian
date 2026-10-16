@@ -4,6 +4,7 @@ members = [
     "crates/agent-core",
     "crates/agent-extensions",
     "crates/agent-provider-openai-compatible",
+    "crates/agent-provider-openai-responses",
     "crates/agent-provider-anthropic",
     "crates/agent-cli",
     "crates/radian-host",
@@ -15,7 +16,7 @@ members = [
     "crates/radian-tui",
     "crates/radian-permissions",
     "crates/radian-memory",
-    "third_party/codex-mermaid",
+    "third_party/grok-mermaid",
 ]
 
 [workspace.package]

@@ -505,8 +505,9 @@ impl BodyLine {
     }
 }
 
-/// A diagram piece's semantic role (ADR 0028 R8): the vendor's `Node`/`Edge`/`Text`, mapped
-/// so `radian-tui` does not expose the dependency's type in its own API.
+/// A diagram piece's semantic role (ADR 0042 decision 4): the vendored renderer's five roles
+/// collapse to these three, so `radian-tui` does not expose the dependency's type in its own API
+/// and the theme keeps its three mermaid roles (ADR 0029).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagramRole {
     Node,
@@ -670,13 +671,6 @@ pub fn gap_at(entries: &[Entry], index: usize) -> usize {
     };
     let prev = previous_shown(entries, index).map(|prev| &entries[prev]);
     block_gap(prev, next)
-}
-
-/// Whether the `bar` input gets its half-cell padding rows under this glyph tier (ADR 0035
-/// revision 3 decision 4, kept by revision 6 for the input alone): `unicode` and `nerd` draw
-/// `▄`/`▀`, `ascii` has no half-block glyph and so gets no padding row.
-pub fn banded_pad(glyphs: crate::footer::Glyphs) -> bool {
-    glyphs != crate::footer::Glyphs::Ascii
 }
 
 /// The entries the startup block is made of (ADR 0027 §标志 / the owner's 2026-10-14 startup

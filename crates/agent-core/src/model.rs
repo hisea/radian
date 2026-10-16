@@ -47,6 +47,22 @@ pub struct ModelResponse {
     /// Usage the provider reported for this call, if any. The core never fills missing
     /// fields: `None` means "not reported", never zero.
     pub usage: Option<ModelUsage>,
+    /// Provider rate-limit headers for this call, kept **raw** (lower-cased name, value as
+    /// received) so a later slice can parse them (ADR 0027 slice ④). `None` when
+    /// the provider sent none. This is not usage: the numbers are rate-limit windows and reset
+    /// times, not tokens, so they must never enter [`ModelUsage`].
+    pub limits: Option<RateLimits>,
+}
+
+/// Raw provider rate-limit headers from one model response (ADR 0027 slice ④). The
+/// codex/Responses adapter fills it from the `x-codex-primary-*` / `x-codex-secondary-*`
+/// response headers; the Chat Completions and Anthropic adapters leave it `None` (they read
+/// their rate-limit headers in a later slice). No field is parsed here yet, so the adapter
+/// cannot drift from the wire.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RateLimits {
+    /// Lower-cased HTTP header name -> value, in the order the headers arrived.
+    pub headers: Vec<(String, String)>,
 }
 
 /// Provider-reported token usage of one model call, self-contained and provider-neutral

@@ -64,6 +64,7 @@ use crate::agents::{SpawnAgent, SpawnOverrides, resolve as resolve_agent};
 use crate::git_commit::{Committed, RepoPin, default_allowed_filters};
 use crate::home::{ensure_private_dir, radian_home, worktrees_dir_for};
 use crate::observer::{JournalObserver, SessionObserver};
+use crate::orchestration::{self, Orchestration, VerifyResult, hook};
 use crate::session::{
     ApprovalRouting, HostBindings, LocalSession, SessionError, SessionQueue, SessionSetup,
     open_session,
@@ -133,7 +134,7 @@ pub enum TaskError {
 }
 
 impl TaskError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self::Message(message.into())
     }
 }
@@ -177,6 +178,11 @@ pub type TaskBuilder =
 /// hosts with [`TaskRegistry::with_notifier`]; `None` in tests, so no notice outside a host.
 pub type TaskNotifier = Arc<dyn Fn(&RuntimeEvent) + Send + Sync>;
 
+/// A callback the registry calls for each ADR 0030 O7 hook point (ADR 0030 slice 9), so the
+/// control port can fan the stable hook event (`task_spawned`, `task_finished`, `stalled`) out to
+/// subscribers. Installed with [`TaskRegistry::with_hook_notifier`]; `None` in tests.
+pub type HookNotifier = Arc<dyn Fn(&str, &serde_json::Value) + Send + Sync>;
+
 /// Where a spawn can be interrupted, for tests (ADR 0039 decision 5). Production installs no
 /// hook, so no variant ever fires outside a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +224,20 @@ pub enum EndCommit {
     Failed(String),
 }
 
+/// What one `integrate_task` produced (ADR 0030, 6, 7, 9): the merge
+/// outcome and, after a successful merge, the integration verify results.
+#[derive(Debug, Clone)]
+pub struct Integrated {
+    /// The lead's integration worktree (created lazily on the first integration).
+    pub integration: crate::integration::Integration,
+    /// The merge result: merged, already up to date, or conflicted (and aborted).
+    pub outcome: crate::integration::MergeOutcome,
+    /// The `verify` results after a successful merge, in the sandbox rooted at the integration
+    /// worktree (ADR 0030). Empty when nothing merged, or when no `verify`
+    /// commands are configured.
+    pub verify: Vec<VerifyResult>,
+}
+
 /// One live task agent: its session and the facts the lead needs about it (ADR 0030 O2/O3).
 pub struct TaskRecord {
     pub id: String,
@@ -247,6 +267,10 @@ pub struct TaskRecord {
     /// The sandbox policy the task's tools run under (ADR 0030 O3): a `workspace` policy with
     /// the network off and `.git` read-only, or `None` for a host with no sandbox.
     pub sandbox_policy: Option<SandboxPolicy>,
+    /// The name of the edge policy command this task's approver was given (ADR 0030 O2 layer 2,
+    /// slice 9), or `None` when no policy is configured. Read from the orchestration snapshot,
+    /// never from a model argument.
+    pub policy: Option<String>,
     /// When the task started, the reference for the stall check before it has an event or a
     /// write (ADR 0030 R5).
     pub started_at: DateTime<Utc>,
@@ -260,6 +284,13 @@ impl TaskRecord {
     /// has ended, so no commit was ever scheduled.
     pub async fn await_end_commit(&self) -> Option<EndCommit> {
         self.finisher.await_end_commit().await
+    }
+
+    /// The `verify` results the runtime filled after the end-of-task commit (ADR 0030 R2), or
+    /// `None` before the task ends. Empty when the task configured no `verify` commands, or for a
+    /// `shared` task (which runs no verify, ADR 0030 O3).
+    pub fn verify_results(&self) -> Option<Vec<VerifyResult>> {
+        self.finisher.verify_results()
     }
 
     /// Whether the task's turn is running right now (ADR 0030 slice 6's `wait_task`): `true`
@@ -313,6 +344,10 @@ pub struct SpawnRequest {
     pub model: Option<String>,
     /// A tier name that overrides the definition's `profile`. A task may only narrow.
     pub profile: Option<String>,
+    /// The commit-ish the task's `radian/<id>` branch is created from (ADR 0030
+    /// decision 3). `None` uses the registry's default: `radian/integration` once the lead's
+    /// integration worktree exists, else the lead's current HEAD. Ignored for `shared`.
+    pub base: Option<String>,
 }
 
 impl SpawnRequest {
@@ -328,6 +363,7 @@ impl SpawnRequest {
             agent: None,
             model: None,
             profile: None,
+            base: None,
         }
     }
 }
@@ -458,6 +494,13 @@ pub struct TaskRegistry {
     /// The host's notice callback for `TaskSpawned`/`TaskFinished` (ADR 0030 O10); `None` in
     /// tests. See [`TaskRegistry::with_notifier`].
     notifier: Option<TaskNotifier>,
+    /// The host's hook-point callback (ADR 0030 O7, slice 9); `None` in tests. See
+    /// [`TaskRegistry::with_hook_notifier`].
+    hook_notifier: Option<HookNotifier>,
+    /// The resolved orchestration snapshot (ADR 0030 slice 9): the O8 limits, the `verify`
+    /// commands, the edge `policy` command, and the spawn defaults. Resolved once, from the LEAD's
+    /// workspace (`orchestration::process` or [`TaskRegistry::with_orchestration`]).
+    orchestration: Orchestration,
     tasks: Mutex<BTreeMap<String, Arc<TaskRecord>>>,
     /// The orchestration limits (ADR 0030 O8): `max_tasks` and `stall_after_secs`.
     limits: OrchestrationLimits,
@@ -494,6 +537,13 @@ pub struct TaskRegistry {
     /// [`TaskRegistry::check_stalls`]; the ticker is then off, so it cannot consume a notice the
     /// test wanted to observe.
     manual_clock: bool,
+    /// The lead's integration worktree (ADR 0030): created lazily on the first
+    /// `integrate_task` and reused afterwards. `None` until then.
+    integration: Mutex<Option<crate::integration::Integration>>,
+    /// The lead's name for per-lead integration naming (ADR 0030): `None`
+    /// is the main lead, whose integration branch is `radian/integration`. A named lead's
+    /// `NamedRegistry` sets its name once the session opens (`set_lead_name`).
+    lead_name: Mutex<Option<String>>,
 }
 
 impl TaskRegistry {
@@ -511,7 +561,10 @@ impl TaskRegistry {
         let workspace = std::fs::canonicalize(&workspace).unwrap_or(workspace);
         let worktree_root = task_worktree_root(&workspace);
         let pending = TaskPendingQueue::new(Some(Arc::clone(&lead_queue)));
-        let limits = OrchestrationLimits::default();
+        // ADR 0030 slice 9: the orchestration snapshot is resolved once (from the LEAD's
+        // workspace) and installed process-wide; `with_orchestration` overrides it for a test.
+        let orchestration = orchestration::process();
+        let limits = orchestration.limits.clone();
         // Install the process gate from these limits (ADR 0030 O8). First configuration wins:
         // the process reads its orchestration config once (ADR 0030 slice 9).
         HeavySlots::set_process(limits.heavy_slots, limits.heavy_patterns.clone());
@@ -527,6 +580,8 @@ impl TaskRegistry {
             builder,
             seams: TaskSeams::default(),
             notifier: None,
+            hook_notifier: None,
+            orchestration,
             tasks: Mutex::new(BTreeMap::new()),
             limits,
             heavy,
@@ -542,7 +597,25 @@ impl TaskRegistry {
             observers: Mutex::new(BTreeMap::new()),
             clock: Box::new(Utc::now),
             manual_clock: false,
+            integration: Mutex::new(None),
+            lead_name: Mutex::new(None),
         }
+    }
+
+    /// Names this lead for per-lead integration naming (ADR 0030). `None`
+    /// (the default) is the main lead (`radian/integration`); a named lead uses
+    /// `radian/integration-<name>`.
+    pub fn with_lead_name(mut self, name: impl Into<String>) -> Self {
+        self.lead_name = Mutex::new(Some(name.into()));
+        self
+    }
+
+    /// Names this lead after construction (ADR 0030): a named agent's
+    /// [`crate::named::NamedRegistry`] sets its name once the session has opened, so the lead's
+    /// integration branch is `radian/integration-<name>`. The main lead never calls this and keeps
+    /// `radian/integration`.
+    pub fn set_lead_name(&self, name: impl Into<String>) {
+        *self.lead_name.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.into());
     }
 
     /// Installs the test seams (ADR 0039 decisions 5 and 7).
@@ -556,8 +629,34 @@ impl TaskRegistry {
     pub fn with_limits(mut self, limits: OrchestrationLimits) -> Self {
         HeavySlots::set_process(limits.heavy_slots, limits.heavy_patterns.clone());
         self.heavy = HeavySlots::process();
-        self.limits = limits;
+        self.limits = limits.clone();
+        self.orchestration.limits = limits;
         self
+    }
+
+    /// Installs a resolved orchestration snapshot (ADR 0030 slice 9): the O8 limits **and** the
+    /// `verify` commands, the edge `policy` command and the spawn defaults. This is the test seam;
+    /// production reads the snapshot from [`orchestration::process`], installed once by the host.
+    pub fn with_orchestration(mut self, orchestration: Orchestration) -> Self {
+        HeavySlots::set_process(
+            orchestration.limits.heavy_slots,
+            orchestration.limits.heavy_patterns.clone(),
+        );
+        self.heavy = HeavySlots::process();
+        self.limits = orchestration.limits.clone();
+        self.orchestration = orchestration;
+        self
+    }
+
+    /// Installs the process-level heavy gate directly (a test seam for the verify runner).
+    pub fn with_heavy(mut self, heavy: Arc<HeavySlots>) -> Self {
+        self.heavy = heavy;
+        self
+    }
+
+    /// The resolved orchestration snapshot this registry uses (ADR 0030 slice 9).
+    pub fn orchestration(&self) -> &Orchestration {
+        &self.orchestration
     }
 
     /// Installs a test clock (ADR 0030 R5 uses time; a test never sleeps 600 s). With an
@@ -603,10 +702,47 @@ impl TaskRegistry {
         self
     }
 
-    /// Calls the host's notice callback, when one is installed.
+    /// Installs the hook-point callback (ADR 0030 O7, slice 9): the control port fans
+    /// `task_spawned`/`task_finished`/`stalled` out to subscribers. `None` in tests.
+    pub fn with_hook_notifier(mut self, notifier: HookNotifier) -> Self {
+        self.hook_notifier = Some(notifier);
+        self
+    }
+
+    /// Calls the host's notice callback, when one is installed, and emits the ADR 0030 O7 hook
+    /// point for the two lifecycle events.
     fn notify(&self, event: &RuntimeEvent) {
+        match event {
+            RuntimeEvent::TaskSpawned {
+                agent_session_id,
+                worktree,
+                label,
+            } => self.hook(
+                hook::TASK_SPAWNED,
+                &hook::task_spawned(agent_session_id, worktree.as_deref(), label.as_deref()),
+            ),
+            RuntimeEvent::TaskFinished {
+                agent_session_id,
+                outcome,
+                error,
+            } => {
+                let word = outcome_word(outcome);
+                self.hook(
+                    hook::TASK_FINISHED,
+                    &hook::task_finished(agent_session_id, word, error.as_deref()),
+                );
+            }
+            _ => {}
+        }
         if let Some(notifier) = &self.notifier {
             notifier(event);
+        }
+    }
+
+    /// Emits one hook point to the installed hook callback, when there is one (ADR 0030 O7).
+    fn hook(&self, name: &str, data: &serde_json::Value) {
+        if let Some(hook) = &self.hook_notifier {
+            hook(name, data);
         }
     }
 
@@ -779,7 +915,7 @@ impl TaskRegistry {
             // call, and carry it through the queue. A queued task must not re-read the file (or
             // re-resolve against a later edit) when a slot frees; and a bad definition is the
             // caller's error now, not a queued failure.
-            let resolved = resolve_task(&request)?;
+            let resolved = resolve_task(&request, &self.orchestration)?;
             if self.live_count() < self.limits.max_tasks {
                 let record = self.spawn_resolved(request, resolved).await?;
                 self.bump_wake();
@@ -956,9 +1092,10 @@ impl TaskRegistry {
             if stalled {
                 if !self.stall_active(&record.id) {
                     self.mark_stall(&record.id);
+                    let idle_secs = idle.num_seconds().max(0) as u64;
                     let notice = StallNotice {
                         task_id: record.id.clone(),
-                        idle_secs: idle.num_seconds().max(0) as u64,
+                        idle_secs,
                     };
                     self.stalls
                         .lock()
@@ -966,6 +1103,8 @@ impl TaskRegistry {
                         .push_back(notice);
                     self.stall_version
                         .send_modify(|version| *version = version.wrapping_add(1));
+                    // ADR 0030 O7/O8: `stalled` is a control-port hook point too.
+                    self.hook(hook::STALLED, &hook::stalled(&record.id, idle_secs));
                     fired += 1;
                 }
             } else {
@@ -1038,7 +1177,7 @@ impl TaskRegistry {
         request: SpawnRequest,
     ) -> futures_util::future::BoxFuture<'_, Result<Arc<TaskRecord>, TaskError>> {
         Box::pin(async move {
-            let resolved = resolve_task(&request)?;
+            let resolved = resolve_task(&request, &self.orchestration)?;
             self.spawn_resolved(request, resolved).await
         })
     }
@@ -1049,10 +1188,13 @@ impl TaskRegistry {
     /// so a queued task starts from its submit-time snapshot.
     fn spawn_resolved(
         &self,
-        request: SpawnRequest,
+        mut request: SpawnRequest,
         resolved: ResolvedAgent,
     ) -> futures_util::future::BoxFuture<'_, Result<Arc<TaskRecord>, TaskError>> {
         Box::pin(async move {
+            // ADR 0030: the task branch's start point, captured before the
+            // request is destructured.
+            let base = request.base.take();
             let SpawnRequest {
                 id,
                 label,
@@ -1073,6 +1215,11 @@ impl TaskRegistry {
                 isolation,
                 approval,
             } = resolved;
+            // ADR 0030 O2 layer 2 / revision 7 item 3: the edge policy command comes only from
+            // the user config or a trusted project config, never a model argument; the registry
+            // fills the snapshot's policy when the request has none. `spawn_task` always passes
+            // `None`, so the model cannot supply one.
+            let policy = policy.or_else(|| self.orchestration.policy.clone());
 
             // The guard owns everything the spawn has built so far; it is disarmed only once the
             // record is in the registry, so no failure below can leave a worktree or a driver.
@@ -1084,6 +1231,7 @@ impl TaskRegistry {
                     isolation,
                     label,
                     brief,
+                    base,
                     (approval, policy),
                     agent,
                 )
@@ -1120,6 +1268,8 @@ impl TaskRegistry {
         isolation: Isolation,
         label: Option<String>,
         brief: Option<String>,
+        // ADR 0030: the branch's start point, or `None` for the default.
+        base: Option<String>,
         // The task's approval policy and its optional edge policy command (ADR 0030 slice 5),
         // together: they are only ever read as a pair by the task approver below.
         (approval, policy): (ApprovalPolicy, Option<crate::task_pending::PolicyCommand>),
@@ -1141,8 +1291,11 @@ impl TaskRegistry {
                 let wt = worktree.clone();
                 let br = format!("radian/{id}");
                 let br_for_git = br.clone();
+                // ADR 0030: an explicit `base`, else the registry's
+                // default (`radian/integration` once the integration worktree exists).
+                let start = self.effective_base(base);
                 tokio::task::spawn_blocking(move || {
-                    create_worktree(&lead, &home, &wt, &br_for_git)
+                    create_worktree_from(&lead, &home, &wt, &br_for_git, start.as_deref())
                 })
                 .await
                 .map_err(|error| TaskError::new(format!("worktree task failed: {error}")))??;
@@ -1227,6 +1380,7 @@ impl TaskRegistry {
 
         // The task's asks and questions go to the task-side pending queue, not the human's; the
         // task is committed when its turn ends (ADR 0030 slice 5).
+        let policy_name = policy.as_ref().map(|policy| policy.name.clone());
         let task_approver = Arc::new(TaskApprover::new(
             Arc::clone(&self.pending),
             id.to_owned(),
@@ -1243,6 +1397,12 @@ impl TaskRegistry {
         // ADR 0030 R9: a task agent's questions go to the lead, so `ask_user` is
         // advertised for the task even when the lead's own host did not advertise it to itself.
         bindings.ask_user = true;
+        // The sandbox policy the task's tools will run under (kept for the record and for the
+        // verify runner): read it before `open_session` consumes the setup.
+        let sandbox_policy = setup
+            .sandbox
+            .as_ref()
+            .map(|sandbox| sandbox.policy().clone());
         let finisher = Arc::new(TaskFinisher {
             id: id.to_owned(),
             lead_journal: Arc::clone(&self.lead_journal),
@@ -1263,6 +1423,12 @@ impl TaskRegistry {
             // ADR 0030 O8: a turn end frees a `max_tasks` slot, so wake the FIFO pump.
             notify: Arc::clone(&self.pump),
             finished: AtomicBool::new(false),
+            // ADR 0030 slice 9: the verify runner's inputs and results.
+            verify: self.orchestration.verify.clone(),
+            sandbox_policy: sandbox_policy.clone(),
+            heavy: Arc::clone(&self.heavy),
+            verify_results: Mutex::new(None),
+            hook_notifier: self.hook_notifier.clone(),
         });
         let inner = Arc::clone(&bindings.runtime_events);
         bindings.runtime_events = Arc::new(TaskRuntimeEvents {
@@ -1271,12 +1437,7 @@ impl TaskRegistry {
             wake: self.wake.clone(),
         });
 
-        // The sandbox policy the task's tools will run under (kept for the record): read it
-        // before `open_session` consumes the setup.
-        let sandbox_policy = setup
-            .sandbox
-            .as_ref()
-            .map(|sandbox| sandbox.policy().clone());
+        // The sandbox policy the task's tools run under was captured before the finisher.
         let session = Arc::new(
             open_session(setup, bindings)
                 .await
@@ -1322,6 +1483,7 @@ impl TaskRegistry {
             start_seq,
             start_commit,
             sandbox_policy,
+            policy: policy_name,
             started_at: Utc::now(),
             finisher,
         });
@@ -1332,12 +1494,194 @@ impl TaskRegistry {
         Ok(record)
     }
 
+    /// ADR 0030: the start point a worktree task's branch is created from.
+    /// An explicit `base` wins; otherwise `radian/integration` once the lead's integration
+    /// worktree exists, else the lead's current HEAD (`None`).
+    fn effective_base(&self, base: Option<String>) -> Option<String> {
+        base.or_else(|| {
+            self.integration_cache()
+                .map(|integration| integration.branch.clone())
+        })
+    }
+
+    /// The lead's integration worktree, once it exists (ADR 0030): `None` until the
+    /// first `integrate_task` creates it.
+    pub fn integration(&self) -> Option<crate::integration::Integration> {
+        self.integration_cache()
+    }
+
+    /// The integration branch this lead uses (ADR 0030):
+    /// `radian/integration` for the main lead, `radian/integration-<name>` for a named lead.
+    pub fn integration_branch(&self) -> String {
+        let lead_name = self
+            .lead_name
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        crate::integration::branch_for(lead_name.as_deref())
+    }
+
+    fn integration_cache(&self) -> Option<crate::integration::Integration> {
+        self.integration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The lead's integration worktree, created lazily on first use (ADR 0030
+    /// decision 2) and cached after. Refuses when the branch or directory already exists.
+    pub fn ensure_integration(
+        &self,
+    ) -> futures_util::future::BoxFuture<'_, Result<crate::integration::Integration, TaskError>>
+    {
+        Box::pin(async move {
+            if let Some(existing) = self.integration_cache() {
+                return Ok(existing);
+            }
+            let root = self.worktree_root.as_ref().ok_or_else(|| {
+                TaskError::new(format!(
+                    "cannot create the integration worktree: {} is not a git repository, or \
+                     there is no usable ~/.radian",
+                    self.workspace.display()
+                ))
+            })?;
+            let lead = self.workspace.clone();
+            let home = root.home.clone();
+            let root_path = root.root.clone();
+            let lead_name = self
+                .lead_name
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let integration = tokio::task::spawn_blocking(move || {
+                crate::integration::create(&lead, &home, &root_path, lead_name.as_deref())
+            })
+            .await
+            .map_err(|error| {
+                TaskError::new(format!("integration worktree task failed: {error}"))
+            })??;
+            *self.integration.lock().unwrap_or_else(|e| e.into_inner()) = Some(integration.clone());
+            Ok(integration)
+        })
+    }
+
     /// Runs the spawn test seam, if this registry has one (ADR 0039 decision 5).
     fn seam(&self, stage: SpawnStage) -> Result<(), TaskError> {
         match &self.seams.spawn {
             Some(hook) => hook(stage).map_err(TaskError::new),
             None => Ok(()),
         }
+    }
+
+    /// Merges one task's branch into the lead's integration worktree (ADR 0030
+    /// decisions 4, 6, 7, 9): a `shared` task is refused (it has no branch), the integration
+    /// worktree is created lazily, a `before_merge` event is emitted before the attempt, the
+    /// merge is host-side `git merge --no-ff` committed through the `git_commit` path with
+    /// `radian/integration` as the only allowed branch, and after a successful merge the
+    /// orchestration's `verify` commands run in a sandbox rooted at the integration worktree,
+    /// through the heavy gate. A conflict aborts and is reported (never left in progress).
+    ///
+    /// The permission decision (`merge_needs_human`) is the session's: `integrate_task`'s rule is
+    /// resolved before this method runs (ADR 0030).
+    pub async fn integrate(&self, id: &str) -> Result<Integrated, TaskError> {
+        let record = self
+            .get(id)
+            .ok_or_else(|| TaskError::new(format!("no task `{id}`")))?;
+        let task_branch = record.branch.clone().ok_or_else(|| {
+            TaskError::new(format!(
+                "task `{id}` is `shared`; it has no branch to integrate (ADR 0030 O3)"
+            ))
+        })?;
+        let integration = self.ensure_integration().await?;
+        let worktree = integration.worktree.clone();
+        let branch = integration.branch.clone();
+
+        // ADR 0030: `before_merge` fires once per attempt, before the merge
+        // (a conflicting attempt included), carrying the task, its branch and both HEADs.
+        let (task_head, integration_head) = {
+            let wt = worktree.clone();
+            let tb = task_branch.clone();
+            tokio::task::spawn_blocking(move || {
+                (
+                    crate::integration::rev_parse(&wt, &tb),
+                    crate::integration::rev_parse(&wt, "HEAD"),
+                )
+            })
+            .await
+            .map_err(|error| TaskError::new(format!("integration task failed: {error}")))?
+        };
+        self.hook(
+            hook::BEFORE_MERGE,
+            &hook::before_merge(
+                id,
+                &task_branch,
+                task_head.as_deref(),
+                integration_head.as_deref(),
+            ),
+        );
+
+        let id_owned = id.to_owned();
+        let filters = default_allowed_filters();
+        let outcome = {
+            let worktree = worktree.clone();
+            let branch = branch.clone();
+            let task_branch = task_branch.clone();
+            tokio::task::spawn_blocking(move || {
+                let pin = RepoPin::resolve(&worktree).ok_or_else(|| {
+                    TaskError::new(format!(
+                        "the integration worktree {} is not a git repository",
+                        worktree.display()
+                    ))
+                })?;
+                crate::integration::merge_task_branch(
+                    &worktree,
+                    &branch,
+                    &id_owned,
+                    &task_branch,
+                    &pin,
+                    &[],
+                    &filters,
+                )
+            })
+            .await
+            .map_err(|error| TaskError::new(format!("integration task failed: {error}")))??
+        };
+
+        // ADR 0030: after a successful merge, rerun the orchestration's
+        // `verify` in a sandbox rooted at the integration worktree, through the heavy gate. An
+        // already-up-to-date branch changed nothing, so it runs no verify.
+        let verify = if matches!(outcome, crate::integration::MergeOutcome::Merged(_))
+            && !self.orchestration.verify.is_empty()
+        {
+            match task_sandbox_policy(&worktree) {
+                Ok(policy) => {
+                    orchestration::run_verify(
+                        &self.orchestration.verify,
+                        &policy,
+                        &worktree,
+                        &self.heavy,
+                    )
+                    .await
+                }
+                Err(error) => vec![VerifyResult {
+                    command: "<sandbox>".to_owned(),
+                    exit_code: None,
+                    timed_out: false,
+                    output_tail: format!("could not build the integration sandbox: {error}"),
+                    truncated: false,
+                    queued_ms: 0,
+                    status: "spawn_failed",
+                }],
+            }
+        } else {
+            Vec::new()
+        };
+
+        Ok(Integrated {
+            integration,
+            outcome,
+            verify,
+        })
     }
 
     /// Closes a task and removes its worktree (ADR 0030 O3: `remove_task`).
@@ -1659,7 +2003,6 @@ pub(crate) fn builtin_tool_names() -> Vec<&'static str> {
         "memory_revise",
         "ask_user",
         "skill",
-        "mermaid_check",
         "git_commit",
     ]
 }
@@ -1688,12 +2031,18 @@ pub fn task_sandbox(lead: &Sandbox, workspace: &Path) -> Result<Sandbox, TaskErr
 }
 
 /// Resolves and snapshots the agent definition for one `spawn_task` call (ADR 0030 O11, revision
-/// 2 item 4). The spawn arguments override the definition's fields (O4), and a profile that would
-/// widen the task floor is refused here, before the worktree is created. `submit` calls this
-/// **before** queueing, so a queued task starts from this snapshot and never re-reads the file.
-fn resolve_task(request: &SpawnRequest) -> Result<ResolvedAgent, TaskError> {
+/// 2 item 4). The spawn arguments override the definition's fields, which override the
+/// orchestration defaults (O4/O7); the project-level definitions come from the LEAD's workspace
+/// (`orchestration.project_agents`, ADR 0031 T1) and never from the task's own worktree. A profile
+/// that would widen the task floor is refused here, before the worktree is created. `submit` calls
+/// this **before** queueing, so a queued task starts from this snapshot and never re-reads the file.
+fn resolve_task(
+    request: &SpawnRequest,
+    orchestration: &Orchestration,
+) -> Result<ResolvedAgent, TaskError> {
     let resolved = resolve_agent(
         radian_home().as_deref(),
+        orchestration.project_agents.as_deref(),
         &SpawnOverrides {
             agent: request.agent.as_deref(),
             isolation: request.isolation,
@@ -1701,6 +2050,7 @@ fn resolve_task(request: &SpawnRequest) -> Result<ResolvedAgent, TaskError> {
             profile: request.profile.as_deref(),
             approval: request.approval,
         },
+        &orchestration.defaults,
     )
     .map_err(|error| TaskError::new(format!("cannot resolve the agent definition: {error}")))?;
     let isolation = resolved.isolation.unwrap_or_default();
@@ -1811,6 +2161,20 @@ pub fn create_worktree(
     worktree: &Path,
     branch: &str,
 ) -> Result<(), TaskError> {
+    create_worktree_from(lead, home, worktree, branch, None)
+}
+
+/// [`create_worktree`] with an explicit start point (ADR 0030): `start` is
+/// the commit-ish the new branch is created from (`None` means the lead's current HEAD). A task
+/// spawned with `base` uses it; the default names `radian/integration` once that exists, so a
+/// slice sees the earlier slices already merged.
+pub fn create_worktree_from(
+    lead: &Path,
+    home: &Path,
+    worktree: &Path,
+    branch: &str,
+    start: Option<&str>,
+) -> Result<(), TaskError> {
     let root = worktree.parent().ok_or_else(|| {
         TaskError::new(format!(
             "the worktree path {} has no parent directory",
@@ -1822,13 +2186,18 @@ pub fn create_worktree(
     let path = worktree
         .to_str()
         .ok_or_else(|| TaskError::new("the worktree path is not valid UTF-8"))?;
-    let output = worktree_git(lead)?
-        .args(["worktree", "add", "-b", branch, path])
+    let mut command = worktree_git(lead)?;
+    command.args(["worktree", "add", "-b", branch, path]);
+    if let Some(start) = start {
+        command.arg(start);
+    }
+    let output = command
         .output()
         .map_err(|error| TaskError::new(format!("could not run git: {error}")))?;
     if !output.status.success() {
+        let start = start.map(|start| format!(" {start}")).unwrap_or_default();
         return Err(TaskError::new(format!(
-            "git worktree add -b {branch} {path} failed: {}",
+            "git worktree add -b {branch} {path}{start} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
@@ -1838,8 +2207,10 @@ pub fn create_worktree(
 /// Creates — and checks — every level of `root` below `home` with an `openat` of
 /// `O_NOFOLLOW|O_DIRECTORY` from a directory fd (ADR 0039 decision 4). A symlink at any level
 /// fails with `ELOOP` and refuses the spawn; a missing level is created owner-only (0700).
+/// Public(crate) so [`crate::integration`] vets the lead's integration worktree the exact same
+/// way (ADR 0030).
 #[cfg(unix)]
-fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
+pub(crate) fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
     use std::ffi::CString;
     use std::os::unix::io::AsFd;
 
@@ -1907,7 +2278,7 @@ fn create_missing_level(
 
 /// The non-Unix fallback: no `openat`, so each level is checked with `symlink_metadata`.
 #[cfg(not(unix))]
-fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
+pub(crate) fn vet_worktree_root(home: &Path, root: &Path) -> Result<(), TaskError> {
     ensure_private_dir(root)
         .map_err(|error| TaskError::new(format!("cannot create {}: {error}", root.display())))?;
     let relative = root.strip_prefix(home).map_err(|_| {
@@ -2077,7 +2448,7 @@ pub fn remove_worktree(lead: &Path, worktree: &Path, force: bool) -> Result<(), 
 
 /// The worktree's HEAD commit, or `None` when it is not a repository (or git fails). A host
 /// `git` call through the shared helper.
-fn git_head(worktree: &Path) -> Option<String> {
+pub(crate) fn git_head(worktree: &Path) -> Option<String> {
     let output = radian_coding::host_git::host_git_command(worktree)
         .ok()?
         .args(["rev-parse", "HEAD"])
@@ -2088,6 +2459,28 @@ fn git_head(worktree: &Path) -> Option<String> {
     }
     let head = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     (!head.is_empty()).then_some(head)
+}
+
+/// Whether `branch` exists as a local branch in `workspace`, through a host `git` call. Used to
+/// refuse creating an integration worktree whose branch a previous lead already handed over
+/// (ADR 0030).
+pub(crate) fn refs_has_branch(workspace: &Path, branch: &str) -> Result<bool, TaskError> {
+    let reference = format!("refs/heads/{branch}");
+    let output = radian_coding::host_git::host_git_command(workspace)
+        .map_err(TaskError::new)?
+        .args(["show-ref", "--verify", "--quiet", &reference])
+        .output()
+        .map_err(|error| TaskError::new(format!("could not run git: {error}")))?;
+    // `show-ref --verify --quiet` exits 0 when the ref exists, 1 when it does not, and anything
+    // else is a real failure (a broken repository), which must not read as "does not exist".
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(TaskError::new(format!(
+            "git show-ref {reference} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
 }
 
 /// Whether the worktree has changes `git status --porcelain` reports. Resolves the pin the way
@@ -2194,6 +2587,18 @@ struct TaskFinisher {
     /// Set by the first end (a turn end or a removal), so the task writes exactly one
     /// `TaskFinished` (ADR 0030 O5): a second turn end or a later removal writes nothing.
     finished: AtomicBool,
+    /// The `verify` commands from the orchestration snapshot (ADR 0030 slice 9); empty means no
+    /// verify runs.
+    verify: Vec<String>,
+    /// The task's sandbox policy; the verify runner builds a sandbox from it. `None` (a `shared`
+    /// task) means no verify.
+    sandbox_policy: Option<SandboxPolicy>,
+    /// The process heavy gate the verify commands queue on (ADR 0030 O8).
+    heavy: Arc<HeavySlots>,
+    /// The verify results, once they have run (ADR 0030 R2).
+    verify_results: Mutex<Option<Vec<VerifyResult>>>,
+    /// The host's hook-point callback (ADR 0030 O7), cloned from the registry.
+    hook_notifier: Option<HookNotifier>,
 }
 
 impl TaskFinisher {
@@ -2209,11 +2614,32 @@ impl TaskFinisher {
         self.turns.subscribe()
     }
 
-    /// Calls the host's notice callback, when one is installed (ADR 0030 O10).
+    /// Calls the host's notice callback, when one is installed (ADR 0030 O10), and emits the
+    /// `task_finished` hook point (ADR 0030 O7) for the task's one end.
     fn notify(&self, event: &RuntimeEvent) {
+        if let RuntimeEvent::TaskFinished {
+            agent_session_id,
+            outcome,
+            error,
+        } = event
+            && let Some(hook) = &self.hook_notifier
+        {
+            hook(
+                hook::TASK_FINISHED,
+                &hook::task_finished(agent_session_id, outcome_word(outcome), error.as_deref()),
+            );
+        }
         if let Some(notifier) = &self.notifier {
             notifier(event);
         }
+    }
+
+    /// The verify results, once they have run (ADR 0030 R2).
+    fn verify_results(&self) -> Option<Vec<VerifyResult>> {
+        self.verify_results
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn signal_turn(&self) {
@@ -2267,6 +2693,11 @@ impl TaskFinisher {
         let filters = self.filters.clone();
         let journal = self.journal.get().cloned();
         let gate = self.gate.clone();
+        // ADR 0030 slice 9: the verify runner's inputs.
+        let verify_commands = self.verify.clone();
+        let verify_policy = self.sandbox_policy.clone();
+        let verify_worktree = self.worktree.clone();
+        let verify_heavy = Arc::clone(&self.heavy);
         let this = Arc::clone(self);
         self.runtime.spawn(async move {
             let end = match (worktree, pin) {
@@ -2312,6 +2743,21 @@ impl TaskFinisher {
                 // end-of-task commit.
                 _ => EndCommit::None,
             };
+            // ADR 0030 O7/R2 / slice 9: after the end-of-task commit, run each `verify` command in
+            // the task's own sandbox (network off, root = worktree), through the heavy gate. A
+            // `shared` task has no worktree and no sandbox, so it runs no verify. The results are
+            // stored before `Done`, so a waiter (and `remove_task`) sees the task's true end.
+            if let (Some(worktree), Some(policy)) = (verify_worktree, verify_policy)
+                && !verify_commands.is_empty()
+            {
+                let results =
+                    orchestration::run_verify(&verify_commands, &policy, &worktree, &verify_heavy)
+                        .await;
+                *this
+                    .verify_results
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(results);
+            }
             // ADR 0030 O5 / ADR 0039 decision 7: the one `TaskFinished`, written after the
             // commit (and after the `GitCommitted` audit) so the record follows the commit. Its
             // `error` is the commit's failure, when the commit failed.

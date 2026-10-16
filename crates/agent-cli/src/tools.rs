@@ -37,8 +37,7 @@ mod tests {
                 "glob",
                 "grep",
                 "git_status",
-                "git_diff",
-                "mermaid_check"
+                "git_diff"
             ]
         );
 
@@ -59,17 +58,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_workspace_only_the_host_tools_exist() {
+    async fn without_a_workspace_no_built_in_tools_exist() {
         let tools = CliTools::new(None, None, McpToolProvider::new(Vec::new()), None);
         let session = tools.open_session().await.unwrap();
-        // `mermaid_check` is a host tool, not a workspace tool (ADR 0028 R8).
-        assert_eq!(
-            session
-                .tool_specs()
-                .iter()
-                .map(|spec| spec.name.as_str())
-                .collect::<Vec<_>>(),
-            ["mermaid_check"]
+        // `mermaid_check` was the one always-mounted host tool; ADR 0042's supplement deleted it,
+        // so a host with no workspace provides no built-in tool at all.
+        assert!(
+            session.tool_specs().is_empty(),
+            "{:?}",
+            session.tool_specs()
         );
     }
 }

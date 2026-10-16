@@ -266,6 +266,7 @@ async fn pause_turn_continues_with_same_budget_and_keeps_opaque_blocks() {
     };
     let model = ScriptedModel::new([
         Reply::Respond(ModelResponse {
+            limits: None,
             reasoning: Vec::new(),
             content: vec![server_block.clone()],
             tool_calls: vec![],
@@ -371,6 +372,7 @@ async fn provider_payload_round_trips() {
     ];
     let model = ScriptedModel::new([
         Reply::Respond(ModelResponse {
+            limits: None,
             reasoning: Vec::new(),
             content: content.clone(),
             tool_calls: vec![],

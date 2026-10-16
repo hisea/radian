@@ -1325,9 +1325,18 @@ pub async fn open_session(
         // `TaskFinished` it writes, so the TUI shows a notice line and the CLI one stderr line.
         // The sink is the host's own runtime-events handler (the same one the driver calls).
         let runtime_events = Arc::clone(&runtime_events);
+        let notifier_events = Arc::clone(&runtime_events);
         let notifier: crate::task::TaskNotifier =
             Arc::new(move |event: &radian_session::RuntimeEvent| {
-                runtime_events.on_runtime_event(event);
+                notifier_events.on_runtime_event(event);
+            });
+        // ADR 0030 O7 / slice 9: the registry's hook points (`task_spawned`, `task_finished`,
+        // `stalled`) go through the same control-wrapped sink, so a subscriber sees them with
+        // their stable hook names.
+        let hook_events = Arc::clone(&runtime_events);
+        let hook_notifier: crate::task::HookNotifier =
+            Arc::new(move |name: &str, data: &serde_json::Value| {
+                hook_events.on_hook_event(name, data);
             });
         Some(Arc::new(
             crate::task::TaskRegistry::new(
@@ -1337,7 +1346,8 @@ pub async fn open_session(
                 Arc::clone(&queue),
                 builder,
             )
-            .with_notifier(notifier),
+            .with_notifier(notifier)
+            .with_hook_notifier(hook_notifier),
         ))
     } else {
         None
@@ -1377,8 +1387,17 @@ pub async fn open_session(
     // lead tools **from the start** (ADR 0030 item 5); a task agent never does
     // (depth limit 2). The profile allows the tool names and the mode gate refuses them
     // outside `lead`, so `/mode` never adds or removes a tool (ADR 0038 decision 1).
+    //
+    // ADR 0030: `integrate_task`'s permission is `merge_needs_human`. With
+    // the default `true` it is deliberately left **unmatched**, so the rules resolve to `ask` — a
+    // human approval with this session as the origin, and a refusal (never an auto-allow) for a
+    // non-`User` turn. `false` adds the `allow` rule.
     let profile = if lead_mounted {
-        profile.with_allowed_tools(&crate::lead_tools::LEAD_TOOL_NAMES)
+        let merge_needs_human = lead_registry
+            .as_ref()
+            .map(|registry| registry.orchestration().merge_needs_human)
+            .unwrap_or(true);
+        profile.with_allowed_tools(&crate::lead_tools::lead_allowed_tools(merge_needs_human))
     } else {
         profile
     };
