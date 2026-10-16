@@ -45,6 +45,7 @@
 //!   is read as a stream, retaining only a bounded head and a trimmed tail, so a command that
 //!   prints gigabytes cannot grow this process's memory.
 
+mod args;
 mod ask;
 mod git;
 mod glob;

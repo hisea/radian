@@ -75,8 +75,14 @@ impl HostTools {
             out.push((name.to_owned(), purpose.to_owned()));
         };
         if self.coding.is_some() {
-            push("read", "read a file, with offset and limit");
-            push("patch", "replace exact text in a file");
+            push(
+                "read",
+                "read a file; lines are numbered, with offset and limit",
+            );
+            push(
+                "patch",
+                "replace text in a file (layered match; replace_all for many)",
+            );
             push("write", "create or overwrite a file");
             push("list", "list a directory");
             push("glob", "find files whose path matches a glob");

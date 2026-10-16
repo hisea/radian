@@ -710,8 +710,9 @@ pub async fn check_input_cache_semantics<M: Model, H: ContractHarness<M>>(h: &H)
     }
 }
 
-/// Server errors are `Transport`, request errors are `Protocol`, and a stream cut before
-/// completion is an error, never a partial `ModelResponse`.
+/// Server errors are `Unavailable` (ADR 0017: the transient kind the core retries),
+/// request errors are `Protocol`, and a stream cut before completion is an error, never a
+/// partial `ModelResponse`.
 pub async fn check_error_classification<M: Model, H: ContractHarness<M>>(h: &H) {
     let model = h
         .script(&[Wire::Status {
@@ -721,8 +722,13 @@ pub async fn check_error_classification<M: Model, H: ContractHarness<M>>(h: &H) 
         .await;
     let error = complete(&model, request(), &NoopSink).await.unwrap_err();
     assert!(
-        matches!(&error, ModelError::Transport(m) if m.contains("HTTP 500") && m.contains("oops")),
-        "a 500 is a transport error quoting the body: {error}"
+        matches!(&error, ModelError::Unavailable { message, .. }
+            if message.contains("HTTP 500") && message.contains("oops")),
+        "a 500 is an unavailable error quoting the body: {error}"
+    );
+    assert!(
+        error.is_transient(),
+        "a 500 must be transient so the core retries it: {error}"
     );
 
     let model = h
@@ -735,6 +741,10 @@ pub async fn check_error_classification<M: Model, H: ContractHarness<M>>(h: &H) 
     assert!(
         matches!(&error, ModelError::Protocol(m) if m.contains("HTTP 400") && m.contains("bad request")),
         "a 400 is a protocol error quoting the body: {error}"
+    );
+    assert!(
+        !error.is_transient(),
+        "a 400 must never be retried: {error}"
     );
 
     let model = h.script(&[Wire::CutMidStream("half an ans".into())]).await;
@@ -876,6 +886,13 @@ mod tests {
         match error {
             ModelError::Transport(text) => ModelError::Transport(text.clone()),
             ModelError::Protocol(text) => ModelError::Protocol(text.clone()),
+            ModelError::Unavailable {
+                message,
+                retry_after,
+            } => ModelError::Unavailable {
+                message: message.clone(),
+                retry_after: *retry_after,
+            },
             ModelError::ContextOverflow(text) => ModelError::ContextOverflow(text.clone()),
         }
     }
@@ -978,7 +995,10 @@ mod tests {
                     if declared || (self.misclassify_all_4xx && matches!(code, 400 | 413)) {
                         Some(ModelError::ContextOverflow(format!("HTTP {code}: {body}")))
                     } else if *code >= 500 || matches!(code, 408 | 429) {
-                        Some(ModelError::Transport(format!("HTTP {code}: {body}")))
+                        Some(ModelError::Unavailable {
+                            message: format!("HTTP {code}: {body}"),
+                            retry_after: None,
+                        })
                     } else {
                         Some(ModelError::Protocol(format!("HTTP {code}: {body}")))
                     }

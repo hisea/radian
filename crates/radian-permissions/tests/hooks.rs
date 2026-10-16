@@ -535,3 +535,37 @@ fn runtime_event_threads_the_optional_policy_name() {
         other => panic!("expected PermissionResolved, got {other:?}"),
     }
 }
+
+/// ADR 0038 slice 2: `/access` swaps the profile in place. A `write` under the workspace is
+/// allowed in `workspace`, denied in `safe`, and allowed again when swapped back — from the
+/// very next call, with no new hooks instance.
+#[tokio::test]
+async fn switching_the_profile_changes_the_next_decision() {
+    let dir = TempDir::new("access-switch");
+    let workspace = dir.path();
+    let hooks = make_hooks(
+        Profile::workspace_write(workspace).unwrap(),
+        ScriptedApprover::scripted(Vec::new()),
+        Arc::new(RecordingAudit::default()),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    let cx = ctx();
+    let write = call("write", json!({"path": "a.txt", "content": "x"}));
+
+    assert!(matches!(
+        decide(&hooks, &cx, &write).await.unwrap(),
+        ToolDecision::Allow
+    ));
+
+    hooks.set_profile(Profile::safe(workspace).unwrap());
+    assert!(matches!(
+        decide(&hooks, &cx, &write).await.unwrap(),
+        ToolDecision::Deny { .. }
+    ));
+
+    hooks.set_profile(Profile::workspace_write(workspace).unwrap());
+    assert!(matches!(
+        decide(&hooks, &cx, &write).await.unwrap(),
+        ToolDecision::Allow
+    ));
+}

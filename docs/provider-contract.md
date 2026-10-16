@@ -95,7 +95,7 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 
 第二个实现（Anthropic）暴露出两处泄漏。以下是在接第三家（Gemini/Cohere/Bedrock 等）前、按现有契约内容**预计**还会撞上的地方——写在这里是为了下次不用重新发现，不是为了预先放宽契约：
 
-1. **错误文本格式与错误分类是规定的**。`check_error_classification` 要求错误信息包含 `HTTP {status}` 并引用响应体，且 500/429/408 → `Transport`、其余 4xx → `Protocol`。若第三家的错误不是 HTTP（gRPC/仅 SSE error 事件）或错误体需要解析出别的码，adapter 会被迫拼出 `HTTP …` 文本。可能需第三个出口：声明“错误不以 HTTP 表达”或让检查只断言分类、不断言文本。
+1. **错误文本格式与错误分类是规定的**。`check_error_classification` 要求错误信息包含 `HTTP {status}` 并引用响应体，且 500/429/408 → `Unavailable`（ADR 0017 起；此前是 `Transport`）、其余 4xx → `Protocol`，且 500 必须 `is_transient()`、400 必须不是。若第三家的错误不是 HTTP（gRPC/仅 SSE error 事件）或错误体需要解析出别的码，adapter 会被迫拼出 `HTTP …` 文本。可能需第三个出口：声明“错误不以 HTTP 表达”或让检查只断言分类、不断言文本。
 2. **`Reason` 枚举本身就是 OpenAI 与 Anthropic 的混合**（`ContentFiltered` 来自 OpenAI，`PauseTurn` 来自 Anthropic）。Gemini 的 `SAFETY`/`RECITATION`/`MALFORMED_FUNCTION_CALL`、Cohere 的 `STOP_SEQUENCE`/`ERROR` 都会要求加变体。考虑改成「每家声明的 provider 原值 → 中性分类」映射，而不是继续扩枚举。
 3. **`Refusal` 假定拒绝文本在 content 里**（`check_finish_reasons` 断言 `joined_text == "I can't help."`）。Anthropic 的拒绝还带 `stop_details`（本 adapter 未解析）；若第三家的安全拒绝**无文本**或只有结构化原因，这条会硬失败。
 4. **usage 的 `Wire` 变体是 OpenAI 的块形状**（`UsageTrailing` = “无 choices 的尾块”）。Anthropic 没有这种块，靠 harness 映射到 `message_delta`；第三家（如 Gemini 的每块 `usageMetadata`）可能需要新变体或更抽象的“usage 在末尾/每块”描述。
@@ -113,7 +113,7 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 | # | 场景 | OpenAI-compatible | Anthropic | 备注 |
 |---|---|---|---|---|
 | 1 | 400 / 401 / 403 / 404 | `Protocol("HTTP {code}: {body}")` | 同 | 错误体最多引用 **2048 字节**（超出截断），空体 → `(empty body)` |
-| 1 | 408 / 429 / 5xx | `Transport(...)` | 同 | 归类：5xx、408、429 属 provider；其余 4xx 属请求 |
+| 1 | 408 / 429 / 5xx | `Unavailable { message, retry_after }`（ADR 0017 的可重试分类） | 同 | 归类：5xx、408、429 属 provider；其余 4xx 属请求。`retry_after` 取 `Retry-After`（秒或 IMF-fixdate），缺省 `None` |
 | 1 | key / header 值 | 不出现在错误里（`<redacted>`） | 同 | HTTP body 与 SSE error 两条路径都 mask |
 | 1 | 400 且 `include_usage` | 附一句 `set include_usage to Some(false)` | 无此提示 | 本地 mock 下 `include_usage` 默认 false，故矩阵里两家一致 |
 | 2 | 首个 delta 前断开 | `Transport`（reqwest 传输错误） | 同 | 无部分结果 |
@@ -142,4 +142,9 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 也落成一条终态事件，是 owner 的决定，本切片不改。
 
 其余格子（错误体 2048 字节上限、不解析结构化错误码、取消不单独断言 mock 侧连接关闭）是
-**记录**，不视为问题。要不要重试、要不要把错误码结构化解出来，同样是 owner 的决定。
+**记录**，不视为问题。要不要把错误码结构化解出来，同样是 owner 的决定。
+
+**重试（ADR 0017，2026-10-15）**：矩阵里标为 provider 的错误（408 / 429 / 5xx）
+现在是 `Unavailable`，与断流、空闲超时、连接失败同属 `is_transient()`；取消仍是
+`Transport` 但**不** transient。重试发生在 core 的一次模型调用内部，策略由宿主的
+`[model] retries` 给出，见 `crates/agent-core/tests/retry.rs`。

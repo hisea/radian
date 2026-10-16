@@ -1,0 +1,9 @@
+# ADR 0017:`[model] retries` 是暂时性模型错误(连接失败、流提前结束、空闲超时、
+# HTTP 408/429/5xx/529)在**一次模型调用内部、提交任何东西之前**的重试上限。默认 3,退避
+# 2/4/8 秒;`0` 关闭(第一次失败即结束本轮)。非负整数,负数或非整数拒绝整个文件。
+schema_version = 1
+
+[model]
+provider = "openai-compatible"
+model = "m-1"
+retries = 3

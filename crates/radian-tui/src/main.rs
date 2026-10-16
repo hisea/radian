@@ -713,11 +713,46 @@ fn run(
         .ok_or_else(|| {
             "no model: pass --model, or set model.model in the config file".to_string()
         })?;
-    let profile_name = cli
+    // ADR 0038 decision 3: the tier and where it came from. The command line wins, then the
+    // resumed session's journal, then the remembered per-project record, then the config
+    // default, then the built-in `workspace`. The remembered record is a per-project,
+    // explicitly-confirmed user choice, so it outranks the machine-wide config default.
+    let resumed_tier = resume
+        .as_deref()
+        .and_then(|id| radian_host::resumed_access(&dir, id))
+        .map(radian_tui::profile::tier_of);
+    let remembered_tier = match radian_host::access::remembered_for(&workspace_path) {
+        Ok(tier) => tier.map(radian_tui::profile::tier_of),
+        Err(warning) => {
+            eprintln!("[access] {warning}");
+            None
+        }
+    };
+    let cli_tier = cli
         .profile
-        .clone()
-        .or_else(|| config.permissions.profile.clone())
-        .unwrap_or_else(|| "workspace".to_string());
+        .as_deref()
+        .map(radian_tui::profile::parse_tier)
+        .transpose()?;
+    let config_tier = config
+        .permissions
+        .profile
+        .as_deref()
+        .map(radian_tui::profile::parse_tier)
+        .transpose()?;
+    let (tier, access_source) = if let Some(tier) = cli_tier {
+        (tier, radian_tui::profile::AccessSource::Flag)
+    } else if let Some(tier) = resumed_tier {
+        (tier, radian_tui::profile::AccessSource::Session)
+    } else if let Some(tier) = remembered_tier {
+        (tier, radian_tui::profile::AccessSource::Project)
+    } else if let Some(tier) = config_tier {
+        (tier, radian_tui::profile::AccessSource::Config)
+    } else {
+        (
+            radian_tui::profile::Tier::WorkspaceWrite,
+            radian_tui::profile::AccessSource::Default,
+        )
+    };
     // ADR 0026 D0/D10: `--provider`/config `model.provider` names a provider — a built-in
     // descriptor or a named one (`[providers.<name>]` in the config, or the auth.json
     // entry's `env`). The generic `openai-compatible` descriptor is the default (the pre-D0
@@ -1026,7 +1061,7 @@ fn run(
     // The permission tier and the sandbox. For an enforced tier a probe failure is an error
     // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). Still before
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
-    let tier = radian_tui::profile::parse_tier(&profile_name)?;
+    // The tier and its source were resolved above (ADR 0038 decision 3).
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
     // the memory directory. The directory was created owner-only before the terminal was
     // entered (`ensure_private_dir` above); Linux's bwrap can only mask paths that exist.
@@ -1045,12 +1080,35 @@ fn run(
     if let Some(trust) = radian_host::trust_dir() {
         sandbox_deny_read.push(trust);
     }
+    // ADR 0038 decision 3: the remembered-tier store is denied read like trust/ — it is the
+    // user's map of which projects run unsandboxed. Creating it first lets bwrap mask it.
+    if let Some(access) = radian_host::access::access_dir() {
+        sandbox_deny_read.push(access);
+    }
     let sandbox = radian_tui::profile::build_sandbox(
         tier,
         &workspace_path,
         &sandbox_deny_read,
         &allow_unix_sockets,
     )?;
+    // ADR 0038 slice 2: `/access` rebuilds the profile and the sandbox for a new tier through
+    // this builder. It captures the same inputs the startup build used, so a switch and a
+    // startup cannot drift; a failed sandbox probe is the `Err` that refuses the switch.
+    let access_builder: radian_host::AccessBuilder = {
+        let workspace = workspace_path.clone();
+        let allow_shell = cli.allow_shell_command.clone();
+        let deny_read = sandbox_deny_read.clone();
+        let sockets = allow_unix_sockets.clone();
+        std::sync::Arc::new(move |preset: radian_permissions::Preset| {
+            radian_tui::profile::build_access(
+                preset,
+                &workspace,
+                &allow_shell,
+                &deny_read,
+                &sockets,
+            )
+        })
+    };
     // ADR 0033: the user's `!`/`!!` commands run in the **same** sandbox the coding tools use
     // (including ADR 0016's Unix-socket rules). `Sandbox` is cheap to clone; `None`
     // (the `safe` tier) means `!` is unavailable.
@@ -1147,8 +1205,8 @@ fn run(
     };
     let driver_stopped = {
         let tx = tx.clone();
-        Arc::new(move || {
-            let _ = tx.send(UiEvent::DriverStopped);
+        Arc::new(move |end| {
+            let _ = tx.send(UiEvent::DriverStopped(end));
         })
     };
     let before_driver: Option<Arc<dyn Fn() + Send + Sync>> = cli
@@ -1214,9 +1272,14 @@ fn run(
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
                 compaction_settings,
                 compaction_settings_for: Some(compaction_settings_for),
+                retries: config
+                    .model
+                    .retries
+                    .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
                 sandbox,
                 tier: tier.preset(),
                 profile,
+                access_builder: Some(access_builder),
                 memory_root,
                 skills_extra_paths: radian_host::config::resolve_extra_paths(
                     &config.skills.extra_paths,
@@ -1329,9 +1392,29 @@ fn run(
             .config_queue()
             .push(serde_json::json!({ "approval": policy.as_str() }));
     }
+    // ADR 0038 decision 2 (same rule as /model D8): an explicit `--profile` on a resume wins
+    // over the journal's recorded access, and the override is recorded so the journal stays
+    // the authority for the next resume.
+    if cli.resume.is_some() && cli.profile.is_some() && resumed_tier != cli_tier {
+        if let Some(recorded) = resumed_tier {
+            eprintln!(
+                "radian: resume recorded tier {}; using the command line's {}",
+                recorded.as_str(),
+                tier.as_str()
+            );
+        }
+        session
+            .config_queue()
+            .push(serde_json::json!({ "access": tier.as_str() }));
+    }
     // The status bar mirrors the live policy from the first frame; the switch below is the
     // only other writer.
     app.set_auto(startup_approval.policy == radian_permissions::ApprovalPolicy::Auto);
+    // ADR 0038 decision 3: `/access` and the footer show the tier and, when it came from the
+    // remembered record, the `(project)` marker. The host set the projection's tier when it
+    // opened the session; the marker is added here.
+    app.set_access_source(access_source);
+    app.set_tier(format!("{}{}", tier.as_str(), access_source.suffix()));
     // The footer's startup facts (ADR 0027 C2): the working directory, the model's display
     // name (the id until a catalog name is known), the provider and the applied thinking
     // level. The git branch is not read here: the `git` contributor refreshes it in the
@@ -1571,8 +1654,9 @@ fn run(
         .budget
         .map_or_else(|| "unknown".to_string(), |b| b.to_string());
     let mut summary = format!(
-        "{} · {sandbox_word} · context {budget} · memory {} · ask_user {}",
+        "{}{} · {sandbox_word} · context {budget} · memory {} · ask_user {}",
         tier.as_str(),
+        access_source.suffix(),
         if session.facts().memory_enabled {
             "on"
         } else {
@@ -2529,15 +2613,27 @@ impl LoopContext<'_> {
                 app.quit = true;
                 return false;
             }
-            UiEvent::DriverStopped => {
-                app.note = Some("the driver stopped; leaving".into());
+            UiEvent::DriverStopped(end) => {
+                // The driver stopped: a fatal error (ADR 0001: the journal may be broken, so
+                // no record is written), a panic, or a graceful close. The session is over.
+                // The TUI leaves `Running`, names the reason in the status bar and refuses
+                // `/fork` (ADR 0022 §1's "idle session" no longer exists). It stays so the
+                // reason is readable; the user quits with the ordinary keys.
+                let reason = match &end {
+                    radian_host::DriverEnd::Ok => "the driver stopped".to_string(),
+                    radian_host::DriverEnd::Failed(error) => format!("driver failed: {error}"),
+                    radian_host::DriverEnd::Panicked(message) => {
+                        format!("driver panicked: {message}")
+                    }
+                };
+                app.session_ended = Some(reason.clone());
+                app.pending_fork = None;
+                app.projection.set_turn(radian_tui::TurnState::Idle);
+                app.note = Some(reason.clone());
                 app.entries.push(radian_tui::Entry::new(
                     radian_tui::EntryKind::Notice,
-                    "the driver task ended; the session is closed",
+                    format!("the session ended: {reason}"),
                 ));
-                app.quit = true;
-                // One last frame, so the notice is what the user sees before the screen is
-                // restored.
                 return true;
             }
         };
@@ -2657,6 +2753,38 @@ impl LoopContext<'_> {
                         refused.capability.as_deref().unwrap_or("capability")
                     )
                 }),
+            // ADR 0038 slice 2: the run-time tier switch. The facade rebuilds the profile and
+            // the sandbox (a failed probe is a refusal that changes nothing) and queues the
+            // durable `ConfigChanged`; when the user chose "remember", the loop also writes the
+            // per-project record. The answer comes back as `Input::AccessApplied`.
+            Effect::SetAccess { tier, remember } => {
+                match self.session.set_access(tier.preset()) {
+                    Ok(()) => {
+                        if remember
+                            && let Err(error) =
+                                radian_host::access::remember_for(self.workspace, tier.preset())
+                        {
+                            self.send(AppInput::SessionDone(vec![format!(
+                                "access: switched, but could not remember it for this project: \
+                                 {error}"
+                            )]));
+                        }
+                        self.send(AppInput::AccessApplied {
+                            tier,
+                            remember,
+                            result: Ok(()),
+                        });
+                    }
+                    Err(refused) => {
+                        self.send(AppInput::AccessApplied {
+                            tier,
+                            remember,
+                            result: Err(refused.reason),
+                        });
+                    }
+                }
+                Ok(())
+            }
             Effect::AnswerRequest {
                 request_id,
                 response,
@@ -3281,19 +3409,30 @@ fn ui_loop(
         // window is the other time-driven display (ADR 0023 U2): while it is armed the loop
         // wakes at its deadline to drop the hint.
         if effects.is_empty() {
+            let now = std::time::Instant::now();
             let quit_remaining = app
                 .quit_pending
-                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
-            let first = if app.is_selecting() || quit_remaining.is_some() {
-                // The nearer of the two deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
-                let timeout = match (app.is_selecting(), quit_remaining) {
-                    (true, Some(quit)) => quit.min(AUTO_SCROLL_TICK),
+                .map(|deadline| deadline.saturating_duration_since(now));
+            // A `/fork` waiting for the turn boundary has its own deadline (FORK_COMMIT_WAIT).
+            let fork_remaining = app
+                .pending_fork
+                .map(|deadline| deadline.saturating_duration_since(now));
+            let wait_remaining = match (quit_remaining, fork_remaining) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let first = if app.is_selecting() || wait_remaining.is_some() {
+                // The nearer of the deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
+                let timeout = match (app.is_selecting(), wait_remaining) {
+                    (true, Some(wait)) => wait.min(AUTO_SCROLL_TICK),
                     (true, None) => AUTO_SCROLL_TICK,
-                    (false, Some(quit)) => quit.max(std::time::Duration::ZERO),
-                    (false, None) => unreachable!("the branch requires selection or a quit window"),
+                    (false, Some(wait)) => wait.max(std::time::Duration::ZERO),
+                    (false, None) => unreachable!("the branch requires selection or a deadline"),
                 }
-                // Also wake for the hang-up check, so a drag or an armed quit window never
-                // postpones it for longer than one tick.
+                // Also wake for the hang-up check, so a drag or a deadline never postpones it
+                // for longer than one tick.
                 .min(TTY_CHECK_TICK);
                 match rx.recv_timeout(timeout) {
                     Ok(event) => Some(event),
@@ -3301,6 +3440,17 @@ fn ui_loop(
                         // Guard 2: the input thread may be stuck inside crossterm's reader; a
                         // non-consuming `poll(2)` on stdin still reports the hang-up.
                         if terminal_is_gone() {
+                            app.quit = true;
+                            break;
+                        }
+                        // A `/fork` waiting for the journaled turn boundary: give up at its
+                        // deadline with a notice, never an empty child session.
+                        if app
+                            .pending_fork
+                            .is_some_and(|d| std::time::Instant::now() >= d)
+                            && app.update(AppInput::ForkDeadline).dirty
+                            && !draw_frame(terminal, app)?
+                        {
                             app.quit = true;
                             break;
                         }

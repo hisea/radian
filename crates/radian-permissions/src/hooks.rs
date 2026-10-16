@@ -19,7 +19,10 @@ type GrantKey = (String, String);
 /// The permission layer. One instance per session: it holds that session's real-time grants,
 /// which must not leak between sessions (ADR 0004 / 0006 §5.9).
 pub struct PermissionHooks {
-    profile: Profile,
+    /// The live profile. Seeded at construction; [`PermissionHooks::set_profile`] swaps it
+    /// when `/access` changes the tier (ADR 0038 slice 2). The rules and the workspace are
+    /// read from it on every call, so a switch takes effect from the very next call.
+    profile: RwLock<Profile>,
     /// The live approval policy. Seeded from `profile.approval`; [`PermissionHooks::
     /// set_approval`] switches it in place (ADR 0026 D9's in-session `auto`), so the
     /// profile's copy is only the starting value.
@@ -42,7 +45,7 @@ impl PermissionHooks {
     ) -> Self {
         let approval = profile.approval;
         Self {
-            profile,
+            profile: RwLock::new(profile),
             approval: RwLock::new(approval),
             approver,
             audit,
@@ -52,8 +55,20 @@ impl PermissionHooks {
         }
     }
 
-    pub fn profile(&self) -> &Profile {
-        &self.profile
+    pub fn profile(&self) -> Profile {
+        self.profile
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Switches the session's tier in place (ADR 0038 slice 2's `/access`): the rule set and
+    /// the workspace the next call is evaluated against. The grants, the approval policy and
+    /// the sandbox are untouched here — the sandbox is the host's `SandboxSlot` — and the
+    /// switch takes effect from the very next call. The host records the durable
+    /// `ConfigChanged` separately; the hook itself writes no audit line for a tier change.
+    pub fn set_profile(&self, profile: Profile) {
+        *self.profile.write().unwrap_or_else(|e| e.into_inner()) = profile;
     }
 
     /// The approval policy `apply_policy` currently applies.
@@ -111,7 +126,17 @@ impl PermissionHooks {
     /// Every decision: rules first, then a session grant or the approver for `ask`.
     async fn decide(&self, cx: &HookContext, call: &ToolCall) -> Result<ToolDecision, HookError> {
         let resource = resource_of(call);
-        let evaluated = evaluate(self.profile.rules(), &self.profile.workspace, call);
+        // The profile is read once, before any `await`: the guard must not be held across the
+        // approver call (a `std` read guard is not `Send`, and the hook's future is). A
+        // `/access` swap between this read and the approver is not visible to this call,
+        // which is exactly the "next call takes effect" rule.
+        let (evaluated, workspace) = {
+            let profile = self.profile.read().unwrap_or_else(|e| e.into_inner());
+            (
+                evaluate(profile.rules(), &profile.workspace, call),
+                profile.workspace.clone(),
+            )
+        };
         let action = self.apply_policy(evaluated.action);
         let request_id = format!("perm-{}", self.next_id.fetch_add(1, Ordering::SeqCst) + 1);
         let call_id = call.id.clone();
@@ -143,10 +168,7 @@ impl PermissionHooks {
 
         // `ask`: a human-answered grant can satisfy it, but only for a human turn.
         let human = self.turn_source() == Some(InputSource::User);
-        let key = (
-            call.name.clone(),
-            resource_key(&resource, &self.profile.workspace),
-        );
+        let key = (call.name.clone(), resource_key(&resource, &workspace));
         let granted = human && self.grants.lock().unwrap().contains(&key);
         if granted {
             self.record(
@@ -192,7 +214,7 @@ impl PermissionHooks {
             resource: resource.display().to_string(),
             // What the rules matched: for a path, the resolved one (the same key the session
             // grant uses), so the prompt cannot be made to look harmless with `..`.
-            resolved_resource: resource_key(&resource, &self.profile.workspace),
+            resolved_resource: resource_key(&resource, &workspace),
             arguments: call.arguments.clone(),
             reason: evaluated.reason.clone(),
         };
