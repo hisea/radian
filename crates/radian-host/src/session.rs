@@ -1153,7 +1153,8 @@ pub async fn open_session(
     // `<sessions_dir>/<session-id>.jobs/`. It is a sibling of the session file, so the
     // sandbox's deny-read rule on the sessions directory covers it.
     let jobs_dir = session_dir.join(format!("{}.jobs", session_id.as_str()));
-    let (coding, jobs) = build_coding_tools(coding_root.as_deref(), sandbox_slot.clone(), &jobs_dir)?;
+    let (coding, jobs) =
+        build_coding_tools(coding_root.as_deref(), sandbox_slot.clone(), &jobs_dir)?;
     // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
     // there are coding tools. It is its own provider, so a host without `--workspace` still
     // advertises it. `None` is what the model sees as "no such tool".
@@ -1760,7 +1761,11 @@ mod tests {
         let (_coding, jobs) = build_coding_tools(Some(&ws), slot, &jobs_dir).expect("tools");
         let jobs = jobs.expect("a registry");
 
-        assert_eq!(jobs.dir(), jobs_dir, "the registry uses the session jobs directory");
+        assert_eq!(
+            jobs.dir(),
+            jobs_dir,
+            "the registry uses the session jobs directory"
+        );
         assert_eq!(
             std::fs::metadata(&jobs_dir).unwrap().permissions().mode() & 0o777,
             0o700,

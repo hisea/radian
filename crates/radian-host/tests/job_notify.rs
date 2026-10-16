@@ -276,9 +276,9 @@ async fn the_first_job_events_are_not_lost() {
     let (mut started, mut settled) = (Vec::new(), Vec::new());
     for event in session.events() {
         match &event.data {
-            EventData::BackgroundJobStarted {
-                job_id, output, ..
-            } => started.push((job_id.clone(), output.clone())),
+            EventData::BackgroundJobStarted { job_id, output, .. } => {
+                started.push((job_id.clone(), output.clone()))
+            }
             EventData::BackgroundJobSettled { job_id, .. } => settled.push(job_id.clone()),
             _ => {}
         }

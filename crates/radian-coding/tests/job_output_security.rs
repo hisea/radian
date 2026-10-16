@@ -116,7 +116,10 @@ async fn a_planted_symlink_at_the_next_output_file_is_not_followed() {
     let outside = dir.file("outside.txt");
     std::fs::write(&outside, "UNCHANGED\n").unwrap();
     plant_symlink(&jobs_dir.join(format!("{predicted}.out")), &outside);
-    plant_symlink(&ws.join(".radian/jobs").join(format!("{predicted}.out")), &outside);
+    plant_symlink(
+        &ws.join(".radian/jobs").join(format!("{predicted}.out")),
+        &outside,
+    );
 
     let result = jobs.start(&sandbox, &ws, "echo LEAK", None);
 
