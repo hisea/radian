@@ -116,7 +116,8 @@ impl HostTools {
         if self.git_commit.is_some() {
             push(
                 "git_commit",
-                "commit inside the workspace; the only way to commit (.git is read-only in the sandbox)",
+                "commit inside the workspace from the host; needed when the sandbox keeps \
+                 `.git` read-only (task agents, Linux)",
             );
         }
         out

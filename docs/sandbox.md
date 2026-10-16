@@ -86,8 +86,8 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
   可能已改位）与 `~/.radian/memory` 加进 `deny_read`，并在建沙箱前把它们创建为 0700（Linux 的
   bwrap 只能遮住**已存在**的路径）；`~/.radian/config` 与 `~/.radian/cache` 保持可读。
 - **macOS**：`(deny default)` + 选择性 allow；只写工作区；更深的 `deny` 覆盖敏感读，并按
-  `git_access` 覆盖 git 元数据（`ReadOnly` 整块拒写；`WritableExceptExec` 只拒执行入口，见下）；
-  默认不加 `(allow network*)`；`/dev/null` 放行；`TMPDIR` 指向工作区内 `.radian-sandbox/tmp`。
+  `git_access` 覆盖 git 元数据（`ReadOnly` 整块拒写；`WritableExceptExec` 只拒执行入口，见下；
+  哪个**真正生效**由后端回答，面向模型的文案见"切片④"）；默认不加 `(allow network*)`；`/dev/null` 放行；`TMPDIR` 指向工作区内 `.radian-sandbox/tmp`。
 - **Linux**：`--unshare-all`（网络关闭）或部分隔离（开启）；宿主根 `--ro-bind / /` + 工作区
   `--bind`；git 元数据 `--ro-bind` 覆盖（ADR 0038 切片①**未改 Linux**：无论 `git_access` 取何值
   都整块只读）；敏感目录 `--tmpfs`（目录）或 `/dev/null`（文件）；
@@ -183,6 +183,30 @@ gitdir 与共享 common dir，三者经同一函数处理——在整块可写�
 **未验证 / Linux**：ADR 0038 切片①**只在 macOS 上实施**。Linux（bwrap）无论 `git_access` 取何值都
 保持今天的整块 `--ro-bind` 只读（`bwrap.rs` 里带注释）；任何"Linux 也只留执行入口只读"的说法都要等
 VM 恢复、`sandbox-escape` 矩阵在 VM 上重跑之后才算数。当前状态：**Linux pending，未改、未验证**。
+
+## ADR 0038 切片④：面向模型的文案按会话说真话（macOS）
+
+切片①之后，macOS 的通用/lead 会话能写 `.git`，但 `shell` 的工具描述与启动行仍写着"`.git` 只读、
+`git commit` 按设计失败"。切片④让这段文案按**实际生效**的 git 权限说：
+
+- **`shell` 的描述**（`radian-coding/src/shell.rs::spec`）：后端真正放开执行入口之外的 `.git` 时，
+  说 `git commit`、`git branch`、`git stash` 可在沙箱里直接用（原生 git），并说明 `.git/config`、
+  `.git/config.worktree`、`.git/hooks/` 仍只读；否则保持今天的只读文案。
+- **启动时的事实句**（`radian-host/src/describe.rs::workspace_sandbox_facts`）同样分两种写法；
+  它同时进入启动块与 `<runtime>` 层（ADR 0036）。
+- **`git_commit` 的描述与 `<runtime>` 的工具行**改为"沙箱保持 `.git` 只读时才需要"（任务 agent、
+  Linux），不再声称 `.git` 处处只读；`git_commit` 仍是宿主侧提交工具。
+
+**判据不是 policy 里的 `git_access`，而是后端实际是否实施**：`Sandbox::git_writable_except_exec`
+（由 `SandboxBackend::git_writable_except_exec` 回答）给出**生效**的答案。`macos-seatbelt` 返回
+policy 的值（它实现了切片①的 carve-out）；Linux（bwrap）沿用安全的默认 `false`，因为切片①未改
+Linux、整块 `--ro-bind` 只读，文案也随之保持只读。忘了接线的宿主退回只读文案，不会谎报可写。
+
+**工具列表每个会话只算一次**（ADR 0036）：`/access` 换档后，本会话的 `shell` 描述
+与启动行**不变**，`/access` 的提示据此说明；下一次会话（含 resume）才显示新档位的文案。切片④的
+测试：`radian-coding` 的 `the_shell_description_follows_the_effective_git_access` 与 `radian-host`
+的 `the_startup_line_reports_the_sandboxes_effective_git_access`（各用一个固定答案的假后端，两种
+文案互为变异）。
 
 ## 敏感目录禁读的兼容性轮次（macOS，`workspace` + 默认 deny 列表）
 

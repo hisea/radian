@@ -2865,6 +2865,14 @@ impl App {
                         } else {
                             self.push_notice(format!("access: {} for this session", tier.as_str()));
                         }
+                        // ADR 0036: the tool list (and the startup line)
+                        // is computed once, when the session opens. The switch changes what
+                        // runs from the next call, not the advertised text, so say so rather
+                        // than leave the description stale.
+                        self.push_notice(
+                            "the shell tool's description and the startup line are fixed for \
+                             this session; a new session shows the new tier",
+                        );
                     }
                     Err(reason) => self.push_notice(format!("cannot switch access: {reason}")),
                 }
