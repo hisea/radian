@@ -288,7 +288,10 @@ impl Fixture {
         .await
         .expect("open the lead session");
         let session = Arc::new(session);
-        server.serve(&tokio::runtime::Handle::current(), Arc::clone(&session));
+        server.serve(
+            &tokio::runtime::Handle::current(),
+            radian_host::ControlTarget::of(&session),
+        );
         Self {
             scratch,
             home,
@@ -710,7 +713,10 @@ async fn a_session_without_a_registry_refuses_the_task_verbs() {
         .expect("open"),
     );
     let server = ControlServer::bind(&home).expect("bind");
-    server.serve(&tokio::runtime::Handle::current(), Arc::clone(&session));
+    server.serve(
+        &tokio::runtime::Handle::current(),
+        radian_host::ControlTarget::of(&session),
+    );
 
     let mut client = Client::connect(server.path()).await;
     let refused = client

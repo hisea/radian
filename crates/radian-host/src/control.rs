@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use agent_core::{
     AgentEvent, CancellationToken, EventSink, InputSource, Message, NoopSink, ToolCall, ToolContext,
@@ -37,6 +37,47 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use crate::session::LocalSession;
+
+/// What the port needs from the hosting session: its id, its inbox, its permission hooks and
+/// its task registry (ADR 0030 O6). Every handle is **weak**, so serving the socket never keeps
+/// a closed session (or its audit sink) alive — a host's teardown still observes the session
+/// dropping. A request upgrades what it needs; if the session has closed it is refused.
+#[derive(Clone)]
+pub struct ControlTarget {
+    pub session_id: String,
+    inbox: Weak<radian_runtime::Inbox>,
+    hooks: Weak<radian_permissions::PermissionHooks>,
+    /// The lead task registry, when this session is a lead (ADR 0030 O4/O13); `None` refuses
+    /// the `spawn_task`/`wait_task`/`task_status` verbs.
+    registry: Option<Weak<crate::task::TaskRegistry>>,
+}
+
+impl ControlTarget {
+    /// The port's view of an open session.
+    pub fn of(session: &LocalSession) -> Self {
+        Self {
+            session_id: session.id().as_str().to_owned(),
+            inbox: Arc::downgrade(session.inbox()),
+            hooks: Arc::downgrade(session.hooks()),
+            registry: session.lead_tasks().map(Arc::downgrade),
+        }
+    }
+
+    /// The session's inbox, or `None` once the session has closed.
+    fn inbox(&self) -> Option<Arc<radian_runtime::Inbox>> {
+        self.inbox.upgrade()
+    }
+
+    /// The session's permission hooks, or `None` once the session has closed.
+    fn hooks(&self) -> Option<Arc<radian_permissions::PermissionHooks>> {
+        self.hooks.upgrade()
+    }
+
+    /// The session's task registry, or `None` when it has none or has closed.
+    fn registry(&self) -> Option<Arc<crate::task::TaskRegistry>> {
+        self.registry.as_ref().and_then(Weak::upgrade)
+    }
+}
 
 /// How many lines may wait for one subscriber before it is disconnected. Small on purpose: a
 /// subscriber that cannot keep up with a live session is dropped, never allowed to slow the
@@ -91,6 +132,31 @@ impl ControlServer {
         &self.path
     }
 
+    /// A guard that removes this server's socket file when it drops. The host holds it as a
+    /// local, so the file goes on the normal return path **and** on a panic unwind even when
+    /// an in-flight connection still holds a reference to the server (ADR 0030 O6).
+    pub fn guard(&self) -> SocketGuard {
+        SocketGuard {
+            path: self.path.clone(),
+        }
+    }
+
+    /// Binds the control server for this process when it is enabled and a home exists
+    /// (`[control] enabled` in the config). A bind failure is returned so the host can warn and
+    /// run without a port; a disabled control port is `Ok(None)`.
+    pub fn bind_if(
+        enabled: bool,
+        home: Option<&Path>,
+    ) -> std::io::Result<Option<Arc<ControlServer>>> {
+        if !enabled {
+            return Ok(None);
+        }
+        let Some(home) = home else {
+            return Ok(None);
+        };
+        ControlServer::bind(home).map(Some)
+    }
+
     /// Wraps the host's committed-`AgentEvent` sink so subscribers see the same events the
     /// host does, minus the live-only deltas (the TUI's channel also drops those).
     pub fn events(self: &Arc<Self>, inner: Arc<dyn EventSink>) -> Arc<dyn EventSink> {
@@ -114,7 +180,7 @@ impl ControlServer {
     /// Accepts connections until the process ends. A no-op when the platform has no Unix
     /// sockets, or when [`ControlServer::serve`] already took the listener.
     #[cfg(unix)]
-    pub fn serve(self: &Arc<Self>, runtime: &tokio::runtime::Handle, session: Arc<LocalSession>) {
+    pub fn serve(self: &Arc<Self>, runtime: &tokio::runtime::Handle, target: ControlTarget) {
         let Some(listener) = self
             .listener
             .lock()
@@ -123,17 +189,22 @@ impl ControlServer {
         else {
             return;
         };
-        let server = Arc::clone(self);
+        let weak = Arc::downgrade(self);
         runtime.spawn(async move {
             loop {
                 let Ok((stream, _addr)) = listener.accept().await else {
                     break;
                 };
                 let _ = set_small_send_buffer(&stream);
-                let server = Arc::clone(&server);
-                let session = Arc::clone(&session);
+                // Only a weak reference lives in the accept loop: when the host drops its
+                // `Arc`, `ControlServer::drop` removes the socket file. A connection task keeps
+                // its own strong reference for as long as the client is connected.
+                let Some(server) = weak.upgrade() else {
+                    break;
+                };
+                let target = target.clone();
                 tokio::spawn(async move {
-                    server.serve_connection(stream, session).await;
+                    server.serve_connection(stream, target).await;
                 });
             }
         });
@@ -141,8 +212,7 @@ impl ControlServer {
 
     /// The non-Unix no-op; see the Unix [`ControlServer::serve`].
     #[cfg(not(unix))]
-    pub fn serve(self: &Arc<Self>, _runtime: &tokio::runtime::Handle, _session: Arc<LocalSession>) {
-    }
+    pub fn serve(self: &Arc<Self>, _runtime: &tokio::runtime::Handle, _target: ControlTarget) {}
 
     /// Registers a subscriber's output channel and returns its id.
     fn register(&self, tx: mpsc::Sender<Value>, close: Arc<Notify>) -> u64 {
@@ -190,7 +260,7 @@ impl ControlServer {
     async fn serve_connection(
         self: Arc<Self>,
         stream: tokio::net::UnixStream,
-        session: Arc<LocalSession>,
+        target: ControlTarget,
     ) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -207,7 +277,7 @@ impl ControlServer {
                     match line {
                         Ok(Some(line)) if !line.trim().is_empty() => {
                             let response = self
-                                .dispatch(&line, &session, &tx, &close, &mut client_id)
+                                .dispatch(&line, &target, &tx, &close, &mut client_id)
                                 .await;
                             if tx.send(response).await.is_err() {
                                 break;
@@ -241,7 +311,7 @@ impl ControlServer {
     async fn dispatch(
         &self,
         line: &str,
-        session: &Arc<LocalSession>,
+        target: &ControlTarget,
         tx: &mpsc::Sender<Value>,
         close: &Arc<Notify>,
         client_id: &mut Option<u64>,
@@ -255,14 +325,17 @@ impl ControlServer {
             return failure(id, "a request needs a string `verb`");
         };
         match verb {
-            "followup" | "steer" | "inject" => self.input(verb, &id, &request, session).await,
+            "followup" | "steer" | "inject" => self.input(verb, &id, &request, target).await,
             "cancel" => {
-                session.inbox().cancel(CancelCause::Requested);
+                let Some(inbox) = target.inbox() else {
+                    return failure(id, "the session has closed");
+                };
+                inbox.cancel(CancelCause::Requested);
                 success(id, None)
             }
-            "list_sessions" => success(id, Some(json!({ "sessions": self.sessions(session) }))),
+            "list_sessions" => success(id, Some(json!({ "sessions": self.sessions(target) }))),
             "spawn_task" | "wait_task" | "task_status" => {
-                self.lead_verb(verb, &id, &request, session).await
+                self.lead_verb(verb, &id, &request, target).await
             }
             "subscribe" => {
                 *client_id = Some(self.register(tx.clone(), Arc::clone(close)));
@@ -285,7 +358,7 @@ impl ControlServer {
         verb: &str,
         id: &Value,
         request: &Value,
-        session: &Arc<LocalSession>,
+        target: &ControlTarget,
     ) -> Value {
         let Some(text) = request.get("text").and_then(Value::as_str) else {
             return failure(id.clone(), "`text` is required");
@@ -294,15 +367,18 @@ impl ControlServer {
             Ok(source) => source,
             Err(reason) => return failure(id.clone(), reason),
         };
+        let (Some(hooks), Some(inbox)) = (target.hooks(), target.inbox()) else {
+            return failure(id.clone(), "the session has closed");
+        };
         // The source the port fixed is what both the permission layer and the durable record
         // see (ADR 0012 decision 5). A signed-out source can never be raised back.
-        session.hooks().set_turn_source(Some(source));
-        session.hooks().observe_input_source(source);
+        hooks.set_turn_source(Some(source));
+        hooks.observe_input_source(source);
         let message = Message::user(text);
         let result = match verb {
-            "followup" => session.inbox().followup(message, source).await,
-            "steer" => session.inbox().steer(message, source).await,
-            _ => session.inbox().inject(message, source).await,
+            "followup" => inbox.followup(message, source).await,
+            "steer" => inbox.steer(message, source).await,
+            _ => inbox.inject(message, source).await,
         };
         match result {
             Ok(message_id) => success(id.clone(), Some(json!({ "message_id": message_id }))),
@@ -317,9 +393,9 @@ impl ControlServer {
         verb: &str,
         id: &Value,
         request: &Value,
-        session: &Arc<LocalSession>,
+        target: &ControlTarget,
     ) -> Value {
-        let Some(registry) = session.lead_tasks() else {
+        let Some(registry) = target.registry() else {
             return failure(
                 id.clone(),
                 "this session has no task registry (it is not a lead)",
@@ -373,7 +449,7 @@ impl ControlServer {
                 json!({ "id": task })
             }
         };
-        let lead = crate::lead_tools::LeadSession::new(Arc::clone(registry));
+        let lead = crate::lead_tools::LeadSession::new(Arc::clone(&registry));
         let call = ToolCall {
             id: format!("control-{verb}"),
             name: verb.to_owned(),
@@ -399,9 +475,9 @@ impl ControlServer {
 
     /// `list_sessions`: the hosting session and its live task agents (ADR 0030 O6). The port
     /// serves one process, so this is one `main` row plus one row per task agent.
-    fn sessions(&self, session: &Arc<LocalSession>) -> Vec<Value> {
-        let mut sessions = vec![json!({ "id": session.id().as_str(), "kind": "main" })];
-        if let Some(registry) = session.lead_tasks() {
+    fn sessions(&self, target: &ControlTarget) -> Vec<Value> {
+        let mut sessions = vec![json!({ "id": target.session_id, "kind": "main" })];
+        if let Some(registry) = target.registry() {
             for task in registry.ids() {
                 sessions.push(json!({ "id": task, "kind": "task" }));
             }
@@ -876,6 +952,26 @@ fn set_small_send_buffer(stream: &tokio::net::UnixStream) -> std::io::Result<()>
 }
 
 impl Drop for ControlServer {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Removes one control socket file when dropped (ADR 0030 O6). A host keeps this as a local:
+/// unlike the server's own `Drop`, it is not shared with any task, so the socket is removed on
+/// the normal return path and on a panic unwind even while the process's driver still runs.
+pub struct SocketGuard {
+    path: PathBuf,
+}
+
+impl SocketGuard {
+    /// The path this guard owns.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SocketGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }

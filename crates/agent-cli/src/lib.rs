@@ -801,6 +801,9 @@ struct Setup {
     shell_auto_background: Option<std::time::Duration>,
     /// `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized (ADR 0016).
     allow_unix_sockets: Vec<PathBuf>,
+    /// `[control] enabled` (ADR 0030 O6, slice 8): whether this process binds its control
+    /// socket at `$RADIAN_HOME/run/<pid>.sock`.
+    control_enabled: bool,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -1285,6 +1288,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         skills_disabled: config.skills.disabled.clone(),
         memory_injection: config.memory.injection(),
         shell_auto_background: config.shell.auto_background_after(),
+        control_enabled: config.control.enabled,
         allow_unix_sockets: {
             let (paths, warnings) = radian_host::resolve_allow_unix_sockets(
                 &config.sandbox.allow_unix_sockets,
@@ -1614,7 +1618,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let projection = Arc::new(radian_host::SessionProjection::new());
     let signals = spawn_signals();
     let driver_ended = Arc::new(Notify::new());
-    let runtime_events = {
+    let runtime_events_inner = {
         let secrets = Arc::new(setup.secrets.clone());
         Arc::new(move |event: &radian_session::RuntimeEvent| {
             // ADR 0030 O10: a task agent's spawn and finish are one stderr line each — a
@@ -1655,6 +1659,34 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
                 }
             }
         })
+    };
+
+    // ADR 0030 slice 8: the process control port. Bound before the session so its fan-out can
+    // wrap the host's own sinks; a bind failure is a warning, never a startup refusal, so a
+    // session always opens. The startup line names the path (a client finds it by pid too).
+    let control = match radian_host::ControlServer::bind_if(
+        setup.control_enabled,
+        radian_host::radian_home().as_deref(),
+    ) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("[control] disabled: {error}");
+            None
+        }
+    };
+    if let Some(server) = &control {
+        eprintln!("[control] {}", server.path().display());
+    }
+    // Held for the whole session: the socket is removed on the normal return and on a panic
+    // unwind, even while the driver task still holds a reference to the server (ADR 0030 O6).
+    let _control_guard = control.as_ref().map(|server| server.guard());
+    let events: Arc<dyn EventSink> = match &control {
+        Some(server) => server.events(Arc::clone(&ui) as Arc<dyn EventSink>),
+        None => Arc::clone(&ui) as Arc<dyn EventSink>,
+    };
+    let runtime_events: Arc<dyn radian_runtime::RuntimeEvents> = match &control {
+        Some(server) => server.runtime_events(runtime_events_inner),
+        None => runtime_events_inner,
     };
 
     // ADR 0031 T3: resolve project trust before the session exists. `--trust`/`--no-trust`
@@ -1790,8 +1822,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             shared_queue: None,
             ask_user: false,
             audit,
-            events: Arc::clone(&ui) as Arc<dyn EventSink>,
-            projection,
+            events,
+            projection: Arc::clone(&projection),
             runtime_events,
             driver_stopped: {
                 let ended = Arc::clone(&driver_ended);
@@ -1807,6 +1839,13 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     .await
     .map_err(|error| SetupError(error.to_string()))?;
     let session = Arc::new(session);
+    // ADR 0030 O6: start accepting control requests for this session.
+    if let Some(server) = &control {
+        server.serve(
+            &tokio::runtime::Handle::current(),
+            radian_host::ControlTarget::of(&session),
+        );
+    }
 
     // ADR 0031 T3: persist the choice now that the journal exists, so the write audits once.
     if let Some(choice) = trust_choice
