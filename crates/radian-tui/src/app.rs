@@ -3056,11 +3056,27 @@ impl App {
         // The question form is the one modal whose keys are rebindable (ADR 0024 Q7): its own
         // actions come from the `form` layer, and everything else that can edit text goes to
         // the focused field. A key the form does not want is swallowed, never passed down.
-        if matches!(self.top_modal(), Some(Modal::Question(_))) {
+        if let Some(Modal::Question(form)) = self.top_modal() {
             // `alt-h` collapses the panel (ADR 0024 R3): it is the form's own key,
             // not a rebindable `form` action.
             if key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::ALT) {
                 return Some(Input::Form(FormKey::Hide));
+            }
+            // ←/→ switch questions while no free-text field has focus (the hint row says so);
+            // with the `Other` row, a `text` question or a note focused they fall through to
+            // the composer's cursor actions below. feedback: ←/→ used to do nothing
+            // outside a field.
+            let field_focused = form.note_focused() || form.text_focused();
+            if !field_focused && key.modifiers.is_empty() {
+                match key.code {
+                    KeyCode::Left => {
+                        return Some(Input::Form(FormKey::Action(Action::FormPrev)));
+                    }
+                    KeyCode::Right => {
+                        return Some(Input::Form(FormKey::Action(Action::FormNext)));
+                    }
+                    _ => {}
+                }
             }
             if let Some(action) = self.keymap.form_action_for(key) {
                 return Some(Input::Form(FormKey::Action(action)));
@@ -4627,7 +4643,14 @@ impl App {
                             } else {
                                 ok_glyph
                             };
-                            entry.text = crate::tools::call_text(card, glyph, &result.text());
+                            // ADR 0024: the call entry draws the whole ask block
+                            // (its result entry is blank), so it keeps the result's own text
+                            // for the declined/cancelled status line inside the box.
+                            entry.text = if card.name == "ask_user" {
+                                result.text()
+                            } else {
+                                crate::tools::call_text(card, glyph, &result.text())
+                            };
                             paired = Some((card.name.clone(), card.arguments.clone()));
                         }
                         call_index = Some(len - 1 - rev);
@@ -4757,22 +4780,45 @@ impl App {
         self.now = now;
     }
 
-    /// The spinner's current frame (ADR 0027): a function of the injected clock,
-    /// so a test advances it with `set_now`.
+    /// The spinner's current frame (ADR 0027/13): a function of the injected clock,
+    /// so a test advances it with `set_now`. Whether the pulse interpolates comes from the theme
+    /// (and the glyph set); a frame is a pure function of its inputs, which is what makes
+    /// "redraw only when it changed" a comparison of frames.
     pub fn spinner_frame(&self) -> crate::spinner::Frame {
         let tick = self
             .now
             .saturating_duration_since(self.session.spinner_origin);
-        crate::spinner::frame(self.spinner_kind, self.footer_glyphs(), tick)
+        crate::spinner::frame(
+            self.spinner_kind,
+            self.footer_glyphs(),
+            self.theme.pulse_can_breathe(),
+            tick,
+        )
     }
 
-    /// The style for a spinner frame: the pulse alternates between the accent and the weak
-    /// level; the rotating frames stay on the accent.
+    /// How long the spinner's current frame stays (ADR 0027/13): the breath's step
+    /// while the pulse interpolates, its 500 ms two-colour switch when it cannot, and the
+    /// rotating kinds' 250 ms. The loop wakes at this interval while a spinner is visible.
+    pub fn spinner_interval(&self) -> Duration {
+        crate::spinner::frame_interval(
+            self.spinner_kind,
+            self.footer_glyphs(),
+            self.theme.pulse_can_breathe(),
+        )
+    }
+
+    /// The style for a spinner frame: the pulse breathes between the accent and the dim level
+    /// when both ends are RGB (ADR 0027); otherwise it is revision 10's two-colour
+    /// switch, and the rotating frames stay on the accent.
     pub fn spinner_style(&self, frame: crate::spinner::Frame) -> ratatui::style::Style {
-        if frame.dim {
-            self.theme.truncation
-        } else {
-            self.theme.notice_label
+        let accent = self.theme.notice_label;
+        let dim = self.theme.truncation;
+        match crate::spinner::breath_color(accent.fg, dim.fg, frame.step) {
+            // The breath interpolates the colour only: the accent's other attributes (its bold)
+            // stay at every step, so no weight pops in the middle of the breath.
+            Some(color) => accent.fg(color),
+            None if frame.step == crate::spinner::PULSE_DIM_STEP => dim,
+            None => accent,
         }
     }
 
@@ -4935,12 +4981,24 @@ mod tests {
         app.set_now(base + std::time::Duration::from_millis(500));
         assert_eq!(app.spinner_frame().glyph, "◞");
 
-        // The default pulse keeps its glyph and only changes the phase every 500 ms.
+        // The default pulse keeps its glyph and only changes its colour: with a non-RGB theme
+        // (revision 13 decision 3) it is revision 10's two-colour switch, every 500 ms.
         app.spinner_kind = crate::spinner::Kind::Pulse;
+        app.theme = crate::theme::Theme::mono();
         app.set_now(base);
-        assert!(!app.spinner_frame().dim);
+        assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_ACCENT_STEP);
         app.set_now(base + std::time::Duration::from_millis(500));
-        assert!(app.spinner_frame().dim);
+        assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_DIM_STEP);
+        // An RGB theme breathes instead: the step advances every ~117 ms.
+        app.theme = crate::theme::Theme::dark();
+        app.set_now(base);
+        assert_eq!(app.spinner_frame().step, crate::spinner::PULSE_DIM_STEP);
+        app.set_now(base + app.spinner_interval());
+        assert!(
+            app.spinner_frame().step > crate::spinner::PULSE_DIM_STEP,
+            "the second sample is already brighter"
+        );
+        assert_eq!(app.spinner_interval(), crate::spinner::pulse_step());
     }
 
     /// ADR 0018 + ADR 0027: the compaction events drive the `Compacting` status.

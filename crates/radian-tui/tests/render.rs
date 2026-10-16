@@ -12,7 +12,7 @@ use radian_tui::tools::DisplayModes;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 
 /// One streaming chunk the way the loop does it: the projection accumulates the delta, then the
 /// snapshot becomes the live entries (ADR 0023 U2).
@@ -257,9 +257,10 @@ fn the_status_line_shows_model_and_turn_state() {
     assert!(text.contains("running"), "{text}");
 }
 
-/// ADR 0027: the input rule shows the spinner and the running state while a turn
-/// runs (`── ◜  Working `), and is a plain rule when idle. The spinner and the text are
-/// separated by **two** spaces.
+/// ADR 0027 + ADR 0035: the default `bar` status row shows the spinner
+/// and the running state while a turn runs (`◜ Working`), and is blank when idle. The dot sits
+/// in the rail's column with **one** cell before the text (which starts at the text column);
+/// the `lines`/`box` rule line keeps revision 2's two spaces (the box test below).
 #[test]
 fn the_input_rule_shows_the_spinner_status_while_running() {
     let mut app = App::new("m", "s");
@@ -272,8 +273,8 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
     assert!(
-        text.contains("◜  Working"),
-        "the spinner and two spaces on the input rule: {text}"
+        text.contains("◜ Working"),
+        "the spinner on the bar's status row: {text}"
     );
 
     // Idle: no spinner, no text.
@@ -284,7 +285,7 @@ fn the_input_rule_shows_the_spinner_status_while_running() {
     assert!(!text.contains('◜'), "{text}");
 }
 
-/// ADR 0018 + ADR 0027: a running compaction shows `Compacting` on the input rule
+/// ADR 0018 + ADR 0027: a running compaction shows `Compacting` on the status row
 /// (the `CompactionStarted`/`CompactionFinished` events exist, so this is not invented).
 #[test]
 fn the_input_rule_shows_compacting() {
@@ -297,7 +298,7 @@ fn the_input_rule_shows_compacting() {
     app.session.compacting = true;
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);
-    assert!(text.contains("◜  Compacting"), "{text}");
+    assert!(text.contains("◜ Compacting"), "{text}");
 
     // The flag clears when the compaction ends.
     app.session.compacting = false;
@@ -466,6 +467,7 @@ fn form(questions: Vec<radian_coding::Question>) -> radian_tui::question::Questi
 fn panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> String {
     text_of(&render::question_panel(
         form,
+        "session",
         width,
         usize::MAX,
         &radian_tui::theme::Theme::dark(),
@@ -504,7 +506,7 @@ fn a_long_option_list_scrolls_to_keep_the_cursor_visible() {
     // The panel lays the whole list out; the frame clips it to the modal height.
     form.answers[0].cursor = 11;
     let shown = panel_text(&form, 40);
-    assert!(shown.contains("❯ ○ Option 11"), "{shown}");
+    assert!(shown.contains("❯ ☐ Option 11"), "{shown}");
     assert!(shown.contains("Option 0"), "{shown}");
 }
 
@@ -626,7 +628,7 @@ fn the_empty_input_shows_the_placeholder_after_the_prompt() {
     let mut bar = App::new("m", "s");
     let text = screen(&render(&mut bar, 80, 8));
     assert!(
-        text.contains("▎ (type a message, Enter to send, Ctrl-J for a new line)"),
+        text.contains("▌ (type a message, Enter to send, Ctrl-J for a new line)"),
         "the bar's placeholder follows the rail:\n{text}"
     );
 }
@@ -729,8 +731,8 @@ fn the_bar_input_style_draws_a_full_width_band_with_the_rail() {
     let terminal = render(&mut app, 20, 8);
     let text = screen(&terminal);
     let band = app.theme.input_bar.bg.expect("the band's background");
-    let first = row_of(&terminal, "▎ first").expect("the first band row");
-    let second = row_of(&terminal, "▎ second").expect("the second band row");
+    let first = row_of(&terminal, "▌ first").expect("the first band row");
+    let second = row_of(&terminal, "▌ second").expect("the second band row");
     assert_eq!(second, first + 1, "one band row per input row:\n{text}");
     for y in [first as u16, second as u16] {
         let line = row(&terminal, y);
@@ -759,17 +761,18 @@ fn the_bar_input_style_draws_a_full_width_band_with_the_rail() {
     wide.input = "中文中文中文".into();
     let terminal = render(&mut wide, 12, 8);
     // Inner width 10: five 2-cell characters, then the sixth.
-    let first = row_of(&terminal, "▎ 中").expect("the first band row");
+    let first = row_of(&terminal, "▌ 中").expect("the first band row");
     let wrapped = row(&terminal, (first + 1) as u16);
     assert!(
-        wrapped.starts_with("▎ ") && wrapped.contains('文'),
+        wrapped.starts_with("▌ ") && wrapped.contains('文'),
         "the band grew a row for the wrapped tail: {wrapped:?}"
     );
     assert_band_across(&terminal, (first + 1) as u16, wide.theme.input_bar.bg, 12);
 }
 
 /// The band reaches the terminal's last column at both widths the brief pins (80 and 120), and
-/// its half-cell pads (ADR 0035) do too: `▄` above, `▀` below, in the band's color.
+/// its half-cell pads (ADR 0035/4) do too: the rail's own quadrant (`▖` above, `▘`
+/// below, in the accent) then `▄`/`▀` in the band's color across the rest.
 #[test]
 fn the_bar_band_fills_the_terminal_width() {
     use radian_tui::render::InputStyle;
@@ -778,18 +781,39 @@ fn the_bar_band_fills_the_terminal_width() {
         app.input_style = InputStyle::Bar;
         app.input = "wide".into();
         let terminal = render(&mut app, width, 8);
-        let y = row_of(&terminal, "▎ wide").expect("the band") as u16;
+        let y = row_of(&terminal, "▌ wide").expect("the band") as u16;
         let band = app.theme.input_bar.bg;
         assert_band_across(&terminal, y, band, width);
-        assert_eq!(row(&terminal, y - 1), "▄".repeat(width as usize), "{width}");
-        assert_eq!(row(&terminal, y + 1), "▀".repeat(width as usize), "{width}");
-        for (y, glyph) in [(y - 1, "▄"), (y + 1, "▀")] {
-            for col in [0u16, width - 1] {
+        // ADR 0035: the rail continues into the pad rows as the half-cell-wide
+        // quadrants, so it is as tall as the band; the rest of the row is the band's half cell.
+        assert_eq!(
+            row(&terminal, y - 1),
+            format!("▖{}", "▄".repeat(width as usize - 1)),
+            "{width}"
+        );
+        assert_eq!(
+            row(&terminal, y + 1),
+            format!("▘{}", "▀".repeat(width as usize - 1)),
+            "{width}"
+        );
+        for (y, rail, glyph) in [(y - 1, "▖", "▄"), (y + 1, "▘", "▀")] {
+            let rail_style = cell_style(&terminal, 0, y);
+            assert_eq!(rail_style.fg, app.theme.notice_label.fg, "the {rail} rail");
+            assert_eq!(
+                rail_style.bg,
+                Some(Color::Reset),
+                "the {rail} rail's cell keeps the terminal background"
+            );
+            for col in [1u16, width - 1] {
                 let style = cell_style(&terminal, col, y);
                 assert_eq!(style.fg, band, "the {glyph} pad's color at {col}");
                 assert_eq!(style.bg, Some(Color::Reset), "the {glyph} pad's background");
             }
         }
+        // The text rows' rail is the same accent in the same column, and the cell after it is
+        // the band's own (the one cell of padding before the text at `BAR_LEAD`).
+        assert_eq!(cell_style(&terminal, 0, y).fg, app.theme.notice_label.fg);
+        assert_eq!(cell_style(&terminal, 1, y).fg, app.theme.input_bar.fg);
     }
 }
 
@@ -808,11 +832,12 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
 
     // Wide enough that the whole status row fits: it is asserted on, not clipped.
     let idle = render(&mut app, 80, 10);
-    let band_row = row_of(&idle, "▎ hello").expect("the band");
+    let band_row = row_of(&idle, "▌ hello").expect("the band");
     let transcript_row = row_of(&idle, "a question").expect("the transcript");
-    // The band's half-cell pads are always there (ADR 0035): `▄` above, `▀` below.
-    assert!(row(&idle, (band_row - 1) as u16).starts_with('▄'));
-    assert!(row(&idle, (band_row + 1) as u16).starts_with('▀'));
+    // The band's half-cell pads are always there (ADR 0035/4): the rail's `▖`
+    // above, `▘` below, then `▄`/`▀` for the rest of the row.
+    assert!(row(&idle, (band_row - 1) as u16).starts_with("▖▄"));
+    assert!(row(&idle, (band_row + 1) as u16).starts_with("▘▀"));
     // The status row is one above the top pad, and blank (but there) while idle.
     assert_eq!(row(&idle, (band_row - 2) as u16).trim_end(), "");
     assert!(!screen(&idle).contains("Working"));
@@ -826,7 +851,7 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     app.set_now(app.session.spinner_origin + std::time::Duration::from_secs(12));
     let running = render(&mut app, 80, 10);
     assert_eq!(
-        row_of(&running, "▎ hello"),
+        row_of(&running, "▌ hello"),
         Some(band_row),
         "the band must not move when the turn starts"
     );
@@ -837,14 +862,28 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     );
     let status = row(&running, (band_row - 2) as u16);
     assert!(
-        status.contains("◜  Working · 12s · esc to interrupt"),
+        status.contains("◜ Working · 12s · esc to interrupt"),
         "the live status row: {status:?}"
+    );
+    // ADR 0035: the dot is in the rail's column (0) — the same vertical line as the
+    // rail — one cell before the text, which starts at the text column.
+    let cells: Vec<char> = status.chars().collect();
+    assert_eq!(cells[0], '◜', "the dot's column: {status:?}");
+    assert_eq!(
+        cells[1], ' ',
+        "one cell between the dot and the text: {status:?}"
+    );
+    assert_eq!(cells[2], 'W', "the text column: {status:?}");
+    assert_eq!(
+        cell_style(&running, 0, (band_row - 2) as u16).fg,
+        app.theme.notice_label.fg,
+        "the dot takes the accent"
     );
 
     // The turn ends: the row is blank again and nothing moved.
     app.session.projection.set_turn(radian_tui::TurnState::Idle);
     let after = render(&mut app, 80, 10);
-    assert_eq!(row_of(&after, "▎ hello"), Some(band_row));
+    assert_eq!(row_of(&after, "▌ hello"), Some(band_row));
     assert_eq!(row_of(&after, "a question"), Some(transcript_row));
     assert_eq!(row(&after, (band_row - 2) as u16).trim_end(), "");
 
@@ -876,25 +915,37 @@ fn the_bar_input_takes_the_status_row_the_pad_rows_and_its_text_rows() {
     // the band 5, the bottom pad 6.
     let terminal = render(&mut app, 20, 8);
     assert_eq!(
-        row_of(&terminal, "▎ hello"),
+        row_of(&terminal, "▌ hello"),
         Some(5),
         "the band sits between the two pad rows:\n{}",
         screen(&terminal)
     );
     assert_eq!(row(&terminal, 3).trim_end(), "", "the blank status row");
-    assert!(row(&terminal, 4).starts_with('▄'), "the top pad");
-    assert!(row(&terminal, 6).starts_with('▀'), "the bottom pad");
+    assert!(
+        row(&terminal, 4).starts_with('▖'),
+        "the top pad's rail cell"
+    );
+    assert!(
+        row(&terminal, 6).starts_with('▘'),
+        "the bottom pad's rail cell"
+    );
 
     app.input = "one\ntwo".into();
     let terminal = render(&mut app, 20, 8);
     assert_eq!(
-        row_of(&terminal, "▎ one"),
+        row_of(&terminal, "▌ one"),
         Some(4),
         "the status row moved up"
     );
-    assert_eq!(row_of(&terminal, "▎ two"), Some(5));
-    assert!(row(&terminal, 3).starts_with('▄'), "the top pad");
-    assert!(row(&terminal, 6).starts_with('▀'), "the bottom pad");
+    assert_eq!(row_of(&terminal, "▌ two"), Some(5));
+    assert!(
+        row(&terminal, 3).starts_with('▖'),
+        "the top pad's rail cell"
+    );
+    assert!(
+        row(&terminal, 6).starts_with('▘'),
+        "the bottom pad's rail cell"
+    );
 }
 
 /// `tui.footer.glyphs = "ascii"` reaches the rail and the status spinner too (ADR 0027
@@ -915,14 +966,14 @@ fn the_bar_rail_and_spinner_fall_back_to_ascii() {
         .set_turn(radian_tui::TurnState::Running);
     let text = screen(&render(&mut app, 40, 10));
     assert!(text.contains("| hi"), "the ascii rail:\n{text}");
-    assert!(!text.contains('▎'), "no unicode rail:\n{text}");
+    assert!(!text.contains('▌'), "no unicode rail:\n{text}");
     // ADR 0035: the `ascii` tier gets no half-cell band padding.
     assert!(
         !text.contains('▄') && !text.contains('▀'),
         "no band padding under ascii:\n{text}"
     );
     assert!(
-        text.contains("*  Working · esc to interrupt"),
+        text.contains("* Working · esc to interrupt"),
         "the ascii pulse glyph: \n{text}"
     );
 }
@@ -948,11 +999,12 @@ fn the_ascii_tier_has_no_band_padding() {
     assert_eq!(row_of(&terminal, "> again"), Some(1), "{text}");
 }
 
-/// ADR 0035: the folded thinking line hugs the block below it (the reply
-/// or the tool call it introduces), while the gap above it stays one line — here the user
-/// block's bottom pad.
+/// ADR 0035 (replacing revision 3 decision 3): thinking has **one blank line on both
+/// sides** — folded or expanded, and whether the block below it is the reply or a tool card. The
+/// gap above it stays one line (here the user block's bottom pad).
 #[test]
-fn thinking_hugs_the_block_below() {
+fn thinking_has_one_blank_line_on_both_sides() {
+    // Folded, before the reply.
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
     app.push_message(&Message::user("q"));
@@ -972,9 +1024,57 @@ fn thinking_hugs_the_block_below() {
     );
     assert_eq!(
         answer,
-        thinking + 1,
-        "the reply hugs thinking, with no gap:\n{text}"
+        thinking + 2,
+        "one blank line between thinking and the reply:\n{text}"
     );
+    assert_eq!(
+        row(&terminal, (thinking + 1) as u16).trim_end(),
+        "",
+        "and that line is empty:\n{text}"
+    );
+
+    // Expanded, and directly against a tool card: the same single line. The entries are pushed
+    // directly because `push_message` always puts an (empty) assistant entry between them — a
+    // block of its own, which is what makes a text-less call show two blank rows in a real
+    // transcript, not this rule. The unit test in `blocks.rs` pins the pair rule itself.
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
+    app.session.entries.push(Entry::new(
+        EntryKind::Reasoning,
+        "first thought\nsecond thought",
+    ));
+    let card = radian_tui::tools::ToolCard::new(
+        "c1",
+        "shell",
+        serde_json::json!({"command": "make test"}),
+    );
+    let mut call = Entry::new(EntryKind::ToolCall, "-> shell: make test");
+    call.tool = Some(Box::new(card));
+    call.card = radian_tui::blocks::Card::Solo;
+    app.session.entries.push(call);
+    let terminal = render(&mut app, 40, 12);
+    let text = screen(&terminal);
+    let first = row_of(&terminal, "first thought").expect("the expanded thinking body");
+    let body = row_of(&terminal, "second thought").expect("the second thinking line");
+    assert_eq!(
+        body,
+        first + 1,
+        "the body's own lines are adjacent:\n{text}"
+    );
+    // The card's own block starts at its top border; the head text is inside it.
+    let top = row_of(&terminal, "┌").expect("the card's top border");
+    assert_eq!(
+        top,
+        body + 2,
+        "one blank line between expanded thinking and the tool card:\n{text}"
+    );
+    assert_eq!(
+        row(&terminal, (body + 1) as u16).trim_end(),
+        "",
+        "and that line is empty:\n{text}"
+    );
+    assert!(row(&terminal, top as u16).contains('┌'), "{text}");
 }
 
 /// ADR 0027 item 2 / ADR 0035: the `unicode` tier's tool
@@ -1616,13 +1716,14 @@ fn the_block_layout_snapshot() {
         "> explain the failure".to_string(), // the user text
         "▀".repeat(80),                      // the user block's bottom half cell
         "› thinking (3 lines)".to_string(), // the folded channel: the unicode fold glyph (ADR 0027)
-        "  Looking into it.".to_string(),   // thinking hugs the reply: no container gap
-        "".to_string(),                     // the gap
-        top.clone(),                        // the shell card's frame (ADR 0028)
+        "".to_string(), // ADR 0035: one blank line between thinking and the block below
+        "  Looking into it.".to_string(), // the reply
+        "".to_string(), // the gap
+        top.clone(),    // the shell card's frame (ADR 0028)
         row(&format!("{} shell: make test", status[2])), // the head status line
-        row("$ make test"),                 // the command (no divider: part of the call)
-        divider("Error"),                   // the output section's label (the call failed)
-        row("$ make test"),                 // the output
+        row("$ make test"), // the command (no divider: part of the call)
+        divider("Error"), // the output section's label (the call failed)
+        row("$ make test"), // the output
         row("exit code: 2"),
         row("--- stdout ---"),
         row("boom"),
@@ -1657,8 +1758,10 @@ fn the_block_layout_snapshot() {
         );
     }
     let bg = |x: u16, y: u16| buffer.cell((x, y)).map(|c| c.bg);
-    let failed = bg(0, 6);
-    for y in 6..=15u16 {
+    // ADR 0035's blank line moved everything below thinking down by one: the reply is
+    // row 5, the gap row 6, the failed card 7..=16 and the list card starts at 18.
+    let failed = bg(0, 7);
+    for y in 7..=16u16 {
         assert_eq!(
             bg(0, y),
             failed,
@@ -1666,9 +1769,9 @@ fn the_block_layout_snapshot() {
         );
         assert_eq!(bg(79, y), failed, "…to the row's end");
     }
-    assert_ne!(failed, bg(0, 4), "the assistant row has no card band");
-    assert_eq!(bg(0, 5), bg(0, 4), "a gap row is not banded");
-    assert_ne!(bg(0, 17), failed, "the successful card's band differs");
+    assert_ne!(failed, bg(0, 5), "the assistant row has no card band");
+    assert_eq!(bg(0, 6), bg(0, 5), "a gap row is not banded");
+    assert_ne!(failed, bg(0, 18), "the successful card's band differs");
 }
 
 /// A tab is four columns when the wrap decides where to break (ADR 0028 R9), not zero: a line
@@ -2273,9 +2376,8 @@ fn folding_changes_the_transcript_line_count() {
         collapsed + 2,
         "three thinking lines become one placeholder"
     );
-    // The placeholder and the answer, **no** gap between them (ADR 0035: thinking
-    // hugs the block below).
-    assert_eq!(collapsed, 2, "placeholder + answer, no gap");
+    // The placeholder, one blank line (ADR 0035) and the answer.
+    assert_eq!(collapsed, 3, "placeholder + the one-line gap + answer");
 }
 
 /// `tui.display.reasoning = "hidden"` removes the reasoning lines entirely.
@@ -2602,6 +2704,164 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
     assert!(text.contains("Ask · session"), "{text}");
 }
 
+/// ADR 0024 rule 4: the Ask panel title is `Ask` alone when the asker is this
+/// process's own session, and `Ask · <origin>` only when another session (an ADR 0030 task
+/// agent) is asking. A TUI process has one session today, so `origin == own session` is the
+/// clean test.
+#[test]
+fn the_ask_panel_title_omits_the_own_session() {
+    let questions = vec![radian_coding::Question {
+        id: "q".into(),
+        header: None,
+        prompt: "Pick one".into(),
+        kind: QuestionKind::Text,
+        options: vec![],
+        allow_other: false,
+        required: true,
+    }];
+    let theme = radian_tui::theme::Theme::dark();
+    let title = |origin: &str, own: &str| {
+        let form = radian_tui::question::QuestionForm::new(7, origin.into(), questions.clone());
+        text_of(&render::question_panel(
+            &form,
+            own,
+            60,
+            usize::MAX,
+            &theme,
+            radian_tui::footer::Glyphs::Unicode,
+        ))
+    };
+    let own = title("session-abc", "session-abc");
+    assert!(
+        own.contains("╭─ Ask "),
+        "own session shows a bare Ask: {own}"
+    );
+    assert!(
+        !own.contains("session-abc"),
+        "the own session id never reaches the title: {own}"
+    );
+    let other = title("other-session", "session-abc");
+    assert!(
+        other.contains("Ask · other-session"),
+        "another session keeps its origin: {other}"
+    );
+}
+
+/// ADR 0024 rules 1-2: while the ask is pending the transcript shows one weak line
+/// ("the questions are in the panel below"); once the answer arrives the **same** entry draws
+/// the full closed block, and the result entry stays blank, so the ask is never drawn twice.
+#[test]
+fn a_pending_ask_is_one_line_and_becomes_the_block_once_answered() {
+    let mut app = App::new("m", "s");
+    let arguments = serde_json::json!({"questions":[
+        {"id":"pick","kind":"single","prompt":"Pick one","options":[
+            {"id":"a","label":"Option A"},{"id":"b","label":"Option B"}]},
+        {"id":"note","kind":"text","prompt":"Anything else?"}
+    ]});
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "ask_user".into(),
+            arguments,
+        }],
+    ));
+
+    // Pending: one line, no questions or options, and only one "Ask" line.
+    let pending = screen(&render(&mut app, 70, 16));
+    assert!(
+        pending.contains("-> Ask 2 questions · answering below"),
+        "the pending one-liner: {pending}"
+    );
+    assert!(
+        !pending.contains("Pick one") && !pending.contains("Option A"),
+        "the pending line carries no questions or options: {pending}"
+    );
+    assert_eq!(
+        pending.matches("Ask 2 questions").count(),
+        1,
+        "only one Ask line while pending: {pending}"
+    );
+
+    // Answered: the same call entry becomes the full closed block (its `->` marker kept), and
+    // the result entry draws nothing, so there is exactly one block.
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("Pick one → Option A")],
+            structured: Some(
+                serde_json::json!({"request_id":"r","answers":[{"id":"pick","selected":["a"]}]}),
+            ),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    let answered = screen(&render(&mut app, 70, 20));
+    assert!(
+        answered.contains("->╭─ Ask 2 questions"),
+        "the same entry draws the block, keeping its marker: {answered}"
+    );
+    assert!(answered.contains("Pick one"), "{answered}");
+    assert!(answered.contains("☑ Option A"), "{answered}");
+    assert!(
+        !answered.contains("answering below"),
+        "the pending line is gone: {answered}"
+    );
+    assert_eq!(
+        answered.matches("╭─ Ask 2 questions").count(),
+        1,
+        "exactly one block, not two: {answered}"
+    );
+}
+
+/// ADR 0024 rule 2: a declined ask shows its status line inside the same closed
+/// block.
+#[test]
+fn a_declined_ask_shows_the_status_inside_the_block() {
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "ask_user".into(),
+            arguments: serde_json::json!({"questions":[{"id":"q","kind":"text","prompt":"Say something"}]}),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("user declined to answer")],
+            structured: None,
+            is_error: true,
+            error_code: Some("user_declined".into()),
+        },
+        meta: Default::default(),
+    });
+    let declined = screen(&render(&mut app, 70, 16));
+    assert!(
+        declined.contains("->╭─ Ask 1 question"),
+        "the declined block keeps the call marker: {declined}"
+    );
+    assert!(
+        declined.contains("user declined to answer"),
+        "the status line stays inside the box: {declined}"
+    );
+    assert!(
+        !declined.contains("answering below"),
+        "the pending line is gone: {declined}"
+    );
+    assert_eq!(
+        declined.matches("╭─ Ask 1 question").count(),
+        1,
+        "exactly one block: {declined}"
+    );
+}
+
 /// `wrap_line_count` (the counting-only path, used to measure every entry on the first frame
 /// and after a resize) must agree with `wrap` for the same corpus, or the transcript's total
 /// line count and the virtualized window disagree.
@@ -2633,4 +2893,186 @@ fn the_line_count_matches_the_wrap() {
             "{text:?} at {width}"
         );
     }
+}
+
+// ---------- the ask markers (ADR 0024 implementation note) ----------
+
+/// A question of `kind` with `options` and `allow_other`.
+fn ask_question(
+    kind: QuestionKind,
+    options: Vec<radian_coding::QuestionOption>,
+    allow_other: bool,
+) -> radian_coding::Question {
+    radian_coding::Question {
+        id: "q".into(),
+        header: None,
+        prompt: "Pick".into(),
+        kind,
+        options,
+        allow_other,
+        required: true,
+    }
+}
+
+/// A panel over one question, laid out at `width`, as text (the same call the frame makes).
+fn ask_panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> String {
+    text_of(&render::question_panel(
+        form,
+        "session",
+        width,
+        usize::MAX,
+        &radian_tui::theme::Theme::dark(),
+        radian_tui::footer::Glyphs::Unicode,
+    ))
+}
+
+/// The chosen option's marker is drawn in its own span and is never bold: the owner's font
+/// draws a glyph missing from its bold face at a smaller size (ADR 0024 note).
+#[test]
+fn the_ask_panel_marker_is_never_bold() {
+    let mut form = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Chosen"), option("b", "Other option")],
+            true,
+        )],
+    );
+    form.answers[0].selected = vec!["a".into()];
+    let lines = render::question_panel(
+        &form,
+        "session",
+        60,
+        usize::MAX,
+        &radian_tui::theme::Theme::dark(),
+        radian_tui::footer::Glyphs::Unicode,
+    );
+    let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
+    terminal
+        .draw(|frame| {
+            frame.render_widget(ratatui::widgets::Paragraph::new(lines), frame.area());
+        })
+        .unwrap();
+
+    let marker = style_of(&terminal, "☑").expect("the chosen marker cell");
+    assert!(
+        !marker.add_modifier.contains(Modifier::BOLD),
+        "the chosen marker must not be bold: {marker:?}"
+    );
+    let label = style_of(&terminal, "Chosen").expect("the label cell");
+    assert!(
+        label.add_modifier.contains(Modifier::BOLD),
+        "the label keeps its chosen (accent) role: {label:?}"
+    );
+    // The cursor is not bold either.
+    let cursor = style_of(&terminal, "❯").expect("the cursor cell");
+    assert!(
+        !cursor.add_modifier.contains(Modifier::BOLD),
+        "the cursor must not be bold: {cursor:?}"
+    );
+}
+
+/// Single, multi and `Other` all draw the same checkbox pair (ADR 0024 note): the
+/// old circle pair is gone.
+#[test]
+fn the_ask_panel_uses_one_checkbox_pair_for_single_multi_and_other() {
+    let mut single = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Alpha"), option("b", "Beta")],
+            true,
+        )],
+    );
+    single.answers[0].selected = vec!["a".into()];
+    let text = ask_panel_text(&single, 60);
+    assert!(text.contains("☑ Alpha"), "the chosen single option: {text}");
+    assert!(
+        text.contains("☐ Beta"),
+        "the unchosen single option: {text}"
+    );
+    assert!(text.contains("☐ Other (type your own)"), "{text}");
+    assert!(
+        !text.contains('○')
+            && !text.contains('◉')
+            && !text.contains("(*)")
+            && !text.contains("( )"),
+        "no circle markers: {text}"
+    );
+
+    let mut multi = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Multi,
+            vec![option("a", "Alpha"), option("b", "Beta")],
+            false,
+        )],
+    );
+    multi.answers[0].selected = vec!["a".into()];
+    let text = ask_panel_text(&multi, 60);
+    assert!(text.contains("☑ Alpha"), "{text}");
+    assert!(text.contains("☐ Beta"), "{text}");
+    assert!(!text.contains('○') && !text.contains('◉'), "{text}");
+
+    let mut other = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Alpha")],
+            true,
+        )],
+    );
+    other.answers[0].other = true;
+    other.answers[0].cursor = 1;
+    let text = ask_panel_text(&other, 60);
+    assert!(
+        text.contains("☑ Other"),
+        "the chosen Other row uses the checked box, not a circle: {text}"
+    );
+}
+
+/// The panel and the transcript block draw the markers from the same source, so both show the
+/// checkbox pair (ADR 0024 note).
+#[test]
+fn the_ask_panel_and_the_transcript_block_use_the_same_markers() {
+    let mut form = radian_tui::question::QuestionForm::new(
+        7,
+        "session".into(),
+        vec![ask_question(
+            QuestionKind::Single,
+            vec![option("a", "Alpha"), option("b", "Beta")],
+            false,
+        )],
+    );
+    form.answers[0].selected = vec!["a".into()];
+    let panel = ask_panel_text(&form, 60);
+    assert!(panel.contains('☑') && panel.contains('☐'), "{panel}");
+
+    let mut card = radian_tui::tools::ToolCard::new(
+        "c1",
+        "ask_user",
+        serde_json::json!({"questions":[{"id":"q","kind":"single","options":[
+            {"id":"a","label":"Alpha"},{"id":"b","label":"Beta"}]}]}),
+    );
+    card.structured = Some(serde_json::json!({"answers":[{"id":"q","selected":["a"]}]}));
+    let mut entry = radian_tui::app::Entry::new(radian_tui::app::EntryKind::ToolResult, "result");
+    entry.tool = Some(Box::new(card));
+    let block = radian_tui::blocks::layout(&entry, &[], EXPANDED, 60);
+    let block_text: String = block
+        .iter()
+        .map(|line| line.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        block_text.contains('☑') && block_text.contains('☐'),
+        "the transcript block uses the same pair: {block_text}"
+    );
+    assert!(
+        !block_text.contains('○') && !block_text.contains('◉'),
+        "{block_text}"
+    );
 }
