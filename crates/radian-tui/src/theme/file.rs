@@ -27,7 +27,9 @@ use super::{Role, Theme, ThemeName};
 /// Every role name pi's theme schema knows (56; the `required` 51 plus the 5 optional).
 /// A name outside this list in a theme file is ignored with one warning, and a
 /// `[tui.colors]` key outside this list and [`Role::ALL`] is the same.
-const PI_ROLES: &[&str] = &[
+/// Shared with the importer (ADR 0029): a pi key in this list but with no
+/// Radian target is reported as dropped.
+pub(crate) const PI_ROLES: &[&str] = &[
     "accent",
     "border",
     "borderAccent",
@@ -98,7 +100,7 @@ pub(crate) fn fg_source_for_test(role: Role) -> Option<&'static str> {
     fg_source(role)
 }
 
-fn fg_source(role: Role) -> Option<&'static str> {
+pub(crate) fn fg_source(role: Role) -> Option<&'static str> {
     match role {
         Role::Reasoning => Some("thinkingText"),
         // The footer's `reasoning` item: one role per level, fed by pi's matching
@@ -192,7 +194,7 @@ fn fg_source(role: Role) -> Option<&'static str> {
 /// (`toolPendingBg` / `toolSuccessBg` / `toolErrorBg`, ADR 0029 decision 3 + ADR 0028 R4).
 /// ADR 0029: the `user` line is a **foreground** role now, so
 /// `userMessageBg` no longer paints it — only the `bar` input keeps that band.
-fn bg_source(role: Role) -> Option<&'static str> {
+pub(crate) fn bg_source(role: Role) -> Option<&'static str> {
     match role {
         Role::InputBar => Some("userMessageBg"),
         Role::Selection => Some("selectedBg"),
@@ -206,7 +208,7 @@ fn bg_source(role: Role) -> Option<&'static str> {
 /// The Radian roles a pi role name feeds, and which channel. Most pi names feed one channel
 /// of one role; a few feed several (`error` colors both the tool errors and a cancelled
 /// turn), which is also how a `[tui.colors]` key by that name applies.
-fn targets_for_pi_name(name: &str) -> Vec<(Role, Channel)> {
+pub(crate) fn targets_for_pi_name(name: &str) -> Vec<(Role, Channel)> {
     let mut targets = Vec::new();
     for role in Role::ALL {
         if fg_source(role) == Some(name) {
@@ -220,7 +222,7 @@ fn targets_for_pi_name(name: &str) -> Vec<(Role, Channel)> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Channel {
+pub(crate) enum Channel {
     Foreground,
     Background,
 }
@@ -260,7 +262,9 @@ pub fn load(
     (resolved, warnings)
 }
 
-/// Loads `<themes_dir>/<name>.json`. A name that cannot be a file (or is pi's reserved
+/// Loads `<themes_dir>/<name>.toml` first, then `<themes_dir>/<name>.json` with the old pi
+/// loader and a one-line hint (ADR 0029: `<name>.toml` wins; the `.json`
+/// path is a one-version transition). A name that cannot be a file (or is pi's reserved
 /// `system`) never touches the disk; a missing, unreadable or broken file falls back to the
 /// built-in `dark` with one warning. The name itself is already known from the config, so a
 /// missing `name` field in the file is tolerated.
@@ -287,12 +291,28 @@ fn load_file(
         ));
         return Theme::dark();
     };
+    // ADR 0029/4: a Radian TOML theme is the format; a `.json` is the old
+    // pi format, still read this version so a user's existing file keeps working, with the
+    // import hint. The next version drops the `.json` path.
+    let toml_path = dir.join(format!("{name}.toml"));
+    if toml_path.is_file() {
+        return match std::fs::read_to_string(&toml_path) {
+            Ok(text) => super::toml_file::build(name, &text, truecolor, warnings),
+            Err(error) => {
+                warnings.push(format!(
+                    "theme `{name}`: could not read {} ({error}); using built-in dark",
+                    toml_path.display()
+                ));
+                Theme::dark()
+            }
+        };
+    }
     let path = dir.join(format!("{name}.json"));
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             warnings.push(format!(
-                "theme `{name}`: no file {} ; using built-in dark",
+                "theme `{name}`: no file {} (or {name}.toml) ; using built-in dark",
                 path.display()
             ));
             return Theme::dark();
@@ -315,6 +335,40 @@ fn load_file(
             Theme::dark()
         }
     }
+}
+
+/// Resolves a pi theme's `colors` table through its `vars` (pi's `resolveVarRefs`), then applies
+/// pi's optional-role fallbacks (its docs). Shared by the JSON loader ([`build`]) and the
+/// importer (ADR 0029): the importer needs exactly the same resolved pi
+/// colors the runtime loader would compute, so the two cannot disagree.
+pub(crate) fn resolve_pi_colors<'a>(
+    colors: &'a serde_json::Map<String, serde_json::Value>,
+    vars: &'a serde_json::Map<String, serde_json::Value>,
+) -> (BTreeMap<&'a str, ColorValue>, Problems) {
+    let mut problems = Problems::default();
+    let mut resolver = VarResolver {
+        vars,
+        memo: BTreeMap::new(),
+    };
+    let mut resolved: BTreeMap<&str, ColorValue> = BTreeMap::new();
+    for (role, value) in colors {
+        match resolver.resolve(value, &mut Vec::new()) {
+            Ok(color) => {
+                resolved.insert(role.as_str(), color);
+            }
+            Err(error) => problems.variable(error),
+        }
+    }
+    // An optional role that a Radian role consumes (the `thinking*` levels feed the footer's
+    // `reasoning` item) must not be reported missing when its fallback is present.
+    for (pi_name, fallback) in PI_FALLBACKS {
+        if !resolved.contains_key(pi_name)
+            && let Some(&fallback_color) = resolved.get(fallback)
+        {
+            resolved.insert(pi_name, fallback_color);
+        }
+    }
+    (resolved, problems)
 }
 
 /// Builds the [`Theme`] from one parsed theme file. Anything that cannot produce a color
@@ -358,33 +412,7 @@ fn build(
         return base;
     };
 
-    let mut problems = Problems::default();
-    let mut resolver = VarResolver {
-        vars,
-        memo: BTreeMap::new(),
-    };
-    // Resolve every pi role once (missing roles are simply absent), then assemble.
-    let mut resolved: BTreeMap<&str, ColorValue> = BTreeMap::new();
-    for (role, value) in colors {
-        match resolver.resolve(value, &mut Vec::new()) {
-            Ok(color) => {
-                resolved.insert(role.as_str(), color);
-            }
-            Err(error) => problems.variable(error),
-        }
-    }
-
-    // pi's optional roles inherit another role when absent (its docs). Apply that to
-    // `resolved` **before** the role loop, so an optional role that a Radian role consumes
-    // (the `thinking*` levels now feed the footer's `reasoning` item) is not reported
-    // missing when its fallback is present.
-    for (pi_name, fallback) in PI_FALLBACKS {
-        if !resolved.contains_key(pi_name)
-            && let Some(&fallback_color) = resolved.get(fallback)
-        {
-            resolved.insert(pi_name, fallback_color);
-        }
-    }
+    let (resolved, problems) = resolve_pi_colors(colors, vars);
 
     let mut theme = base;
     let mut missing: Vec<&'static str> = Vec::new();
@@ -524,7 +552,7 @@ fn apply_override(
     }
 }
 
-fn apply_modifiers(style: &mut Style, spec: &TuiColorOverride) {
+pub(crate) fn apply_modifiers(style: &mut Style, spec: &TuiColorOverride) {
     use ratatui::style::Modifier;
     for (flag, modifier) in [
         (spec.bold, Modifier::BOLD),
@@ -576,7 +604,7 @@ pub(crate) fn ratatui_color(value: ColorValue, truecolor: bool) -> Option<Color>
 
 /// Variable-resolution failures, collected so each is reported once.
 #[derive(Default)]
-struct Problems {
+pub(crate) struct Problems {
     /// `variable name -> the roles/values that wanted it` (deduplicated by name).
     missing: BTreeMap<String, usize>,
     cycles: BTreeMap<String, usize>,
@@ -603,6 +631,25 @@ impl Problems {
         unknown_roles: &[String],
         warnings: &mut Vec<String>,
     ) {
+        warnings.extend(self.into_variable_warnings(name));
+        if !missing_roles.is_empty() {
+            warnings.push(format!(
+                "theme `{name}`: missing role(s) {} — using the built-in color",
+                missing_roles.join(", ")
+            ));
+        }
+        if !unknown_roles.is_empty() {
+            warnings.push(format!(
+                "theme `{name}`: unknown role(s) {} ignored",
+                unknown_roles.join(", ")
+            ));
+        }
+    }
+
+    /// The variable problems only (missing, circular, invalid), one line each. The importer
+    /// (ADR 0029) reports roles itself and reuses just this part.
+    pub(crate) fn into_variable_warnings(self, name: &str) -> Vec<String> {
+        let mut warnings = Vec::new();
         for (variable, uses) in self.missing {
             warnings.push(format!(
                 "theme `{name}`: unknown variable `{variable}` ({uses} use(s) fell back to the \
@@ -621,18 +668,7 @@ impl Problems {
                 "theme `{name}`: invalid color value(s) {list}; those roles fell back"
             ));
         }
-        if !missing_roles.is_empty() {
-            warnings.push(format!(
-                "theme `{name}`: missing role(s) {} — using the built-in color",
-                missing_roles.join(", ")
-            ));
-        }
-        if !unknown_roles.is_empty() {
-            warnings.push(format!(
-                "theme `{name}`: unknown role(s) {} ignored",
-                unknown_roles.join(", ")
-            ));
-        }
+        warnings
     }
 }
 

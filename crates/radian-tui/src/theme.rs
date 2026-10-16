@@ -10,6 +10,7 @@
 
 mod color;
 mod file;
+mod toml_file;
 
 pub use color::{
     ColorValue, Rgb, approximate_256, parse_color_value, truecolor_env, truecolor_for,
@@ -46,7 +47,10 @@ pub fn switch(
         };
     }
     let builtin = matches!(name, "dark" | "light" | "mono");
-    let is_file = themes_dir.is_some_and(|dir| dir.join(format!("{name}.json")).is_file());
+    let is_file = themes_dir.is_some_and(|dir| {
+        // ADR 0029: `<name>.toml` first, then the old `<name>.json`.
+        dir.join(format!("{name}.toml")).is_file() || dir.join(format!("{name}.json")).is_file()
+    });
     if !builtin && !is_file {
         return Switch {
             theme: None,
