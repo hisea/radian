@@ -16,6 +16,7 @@ mod catalog;
 pub mod config;
 pub mod context;
 pub mod contrib;
+pub mod control;
 pub mod cost;
 mod describe;
 mod diagnostics;
@@ -92,8 +93,8 @@ pub use catalog::{
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{
-    CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ModelConfig, PermissionsConfig,
-    RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
+    CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ControlConfig, ModelConfig,
+    PermissionsConfig, RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
     parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path,
 };
@@ -102,6 +103,7 @@ pub use contrib::{
     Contribution, ContributionStore, ContributorRunner, GitContributor, Segment, SegmentRole,
     StatusContributor, Tick, spawn as spawn_contributor, spawn_gated as spawn_contributor_gated,
 };
+pub use control::{ControlServer, ControlTarget, SUBSCRIBER_BUFFER, SocketGuard};
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use diagnostics::{
     CleanReport, MAX_TOTAL_BYTES, RETENTION, append, cache_dir, clean, clean_startup, clean_with,
@@ -114,8 +116,8 @@ pub use home::{
     catalog_cache_for, config_dir, config_dir_for, credentials_dir, credentials_dir_for,
     diagnostics_dir_for, ensure_private_dir, legacy_sessions_dirs_for, legacy_sessions_hint,
     legacy_sessions_hint_for, memory_dir, memory_dir_for, radian_home, radian_home_for,
-    sessions_dir, sessions_dir_for, skills_dir, skills_dir_for, themes_dir, themes_dir_for,
-    trust_dir, trust_dir_for, user_home, worktrees_dir_for,
+    run_dir_for, sessions_dir, sessions_dir_for, skills_dir, skills_dir_for, themes_dir,
+    themes_dir_for, trust_dir, trust_dir_for, user_home, worktrees_dir_for,
 };
 pub use job_notify::{
     JobNotifier, MAX_CONSECUTIVE_WAKES, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message,

@@ -15,15 +15,22 @@ takes the exclusive lock, truncates any torn tail and writes `SessionCreated` at
 `resume(path, session_id)` opens an existing file, truncates the torn tail (ADR 0006 §3.2),
 verifies `schema_version`/`session_id` **from the file**, and continues `seq` after the last
 complete line. `append_runtime_event(RuntimeEvent)` writes a runtime-owned event through the
-same lock, `seq` counter and fsync; `next_seq()`, `session_id()`, `path()`.
+same lock, `seq` counter and sync-point decision (ADR 0040); `next_seq()`, `session_id()`,
+`path()`, and `close()` (the explicit close-time fsync; `Drop` does the same best-effort).
 
 - One writer per file, enforced by a kernel `flock` (`WriteError::Locked`). A contended
   `flock` is retried with backoff for ~200 ms before `Locked` is reported, so the transient
   false conflict caused by a child that inherited the lock in another thread's `[fork, exec)`
   window (released at the child's `exec`) is not mistaken for a second writer.
-- The line's `seq` is chosen, rendered, written and fsynced **while the lock is held**, and the
-  counter only advances once the write succeeded — so `seq` order is file order even when the
-  core's journal records and the runtime's events are appended concurrently.
+- The line's `seq` is chosen, rendered and written **while the lock is held** (ADR 0040:
+  `fsync`ed there too when the record is a sync point), and the counter only advances once the
+  write succeeded — so `seq` order is file order even when the core's journal records and the
+  runtime's events are appended concurrently.
+- Group commit (ADR 0040): every append is `write` + `flush`; only the sync points
+  (`SessionCreated`, `ToolExecutionStarted`, `TurnFinished`, `TurnFailed`,
+  `TranscriptReplacementCommitted`/`Aborted`, `TaskSpawned`) `fsync`, and close/`Drop`
+  `fsync`s the tail. A group of records becomes durable together, so a step fsyncs 2–3 times
+  instead of once per record.
 - A new file is created owner-only (0600) at creation time, not chmod'ed afterwards.
 - `critical` is a property of the event type, never a caller argument.
 
@@ -139,11 +146,14 @@ Mutation records: `MUTATIONS.md` (writer/reader/crash/fuzz/privacy) and `MUTATIO
 
 ## Known limits and what is not verified
 
-- **`fsync` is not provable here.** Removing `sync_all()` leaves every test green: no test in
-  this environment can simulate a power loss, and a killed process still leaves its bytes in
-  the page cache. `MUTATIONS.md` records this as an *equivalent mutation under the test
-  environment*, not a hole, and states plainly that no test proves the fsync is there. The
-  measured cost it buys is ~4 ms per append on this machine (ADR 0006 §15).
+- **`fsync` as a power-loss proof is not provable here**, though its *timing* now is: no test
+  in this environment can simulate a power loss, and a killed process still leaves its bytes in
+  the page cache, so removing `sync_all()` from a single record leaves the durability tests
+  green (recorded in `MUTATIONS.md` as an *equivalent mutation under the test environment*).
+  The group-commit tests (`tests/group_commit.rs`, `radian-runtime/tests/group_commit.rs`)
+  instead pin *when* the fsync happens — the per-step count and the crash-at-every-record
+  traversal fail if a sync point stops syncing. The measured cost it buys is ~4 ms per fsync
+  on this machine (ADR 0006 §15.2; the per-step numbers are in `docs/perf-baseline.md`).
 - **Space cost, accepted:** `ToolExecutionSettled` carries the full result and the following
   `MessageAppended` carries the same result message again, so a large tool output is stored
   **twice** (ADR 0006 §15.1). v1 does not change this.

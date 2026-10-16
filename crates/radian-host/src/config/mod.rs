@@ -542,6 +542,21 @@ impl Default for IntegrationsConfig {
     }
 }
 
+/// `[control]` (ADR 0030 O6, slice 8): the process control port. `enabled` defaults to
+/// **true** — every hosting process binds `$RADIAN_HOME/run/<pid>.sock` — and `false` turns
+/// the socket off for this process. The socket carries the same verbs O6 lists; a client can
+/// never declare the `User` source and there is no approval verb.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlConfig {
+    pub enabled: bool,
+}
+
+impl Default for ControlConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// One parsed configuration file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
@@ -556,6 +571,8 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     pub sandbox: SandboxConfig,
     pub integrations: IntegrationsConfig,
+    /// `[control]` (ADR 0030 O6, slice 8): the process control port, on by default.
+    pub control: ControlConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
     /// `[memory]` (ADR 0021): the injection keys this revision adds.
@@ -667,6 +684,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
             "sandbox" => parse_sandbox(value, path, &mut config)?,
             "integrations" => parse_integrations(value, path, &mut config)?,
+            "control" => parse_control(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
             "memory" => parse_memory(value, path, &mut config)?,
@@ -912,6 +930,24 @@ fn parse_integrations(value: &Value, path: &Path, config: &mut Config) -> Result
                 return Err(wrong_type(path, "integrations.herdr", "a boolean"));
             }
             (other, _) => config.skipped.push(format!("integrations.{other}")),
+        }
+    }
+    Ok(())
+}
+
+/// Parses `[control]` (ADR 0030 O6, slice 8). Only the `enabled` key exists today; an unknown
+/// key is reported and ignored (the `tui.*` rule, not refuse).
+fn parse_control(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "control", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("enabled", Value::Boolean(on)) => config.control.enabled = *on,
+            ("enabled", _) => {
+                return Err(wrong_type(path, "control.enabled", "a boolean"));
+            }
+            (other, _) => config.skipped.push(format!("control.{other}")),
         }
     }
     Ok(())
