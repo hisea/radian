@@ -7,7 +7,7 @@
 //!   circular reference; Radian only falls the *affected roles* back to the built-in palette
 //!   (the file's `appearance`, `dark` by default) and warns once per problem. A broken file
 //!   falls back as a whole. Nothing here blocks startup.
-//! - **Coverage** (decision 3): pi styles its own UI roles; Radian maps them onto its 23
+//! - **Coverage** (decision 3): pi styles its own UI roles; Radian maps them onto its 70
 //!   [`Role`]s. The mapping is in [`fg_source`]/[`bg_source`] and pinned by tests. The pi
 //!   roles nothing consumes yet (the `md*`, `toolDiff*`, `syntax*`, `thinking*` families and
 //!   the remaining panel roles) are parsed into [`Theme::reserved`] so their values survive
@@ -175,15 +175,25 @@ fn fg_source(role: Role) -> Option<&'static str> {
         Role::DiffHunk => Some("accent"),
         // pi has no auto role; the warning role is the closest "this needs attention" color.
         Role::Auto => Some("warning"),
+        // ADR 0029: the thin roles. `frame` and `diff_line_number` are the
+        // weak level (`dim`); a tool block's name takes pi's keyword colour; the head's status
+        // markers take pi's success/warning/error.
+        Role::Frame => Some("dim"),
+        Role::ToolName => Some("syntaxKeyword"),
+        Role::DiffLineNumber => Some("dim"),
+        Role::StatusOk => Some("success"),
+        Role::StatusWarn => Some("warning"),
+        Role::StatusError => Some("error"),
     }
 }
 
-/// The pi role feeding a Radian role's **background**: the user line (`userMessageBg`), the
-/// transcript selection (`selectedBg`), and the tool cards by state (`toolPendingBg` /
-/// `toolSuccessBg` / `toolErrorBg`, ADR 0029 decision 3 + ADR 0028 R4).
+/// The pi role feeding a Radian role's **background**: the transcript selection
+/// (`selectedBg`), the `bar` input's band (`userMessageBg`) and the tool cards by state
+/// (`toolPendingBg` / `toolSuccessBg` / `toolErrorBg`, ADR 0029 decision 3 + ADR 0028 R4).
+/// ADR 0029: the `user` line is a **foreground** role now, so
+/// `userMessageBg` no longer paints it — only the `bar` input keeps that band.
 fn bg_source(role: Role) -> Option<&'static str> {
     match role {
-        Role::User => Some("userMessageBg"),
         Role::InputBar => Some("userMessageBg"),
         Role::Selection => Some("selectedBg"),
         Role::ToolPendingBg => Some("toolPendingBg"),
@@ -716,10 +726,11 @@ mod tests {
         assert_eq!(theme.tool_call.fg, Some(Color::Indexed(39)));
     }
 
-    /// ADR 0029 decision 3's example: the user line takes pi's `userMessageText` foreground
-    /// and `userMessageBg` background.
+    /// ADR 0029: the user line takes pi's `userMessageText` foreground,
+    /// but it is a **foreground** role now — `userMessageBg` no longer paints it (only the
+    /// `bar` input keeps that band).
     #[test]
-    fn the_user_line_takes_pi_text_and_background() {
+    fn the_user_line_takes_pi_text_but_no_background() {
         let (theme, warnings) = loaded(&theme_json(
             "{}",
             "{\"userMessageText\": \"#ffffff\", \"userMessageBg\": \"#222222\"}",
@@ -729,10 +740,11 @@ mod tests {
             "{warnings:?}"
         );
         assert_eq!(fg(theme.user), Some(Color::Rgb(255, 255, 255)));
-        assert_eq!(theme.user.bg, Some(Color::Rgb(0x22, 0x22, 0x22)));
-        assert!(
-            warnings.iter().all(|w| w.contains("missing role(s)")),
-            "{warnings:?}"
+        assert_eq!(theme.user.bg, None, "the user role has no background now");
+        assert_eq!(
+            theme.input_bar.bg,
+            Some(Color::Rgb(0x22, 0x22, 0x22)),
+            "only the bar input keeps the userMessageBg band"
         );
     }
 
@@ -1003,7 +1015,14 @@ mod tests {
             Some(Color::Rgb(0xDC, 0xD7, 0xBA)),
             "userMessageText → var fg"
         );
-        assert_eq!(theme.user.bg, Some(Color::Rgb(0x18, 0x18, 0x20)));
+        // ADR 0029: `user` is a foreground role; the band from
+        // `userMessageBg` no longer paints it (only the `bar` input keeps it).
+        assert_eq!(theme.user.bg, None, "the user role has no background now");
+        assert_eq!(
+            theme.input_bar.bg,
+            Some(Color::Rgb(0x18, 0x18, 0x20)),
+            "the bar input keeps the userMessageBg band"
+        );
         assert_eq!(theme.model.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
         assert_eq!(theme.find.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
         assert_eq!(theme.approval_border.fg, Some(Color::Rgb(0x54, 0x54, 0x6D)));
@@ -1011,10 +1030,11 @@ mod tests {
         // `#363646`, background only (the text keeps its own foreground under it).
         assert_eq!(theme.selection.bg, Some(Color::Rgb(0x36, 0x36, 0x46)));
         assert_eq!(theme.selection.fg, None);
-        // The block backgrounds (ADR 0028 R4): `userMessageBg: "bg_m2"` → `#181820`,
+        // The block backgrounds (ADR 0028 R4; ADR 0029 keeps the band
+        // only on the `bar` input): `userMessageBg: "bg_m2"` → `#181820` paints `input_bar`,
         // `toolPendingBg: "bg_m3"` → `#16161D`, `toolSuccessBg: "diff_add_bg"` → `#2B3328`,
         // `toolErrorBg: "diff_del_bg"` → `#43242B`.
-        assert_eq!(theme.user.bg, Some(Color::Rgb(0x18, 0x18, 0x20)));
+        assert_eq!(theme.input_bar.bg, Some(Color::Rgb(0x18, 0x18, 0x20)));
         assert_eq!(theme.tool_pending_bg.bg, Some(Color::Rgb(0x16, 0x16, 0x1D)));
         assert_eq!(theme.tool_success_bg.bg, Some(Color::Rgb(0x2B, 0x33, 0x28)));
         assert_eq!(theme.tool_error_bg.bg, Some(Color::Rgb(0x43, 0x24, 0x2B)));
@@ -1190,5 +1210,97 @@ mod tests {
             assert_eq!(theme.name, ThemeName::Dark, "{name}");
             assert_eq!(warnings.len(), 1, "{name}: {warnings:?}");
         }
+    }
+
+    /// ADR 0029: each new thin role maps to its pi key.
+    #[test]
+    fn the_thin_roles_map_to_their_pi_keys() {
+        for (role, key) in [
+            (Role::Frame, "dim"),
+            (Role::ToolName, "syntaxKeyword"),
+            (Role::DiffLineNumber, "dim"),
+            (Role::StatusOk, "success"),
+            (Role::StatusWarn, "warning"),
+            (Role::StatusError, "error"),
+        ] {
+            assert_eq!(fg_source_for_test(role), Some(key), "{role:?}");
+        }
+    }
+
+    /// ADR 0029: the new roles resolve from a theme file through those pi
+    /// keys (`frame`/`diff_line_number` ← `dim`, `tool_name` ← `syntaxKeyword`, the status
+    /// markers ← `success`/`warning`/`error`).
+    #[test]
+    fn the_thin_roles_resolve_from_a_theme_file() {
+        let (theme, warnings) = loaded(&theme_json(
+            "{}",
+            "{\"dim\": \"#010203\", \"syntaxKeyword\": \"#040506\", \"success\": \"#070809\", \
+             \"warning\": \"#0a0b0c\", \"error\": \"#0d0e0f\"}",
+        ));
+        assert!(
+            warnings.iter().all(|w| w.contains("missing role(s)")),
+            "{warnings:?}"
+        );
+        assert_eq!(theme.frame.fg, Some(Color::Rgb(1, 2, 3)), "frame ← dim");
+        assert_eq!(
+            theme.diff_line_number.fg,
+            Some(Color::Rgb(1, 2, 3)),
+            "diff_line_number ← dim"
+        );
+        assert_eq!(
+            theme.tool_name.fg,
+            Some(Color::Rgb(4, 5, 6)),
+            "tool_name ← syntaxKeyword"
+        );
+        assert_eq!(
+            theme.status_ok.fg,
+            Some(Color::Rgb(7, 8, 9)),
+            "status_ok ← success"
+        );
+        assert_eq!(
+            theme.status_warn.fg,
+            Some(Color::Rgb(0x0a, 0x0b, 0x0c)),
+            "status_warn ← warning"
+        );
+        assert_eq!(
+            theme.status_error.fg,
+            Some(Color::Rgb(0x0d, 0x0e, 0x0f)),
+            "status_error ← error"
+        );
+    }
+
+    /// ADR 0029: every new role is settable through `[tui.colors]` by its
+    /// Radian name, over the built-in theme.
+    #[test]
+    fn the_thin_roles_are_settable_from_tui_colors() {
+        let overrides = |text: &str| -> Vec<(String, TuiColorOverride)> {
+            radian_host::config::parse(Path::new("/tmp/c.toml"), text)
+                .unwrap()
+                .tui
+                .colors
+        };
+        let (theme, warnings) = load(
+            None,
+            false,
+            true,
+            None,
+            &overrides(concat!(
+                "schema_version = 1\n",
+                "[tui.colors]\n",
+                "frame = \"#010101\"\n",
+                "tool_name = \"#020202\"\n",
+                "diff_line_number = \"#030303\"\n",
+                "status_ok = \"#040404\"\n",
+                "status_warn = \"#050505\"\n",
+                "status_error = \"#060606\"\n",
+            )),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(theme.frame.fg, Some(Color::Rgb(1, 1, 1)));
+        assert_eq!(theme.tool_name.fg, Some(Color::Rgb(2, 2, 2)));
+        assert_eq!(theme.diff_line_number.fg, Some(Color::Rgb(3, 3, 3)));
+        assert_eq!(theme.status_ok.fg, Some(Color::Rgb(4, 4, 4)));
+        assert_eq!(theme.status_warn.fg, Some(Color::Rgb(5, 5, 5)));
+        assert_eq!(theme.status_error.fg, Some(Color::Rgb(6, 6, 6)));
     }
 }

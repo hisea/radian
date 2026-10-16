@@ -1493,6 +1493,20 @@ Base `19dc0d7`（worktree `.radian-worktrees/pulse`，分支 `dogfood/pulse`）�
 条目，它是独立的一块，所以「thinking + 无正文的工具调用」在屏幕上会是两行空行（thinking 自己的一行
 + 空块两侧的行）；`thinking_has_one_blank_line_on_both_sides` 直接压条目来测 thinking 这条规则本身，
 并在注释里写明这一点。
+
+## thin ⓪：新角色与内建取值（ADR 0029/6，ADR 0028 的片 ⓪）
+
+Base：本片 HEAD（`oc/thin-roles`）· 就地变异，每个变异后从 `.radian/scratch/theme.rs.new`
+还原并用 `cmp` 确认逐字节相同（`git status --short` 只留本片改动）。测试 `--no-fail-fast`。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| R0-M1 | `frame` 取 `accent` 的值而不是 `dim`（dark/light 两处） | 细线是弱一级 | `theme::tests::the_thin_roles_and_the_changed_builtin_values` FAILED（"frame is the dim level"） |
+| R0-M2 | `user` 仍是背景角色（恢复 `text.bg(band)`，dark/light 两处） | user 是前景角色、无底色 | `theme::tests::the_thin_roles_and_the_changed_builtin_values`（"user is the accent foreground"）与 `theme::tests::the_input_bar_keeps_the_user_band_on_the_main_level` FAILED |
+| R0-M3 | `reasoning` 仍斜体（dark/light 两处加回 `Modifier::ITALIC`） | reasoning 不斜体 | `theme::tests::the_thin_roles_and_the_changed_builtin_values` 与 `render::reasoning_and_assistant_text_are_visually_distinct` FAILED |
+
+3/3 抓住，无等价变异。新角色的映射/解析另有正向断言（`theme::file::tests::the_thin_roles_map_to_their_pi_keys`、
+`the_thin_roles_resolve_from_a_theme_file`、`the_thin_roles_are_settable_from_tui_colors`）。
 ## ask-box：transcript 的 Ask 块、面板标题、待答一行、标记与两个按键（ADR 0024，2026-10-15）
 
 Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个变异就地改完后跑
