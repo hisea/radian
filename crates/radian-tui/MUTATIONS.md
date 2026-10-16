@@ -1827,6 +1827,19 @@ Base：`ed858d8`（评审已接受的 head）· 就地变异：先把 `crates/ra
 | FX1-M2 | 被中断的空回复留一行给标记 | `blocks.rs::layout_with` 去掉那段 `lines.push(BodyLine::prose(...))`（保留 interrupted 条件） | `render::an_interrupted_reply_with_no_text_still_shows_the_marker`（屏幕没有 `[interrupted]`）、`blocks::tests::an_empty_committed_assistant_is_skipped_by_the_gaps`（`line_count == 1`） | ✅ |
 
 2/2 抓住。新测试在 `ed858d8`（未修复）上先跑过：`contains("[interrupted]")` FAILED。
+## ADR 0030 片 6b2：TUI 的任务视图（2026-10-16）
+
+Base `2f41f69` · 直接改源码、跑单个测试、从 `.radian/scratch/mut/` 副本 `cp` 还原，
+`git status --short` 跑完为空。
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| S6B2-1 | 宿主不再传 builder，lead tools 不挂载 | `cli.rs` 的 `task_builder: Some(task_builder)` 改回 `None` | `pty_the_tui_mounts_the_task_tools` | ✅ |
+| S6B2-2 | 没有 task 时不显示计数 | `footer.rs` 的 `tasks` item 从 `task_counts().map(..)` 改成恒 `Some(0/0)` | `task_events_become_notices_and_move_the_count`（无 task 时屏幕出现 `tasks`） | ✅ |
+| S6B2-3 | `/tasks cancel` 要真的 cancel | `command.rs` 的 `cancel` 分支返回 `TasksRequest::List` | `tasks_parses_list_cancel_and_kill`、`a_submitted_tasks_line_is_the_loop_effect` | ✅ |
+
+3/3 抓住。S6B2-1 的 pty 测试会重编 `radian` 二进制并检查第一次模型请求的 tools 含全部
+`LEAD_TOOL_NAMES`。
 ## pulse-slow: the breath's period 1.4 s -> 2.0 s and 12 -> 16 samples
 
 Worktree `.radian-worktrees/pulse-slow`, branch `oc/pulse-slow`. In-place mutation: `cp` the file

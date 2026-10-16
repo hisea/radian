@@ -7354,13 +7354,16 @@ async fn the_startup_line_says_ask_user_is_off() {
         stderr.contains("ask_user: off (no interactive user)"),
         "the startup line must say ask_user is off: {stderr}"
     );
-    // The model was never offered the tool: the request's tool list has no `ask_user`.
+    // The model was never offered the tool: the request's tool list has no tool **named**
+    // `ask_user`. (The name still appears inside the lead tools' own descriptions — an
+    // `answer_task` answers a task's `ask_user` question — so the check is on the tool list,
+    // not the raw body.)
     let requests = server.requests();
     assert_eq!(requests.len(), 1, "{stderr}");
+    let names = advertised_tools(&server, 0);
     assert!(
-        !requests[0].body.contains("ask_user"),
-        "agent must not advertise ask_user: {}",
-        requests[0].body
+        !names.iter().any(|name| name == "ask_user"),
+        "the CLI must not advertise the ask_user tool: {names:?}"
     );
 }
 
@@ -7762,4 +7765,28 @@ async fn pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo() {
     let tail = String::from_utf8_lossy(&seen);
     let stty = tail.split("EXITED:130").nth(1).unwrap_or("");
     assert_stty_has_echo(stty);
+}
+
+/// ADR 0030 slice 6b2: a headless lead (`radian exec`) mounts the lead tools from the start, so
+/// every lead tool name is in the model's list. The mode gate still refuses the calls (a
+/// `general` turn), which is pinned in `radian-host`'s `lead_tools` tests.
+#[tokio::test]
+async fn a_headless_lead_mounts_the_task_tools() {
+    let server = MockServer::start(vec![text_reply("hi")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let names = advertised_tools(&server, 0);
+    for lead in radian_host::LEAD_TOOL_NAMES {
+        assert!(
+            names.iter().any(|name| name == lead),
+            "`{lead}` is not mounted by a headless lead: {names:?}"
+        );
+    }
 }

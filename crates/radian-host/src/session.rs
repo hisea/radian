@@ -1271,13 +1271,24 @@ pub async fn open_session(
     let lead_mounted = !task_agent && task_builder.is_some();
     let lead_registry = if lead_mounted {
         let builder = task_builder.expect("lead_mounted implies a task builder");
-        Some(Arc::new(crate::task::TaskRegistry::new(
-            workspace.clone(),
-            session_id.as_str(),
-            Arc::clone(&journal),
-            Arc::clone(&queue),
-            builder,
-        )))
+        // ADR 0030 O10: the registry tells the host's live view about every `TaskSpawned` and
+        // `TaskFinished` it writes, so the TUI shows a notice line and the CLI one stderr line.
+        // The sink is the host's own runtime-events handler (the same one the driver calls).
+        let runtime_events = Arc::clone(&runtime_events);
+        let notifier: crate::task::TaskNotifier =
+            Arc::new(move |event: &radian_session::RuntimeEvent| {
+                runtime_events.on_runtime_event(event);
+            });
+        Some(Arc::new(
+            crate::task::TaskRegistry::new(
+                workspace.clone(),
+                session_id.as_str(),
+                Arc::clone(&journal),
+                Arc::clone(&queue),
+                builder,
+            )
+            .with_notifier(notifier),
+        ))
     } else {
         None
     };

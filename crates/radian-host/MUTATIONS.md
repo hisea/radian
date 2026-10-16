@@ -1089,3 +1089,18 @@ inbox」与「lead 的回合来源被任务事件降低」在 part a 里**不可
 **平台说明（如实记录）**：reviewer 给的例子是 `1e15`，但 macOS 上 `Instant` 用 `i64` 秒存，`1e15` 秒加得下、不 panic
 （集成测试在变异下仍通过）。真正 panic 的是 `1e19`（`i64` 秒溢出、但仍是合法 `Duration`），所以测试用
 `1e19`；夹取去掉后集成测试确实 panic。单元测试与平台无关，两种值下都抓住夹取被去掉。
+
+## ADR 0030 片 6b2：宿主的真任务 builder（2026-10-16）
+
+Base `2f41f69` · 在 worktree 内直接改文件、跑单个测试、再从 `.radian/scratch/mut/` 的副本
+`cp` 还原并 `cmp` 对比；每个变异后 `git status --short` 只剩被测文件，本次跑完为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S6B2-1 | 把 lead 的 live sink 当成任务的 `task_events`（fixture 里 `host(...)` 收到 `lead_seen` 而非 `task_seen`） | ✅ failed | `the_production_builder_builds_an_accepted_session`（任务的 event 没进它自己的 sink：`the task's own sink sees its turn: []`；lead 的 sink 同时会看到任务的 `TurnFinished`） |
+| S6B2-2 | 任务会话挂一个 MCP server（`servers: vec![McpServerConfig::new("mut", "/bin/true")]`） | ✅ failed | `the_production_builder_builds_an_accepted_session`（`registry.spawn` 因 MCP 启动失败而报错）；`a_shared_task_has_no_worktree_and_no_network` 的 `mcp_configured == 0` 同理 |
+
+2/2 抓住。**说明（如实记录）**：S6B2-1 的变异落在测试 fixture 的接线处（builder 拿到的
+sink 就是宿主会传的 sink），因为生产 builder 的 `task_events` 由宿主提供，没有"把 lead 的
+sink 塞进 builder"的单行源码改法；测试断言（任务自己的 sink 收到它自己的 stream、lead 的
+sink 只收到 `TaskSpawned`/`TaskFinished`）在变异下失败。S6B2-2 的变异是源码变异。
