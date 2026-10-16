@@ -156,6 +156,15 @@ fn an_applied_switch_updates_the_footer_and_the_shell_flag() {
     assert!(result.effects.is_empty());
     assert_eq!(app.projection.read().tier(), Some("safe (session)"));
     assert!(!app.bash_available, "safe has no shell");
+    // ADR 0036: the tool list (and the shell description) is fixed when
+    // the session opens, so the switch says so instead of leaving the text stale.
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|notice| notice.contains("fixed for this session")),
+        "{:?}",
+        notices(&app)
+    );
 
     let result = app.update(Input::AccessApplied {
         tier: Tier::FullAccess,

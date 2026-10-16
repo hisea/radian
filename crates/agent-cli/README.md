@@ -155,12 +155,18 @@ in the default scope registers a git workspace whose project is not registered y
 notice line as above, on stderr); a directory that is not a project workspace is refused with
 a tool error that says the memory was not saved and does not point at another scope.
 
-Each request also injects the current memory into the **system prompt** (never the
+Each request carries the memory **fixed block** in the **system prompt** (never the
 transcript): Active records in the D6 order, up to 2000 tokens (Global 500 / Project 1500 soft
 shares, whole records only), with the user/confirmed and agent-unverified segments labelled
-apart. The injected ids/revisions/scopes are recorded as a `MemoryInjected` runtime event when
-the set changes; the content is never written. A memory read failure is a `[memory]` warning,
-never a failed turn. Startup prints `[memory]` with the project state and the budget.
+apart. The block is computed **once per process** and ranked by the session's first user message
+(ADR 0021), so every request of a session carries the same system-prompt bytes and a
+provider's prefix cache stays valid. A record the agent saves mid-session reaches the model as
+**one System-source message** right after the next user message — ids and origin in its
+metadata, the content in the transcript — and never by rewriting the system prompt; a turn whose
+text hits nothing appends nothing, and `[memory.injection] additions = false` turns the
+appending off. The injected ids/revisions/scopes are recorded as a `MemoryInjected` runtime
+event when the set changes. A memory read failure is a `[memory]` warning, never a failed turn.
+Startup prints `[memory]` with the project state and the budget.
 
 ## Input
 

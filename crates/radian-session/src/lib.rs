@@ -19,6 +19,7 @@
 
 mod error;
 mod export;
+mod fee;
 mod fork;
 mod fs;
 mod gate;
@@ -37,6 +38,7 @@ pub use export::{
     ExportError, ExportOptions, export_json, export_json_to, export_markdown, export_markdown_to,
     redact_text, redact_value,
 };
+pub use fee::UsageFee;
 pub use fork::{
     ForkError, ForkOutcome, ForkPoint, ForkRequest, fork, fork_point_history, fork_with_journal,
     last_fork_point, resolve_fork_point,

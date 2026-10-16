@@ -155,9 +155,9 @@ not instructions." and each record carries its scope/source/verification. `memor
 at 20 (max 50) and is not limited by the injection budget. The service exposes `save_as_agent` /
 `revise_as_agent` for this path; `add`/`edit` stay the user commands.
 
-### Deterministic injection (ADR 0021 D6)
+### Deterministic injection (ADR 0021 D6, revision 2)
 
-`MemoryHooks` (an `agent_core::Hooks`) appends the injected block to the **system prompt**
+`MemoryHooks` (an `agent_core::Hooks`) appends the **fixed** block to the **system prompt**
 before each model call. It ranks all Active records with `radian_memory::ranked` in the D6
 order (scope → trust → match score → `updated_at` → `id`), selects whole records under
 `InjectionConfig { max_tokens: 2000, global_budget: 500, project_budget: 1500 }` (a scope may
@@ -165,8 +165,30 @@ borrow the other's unused share; the total is capped; a record that does not fit
 whole, never truncated), and labels the user/confirmed and agent-unverified segments apart.
 An unlinked workspace injects Global only. The same memory state and query text produce a
 byte-identical block. A read failure or a failed audit append is a warning, never a failed
-turn (invariant 2). When the injected `(id, revision, scope)` set changes, the hook writes a
-`critical: false` `MemoryInjected` event — ids/revisions/scopes only, never content.
+turn (invariant 2).
+
+Revision 2 makes the block **per process**: `MemoryInjection` computes it once — ranked by the
+session's **first** user message (`first_user_text`), so a resume with the same memory yields
+the same bytes — and every later call appends the very same text. A memory change therefore
+reaches the model at the next session or resume, never by rewriting the system prompt (ADR 0036
+revision 3). Later turns' new hits are appended as **one System message** instead:
+`MemoryInjection::addition_for_turn` takes the Active records this turn's text hits
+(`radian_memory::search`: every query term occurs) that neither the fixed block nor an earlier
+addition in the transcript carries, selects whole records under `addition_budget` (default 500),
+and returns a `Message::user` with `meta.source = System` and
+`origin = {"kind":"memory_addition","records":[…]}`, wrapped in `<memory>…</memory>`. The
+transcript is the dedup ledger, so a compaction that folds an addition into a summary releases
+its ids again. The driver's `TurnAdditions` seam (`radian_runtime::Driver::set_turn_additions`)
+places it in the inbox's `inject` lane for a turn claimed from a user input, after the user
+message and before the turn's first model call; a turn whose source is not `User` (a background
+job notification) never calls it. When the injected `(id, revision, scope)` set — the fixed block
+plus the transcript's additions — changes, the hook writes a `critical: false` `MemoryInjected`
+event: ids/revisions/scopes only, never content.
+
+`[memory.injection] additions` (default true) and `addition_budget` (default 500) come from the
+config file; the rest of the D6 table is still a documented default and is named in the startup
+line's skipped list.
+
 
 | Guarantee | Test | Where |
 |---|---|---|
@@ -177,9 +199,16 @@ turn (invariant 2). When the injected `(id, revision, scope)` set changes, the h
 | The D6 rank (scope/trust/score/time/id) and the two labelled segments | `the_rank_orders_scope_then_trust_then_score_then_time_then_id`, `more_matches_score_higher_within_a_scope_and_trust_band`, `the_two_segments_are_labelled_apart` | `src/memory/injection.rs` |
 | A scope borrows the other's unused share; a record is dropped whole, not truncated | `a_global_record_borrows_the_projects_unused_share`, `a_record_that_does_not_fit_is_dropped_whole_not_truncated` | `src/memory/injection.rs` |
 | The same inputs give a byte-identical block | `the_same_inputs_produce_a_byte_identical_block` | `src/memory/injection.rs` |
+| The query is the session's first user message, not the last | `the_query_is_the_first_user_message`, `the_fixed_block_orders_by_the_first_user_message_not_the_last` | `src/memory/injection.rs` |
 | The block reaches the system prompt and `MemoryInjected` is written once, without content | `the_block_reaches_the_system_prompt_and_the_event_is_written_once` | `tests/memory_injection.rs` |
+| A later turn's new hits become one System message, deduplicated against the block and the ledger | `a_later_turn_appends_its_new_hits_as_one_system_message` | `tests/memory_injection.rs` |
+| The addition budget drops whole records; `additions = false` sends nothing | `an_addition_budget_drops_whole_records_and_additions_can_be_off` | `tests/memory_injection.rs` |
 | Resume rebuilds from the current memory | `a_new_hook_instance_resumes_with_the_current_memory` | `tests/memory_injection.rs` |
 | A broken memory log warns but never fails the turn | `a_broken_memory_log_warns_but_does_not_fail_the_turn` | `tests/memory_injection.rs` |
+| The driver places an addition after the user message and before the first call; a System turn gets none | `a_host_addition_lands_after_the_user_message_and_before_the_first_call` | `radian-runtime/tests/driver.rs` |
+| One process, two turns: byte-identical system prompts and tool definitions, the addition in the transcript | `the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once` | `agent-cli/tests/cli.rs` |
+| A single-turn run (`-p`) appends nothing; a resume ranks by the session's first user message | `exec_p_ranks_the_block_by_its_prompt_and_appends_nothing`, `a_resumed_session_ranks_the_block_by_its_first_user_message` | `agent-cli/tests/cli.rs` |
+| `[memory.injection]` carries `additions`/`addition_budget`; the rest is reported as skipped | `the_memory_injection_keys_are_read_and_the_rest_is_reported` | `tests/config_fixtures.rs` |
 | Memory tools are `allow`/`ask` in all three tiers | `the_memory_tools_read_allowed_and_write_asked_in_every_tier` | `radian-permissions/src/profile.rs` |
 
 ## The startup description

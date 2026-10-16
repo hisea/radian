@@ -490,6 +490,44 @@ fn a_selection_across_a_banded_user_block_copies_the_text() {
     );
 }
 
+/// ADR 0035: a selection that starts or ends on a band's half-cell
+/// padding row copies none of the pad itself and never panics — including with a CJK body,
+/// where the pad's empty text must not index into a multi-byte offset.
+#[test]
+fn a_selection_from_a_padding_row_copies_no_pad_characters_with_cjk() {
+    let mut app = App::new("m", "s");
+    app.push_message(&Message::user("中文消息"));
+    app.set_viewport(3, 3);
+    app.set_transcript_width(30);
+    // Line 0 is the top pad, 1 the text, 2 the bottom pad (ADR 0035).
+    // From the top pad into the text: the pad contributes nothing.
+    press(&mut app, 0, 0);
+    drag(&mut app, 1, 20);
+    let result = release(&mut app, 1, 20);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy {
+            text: "中文消息".into()
+        }],
+        "the pad row contributes no character"
+    );
+    // From the text onto the bottom pad: still no pad character, no panic.
+    press(&mut app, 1, 2);
+    drag(&mut app, 2, 4);
+    let result = release(&mut app, 2, 4);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy {
+            text: "中文消息".into()
+        }],
+        "ending on the pad copies the text, not the pad"
+    );
+    // A click wholly on a pad row selects nothing.
+    press(&mut app, 0, 3);
+    let result = release(&mut app, 0, 3);
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+}
+
 #[test]
 fn a_selection_over_a_tool_card_head_copies_its_text() {
     use agent_core::{ContentPart, Message, ToolCall, ToolResult};
