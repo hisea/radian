@@ -32,7 +32,8 @@ has no second effect.
 driver then writes `InputClaimed` when it claims inputs for a turn and `InputAdmitted`
 after the transcript has actually taken the message (using the core's
 `TranscriptAppended` notifications, never a transcript diff). All runtime events share the
-journal's `seq` counter and fsync path with the core's own records.
+journal's `seq` counter and its per-event sync decision (ADR 0040) with the core's own
+records — `TurnFinished`/`TurnFailed` are sync points, the rest ride the next one.
 
 ## The driver
 
