@@ -1598,7 +1598,7 @@ fn the_block_layout_snapshot() {
         "▄".repeat(80),                      // the user block's top half cell (ADR 0035)
         "> explain the failure".to_string(), // the user text
         "▀".repeat(80),                      // the user block's bottom half cell
-        "> thinking (3 lines)".to_string(), // the folded channel: the marker glyph (ADR 0027)
+        "› thinking (3 lines)".to_string(), // the folded channel: the unicode fold glyph (ADR 0027)
         "  Looking into it.".to_string(),   // thinking hugs the reply: no container gap
         "".to_string(),                     // the gap
         top.clone(),                        // the shell card's frame (ADR 0028)
@@ -2206,7 +2206,7 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
         message: assistant_with("THE ANSWER", "FIRST THOUGHT\nSECOND THOUGHT", false, vec![]),
     });
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("> thinking (2 lines)"), "{text}");
+    assert!(text.contains("› thinking (2 lines)"), "{text}");
     assert!(
         !text.contains("FIRST THOUGHT"),
         "folded by default:
@@ -2222,11 +2222,11 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
 {text}"
     );
     assert!(text.contains("SECOND THOUGHT"), "{text}");
-    assert!(!text.contains("> thinking"), "{text}");
+    assert!(!text.contains("› thinking"), "{text}");
 
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("> thinking (2 lines)"), "{text}");
+    assert!(text.contains("› thinking (2 lines)"), "{text}");
     assert!(!text.contains("FIRST THOUGHT"), "{text}");
 }
 

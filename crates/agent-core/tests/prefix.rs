@@ -16,10 +16,15 @@ async fn session_with(
     model: Arc<ScriptedModel>,
     journal: Arc<dyn TranscriptJournal>,
 ) -> AgentSession<Arc<ScriptedModel>, NoTools, ()> {
-    Arc::new(Agent::new(model, NoTools))
-        .open_session_with_journal(Vec::new(), journal)
-        .await
-        .unwrap()
+    // These tests pin the interrupted-prefix behaviour of one attempt; retrying (ADR 0017
+    // revision 1) would turn "one failure" into several, so it is off here.
+    Arc::new(Agent::new(model, NoTools).with_config(AgentConfig {
+        retries: 0,
+        ..Default::default()
+    }))
+    .open_session_with_journal(Vec::new(), journal)
+    .await
+    .unwrap()
 }
 
 /// Records the text deltas in order; tests wait on it to cancel at the right moment.

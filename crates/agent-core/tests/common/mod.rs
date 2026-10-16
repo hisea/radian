@@ -35,6 +35,11 @@ pub enum Reply {
     StreamFail(Vec<String>, String),
     /// Fails with the provider's recognizable context-overflow error (ADR 0018 §兜底).
     Overflow(String),
+    /// Fails with a provider `Unavailable` error (ADR 0017), e.g. an HTTP 429 with
+    /// the provider's `Retry-After`.
+    Unavailable(String, Option<Duration>),
+    /// Fails with a non-transient `Protocol` error (e.g. HTTP 400).
+    Protocol(String),
 }
 
 /// Returns scripted replies in order and records every request.
@@ -129,6 +134,11 @@ impl Model for ScriptedModel {
                 }
                 Err(ModelError::Transport(message))
             }
+            Some(Reply::Unavailable(message, retry_after)) => Err(ModelError::Unavailable {
+                message,
+                retry_after,
+            }),
+            Some(Reply::Protocol(message)) => Err(ModelError::Protocol(message)),
             None => Err(ModelError::Protocol("script exhausted".into())),
         }
     }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the unicode-tier glyphs against the six mainstream coding fonts (ADR 0027
-revisions 4 and 6: Operator Mono left the reference set) and print the coverage table that
-lives in `crates/radian-tui/README.md`.
+revision 6: Operator Mono left the reference set) and print the coverage table that lives
+in `crates/radian-tui/README.md`.
 
 Why: a glyph the font does not have is drawn by a system fallback font with different
 metrics, so it sits off the baseline. The `unicode` footer tier must only use characters
@@ -14,10 +14,10 @@ Usage:
 
 fontTools is not a repository dependency: this script is a one-off check, not part of
 `cargo test`. A font that is not installed here is printed as `未查` (not checked); the
-table never guesses. `JetBrains Mono` is checked through its Nerd Font build when the plain
-build is not installed (the patch is additive, so a glyph missing from the Nerd build is
-missing upstream too). Keep the GLYPHS list in step with the coverage test in
-`crates/radian-tui/src/footer.rs`.
+table never guesses. `JetBrains Mono` is checked through its Nerd Font build
+when the plain build is not installed (the patch is additive, so a glyph missing from the
+Nerd build is missing upstream too). Keep the GLYPHS list in step with
+the coverage test in `crates/radian-tui/src/footer.rs`.
 """
 
 import os
@@ -55,8 +55,8 @@ GLYPHS = [
     ("»", "speed"),
     ("*", "reasoning"),
     ("#", "session"),
-    ("^", "tokens in"),
-    ("v", "tokens out"),
+    ("↑", "tokens in"),
+    ("↓", "tokens out"),
     ("R", "tokens cache"),
     ("~", "auto-compaction marker"),
     ("│", "footer separator"),
@@ -77,7 +77,8 @@ GLYPHS = [
     ("~", "tool status: running"),
     ("✓", "tool status: success"),
     ("×", "tool status: failure"),
-    (">", "reasoning fold marker"),
+    ("›", "reasoning fold marker"),
+    ("…", "truncation"),
 ]
 
 

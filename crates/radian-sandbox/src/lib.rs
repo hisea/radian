@@ -23,6 +23,7 @@ mod error;
 mod policy;
 #[cfg(target_os = "macos")]
 mod seatbelt;
+mod slot;
 
 #[cfg(feature = "testing")]
 pub mod harness;
@@ -32,6 +33,7 @@ use std::process::Command;
 
 pub use error::{ProbeReport, SandboxError};
 pub use policy::{DEFAULT_ALLOW_ENV, DEFAULT_DENY_READ, GitAccess, SandboxMode, SandboxPolicy};
+pub use slot::SandboxSlot;
 
 /// A concrete sandbox mechanism. `command` returns a launcher `Command` that runs `program`
 /// with `args` under the policy; the caller may add cwd/stdio but must not widen the

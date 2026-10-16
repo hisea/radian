@@ -64,19 +64,14 @@ fn screen(terminal: &Terminal<TestBackend>) -> String {
 
 /// A shell call, with its result if `result` is `Some`.
 fn shell_app(result: Option<ToolResult>) -> App {
-    shell_app_glyphs(None, result)
+    shell_app_with(result, |_| {})
 }
 
-/// [`shell_app`] under a glyph tier chosen **before** the messages are pushed, so the status
-/// glyph baked into the entry text is that tier's (the tier is read at push time).
-fn shell_app_glyphs(glyphs: Option<&str>, result: Option<ToolResult>) -> App {
+/// `shell_app` with a setup step before any message arrives (the app's real order: the footer
+/// glyph set comes from the config at startup, before the first tool result writes its head).
+fn shell_app_with(result: Option<ToolResult>, setup: impl FnOnce(&mut App)) -> App {
     let mut app = App::new("m", "s");
-    if let Some(glyphs) = glyphs {
-        app.apply_footer(&radian_host::config::TuiFooterConfig {
-            glyphs: Some(glyphs.to_string()),
-            ..Default::default()
-        });
-    }
+    setup(&mut app);
     app.push_message(&Message::Assistant {
         content: vec![],
         reasoning: vec![],
@@ -396,10 +391,17 @@ fn the_meta_writes_only_the_data_that_exists() {
 
 #[test]
 fn the_ascii_glyph_set_draws_ascii_borders_and_brackets() {
-    // The glyph tier is chosen before the messages so the baked status glyph is ascii too.
-    let mut app = shell_app_glyphs(Some("ascii"), Some(ok_result("done")));
-    let terminal = render(&mut app, 60, 16);
-    let lines = rows(&terminal, 60, 16);
+    // The glyph set is chosen before the result arrives, as at startup: the head's status glyph
+    // is written into the entry when the result lands (app.rs), so a later switch would not
+    // repaint it (a separate, known limit).
+    let mut app = shell_app_with(Some(ok_result("done")), |app| {
+        app.apply_footer(&radian_host::config::TuiFooterConfig {
+            glyphs: Some("ascii".into()),
+            ..Default::default()
+        });
+    });
+    let terminal = render(&mut app, 60, 12);
+    let lines = rows(&terminal, 60, 12);
     // The card's own rows (the footer draws its own separators, not this assertion's).
     let card: Vec<&String> = lines
         .iter()

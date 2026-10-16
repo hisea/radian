@@ -760,6 +760,9 @@ struct Setup {
     compaction_settings: serde_json::Value,
     /// Recomputes the summary call's settings for a switched route (ADR 0018).
     compaction_settings_for: radian_runtime::CompactionSettingsFor,
+    /// `[model] retries` (ADR 0017): how many times a transient model failure is
+    /// retried inside one model call; `0` disables.
+    retries: u32,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
     session_id: String,
     /// The validated, canonical workspace (dogfooding D1). Resolved in `setup`, before any
@@ -822,13 +825,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             .ok_or_else(|| {
                 SetupError("no model: pass --model, or set model.model in the config file".into())
             })?,
-    };
-    let profile = match cli.profile {
-        Some(profile) => profile,
-        None => match config.permissions.profile.as_deref() {
-            Some(name) => profile::parse_profile(name)?,
-            None => profile::default_profile(),
-        },
     };
     // ADR 0026 D9: `--approval`/`--yes` are the command line's choice; the config and the
     // journal's last in-session switch fill in when it is silent. `full` ignores a config
@@ -935,6 +931,43 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         (None, None) => generate_session_id(),
     };
     validate_session_id(&session_id).map_err(SetupError)?;
+    // D1: the workspace is validated here, before the sandbox is built and before the session
+    // file is created, so a missing or unusable path is a workspace error (not a sandbox
+    // message) and leaves nothing behind (D2). `radian-host` owns the rule for both hosts.
+    let workspace = resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
+        .map_err(SetupError)?;
+    // ADR 0038 decision 3: the tier and where it came from. The command line wins, then the
+    // resumed session's journal, then the remembered per-project record, then the config
+    // default. The CLI has no `/access`, but it honors what the TUI remembered and recorded.
+    let resumed_access = cli.resume.as_ref().and_then(|id| {
+        session_dir(cli)
+            .ok()
+            .and_then(|dir| radian_host::resumed_access(&dir, id))
+    });
+    let remembered_access = match radian_host::access::remembered_for(&workspace) {
+        Ok(tier) => tier,
+        Err(warning) => {
+            eprintln!("[access] {warning}");
+            None
+        }
+    };
+    let (profile, access_source) = if let Some(explicit) = cli.profile {
+        (explicit, "flag")
+    } else if let Some(preset) = resumed_access {
+        (profile::from_preset(preset), "session")
+    } else if let Some(preset) = remembered_access {
+        (profile::from_preset(preset), "project")
+    } else {
+        match config.permissions.profile.as_deref() {
+            Some(name) => (profile::parse_profile(name)?, "config"),
+            None => (profile::default_profile(), "default"),
+        }
+    };
+    // ADR 0038 decision 3: name where the tier came from when it was not the built-in default,
+    // so a remembered or resumed tier is visible at startup.
+    if access_source != "default" {
+        eprintln!("[access] {} (from {access_source})", profile.as_str());
+    }
     // ADR 0026 D9: the journal's last in-session switch restores auto on `safe`/`workspace`
     // when the command line was silent. The precedence is `resolve_startup`'s, shared with
     // the TUI.
@@ -951,11 +984,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         profile.preset(),
         cli.resume.is_some(),
     );
-    // D1: the workspace is validated here, before the sandbox is built and before the session
-    // file is created, so a missing or unusable path is a workspace error (not a sandbox
-    // message) and leaves nothing behind (D2). `radian-host` owns the rule for both hosts.
-    let workspace = resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
-        .map_err(SetupError)?;
     // The config's headers come first, so a `--header` of the same name wins.
     let mut header_args: Vec<String> = config
         .model
@@ -1174,6 +1202,10 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
         compaction_settings,
         compaction_settings_for,
+        retries: config
+            .model
+            .retries
+            .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
         session_id,
         workspace,
         secrets,
@@ -1595,9 +1627,11 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             auto_compact: setup.auto_compact,
             compaction_settings: setup.compaction_settings,
             compaction_settings_for: Some(setup.compaction_settings_for),
+            retries: setup.retries,
             sandbox,
             tier: profile_arg.preset(),
             profile: permission_profile,
+            access_builder: None,
             memory_root,
             skills_extra_paths: setup.skills_extra_paths,
             skills_builtin: setup.skills_builtin,
@@ -1626,7 +1660,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             runtime_events,
             driver_stopped: {
                 let ended = Arc::clone(&driver_ended);
-                Arc::new(move || ended.notify_one())
+                Arc::new(move |_| ended.notify_one())
             },
             before_driver: None,
             memory_warning: Arc::new(|message: &str| eprintln!("[memory] {message}")),
@@ -1671,6 +1705,20 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         session
             .config_queue()
             .push(serde_json::json!({ "approval": policy.as_str() }));
+    }
+    // ADR 0038 decision 2 (same rule as /model D8): an explicit `--profile` on a resume wins
+    // over the journal's recorded access, and the override is recorded so the journal stays
+    // the authority for the next resume.
+    let recorded_access = session_dir(&cli)
+        .ok()
+        .and_then(|dir| radian_host::resumed_access(&dir, &setup.session_id));
+    if resume_session
+        && cli.profile.is_some()
+        && recorded_access != cli.profile.map(|explicit| explicit.preset())
+    {
+        session
+            .config_queue()
+            .push(serde_json::json!({ "access": setup.profile.as_str() }));
     }
 
     // The audit drain task: every decision goes into the channel and is appended here. It is
@@ -2250,6 +2298,18 @@ impl EventSink for Ui {
             }
             AgentEvent::ToolStarted { index, name, .. } => {
                 eprintln!("[tool {index}] {name}: started");
+            }
+            AgentEvent::ModelRetrying {
+                attempt,
+                max,
+                delay,
+                reason,
+            } => {
+                // ADR 0017: the same line the TUI shows, on stderr, before the wait.
+                // The failed attempt's streamed text went to stdout and cannot be unwritten, so
+                // this only closes its line before the retry notice and the next attempt.
+                self.end_of_turn();
+                eprintln!("retrying {attempt}/{max} in {}s: {reason}", delay.as_secs());
             }
             AgentEvent::ToolFinished {
                 index, is_error, ..
