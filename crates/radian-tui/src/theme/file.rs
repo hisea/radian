@@ -326,7 +326,16 @@ fn load_file(
         }
     };
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(value) => build(name, &value, truecolor, warnings),
+        Ok(value) => {
+            let theme = build(name, &value, truecolor, warnings);
+            warnings.push(format!(
+                "theme `{name}`: {} is the old pi JSON format; run `radian theme import {}` to \
+                 convert it to TOML",
+                path.display(),
+                path.display()
+            ));
+            theme
+        }
         Err(error) => {
             warnings.push(format!(
                 "theme `{name}`: could not parse {} ({error}); using built-in dark",
@@ -1220,8 +1229,13 @@ mod tests {
                 .to_string_lossy()
                 .into_owned();
             let text = std::fs::read_to_string(&path).expect("readable");
-            let (theme, warnings) = load(Some(&name), false, true, Some(&dir), &[]);
-            assert_eq!(warnings, Vec::<String>::new(), "{name} produced warnings");
+            // The mapping is what this test pins, so it parses the JSON directly rather than
+            // going through `load` (ADR 0029: a `.toml` beside a `.json`
+            // would win there, and the `.json` path now adds the import hint).
+            let value: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+            let mut warnings = Vec::new();
+            let theme = build(&name, &value, true, &mut warnings);
+            assert!(warnings.is_empty(), "{name} produced warnings: {warnings:?}");
             assert_eq!(theme.name, ThemeName::File, "{name} loaded as a file theme");
             // The three levels exist (a level may legitimately be the terminal default).
             for (level, style) in [
@@ -1234,7 +1248,6 @@ mod tests {
                     "{name}: the {level} level resolved to nothing"
                 );
             }
-            let _ = text;
         }
     }
 
@@ -1338,5 +1351,41 @@ mod tests {
         assert_eq!(theme.status_ok.fg, Some(Color::Rgb(4, 4, 4)));
         assert_eq!(theme.status_warn.fg, Some(Color::Rgb(5, 5, 5)));
         assert_eq!(theme.status_error.fg, Some(Color::Rgb(6, 6, 6)));
+    }
+
+    /// ADR 0029: `<name>.toml` wins over `<name>.json`; without the TOML
+    /// the old JSON loader runs and the startup warnings carry the import hint.
+    #[test]
+    fn a_toml_theme_wins_over_a_json_one_and_the_json_fallback_hints() {
+        let dir = std::env::temp_dir().join(format!("radian-theme-dispatch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("both.json"),
+            r##"{"name": "both", "colors": {"userMessageText": "#ff0000"}}"##,
+        )
+        .unwrap();
+        std::fs::write(dir.join("both.toml"), "[roles]\nuser = \"#0000ff\"\n").unwrap();
+
+        let (theme, warnings) = load(Some("both"), false, true, Some(&dir), &[]);
+        assert_eq!(
+            theme.user.fg,
+            Some(Color::Rgb(0, 0, 255)),
+            "the .toml must win"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        std::fs::remove_file(dir.join("both.toml")).unwrap();
+        let (theme, warnings) = load(Some("both"), false, true, Some(&dir), &[]);
+        assert_eq!(
+            theme.user.fg,
+            Some(Color::Rgb(255, 0, 0)),
+            "the .json fallback loaded"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("radian theme import")),
+            "the .json fallback must hint: {warnings:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

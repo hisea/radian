@@ -457,7 +457,12 @@ pub fn theme_candidates(themes_dir: Option<&std::path::Path>) -> Vec<Candidate> 
         for entry in entries.flatten() {
             let file = entry.file_name();
             let name = file.to_string_lossy();
-            if let Some(stem) = name.strip_suffix(".json") {
+            // ADR 0029: a Radian `.toml` theme, or the old pi `.json`
+            // theme (still loadable this version); both are candidates.
+            let stem = name
+                .strip_suffix(".toml")
+                .or_else(|| name.strip_suffix(".json"));
+            if let Some(stem) = stem {
                 out.push(Candidate {
                     insert: stem.to_string(),
                     description: "theme file".to_string(),
