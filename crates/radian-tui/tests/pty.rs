@@ -6684,7 +6684,7 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
     );
     // Wait for the **panel** (its hint), not the transcript block (`[loader]` appears there too).
     assert!(
-        pty.wait_for_screen("⏎ select", 40),
+        pty.wait_for_screen("space select", 40),
         "the panel must be up: {}",
         pty.screen()
     );
@@ -6756,10 +6756,10 @@ async fn pty_ask_user_alt_h_hides_and_shows() {
     assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.send(b"go\r");
     // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
-    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
     // Answer the first question, then collapse.
     pty.send(b" ");
-    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
     pty.send(b"\x1bh"); // alt-h
     assert!(
         pty.wait_for_screen("alt-h to show", 40),
@@ -6805,7 +6805,7 @@ async fn pty_ask_user_esc_declines() {
     assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.send(b"go\r");
     // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
-    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
     pty.send(&[0x1b]); // the first Esc asks again
     assert!(
         pty.wait_for_screen("press Esc again", 40),
@@ -6861,7 +6861,7 @@ async fn pty_ask_user_other_keeps_its_text() {
     assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.send(b"go\r");
     // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
-    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
     // Move to `Other` (A, B, Other) and type.
     pty.send(b"\x1b[B"); // Down
     pty.send(b"\x1b[B"); // Down
@@ -6948,7 +6948,7 @@ async fn pty_ctrl_c_during_a_question_cancels_without_an_answer() {
     // The form's own title, not the prompt: the transcript shows the tool call's arguments,
     // which contain the prompt text.
     assert!(
-        pty.wait_until_gone("⏎ select", 20),
+        pty.wait_until_gone("space select", 20),
         "the panel must go with the cancelled wait: {}",
         pty.screen()
     );

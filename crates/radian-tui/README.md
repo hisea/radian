@@ -596,7 +596,12 @@ the rest is sent as an ordinary message.
   block (a running call, an empty result, or a `read`/`grep`/`glob`/`list` result of **any**
   size); ascii
   `-`/`+`/`*`. A small tool (`read`, `grep`, `glob`, `list`) is that one line — a `•`, never a
-  fold — until it errors or `Ctrl-O` expands it.
+  fold — until it errors or `Ctrl-O` expands it. A **multi-line** `shell` command (a heredoc)
+  follows its block (ADR 0035's 2026-10-16 "多行命令" note, option A): the fold marker is on the
+  first row only, which carries the command's first line, the `… (+N lines)` note (N its
+  remaining lines, never the output's) and the meta; fully expanded, the command's other lines
+  are `│ ` body rows before the output, and a command line wider than the row wraps with `│ `
+  continuations too.
 
 ## Scroll-follow rules
 
@@ -793,12 +798,15 @@ Run a general `workspace` session in a throwaway terminal and get the model to c
    meta when the call ends?
 4. **The shell block, cancelled**: Ctrl-C (or Esc) a running command. *Expect* `· cancelled`
    in the meta and **no** status glyph. *Look*: is it clear this is a cancel, not a failure?
-5. **The three fold levels**: with a multi-line output, press `Ctrl-O` through
+5. **The three fold levels**: with a multi-line output (and a multi-line command — a heredoc —
+   as well), press `Ctrl-O` through
    `errors → expanded → collapsed`. *Expect* `errors` = the last `tool_preview_lines` rows under
-   a `◻` head, `expanded` = all of them under `◻`, `collapsed` = the head only with `· N lines`
+   a `◻` head, `expanded` = all of them under `◻` (and a multi-line command's own lines above
+   them, under `│ `), `collapsed` = the head only with `· N lines`
    in the meta and a `◼` head; a failed
    call's body is never hidden. *Look*: does the head stay put as the body folds, is the fold
-   marker `◻`/`◼` the right one, and is the
+   marker `◻`/`◼` the right one, does a folded multi-line command read
+   `◼ shell $ <first line> … (+N lines) · …` with the meta on that row, and is the
    `N lines` count right?
 6. **The small tool (`read`)**: call `read` with a path and a range. *Expect* one line
    `• read <path> <start>-<end> · <duration> ✓` with no body — a `•` one-liner however many
@@ -1317,15 +1325,15 @@ description), the `Other` row with inline editing, and the key hints in the bott
 │   ○ External process plugins                                │
 │      ↳ a separate program, JSON-RPC over stdio              │
 │   ○ Other (type your own)                                   │
-╰─ ⏎ select · n note · ↑/↓ move · ⇥/←/→ question · esc cancel…╯
+╰─ space select · ⏎ next · ↑/↓ move · ⇥/←/→ question · esc can…╯
 ```
 
 | Key | Action |
 |---|---|
 | `Tab`/`→` / `Shift-Tab`/`←` (`form_next`/`form_prev`) | the next/previous tab (a question or `Submit`), wrapping |
 | `Up` / `Down` (`form_up`/`form_down`) | the option cursor; on the `Other` row it still moves between options and keeps the typed text (a `text` question and a note are multi-line, so there it moves the composer's cursor) |
-| `Space` (`form_select`) | choose the highlighted option without advancing (toggle it for a `multi` question) |
-| `Enter` (`form_submit`) | save a note; a `single` selects **and advances**; a `multi` toggles; on `Submit`, submit |
+| `Space` (`form_select`) | the **only** select key: choose the highlighted option without advancing (toggle it for a `multi` question). On the `Other` row it chooses `Other` and starts typing at once (a visible cursor on that row); a `Space` inside the field is a space |
+| `Enter` (`form_submit`) | **only** confirm and advance to the next question (never select; the last question goes to `Submit`, `Submit` submits). Saves a note. Inside the `Other` field it confirms the typed answer and advances |
 | `n` | a note for the current question (type, `Enter` saves, `Esc` cancels) |
 | `Esc` (`form_decline`) | ask once; a second `Esc` declines (`user_declined`) |
 | `alt-h` | collapse the panel to one line (`Ask · 2/3 answered · alt-h to show`) |
