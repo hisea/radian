@@ -83,6 +83,14 @@ pub enum DriverError {
 /// `driver.set_runtime_events(Arc::new(move |event| { ... }))`.
 pub trait RuntimeEvents: Send + Sync {
     fn on_runtime_event(&self, event: &RuntimeEvent);
+
+    /// ADR 0030 O7's orchestration hook points (`task_spawned`, `task_finished`, `stalled`,
+    /// `before_merge`): a second, host-side channel the control port fans out to subscribers with
+    /// the stable hook name and a JSON payload. The default is a no-op, so a plain sink (or the
+    /// closure impl below) ignores it and only the control fanout has to override it.
+    fn on_hook_event(&self, name: &str, data: &serde_json::Value) {
+        let _ = (name, data);
+    }
 }
 
 impl<F> RuntimeEvents for F
