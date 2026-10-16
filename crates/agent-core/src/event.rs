@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::Value;
 
 use crate::budget::BudgetReport;
@@ -30,6 +32,21 @@ pub enum AgentEvent {
         /// still sent; a host's status bar shows `projected_tokens / input_budget_tokens`.
         /// `None` when no budget is configured.
         budget: Option<BudgetReport>,
+    },
+    /// The core is about to retry a transient model failure in place (ADR 0017).
+    /// Nothing of the failed attempt was committed; a host should clear any streaming block it
+    /// was showing for this call (the failed attempt's deltas are live-only, ADR 0010) and may
+    /// show `retrying {attempt}/{max} in {delay}: {reason}`. Emitted once per retry, before the
+    /// wait, so a cancellation during that wait is announced by the event already sent.
+    ModelRetrying {
+        /// 1 for the first retry, up to `max`.
+        attempt: u32,
+        /// The configured retry cap (`AgentConfig::retries`).
+        max: u32,
+        /// How long the core will wait before the next attempt.
+        delay: Duration,
+        /// The failed attempt's error text, masked by the adapter.
+        reason: String,
     },
     /// Emitted by model adapters while streaming.
     ModelTextDelta {

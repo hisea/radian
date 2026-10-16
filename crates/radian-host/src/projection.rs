@@ -22,6 +22,7 @@ use std::sync::MutexGuard;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use agent_core::{BudgetReport, ModelUsage};
+use radian_session::UsageFee;
 
 use crate::ModelPrice;
 
@@ -99,11 +100,15 @@ struct Facts {
     usage_cache_read: Option<u64>,
     /// The provider-reported cache **write** tokens, for the same reason.
     usage_cache_write: Option<u64>,
-    /// The session's accumulated fee in micro-dollars (ADR 0027). Each model call
-    /// is priced at the rate the route had **when it arrived** (`cost::add_cost`), so a
-    /// `/model` switch does not re-price earlier calls. `None` until a call had something to
-    /// bill: the item hides rather than showing `$0.00`.
-    cost_micros: Option<u64>,
+    /// The session's accumulated fee (ADR 0027/12). Each model call is priced at
+    /// the rate the route had **when it arrived** (`cost::add_cost`), so a `/model` switch does
+    /// not re-price earlier calls. `None` until a call had something to bill: the item hides
+    /// rather than showing `$0.00`. An incomplete fee (a non-zero counter with no rate) makes
+    /// the whole total incomplete.
+    cost: Option<UsageFee>,
+    /// `true` when at least one restored call was re-priced with today's catalog instead of
+    /// taken from its record (ADR 0027): the footer shows `~$X`.
+    cost_estimated: bool,
     /// The unit prices of the model in force (ADR 0027), set at startup and on each
     /// applied route change. `None` means the catalog has no price for it: calls arriving then
     /// contribute no fee.
@@ -112,6 +117,9 @@ struct Facts {
     /// The effective input budget `B` (ADR 0018), for the status bar's `T / B`.
     context_window: Option<u64>,
     tier: Option<String>,
+    /// The working mode in force (`general` / `lead`, ADR 0038 decision 1). The footer and
+    /// `/mode` with no argument read it.
+    mode: Option<String>,
     mcp_configured: usize,
     mcp_open: Option<(usize, usize)>,
     last_tool: Option<LastToolCall>,
@@ -202,15 +210,40 @@ impl SessionProjection {
         })
     }
 
-    /// Like [`Self::add_usage`], but at an explicit price: the resume path folds a journal's
-    /// usage records, each of which belongs to the route that was in force **then**, not to the
-    /// route the process starts with (F3, ADR 0027). The live path uses
-    /// `add_usage`, which passes the price currently in force.
+    /// Like [`Self::add_usage`], but at an explicit price and marking the total an estimate:
+    /// the resume path folds a journal's **old** usage records (written before the fee field
+    /// existed, ADR 0007), which have to be re-priced with today's catalog at the
+    /// route that was in force **then**, not the route the process starts with (F3, ADR 0027
+    /// revision 12 decision 3). A record that carries its own fee goes through
+    /// [`Self::add_recorded_usage`] instead.
     pub fn add_usage_at(&self, price: Option<&ModelPrice>, usage: &ModelUsage) -> bool {
-        self.write(|facts| Self::add_usage_locked(facts, price, usage))
+        self.write(|facts| {
+            Self::add_usage_locked(facts, price, usage);
+            facts.cost_estimated = true;
+        })
+    }
+
+    /// Folds one **recorded** call back in (ADR 0027): its tokens join
+    /// the totals and the fee it was billed at is added as it stands, so a later catalog change
+    /// cannot move what the session already spent. Used only by the resume path.
+    pub fn add_recorded_usage(&self, usage: &ModelUsage, fee: UsageFee) -> bool {
+        self.write(|facts| {
+            Self::add_tokens(facts, usage);
+            facts.cost = Some(match facts.cost {
+                Some(total) => total.merge(fee),
+                None => fee,
+            });
+        })
     }
 
     fn add_usage_locked(facts: &mut Facts, price: Option<&ModelPrice>, usage: &ModelUsage) {
+        Self::add_tokens(facts, usage);
+        facts.cost = crate::cost::add_cost(facts.cost, price, usage);
+    }
+
+    /// Adds one provider-reported usage to the token totals. A field the provider did not
+    /// report is left alone; it is never treated as zero.
+    fn add_tokens(facts: &mut Facts, usage: &ModelUsage) {
         if let Some(input) = usage.input {
             facts.usage_input = Some(facts.usage_input.unwrap_or(0).saturating_add(input));
         }
@@ -233,7 +266,6 @@ impl SessionProjection {
                     .saturating_add(cache_write),
             );
         }
-        facts.cost_micros = crate::cost::add_cost(facts.cost_micros, price, usage);
     }
 
     /// Sets the unit prices of the route now in force (ADR 0027, ADR 0026 D5): the
@@ -256,6 +288,12 @@ impl SessionProjection {
     /// The permission tier's display name (ADR 0012).
     pub fn set_tier(&self, tier: Option<String>) -> bool {
         self.write(|facts| facts.tier = tier)
+    }
+
+    /// The working mode's name (ADR 0038 decision 1). The session sets the startup value; a
+    /// `/mode` switch sets the new one as it queues the change.
+    pub fn set_mode(&self, mode: Option<String>) -> bool {
+        self.write(|facts| facts.mode = mode)
     }
 
     /// How many MCP servers are configured, and the servers/tools the opened session reported.
@@ -342,10 +380,23 @@ impl ProjectionRead<'_> {
         self.facts.usage_cache_write
     }
 
-    /// The session's accumulated fee in micro-dollars (ADR 0027). `None` when no
-    /// call has had anything to bill: the `cost` item hides rather than showing `$0.00`.
+    /// The session's accumulated fee in micro-dollars (ADR 0027/12). `None` when
+    /// no call has had anything to bill: the `cost` item hides rather than showing `$0.00`.
     pub fn cost_micros(&self) -> Option<u64> {
-        self.facts.cost_micros
+        self.facts.cost.map(|cost| cost.micros)
+    }
+
+    /// Whether the accumulated fee is a lower bound: a non-zero counter had no rate during at
+    /// least one call (ADR 0027). The footer shows `≥`.
+    pub fn cost_incomplete(&self) -> bool {
+        self.facts.cost.is_some_and(|cost| cost.incomplete)
+    }
+
+    /// Whether the accumulated fee is an estimate: at least one restored call was re-priced
+    /// with today's catalog rather than taken from its record (ADR 0027 decision
+    /// 3). The footer shows `~`, which wins over the incomplete `≥`.
+    pub fn cost_estimated(&self) -> bool {
+        self.facts.cost_estimated
     }
 
     pub fn budget(&self) -> Option<&BudgetReport> {
@@ -358,6 +409,11 @@ impl ProjectionRead<'_> {
 
     pub fn tier(&self) -> Option<&str> {
         self.facts.tier.as_deref()
+    }
+
+    /// The working mode's name (ADR 0038 decision 1): `general` or `lead`.
+    pub fn mode(&self) -> Option<&str> {
+        self.facts.mode.as_deref()
     }
 
     pub fn mcp_configured(&self) -> usize {

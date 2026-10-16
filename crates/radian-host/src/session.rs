@@ -17,21 +17,26 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Hooks, Message, TurnOptions};
+use agent_core::{
+    Agent, AgentConfig, ContextBudget, EventSink, Hooks, Message, ModelUsage, TurnOptions,
+};
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use radian_coding::CodingTools;
 use radian_permissions::{ApprovalPolicy, Approver, AuditSink, PermissionHooks, Preset, Profile};
 use radian_runtime::{
     BudgetFor, CancelCause, CompactionSettingsFor, ConfigQueue, ConfigSlot, Driver, Inbox,
-    RuntimeEvents,
+    ModelRoute, RuntimeEvents,
 };
-use radian_sandbox::Sandbox;
+use radian_sandbox::{Sandbox, SandboxSlot};
 use radian_session::{SessionCreatedData, SessionJournal};
 
 use crate::cost::RoutePrice;
 use crate::describe::{Wording, describe, sandbox_word};
 use crate::home::{radian_home, skills_dir, user_home};
-use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
+use crate::memory::{
+    InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState,
+    injection::MemoryInjection,
+};
 use crate::model::SwitchableModel;
 use crate::pending::{
     Answered, PendingQueue, PendingRequest, PendingResponse, QueuedApprover, QueuedPrompter,
@@ -230,6 +235,21 @@ pub trait SessionFacade: Send + Sync {
     /// capability as answering: it belongs to the interactive approver.
     fn set_approval(&self, policy: ApprovalPolicy) -> Result<(), CommandRefused>;
 
+    /// Switch the session's permission tier in place (ADR 0038 slice 2's `/access`). The
+    /// profile and the sandbox are rebuilt through the host's [`AccessBuilder`]; a failed
+    /// sandbox probe is a refusal that changes nothing. The switch takes effect on the next
+    /// tool call (a running command keeps its sandbox). The durable `ConfigChanged`
+    /// (`{"access": …}`) is queued for the driver to journal at the turn boundary.
+    fn set_access(&self, tier: Preset) -> Result<(), CommandRefused>;
+
+    /// Switch the session's working mode (ADR 0038 decision 1's `/mode`). Layer 1 (the role
+    /// prompt) changes at the **next** model request: the change is queued for the next turn
+    /// boundary and journaled as a `ConfigChanged` (`{"mode": …}`), so a resume restores it.
+    /// Session only — never written to a config file. A task agent's role comes from its brief
+    /// and cannot be switched, and neither can a session whose layer 1 is fixed (`--system`,
+    /// an explicit role).
+    fn set_mode(&self, mode: crate::prompt::Mode) -> Result<(), CommandRefused>;
+
     /// The discovered skills, in discovery order (ADR 0025 S1). The UI lists them (`/skills`)
     /// and completes their names (`/skill:`); the host owns the list because it owns discovery.
     fn skills(&self) -> &[Skill];
@@ -293,6 +313,19 @@ pub enum SessionError {
     Message(String),
 }
 
+/// The parts a tier switch rebuilds (ADR 0038 slice 2): the permission profile and the
+/// sandbox for the new tier. The sandbox is `None` for `safe`.
+pub struct AccessParts {
+    pub profile: Profile,
+    pub sandbox: Option<Sandbox>,
+}
+
+/// Rebuilds [`AccessParts`] for a tier. The host/binary owns the inputs (the workspace, the
+/// sandbox deny-read list, the Unix-socket whitelist, the `--allow-shell-command` rules), so
+/// the session calls back into it instead of guessing. A failed sandbox probe returns `Err`,
+/// which the facade turns into a refusal: the switch never degrades (ADR 0012).
+pub type AccessBuilder = Arc<dyn Fn(Preset) -> Result<AccessParts, String> + Send + Sync>;
+
 /// The values a host resolves before the session exists. Both binaries build this from their
 /// own flags and config; `open_session` does the rest.
 pub struct SessionSetup {
@@ -337,12 +370,22 @@ pub struct SessionSetup {
     /// revision 8, ADR 0026 D7). `None` means a switch cannot move the settings (they stay at
     /// the startup value).
     pub compaction_settings_for: Option<CompactionSettingsFor>,
+    /// `[model] retries` (ADR 0017), the host already resolved against the default:
+    /// how many times a transient model failure is retried inside one model call; `0` disables.
+    pub retries: u32,
     /// The sandbox `shell` runs under; `None` for the safe tier.
     pub sandbox: Option<Sandbox>,
     /// The tier, for the startup description.
     pub tier: Preset,
     /// The permission profile (the host adds its own `allow` rules and approval policy).
     pub profile: Profile,
+    /// Rebuilds the profile and sandbox for a run-time tier switch (ADR 0038 slice 2). `None`
+    /// for a host that has no `/access` command (the CLI): a switch is then refused.
+    pub access_builder: Option<AccessBuilder>,
+    /// `true` when this session is a **task agent** (ADR 0030 O2: opened by a lead's
+    /// `spawn_task`, one brief per session). Nothing sets it yet; the orchestration slice will.
+    /// It is the flag `/mode` is refused behind: a task agent's role comes from its brief.
+    pub task_agent: bool,
     /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
     pub memory_root: Option<PathBuf>,
     /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
@@ -353,6 +396,9 @@ pub struct SessionSetup {
     pub skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     pub skills_disabled: Vec<String>,
+    /// The memory injection configuration (ADR 0021). The host builds it
+    /// from `[memory.injection]`; `InjectionConfig::default()` is the documented D6 table.
+    pub memory_injection: InjectionConfig,
     /// `true` to resume
     /// The project-trust state this session starts with (ADR 0031 T3). The host resolves it
     /// before `open_session`; `needs_ask` means an interactive host must ask before the first
@@ -401,7 +447,7 @@ pub struct HostBindings {
     /// Called for a failed turn (ADR 0017).
     pub runtime_events: Arc<dyn RuntimeEvents>,
     /// Called once when the driver task ends (the TUI sends an event, the CLI notifies).
-    pub driver_stopped: Arc<dyn Fn() + Send + Sync>,
+    pub driver_stopped: Arc<dyn Fn(DriverEnd) + Send + Sync>,
     /// Runs at the start of the driver task (a TUI test hook panics here).
     pub before_driver: Option<Arc<dyn Fn() + Send + Sync>>,
     /// A memory hook's warning line (the two hosts prefix it differently).
@@ -467,6 +513,19 @@ pub struct LocalSession {
     journal: Arc<SessionJournal>,
     inbox: Arc<Inbox>,
     hooks: Arc<PermissionHooks>,
+    /// The sandbox the coding tools and the host's `!`/`!!` path read at each call (ADR 0038
+    /// slice 2). `set_access` swaps it; a call in flight keeps the `Arc` it cloned.
+    sandbox_slot: SandboxSlot,
+    /// Rebuilds the profile and sandbox for a tier switch. `None` refuses `set_access`.
+    access_builder: Option<AccessBuilder>,
+    /// Whether this session is a task agent (ADR 0030 O2): `set_mode` refuses then.
+    task_agent: bool,
+    /// Whether layer 1 is fixed for the session (`--system` or an explicit role): `set_mode`
+    /// refuses then.
+    role_fixed: bool,
+    /// Layer 0b's hook (ADR 0038 decision 1): `set_mode` recomputes `<session>` together with
+    /// the layer-1 change, through the same seam `/reload` will use (ADR 0036).
+    facts_hooks: Arc<crate::prompt::SessionFactsHooks>,
     projection: Arc<SessionProjection>,
     /// The pending approvals and questions (ADR 0023 U7).
     queue: Arc<SessionQueue>,
@@ -549,6 +608,12 @@ impl LocalSession {
     /// The permission hooks, for the same reason: the CLI sets the turn source per input.
     pub fn hooks(&self) -> &Arc<PermissionHooks> {
         &self.hooks
+    }
+
+    /// The sandbox mode in force right now (ADR 0038 slice 2). `None` is the `safe` tier (no
+    /// shell). A host reads this after a `/access` switch; the tools read the slot themselves.
+    pub fn sandbox_mode(&self) -> Option<radian_sandbox::SandboxMode> {
+        self.sandbox_slot.mode()
     }
 
     pub fn memory(&self) -> Option<&MemoryService> {
@@ -754,6 +819,85 @@ impl SessionFacade for LocalSession {
         Ok(())
     }
 
+    fn set_access(&self, tier: Preset) -> Result<(), CommandRefused> {
+        if !self
+            .capabilities
+            .contains(&SessionCapability::AnswerRequest)
+        {
+            return Err(CommandRefused {
+                command: "set-access".into(),
+                capability: Some(SessionCapability::AnswerRequest.as_str().to_string()),
+                reason: "this session does not declare the `answer` capability".into(),
+            });
+        }
+        let Some(builder) = &self.access_builder else {
+            return Err(CommandRefused {
+                command: "set-access".into(),
+                capability: None,
+                reason: "this session cannot switch the tier at run time".into(),
+            });
+        };
+        // The rebuild runs the sandbox probe for an enforced tier. A failure is a refusal that
+        // changes nothing (ADR 0012: a failed probe never degrades).
+        let parts = builder(tier).map_err(|reason| CommandRefused {
+            command: "set-access".into(),
+            capability: None,
+            reason,
+        })?;
+        // The live switch first (the next tool call obeys it), then the durable record the
+        // driver journals at the next turn boundary (ADR 0004 path B, ADR 0038 decision 2).
+        self.hooks.set_profile(parts.profile);
+        self.sandbox_slot.set(parts.sandbox);
+        self.config_queue
+            .push(serde_json::json!({ "access": tier.as_str() }));
+        // The status bar reads the tier from the projection; keep it in step. The startup
+        // source marker is a startup fact and is not re-applied here.
+        self.projection.set_tier(Some(tier.as_str().to_string()));
+        Ok(())
+    }
+
+    fn set_mode(&self, mode: crate::prompt::Mode) -> Result<(), CommandRefused> {
+        if !self
+            .capabilities
+            .contains(&SessionCapability::AnswerRequest)
+        {
+            return Err(CommandRefused {
+                command: "set-mode".into(),
+                capability: Some(SessionCapability::AnswerRequest.as_str().to_string()),
+                reason: "this session does not declare the `answer` capability".into(),
+            });
+        }
+        // A task agent is told what to do by its brief; its role is the orchestrator's, not the
+        // user's to switch (ADR 0030 O12, ADR 0038 decision 1).
+        if self.task_agent {
+            return Err(CommandRefused {
+                command: "set-mode".into(),
+                capability: None,
+                reason: "a task agent's role comes from its brief and cannot be switched".into(),
+            });
+        }
+        if self.role_fixed {
+            return Err(CommandRefused {
+                command: "set-mode".into(),
+                capability: None,
+                reason: "this session's role layer is fixed for the whole session".into(),
+            });
+        }
+        // Layer 1 is not swapped here: the hook reads the mode from the config slot, and the
+        // driver applies this queued change at the next turn boundary (ADR 0026 D5,
+        // ADR 0038 slice 3), so the switch takes effect on the next turn's first model request
+        // and never mid-turn. The durable record is that same `ConfigChanged`.
+        self.config_queue
+            .push(serde_json::json!({ "mode": mode.as_str() }));
+        // ADR 0036: the mode switch recomputes `<session>` too. Its bytes do not
+        // name the mode, so this only matters if a live read (the date, the git state) moved;
+        // doing it here is what keeps the ADR's rule (0a/2/3 fixed, 0b recomputed on an
+        // explicit switch) true for `/mode` as it is for `/model`.
+        self.facts_hooks.refresh();
+        self.projection.set_mode(Some(mode.as_str().to_string()));
+        Ok(())
+    }
+
     fn skills(&self) -> &[Skill] {
         &self.skills
     }
@@ -931,13 +1075,17 @@ pub async fn open_session(
         auto_compact,
         compaction_settings,
         compaction_settings_for,
+        retries,
         sandbox,
         tier,
         profile,
+        access_builder,
+        task_agent,
         memory_root,
         skills_extra_paths,
         skills_builtin,
         skills_disabled,
+        memory_injection,
         trust,
         resume,
         config_snapshot,
@@ -981,7 +1129,11 @@ pub async fn open_session(
         tier.sandbox_mode(),
         sandbox.as_ref().map(Sandbox::backend_name),
     );
-    let (coding, jobs) = build_coding_tools(coding_root.as_deref(), sandbox)?;
+    // ADR 0038 slice 2: the sandbox lives in a shared slot, so `/access` can swap it and the
+    // coding tools read the new one on their next call. The host keeps this clone; the tools
+    // get another.
+    let sandbox_slot = SandboxSlot::from_option(sandbox);
+    let (coding, jobs) = build_coding_tools(coding_root.as_deref(), sandbox_slot.clone())?;
     // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
     // there are coding tools. It is its own provider, so a host without `--workspace` still
     // advertises it. `None` is what the model sees as "no such tool".
@@ -990,7 +1142,7 @@ pub async fn open_session(
             Arc::new(QueuedPrompter::new(Arc::clone(&queue), origin.clone()));
         radian_coding::AskTools::new(prompter)
     });
-    let injection_config = InjectionConfig::default();
+    let injection_config = memory_injection;
     let memory = memory_root
         .as_ref()
         .map(|root| MemoryService::open(&workspace, root));
@@ -1045,6 +1197,22 @@ pub async fn open_session(
         )
     };
     radian_session::trace::took("open/journal", t0);
+    // ADR 0027: the journal records each call's fee, computed at the
+    // price in force when the call ran, so a resume does not have to re-price history with
+    // whatever the catalog says later. The writer asks this closure per usage record; it
+    // resolves the route from the same slot the model reads, so the journal and the live
+    // footer agree (both use `cost_micros`). No `price_for`, or a catalog miss, means no fee on
+    // the record — never an invented number.
+    if let Some(price_for) = price_for.as_ref() {
+        let slot = Arc::clone(&config_slot);
+        let initial = model.current_route();
+        let price_for = Arc::clone(price_for);
+        journal.set_usage_fee(Arc::new(move |usage: &ModelUsage| {
+            let route = ModelRoute::from_value(&slot.value()).unwrap_or_else(|| initial.clone());
+            let price = price_for(&route.provider, &route.model)?;
+            crate::cost::cost_micros(&price, usage)
+        }));
+    }
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
     // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line
@@ -1079,12 +1247,16 @@ pub async fn open_session(
     };
     let shared_skills = Arc::new(skills);
     let skills_hooks = Arc::new(SkillsHooks::new(&shared_skills));
-    let memory_hooks = Arc::new(MemoryHooks::new(
+    // ADR 0021: one injection object per session. The fixed block is computed once
+    // (by whichever of the two seams runs first) and the driver's per-turn seam appends later
+    // turns' new hits as one System message through the inbox's inject lane.
+    let injection = MemoryInjection::new(
         memory.clone(),
         Arc::clone(&journal),
         injection_config,
         memory_warning,
-    ));
+    );
+    let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
     // ADR 0030 R10: pin the repository now, before the model runs. A workspace that is not a
     // git repository does not mount `git_commit` at all.
@@ -1121,7 +1293,8 @@ pub async fn open_session(
         network: workspace_mode,
         unix_sockets_restricted: workspace_mode,
     });
-    let role_layer = match &system_prompt {
+    let role_override = system_prompt.clone();
+    let role_layer = match &role_override {
         Some(system) => system.clone(),
         None => crate::prompt::role_prompt(role.as_deref(), radian_home().as_deref()),
     };
@@ -1130,24 +1303,41 @@ pub async fn open_session(
         &role_layer,
         &context.section,
     ));
+    // ADR 0038 decision 1: `/mode` swaps layer 1 only, at the next turn's first model request.
+    // The hook reads the mode from the same config slot `/model` writes, so the switch is
+    // journaled and replayed by the driver like any other change, and it can never land
+    // mid-turn. Layer 1 is fixed when `--system` (or an explicit role) set it for the session,
+    // and the hook then rebuilds exactly that layer — the same bytes the assemble above made.
+    let role_hooks = Arc::new(crate::prompt::RoleHooks::new(
+        &runtime_layer,
+        &context.section,
+        role_override,
+        role.clone(),
+        Some(Arc::clone(&config_slot)),
+    ));
+    let role_fixed = role_hooks.fixed();
     let agent_config = AgentConfig {
         system_prompt,
         context_budget,
         auto_compact,
         compaction_settings,
+        retries,
         ..AgentConfig::default()
     };
     let facts_hooks = Arc::new(crate::prompt::SessionFactsHooks::new(
-        crate::prompt::session_layer(&workspace, &model_name),
+        workspace.clone(),
+        model_name,
+        Some(Arc::clone(&config_slot)),
     ));
     let agent = Arc::new(
         Agent::new(model, tools)
             .with_config(agent_config)
             .with_hooks(session_hooks(
+                Arc::clone(&role_hooks),
                 Arc::clone(&hooks),
                 Arc::clone(&memory_hooks),
                 Arc::clone(&skills_hooks),
-                facts_hooks,
+                Arc::clone(&facts_hooks),
             )),
     );
 
@@ -1186,7 +1376,20 @@ pub async fn open_session(
     })?;
     radian_session::trace::took("open/driver-recover", t0);
     driver.set_turn_timeout(turn_timeout);
+    // Test hook: a controllable gap between the turn's `RunFinished` and its journaled
+    // `TurnFinished` (the `/fork` commit-wait test).
+    driver.set_commit_delay(
+        std::env::var("RADIAN_TURN_COMMIT_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis),
+    );
     driver.set_runtime_events(runtime_events);
+    // ADR 0021: the per-turn memory addition, placed in the inject lane
+    // after the user's turn is claimed and before its first model call.
+    driver.set_turn_additions(crate::memory::injection::addition_seam(Arc::clone(
+        &injection,
+    )));
     if let Some(budget_for) = budget_for.clone() {
         driver.set_budget_for(budget_for);
     }
@@ -1240,6 +1443,14 @@ pub async fn open_session(
             .map(|budget| budget.input_budget_tokens),
     );
     projection.set_tier(Some(tier.as_str().to_string()));
+    // ADR 0038 decision 1: the mode in force, as the slot has it after the resume replay (the
+    // driver applied the journal's last `{"mode": …}` change before this line). `/mode` with no
+    // argument prints it.
+    projection.set_mode(Some(
+        crate::prompt::Mode::of(&config_slot.value())
+            .as_str()
+            .to_string(),
+    ));
     // F3 (ADR 0027): a resumed session folds its journal's usage records back into
     // the projection. The projection's only other writer is the live event sink, so without
     // this `--resume` showed `-` for the tokens and hid `cost` until the next response — the
@@ -1276,7 +1487,7 @@ pub async fn open_session(
             Ok(Err(error)) => DriverEnd::Failed(error.to_string()),
             Err(join) => DriverEnd::Panicked(join.to_string()),
         };
-        driver_stopped();
+        driver_stopped(end.clone());
         let _ = done_tx.send(end);
     });
 
@@ -1305,6 +1516,11 @@ pub async fn open_session(
         journal,
         inbox,
         hooks,
+        sandbox_slot,
+        access_builder,
+        task_agent,
+        role_fixed,
+        facts_hooks,
         projection,
         queue,
         memory,
@@ -1325,21 +1541,22 @@ pub async fn open_session(
     })
 }
 
-/// The agent's hook chain (ADR 0025 S6): the permission rules run first, then the memory section
-/// is appended, then the skills section. The order is a promise — the sections must be
-/// deterministic and memory must precede skills — so it lives in this one function, which
-/// `open_session` calls; `tests/skills_order.rs` builds the three real hooks and asserts the
-/// order on the composed chain. Swapping `memory` and `skills` here is the mutation that test
-/// catches.
+/// The agent's hook chain (ADR 0025 S6, ADR 0038 decision 1): the role hook writes layers 0a, 1
+/// and 2 first, then the permission rules run, then the memory section is appended, then the
+/// skills section. The order is a promise — the role layer comes first, and the sections must be
+/// deterministic with memory before skills — so it lives in this one function, which
+/// `open_session` calls; `tests/skills_order.rs` builds the real hooks and asserts the order on
+/// the composed chain. Swapping `memory` and `skills` here is the mutation that test catches.
 pub fn session_hooks(
+    role: Arc<crate::prompt::RoleHooks>,
     permissions: Arc<PermissionHooks>,
     memory: Arc<MemoryHooks>,
     skills: Arc<SkillsHooks>,
     facts: Arc<crate::prompt::SessionFactsHooks>,
 ) -> impl Hooks {
-    // The order is the promise: permissions, memory, skills, then the volatile <session> facts
-    // (ADR 0025 S6, ADR 0036 D1).
-    (((permissions, memory), skills), facts)
+    // The order is the promise: the role layers, permissions, memory, skills, then the volatile
+    // <session> facts (ADR 0025 S6, ADR 0036 D1).
+    ((((role, permissions), memory), skills), facts)
 }
 
 /// The durable audit event for one trust write (ADR 0031 T2).
@@ -1382,26 +1599,29 @@ fn open_journal(
 
 fn build_coding_tools(
     workspace: Option<&Path>,
-    sandbox: Option<Sandbox>,
+    sandbox: SandboxSlot,
 ) -> Result<(Option<CodingTools>, Option<Arc<radian_coding::Jobs>>), SessionError> {
-    match (workspace, sandbox) {
-        (Some(dir), Some(sandbox)) => {
-            let tools = CodingTools::with_sandbox(dir, sandbox).map_err(|error| {
-                SessionError::Message(format!("--workspace {}: {error}", dir.display()))
-            })?;
+    match workspace {
+        Some(dir) => {
+            // The slot decides whether `shell` exists: an empty slot is the `safe` tier (no
+            // shell advertised), a non-empty one is a sandbox the shell can run under. The
+            // tool set is fixed here at `open_session`; a later switch to a *narrower* tier
+            // still denies `shell` through the permission rules (ADR 0038 slice 2).
+            let tools = if sandbox.is_some() {
+                CodingTools::with_sandbox_slot(dir, sandbox).map_err(|error| {
+                    SessionError::Message(format!("--workspace {}: {error}", dir.display()))
+                })?
+            } else {
+                CodingTools::new(dir).map_err(|error| {
+                    SessionError::Message(format!("--workspace {}: {error}", dir.display()))
+                })?
+            };
             // The host creates the registry (from the canonical root) so it can subscribe to
             // job lifecycle notices and write the durable start/settle records (ADR 0037).
             let jobs = Arc::new(radian_coding::Jobs::new(tools.root()));
             Ok((Some(tools.with_jobs(Arc::clone(&jobs))), Some(jobs)))
         }
-        (Some(dir), None) => {
-            let tools = CodingTools::new(dir).map_err(|error| {
-                SessionError::Message(format!("--workspace {}: {error}", dir.display()))
-            })?;
-            let jobs = Arc::new(radian_coding::Jobs::new(tools.root()));
-            Ok((Some(tools.with_jobs(Arc::clone(&jobs))), Some(jobs)))
-        }
-        (None, _) => Ok((None, None)),
+        None => Ok((None, None)),
     }
 }
 
@@ -1444,4 +1664,25 @@ pub fn resumed_model_route(
         }
     }
     route
+}
+
+/// The permission tier a **resume** would restore (ADR 0038 decision 2): the journal's last
+/// `ConfigChanged` whose change carries an `access` key. `None` when the file has none — the
+/// caller then falls back to the remembered per-project tier, the config and the default.
+/// Reads the session file line by line; this runs before anything durable is created.
+pub fn resumed_access(session_dir: &Path, session_id: &str) -> Option<Preset> {
+    let text = std::fs::read_to_string(session_dir.join(format!("{session_id}.jsonl"))).ok()?;
+    let mut tier = None;
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value["event"] == "ConfigChanged"
+            && let Some(name) = value["data"]["change"]["access"].as_str()
+            && let Some(found) = crate::access::parse_tier(name)
+        {
+            tier = Some(found);
+        }
+    }
+    tier
 }

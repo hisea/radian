@@ -39,6 +39,9 @@ fn overflow_agent(
     Arc::new(Agent::new(model, NoTools).with_config(AgentConfig {
         context_budget: budget.map(ContextBudget::new),
         auto_compact,
+        // These tests count requests exactly; a transient failure is one request here, not
+        // the ADR 0017 retry storm.
+        retries: 0,
         ..Default::default()
     }))
 }

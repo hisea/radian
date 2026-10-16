@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::Value;
@@ -152,6 +152,66 @@ async fn race<T>(interrupt: &Interrupt, work: impl Future<Output = T>) -> Raced<
         biased;
         reason = interrupt.wait() => Raced::Interrupted(reason),
         value = work => Raced::Done(value),
+    }
+}
+
+/// ADR 0017's retry policy: the exponential part is 2 s, 4 s, 8 s for the first,
+/// second and third retry; a provider-supplied `Retry-After` replaces it; one wait is never
+/// over 60 s, and all waits of one model call are never over 60 s together.
+const RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(60);
+
+/// The wait before retry `attempt` (1-based), given the provider's `Retry-After` (if any) and
+/// how long this model call has already waited. Capping by what is left of the 60 s total also
+/// caps a single `Retry-After` request, since the total is itself at most 60 s. The caller must
+/// not retry once `waited` has reached [`MAX_RETRY_WAIT`] (this returns 0 there, which would be
+/// a back-to-back retry, not a wait).
+fn retry_delay(attempt: u32, retry_after: Option<Duration>, waited: Duration) -> Duration {
+    let desired = match retry_after {
+        // The provider knows its own load better than our backoff does; honour it exactly,
+        // without jitter.
+        Some(after) => after,
+        None => {
+            let base =
+                RETRY_BASE_DELAY.saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)));
+            base + jitter(base)
+        }
+    };
+    desired
+        .min(MAX_RETRY_WAIT)
+        .min(MAX_RETRY_WAIT.saturating_sub(waited))
+}
+
+/// Up to a quarter of `base`, so clients that failed at the same moment do not all come back
+/// together. `SystemTime` is the one clock the runtime's paused test clock does not freeze.
+fn jitter(base: Duration) -> Duration {
+    let span = base.as_millis() as u64 / 4;
+    if span == 0 {
+        return Duration::ZERO;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.subsec_nanos() as u64)
+        .unwrap_or(0);
+    Duration::from_millis(nanos % (span + 1))
+}
+
+/// Marks an error the core retried and gave up on, so the host can report "after N retries"
+/// (ADR 0017, item 5). Only the two transient kinds can carry it.
+fn after_retries(error: ModelError, retries: u32) -> ModelError {
+    let noun = if retries == 1 { "retry" } else { "retries" };
+    match error {
+        ModelError::Unavailable {
+            message,
+            retry_after,
+        } => ModelError::Unavailable {
+            message: format!("{message} (after {retries} {noun})"),
+            retry_after,
+        },
+        ModelError::Transport(message) => {
+            ModelError::Transport(format!("{message} (after {retries} {noun})"))
+        }
+        other => other,
     }
 }
 
@@ -1433,6 +1493,11 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         // and retries this request **once**. A model error commits no partial output (the tap
         // below is discarded), so the fallback is safe. `overflow_retried` bounds it to one.
         let mut overflow_retried = false;
+        // ADR 0017: a *transient* failure is retried in place, before anything is
+        // committed, up to `retries` times. `waited` feeds the 60 s total cap.
+        let max_retries = agent.config.retries;
+        let mut retries_used: u32 = 0;
+        let mut waited = Duration::ZERO;
         let response = loop {
             // `T_before`: the projection of the request about to be sent. The fallback needs
             // it even with no configured budget — the window-unknown path is exactly this one.
@@ -1486,6 +1551,42 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                     return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
                 }
                 Raced::Done(Err(error)) => {
+                    // ADR 0017: a transient failure is retried here, inside the one
+                    // model call and before anything is committed. The failed attempt's live
+                    // text and reasoning stay in its (dropped) tap, never in the transcript.
+                    //
+                    // `waited < MAX_RETRY_WAIT` is the spent-budget stop: once the 60 s of one
+                    // model call are used up, `retry_delay` can only return 0, and retrying then
+                    // would hammer a provider that just said it is busy. The turn fails instead,
+                    // with the "after N retries" count of the retries that were really made.
+                    if error.is_transient() && retries_used < max_retries && waited < MAX_RETRY_WAIT
+                    {
+                        retries_used += 1;
+                        let delay = retry_delay(retries_used, error.retry_after(), waited);
+                        waited += delay;
+                        events.emit(AgentEvent::ModelRetrying {
+                            attempt: retries_used,
+                            max: max_retries,
+                            delay,
+                            reason: error.to_string(),
+                        });
+                        match race(&interrupt, tokio::time::sleep(delay)).await {
+                            Raced::Interrupted(reason) => {
+                                // Revision 1, item 4: a cancellation during the backoff ends
+                                // the turn `cancelled` at once; nothing of the failed attempt
+                                // is kept.
+                                return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
+                            }
+                            Raced::Done(()) => continue,
+                        }
+                    }
+                    // The retries are spent (or were never attempted): the turn fails with the
+                    // adapter's error, marked with how many attempts were already made.
+                    let error = if retries_used > 0 && error.is_transient() {
+                        after_retries(error, retries_used)
+                    } else {
+                        error
+                    };
                     let ModelError::ContextOverflow(message) = &error else {
                         // ADR 0017: any other model error fails the turn, no compaction.
                         return Err(self.run.fail(RunError::Model(error), events));

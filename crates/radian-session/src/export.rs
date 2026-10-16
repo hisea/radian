@@ -292,16 +292,31 @@ fn event_data_value(
         EventData::ToolExecutionSettled { call_id, result } => {
             json!({"call_id": call_id, "result": serde_json::to_value(result)?})
         }
-        EventData::ModelUsageRecorded { usage } => json!({"usage": serde_json::to_value(usage)?}),
+        EventData::ModelUsageRecorded { usage, fee } => {
+            let mut data = serde_json::Map::new();
+            data.insert("usage".into(), serde_json::to_value(usage)?);
+            // The fee is optional (ADR 0007): an old record has none, and the key is
+            // omitted rather than written as `null`, matching the file.
+            if let Some(fee) = fee {
+                data.insert("fee".into(), serde_json::to_value(fee)?);
+            }
+            Value::Object(data)
+        }
         EventData::CompactionUsageRecorded {
             revision,
             model,
             usage,
-        } => json!({
-            "revision": revision,
-            "model": model,
-            "usage": serde_json::to_value(usage)?,
-        }),
+            fee,
+        } => {
+            let mut data = serde_json::Map::new();
+            data.insert("revision".into(), json!(revision));
+            data.insert("model".into(), json!(model));
+            data.insert("usage".into(), serde_json::to_value(usage)?);
+            if let Some(fee) = fee {
+                data.insert("fee".into(), serde_json::to_value(fee)?);
+            }
+            Value::Object(data)
+        }
         EventData::ContextCompacted {
             revision,
             source_revision,

@@ -1,8 +1,10 @@
 //! `git_commit`: the host-side commit tool (ADR 0030 R10).
 //!
-//! The `workspace` tier keeps `.git` read-only (ADR 0016), so a model cannot `git commit` from
-//! the sandbox. This tool runs in the **host process**, outside the sandbox: it is the one
-//! write path for a commit.
+//! When the sandbox keeps `.git` read-only — a task agent (ADR 0030), or any session whose
+//! backend does not open it (ADR 0038 decision 4; Linux is still pending) — a model cannot
+//! `git commit` from the sandbox. This tool runs in the **host process**, outside the sandbox:
+//! it is the write path for a commit there. A general session in the `workspace` tier on macOS
+//! can commit with native git instead, but the tool stays mounted and remains usable.
 //!
 //! What it refuses, by construction:
 //!
@@ -50,11 +52,14 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "git_commit".into(),
         description: "Commit the workspace's changes on the current branch. Runs in the host, \
-                      outside the sandbox (the sandbox keeps `.git` read-only, so `git commit` \
-                      there fails by design). It stages with `git add` and commits with \
-                      `git commit --no-verify`; it never runs workspace hooks (a project's \
-                      `core.hooksPath` lives in the worktree you can write, so the host would \
-                      be running your scripts as the user), and it refuses a path whose \
+                      outside the sandbox: use it when the sandbox keeps `.git` read-only — a \
+                      task agent, or any session whose backend does not open `.git` — where a \
+                      sandboxed `git commit` fails by design; a general session in the \
+                      `workspace` tier on macOS can commit with native git instead. It stages \
+                      with `git add` and commits with `git commit --no-verify`; it never runs \
+                      workspace hooks (a project's `core.hooksPath` lives in the worktree you \
+                      can write, so the host would be running your scripts as the user), and it \
+                      refuses a path whose \
                       `.gitattributes` `filter` names a driver outside `[git] allowed_filters`. \
                       It refuses a detached HEAD, \
                       `main`/`master` and configured protected branches, and never pushes, \

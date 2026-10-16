@@ -195,6 +195,10 @@ pub struct ModelConfig {
     pub model: Option<String>,
     pub headers: Vec<(String, String)>,
     pub context_window: Option<u64>,
+    /// `[model] retries` (ADR 0017): how many times a transient model failure is
+    /// retried inside one model call. `None` means the host's default
+    /// ([`agent_core::DEFAULT_MODEL_RETRIES`]); `0` disables retrying.
+    pub retries: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -251,6 +255,33 @@ pub struct SkillsConfig {
     pub builtin: Option<bool>,
     /// `[skills] disabled`: built-in skill names to leave out.
     pub disabled: Vec<String>,
+}
+
+/// `[memory]` (ADR 0021). Only the two keys this revision adds are read;
+/// the rest of the D6 injection table (`enabled`, `max_tokens`, `global_budget`,
+/// `project_budget`, `overflow`) is still the documented default and is named in
+/// [`Config::skipped`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryConfig {
+    /// `[memory.injection] additions`: append later turns' new hits as one System message.
+    /// `None` means the default, **on**; the host reads `unwrap_or(true)`.
+    pub additions: Option<bool>,
+    /// `[memory.injection] addition_budget`: the token cap on one turn's addition. `None`
+    /// means the default (500).
+    pub addition_budget: Option<u64>,
+}
+
+impl MemoryConfig {
+    /// The injection configuration this section describes, with the D6 defaults for everything
+    /// the file does not set.
+    pub fn injection(&self) -> crate::memory::InjectionConfig {
+        let defaults = crate::memory::InjectionConfig::default();
+        crate::memory::InjectionConfig {
+            additions: self.additions.unwrap_or(defaults.additions),
+            addition_budget: self.addition_budget.unwrap_or(defaults.addition_budget),
+            ..defaults
+        }
+    }
 }
 
 /// One `[tui.colors]` color value (ADR 0029 decision 5): a color literal (`#hex`,
@@ -364,6 +395,14 @@ pub struct TuiFooterConfig {
     pub separator_style: Option<String>,
     /// `glyphs`: `"unicode"` (the default), `"nerd"` or `"ascii"`. The TUI validates it.
     pub glyphs: Option<String>,
+    /// `context_line`: `"off"` (the default) or `"percentage"`. ADR 0027 item 4:
+    /// `percentage` fills the gap between a row's left and right groups with the context
+    /// usage (the used fraction in the budget role, the rest in the border role).
+    pub context_line: Option<String>,
+    /// `transparent`: `false` (the default) or `true`. ADR 0027 item 5 (omp's
+    /// `statusLine.transparent`): the footer inherits the terminal's background - every
+    /// footer cell's background is cleared, a configured item style's included.
+    pub transparent: Option<bool>,
     /// `[tui.footer.items.<id>]`: per-field defaults for one item, applied when a row names the
     /// item by bare id (ADR 0027). A row's inline table wins over this.
     pub items: std::collections::BTreeMap<String, TuiFooterItemConfig>,
@@ -440,6 +479,8 @@ pub struct Config {
     pub integrations: IntegrationsConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
+    /// `[memory]` (ADR 0021): the injection keys this revision adds.
+    pub memory: MemoryConfig,
     /// `[git]` (ADR 0030 R10): the branches `git_commit` refuses besides `main`/`master`.
     pub git: GitConfig,
     pub tui: TuiConfig,
@@ -547,6 +588,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "integrations" => parse_integrations(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
+            "memory" => parse_memory(value, path, &mut config)?,
             "git" => parse_git(value, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
             "providers" => parse_providers(value, path, &mut config)?,
@@ -682,6 +724,14 @@ fn parse_model(
                     "model.context_window",
                     "a positive integer",
                 ));
+            }
+            // ADR 0017: `[model] retries = 3`; `0` disables retrying. A negative or
+            // non-integer value is refused rather than guessed (fail-closed).
+            ("retries", Value::Integer(n)) if *n >= 0 => {
+                config.model.retries = Some(*n as u32);
+            }
+            ("retries", _) => {
+                return Err(wrong_type(path, "model.retries", "a non-negative integer"));
             }
             // Known by the ADR, not wired here (the host's `--include-usage` controls it).
             ("include_usage", _) => config.skipped.push("model.include_usage".into()),
@@ -875,6 +925,50 @@ fn parse_git(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
                 }
             }
             config.git.allowed_filters = Some(names);
+        }
+    }
+    Ok(())
+}
+
+fn parse_memory(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "memory", "a table"));
+    };
+    for (key, value) in table {
+        match key.as_str() {
+            "injection" => {
+                let Some(injection) = value.as_table() else {
+                    return Err(wrong_type(path, "memory.injection", "a table"));
+                };
+                for (key, value) in injection {
+                    match (key.as_str(), value) {
+                        ("additions", Value::Boolean(on)) => {
+                            config.memory.additions = Some(*on);
+                        }
+                        ("additions", _) => {
+                            return Err(wrong_type(
+                                path,
+                                "memory.injection.additions",
+                                "a boolean",
+                            ));
+                        }
+                        ("addition_budget", Value::Integer(budget)) if *budget > 0 => {
+                            config.memory.addition_budget = Some(*budget as u64);
+                        }
+                        ("addition_budget", _) => {
+                            return Err(wrong_type(
+                                path,
+                                "memory.injection.addition_budget",
+                                "a positive integer",
+                            ));
+                        }
+                        // The rest of the D6 table is known but not wired in this slice: it is
+                        // interpreted as the documented default and named on the startup line.
+                        (other, _) => config.skipped.push(format!("memory.injection.{other}")),
+                    }
+                }
+            }
+            other => config.skipped.push(format!("memory.{other}")),
         }
     }
     Ok(())
@@ -1254,6 +1348,9 @@ fn parse_footer(table: &toml::map::Map<String, Value>, config: &mut Config) -> R
                 footer.separator_style = Some(style.clone())
             }
             ("glyphs", Value::String(glyphs)) => footer.glyphs = Some(glyphs.clone()),
+            // ADR 0027 item 4: the left/right gap fill.
+            ("context_line", Value::String(mode)) => footer.context_line = Some(mode.clone()),
+            ("transparent", Value::Boolean(on)) => footer.transparent = Some(*on),
             ("items", Value::Table(items)) => {
                 for (id, value) in items {
                     let Value::Table(table) = value else {
@@ -1731,6 +1828,18 @@ theme = "light"
         }
         assert!(parse_str("schema_version = 1\n[compaction]\nthinking = \"loud\"\n").is_err());
         assert!(parse_str("schema_version = 1\n[compaction]\nthinking = 3\n").is_err());
+    }
+
+    /// `[model] retries` (ADR 0017) is carried; a negative or non-integer value is
+    /// refused (fail-closed), and `0` means "no retrying".
+    #[test]
+    fn model_retries_must_be_a_non_negative_integer() {
+        let config = parse_str("schema_version = 1\n[model]\nretries = 3\n").unwrap();
+        assert_eq!(config.model.retries, Some(3));
+        let config = parse_str("schema_version = 1\n[model]\nretries = 0\n").unwrap();
+        assert_eq!(config.model.retries, Some(0));
+        assert!(parse_str("schema_version = 1\n[model]\nretries = -1\n").is_err());
+        assert!(parse_str("schema_version = 1\n[model]\nretries = \"3\"\n").is_err());
     }
 
     /// `tui.input_style` is carried as a string; the TUI parses it, and an unknown value is a
@@ -2251,6 +2360,8 @@ mod footer_tests {
             "preset = \"pi\"\n",
             "separator = \" | \"\n",
             "glyphs = \"unicode\"\n",
+            "context_line = \"percentage\"\n",
+            "transparent = true\n",
             "[[tui.footer.rows]]\n",
             "left = [\n",
             "  { item = \"model\", format = \"{display_name}\" },\n",
@@ -2268,6 +2379,8 @@ mod footer_tests {
         assert_eq!(footer.preset.as_deref(), Some("pi"));
         assert_eq!(footer.separator.as_deref(), Some(" | "));
         assert_eq!(footer.glyphs.as_deref(), Some("unicode"));
+        assert_eq!(footer.context_line.as_deref(), Some("percentage"));
+        assert_eq!(footer.transparent, Some(true));
         assert_eq!(footer.rows.len(), 3);
         assert_eq!(footer.rows[0].left.len(), 2);
         assert_eq!(footer.rows[0].left[0].id, "model");

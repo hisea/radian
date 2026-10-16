@@ -64,7 +64,14 @@ fn screen(terminal: &Terminal<TestBackend>) -> String {
 
 /// A shell call, with its result if `result` is `Some`.
 fn shell_app(result: Option<ToolResult>) -> App {
+    shell_app_with(result, |_| {})
+}
+
+/// `shell_app` with a setup step before any message arrives (the app's real order: the footer
+/// glyph set comes from the config at startup, before the first tool result writes its head).
+fn shell_app_with(result: Option<ToolResult>, setup: impl FnOnce(&mut App)) -> App {
     let mut app = App::new("m", "s");
+    setup(&mut app);
     app.push_message(&Message::Assistant {
         content: vec![],
         reasoning: vec![],
@@ -156,7 +163,7 @@ fn a_failed_call_labels_its_section_error() {
         error_code: None,
     }));
     let failed = status(&app)[2];
-    let terminal = render(&mut app, 80, 12);
+    let terminal = render(&mut app, 80, 20);
     let text = screen(&terminal);
     assert!(
         text.contains(&format!("{failed} shell: make test")),
@@ -169,10 +176,10 @@ fn a_failed_call_labels_its_section_error() {
     // (ADR 0035 V3), so find its top and bottom borders instead of hardcoding rows.
     let buffer = terminal.backend().buffer();
     let symbol = |y: u16| buffer.cell((0, y)).map(|c| c.symbol().to_string());
-    let top = (0..12)
+    let top = (0..20)
         .find(|&y| symbol(y).as_deref() == Some("┌"))
         .expect("top border");
-    let bottom = (0..12)
+    let bottom = (0..20)
         .rev()
         .find(|&y| symbol(y).as_deref() == Some("└"))
         .expect("bottom border");
@@ -384,10 +391,14 @@ fn the_meta_writes_only_the_data_that_exists() {
 
 #[test]
 fn the_ascii_glyph_set_draws_ascii_borders_and_brackets() {
-    let mut app = shell_app(Some(ok_result("done")));
-    app.apply_footer(&radian_host::config::TuiFooterConfig {
-        glyphs: Some("ascii".into()),
-        ..Default::default()
+    // The glyph set is chosen before the result arrives, as at startup: the head's status glyph
+    // is written into the entry when the result lands (app.rs), so a later switch would not
+    // repaint it (a separate, known limit).
+    let mut app = shell_app_with(Some(ok_result("done")), |app| {
+        app.apply_footer(&radian_host::config::TuiFooterConfig {
+            glyphs: Some("ascii".into()),
+            ..Default::default()
+        });
     });
     let terminal = render(&mut app, 60, 12);
     let lines = rows(&terminal, 60, 12);

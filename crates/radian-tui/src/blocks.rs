@@ -296,6 +296,27 @@ pub enum Frame {
     Bottom,
 }
 
+/// A banded block's half-cell padding row (ADR 0035): a half cell of the band above
+/// the block's text (`▄`, drawn with the band's color as the glyph's foreground) or below it
+/// (`▀`). The row is part of the block's geometry (the selection maps it to a gap, it never
+/// copies) and it carries no text. `None` for every line that is not such a pad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pad {
+    #[default]
+    None,
+    /// The row above the band: `▄` (the band's upper half).
+    Top,
+    /// The row below the band: `▀` (the band's lower half).
+    Bottom,
+}
+
+impl Pad {
+    /// Whether this is a padding row at all.
+    pub fn is_pad(self) -> bool {
+        !matches!(self, Pad::None)
+    }
+}
+
 /// One laid-out line of an entry's body. `chars`/`end` are the selection mapping's view (the
 /// same semantics as [`crate::render::WrappedLine`]: byte offsets into the entry's display
 /// text, `end` the gap after the line); `text` is what the body span renders.
@@ -313,8 +334,9 @@ pub struct BodyLine {
     pub text: String,
     /// This line is a code line (rendered without the prefix lead, no wrap).
     pub code: bool,
-    /// This line is a padding row around a user block.
-    pub pad: bool,
+    /// This line is a banded block's half-cell padding row (ADR 0035): a half cell
+    /// of the band above the text (`▄`) or below it (`▀`). `None` for every other line.
+    pub pad: Pad,
     /// The card frame this line draws (ADR 0028); `None` for every line that is
     /// not part of a tool card's frame.
     pub frame: Frame,
@@ -353,6 +375,17 @@ pub struct MdPiece {
 pub enum MdStyle {
     /// A heading's text (`mdHeading`).
     Heading,
+    /// A level-1 heading's text: the heading role plus underline (ADR 0035).
+    Heading1,
+    /// A heading's `#` mark (`md_heading_mark`).
+    HeadingMark,
+    /// `~~struck~~`: the crossed-out modifier.
+    Strikethrough,
+    /// A task list's checkbox (`☐`/`☑`, `[ ]`/`[x]` under ascii).
+    TaskUnchecked,
+    TaskChecked,
+    /// A code block's fence line (weak).
+    Fence,
     Bold,
     Italic,
     /// Inline code (`mdCode`).
@@ -380,13 +413,37 @@ pub enum MdStyle {
 }
 
 impl BodyLine {
+    /// A code block's fence line (ADR 0035): weak, at the body column (no marker
+    /// lead, like a code line).
+    fn fence(text: String, offset: usize) -> Self {
+        Self {
+            chars: Vec::new(),
+            end: offset,
+            text: text.clone(),
+            code: true,
+            pad: Pad::None,
+            frame: Frame::None,
+            role: tools::LineRole::Normal,
+            // `hint: true` so `strip_edge_blanks` never treats a fence as a blank edge line.
+            hint: true,
+            diagram: None,
+            reason: false,
+            md: Some(vec![MdPiece {
+                text,
+                style: MdStyle::Fence,
+                offset: None,
+            }]),
+            syntax: None,
+        }
+    }
+
     fn prose(chars: Vec<Option<usize>>, end: usize, text: String) -> Self {
         Self {
             chars,
             end,
             text,
             code: false,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -405,7 +462,7 @@ impl BodyLine {
             end: 0,
             text: String::new(),
             code: false,
-            pad: false,
+            pad: Pad::None,
             frame,
             role: tools::LineRole::Normal,
             hint: true,
@@ -424,7 +481,7 @@ impl BodyLine {
             end: 0,
             text,
             code: false,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::Meta,
             role: tools::LineRole::Normal,
             hint: true,
@@ -435,13 +492,13 @@ impl BodyLine {
         }
     }
 
-    fn pad(end: usize) -> Self {
+    fn pad(half: Pad, end: usize) -> Self {
         Self {
             chars: Vec::new(),
             end,
             text: String::new(),
             code: false,
-            pad: true,
+            pad: half,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -463,7 +520,7 @@ impl BodyLine {
             end,
             text,
             code: true,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -482,7 +539,7 @@ impl BodyLine {
             end,
             text,
             code: false,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -499,7 +556,7 @@ impl BodyLine {
             end,
             text,
             code: false,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -676,7 +733,7 @@ pub fn is_folded(entry: &Entry, modes: DisplayModes) -> bool {
 /// stays; the layout is the one place this happens, so counting, drawing, the selection
 /// mapping and the search all see the stripped form.
 fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
-    let blank = |line: &BodyLine| !line.pad && !line.hint && line.chars.is_empty();
+    let blank = |line: &BodyLine| !line.pad.is_pad() && !line.hint && line.chars.is_empty();
     let start = lines
         .iter()
         .position(|line| !blank(line))
@@ -695,7 +752,10 @@ fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
 /// * a tool call and **its own** result (matched by call id, rule 4) - the result hugs its
 ///   call, with no gap in between;
 /// * either side is a user block: its pad row is the separation already (painted in a theme
-///   with a user background, blank in one without - the shape is the same either way).
+///   with a user background, blank in one without - the shape is the same either way);
+/// * the previous entry is the thinking channel (ADR 0035): it hugs the block below
+///   it (the reply or the tool call it introduces), so the folded one-liner reads as part of
+///   what follows. The gap **above** thinking is unchanged.
 ///
 /// Otherwise exactly one line. The counting ([`line_count`]'s callers), the drawing
 /// ([`crate::render::visible_lines`]), the selection mapping and the find geometry all call
@@ -712,10 +772,21 @@ pub fn block_gap(prev: Option<&Entry>, next: &Entry) -> usize {
     if is_startup_block(prev.kind) && is_startup_block(next.kind) {
         return 0;
     }
+    // ADR 0035: thinking hugs the block below it.
+    if prev.kind == EntryKind::Reasoning {
+        return 0;
+    }
     if prev.kind == EntryKind::User || next.kind == EntryKind::User {
         return 0;
     }
     1
+}
+
+/// Whether the banded blocks get their half-cell padding rows under this glyph tier (ADR 0035
+/// revision 3 decision 4): `unicode` and `nerd` draw `▄`/`▀`, `ascii` has no half-block glyph
+/// and so gets no padding row.
+pub fn banded_pad(glyphs: crate::footer::Glyphs) -> bool {
+    glyphs != crate::footer::Glyphs::Ascii
 }
 
 /// The entries the startup block is made of (ADR 0027 §标志 / the owner's 2026-10-14 startup
@@ -780,8 +851,10 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     // is a color-only pass and must not run here: the measure pass is the cheap one
     // (`tui.display.highlight`'s lazy rule).
     if has_blank_edge(&text) {
+        // Keep the caller's glyph tier: it decides whether a banded block has padding rows
+        // (ADR 0035), so the count must use the same one the draw does. Only the
+        // costly color pass is skipped.
         let plain = DisplayModes {
-            glyphs: crate::footer::Glyphs::Unicode,
             highlight: false,
             ..modes
         };
@@ -789,8 +862,9 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     }
     match entry.kind {
         EntryKind::User => {
-            // pad + text + pad.
-            crate::render::wrap_line_count(&text, body_width) + 2
+            // The text plus the band's two half-cell padding rows (none under `ascii`).
+            let pad = if banded_pad(modes.glyphs) { 2 } else { 0 };
+            crate::render::wrap_line_count(&text, body_width) + pad
         }
         EntryKind::Assistant => {
             let mut diagram_index = 0;
@@ -798,7 +872,7 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                 .iter()
                 .map(|block| match block {
                     Block::Paragraph { start, end, .. } => {
-                        md_line_count_cached(entry, *start, *end, body_width, &text)
+                        md_line_count_cached(entry, *start, *end, body_width, modes.glyphs, &text)
                     }
                     Block::Code {
                         start,
@@ -807,12 +881,15 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                         lang,
                     } => {
                         let source = &text[*start..*end];
+                        // ADR 0035: the fence lines are counted too (the layout
+                        // shows them).
+                        let fences = if *closed { 2 } else { 1 };
                         if is_mermaid(lang, *closed, modes.mermaid) {
                             let index = diagram_index;
                             diagram_index += 1;
                             match diagram_outcome(entry, index, &code_body(source, *closed), width)
                             {
-                                DiagramOutcome::Rendered(lines) => lines.len(),
+                                DiagramOutcome::Rendered(lines) => lines.len() + fences,
                                 DiagramOutcome::Failed(_) => 1 + code_line_count(source, *closed),
                             }
                         } else {
@@ -879,6 +956,9 @@ fn tool_plan(
 /// How many display lines a fenced code block lays out to: its body's line count (the fence
 /// lines are markup). Mirrors [`code_lines`]'s skipping exactly.
 fn code_line_count(raw: &str, closed: bool) -> usize {
+    // The fence lines are shown (ADR 0035): the opening fence always, the closing
+    // fence when the block is closed.
+    let fences = if closed { 2 } else { 1 };
     let lines: Vec<&str> = raw.lines().collect();
     let mut count = lines.len();
     if lines
@@ -895,7 +975,7 @@ fn code_line_count(raw: &str, closed: bool) -> usize {
     {
         count -= 1;
     }
-    count.max(1)
+    count.max(1) + fences
 }
 
 /// The cached count (the renderer's per-frame path for **every** entry, on screen or not).
@@ -941,7 +1021,7 @@ pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -
         let body_width = width
             .saturating_sub(crate::render::marker_prefix(entry.kind).width())
             .max(1);
-        fill_md_cache(entry, &blocks, body_width);
+        fill_md_cache(entry, &blocks, body_width, modes.glyphs);
     }
     let lines = line_count(entry, modes, width);
     entry.layout_cache = Some((key, lines));
@@ -1053,7 +1133,7 @@ fn layout_unstripped(
                 end: 0,
                 text: placeholder(entry, spinner),
                 code: false,
-                pad: false,
+                pad: Pad::None,
                 frame: Frame::None,
                 role: tools::LineRole::Normal,
                 hint: true,
@@ -1064,10 +1144,17 @@ fn layout_unstripped(
             }]
         }
         (EntryKind::User, _) => {
-            let mut lines = vec![BodyLine::pad(0)];
+            // ADR 0035: the user band gains a half cell above and below, replacing
+            // the full-row padding. The `ascii` glyph tier has no half-block glyph, so it gets
+            // no padding row at all (decision 4).
+            let mut lines = Vec::new();
+            if banded_pad(modes.glyphs) {
+                lines.push(BodyLine::pad(Pad::Top, 0));
+            }
             lines.extend(prose_lines(&text, body_width));
-            let end = text.len();
-            lines.push(BodyLine::pad(end));
+            if banded_pad(modes.glyphs) {
+                lines.push(BodyLine::pad(Pad::Bottom, text.len()));
+            }
             lines
         }
         (EntryKind::Assistant, _) => {
@@ -1076,7 +1163,14 @@ fn layout_unstripped(
             for block in blocks {
                 match block {
                     Block::Paragraph { start, end, .. } => {
-                        lines.extend(md_lines_cached(entry, *start, *end, body_width, &text));
+                        lines.extend(md_lines_cached(
+                            entry,
+                            *start,
+                            *end,
+                            body_width,
+                            modes.glyphs,
+                            &text,
+                        ));
                     }
                     Block::Code {
                         start,
@@ -1092,6 +1186,15 @@ fn layout_unstripped(
                         } else {
                             syntax_lines_cached(*start, *end, &text, lang, *closed, modes.highlight)
                         };
+                        // ADR 0035: the fence line is shown weak as the code
+                        // block's title and end.
+                        let opening = source.lines().next().unwrap_or("").to_owned();
+                        // The closing fence is a separate line even when it is identical to
+                        // the opening (the usual ``` pair).
+                        let closing = (*closed)
+                            .then(|| source.lines().last().unwrap_or("").to_owned())
+                            .filter(|_| source.lines().count() > 1);
+                        lines.push(BodyLine::fence(opening, *start));
                         if is_mermaid(lang, *closed, modes.mermaid) {
                             let index = diagram_index;
                             diagram_index += 1;
@@ -1127,6 +1230,9 @@ fn layout_unstripped(
                                 width,
                                 highlight.as_deref().map(Vec::as_slice),
                             ));
+                        }
+                        if let Some(closing) = closing {
+                            lines.push(BodyLine::fence(closing, *start));
                         }
                     }
                 }
@@ -1164,7 +1270,7 @@ fn layout_unstripped(
                     end: 0,
                     text: line,
                     code: false,
-                    pad: false,
+                    pad: Pad::None,
                     frame: Frame::None,
                     role: tools::LineRole::Normal,
                     hint: true,
@@ -1288,7 +1394,7 @@ fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
         end: 0,
         text,
         code: false,
-        pad: false,
+        pad: Pad::None,
         frame: Frame::None,
         role: tools::LineRole::Normal,
         hint: true,
@@ -1516,7 +1622,7 @@ fn tool_line_at(line: &str, offset: usize, width: usize) -> Vec<BodyLine> {
         end: offset + line.len(),
         text: rendered,
         code: false,
-        pad: false,
+        pad: Pad::None,
         frame: Frame::None,
         role: tools::LineRole::Normal,
         hint: false,
@@ -1745,7 +1851,7 @@ fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> V
                 end: 0,
                 text: hint.clone(),
                 code: false,
-                pad: false,
+                pad: Pad::None,
                 frame: Frame::None,
                 role: tools::LineRole::Normal,
                 hint: true,
@@ -1912,8 +2018,9 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
     // layout when there are any (see `has_blank_edge`), so the search geometry and the drawing
     // cannot disagree.
     if has_blank_edge(&text) {
+        // Keep the caller's glyph tier (ADR 0035): it decides the band padding, so
+        // the text-only path must match the drawing.
         let plain = DisplayModes {
-            glyphs: crate::footer::Glyphs::Unicode,
             highlight: false,
             ..modes
         };
@@ -1929,9 +2036,17 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
             vec![placeholder(entry, crate::spinner::Frame::default())]
         }
         (EntryKind::User, _) => {
-            let mut lines = vec![String::new()];
+            // The band's two half-cell pad rows are empty text: they occupy rows and never
+            // match a query. The `ascii` tier has none (decision 4).
+            let pad = banded_pad(modes.glyphs);
+            let mut lines = Vec::new();
+            if pad {
+                lines.push(String::new());
+            }
             lines.extend(crate::render::wrap(&text, body_width));
-            lines.push(String::new());
+            if pad {
+                lines.push(String::new());
+            }
             lines
         }
         (EntryKind::Assistant, _) => {
@@ -1941,7 +2056,7 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
                 match block {
                     Block::Paragraph { start, end, .. } => {
                         lines.extend(
-                            md_lines_cached(entry, start, end, body_width, &text)
+                            md_lines_cached(entry, start, end, body_width, modes.glyphs, &text)
                                 .into_iter()
                                 .map(|line| line.text),
                         );
@@ -2087,7 +2202,7 @@ fn code_lines(
             end,
             text,
             code: true,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -2104,7 +2219,7 @@ fn code_lines(
             end: 0,
             text: String::new(),
             code: true,
-            pad: false,
+            pad: Pad::None,
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
@@ -2142,13 +2257,92 @@ type Cell = (char, MdStyle, Option<usize>);
 /// source range (starting at `base` in the entry's display text). Every piece that exists in
 /// the source keeps its offset, so a selection copies the **source** it covers; a synthesized
 /// prefix (a bullet, a quote bar, a rule, a table border, a heading's `#`) selects the block.
-pub(crate) fn md_lines(source: &str, base: usize, width: usize) -> Vec<BodyLine> {
+/// The Markdown glyphs for the footer's glyph set (ADR 0035): the list bullet, the
+/// quote bar, the task checkboxes, the rule character and the table borders.
+struct MdGlyphs {
+    bullet: &'static str,
+    quote: &'static str,
+    task_unchecked: &'static str,
+    task_checked: &'static str,
+    rule: char,
+    top: (&'static str, &'static str, &'static str),
+    mid: (&'static str, &'static str, &'static str),
+    bottom: (&'static str, &'static str, &'static str),
+    horizontal: &'static str,
+    vertical: &'static str,
+}
+
+impl MdGlyphs {
+    fn for_glyphs(glyphs: crate::footer::Glyphs) -> Self {
+        match glyphs {
+            crate::footer::Glyphs::Ascii => Self {
+                bullet: "- ",
+                quote: "| ",
+                task_unchecked: "[ ] ",
+                task_checked: "[x] ",
+                rule: '-',
+                top: ("+", "+", "+"),
+                mid: ("+", "+", "+"),
+                bottom: ("+", "+", "+"),
+                horizontal: "-",
+                vertical: "|",
+            },
+            // ADR 0035: nerd uses the heavier `│`, unicode the lighter `▏`.
+            crate::footer::Glyphs::Nerd => Self {
+                bullet: "- ",
+                quote: "│ ",
+                task_unchecked: "☐ ",
+                task_checked: "☑ ",
+                rule: '─',
+                top: ("┌", "┬", "┐"),
+                mid: ("├", "┼", "┤"),
+                bottom: ("└", "┴", "┘"),
+                horizontal: "─",
+                vertical: "│",
+            },
+            crate::footer::Glyphs::Unicode => Self {
+                bullet: "- ",
+                quote: "▏ ",
+                task_unchecked: "☐ ",
+                task_checked: "☑ ",
+                rule: '─',
+                top: ("┌", "┬", "┐"),
+                mid: ("├", "┼", "┤"),
+                bottom: ("└", "┴", "┘"),
+                horizontal: "─",
+                vertical: "│",
+            },
+        }
+    }
+}
+
+pub(crate) fn md_lines(
+    source: &str,
+    base: usize,
+    width: usize,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<BodyLine> {
     let blocks = crate::markdown::parse(source, base);
+    let glyphs = MdGlyphs::for_glyphs(glyphs);
     let mut out = Vec::new();
-    md_blocks(&blocks, width, base, 0, &mut out);
-    // A block range carries its trailing newline (the ranges tile the text), and the prose
-    // wrap showed it as one empty line; pulldown drops it, so restore it. The blank line
-    // between two paragraphs is what makes the transcript read as the author wrote it.
+    for (index, block) in blocks.iter().enumerate() {
+        // ADR 0035 V1: exactly one blank line between block-level Markdown elements, managed
+        // here and not by the source's blank lines. The trailing blank line (the gap to the
+        // next entry block) is restored below.
+        if index > 0 {
+            out.push(BodyLine::prose(Vec::new(), base, String::new()));
+        }
+        md_blocks(
+            std::slice::from_ref(block),
+            width,
+            base,
+            0,
+            &glyphs,
+            &mut out,
+        );
+    }
+    // A block range carries its trailing newline (the ranges tile the text); pulldown drops
+    // it, so restore it: the gap between this block and the next entry block.
     if source.ends_with('\n') && out.last().is_some_and(|line| !line.text.is_empty()) {
         out.push(BodyLine::prose(
             Vec::new(),
@@ -2162,54 +2356,58 @@ pub(crate) fn md_lines(source: &str, base: usize, width: usize) -> Vec<BodyLine>
     out
 }
 
-/// The Markdown lines of the paragraph at `[start, end)`: the entry's `(width, text_len)`
-/// cache when it holds them, else rendered fresh (the immutable paths may not have run the
-/// mutable measure pass). The layout does not depend on the folds, so a fold toggle reuses
-/// the cache and stays inside the R7 gate.
+/// The Markdown lines of the paragraph at `[start, end)`: the entry's cache when it holds them,
+/// else rendered fresh (the immutable paths may not have run the mutable measure pass).
 fn md_lines_cached(
     entry: &Entry,
     start: usize,
     end: usize,
     width: usize,
+    glyphs: crate::footer::Glyphs,
     text: &str,
 ) -> Vec<BodyLine> {
-    if let Some((cached_width, cached_len, paragraphs)) = &entry.md_cache
+    if let Some((cached_width, cached_len, cached_glyphs, paragraphs)) = &entry.md_cache
         && *cached_width == width
         && *cached_len == entry.text.len()
+        && *cached_glyphs == glyphs
         && let Some((_, lines)) = paragraphs.iter().find(|(at, _)| *at == start)
     {
         return lines.clone();
     }
-    md_lines(&text[start..end], start, width)
+    md_lines(&text[start..end], start, width, glyphs)
 }
 
-/// The Markdown line count of the paragraph at `[start, end)` without cloning the cached
-/// lines (the per-frame measure path).
+/// The Markdown line count of the paragraph at `[start, end)` without cloning the cached lines
+/// (the per-frame measure path).
 fn md_line_count_cached(
     entry: &Entry,
     start: usize,
     end: usize,
     width: usize,
+    glyphs: crate::footer::Glyphs,
     text: &str,
 ) -> usize {
-    if let Some((cached_width, cached_len, paragraphs)) = &entry.md_cache
+    if let Some((cached_width, cached_len, cached_glyphs, paragraphs)) = &entry.md_cache
         && *cached_width == width
         && *cached_len == entry.text.len()
+        && *cached_glyphs == glyphs
         && let Some((_, lines)) = paragraphs.iter().find(|(at, _)| *at == start)
     {
         return lines.len();
     }
-    md_lines(&text[start..end], start, width).len()
+    md_lines(&text[start..end], start, width, glyphs).len()
 }
 
-/// Builds the entry's Markdown paragraph-line cache for `width` (the mutable measure pass),
-/// so the following `layout`/`line_count` reuse it.
-fn fill_md_cache(entry: &mut Entry, blocks: &[Block], width: usize) {
+/// Builds the entry's Markdown paragraph-line cache for `width` (the mutable measure pass), so
+/// the following `layout`/`line_count` reuse it.
+fn fill_md_cache(entry: &mut Entry, blocks: &[Block], width: usize, glyphs: crate::footer::Glyphs) {
     let text_len = entry.text.len();
     let fresh = entry
         .md_cache
         .as_ref()
-        .filter(|(cached_width, cached_len, _)| *cached_width == width && *cached_len == text_len)
+        .filter(|(cached_width, cached_len, cached_glyphs, _)| {
+            *cached_width == width && *cached_len == text_len && *cached_glyphs == glyphs
+        })
         .is_none();
     if !fresh {
         return;
@@ -2218,10 +2416,10 @@ fn fill_md_cache(entry: &mut Entry, blocks: &[Block], width: usize) {
     let mut paragraphs = Vec::new();
     for block in blocks {
         if let Block::Paragraph { start, end, .. } = block {
-            paragraphs.push((*start, md_lines(&text[*start..*end], *start, width)));
+            paragraphs.push((*start, md_lines(&text[*start..*end], *start, width, glyphs)));
         }
     }
-    entry.md_cache = Some((width, text_len, paragraphs));
+    entry.md_cache = Some((width, text_len, glyphs, paragraphs));
 }
 
 /// The highlighted lines of the closed code block at `[start, end)`, or `None` when
@@ -2252,42 +2450,84 @@ fn md_blocks(
     width: usize,
     base: usize,
     indent: usize,
+    glyphs: &MdGlyphs,
     out: &mut Vec<BodyLine>,
 ) {
     use crate::markdown::MdBlock;
     for block in blocks {
         match block {
             MdBlock::Paragraph(pieces) => {
-                out.extend(md_wrap(md_pieces(pieces, MdStyle::Plain), width, indent));
+                out.extend(md_wrap(
+                    md_pieces(pieces, MdStyle::Plain, glyphs),
+                    width,
+                    indent,
+                ));
             }
             MdBlock::Heading { level, pieces } => {
-                // The `#`s are markup; the level shows as a synthesized prefix.
+                // ADR 0035: the `#` marks stay but use the
+                // `md_heading_mark` role; the text is the heading role (level 1 underlined).
                 let mut line = vec![MdPiece {
                     text: format!("{} ", "#".repeat(*level as usize)),
-                    style: MdStyle::Heading,
+                    style: MdStyle::HeadingMark,
                     offset: None,
                 }];
-                line.extend(md_pieces(pieces, MdStyle::Heading));
+                let text_style = if *level == 1 {
+                    MdStyle::Heading1
+                } else {
+                    MdStyle::Heading
+                };
+                line.extend(md_pieces(pieces, text_style, glyphs));
                 out.extend(md_wrap(line, width, indent));
             }
+            // A task marker is only meaningful as the first block of a task item; on its own
+            // it draws nothing.
+            MdBlock::TaskMarker { .. } => {}
             MdBlock::List { ordered, items } => {
                 for (index, item) in items.iter().enumerate() {
-                    let marker = match ordered {
-                        Some(first) => format!("{}. ", first + index as u64),
-                        None => "• ".to_owned(),
+                    let (marker, task) = match item.first() {
+                        Some(MdBlock::TaskMarker { checked }) => (
+                            if *checked {
+                                glyphs.task_checked.to_owned()
+                            } else {
+                                glyphs.task_unchecked.to_owned()
+                            },
+                            true,
+                        ),
+                        _ => (
+                            match ordered {
+                                Some(first) => format!("{}. ", first + index as u64),
+                                None => glyphs.bullet.to_owned(),
+                            },
+                            false,
+                        ),
                     };
+                    let body = if task { &item[1..] } else { item };
+                    let marker_width = UnicodeWidthStr::width(marker.as_str());
                     let mut item_lines = Vec::new();
-                    md_blocks(item, width, base, indent + 2, &mut item_lines);
+                    md_blocks(
+                        body,
+                        width,
+                        base,
+                        indent + marker_width,
+                        glyphs,
+                        &mut item_lines,
+                    );
                     let mut first = true;
                     for line in item_lines {
                         if first {
-                            // The marker takes the first line's indent columns, so the text
-                            // starts right after it (`• one`, not `•   one`).
+                            // The marker takes the first line's indent columns; the
+                            // continuation lines keep the marker's width (ADR 0035:
+                            // `10. ` is 4 cells, not 2).
                             let mut pieces = vec![MdPiece {
+                                text: " ".repeat(indent),
+                                style: MdStyle::Plain,
+                                offset: None,
+                            }];
+                            pieces.push(MdPiece {
                                 text: marker.clone(),
                                 style: MdStyle::Bullet,
                                 offset: None,
-                            }];
+                            });
                             pieces.extend(
                                 line.md
                                     .clone()
@@ -2307,27 +2547,36 @@ fn md_blocks(
                         out.push(BodyLine::md(
                             vec![None],
                             base,
-                            vec![MdPiece {
-                                text: marker,
-                                style: MdStyle::Bullet,
-                                offset: None,
-                            }],
+                            vec![
+                                MdPiece {
+                                    text: " ".repeat(indent),
+                                    style: MdStyle::Plain,
+                                    offset: None,
+                                },
+                                MdPiece {
+                                    text: marker,
+                                    style: MdStyle::Bullet,
+                                    offset: None,
+                                },
+                            ],
                         ));
                     }
                 }
             }
             MdBlock::Quote(inner) => {
+                let marker_width = UnicodeWidthStr::width(glyphs.quote);
                 let mut inner_lines = Vec::new();
                 md_blocks(
                     inner,
-                    width.saturating_sub(2).max(1),
+                    width.saturating_sub(marker_width).max(1),
                     base,
                     indent,
+                    glyphs,
                     &mut inner_lines,
                 );
                 for line in inner_lines {
                     let mut pieces = vec![MdPiece {
-                        text: "│ ".to_owned(),
+                        text: glyphs.quote.to_owned(),
                         style: MdStyle::QuoteBar,
                         offset: None,
                     }];
@@ -2353,31 +2602,46 @@ fn md_blocks(
                 vec![None],
                 base,
                 vec![MdPiece {
-                    text: "─".repeat(width.clamp(1, 40)),
+                    // ADR 0035: the rule is at most 40 cells (omp uses 80).
+                    text: glyphs.rule.to_string().repeat(width.clamp(1, 40)),
                     style: MdStyle::Rule,
                     offset: None,
                 }],
             )),
-            MdBlock::Table { head, rows } => out.extend(md_table(head, rows, base, width, indent)),
+            MdBlock::Table { head, rows } => {
+                out.extend(md_table(head, rows, base, width, indent, glyphs))
+            }
         }
     }
 }
 
-/// The Markdown pieces of a parsed block, in the given fallback role.
-fn md_pieces(pieces: &[crate::markdown::Piece], plain: MdStyle) -> Vec<MdPiece> {
+fn md_pieces(pieces: &[crate::markdown::Piece], plain: MdStyle, glyphs: &MdGlyphs) -> Vec<MdPiece> {
     pieces
         .iter()
-        .map(|piece| MdPiece {
-            text: piece.text.clone(),
-            style: match piece.inline {
-                crate::markdown::Inline::Bold => MdStyle::Bold,
-                crate::markdown::Inline::Italic => MdStyle::Italic,
-                crate::markdown::Inline::Code => MdStyle::Code,
-                crate::markdown::Inline::LinkText => MdStyle::Link,
-                crate::markdown::Inline::LinkUrl => MdStyle::LinkUrl,
-                crate::markdown::Inline::Plain => plain,
-            },
-            offset: piece.offset,
+        .map(|piece| {
+            let (text, style) = match piece.inline {
+                crate::markdown::Inline::Bold => (piece.text.clone(), MdStyle::Bold),
+                crate::markdown::Inline::Italic => (piece.text.clone(), MdStyle::Italic),
+                crate::markdown::Inline::Code => (piece.text.clone(), MdStyle::Code),
+                crate::markdown::Inline::LinkText => (piece.text.clone(), MdStyle::Link),
+                crate::markdown::Inline::LinkUrl => (piece.text.clone(), MdStyle::LinkUrl),
+                crate::markdown::Inline::Strikethrough => {
+                    (piece.text.clone(), MdStyle::Strikethrough)
+                }
+                // The task checkbox's own text is empty: the renderer supplies the glyph.
+                crate::markdown::Inline::TaskUnchecked => {
+                    (glyphs.task_unchecked.to_owned(), MdStyle::TaskUnchecked)
+                }
+                crate::markdown::Inline::TaskChecked => {
+                    (glyphs.task_checked.to_owned(), MdStyle::TaskChecked)
+                }
+                crate::markdown::Inline::Plain => (piece.text.clone(), plain),
+            };
+            MdPiece {
+                text,
+                style,
+                offset: piece.offset,
+            }
         })
         .collect()
 }
@@ -2400,8 +2664,23 @@ fn md_chars(pieces: &[MdPiece]) -> Vec<Option<usize>> {
 /// Wraps Markdown pieces to `width`, one body line per wrapped row, with `indent` leading
 /// spaces on every row.
 fn md_wrap(pieces: Vec<MdPiece>, width: usize, indent: usize) -> Vec<BodyLine> {
-    let width = width.saturating_sub(indent).max(1);
-    let pad = " ".repeat(indent);
+    md_wrap_marked(pieces, width, indent, None)
+}
+
+/// Wraps with an optional first-line `marker`: the marker takes the first line's indent, and
+/// the continuation lines align to the marker's actual display width (ADR 0035).
+fn md_wrap_marked(
+    pieces: Vec<MdPiece>,
+    width: usize,
+    indent: usize,
+    marker: Option<MdPiece>,
+) -> Vec<BodyLine> {
+    let marker_width = marker
+        .as_ref()
+        .map_or(0, |piece| UnicodeWidthStr::width(piece.text.as_str()));
+    let first_pad = " ".repeat(indent);
+    let continuation_pad = " ".repeat(indent + marker_width);
+    let width = width.saturating_sub(indent + marker_width).max(1);
     // Flatten to cells so wrapping is per character; a newline forces a row break.
     let mut cells: Vec<Cell> = Vec::new();
     for piece in pieces {
@@ -2416,14 +2695,14 @@ fn md_wrap(pieces: Vec<MdPiece>, width: usize, indent: usize) -> Vec<BodyLine> {
     let mut out = Vec::new();
     let mut row: Vec<Cell> = Vec::new();
     let mut used = 0usize;
-    let flush = |row: &mut Vec<Cell>, out: &mut Vec<BodyLine>| {
+    let mut first = true;
+    let flush = |row: &mut Vec<Cell>, out: &mut Vec<BodyLine>, first: &mut bool| {
         let mut pieces: Vec<MdPiece> = Vec::new();
         for (ch, style, offset) in row.iter() {
             match pieces.last_mut() {
                 Some(piece)
                     if piece.style == *style && piece.offset.is_some() == offset.is_some() =>
                 {
-                    // Extend a run only when its offsets stay contiguous.
                     let contiguous = match (piece.offset, offset) {
                         (Some(a), Some(b)) => a + piece.text.len() == *b,
                         (None, None) => true,
@@ -2442,15 +2721,21 @@ fn md_wrap(pieces: Vec<MdPiece>, width: usize, indent: usize) -> Vec<BodyLine> {
                 offset: *offset,
             });
         }
+        let pad = if *first {
+            &first_pad
+        } else {
+            &continuation_pad
+        };
         let mut all = vec![MdPiece {
             text: pad.clone(),
             style: MdStyle::Plain,
             offset: None,
         }];
+        if *first && let Some(marker) = &marker {
+            all.push(marker.clone());
+        }
         all.extend(pieces);
         let chars = md_chars(&all);
-        // `end` is the gap after the line's last source char, so the selection mapping lands
-        // between lines the way the prose wrap's does.
         let end = row
             .iter()
             .filter_map(|(ch, _, offset)| offset.map(|offset| offset + ch.len_utf8()))
@@ -2458,21 +2743,20 @@ fn md_wrap(pieces: Vec<MdPiece>, width: usize, indent: usize) -> Vec<BodyLine> {
             .unwrap_or(0);
         out.push(BodyLine::md(chars, end, all));
         row.clear();
+        *first = false;
     };
     let mut trailing_break = false;
     for (ch, style, offset) in cells {
         if ch == '\n' {
-            flush(&mut row, &mut out);
+            flush(&mut row, &mut out, &mut first);
             used = 0;
             trailing_break = true;
             continue;
         }
         let w = UnicodeWidthChar::width(ch).unwrap_or(0);
         if used + w > width && !row.is_empty() {
-            flush(&mut row, &mut out);
+            flush(&mut row, &mut out, &mut first);
             used = 0;
-            // A soft wrap drops the space it broke at (the prose wrap's rule): it must not
-            // start the next line.
             if ch == ' ' {
                 trailing_break = false;
                 continue;
@@ -2483,20 +2767,22 @@ fn md_wrap(pieces: Vec<MdPiece>, width: usize, indent: usize) -> Vec<BodyLine> {
         trailing_break = false;
     }
     if !row.is_empty() || out.is_empty() || trailing_break {
-        flush(&mut row, &mut out);
+        flush(&mut row, &mut out, &mut first);
     }
     out
 }
 
 /// A table: column widths from the cells, wrapping a cell that does not fit; if even the
 /// minimum does not fit (too many columns), the raw `|` source comes back as plain text
-/// (ADR 0028 R2's fallback).
+/// (ADR 0028 R2's fallback). Every two rows are separated by a border line (ADR 0035
+/// revision 1).
 fn md_table(
     head: &[Vec<crate::markdown::Piece>],
     rows: &[Vec<Vec<crate::markdown::Piece>>],
     base: usize,
     width: usize,
     indent: usize,
+    glyphs: &MdGlyphs,
 ) -> Vec<BodyLine> {
     let cell_text = |cell: &[crate::markdown::Piece]| -> String {
         cell.iter().map(|piece| piece.text.as_str()).collect()
@@ -2517,7 +2803,6 @@ fn md_table(
             .unwrap_or(0)
     };
     let mut widths: Vec<usize> = (0..columns).map(natural).collect();
-    // A bordered table costs `columns + 1` borders plus one space each side of every cell.
     let overhead = columns + 1 + columns * 2;
     let available = width.saturating_sub(indent);
     let min_column = 3;
@@ -2533,10 +2818,11 @@ fn md_table(
         }
         widths[widest] -= 1;
     }
+    let (left, mid, right) = glyphs.mid;
     let border = |left: &str, mid: &str, right: &str| -> String {
         let mut out = String::from(left);
         for (index, w) in widths.iter().enumerate() {
-            out.push_str(&"─".repeat(w + 2));
+            out.push_str(&glyphs.horizontal.repeat(w + 2));
             out.push_str(if index + 1 == widths.len() {
                 right
             } else {
@@ -2559,7 +2845,9 @@ fn md_table(
         });
         BodyLine::md(vec![None; indent + 1], base, pieces)
     };
-    let mut out = vec![border_line(border("┌", "┬", "┐"))];
+    let (top_left, top_mid, top_right) = glyphs.top;
+    let (bottom_left, bottom_mid, bottom_right) = glyphs.bottom;
+    let mut out = vec![border_line(border(top_left, top_mid, top_right))];
     let row_cells: Vec<Vec<&[crate::markdown::Piece]>> = std::iter::once(head)
         .chain(rows.iter().map(Vec::as_slice))
         .map(|row| {
@@ -2568,6 +2856,7 @@ fn md_table(
                 .collect()
         })
         .collect();
+    let last_row = row_cells.len().saturating_sub(1);
     for (row_index, row) in row_cells.iter().enumerate() {
         let wrapped: Vec<Vec<String>> = row
             .iter()
@@ -2583,7 +2872,7 @@ fn md_table(
                     offset: None,
                 },
                 MdPiece {
-                    text: "│".to_owned(),
+                    text: glyphs.vertical.to_owned(),
                     style: MdStyle::TableBorder,
                     offset: None,
                 },
@@ -2599,18 +2888,20 @@ fn md_table(
                     offset: None,
                 });
                 pieces.push(MdPiece {
-                    text: "│".to_owned(),
+                    text: glyphs.vertical.to_owned(),
                     style: MdStyle::TableBorder,
                     offset: None,
                 });
             }
             out.push(BodyLine::md(vec![None; indent + 1], base, pieces));
         }
-        if row_index == 0 {
-            out.push(border_line(border("├", "┼", "┤")));
+        // The header separator and, after every row but the last, another (ADR 0035 revision
+        // 1: every two rows are separated).
+        if row_index < last_row {
+            out.push(border_line(border(left, mid, right)));
         }
     }
-    out.push(border_line(border("└", "┴", "┘")));
+    out.push(border_line(border(bottom_left, bottom_mid, bottom_right)));
     out
 }
 
@@ -2851,7 +3142,7 @@ mod tests {
         text.text = "hi".to_string();
         let lines = layout(&text, &[], EXPANDED, 20);
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].pad && lines[2].pad);
+        assert!(lines[0].pad.is_pad() && lines[2].pad.is_pad());
     }
 
     #[test]
@@ -2927,15 +3218,17 @@ mod tests {
         let entry = assistant("```\nshort\nabc def gh ijk\n```");
         let blocks = parse_blocks(&entry.text);
         let lines = layout(&entry, &blocks, EXPANDED, 10);
-        // Fence lines are markup: body = "short" / "abc def gh ijk" → two lines.
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].text, "short");
-        assert_eq!(lines[1].text, "abc def g…", "truncated at 9 columns + …");
-        assert_eq!(lines[1].chars.len(), lines[1].text.chars().count());
+        // The two fence lines plus the body's two lines.
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].text, "```", "the opening fence");
+        assert_eq!(lines[1].text, "short");
+        assert_eq!(lines[2].text, "abc def g…", "truncated at 9 columns + …");
+        assert_eq!(lines[3].text, "```", "the closing fence");
+        assert_eq!(lines[2].chars.len(), lines[2].text.chars().count());
         // The gap still reaches the source line's end (byte offsets are into the entry
         // text, fences included): a selection across it copies all.
         let start = entry.text.find("abc").expect("the line is in the text");
-        assert_eq!(lines[1].end, start + "abc def gh ijk".len());
+        assert_eq!(lines[2].end, start + "abc def gh ijk".len());
     }
 
     #[test]
@@ -2943,10 +3236,10 @@ mod tests {
         let entry = assistant("```\na\tb\n```");
         let blocks = parse_blocks(&entry.text);
         let lines = layout(&entry, &blocks, EXPANDED, 20);
-        assert_eq!(lines[0].text, "a    b");
+        assert_eq!(lines[1].text, "a    b");
         let base = entry.text.find('a').expect("the line is in the text");
         assert_eq!(
-            lines[0].chars,
+            lines[1].chars,
             vec![
                 Some(base),
                 Some(base + 1),
@@ -2964,16 +3257,16 @@ mod tests {
         let entry = assistant(&format!("```\n{}\n```", "x".repeat(20)));
         let blocks = parse_blocks(&entry.text);
         let lines = layout(&entry, &blocks, EXPANDED, 20);
-        assert_eq!(lines[0].text, "x".repeat(20));
-        assert!(!lines[0].text.contains('…'));
+        assert_eq!(lines[1].text, "x".repeat(20));
+        assert!(!lines[1].text.contains('…'));
         // One over: it does not fit; keep width-1 and mark the cut.
         let entry = assistant(&format!("```\n{}\n```", "x".repeat(21)));
         let blocks = parse_blocks(&entry.text);
         let lines = layout(&entry, &blocks, EXPANDED, 20);
-        assert_eq!(lines[0].text, format!("{}…", "x".repeat(19)));
+        assert_eq!(lines[1].text, format!("{}…", "x".repeat(19)));
         // The mapping still reaches the source line's end either way (the offset is into the
         // entry text, which starts with the "```\n" fence line).
-        assert_eq!(lines[0].end, "```\n".len() + 21);
+        assert_eq!(lines[1].end, "```\n".len() + 21);
     }
 
     #[test]
@@ -2982,14 +3275,14 @@ mod tests {
         let entry = assistant("```\n日本語\n```");
         let blocks = parse_blocks(&entry.text);
         let lines = layout(&entry, &blocks, EXPANDED, 6);
-        assert_eq!(lines[0].text, "日本語");
+        assert_eq!(lines[1].text, "日本語");
         // 6 columns at width 5: keep 4 columns (2 wide chars) and the ellipsis.
         let lines = layout(&entry, &blocks, EXPANDED, 5);
-        assert_eq!(lines[0].text, "日本…");
-        assert_eq!(lines[0].chars.len(), lines[0].text.chars().count());
+        assert_eq!(lines[1].text, "日本…");
+        assert_eq!(lines[1].chars.len(), lines[1].text.chars().count());
         // 6 columns at width 7: as-is.
         let lines = layout(&entry, &blocks, EXPANDED, 7);
-        assert_eq!(lines[0].text, "日本語");
+        assert_eq!(lines[1].text, "日本語");
     }
 
     #[test]
@@ -2998,7 +3291,7 @@ mod tests {
         let blocks = parse_blocks(&entry.text);
         // Width 7: 日(2)本(2)語(2) = 6, テ would exceed → cut after 語.
         let lines = layout(&entry, &blocks, EXPANDED, 7);
-        assert_eq!(lines[0].text, "日本語…");
+        assert_eq!(lines[1].text, "日本語…");
     }
 
     #[test]
@@ -3006,11 +3299,24 @@ mod tests {
         let entry = Entry::new(EntryKind::User, "hello");
         let lines = layout(&entry, &[], EXPANDED, 30);
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].pad && lines[2].pad);
+        // ADR 0035: the pads are half cells, above and below.
+        assert_eq!(lines[0].pad, Pad::Top);
+        assert_eq!(lines[2].pad, Pad::Bottom);
         assert!(lines[0].chars.is_empty());
         assert_eq!(lines[0].end, 0, "the top pad is the gap before the text");
         assert_eq!(lines[2].end, 5, "the bottom pad reaches the text's end");
         assert_eq!(lines[1].text, "hello");
+        // The `ascii` tier has no half-block glyph, so it gets no padding row: the block is
+        // just the text (decision 4).
+        let ascii = DisplayModes {
+            glyphs: crate::footer::Glyphs::Ascii,
+            ..EXPANDED
+        };
+        let lines = layout(&entry, &[], ascii, 30);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].text, "hello");
+        assert_eq!(line_count(&entry, ascii, 30), 1);
+        assert_eq!(line_count(&entry, EXPANDED, 30), 3);
     }
 
     #[test]
@@ -3039,6 +3345,189 @@ mod tests {
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
         assert_eq!(lines[0].text, "thinking (3 lines)");
     }
+    // ---- ADR 0035: the Markdown elements ----
+
+    fn md(source: &str, width: usize, glyphs: crate::footer::Glyphs) -> Vec<String> {
+        md_lines(source, 0, width, glyphs)
+            .into_iter()
+            .map(|line| line.text)
+            .collect()
+    }
+
+    /// Block-level elements are separated by exactly one blank line, whatever the source.
+    #[test]
+    fn markdown_elements_have_one_blank_line_between_them() {
+        let texts = md(
+            "# H\n\npara\n\n- one\n\n> q\n\n---\n",
+            40,
+            crate::footer::Glyphs::Unicode,
+        );
+        assert!(
+            texts
+                .windows(2)
+                .all(|w| !(w[0].is_empty() && w[1].is_empty())),
+            "{texts:?}"
+        );
+        let h = texts.iter().position(|t| t.contains('H')).unwrap();
+        let p = texts.iter().position(|t| t.contains("para")).unwrap();
+        assert_eq!(p, h + 2, "exactly one blank between blocks: {texts:?}");
+        // A source with no blank lines still gets the spacing.
+        let tight = md(
+            "para one\n# H\npara two\n",
+            40,
+            crate::footer::Glyphs::Unicode,
+        );
+        let h = tight.iter().position(|t| t.contains('H')).unwrap();
+        assert!(tight[h - 1].is_empty(), "{tight:?}");
+        assert!(tight[h + 1].is_empty(), "{tight:?}");
+    }
+
+    /// The unordered marker is `-`, and a continuation aligns to the marker's actual width.
+    #[test]
+    fn lists_use_a_dash_and_align_continuations_to_the_marker() {
+        let texts = md(
+            "- one two three four five six\n",
+            12,
+            crate::footer::Glyphs::Unicode,
+        );
+        assert!(texts[0].starts_with("- one"), "{texts:?}");
+        assert!(texts[1].starts_with("  "), "{texts:?}");
+        let ordered = md("10. aaa bbb ccc ddd\n", 12, crate::footer::Glyphs::Unicode);
+        assert!(ordered[0].starts_with("10. aaa"), "{ordered:?}");
+        assert!(
+            ordered[1].starts_with("    "),
+            "`10. ` is 4 cells: {ordered:?}"
+        );
+    }
+
+    /// Task lists render `☐`/`☑` (ascii `[ ]`/`[x]`) instead of the bullet.
+    #[test]
+    fn task_lists_render_checkboxes() {
+        let texts = md(
+            "- [ ] todo\n- [x] done\n",
+            40,
+            crate::footer::Glyphs::Unicode,
+        );
+        assert!(texts.iter().any(|t| t.contains("☐ todo")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("☑ done")), "{texts:?}");
+        let ascii = md("- [ ] todo\n", 40, crate::footer::Glyphs::Ascii);
+        assert!(ascii.iter().any(|t| t.contains("[ ] todo")), "{ascii:?}");
+    }
+
+    /// The quote bar and the rule follow the glyph set.
+    #[test]
+    fn quotes_and_rules_use_the_glyphs() {
+        let texts = md("> quoted\n\n---\n", 40, crate::footer::Glyphs::Unicode);
+        assert!(texts.iter().any(|t| t.contains("▏ quoted")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains('─')), "{texts:?}");
+        let ascii = md("> quoted\n\n---\n", 40, crate::footer::Glyphs::Ascii);
+        assert!(ascii.iter().any(|t| t.contains("| quoted")), "{ascii:?}");
+        assert!(ascii.iter().any(|t| t.contains('-')), "{ascii:?}");
+        let nerd = md("> quoted\n", 40, crate::footer::Glyphs::Nerd);
+        assert!(nerd.iter().any(|t| t.contains("│ quoted")), "{nerd:?}");
+    }
+
+    /// A table has a border between every two rows, not only under the header.
+    #[test]
+    fn a_table_has_a_border_between_every_row() {
+        let texts = md(
+            "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n",
+            40,
+            crate::footer::Glyphs::Unicode,
+        );
+        assert_eq!(
+            texts.iter().filter(|t| t.contains('├')).count(),
+            2,
+            "{texts:?}"
+        );
+        assert!(texts[0].contains('┌'), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains('└')), "{texts:?}");
+        let ascii = md(
+            "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n",
+            40,
+            crate::footer::Glyphs::Ascii,
+        );
+        assert!(!ascii.iter().any(|t| t.contains('┌')), "{ascii:?}");
+    }
+
+    /// HTML: `<br>` is a break, `<hr>` a rule, `<blockquote>` a quote; other tags are stripped.
+    #[test]
+    fn html_br_hr_and_blockquote_render() {
+        let texts = md(
+            "a<br>b\n\n<hr>\n\n<blockquote>q</blockquote>\n",
+            40,
+            crate::footer::Glyphs::Unicode,
+        );
+        assert!(texts.iter().any(|t| t == "a"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "b"), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains('─')), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("▏ q")), "{texts:?}");
+        // A span's text is kept, its tags stripped.
+        let stripped = md(
+            "a <span class=\"x\">b</span> c\n",
+            40,
+            crate::footer::Glyphs::Unicode,
+        );
+        assert!(stripped.iter().any(|t| t.contains("a b c")), "{stripped:?}");
+    }
+
+    /// A code block shows its fence line (weak) as its title and end.
+    #[test]
+    fn a_code_block_shows_its_fence() {
+        let mut entry = Entry::new(EntryKind::Assistant, "```rust\nlet x = 1;\n```\n");
+        let blocks = blocks_for(&mut entry, ReasoningMode::Collapsed);
+        let lines = layout(&entry, &blocks, DisplayModes::default(), 40);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.contains(&"```rust"), "{texts:?}");
+        assert!(texts.contains(&"let x = 1;"), "{texts:?}");
+        assert_eq!(
+            texts.iter().filter(|t| **t == "```").count(),
+            1,
+            "{texts:?}"
+        );
+    }
+
+    /// The synthesized Markdown decorations (bullet, checkbox, quote bar) have no source
+    /// offset, so a copy never includes them (the real text does).
+    #[test]
+    fn markdown_decorations_do_not_copy() {
+        let lines = md_lines(
+            "- one\n- [ ] todo\n\n> quoted\n",
+            0,
+            40,
+            crate::footer::Glyphs::Unicode,
+        );
+        let mut found = 0;
+        for line in &lines {
+            for piece in line.md.as_deref().unwrap_or_default() {
+                if ["- ", "☐ ", "▏ "].contains(&piece.text.as_str()) {
+                    assert!(piece.offset.is_none(), "a decoration copies: {piece:?}");
+                    found += 1;
+                }
+            }
+        }
+        assert_eq!(found, 3, "the bullet, the checkbox and the quote bar");
+    }
+
+    /// A heading's `#` uses the weak role; the text is the heading role (level 1 underlined).
+    #[test]
+    fn headings_keep_the_hash_with_their_own_role() {
+        let lines = md_lines("# H\n", 0, 40, crate::footer::Glyphs::Unicode);
+        let pieces = lines[0].md.as_ref().expect("md pieces");
+        let mark = pieces.iter().find(|p| p.style == MdStyle::HeadingMark);
+        assert_eq!(mark.map(|p| p.text.as_str()), Some("# "), "{pieces:?}");
+        assert_eq!(
+            pieces.last().map(|p| p.style),
+            Some(MdStyle::Heading1),
+            "level 1 underlines"
+        );
+        let lines = md_lines("## H\n", 0, 40, crate::footer::Glyphs::Unicode);
+        let pieces = lines[0].md.as_ref().expect("md pieces");
+        let mark = pieces.iter().find(|p| p.style == MdStyle::HeadingMark);
+        assert_eq!(mark.map(|p| p.text.as_str()), Some("## "), "{pieces:?}");
+        assert_eq!(pieces.last().map(|p| p.style), Some(MdStyle::Heading));
+    }
+
     /// ADR 0024 R1: the `ask_user` card is a boxed block. The call has no answers
     /// (unanswered), the structured result marks the chosen option and shows a note, and an
     /// error result is a declined/cancelled status.

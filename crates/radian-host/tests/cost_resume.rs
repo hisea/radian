@@ -294,6 +294,125 @@ fn the_snapshot_route_prices_the_calls_before_the_first_switch() {
 
 /// Research F5: a resumed session folds each historical call at the price in force **then**,
 /// and a tiered price picks its tier by that call's own prompt length, not the session total.
+/// ADR 0027: a record that carries its fee is added as it stands, so a
+/// catalog update does not change what an old session spent. Without this the resume re-priced
+/// the call with the **current** catalog and the total moved when the price did.
+#[tokio::test]
+async fn a_recorded_fee_is_restored_as_it_stands_when_the_catalog_moves() {
+    let scratch = Scratch::new("recorded-fee");
+    let path = scratch.file("s.jsonl");
+    let journal = SessionJournal::create(
+        &path,
+        "recorded-fee",
+        SessionCreatedData::new(
+            "/work/example",
+            json!({"model": {"provider": "opencode-go", "model": "cheap"}}),
+        ),
+    )
+    .unwrap();
+    // What the writer records: a fixed $0.10 for a 1M-input call (micro-dollars).
+    journal.set_usage_fee(Arc::new(|usage: &agent_core::ModelUsage| {
+        usage
+            .input
+            .map(|input| radian_session::UsageFee::new(input / 10, false))
+    }));
+    journal
+        .append(JournalRecord::ModelUsage {
+            usage: agent_core::ModelUsage {
+                input: Some(1_000_000),
+                input_includes_cache: Some(false),
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    // The catalog has moved since: the same route now bills 20x more. The recorded fee wins.
+    let moved: cost::RoutePrice = Arc::new(|provider: &str, model: &str| {
+        (provider == "opencode-go" && model == "cheap").then(|| radian_host::ModelPrice {
+            input: 3_000_000,
+            output: 0,
+            cache_read: None,
+            cache_write: None,
+            tiers: Vec::new(),
+        })
+    });
+    let parsed = Session::open(&path).unwrap();
+    let projection = SessionProjection::new();
+    assert_eq!(cost::restore_usage(&parsed, &projection, &moved), 1);
+    let read = projection.read();
+    assert_eq!(
+        read.cost_micros(),
+        Some(100_000),
+        "the recorded fee, not the moved catalog price"
+    );
+    assert!(!read.cost_estimated(), "a recorded fee is not an estimate");
+    assert!(!read.cost_incomplete());
+}
+
+/// ADR 0027: an old record (no fee field) is re-priced with the current
+/// catalog **and** the total is marked an estimate, so the footer shows `~`.
+#[test]
+fn an_old_record_without_a_fee_is_repriced_and_marks_the_total_an_estimate() {
+    let (_scratch, path) = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(usage_session("old-estimate"));
+    let parsed = Session::open(&path).unwrap();
+    let projection = SessionProjection::new();
+
+    assert_eq!(cost::restore_usage(&parsed, &projection, &prices()), 3);
+    let read = projection.read();
+    assert_eq!(
+        read.cost_micros(),
+        Some(3_450_000),
+        "re-priced with today's catalog"
+    );
+    assert!(
+        read.cost_estimated(),
+        "an old record has no fee: the total is an estimate"
+    );
+}
+
+/// ADR 0027: a recorded fee that was incomplete keeps the total
+/// incomplete after a resume — and is still not an estimate.
+#[tokio::test]
+async fn a_recorded_incomplete_fee_keeps_the_total_incomplete() {
+    let scratch = Scratch::new("recorded-incomplete");
+    let path = scratch.file("s.jsonl");
+    let journal = SessionJournal::create(
+        &path,
+        "recorded-incomplete",
+        SessionCreatedData::new(
+            "/work/example",
+            json!({"model": {"provider": "opencode-go", "model": "cheap"}}),
+        ),
+    )
+    .unwrap();
+    journal.set_usage_fee(Arc::new(|_usage: &agent_core::ModelUsage| {
+        Some(radian_session::UsageFee::new(50_000, true))
+    }));
+    journal
+        .append(JournalRecord::ModelUsage {
+            usage: agent_core::ModelUsage {
+                input: Some(1_000_000),
+                input_includes_cache: Some(false),
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let parsed = Session::open(&path).unwrap();
+    let projection = SessionProjection::new();
+    assert_eq!(cost::restore_usage(&parsed, &projection, &prices()), 1);
+    let read = projection.read();
+    assert_eq!(read.cost_micros(), Some(50_000));
+    assert!(read.cost_incomplete(), "the recorded flag survives");
+    assert!(!read.cost_estimated());
+}
+
 #[tokio::test]
 async fn a_resumed_tiered_price_folds_each_call_by_its_own_length() {
     let scratch = Scratch::new("tiered-resume");

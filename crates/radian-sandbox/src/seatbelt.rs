@@ -26,6 +26,14 @@ impl SandboxBackend for Seatbelt {
         "macos-seatbelt"
     }
 
+    /// macos-seatbelt is where the ADR 0038 carve-out is implemented, so it reports the policy's
+    /// request as the effective one: `ReadOnly` keeps the whole metadata read-only, and
+    /// `WritableExceptExec` opens it except the executable entries (`git_exec_denies`). The two
+    /// stay in step because the same `policy.git_access` drives the profile and this answer.
+    fn git_writable_except_exec(&self, policy: &SandboxPolicy) -> bool {
+        matches!(policy.git_access, GitAccess::WritableExceptExec)
+    }
+
     fn probe(&self) -> Result<ProbeReport, SandboxError> {
         if !Path::new(SANDBOX_EXEC).exists() {
             return Err(SandboxError::BackendUnavailable {
@@ -345,6 +353,24 @@ mod tests {
         assert!(
             !profile.contains("(allow network*)"),
             "network is off by default"
+        );
+    }
+
+    /// ADR 0038 decision 4: the effective git access the per-session text reports is the
+    /// policy's on this backend, because macos-seatbelt is where the carve-out is implemented.
+    /// `ReadOnly` (the default, and what a task agent keeps) must report `false` so the text
+    /// stays the read-only wording; only `WritableExceptExec` reports the writable one.
+    #[test]
+    fn the_effective_git_access_follows_the_policy() {
+        let mut p = policy();
+        assert!(
+            !SEATBELT.git_writable_except_exec(&p),
+            "the default must not claim the carve-out"
+        );
+        p.git_access = GitAccess::WritableExceptExec;
+        assert!(
+            SEATBELT.git_writable_except_exec(&p),
+            "WritableExceptExec must report the carve-out"
         );
     }
 

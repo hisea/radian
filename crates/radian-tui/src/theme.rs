@@ -180,6 +180,8 @@ pub enum Role {
     MermaidText,
     /// Assistant-text Markdown roles (ADR 0028 R2, pi's same-named `md*` roles).
     MdHeading,
+    /// A heading's `#` mark (ADR 0035): one level weaker than the heading text.
+    MdHeadingMark,
     MdLink,
     MdLinkUrl,
     MdCode,
@@ -205,7 +207,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 63] = [
+    pub const ALL: [Role; 64] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
@@ -252,6 +254,7 @@ impl Role {
         Role::MermaidEdge,
         Role::MermaidText,
         Role::MdHeading,
+        Role::MdHeadingMark,
         Role::MdLink,
         Role::MdLinkUrl,
         Role::MdCode,
@@ -320,6 +323,7 @@ impl Role {
             Role::MermaidEdge => "mermaid_edge",
             Role::MermaidText => "mermaid_text",
             Role::MdHeading => "md_heading",
+            Role::MdHeadingMark => "md_heading_mark",
             Role::MdLink => "md_link",
             Role::MdLinkUrl => "md_link_url",
             Role::MdCode => "md_code",
@@ -394,6 +398,7 @@ impl Role {
             Role::MermaidEdge => &mut theme.mermaid_edge,
             Role::MermaidText => &mut theme.mermaid_text,
             Role::MdHeading => &mut theme.md_heading,
+            Role::MdHeadingMark => &mut theme.md_heading_mark,
             Role::MdLink => &mut theme.md_link,
             Role::MdLinkUrl => &mut theme.md_link_url,
             Role::MdCode => &mut theme.md_code,
@@ -488,6 +493,8 @@ pub struct Theme {
     /// Assistant-text Markdown roles (ADR 0028 R2): headings, links, inline code, quotes,
     /// rules and list bullets.
     pub md_heading: Style,
+    /// A heading's `#` mark (ADR 0035).
+    pub md_heading_mark: Style,
     pub md_link: Style,
     pub md_link_url: Style,
     pub md_code: Style,
@@ -677,6 +684,7 @@ impl Theme {
             mermaid_text: text,
             // Markdown (ADR 0028 R2): pi's `md*` roles.
             md_heading: spec(pi::TEXT, Modifier::BOLD, truecolor),
+            md_heading_mark: dim,
             md_link: spec(pi::VIOLET, Modifier::UNDERLINED, truecolor),
             md_link_url: muted,
             md_code: spec(pi::YELLOW, Modifier::empty(), truecolor),
@@ -768,6 +776,7 @@ impl Theme {
             mermaid_text: text,
             // Markdown (ADR 0028 R2): pi's `md*` roles.
             md_heading: spec(pi::TEXT, Modifier::BOLD, truecolor),
+            md_heading_mark: dim,
             md_link: spec(pi::VIOLET, Modifier::UNDERLINED, truecolor),
             md_link_url: muted,
             md_code: spec(pi::YELLOW, Modifier::empty(), truecolor),
@@ -879,6 +888,7 @@ impl Theme {
             mermaid_text: style(None, Modifier::empty()),
             // `mono` uses modifiers only: bold headings and links, dim quotes/rules/urls.
             md_heading: style(None, Modifier::BOLD),
+            md_heading_mark: style(None, Modifier::DIM),
             md_link: style(None, Modifier::UNDERLINED),
             md_link_url: style(None, Modifier::DIM),
             md_code: style(None, Modifier::BOLD),

@@ -2177,11 +2177,12 @@ async fn pty_a_compound_shell_command_always_asks() {
     pty.quit();
 }
 
-/// A panic inside the driver task is caught by the runtime, but the UI must notice that the
-/// session is gone: leave in order, restore the terminal, and report the failure where the
-/// user can see it (after the alternate screen is gone).
+/// A panic inside the driver task is caught by the runtime. The UI must notice that the
+/// session is gone: leave `Running`, name the reason in the status bar, and refuse `/fork`
+/// (ADR 0022 §1's idle session no longer exists). It stays so the reason is readable; the
+/// user quits with the ordinary keys, which restore the terminal.
 #[test]
-fn pty_a_driver_panic_exits_orderly_and_restores_the_terminal() {
+fn pty_a_driver_panic_ends_the_session_and_refuses_fork() {
     let _serial = pty_guard();
     let dir = TempDir::new("driver-panic");
     let mut pty = Pty::spawn(
@@ -2199,31 +2200,35 @@ fn pty_a_driver_panic_exits_orderly_and_restores_the_terminal() {
         24,
         100,
     );
+    // The session ends in place: the notice names the reason and the app stays.
     assert!(
-        pty.wait_for_exit(15).is_some(),
-        "the TUI did not exit after the driver task panicked"
+        pty.wait_for_screen("the session ended: driver panicked", 15),
+        "the session-ended notice is missing:\n{}",
+        pty.screen()
     );
-    // Not 101: the process did not panic, its driver did. The app exits 1 with a message.
-    assert_eq!(pty.app_exit_code(), Some(1), "an orderly failure exit");
+    assert!(
+        pty.wait_for_screen("driver task panic test", 10),
+        "the reason is the panic message:\n{}",
+        pty.screen()
+    );
+    // `/fork` is refused: the session is over.
+    pty.send(b"/fork\r");
+    assert!(
+        pty.wait_for_screen("the session has ended; there is nothing to fork", 10),
+        "`/fork` was not refused:\n{}",
+        pty.screen()
+    );
+    // The user quits with the ordinary keys; the terminal is restored. The exit is still 1:
+    // the driver's failure is reported on the normal screen by `main` after the loop.
+    pty.quit();
+    assert_eq!(
+        pty.app_exit_code(),
+        Some(1),
+        "the driver failure is still reported"
+    );
     let raw_text = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw_text.contains("\u{1b}[?1049l"), "left alternate screen");
-    assert!(
-        raw_text.contains("\u{1b}[?2004l"),
-        "bracketed paste disabled"
-    );
     assert!(raw_text.contains("\u{1b}[?25h"), "cursor restored");
-    assert!(raw_text.contains("icanon"), "cooked mode restored");
-    assert!(!raw_text.contains("-icanon"), "raw mode not restored");
-    // The panic is reported after the alternate screen is gone, so it is readable.
-    let after_restore = raw_text
-        .rsplit_once("\u{1b}[?1049l")
-        .map(|(_, rest)| rest.to_string())
-        .unwrap_or_default();
-    assert!(
-        after_restore.contains("driver task ended unexpectedly")
-            || after_restore.contains("driver task panic test"),
-        "the failure was not reported on the normal screen: {after_restore}"
-    );
 }
 
 /// A bracketed paste arrives whole and multi-line in the input box.
@@ -3736,7 +3741,9 @@ fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
 async fn pty_a_model_error_is_shown_and_the_session_continues() {
     let _serial = pty_guard();
     let server = MockServer::start(vec![
-        Reply::status(500, "provider is down"),
+        // Non-transient, so one failure ends the turn (ADR 0017 retries only
+        // connection failures, dropped streams, idle timeouts and 408/429/5xx/529).
+        Reply::status(400, "provider is down"),
         text_reply("SECOND-OK"),
     ])
     .await;
@@ -3763,7 +3770,7 @@ async fn pty_a_model_error_is_shown_and_the_session_continues() {
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("HTTP 500", 20),
+        pty.wait_for_screen("HTTP 400", 20),
         "the HTTP status is not shown:\n{}",
         pty.screen()
     );
@@ -3889,24 +3896,25 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    // The memory notice is one of the folded startup lines.
+    // The memory notice is one of the folded startup lines. Wait for
+    // **that** line: `expand_startup` returns as soon as the block is expanded (its predicate
+    // accepts the header or `profile:`), so reading the screen right after can catch a frame
+    // whose tail is not on screen yet.
     pty.expand_startup();
-    let notice = pty
-        .screen()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
     assert!(
-        notice.contains("[memory]"),
-        "the memory startup notice is shown: {notice}"
+        pty.wait_for_screen("[memory]", 10),
+        "the memory startup notice is shown:\n{}",
+        pty.screen()
     );
     assert!(
-        notice.contains("no project linked"),
-        "the notice names the unlinked state: {notice}"
+        pty.wait_for_screen("no project linked", 10),
+        "the notice names the unlinked state:\n{}",
+        pty.screen()
     );
     assert!(
-        notice.contains("injection on, up to 2000 tokens"),
-        "the notice names the budget: {notice}"
+        pty.wait_for_screen("injection on, up to 2000 tokens", 10),
+        "the notice names the budget:\n{}",
+        pty.screen()
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -4939,6 +4947,126 @@ async fn pty_fork_creates_a_resumable_child_when_idle() {
     assert_eq!(child.app_exit_code(), Some(0));
 }
 
+/// ADR 0022 §1: a `/fork` requested while the turn's boundary is still being written waits for
+/// the journaled `TurnFinished` (a controllable gap via `RADIAN_TURN_COMMIT_DELAY_MS`) instead
+/// of copying an empty history. The classic footer shows the turn state, so the test can wait
+/// for `idle` (the `RunFinished`) while the commit is still pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_fork_waits_for_the_turn_to_be_committed() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("fork-commit-wait");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("PARENT-DONE")]).await;
+    let config = "schema_version = 1\n[tui.footer]\npreset = \"classic\"\n";
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "parent",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_TURN_COMMIT_DELAY_MS", "1500")],
+        config,
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello parent\r");
+    assert!(pty.wait_for_screen("PARENT-DONE", 15), "{}", pty.screen());
+    // The turn is idle (the agent's `RunFinished`), but the journaled `TurnFinished` is still
+    // ~1.5 s away.
+    assert!(pty.wait_for_screen("idle", 10), "{}", pty.screen());
+    pty.send(b"/fork\r");
+    assert!(
+        pty.wait_for_screen("forked at seq", 10),
+        "the fork never ran after the commit:\n{}",
+        pty.screen()
+    );
+    // The child has the parent's whole turn, not an empty history.
+    let child = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().is_some_and(|ext| ext == "jsonl") && !path.ends_with("parent.jsonl")
+        })
+        .expect("a child session file");
+    let text = std::fs::read_to_string(&child).unwrap();
+    assert!(
+        text.contains("hello parent"),
+        "the child history is empty:\n{text}"
+    );
+    assert!(text.contains("PARENT-DONE"), "{text}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0022 §1: when the commit takes longer than `FORK_COMMIT_WAIT`, the `/fork` gives up with
+/// a notice and creates no child session (never an empty one).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_fork_gives_up_when_the_turn_is_still_being_written() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("fork-commit-timeout");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("PARENT-DONE")]).await;
+    let config = "schema_version = 1\n[tui.footer]\npreset = \"classic\"\n";
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "parent",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_TURN_COMMIT_DELAY_MS", "8000")],
+        config,
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello parent\r");
+    assert!(pty.wait_for_screen("PARENT-DONE", 15), "{}", pty.screen());
+    assert!(pty.wait_for_screen("idle", 10), "{}", pty.screen());
+    pty.send(b"/fork\r");
+    assert!(
+        pty.wait_for_screen("still writing the turn; try again", 10),
+        "the fork did not time out:\n{}",
+        pty.screen()
+    );
+    // No child session file was created.
+    let files: Vec<String> = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        files,
+        vec!["parent.jsonl".to_string()],
+        "no empty child: {files:?}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// `/fork` while a turn is running is refused with a notice and creates nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -5185,6 +5313,102 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
             std::fs::read_to_string(&trace).unwrap_or_default()
         );
     }
+}
+
+/// The exit line must not hang the process when the terminal stops draining (a full pty output
+/// buffer, or XOFF). `main` prints it **after** `runtime.shutdown_timeout`, so the signal task
+/// — the watchdog that is the only other way a stuck process ends — is already gone; an
+/// unbounded `writeln!` to a full pty would then block forever (small-fixes-3).
+///
+/// `--exit-line-filler` makes the clean-exit reason line larger than the pty output buffer, so
+/// the write is guaranteed to block once the test stops draining. `--freeze-draw` parks the app
+/// after the first frame, so the only writes left on the exit path are the terminal restore
+/// (small, and the buffer has room for it after the drain) and the exit line itself. The child
+/// must still exit within the bound; the deadline is a failure bound, not synchronization.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_full_terminal_cannot_hang_the_exit_line() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("exit-line-hang");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = dir.path().join("sessions");
+    let frozen = dir.path().join("frozen");
+    let home = TempDir::new("exit-line-hang-home");
+    let (mut child, mut master) = spawn_direct(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "exit-line-hang",
+            "--offline-catalog",
+            "--workspace",
+            ws.to_str().unwrap(),
+            // The app stops drawing once the first frame is out; with no further writes the pty
+            // buffer cannot fill from the draw path.
+            "--freeze-draw",
+            frozen.to_str().unwrap(),
+            // Larger than any pty output buffer, so the exit line's write cannot complete once
+            // the test stops reading.
+            "--exit-line-filler",
+            "1048576",
+        ],
+        home.path(),
+    );
+
+    // The first frame is larger than the pty buffer, so the app blocks in `draw` until someone
+    // reads; the marker appears only once the frame is fully written.
+    let mut drained = Vec::new();
+    let mut buf = [0u8; 65536];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !frozen.exists() {
+        if let Ok(n) = master.read(&mut buf) {
+            drained.extend_from_slice(&buf[..n]);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the app never drew its first frame; output: {}",
+            String::from_utf8_lossy(&drained)
+        );
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "the app exited before the signal"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Empty the pty buffer: the app is frozen, so nothing else is coming from the draw path, and
+    // the restore sequences need room. A non-blocking master reports "nothing buffered" as an
+    // error, which ends the drain.
+    loop {
+        match master.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => drained.extend_from_slice(&buf[..n]),
+        }
+    }
+
+    // Stop draining and ask the app to leave. Its exit path writes the restore sequences (they
+    // fit) and then the oversized exit line, whose write blocks on the full buffer.
+    // SAFETY: signal delivery to our own child process.
+    unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM) };
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the app did not exit within 10 s of SIGTERM: the exit line blocked on the full pty \
+             (it is printed after runtime.shutdown_timeout, when the signal watchdog is gone)"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(128 + 15), "128 + SIGTERM: {status:?}");
 }
 
 /// The remaining window: the main loop can be stuck inside a long frame (a terminal write that
@@ -8894,7 +9118,7 @@ async fn pty_the_pi_footer_is_two_rows() {
     // The model item is on the footer's first row; the tokens item on the second. The screen
     // text is one string, so both must be present, and the tokens glyph marks the second row.
     assert!(
-        pty.wait_for_screen("^-", 10),
+        pty.wait_for_screen("↑-", 10),
         "the tokens row is missing:\n{}",
         pty.screen()
     );
@@ -8932,15 +9156,22 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
         90,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // Wait for the **footer** before reading its last two lines: `message` is the input hint,
+    // which is drawn in the same frame as the footer, but the hint can appear before the
+    // footer's items have data. `↑- ↓- R-` is the numbers row with no usage yet (the unicode
+    // tier's token arrows, ADR 0027 item 2).
+    assert!(
+        pty.wait_for_screen("↑- ↓-", 10),
+        "the numbers row is on screen:\n{}",
+        pty.screen()
+    );
     let lines: Vec<String> = pty.screen().lines().map(str::to_owned).collect();
     let first = lines.get(lines.len() - 2).cloned().unwrap_or_default();
     let second = lines.last().cloned().unwrap_or_default();
-    // The shipped default is the `full` preset (ADR 0027): the identity row (brand,
-    // model, repo/worktree) and the numbers row (tokens, speed, cost, context, elapsed).
-    assert!(
-        first.contains('R') || first.contains("rad"),
-        "the brand is on the first row: {first:?}"
-    );
+    // The shipped default is the `deck` preset (ADR 0027): the identity row (model,
+    // cwd, branch, worktree) and the numbers row (tokens, cost, context). The `deck` identity
+    // row has no brand, so there is no brand assertion (the old one passed only because the
+    // temp workspace is named `radian-…`).
     assert!(
         first.contains("mock"),
         "the model is on the identity row: {first:?}"
@@ -8950,7 +9181,7 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
         "the repo/worktree name is on the identity row: {first:?}"
     );
     assert!(
-        second.contains('^'),
+        second.contains('↑'),
         "the numbers row shows the tokens: {second:?}"
     );
     assert!(
@@ -9062,14 +9293,14 @@ async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     // The earlier turn's tokens are there (1M in, 100K out). The default `tokens` format is
-    // `^{in} v{out} R{cache}` (ADR 0027's ASCII-default icons), and `format_tokens`
+    // `↑{in} ↓{out} R{cache}` (ADR 0027 item 2's unicode arrows), and `format_tokens`
     // keeps one decimal under 10 (so 1 000 000 is `1.0M`) and rounds above it (`100K`).
     assert!(
-        pty.wait_for_screen("^1.0M", 10),
+        pty.wait_for_screen("↑1.0M", 10),
         "the resumed token total is missing:\n{}",
         pty.screen()
     );
-    assert!(pty.screen().contains("v100K"), "{}", pty.screen());
+    assert!(pty.screen().contains("↓100K"), "{}", pty.screen());
     // ... and its fee: 1M x $0.15 + 100K x $0.60 per Mtok = $0.21, three decimals
     // (ADR 0027).
     assert!(
@@ -9527,5 +9758,308 @@ fn the_bang_command_runs_through_the_sandboxed_executor() {
     assert!(
         !arm.contains("Command::new"),
         "the RunBash arm must not build a command directly (that would bypass the sandbox):\n{arm}"
+    );
+}
+
+/// ADR 0038 slice 2: switching to `full` (no sandbox) opens a confirmation; Esc cancels and
+/// leaves the tier unchanged. The model has no tool for this, so it is a user-only command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_access_full_requires_confirmation_and_esc_cancels() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("access-confirm");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().join("sessions").to_str().unwrap(),
+            "--session-id",
+            "access-confirm",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("workspace", 15),
+        "the startup must show the tier:\n{}",
+        pty.screen()
+    );
+
+    // `/access full` opens the confirmation; nothing has switched yet.
+    pty.send(b"/access full\r");
+    assert!(
+        pty.wait_for_screen("full means no sandbox", 10),
+        "the confirmation must be up:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("access: full"),
+        "the tier must not switch before confirmation:\n{}",
+        pty.screen()
+    );
+
+    // Esc cancels.
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_for_screen("access unchanged", 10),
+        "Esc must cancel:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("access: full"),
+        "the tier must be unchanged after Esc:\n{}",
+        pty.screen()
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0038 decision 3: a remembered per-project `full` applies at the next start, and the
+/// startup line and the footer mark it `(project)`. A file **in the workspace** cannot cause
+/// it — only the user's `~/.radian/access/access.json` can.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("access-remembered");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // The store is keyed by the ADR 0021 project identity, and `RADIAN_HOME` is the root the
+    // app reads (not `<root>/.radian`): `$RADIAN_HOME/access/access.json`.
+    let key = radian_host::memory::project_identity_key(&ws)
+        .to_string_lossy()
+        .into_owned();
+    let home = dir.path().join("home");
+    let store_dir = home.join("access");
+    std::fs::create_dir_all(&store_dir).unwrap();
+    std::fs::write(
+        store_dir.join("access.json"),
+        format!("{{\"{key}\": \"full\"}}\n"),
+    )
+    .unwrap();
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().join("sessions").to_str().unwrap(),
+            "--session-id",
+            "access-remembered",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("full (project)", 15),
+        "the remembered tier must apply and be marked:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    // A workspace file with the same content, and a fresh HOME with no store, must not set the
+    // tier: a cloned repository cannot ship a line that opens the sandbox.
+    let home2 = dir.path().join("home2");
+    std::fs::create_dir_all(&home2).unwrap();
+    std::fs::create_dir_all(ws.join(".radian")).unwrap();
+    std::fs::write(
+        ws.join(".radian/access.json"),
+        format!("{{\"{key}\": \"full\"}}\n"),
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().join("sessions2").to_str().unwrap(),
+            "--session-id",
+            "access-wsfile",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home2.to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("workspace", 15),
+        "the workspace file must be ignored:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("full (project)"),
+        "a workspace file must not set the tier:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0038 decision 2: a journaled access change restores the tier on resume, the same way
+/// `/model` restores the route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_restores_the_access_tier() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("access-resume");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let path = sessions.join("access-resume.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "access-resume",
+        radian_session::SessionCreatedData::new(ws.to_string_lossy(), json!({})),
+    )
+    .expect("create the session file");
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: json!({"access": "full"}),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--resume",
+            "access-resume",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("full (session)", 15),
+        "the resumed tier must apply and be marked:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0038 slice 3: `/mode lead` in the real TUI switches the role layer from the next turn.
+/// The first turn runs the general role, the notice names the switch, and the second turn's
+/// request carries the lead role prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_mode_lead_switches_the_role_prompt_from_the_next_turn() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("mode-switch");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("FIRST-OK"), text_reply("SECOND-OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().join("sessions").to_str().unwrap(),
+            "--session-id",
+            "mode",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 15), "{}", pty.screen());
+
+    pty.send(b"one\r");
+    assert!(
+        pty.wait_for_screen("FIRST-OK", 20),
+        "the first turn did not finish:\n{}",
+        pty.screen()
+    );
+
+    // `/mode` with no argument reports the current mode; `/mode lead` switches it.
+    pty.send(b"/mode\r");
+    assert!(
+        pty.wait_for_screen("mode: general", 10),
+        "the mode must be reported:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/mode lead\r");
+    assert!(
+        pty.wait_for_screen("mode: lead from the next turn", 10),
+        "the switch notice must be shown:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"two\r");
+    assert!(
+        pty.wait_for_screen("SECOND-OK", 20),
+        "the second turn did not finish:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "two turns, two requests");
+    let system = |n: usize| -> String {
+        requests[n].json()["messages"]
+            .as_array()
+            .expect("messages is an array")
+            .iter()
+            .find(|message| message["role"] == "system")
+            .and_then(|message| message["content"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert!(
+        system(0).contains("You are radian, a coding agent"),
+        "turn 1 runs the general role: {}",
+        system(0)
+    );
+    assert!(
+        system(1).contains("You are a radian lead agent"),
+        "turn 2 runs the lead role: {}",
+        system(1)
+    );
+    // Only the role layer moved: everything outside `<role>` is byte-identical.
+    let without_role = |prompt: &str| {
+        let start = prompt.find("<role>\n").expect("a <role> block") + "<role>\n".len();
+        let end = prompt.find("\n</role>").expect("the block's end");
+        format!("{}ROLE{}", &prompt[..start], &prompt[end..])
+    };
+    assert_eq!(
+        without_role(&system(0)),
+        without_role(&system(1)),
+        "only `<role>` may differ across the switch"
     );
 }

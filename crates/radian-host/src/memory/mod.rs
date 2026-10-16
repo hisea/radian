@@ -16,7 +16,9 @@ pub use commands::{
     CommandError, CommandOutput, MemoryCommand, ProjectCommand, USAGE_ERROR, execute, parse_args,
 };
 pub use identity::{candidate_name, project_identity_key};
-pub use injection::{Injection, InjectionConfig, MemoryHooks, plan};
+pub use injection::{
+    ADDITION_KIND, Injection, InjectionConfig, MemoryHooks, MemoryInjection, addition_seam, plan,
+};
 pub use service::{
     CreatedProject, MemoryService, MemoryServiceError, ProjectForWrite, ProjectState,
     ScopeSelection, WriteScope,

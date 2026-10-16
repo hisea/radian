@@ -22,6 +22,12 @@ pub const HELP: &str = "\
 /thinking <level>     set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)
 /auto on|off          auto-approve tool asks for this session (ADR 0026 D9)
 /yolo                 alias of /auto
+/access [safe|workspace|full]
+                      show or switch the permission tier (ADR 0038); the switch takes effect
+                      at the next tool call, and `full` asks for confirmation
+/mode [general|lead]
+                      show or switch the working mode (ADR 0038); `lead` is the project-lead
+                      role prompt, and the switch takes effect at the next turn
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
@@ -94,6 +100,12 @@ pub enum Outcome {
     /// `/auto on|off` (and `/yolo`, its alias): the in-session auto-approval switch
     /// (ADR 0026 D9). `true` = on.
     AutoToggle(bool),
+    /// `/access [safe|workspace|full]` (ADR 0038 slice 2): show the current tier and where it
+    /// came from (`None`), or switch to a named tier (`Some`).
+    Access(Option<String>),
+    /// `/mode [general|lead]` (ADR 0038 slice 3): show the current mode (`None`), or switch to
+    /// a named one (`Some`). The switch takes effect at the next turn.
+    ModeSwitch(Option<String>),
     /// `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and sends
     /// `<skill name=…>…</skill>` + `args` as one user message. `args` is the raw remainder,
     /// verbatim.
@@ -235,6 +247,16 @@ pub fn tree() -> &'static [Command] {
             name: "yolo",
             description: "alias of /auto",
             levels: &[auto_level],
+        },
+        Command {
+            name: "access",
+            description: "show or switch the permission tier (ADR 0038)",
+            levels: &[access_level],
+        },
+        Command {
+            name: "mode",
+            description: "show or switch the working mode (ADR 0038)",
+            levels: &[mode_level],
         },
         Command {
             name: "export",
@@ -458,6 +480,38 @@ fn auto_level(_typed: &[&str], _partial: &str) -> Level {
         Candidate {
             insert: "off".to_owned(),
             description: "ask again (back to on-ask)".to_owned(),
+        },
+    ])
+}
+
+/// `/access`: the three tier names (ADR 0038 slice 2).
+fn access_level(_typed: &[&str], _partial: &str) -> Level {
+    Level::Ready(vec![
+        Candidate {
+            insert: "safe".to_owned(),
+            description: "read-only; no shell, no network".to_owned(),
+        },
+        Candidate {
+            insert: "workspace".to_owned(),
+            description: "write the workspace; sandboxed shell".to_owned(),
+        },
+        Candidate {
+            insert: "full".to_owned(),
+            description: "no sandbox; asks for confirmation".to_owned(),
+        },
+    ])
+}
+
+/// `/mode`: the two modes (ADR 0038 slice 3).
+fn mode_level(_typed: &[&str], _partial: &str) -> Level {
+    Level::Ready(vec![
+        Candidate {
+            insert: "general".to_owned(),
+            description: "the default role: a coding agent in this workspace".to_owned(),
+        },
+        Candidate {
+            insert: "lead".to_owned(),
+            description: "the lead role: turn goals into work for task agents".to_owned(),
         },
     ])
 }
@@ -864,6 +918,8 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/login") => Outcome::Login(login_provider(&tokens[1..])),
         Some("/logout") => Outcome::Logout(logout_provider(&tokens[1..])),
         Some("/auto") | Some("/yolo") => auto_toggle(&tokens[1..]),
+        Some("/access") => access_request(&tokens[1..]),
+        Some("/mode") => mode_request(&tokens[1..]),
         Some("/skills") if tokens.len() == 1 => Outcome::Skills,
         Some("/skills") => Outcome::Notices(vec!["usage: /skills (no arguments)".to_owned()]),
         Some("/jobs") => jobs_request(&tokens[1..]),
@@ -938,6 +994,26 @@ fn auto_toggle(args: &[String]) -> Outcome {
         _ => Outcome::Notices(vec![
             "usage: /auto on|off (deny rules and the sandbox still apply)".to_owned(),
         ]),
+    }
+}
+
+/// `/access [safe|workspace|full]` (ADR 0038 slice 2). No argument is the query; one name is
+/// the switch; anything else is a usage notice.
+fn access_request(args: &[String]) -> Outcome {
+    match (args.first(), args.get(1)) {
+        (None, _) => Outcome::Access(None),
+        (Some(name), None) => Outcome::Access(Some(name.clone())),
+        _ => Outcome::Notices(vec!["usage: /access [safe|workspace|full]".to_owned()]),
+    }
+}
+
+/// `/mode [general|lead]` (ADR 0038 slice 3). No argument is the query; one name is the
+/// switch; anything else is a usage notice.
+fn mode_request(args: &[String]) -> Outcome {
+    match (args.first(), args.get(1)) {
+        (None, _) => Outcome::ModeSwitch(None),
+        (Some(name), None) => Outcome::ModeSwitch(Some(name.clone())),
+        _ => Outcome::Notices(vec!["usage: /mode [general|lead]".to_owned()]),
     }
 }
 

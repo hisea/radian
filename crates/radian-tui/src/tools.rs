@@ -805,8 +805,9 @@ pub struct DisplayModes {
     /// cache key for the same reason as `mermaid`: highlighted lines are what is drawn.
     pub highlight: bool,
     /// The footer's glyph set (ADR 0027 C2): the tool card's frame characters follow it
-    /// (ADR 0028, `ascii` draws `+ - |`) and so do the `ask_user` block's box and
-    /// marks (ADR 0024 R1). In the layout cache key: the drawn glyphs differ.
+    /// (ADR 0028, `ascii` draws `+ - |`), and so do the Markdown elements that have
+    /// an ascii fallback (ADR 0035) and the `ask_user` block's box and marks
+    /// (ADR 0024 R1). In the layout cache key: the drawn glyphs differ.
     pub glyphs: crate::footer::Glyphs,
 }
 

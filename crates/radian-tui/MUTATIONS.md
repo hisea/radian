@@ -1206,6 +1206,36 @@ IM-M2 与既有记录一致（见上文 `RESIZE-B`：closed-master 测试抓不�
 不是保证退出；退出由第一次 `tty_readiness` 的 Gone 与主循环兜底覆盖，两者都用同一个
 `tty_readiness`）。IM-M3 证明这次改动没有削弱该测试对 POLLHUP 的检查。
 
+## markdown-b：间距与 Markdown 各元素（ADR 0035，2026-10-16）
+
+Base `2ecb02b` · 一次性 worktree `/tmp/radian-mut-mdb` · 每条跑完 `git checkout -- .`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MD-A | 某元素自己多加一行空白（块间补两行） | `markdown_elements_have_one_blank_line_between_them` | ✅ |
+| MD-B | 续行固定 2 格（`marker_width` 恒 2） | `lists_use_a_dash_and_align_continuations_to_the_marker` | ✅ |
+| MD-C | 表格只画表头线（`row_index == 0`） | `a_table_has_a_border_between_every_row` | ✅ |
+| MD-D | 不画围栏行 | `a_code_block_shows_its_fence` | ✅ |
+| MD-E | `<br>` 不换行 | `html_br_hr_and_blockquote_render` | ✅ |
+
+5/5 抓住。
+
+### 补：任务勾选框的 nerd 档（并入 main 之后的交接，2026-10-16）
+
+`MdGlyphs::for_glyphs` 给 unicode 与 nerd 各一张表（`task_unchecked`/`task_checked`），但原来只有
+unicode 快照与 ascii 两处覆盖，**nerd 表改掉没有测试变红**（unicode 与 nerd 的勾选框字形相同，
+nerd 那条断言缺失）。新用例 `markdown::every_glyph_tier_renders_its_own_task_checkbox_prefix`
+对三档各渲染一个 `- [ ] todo` 与一个 `- [x] done`，断言各自的前缀。
+
+Base = 合并 origin/main 后的 `6db84c1` · 就地变异：改前 `cp crates/radian-tui/src/blocks.rs
+/tmp/mdb-blocks-backup.rs`，改后跑测试，再从副本写回并 `cmp`（逐字节相同），`git status --short`
+为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MD-F | nerd 表的 `task_unchecked` 从 `"☐ "` 改成 `"[?] "`（unicode 与 ascii 两档不动） | `markdown::every_glyph_tier_renders_its_own_task_checkbox_prefix`（`tier nerd: missing "☐ todo"`） | ✅ |
+
+1/1 抓住。本条的基线是合并 main 之后的树，与前面的 MD-A…MD-E（基线 `2ecb02b`）不同。
 ## small-fixes-2：footer 状态与 Esc 取消
 
 Base `e157bfb` · 一次性 worktree `.radian-worktrees/sf2-mut`（detached，跑完删除）。
@@ -1218,6 +1248,16 @@ Base `e157bfb` · 一次性 worktree `.radian-worktrees/sf2-mut`（detached，�
 SF2（高亮计数改线程局部）与 SF3（build.rs 用运行时 `CARGO_MANIFEST_DIR`）没有常规变异测试：
 SF2 是把测试自身的干扰源去掉，SF3 是编译期路径问题；两者的证据分别是「高亮测试单独跑 5/5」
 与「把 worktree 改名后 build script 仍找得到 `third_party/syntaxes`」。
+## fork-commit（/fork 等落盘, 2026-10-15）
+
+Base `52265c1` · 一次性 worktree `/tmp/radian-fc-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| FC-M1 | `/fork` 不看 `turn_committed`（间隙下立即 fork, 空历史） | `pty_a_fork_waits_for_the_turn_to_be_committed` | ✅ |
+| FC-M2 | `ForkDeadline` 超时也执行 fork（生成空子会话） | `pty_a_fork_gives_up_when_the_turn_is_still_being_written` | ✅ |
+
+2/2 抓住。
 ## spinner（运行指示一处定义 + 输入框上沿状态线，ADR 0027/9/10，2026-10-15）
 
 Base `c0ae44c` · 一次性 worktree `/tmp/radian-sp-mut2`，还原后 `git status --short` 为空。
@@ -1281,6 +1321,22 @@ Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktr
 3/3 抓住。三个变异都是**原有行为测试**，证明这次外观迁移没有削弱它们（审批的 `y`、信任 Esc
 只限本次不写盘、选择器按 id 或 summary 过滤）。外观本身由新的 TestBackend 快照覆盖。
 
+## glyphs2: ADR 0027 items 1/2/4/5 (2026-10-15)
+
+Base `1155b98` · one-shot worktree `/tmp/g2-mut` (from HEAD, deleted after) · each mutation
+applied by a patch with an anchor assertion, then `cargo test -p radian-tui --test footer
+<name>` / `--test render <name>` / `--lib <name>` (one positional filter at a time) under
+`timeout 300`; files restored after each; `git status --short` empty at the end.
+
+| # | Rule mutated | Mutation | Caught by |
+|---|---|---|---|
+| G1 | 2: the unicode token arrows | `Glyphs::token_arrows` returns `^`/`v` for unicode | `footer.rs::the_unicode_footer_snapshot_at_80_and_120_columns` FAILED |
+| G2 | 2: the unicode fold marker | `Glyphs::fold_marker` returns `>` for unicode | `render.rs::the_block_layout_snapshot` and `render.rs::thinking_folds_to_one_line_and_ctrl_t_expands_it` FAILED |
+| G3 | 5: transparent clears the background | the post-pass is skipped (`if false && self.transparent`) | `footer.rs::transparent_clears_the_footer_background` FAILED |
+| G4 | 1/2: the coverage rule | the unicode `reasoning` icon becomes `◐` (no reference font has it) | `footer::tests::unicode_tier_glyphs_are_all_verified_covered` FAILED |
+
+4/4 caught. G2's glyph is drawn in the transcript (the folded-reasoning marker), so its
+catching tests are the render snapshots, not the footer ones.
 ## md-test-speed：中文 Markdown 选区测试从 N² 改成每格 4 次（2026-10-15）
 
 `a_chinese_markdown_selection_does_not_panic` 原来对每两个格子都做一次选区（N²，每次重新排版），在工作区测试里约占 700 s；
@@ -1292,3 +1348,54 @@ Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktr
 | MS-M2 | 只给列表符号 `•` 这一个合成格子假偏移 1（落在「能」的 UTF-8 中间） | 同上 | ✅ |
 
 另记一个无效变异：「只给第 200 字节之后的第一个合成格子假偏移」——那一处的上一个字符是 ASCII，`+1` 正好是合法边界，不会 panic，不能说明覆盖缺口；MS-M2 用确定落在多字节中间的单格变异代替。
+
+## band-padding：带的半格留白与 thinking 贴住下一块（ADR 0035，2026-10-15）
+
+Base `a36a099` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`，每条只跑列出的测试，
+`cargo test -p radian-tui --no-fail-fast <目标> -- --exact`）。变异脚本带 `assert old in s`
+（吸取 U3/U4 的教训：no-op patch 是假通过）。结束后 `git status --short` 只剩本节的文档改动。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| BP1 | 留白行画整行空格（`glyph.repeat(width)` → `" ".repeat(width)`） | 半格留白必须真的是 `▄`/`▀` | `render::a_user_block_pads_its_band_with_half_cells_at_80_and_120` FAILED |
+| BP2 | 留白用文字色（把 `theme.text` 当带传给 `band_pad_line`） | 留白的前景色是**带的背景色**，不是文字色 | 同上 FAILED |
+| BP3 | `ascii` 档也加留白（`banded_pad` 恒为 true） | `ascii` 档没有留白行 | `blocks::tests::a_user_block_gets_padding_rows_and_they_map_to_gaps` FAILED |
+| BP4 | thinking 与下一个块之间多一行（`prev.kind == Reasoning` 返回 1） | thinking 贴住下面的块（回复或工具卡片） | `render::thinking_hugs_the_block_below` FAILED |
+| BP5 | 留白行可被复制（把 `▄` 混进 user 条目的 display text） | 留白行不参与复制 | `selection::a_selection_from_a_padding_row_copies_no_pad_characters_with_cjk` FAILED |
+| BP6 | 运行中卡片仍用 `~`（去掉 live spinner 替换，画回烘焙的字形） | 工具卡片运行中用 pulse spinner | `card::a_running_call_is_a_card_with_a_spinner_and_no_output_section` FAILED |
+| BP7 | unicode 成功图标改回 `+` | unicode 档成功图标是 `✓` | `render::the_unicode_tool_success_glyph_is_a_check_mark` FAILED |
+
+7/7 抓住，无等价变异。**BP5 说明**：字形只由 renderer 画出时，`logical_text` 只读条目的
+display text，留白永远复制不到；能进入复制的唯一路径是把半格字形当成文本实现（BP5 正是这种朴素写法），
+所以用「把 `▄` 混进 display text」模拟，`selection` 那条测试抓住。**BP6** 是既有测试
+（`card.rs` 的 `a_running_call_is_a_card_with_a_spinner_and_no_output_section`）本次一并入册：
+修订 3 决策 7 的「运行中用 pulse spinner 而不是 `~`」早已实现，之前没有变异记录。
+## access-cmd：`/access` 确认、按项目记住、resume（ADR 0038 切片 ②，2026-10-15）
+
+Base `d8b7688`（worktree `.radian-worktrees/access-cmd`）· 每个变异在就地改完后跑
+`cargo test -p radian-tui --test <file> --no-fail-fast`，再从 `/tmp/access-mut/` 的副本还原并用
+`diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| AC-M1 | `run_slash_command` 的 `/access full` 不再弹确认（条件改 `false && …`，直接切） | `access::access_full_asks_first_and_the_default_is_cancel`、`esc_cancels_the_full_confirmation`、`access_full_choices_switch_with_the_right_remember_flag` | ✅（3 条 FAILED） |
+| AC-M3 | `radian_host::access::remembered_for` 从**工作区**读 `access.json`（而不是 `~/.radian/access/`） | `pty::pty_a_remembered_full_applies_at_start_with_the_project_marker` | ✅（home 里记住的 full 不再生效，首屏是 `workspace`） |
+| AC-M4 | `resumed_access` 直接返回 `None`（resume 忽略 journal 里的档位） | `pty::pty_resume_restores_the_access_tier`、`radian_host::access_switch::resumed_access_reads_the_last_change` | ✅ |
+
+3/3 抓住。AC-M3 的两半都在同一个 pty 用例里：写 `~/.radian/access/access.json` 时必须生效并带
+`(project)` 标记；把同样内容写进工作区文件、用干净 HOME 启动时**必须不生效**。
+
+## mode-cmd：`/mode` 的查询与切换（ADR 0038 切片 ③，2026-10-15）
+
+Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 每个变异在就地改完后跑
+`cargo test -p radian-tui --test mode --no-fail-fast`（或 `--test pty pty_mode_lead`），再从
+`/tmp/mut/app.rs.bak` 还原并用 `diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MD-M1 | `/mode <name>` 忽略名字，永远发出 `SetMode { General }` | `mode::mode_switches_without_confirmation` | ✅ |
+| MD-M2 | `/mode`（无参数）不读投影，固定打印 `mode: general` | `mode::mode_with_no_argument_reports_the_current_mode` | ✅ |
+
+2/2 抓住。`pty::pty_mode_lead_switches_the_role_prompt_from_the_next_turn`（真 TUI、mock 模型）
+覆盖上一层的接线：`/mode lead` 的 layer 1 在下一次请求里变成 lead 角色提示词，`<role>` 之外的字节
+不变；它连跑 5 次全绿。

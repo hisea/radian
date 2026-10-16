@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use agent_core::{
     Agent, AgentEvent, AgentSession, CancelReason, CancellationToken, CompactionFailure,
-    ContextBudget, EventSink, Hooks, IncompleteReason, JournalError, JournalRecord, Message,
-    MessageId, Model, RunError, RunOutcome, RunStatus, SessionError, SteeringHandle, Step,
+    ContextBudget, EventSink, Hooks, IncompleteReason, InputSource, JournalError, JournalRecord,
+    Message, MessageId, Model, RunError, RunOutcome, RunStatus, SessionError, SteeringHandle, Step,
     ToolProvider, TranscriptJournal, TurnOptions,
 };
 use radian_session::{
@@ -37,6 +37,16 @@ use crate::config::{ConfigQueue, ConfigSlot, ModelRoute};
 /// estimate must count it (ADR 0014 Q4).
 pub type BudgetFor = Arc<dyn Fn(&str, &str) -> Option<ContextBudget> + Send + Sync>;
 
+/// A host seam that adds context to a **user** turn before its first model call (ADR 0021
+/// revision 2 decision 3): the memory addition. It is called with the turn's user text and the
+/// transcript **before** the turn's input is committed, and returns the one message the driver
+/// puts in the inbox's `inject` lane — or `None`, which is the common case.
+///
+/// The driver only calls it for an input whose declared source is [`InputSource::User`], and it
+/// injects with [`InputSource::System`]: the message is context, never human input (ADR 0005
+/// G2). A `None` return or an inbox refusal changes nothing about the turn.
+pub type TurnAdditions = Arc<dyn Fn(&str, &[Message]) -> Option<Message> + Send + Sync>;
+
 /// Computes the request-level settings the **compaction** (summary) call carries for a
 /// (provider, model) (ADR 0018). The host supplies it; it converts the configured
 /// `[compaction] thinking` level to the route's wire value with the same map `/thinking` uses.
@@ -44,6 +54,7 @@ pub type BudgetFor = Arc<dyn Fn(&str, &str) -> Option<ContextBudget> + Send + Sy
 /// `/model` switch: a frozen value would send `reasoning_effort` to an Anthropic route (or the
 /// reverse) and the provider would reject the request.
 pub type CompactionSettingsFor = Arc<dyn Fn(&str, &str) -> serde_json::Value + Send + Sync>;
+
 use crate::inbox::{ControlRequest, Inbox, InboxEntry, Lane};
 
 /// Why the driver could not continue.
@@ -117,6 +128,9 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// A per-turn time limit: each turn's deadline is computed when the turn starts, so it
     /// is fresh rather than an absolute instant fixed at startup.
     turn_timeout: Option<std::time::Duration>,
+    /// Test hook: how long to wait after the turn ends and before the journaled
+    /// `TurnFinished` (a controllable gap between `RunFinished` and the commit).
+    commit_delay: Option<std::time::Duration>,
     /// A host listener for the runtime events this driver writes (ADR 0017). `None` keeps the
     /// behavior a host that never installed one had before.
     runtime_events: Option<Arc<dyn RuntimeEvents>>,
@@ -146,6 +160,9 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// 3). The host shares it so a job-settle notifier can choose the `inject` lane (busy) or
     /// the waking `followup` lane (idle).
     turn_running: Arc<AtomicBool>,
+    /// The host's per-turn addition seam (ADR 0021). `None` keeps the
+    /// behavior a host that never installed one had before.
+    turn_additions: Option<TurnAdditions>,
 }
 
 impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
@@ -222,6 +239,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             queue,
             options,
             turn_timeout: None,
+            commit_delay: None,
             runtime_events: None,
             #[cfg(feature = "testing")]
             testing_wake_branch: Arc::new(tokio::sync::Notify::new()),
@@ -233,6 +251,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             compaction_settings_for: None,
             turn_compaction_settings: None,
             turn_running: Arc::new(AtomicBool::new(false)),
+            turn_additions: None,
             closed: false,
         };
         // D8: resume restores the last recorded change (the model and its budget) before the
@@ -299,6 +318,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         Arc::clone(&self.turn_running)
     }
 
+    /// Installs the host's per-turn addition seam (ADR 0021). Set it
+    /// before `run()`; the last one wins.
+    pub fn set_turn_additions(&mut self, additions: TurnAdditions) {
+        self.turn_additions = Some(additions);
+    }
+
     /// Overrides the shared flag (a host that wants its own handle).
     pub fn set_turn_running(&mut self, flag: Arc<AtomicBool>) {
         self.turn_running = flag;
@@ -330,6 +355,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// applies to every turn rather than only the first.
     pub fn set_turn_timeout(&mut self, timeout: Option<std::time::Duration>) {
         self.turn_timeout = timeout;
+    }
+
+    /// Test hook: delay the journaled `TurnFinished` by `delay`, so a test can control the
+    /// gap between `RunFinished` (the UI's idle) and the commit.
+    pub fn set_commit_delay(&mut self, delay: Option<std::time::Duration>) {
+        self.commit_delay = delay;
     }
 
     /// Test seam: the wake-branch signal (fired when the turn loop enters the wake branch).
@@ -428,7 +459,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let inbox = Arc::clone(&self.inbox);
         let live: Arc<dyn EventSink> = Arc::clone(&self.live);
         let runtime_events = self.runtime_events.clone();
+        let turn_additions = self.turn_additions.clone();
         let mut options = self.options.clone();
+        // ADR 0036: the tool definitions are never withdrawn mid-session.
+        // This driver has no step ceiling (the request carries every mounted tool on every
+        // call); if a per-agent step limit ever lands (ADR 0030), reaching it must
+        // keep the definitions and set `tool_choice: none` instead, so the provider's cached
+        // prefix survives.
         // ADR 0026 D7: a `/model` switch moves the budget with the model. `None` keeps the
         // configured budget, so a session that never switches behaves exactly as before.
         options.context_budget = self.turn_budget;
@@ -457,9 +494,25 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let mut admitted: HashSet<MessageId> = HashSet::new();
         let tap = Tap::new(&*live);
 
+        // The addition seam needs the turn's own text and source after the message has moved
+        // into the run (ADR 0021).
+        let input_text = entry.message.text();
+        let input_source = entry.source;
+
         let mut run = self.session.start_turn_with(entry.message, options)?;
         let steering = run.steering_handle();
         let cancellation = run.cancellation_handle();
+        // ADR 0021: a host may add one message to a **user** turn. It
+        // goes into the `inject` lane, so it is a durable input with an id, and the
+        // `drain_steering` below hands it to the core before the turn's first model call —
+        // right after the user message in the transcript. The host's callback sees the
+        // transcript as it is now, which is the dedup ledger. A refused inject is dropped: the
+        // addition is context, never a session fact (ADR 0021 invariant 2).
+        if let (Some(additions), InputSource::User) = (turn_additions.as_ref(), input_source)
+            && let Some(message) = additions(&input_text, run.transcript())
+        {
+            let _ = inbox.inject(message, InputSource::System).await;
+        }
         // Anything already waiting in the next_step lane joins before the first request.
         drain_steering(
             &inbox,
@@ -540,28 +593,42 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 if let Some(sink) = &runtime_events {
                     sink.on_runtime_event(&failed);
                 }
-                journal
-                    .append_runtime_event(RuntimeEvent::TurnFinished {
-                        turn_id,
-                        outcome: TurnOutcome::Failed,
-                        reason: None,
-                        stop_reason: None,
-                    })
-                    .await?;
+                if let Some(delay) = self.commit_delay {
+                    tokio::time::sleep(delay).await;
+                }
+                let finished = RuntimeEvent::TurnFinished {
+                    turn_id,
+                    outcome: TurnOutcome::Failed,
+                    reason: None,
+                    stop_reason: None,
+                };
+                journal.append_runtime_event(finished.clone()).await?;
+                // The host hears the journaled turn boundary (ADR 0023 U5): it flips its
+                // "the turn is on disk" flag, so a `/fork` cannot race the append.
+                if let Some(sink) = &runtime_events {
+                    sink.on_runtime_event(&finished);
+                }
                 // The driver keeps running: the next input opens a fresh turn.
                 return Ok(());
             }
         };
 
+        if let Some(delay) = self.commit_delay {
+            tokio::time::sleep(delay).await;
+        }
         let (outcome, reason, stop_reason) = wire_outcome(&outcome);
-        journal
-            .append_runtime_event(RuntimeEvent::TurnFinished {
-                turn_id,
-                outcome,
-                reason,
-                stop_reason,
-            })
-            .await?;
+        let finished = RuntimeEvent::TurnFinished {
+            turn_id,
+            outcome,
+            reason,
+            stop_reason,
+        };
+        journal.append_runtime_event(finished.clone()).await?;
+        // Journaled before the host hears it: the host flips its "the turn is on disk" flag
+        // here, so a `/fork` that arrives first waits for this event.
+        if let Some(sink) = &runtime_events {
+            sink.on_runtime_event(&finished);
+        }
         Ok(())
     }
 
@@ -1050,7 +1117,7 @@ fn reported_baseline(session: &Session) -> Option<(usize, u64)> {
                     _ => None,
                 };
             }
-            EventData::ModelUsageRecorded { usage } => {
+            EventData::ModelUsageRecorded { usage, .. } => {
                 if let (Some(input), Some(prefix_len)) = (usage.prompt_total(), last_assistant) {
                     baseline = Some((prefix_len, input));
                 }

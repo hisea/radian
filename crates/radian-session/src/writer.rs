@@ -14,6 +14,7 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 
 use crate::ReadError;
+use crate::fee::UsageFee;
 use crate::gate::SegmentGate;
 use crate::runtime::{RuntimeEvent, runtime_data};
 
@@ -121,6 +122,11 @@ const EVT_USAGE: (&str, bool) = ("ModelUsageRecorded", false);
 const EVT_COMPACTION_USAGE: (&str, bool) = ("CompactionUsageRecorded", false);
 const EVT_CONTEXT_COMPACTED: (&str, bool) = ("ContextCompacted", false);
 
+/// Computes the fee for one usage record (ADR 0027). The host installs it on the
+/// journal; the writer resolves the route in force and prices the call, or returns `None` when
+/// it cannot (no price: the record carries no fee, never an invented number).
+pub type UsageFeeFn = Arc<dyn Fn(&ModelUsage) -> Option<UsageFee> + Send + Sync>;
+
 /// One JSONL session file plus its single-writer lock and running `seq` counter. It
 /// implements [`TranscriptJournal`], so it plugs directly into
 /// `Agent::open_session_with_journal`.
@@ -135,6 +141,10 @@ pub struct SessionJournal {
     inner: Arc<Mutex<Writer>>,
     /// Holds host appends back while a core replacement segment is open (ADR 0018 §A).
     gate: Arc<SegmentGate>,
+    /// Computes the fee for one usage record at append time (ADR 0027). The host
+    /// installs it; with none set (a test journal, a host with no catalog price) the record
+    /// carries no fee, which an old reader treats as an old record.
+    usage_fee: std::sync::OnceLock<UsageFeeFn>,
     /// Test seam: pause one in-segment core append so a driver test can observe a segment
     /// mid-flight and prove no other writer deadlocks on it.
     #[cfg(feature = "testing")]
@@ -172,6 +182,7 @@ impl SessionJournal {
             session_id: session_id.to_owned(),
             inner: Arc::new(Mutex::new(Writer { file, next_seq: 0 })),
             gate: Arc::new(SegmentGate::new()),
+            usage_fee: std::sync::OnceLock::new(),
             #[cfg(feature = "testing")]
             segment_pause: Arc::new(SegmentPause::default()),
         };
@@ -209,6 +220,13 @@ impl SessionJournal {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Installs the fee recorder (ADR 0027): the writer calls it for every
+    /// `ModelUsage`/`CompactionUsage` record and writes the returned fee beside the usage. Set
+    /// once, before the session runs; a second call is ignored.
+    pub fn set_usage_fee(&self, fee: UsageFeeFn) {
+        let _ = self.usage_fee.set(fee);
     }
 
     /// The `seq` the next append will use.
@@ -455,6 +473,7 @@ impl ResumeLock {
                 next_seq: last_seq + 1,
             })),
             gate: Arc::new(SegmentGate::new()),
+            usage_fee: std::sync::OnceLock::new(),
             #[cfg(feature = "testing")]
             segment_pause: Arc::new(SegmentPause::default()),
         };
@@ -637,7 +656,12 @@ impl TranscriptJournal for SessionJournal {
     fn append(&self, record: JournalRecord) -> BoxFuture<'static, Result<(), JournalError>> {
         // Render the body now (it borrows `record`); the `seq` is chosen later, under the
         // lock, so it matches file order even when runtime events are appended concurrently.
-        let rendered = render_record(&record)
+        // The fee is computed here too: the route in force is read once, at the moment the
+        // core appends the record, so the journal and the live footer agree (ADR 0027
+        // revision 12).
+        let fee = usage_of(&record)
+            .and_then(|usage| self.usage_fee.get().and_then(|fee_for| fee_for(usage)));
+        let rendered = render_record(&record, fee)
             .ok_or_else(|| "this record has no disk event".to_string())
             .and_then(|(event, data)| {
                 raw_data(&data)
@@ -732,6 +756,8 @@ struct SettledData<'a> {
 #[derive(Serialize)]
 struct UsageData<'a> {
     usage: &'a ModelUsage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fee: Option<UsageFee>,
 }
 
 #[derive(Serialize)]
@@ -739,6 +765,8 @@ struct CompactionUsageData<'a> {
     revision: u64,
     model: &'a str,
     usage: &'a ModelUsage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fee: Option<UsageFee>,
 }
 
 #[derive(Serialize)]
@@ -780,11 +808,25 @@ fn gate_effect(record: &JournalRecord) -> GateEffect {
     }
 }
 
+/// The usage a journal record carries, or `None` for a record without any (ADR 0027 revision
+/// 12: only the two usage records are priced).
+fn usage_of(record: &JournalRecord) -> Option<&ModelUsage> {
+    match record {
+        JournalRecord::ModelUsage { usage } | JournalRecord::CompactionUsage { usage, .. } => {
+            Some(usage)
+        }
+        _ => None,
+    }
+}
+
 /// Maps a core record to its disk event name/`critical` and its `data` shape (ADR 0006
 /// §12). Every current variant is handled; `JournalRecord` is `#[non_exhaustive]`, so a
 /// future variant falls into the `None` arm and the append fails loudly instead of being
 /// dropped silently.
-fn render_record(record: &JournalRecord) -> Option<((&'static str, bool), Render<'_>)> {
+fn render_record(
+    record: &JournalRecord,
+    fee: Option<UsageFee>,
+) -> Option<((&'static str, bool), Render<'_>)> {
     let (event, data) = match record {
         JournalRecord::Message { index, message } => (
             EVT_MESSAGE_APPENDED,
@@ -829,7 +871,7 @@ fn render_record(record: &JournalRecord) -> Option<((&'static str, bool), Render
             EVT_TOOL_SETTLED,
             Render::Settled(SettledData { call_id, result }),
         ),
-        JournalRecord::ModelUsage { usage } => (EVT_USAGE, Render::Usage(UsageData { usage })),
+        JournalRecord::ModelUsage { usage } => (EVT_USAGE, Render::Usage(UsageData { usage, fee })),
         JournalRecord::CompactionUsage {
             revision,
             model,
@@ -840,6 +882,7 @@ fn render_record(record: &JournalRecord) -> Option<((&'static str, bool), Render
                 revision: *revision,
                 model,
                 usage,
+                fee,
             }),
         ),
         JournalRecord::ContextCompacted {

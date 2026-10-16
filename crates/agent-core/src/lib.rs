@@ -16,7 +16,9 @@ mod steering;
 mod tool;
 mod turn;
 
-pub use agent::{Agent, AgentConfig, AgentSession, DEFAULT_MAX_MODEL_CALLS, ReplaceError};
+pub use agent::{
+    Agent, AgentConfig, AgentSession, DEFAULT_MAX_MODEL_CALLS, DEFAULT_MODEL_RETRIES, ReplaceError,
+};
 pub use budget::{
     BudgetReport, BudgetStatus, ContextBudget, DEFAULT_BYTES_PER_TOKEN, RequestSize, UsageSource,
     estimate_tokens, estimate_tokens_with, over_budget,
@@ -44,8 +46,8 @@ pub use message::{
     ToolCall, ToolResult,
 };
 pub use model::{
-    CONTEXT_OVERFLOW_PREFIX, Model, ModelContext, ModelError, ModelRequest, ModelResponse,
-    ModelUsage, StopReason,
+    CANCELLATION_MESSAGE, CONTEXT_OVERFLOW_PREFIX, Model, ModelContext, ModelError, ModelRequest,
+    ModelResponse, ModelUsage, StopReason,
 };
 pub use outcome::{
     CancelReason, CompactionError, CompactionFailure, CompactionOutcome, IncompleteReason,
