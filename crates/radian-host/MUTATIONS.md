@@ -914,3 +914,12 @@ allowed_branch=None)` 在 `main` 上，此时只有 `refuse_main` 在起作用�
 （`a_shared_task_writes_no_end_commit`）先等任务 journal 里出现 `TurnFinished`，再给错误的 finisher
 一个有界的窗口（2 s）去提交，然后断言 lead 工作区未变——纯 `requests()` 计数会在 finisher 运行前
 就通过（假绿）。
+
+## ADR 0039 决定 6：通知方在 spawn 之前同步订阅（2026-10-16）
+
+工作树 `oc/sec-jobs`（base `0e9baef`）· 变异就地改 `job_notify.rs`、跑完从
+`.radian/scratch/mut/job_notify.rs.orig` 还原并 `diff -q` 确认，`git status --short` 干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SJ6 | `JobNotifier::spawn` 把 `self.jobs.subscribe()` 放回 `runtime.spawn(async move { … })` 内部 | `job_notify::the_first_job_events_are_not_lost`（首个 job 的 `Started`/`Settled` 都不在 journal 里） | ✅ failed |

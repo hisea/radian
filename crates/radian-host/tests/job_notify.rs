@@ -1,13 +1,16 @@
 //! The background-job notifier (ADR 0037 slices 3-4): the durable start/settle records, the
 //! busy/idle lane choice, the wake cap, and the crash-orphan scan.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use radian_coding::{JobEvent, JobState, Jobs};
+use radian_coding::{JobEvent, JobState, Jobs, OUTPUT_HINT};
 use radian_host::job_notify::{JobNotifier, MAX_CONSECUTIVE_WAKES, orphan_jobs};
 use radian_runtime::{Inbox, Lane};
+use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
 use radian_session::{EventData, Session, SessionCreatedData, SessionJournal};
 use serde_json::json;
 
@@ -38,17 +41,17 @@ fn journal(dir: &Path) -> Arc<SessionJournal> {
     )
 }
 
-fn notifier(dir: &Path) -> (Arc<JobNotifier>, Arc<Inbox>, Arc<AtomicBool>) {
+fn notifier(dir: &Path) -> (Arc<JobNotifier>, Arc<Jobs>, Arc<Inbox>, Arc<AtomicBool>) {
     let inbox = Inbox::new(64);
-    let jobs = Arc::new(Jobs::new(dir));
+    let jobs = Arc::new(Jobs::new(dir.join("jobs")));
     let turn_running = Arc::new(AtomicBool::new(false));
     let notifier = JobNotifier::new(
-        jobs,
+        Arc::clone(&jobs),
         Arc::clone(&inbox),
         journal(dir),
         Arc::clone(&turn_running),
     );
-    (notifier, inbox, turn_running)
+    (notifier, jobs, inbox, turn_running)
 }
 
 fn settled(id: &str, notify: bool) -> JobEvent {
@@ -74,7 +77,7 @@ async fn lanes(inbox: &Inbox) -> Vec<Lane> {
 #[tokio::test]
 async fn busy_injects_and_idle_wakes() {
     let dir = scratch("lanes");
-    let (notifier, inbox, turn_running) = notifier(&dir);
+    let (notifier, _jobs, inbox, turn_running) = notifier(&dir);
 
     turn_running.store(true, Ordering::SeqCst);
     notifier.deliver(settled("job-1", true)).await;
@@ -95,7 +98,7 @@ async fn busy_injects_and_idle_wakes() {
 #[tokio::test]
 async fn the_wake_cap_degrades_to_inject_and_a_user_message_resets_it() {
     let dir = scratch("cap");
-    let (notifier, inbox, _) = notifier(&dir);
+    let (notifier, _jobs, inbox, _) = notifier(&dir);
 
     for i in 0..MAX_CONSECUTIVE_WAKES {
         notifier.deliver(settled(&format!("job-{i}"), true)).await;
@@ -147,7 +150,7 @@ async fn the_wake_cap_degrades_to_inject_and_a_user_message_resets_it() {
 #[tokio::test]
 async fn a_non_notifiable_settle_is_silent() {
     let dir = scratch("silent");
-    let (notifier, inbox, _) = notifier(&dir);
+    let (notifier, _jobs, inbox, _) = notifier(&dir);
     notifier.deliver(settled("job-1", false)).await;
     assert!(
         inbox.is_empty().await,
@@ -160,7 +163,7 @@ async fn a_non_notifiable_settle_is_silent() {
 #[tokio::test]
 async fn the_start_and_settle_records_are_written() {
     let dir = scratch("journal");
-    let (notifier, _, _) = notifier(&dir);
+    let (notifier, _jobs, _, _) = notifier(&dir);
     notifier
         .deliver(JobEvent::Started {
             id: "job-1".into(),
@@ -207,7 +210,7 @@ async fn the_start_and_settle_records_are_written() {
 async fn orphan_jobs_reports_a_start_without_a_settle() {
     // A session with one settled and one orphaned job: only the orphan is reported.
     let dir = scratch("orphan");
-    let (notifier, _, _) = notifier(&dir);
+    let (notifier, _jobs, _, _) = notifier(&dir);
     notifier
         .deliver(JobEvent::Started {
             id: "job-1".into(),
@@ -228,5 +231,116 @@ async fn orphan_jobs_reports_a_start_without_a_settle() {
     assert_eq!(
         orphan_jobs(&session),
         vec![("job-2".to_string(), "sleep 600".to_string())]
+    );
+}
+
+// ---------- ADR 0039 decision 6: no lost first event, no Settled before its Started ----------
+
+fn full_access(ws: &Path) -> Sandbox {
+    let policy = SandboxPolicy::new(SandboxMode::FullAccess, ws).expect("full-access policy");
+    Sandbox::from_policy(policy).expect("full-access needs no backend")
+}
+
+/// Waits for the notifier to deliver the settle's System message. Because the notifier handles
+/// a job's `Started` before its `Settled`, a delivery proves both durable records are written,
+/// without a sleep: the idle settle sends a `followup`, which wakes the inbox.
+async fn await_delivery(inbox: &Inbox) {
+    loop {
+        if inbox.claim_next_turn().await.is_some() {
+            return;
+        }
+        tokio::time::timeout(Duration::from_secs(10), inbox.wake_signal())
+            .await
+            .expect("a settle must reach the notifier");
+    }
+}
+
+/// The first job's `Started` and `Settled` both reach the journal. Subscribing **inside** the
+/// spawned task would lose them: the job starts between `spawn` returning and the task running
+/// (ADR 0039 decision 6).
+#[tokio::test]
+async fn the_first_job_events_are_not_lost() {
+    let dir = scratch("first-events");
+    let (notifier, jobs, inbox, _turn) = notifier(&dir);
+    notifier.spawn(&tokio::runtime::Handle::current());
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sandbox = full_access(&ws);
+
+    let info = jobs
+        .start(&sandbox, &ws, "true", None)
+        .expect("start the first job");
+    await_delivery(&inbox).await;
+
+    let session = Session::open(dir.join("s.jsonl")).unwrap();
+    let (mut started, mut settled) = (Vec::new(), Vec::new());
+    for event in session.events() {
+        match &event.data {
+            EventData::BackgroundJobStarted {
+                job_id, output, ..
+            } => started.push((job_id.clone(), output.clone())),
+            EventData::BackgroundJobSettled { job_id, .. } => settled.push(job_id.clone()),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        started,
+        vec![(info.id.clone(), OUTPUT_HINT.to_owned())],
+        "the first job's Started must not be lost"
+    );
+    assert_eq!(
+        settled,
+        vec![info.id.clone()],
+        "the first job's Settled must not be lost"
+    );
+}
+
+/// A burst of instant jobs: every `Settled` in the journal is preceded by its `Started`. The
+/// supervisor is started only after the job is registered and `Started` is published, so an
+/// instant leader cannot settle first (ADR 0039 decision 6).
+#[tokio::test]
+async fn a_burst_of_instant_jobs_keeps_every_settle_behind_its_start() {
+    let dir = scratch("burst-order");
+    let (notifier, jobs, inbox, _turn) = notifier(&dir);
+    notifier.spawn(&tokio::runtime::Handle::current());
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sandbox = full_access(&ws);
+
+    let mut ids = Vec::new();
+    for _ in 0..1000 {
+        // Keep every settle on the idle lane, so `await_delivery` is the message the notifier
+        // sends after writing both records.
+        notifier.reset_wakes();
+        let info = jobs
+            .start(&sandbox, &ws, "true", None)
+            .expect("an instant job");
+        ids.push(info.id);
+        await_delivery(&inbox).await;
+    }
+
+    let session = Session::open(dir.join("s.jsonl")).unwrap();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut settles = 0usize;
+    for event in session.events() {
+        match &event.data {
+            EventData::BackgroundJobStarted { job_id, .. } => {
+                seen.insert(job_id.as_str());
+            }
+            EventData::BackgroundJobSettled { job_id, .. } => {
+                assert!(
+                    seen.contains(job_id.as_str()),
+                    "{job_id} settled before it started"
+                );
+                settles += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(settles, 1000, "every job must have its settle");
+    assert_eq!(seen.len(), 1000, "every job must have its start");
+    assert!(
+        seen.contains(ids[0].as_str()),
+        "the first job's Started must not be lost"
     );
 }

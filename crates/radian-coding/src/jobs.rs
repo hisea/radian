@@ -332,6 +332,19 @@ impl Jobs {
             });
         }
 
+        // ADR 0039 decision 6: register the job and publish `Started` **before** the supervisor
+        // can publish a `Settled`. An instant command's leader can be reaped the moment the
+        // supervisor starts, so starting it any earlier lets `Settled` overtake `Started` in
+        // the journal. The readers are already running, so nothing is lost by the wait.
+        state.order.push(id.clone());
+        state.jobs.insert(id.clone(), Arc::clone(&cell));
+        drop(state);
+        let _ = self.inner.events.send(JobEvent::Started {
+            id: id.clone(),
+            command: first_line(command),
+            output: OUTPUT_HINT.to_owned(),
+        });
+
         {
             let supervisor_cell = Arc::clone(&cell);
             let events = self.inner.events.clone();
@@ -345,19 +358,6 @@ impl Jobs {
                 terminate(&timer_cell, Termination::TimedOut);
             });
         }
-
-        // ADR 0039 decision 6: register the job and publish `Started` **before** the supervisor
-        // can publish a `Settled`. An instant command's leader can be reaped the moment the
-        // supervisor starts, so starting it any earlier lets `Settled` overtake `Started` in
-        // the journal. The readers are already running, so nothing is lost by the wait.
-        state.order.push(id.clone());
-        state.jobs.insert(id.clone(), Arc::clone(&cell));
-        drop(state);
-        let _ = self.inner.events.send(JobEvent::Started {
-            id: id.clone(),
-            command: first_line(command),
-            output: OUTPUT_HINT.to_owned(),
-        });
 
         Ok(StartInfo {
             id,

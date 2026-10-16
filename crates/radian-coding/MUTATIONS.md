@@ -307,3 +307,14 @@ Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 变异就地改完�
 区分它，与上面 M7（`write` 的 `O_NOFOLLOW`）同理。
 
 SJ5（supervisor 在 `Started` 之前 spawn）见下方「决定 6」小节。
+
+## ADR 0039 决定 6：先登记并发 `Started`，supervisor 之后才 spawn（2026-10-16）
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SJ5 | `Jobs::start` 把 insert + `Started` 放回 supervisor/timer spawn 之后（本片前的顺序） | `radian-host::job_notify::a_burst_of_instant_jobs_keeps_every_settle_behind_its_start`（第 117 个 job 现 `job-81330-117 settled before it started`） | ✅ failed |
+
+SJ5 要在 1000 次瞬时 job 里跑出一次线程调度倒序：`Started` 与 `Settled` 由不同线程发出，主线程在
+spawn supervisor 之后还要 insert 并 `send`，所以 supervisor 偶尔先跑完。本机在第 117 次复现。修好后
+supervisor 在 `Started` 之后才 spawn，倒序在构造上不可能；测试仍保留 1000 次以防回归（不依赖时间）。
+`JobNotifier::spawn` 的订阅顺序（SJ6）在 `radian-host/MUTATIONS.md`。
