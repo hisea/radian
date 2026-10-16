@@ -822,11 +822,30 @@ pub fn select_user_messages(
     newly_summarized: &[Message],
     input_budget: Option<u64>,
 ) -> Vec<RetainedUserMessage> {
+    select_user_messages_tracked(previous, newly_summarized, input_budget).0
+}
+
+/// [`select_user_messages`] plus how many of `newly_summarized`'s user messages the result
+/// carries verbatim.
+///
+/// The deterministic fallback (ADR 0018, decision 3) needs the count to report `N`
+/// in its fixed line: a user message the list carries is still in the new view, so only the
+/// other summarized messages count as dropped. The second element is that many **carried**
+/// messages out of `newly_summarized`, in the same selection the first element encodes, so the
+/// two cannot drift.
+pub fn select_user_messages_tracked(
+    previous: &[RetainedUserMessage],
+    newly_summarized: &[Message],
+    input_budget: Option<u64>,
+) -> (Vec<RetainedUserMessage>, usize) {
     let mut texts: Vec<String> = previous
         .iter()
         .filter(|kept| !is_omitted_marker(&kept.text))
         .map(|kept| kept.text.clone())
         .collect();
+    // Everything from this index on in `texts` comes from `newly_summarized`; the entries before
+    // it are the earlier compaction's own. `carried` counts only the former.
+    let base = texts.len();
     // A previous marker's count is carried forward: those messages are still omitted, and the
     // new marker must name all of them, not just this round's.
     let mut omitted: usize = previous
@@ -839,12 +858,14 @@ pub fn select_user_messages(
         }
     }
     if texts.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let (u, u1) = user_message_budget(input_budget);
 
-    // The first message is the task itself: always kept, cut to `U₁`.
+    // The first message is the task itself: always kept, cut to `U₁`. When it came from
+    // `newly_summarized` (no earlier list), it counts as carried.
     let first = truncate_text(&texts[0], u1).unwrap_or_else(|| texts[0].clone());
+    let mut carried = usize::from(base == 0);
     let mut kept: Vec<String> = Vec::new();
     let mut used = 0u64;
     // From the newest backwards: the newest is always placed, truncated into `U` when it alone
@@ -870,6 +891,9 @@ pub fn select_user_messages(
             break;
         }
         used += entry_tokens;
+        if index + 1 >= base {
+            carried += 1;
+        }
         kept.push(entry);
     }
     kept.reverse();
@@ -882,5 +906,5 @@ pub fn select_user_messages(
         });
     }
     out.extend(kept.into_iter().map(|text| RetainedUserMessage { text }));
-    out
+    (out, carried)
 }

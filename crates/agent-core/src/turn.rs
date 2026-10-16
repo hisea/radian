@@ -638,7 +638,6 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             let first_kept = units[planned + drop].start;
             let mut kept = transcript[first_kept..].to_vec();
             let truncated = compaction::truncate_kept_tool_results(&mut kept);
-            let dropped = first_kept - plan.first_kept;
             // The user messages of every drop join the verbatim list (ADR 0018),
             // re-budgeted exactly as a model-summary compaction would.
             let dropped_user_messages = if has_summary {
@@ -646,11 +645,17 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             } else {
                 &transcript[..first_kept]
             };
-            let user_messages = compaction::select_user_messages(
+            let (user_messages, carried) = compaction::select_user_messages_tracked(
                 &previous_user_messages,
                 dropped_user_messages,
                 summary_budget,
             );
+            // ADR 0018, decision 3: `N` is the number of transcript messages that are
+            // **not** in the new view, not just the ones dropped beyond the plan's cut. The whole
+            // removed prefix counts, minus the previous summary message (replaced by the new
+            // summary) and minus the user messages the verbatim list still carries.
+            let start = if has_summary { 1 } else { 0 };
+            let dropped = first_kept - start - carried;
             let summary =
                 compaction::deterministic_summary(previous_summary.as_deref(), dropped, truncated);
             let history = self.compacted_view(&summary, &user_messages, &kept, events)?;

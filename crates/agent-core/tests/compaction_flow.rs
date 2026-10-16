@@ -1539,10 +1539,12 @@ async fn the_deterministic_fallback_truncates_tools_and_drops_the_oldest_first()
     );
     assert!(kept.contains("[truncated"), "{kept:?}");
 
-    // The summary names the counts and the first user words survive.
+    // The summary names the counts and the first user words survive. Six transcript messages
+    // left the view, but the two user ones (`task`, `m`) are carried verbatim, so `N` is four —
+    // not the three dropped beyond the plan's cut alone (ADR 0018, decision 3).
     let summary = history[0].text();
     assert!(summary.contains("without a summary"), "{summary}");
-    assert!(summary.contains("3 messages dropped"), "{summary}");
+    assert!(summary.contains("4 messages dropped"), "{summary}");
     assert!(summary.contains("1 tool results truncated"), "{summary}");
     assert!(
         summary.contains("task"),
@@ -1553,4 +1555,85 @@ async fn the_deterministic_fallback_truncates_tools_and_drops_the_oldest_first()
     assert!(compaction::is_compaction_summary(
         &model.requests().last().unwrap().messages[0]
     ));
+}
+
+/// ADR 0018, decision 3: the fixed line's `N` is the number of transcript messages
+/// that are **not** in the new view, not the number dropped beyond the plan's cut. Here the
+/// first deterministic stage (drop = 0) already reaches the target, so the old formula reported
+/// `0`, although the plan's whole head (`x`, `call`, `result`) left the transcript. The one
+/// carried user message is still in the new view (its verbatim list), so `N` is the other two.
+#[tokio::test]
+async fn the_deterministic_fallback_counts_the_whole_removed_head() {
+    use agent_core::{MessageMeta, ToolCall, ToolResult};
+
+    let history = vec![
+        Message::user("x".repeat(8_000)),
+        Message::Assistant {
+            content: Vec::new(),
+            reasoning: Vec::new(),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: MessageMeta::default(),
+        },
+        Message::Tool {
+            result: ToolResult::success("c1", vec![ContentPart::text("a".repeat(10_000))]),
+            meta: MessageMeta::default(),
+        },
+        Message::user("last"),
+    ];
+    let model = ScriptedModel::new([empty_reply(), empty_reply(), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 3_500, true);
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the fallback committed");
+
+    // The whole head (`x`, `c1`, its result) is not in the new view; only the two tail messages
+    // are. That is the `drop = 0` stage: no unit was dropped beyond the plan's cut.
+    let history = session.transcript();
+    for gone in ["c1"] {
+        assert!(
+            !history
+                .iter()
+                .any(|m| matches!(m, Message::Tool { result, .. } if result.call_id == gone)),
+            "{gone} must be gone"
+        );
+    }
+    assert!(history.iter().any(|m| *m == Message::user("last")));
+    assert!(history.iter().any(|m| *m == Message::user("go")));
+
+    // `x` is carried verbatim (the first user message), so it stays in the new view; `c1` and
+    // its result are the two removed messages. The old beyond-the-cut formula would say `0`.
+    let summary = history[0].text();
+    assert!(summary.contains("without a summary"), "{summary}");
+    assert!(
+        summary.contains(&"x".repeat(64)),
+        "verbatim survives: {summary}"
+    );
+    assert!(summary.contains("2 messages dropped"), "{summary}");
+    assert!(
+        recorder.events().iter().any(|event| matches!(
+            event,
+            AgentEvent::CompactionFinished {
+                deterministic: true,
+                dropped: 2,
+                ..
+            }
+        )),
+        "the event names the same count"
+    );
 }

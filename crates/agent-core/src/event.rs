@@ -101,9 +101,11 @@ pub enum AgentEvent {
     ///
     /// ADR 0018, decision 3: `deterministic` is `true` when the summary path failed
     /// and this is the deterministic fallback (no model call, so no `CompactionUsage`), and
-    /// `dropped` is then the number of messages the fallback dropped from the planned kept
-    /// suffix. A model summary sends `deterministic: false, dropped: 0`. The host wording names
-    /// the count — "compacted without a summary (N dropped)".
+    /// `dropped` is then the number of transcript messages the fallback left out of the new
+    /// view: the whole summarized prefix the plan removed, minus the previous summary message
+    /// the new summary replaces, minus the user messages the verbatim list still carries. A
+    /// model summary sends `deterministic: false, dropped: 0`. The host wording names the
+    /// count — "compacted without a summary (N dropped)".
     CompactionFinished {
         revision: u64,
         tokens_before: u64,

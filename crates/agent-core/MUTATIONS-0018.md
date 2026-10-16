@@ -188,7 +188,10 @@ Base `dfa66b7`（oc/compaction-thinking）· 在本任务工作树内逐条施�
 | D4 | 手动路径也兜底（`deterministic_allowed = true`） | `compaction_flow::a_manual_compact_reports_a_summary_failure_instead_of_falling_back` | ✅ failed |
 | D5 | 确定性兜底写 `CompactionUsageRecorded`（`finish_compaction` 里补一条 dummy usage） | `compaction_flow::two_invalid_summaries_fall_back_deterministically`（断言 usage 数为 0） | ✅ failed |
 | D6 | 工具结果不截断（`truncate_tool_result_text` 恒返回 `None`） | `compaction::a_truncated_tool_result_keeps_the_marker_within_the_limit`、`truncate_kept_tool_results_cuts_only_over_long_results` | ✅ failed |
+| D7 | `N` 只数计划切点之外丢掉的条数（`dropped = first_kept - plan.first_kept`，评审修正前的公式） | `compaction_flow::the_deterministic_fallback_counts_the_whole_removed_head`、`the_deterministic_fallback_truncates_tools_and_drops_the_oldest_first` | ✅ failed |
 
-6/6 抓住。D1/D2 由同一条集成测试的两条断言分别覆盖：D1 让最新单元（`go`）消失，D2 让切点落在
+7/7 抓住。D1/D2 由同一条集成测试的两条断言分别覆盖：D1 让最新单元（`go`）消失，D2 让切点落在
 原子单元内部（`validate_history` 拒绝 → 本轮失败）。D5 用 dummy usage 作近似（真实签名相同），
-断言的是「确定性兜底不得留下任何 `CompactionUsage` 记录」。
+断言的是「确定性兜底不得留下任何 `CompactionUsage` 记录」。D7 是第一档（`drop = 0`）就达标时的
+计数：新测试的计划头含 1 条用户原话（逐字保留）+ 1 个 assistant/结果单元（共 3 条被移出前缀），
+老公式报 0，新公式报 2；它同时让旧测试的 `3`（只数切点之外）变红，两条一起钉住口径。

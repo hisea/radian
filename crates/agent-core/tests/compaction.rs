@@ -928,6 +928,44 @@ fn the_selection_is_the_contiguous_newest_run() {
     );
 }
 
+/// ADR 0018, decision 3: [`select_user_messages_tracked`] returns, next to the list,
+/// how many of the newly summarized user messages that list carries. The deterministic fallback
+/// subtracts that count from the removed prefix to report `N`, so it must count only the new
+/// messages (not the previous list's) and only the carried ones (not the omitted).
+#[test]
+fn the_tracked_count_names_only_carried_new_messages() {
+    use agent_core::{RetainedUserMessage, select_user_messages_tracked};
+
+    // Everything fits: both new user messages are carried.
+    let budget = Some(16_000); // U = U₁ = 1000
+    let messages = vec![
+        user_sourced("task", Some(InputSource::User)),
+        user_sourced("next", Some(InputSource::User)),
+    ];
+    let (kept, carried) = select_user_messages_tracked(&[], &messages, budget);
+    assert_eq!(texts(&kept), ["task", "next"]);
+    assert_eq!(carried, 2);
+
+    // The previous list's own entry is carried but is not one of the new messages.
+    let previous = vec![RetainedUserMessage { text: "old".into() }];
+    let (kept, carried) = select_user_messages_tracked(&previous, &messages, budget);
+    assert_eq!(texts(&kept), ["old", "task", "next"]);
+    assert_eq!(carried, 2, "the previous entry is not a new message");
+
+    // An omitted new message is not carried.
+    let many = vec![
+        user_sourced("first", Some(InputSource::User)),
+        user_sourced(&"x".repeat(8_000), Some(InputSource::User)), // over `U`, not the newest
+        user_sourced("newest", Some(InputSource::User)),
+    ];
+    let (kept, carried) = select_user_messages_tracked(&[], &many, budget);
+    assert_eq!(
+        texts(&kept),
+        ["first", "[1 earlier user messages omitted]", "newest"]
+    );
+    assert_eq!(carried, 2, "the omitted one is not carried");
+}
+
 // ---------- ADR 0018, decision 3: the deterministic fallback ----------
 
 /// The truncation keeps the marker **inside** the limit, so a kept tool result never grows past
