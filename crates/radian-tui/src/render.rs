@@ -371,8 +371,9 @@ fn entry_lines(
     let style = body_style(entry, theme);
     // The first and last text rows: the `first_text` flag is the structured-notice label's
     // (ADR 0028) and the interrupted marker sits on the last.
-    let first_text = body.iter().position(|line| !line.pad.is_pad());
-    let last = body.iter().rposition(|line| !line.pad.is_pad());
+    // Every row carries text now (the tool block's frame rows are what carried none).
+    let first_text = (!body.is_empty()).then_some(0);
+    let last = body.len().checked_sub(1);
     let mut lines = Vec::with_capacity(body.len());
     for (i, row) in body.into_iter().enumerate() {
         let mut line = render_row(
@@ -434,11 +435,6 @@ fn render_row(
     glyphs: crate::footer::Glyphs,
     spinner: crate::spinner::Frame,
 ) -> Line<'static> {
-    if row.pad.is_pad() {
-        // A padding row carries no text (ADR 0035): the transcript's blocks have
-        // none since ADR 0028 (the `bar` input draws its own).
-        return Line::from(vec![Span::raw(String::new())]);
-    }
     match row.frame {
         // The tool block's head (ADR 0028): `• ` and the head's pieces.
         blocks::Frame::Head => return render_head_row(row, style, theme, glyphs, spinner),
@@ -710,8 +706,8 @@ pub fn visible_lines_with(
             let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
             let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
             let style = body_style(entry, theme);
-            let first_text = body.iter().position(|line| !line.pad.is_pad());
-            let last = body.iter().rposition(|line| !line.pad.is_pad());
+            let first_text = (!body.is_empty()).then_some(0);
+            let last = body.len().checked_sub(1);
             out.extend(
                 body.into_iter()
                     .enumerate()

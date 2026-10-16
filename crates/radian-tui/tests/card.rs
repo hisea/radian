@@ -358,6 +358,53 @@ fn a_patch_block_shows_its_diff_body() {
     assert_eq!(block[3], "│    3 + new one", "{block:?}");
 }
 
+/// The count mirror: `blocks::line_count` equals the rows `blocks::layout` draws for a tool
+/// block, at two widths and in every fold mode (virtualization measures without laying out).
+#[test]
+fn line_count_matches_the_layout_for_a_tool_block() {
+    use radian_tui::blocks;
+    for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
+        for width in [80usize, 24] {
+            let mut app = App::new("m", "s");
+            app.tool_display = ToolDisplay {
+                fold,
+                preview_lines: 3,
+            };
+            app.push_message(&Message::Assistant {
+                content: vec![],
+                reasoning: vec![],
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "shell".into(),
+                    arguments: json!({"command": "make test\nmake lint --all --long"}),
+                }],
+                provider_payload: None,
+                interrupted: false,
+                meta: Default::default(),
+            });
+            app.push_message(&Message::Tool {
+                result: ToolResult {
+                    call_id: "c1".into(),
+                    content: vec![ContentPart::text(
+                        (1..=9).map(|i| format!("line {i}\n")).collect::<String>(),
+                    )],
+                    structured: Some(json!({"command": "make test", "exit_code": 0})),
+                    is_error: false,
+                    error_code: None,
+                },
+                meta: Default::default(),
+            });
+            let modes = app.display_modes();
+            for entry in &app.session.entries {
+                // A tool entry has no fenced blocks (only assistant prose does).
+                let count = blocks::line_count(entry, modes, width);
+                let laid_out = blocks::layout(entry, &[], modes, width).len();
+                assert_eq!(count, laid_out, "{fold:?} {width} {entry:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn a_cjk_command_and_output_keep_the_marker_column() {
     let mut app = App::new("m", "s");

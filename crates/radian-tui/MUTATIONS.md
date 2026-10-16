@@ -1610,3 +1610,29 @@ Base：本片 HEAD（`oc/thin-user`）· 就地变异，每个变异后从 `.rad
 与 `render::thinking_has_one_blank_line_on_both_sides` 钉住。`apply_selection` 顺带修正：选中段保留它
 来自的 span 的前景色（原先最后一段回退到 `Style::default()`，会把选区尾部的前景色抹掉），由
 `render::a_selection_draws_the_selection_role_on_its_cells` 的「文字保留自己的前景色」断言钉住。
+
+## thin ①：工具块（ADR 0028，2026-10-16）
+
+Base：本片 HEAD（`dogfood/thin-tools`）· 就地变异：脚本 `.radian/scratch/mutate.py`（不提交）先把
+`render.rs`/`blocks.rs`/`tools.rs` 复制到 `.radian/scratch/mut-backup/`，用带 `assert` 的精确文本替换打补丁，
+跑命名的测试（`--no-fail-fast`），再从副本写回并用 `cmp` 确认逐字节相同（脚本结尾对三个文件各 `cmp` 一次，
+`git status --short` 只剩本片改动）。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| T1-M1 | head 行没有底色 | `render_head_row` 的 `• ` 标记加 `patch(theme.tool_success_bg)` | `card::every_tool_row_has_no_background_and_the_marker_column_holds`、`render::a_tool_block_never_paints_a_band`、`render::the_block_layout_snapshot` | ✅ |
+| T1-M2 | 元信息在 head 行上，不单独成行 | `head_rows` 把 meta+状态另起一行 | `card::the_head_line_is_the_name_the_title_the_meta_and_the_status` 等（card 12 条全 FAILED） | ✅ |
+| T1-M3 | 小工具成功时只有一行 | `body_plan` 去掉 `renderer.compact` 分支 | `card::a_small_tool_is_one_line_until_it_is_expanded` | ✅ |
+| T1-M4 | 状态符号在行尾 | `styled_row` 把 tail（meta+状态）旋到行首 | `card::the_head_line_is_the_name_the_title_the_meta_and_the_status`、`card::every_tool_row_has_no_background_and_the_marker_column_holds`（card 11 条 FAILED） | ✅ |
+| T1-M5 | `collapsed` 不画输出 | `body_plan` 的 collapsed 分支返回全部行 | `card::the_fold_modes_decide_the_body_and_the_collapsed_meta`、`render::collapsed_and_errors_differ_for_a_successful_card`、`render::the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it` | ✅ |
+
+5/5 抓住。行数记账（`line_count` 与 `layout`）由新增的
+`card::line_count_matches_the_layout_for_a_tool_block`（三种折叠 × 80/24 列）与既有的
+`markdown::line_count_matches_the_layout`、`tests/virtual.rs` 的窗口测试共同钉住。
+
+**一处要记录的缺口（不是本片能修的）**：状态符号 `✗`（U+2717）不在 ADR 0027 的六款参考字体
+核对集里（那张表用 `×`，`✓` 在表内）。ADR 0028 与原型 `render-screen.py` 都写 `✗`，
+所以 transcript 用它；`crates/radian-tui/src/footer.rs` 的 `tool_status()`（footer 自己的字形表）没有改，
+`unicode_tier_glyphs_are_all_verified_covered` 也不检查 transcript 的字形——`✗` 因此不受那条覆盖检查约束。
+若要收紧，应在 `footer.rs` 的参考集里补 `✗`（或改成 `×`），那是 ⓪/字形片的范围。
+
