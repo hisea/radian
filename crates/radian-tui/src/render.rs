@@ -2420,8 +2420,13 @@ pub fn completion_rows(app: &App, width: usize, visible: usize) -> Vec<Line<'sta
     let items: Vec<crate::select_list::Item> = candidates
         .iter()
         .map(|candidate| {
-            crate::select_list::Item::new(candidate.insert.clone())
-                .description(candidate.description.clone())
+            let item = crate::select_list::Item::new(candidate.insert.clone())
+                .description(candidate.description.clone());
+            if candidate.current {
+                item.current()
+            } else {
+                item
+            }
         })
         .collect();
     crate::select_list::view(

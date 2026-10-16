@@ -4,7 +4,7 @@
 //! out. The completion menu, `/model`, `/theme`, `/thinking` and the resume picker draw
 //! through it.
 
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -16,7 +16,8 @@ use crate::theme::Theme;
 pub struct Item {
     pub label: String,
     pub description: Option<String>,
-    /// The active item (the current model): drawn with a `● current` marker.
+    /// The item in effect (the current model, theme or thinking level): a ` ✓` is drawn right
+    /// after its label (ASCII tier ` *`).
     pub current: bool,
 }
 
@@ -103,6 +104,9 @@ pub struct ListView {
 const PRIMARY_COLUMN: usize = 32;
 const MIN_DESCRIPTION: usize = 10;
 
+/// The current-item mark's display width: ` ✓` (ASCII ` *`), never part of the description.
+const CURRENT_MARK_WIDTH: usize = 2;
+
 /// Renders the list. `selected` indexes the **filtered** rows (the caller resets it to 0 when
 /// the filter changes). `visible` is how many item rows fit; the caller computes it (omp's
 /// formula is `max(3, min(10, viewport_rows - used_rows - 2))`).
@@ -125,12 +129,18 @@ pub fn view(
     let two_columns = width > 40;
     let track_width = usize::from(overflow);
     let content_width = width.saturating_sub(track_width);
-    // The label column fits the longest filtered label (cursor, label, one space), so the
-    // description column is the same for every row and does not move while scrolling. A
-    // longer label is cut at omp's 32 columns, or at half the width when that is wider.
+    // The label column fits the longest filtered label (cursor, label, the current-item mark,
+    // one space), so the description column is the same for every row and does not move while
+    // scrolling. A longer label is cut at omp's 32 columns, or at half the width when that is
+    // wider. The current item's mark counts as two columns, so a long current label is cut to
+    // make room for it instead of pushing its description.
     let longest = indices
         .iter()
-        .map(|&index| UnicodeWidthStr::width(items[index].label.as_str()))
+        .map(|&index| {
+            let item = &items[index];
+            UnicodeWidthStr::width(item.label.as_str())
+                + if item.current { CURRENT_MARK_WIDTH } else { 0 }
+        })
         .max()
         .unwrap_or(0);
     let label_column = (longest + 3).min(PRIMARY_COLUMN.max(content_width / 2));
@@ -184,8 +194,10 @@ pub fn view(
     }
 }
 
-/// One item row: the cursor, the label, the description column and the `● current` marker.
-/// The whole row never exceeds `width` display columns.
+/// One item row: the cursor, the label, the current-item mark and the description column. The
+/// current item is marked ` ✓` right after its label (ASCII ` *`) in the `status_ok` role; the
+/// mark is never part of the description, so every row's description starts in the same column
+///. The whole row never exceeds `width` display columns.
 fn row_line(
     theme: &Theme,
     item: &Item,
@@ -204,43 +216,61 @@ fn row_line(
     let mut spans = vec![Span::styled(cursor.to_string(), selected_style)];
     let mut used = 2usize;
     let marker = if item.current {
-        if ascii { " * current" } else { " ● current" }
+        if ascii { " *" } else { " ✓" }
     } else {
         ""
     };
     let marker_width = UnicodeWidthStr::width(marker);
     let description = item.description.as_deref().unwrap_or("");
     if two_columns && !description.is_empty() && width > 2 {
-        // The label ends one column before the description column, so a long label cannot
-        // push the description out of line.
+        // The label ends before the description column, leaving room for the current mark, so a
+        // long current label is cut before the mark and the description column never moves.
         let label = truncate(
             &item.label,
-            label_column.saturating_sub(used + 1).min(width - used),
+            label_column
+                .saturating_sub(used + marker_width + 1)
+                .min(width.saturating_sub(used + marker_width)),
         );
         used += UnicodeWidthStr::width(label.as_str());
         spans.push(Span::styled(label, selected_style));
+        used += draw_marker(&mut spans, marker, theme.status_ok, used, width);
         let pad = label_column
             .saturating_sub(used)
             .max(1)
-            .min(width.saturating_sub(used + marker_width));
+            .min(width.saturating_sub(used));
         spans.push(Span::raw(" ".repeat(pad)));
         used += pad;
-        let room = width.saturating_sub(used + marker_width);
+        let room = width.saturating_sub(used);
         // The description column only exists when it can hold a useful amount.
         if room >= MIN_DESCRIPTION {
             let description = truncate(description, room);
-            used += UnicodeWidthStr::width(description.as_str());
             spans.push(Span::styled(description, theme.truncation));
         }
     } else {
         let label = truncate(&item.label, width.saturating_sub(used + marker_width));
         used += UnicodeWidthStr::width(label.as_str());
         spans.push(Span::styled(label, selected_style));
-    }
-    if !marker.is_empty() && used + marker_width <= width {
-        spans.push(Span::styled(marker.to_string(), theme.truncation));
+        draw_marker(&mut spans, marker, theme.status_ok, used, width);
     }
     Line::from(spans)
+}
+
+/// Draws the current-item mark right after its label when the row is wide enough for the whole
+/// glyph, returning the columns it used. A row too narrow keeps its (already truncated) label
+/// and drops the mark; the mark itself is never cut to a partial glyph.
+fn draw_marker(
+    spans: &mut Vec<Span<'static>>,
+    marker: &str,
+    style: Style,
+    used: usize,
+    width: usize,
+) -> usize {
+    let marker_width = UnicodeWidthStr::width(marker);
+    if marker.is_empty() || used + marker_width > width {
+        return 0;
+    }
+    spans.push(Span::styled(marker.to_string(), style));
+    marker_width
 }
 
 /// The scrollbar thumb's row: proportional to the window's position in the list, always a
@@ -367,17 +397,19 @@ mod tests {
             .collect();
         entries[1] =
             Item::new("opencode-go/deepseek-v4-flash-vision-exp").description("opencode-go");
-        entries[2] =
-            Item::new("opencode-go/deepseek-v4.1-flash").description("● current · opencode-go");
+        entries[2] = Item::new("opencode-go/deepseek-v4.1-flash")
+            .description("opencode-go")
+            .current();
         let list = view(&theme, &entries, "", 0, 10, 80, false);
         assert!(list.overflow);
         let rows: Vec<String> = list.lines.iter().map(text).collect();
         for row in &rows {
             assert_eq!(UnicodeWidthStr::width(row.as_str()), 80, "{row:?}");
         }
-        // The display column where the description starts (after the label's own text).
+        // The display column where the description starts. The last `opencode-go` on a row is the
+        // description; every row's label is longer and comes earlier.
         let column = |row: &str| {
-            let at = row.find(" ●").or(row.rfind(" opencode-go")).unwrap() + 1;
+            let at = row.rfind("opencode-go").unwrap();
             UnicodeWidthStr::width(&row[..at])
         };
         let first = column(&rows[0]);
@@ -388,9 +420,82 @@ mod tests {
         );
         assert_eq!(column(&rows[2]), first, "{rows:?}");
         assert!(
-            rows[2].contains("opencode-go/deepseek-v4.1-flash "),
-            "a label that fits half the width is not cut: {rows:?}"
+            rows[2].contains("opencode-go/deepseek-v4.1-flash ✓"),
+            "the current label is drawn in full before its mark: {rows:?}"
         );
+        assert!(
+            !rows.iter().any(|row| row.contains("current")),
+            "the description never carries the marker: {rows:?}"
+        );
+    }
+
+    /// the current item is marked ` ✓` right after its label, never in the
+    /// description; the description still starts in the same column on every row.
+    #[test]
+    fn the_current_item_is_marked_after_its_label() {
+        let theme = Theme::default();
+        let entries = vec![
+            Item::new("dark").description("built-in theme"),
+            Item::new("mono").description("built-in theme").current(),
+            Item::new("light").description("built-in theme"),
+        ];
+        let list = view(&theme, &entries, "", 0, 10, 80, false);
+        let rows: Vec<String> = list.lines.iter().map(text).collect();
+        assert!(
+            rows[1].contains("mono ✓"),
+            "the current row is marked after its label: {rows:?}"
+        );
+        for (index, row) in rows.iter().enumerate() {
+            assert!(!row.contains("current"), "{row:?}");
+            if index != 1 {
+                assert!(
+                    !row.contains('✓'),
+                    "only the current row is marked: {row:?}"
+                );
+            }
+        }
+        let column = |row: &str| UnicodeWidthStr::width(&row[..row.rfind("built-in").unwrap()]);
+        assert_eq!(column(&rows[0]), column(&rows[1]), "{rows:?}");
+        assert_eq!(column(&rows[1]), column(&rows[2]), "{rows:?}");
+    }
+
+    /// ASCII tier: the mark is ` *`.
+    #[test]
+    fn the_ascii_tier_marks_the_current_item_with_a_star() {
+        let theme = Theme::default();
+        let entries = vec![
+            Item::new("dark").description("built-in theme"),
+            Item::new("mono").description("built-in theme").current(),
+        ];
+        let list = view(&theme, &entries, "", 0, 10, 80, true);
+        let rows: Vec<String> = list.lines.iter().map(text).collect();
+        assert!(rows[1].contains("mono *"), "{rows:?}");
+        assert!(!rows.iter().any(|row| row.contains('✓')), "{rows:?}");
+    }
+
+    /// A current label longer than the column is cut before the ` ✓`; the mark stays and the
+    /// description column does not move.
+    #[test]
+    fn a_long_current_label_is_truncated_before_its_mark() {
+        let theme = Theme::default();
+        let long = "a-very-long-current-label-that-does-not-fit-the-column";
+        let entries = vec![
+            Item::new("short").description("provider"),
+            Item::new(long).description("provider").current(),
+        ];
+        let list = view(&theme, &entries, "", 0, 10, 80, false);
+        let rows: Vec<String> = list.lines.iter().map(text).collect();
+        assert!(!rows[1].contains(long), "the label is cut: {rows:?}");
+        assert!(
+            rows[1].contains('✓'),
+            "the mark stays after the label is cut: {rows:?}"
+        );
+        assert!(
+            UnicodeWidthStr::width(rows[1].as_str()) <= 80,
+            "the row never exceeds the width: {rows:?}"
+        );
+        let column = |row: &str| UnicodeWidthStr::width(&row[..row.rfind("provider").unwrap()]);
+        assert_eq!(column(&rows[1]), column(&rows[0]), "{rows:?}");
     }
 
     #[test]

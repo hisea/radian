@@ -5708,8 +5708,8 @@ async fn pty_a_visible_spinner_redraws_on_its_interval() {
     );
 }
 
-/// ADR 0027: with truecolor the default pulse **breathes** — the `⏺` takes the 12
-/// colours of one sine period — and the loop wakes at the step (~117 ms), not at revision 10's
+/// ADR 0027: with truecolor the default pulse **breathes** — the `⏺` takes the 16
+/// colours of one sine period — and the loop wakes at the step (~125 ms), not at revision 10's
 /// 500 ms switch. The wire carries each colour as `38;2;R;G;B` in front of the glyph, so the
 /// colours themselves are checkable, not just the frame count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5749,11 +5749,11 @@ async fn pty_the_pulse_breathes_through_rgb_colours() {
     pty.quit();
     assert!(
         after >= start + 10,
-        "the breath must redraw about every 117 ms (a two-colour switch would be 4): {start} -> {after}"
+        "the breath must redraw about every 125 ms (a two-colour switch would be 4): {start} -> {after}"
     );
-    // The breath's 12 samples hold 7 distinct colours (the sine's levels 0, 1, 3, 6, 9, 11, 12),
-    // and one sample is missed whenever a wake lands late, so the exact ends need not appear in a
-    // given window: a two-colour switch would show 2 colours, a rotating frame 1.
+    // The breath's 16 samples hold 9 distinct colours (the sine's levels 0, 1, 2, 5, 8, 11, 14, 15,
+    // 16), and one sample is missed whenever a wake lands late, so the exact ends need not appear in
+    // a given window: a two-colour switch would show 2 colours, a rotating frame 1.
     assert!(
         breathed.len() >= 6,
         "the dot must take the breath's colours: {breathed:?}"

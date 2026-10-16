@@ -330,6 +330,7 @@ fn the_id_level_asks_the_host_and_shows_the_answer() {
         candidates: vec![radian_tui::command::Candidate {
             insert: "m-1".into(),
             description: "fact note".into(),
+            current: false,
         }],
     });
     assert!(result.dirty);
@@ -355,6 +356,7 @@ fn the_id_level_asks_the_host_and_shows_the_answer() {
         candidates: vec![radian_tui::command::Candidate {
             insert: "stale".into(),
             description: String::new(),
+            current: false,
         }],
     });
     assert!(!result.dirty);
