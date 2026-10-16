@@ -1939,3 +1939,26 @@ requirement depends on, pinned by the copy test (the same mutation leaves
 `a_copy_of_a_block_has_no_marker_meta_or_status` green, because its single-line result starts at
 offset 0).
 
+## input-box: drop the `bar` input, `box` becomes the thin half frame (ADR 0035's 2026-10-16 note)
+
+Base: the `oc/input-box` worktree; the source backed up under `.radian/scratch/mut/`
+(`render.rs.orig`, `app.rs.orig`), each mutation patched in place with a Python `assert`-guarded
+text replace (a stale anchor is a hard PATCH FAILED), restored with a plain `cp` and `cmp`ed
+byte-for-byte (`git status --short` back to the same set after each). The one test named per row
+ran with `timeout 300 cargo test -p radian-tui --no-fail-fast`.
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| IB-M1 | the running status is **not bold** | `render.rs::input_status_spans`: the pulse keeps `spinner_style`'s BOLD (drop the `remove_modifier(Modifier::BOLD)`) | `render::the_box_frame_puts_the_status_in_the_label_position_and_never_bold` (the spinner cell is `.bold()`) | ✅ (1 FAILED) |
+| IB-M2 | the idle top border carries **no label** | `render.rs` idle top rule draws `╭─ message ─…` again | `render::the_box_input_style_draws_the_thin_half_frame` (`!text.contains("message")` and the exact full-width rule) | ✅ (1 FAILED) |
+| IB-M3 | the removed `bar` warns and falls back to `lines` | `app.rs::apply_config`: `Some("bar") => InputStyle::default()` (no warning pushed) | `config::the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines` (warnings empty) | ✅ (1 FAILED) |
+
+3/3 caught. IB-M2's test also pins the full shape (the `│ ❯ `/`│   ` rows and the `╰──` tail),
+so a mutation of the marker column or the tail fails it too; the CJK wrap and the cursor column
+are pinned by `render::the_box_frame_wraps_a_cjk_line` and `cursor::the_box_cursor_counts_the_prompts_display_width`.
+The `input_style = "bar"` reader test (`config::the_tui_input_style_is_carried_and_a_non_string_is_skipped`)
+covers the host side (the spelling is carried, not skipped).
+
+**Piece 2 dropped.** The task's fourth mutation ("the configured separator ignored with a preset")
+belonged to the `[tui.footer]` separator bug, which the owner dropped ("the owner is redesigning the
+footer") before any code was written; no commit or mutation for it exists.

@@ -823,13 +823,6 @@ pub fn gap_at(entries: &[Entry], index: usize) -> usize {
     block_gap(prev, next)
 }
 
-/// Whether the `bar` input gets its half-cell padding rows under this glyph tier (ADR 0035
-/// revision 3 decision 4, kept by revision 6 for the input alone): `unicode` and `nerd` draw
-/// `▄`/`▀`, `ascii` has no half-block glyph and so gets no padding row.
-pub fn banded_pad(glyphs: crate::footer::Glyphs) -> bool {
-    glyphs != crate::footer::Glyphs::Ascii
-}
-
 /// The entries the startup block is made of (ADR 0027 §标志 / the owner's 2026-10-14 startup
 /// screen): one visual block, so the container inserts no gaps between them.
 fn is_startup_block(kind: EntryKind) -> bool {
