@@ -192,11 +192,15 @@ pub fn wrap_line_count(text: &str, width: usize) -> usize {
     lines
 }
 
-/// The visible marker for an entry kind (the transcript's `> `, `~ `, …). Also the cell
+/// The visible marker for an entry kind (the transcript's `❯ `, `~ `, …). Also the cell
 /// offset the selection mapping ([`crate::select`]) subtracts to get a body column.
+///
+/// This is the **default** (unicode) spelling. Both the user marker and every other marker are
+/// two cells wide, so the width the mapping and the body layout subtract is the same under
+/// every glyph tier; [`user_marker`] is what picks the `ascii` spelling of the user row.
 pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
     match kind {
-        EntryKind::User => "> ",
+        EntryKind::User => USER_MARKER,
         EntryKind::Assistant => "  ",
         EntryKind::Reasoning => "~ ",
         // Rule 2: every marker is two cells; rule 4: a result's marker sits one cell further
@@ -218,7 +222,20 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
     }
 }
 
-fn marker(kind: EntryKind, theme: &Theme) -> (&'static str, Style) {
+/// The user row's two-cell marker (ADR 0035): `❯ ` in the `user` role.
+/// The default (unicode) spelling, also what [`marker_prefix`] returns for the width.
+const USER_MARKER: &str = "❯ ";
+
+/// The user row's marker in the terminal's glyph set (ADR 0035): `❯ `
+/// normally, `> ` under `ascii`. Two cells either way, so the body column never moves.
+fn user_marker(glyphs: crate::footer::Glyphs) -> &'static str {
+    match glyphs {
+        crate::footer::Glyphs::Ascii => "> ",
+        _ => USER_MARKER,
+    }
+}
+
+fn marker(kind: EntryKind, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'static str, Style) {
     let style = match kind {
         EntryKind::User => theme.user,
         EntryKind::Assistant => Style::default(),
@@ -231,8 +248,9 @@ fn marker(kind: EntryKind, theme: &Theme) -> (&'static str, Style) {
         EntryKind::Warning => theme.note,
         // The `Tip:` label steps down (dim), the body is muted.
         EntryKind::Tip => theme.truncation,
-        // The compaction one-liner is structural: the hunk/accent role.
-        EntryKind::Compaction => theme.diff_hunk,
+        // The compaction one-liner is structural (ADR 0035): the `frame`
+        // role, the same dim level every other structural line uses.
+        EntryKind::Compaction => theme.frame,
         // ADR 0033: `!` uses the command color; `!!` steps down to the hint level.
         EntryKind::Bash {
             exclude_from_context: false,
@@ -241,7 +259,13 @@ fn marker(kind: EntryKind, theme: &Theme) -> (&'static str, Style) {
             exclude_from_context: true,
         } => theme.hint,
     };
-    (marker_prefix(kind), style)
+    // The user row draws its own marker per glyph tier; every other entry's marker has one
+    // spelling. Both are two cells, so nothing else changes with the tier.
+    let prefix = match kind {
+        EntryKind::User => user_marker(glyphs),
+        _ => marker_prefix(kind),
+    };
+    (prefix, style)
 }
 
 fn body_style(entry: &Entry, theme: &Theme) -> Style {
@@ -264,7 +288,11 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::Bash {
             exclude_from_context: true,
         } => theme.hint,
-        EntryKind::User | EntryKind::Assistant => {
+        // The thin user row (ADR 0035): `❯` **and** the user's words
+        // carry the `user` role's foreground. `body_style` is separate from `marker` because a
+        // wrapped continuation row has no marker to carry the style.
+        EntryKind::User => theme.user,
+        EntryKind::Assistant => {
             if entry.interrupted {
                 Style::default().add_modifier(Modifier::ITALIC)
             } else {
@@ -275,12 +303,14 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
 }
 
 /// The background band an entry's block paints across the transcript (ADR 0028 R4 + owner
-/// acceptance): a user message uses the `user` role's background, a tool card the state's
-/// (`tool_pending_bg` / `tool_success_bg` / `tool_error_bg`). `None` means no band — the
-/// built-in themes without a user background, and every other kind.
+/// acceptance): a tool card the state's (`tool_pending_bg` / `tool_success_bg` /
+/// `tool_error_bg`). A user message has **no** band (ADR 0035: its
+/// `user` role is a foreground, with no background), so this returns `None` for it; `None`
+/// also means no band for every other kind.
 fn card_band(entry: &Entry, theme: &Theme) -> Option<Style> {
     let role = match entry.kind {
-        EntryKind::User => theme.user,
+        // The user row is a foreground role now and never paints a band (ADR 0035
+        // decision 3), so it is not a band source here.
         EntryKind::ToolCall => match entry.result {
             None => theme.tool_pending_bg,
             Some(false) => theme.tool_success_bg,
@@ -380,7 +410,7 @@ fn entry_lines(
     theme: &Theme,
     spinner: crate::spinner::Frame,
 ) -> Vec<Line<'static>> {
-    let (prefix, prefix_style) = marker(entry.kind, theme);
+    let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
     let band = card_band(entry, theme);
     let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
     let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
@@ -676,8 +706,7 @@ pub fn visible_lines_with(
             let skip = start.saturating_sub(line);
             let blocks = blocks::blocks_for(entry, modes.reasoning);
             let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
-            let prefix = marker_prefix(entry.kind);
-            let prefix_style = marker(entry.kind, theme).1;
+            let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
             let style = body_style(entry, theme);
             let band = card_band(entry, theme);
             // Border rows carry no text (ADR 0028): `first_text` is the head
@@ -738,11 +767,13 @@ const FIND_BOX_HEIGHT: u16 = 3;
 /// How the input area is drawn (config `tui.input_style`, owner UI review 2026-10-13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputStyle {
-    /// The banded input (ADR 0035 V3, omp's `rail`, the default): one background band per row
-    /// with a left accent rail, no border and no rules, and a fixed status row above the band.
-    #[default]
+    /// The banded input (ADR 0035 V3, omp's `rail`): one background band per row with a left
+    /// accent rail, no border and no rules, and a fixed status row above the band. Still
+    /// selectable (`tui.input_style = "bar"`, ADR 0035).
     Bar,
-    /// A rule above and below, `> ` on the first line, continuation lines indented two cells.
+    /// A rule above and below, `❯ ` on the first line, continuation lines indented two cells
+    /// (ADR 0035: the default).
+    #[default]
     Lines,
     /// The bordered box with a ` message ` title (the pre-review shape).
     Box,
@@ -1238,9 +1269,11 @@ fn apply_selection(
 ) -> Line<'static> {
     let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + ranges.len());
     let mut col = 0usize;
-    let mut run: Option<(String, bool)> = None;
-    let flush = |out: &mut Vec<Span<'static>>, run: &mut Option<(String, bool)>, base: Style| {
-        if let Some((text, run_selected)) = run.take() {
+    // Each run carries its own base style, so a run's piece keeps the foreground of the span it
+    // came from (a selected tail used to fall back to `Style::default()` on the final flush).
+    let mut run: Option<(String, bool, Style)> = None;
+    let flush = |out: &mut Vec<Span<'static>>, run: &mut Option<(String, bool, Style)>| {
+        if let Some((text, run_selected, base)) = run.take() {
             let styled = if run_selected {
                 base.patch(selection)
             } else {
@@ -1251,23 +1284,26 @@ fn apply_selection(
     };
     for span in line.spans {
         let base = span.style;
-        flush(&mut out, &mut run, base);
         for ch in span.content.into_owned().chars() {
             let w = ch.width().unwrap_or(0);
             let selected = ranges
                 .iter()
                 .any(|&(start, end)| col < end && col + w.max(1) > start);
             match &mut run {
-                Some((text, run_selected)) if *run_selected == selected => text.push(ch),
+                Some((text, run_selected, run_base))
+                    if *run_selected == selected && *run_base == base =>
+                {
+                    text.push(ch)
+                }
                 _ => {
-                    flush(&mut out, &mut run, base);
-                    run = Some((ch.to_string(), selected));
+                    flush(&mut out, &mut run);
+                    run = Some((ch.to_string(), selected, base));
                 }
             }
             col += w;
         }
     }
-    flush(&mut out, &mut run, Style::default());
+    flush(&mut out, &mut run);
     Line::from(out)
 }
 
@@ -2429,6 +2465,7 @@ fn body_spans(
                 blocks::MdStyle::Accent => theme.notice_label,
                 blocks::MdStyle::Muted => theme.notice_body,
                 blocks::MdStyle::Dim => theme.truncation,
+                blocks::MdStyle::Diff(role) => diff_style(role, body_style, theme),
                 blocks::MdStyle::TableBorder => theme.md_hr,
                 blocks::MdStyle::Plain => body_style,
             };
@@ -2443,18 +2480,7 @@ fn body_spans(
         // style; `Plain` keeps the code block's own style. The text is unchanged, so
         // selection, copy and search are unaffected.
         for (text, role) in syntax {
-            let style = match role {
-                crate::highlight::SyntaxRole::Comment => theme.syntax_comment,
-                crate::highlight::SyntaxRole::Keyword => theme.syntax_keyword,
-                crate::highlight::SyntaxRole::Function => theme.syntax_function,
-                crate::highlight::SyntaxRole::Variable => theme.syntax_variable,
-                crate::highlight::SyntaxRole::String => theme.syntax_string,
-                crate::highlight::SyntaxRole::Number => theme.syntax_number,
-                crate::highlight::SyntaxRole::Type => theme.syntax_type,
-                crate::highlight::SyntaxRole::Operator => theme.syntax_operator,
-                crate::highlight::SyntaxRole::Punctuation => theme.syntax_punctuation,
-                crate::highlight::SyntaxRole::Plain => body_style,
-            };
+            let style = syntax_style(*role, body_style, theme);
             let style = match band {
                 Some(band) => style.patch(band),
                 None => style,
@@ -2478,6 +2504,11 @@ fn body_spans(
     } else if row.reason {
         // A weak one-line reason (`mermaid: …`, ADR 0028 R8): the dim/truncation role.
         out.push(Span::styled(row.text.clone(), theme.truncation));
+    } else if entry.kind == EntryKind::Compaction && row.hint {
+        // The folded compaction one-liner is structural (ADR 0035 /
+        // ADR 0028): the `frame` role, from column 1. The expanded body
+        // (`hint == false`) keeps the summary's own body style, unchanged.
+        out.push(Span::styled(row.text.clone(), theme.frame));
     } else if entry.kind == EntryKind::ToolCall && entry.result.is_none() && first_text {
         // A running tool card's leading status glyph is the live spinner (ADR 0027 revision
         // 10): strip the glyph baked at call time and prepend the current frame. Every frame
@@ -2629,6 +2660,39 @@ fn body_style_of(entry: &Entry, row: &BodyLine, style: Style, theme: &Theme) -> 
         }
     } else {
         style
+    }
+}
+
+/// The style one highlighted piece takes (ADR 0028 R2): its Radian syntax role's colour, with
+/// `Plain` keeping the row's own body style. Shared by a code block's lines and by a diff row's
+/// code.
+fn syntax_style(role: crate::highlight::SyntaxRole, body_style: Style, theme: &Theme) -> Style {
+    match role {
+        crate::highlight::SyntaxRole::Comment => theme.syntax_comment,
+        crate::highlight::SyntaxRole::Keyword => theme.syntax_keyword,
+        crate::highlight::SyntaxRole::Function => theme.syntax_function,
+        crate::highlight::SyntaxRole::Variable => theme.syntax_variable,
+        crate::highlight::SyntaxRole::String => theme.syntax_string,
+        crate::highlight::SyntaxRole::Number => theme.syntax_number,
+        crate::highlight::SyntaxRole::Type => theme.syntax_type,
+        crate::highlight::SyntaxRole::Operator => theme.syntax_operator,
+        crate::highlight::SyntaxRole::Punctuation => theme.syntax_punctuation,
+        crate::highlight::SyntaxRole::Plain => body_style,
+    }
+}
+
+/// The style one piece of a diff row takes (ADR 0028): the line number is
+/// the weak `diff_line_number` role, the sign carries its own side's colour, a `+`/`-` row's
+/// unhighlighted code is the file's own text colour (so the sign stays the coloured part), and a
+/// highlighted piece goes through the code block's table.
+fn diff_style(role: crate::tools::DiffRole, body_style: Style, theme: &Theme) -> Style {
+    match role {
+        crate::tools::DiffRole::Number => theme.diff_line_number,
+        crate::tools::DiffRole::Added => theme.diff_added,
+        crate::tools::DiffRole::Removed => theme.diff_removed,
+        crate::tools::DiffRole::Context => theme.diff_context,
+        crate::tools::DiffRole::Code => theme.text,
+        crate::tools::DiffRole::Syntax(role) => syntax_style(role, body_style, theme),
     }
 }
 

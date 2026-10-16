@@ -50,11 +50,13 @@ mod ask;
 mod git;
 mod glob;
 mod grep;
+pub mod host_git;
 mod jobs;
 mod list;
 mod patch;
 mod provider;
 mod read;
+pub mod safe_fs;
 mod search;
 mod shell;
 mod workspace;
@@ -65,7 +67,9 @@ pub use ask::{
     MAX_PROMPT_CHARS, MAX_QUESTIONS, PromptError, Prompter, Question, QuestionAnswer, QuestionKind,
     QuestionOption, QuestionReply, QuestionRequest,
 };
-pub use jobs::{JOB_RING_BYTES, JobEvent, JobState, JobSummary, Jobs, MAX_RUNNING_JOBS};
+pub use jobs::{
+    JOB_RING_BYTES, JobEvent, JobState, JobSummary, Jobs, MAX_RUNNING_JOBS, OUTPUT_HINT,
+};
 pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits};
 pub use shell::{UserBash, run_user_bash};
 pub use workspace::{WorkspaceError, WorkspaceRoot};

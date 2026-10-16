@@ -285,3 +285,72 @@ Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 变异就地改完�
 | # | 变异（行为） | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | SD-1 | 删掉描述里的 `Read files with read and list, and search with grep and glob … while shell runs alone`（回到只提 "Use `shell` to run programs"） | `the_shell_description_points_file_reading_and_searching_at_the_read_only_tools`（三段关键句都断言） | ✅ |
+
+## ADR 0039 决定 1/6：后台任务输出移出工作区、事件有序（2026-10-16）
+
+工作树 `oc/sec-jobs`（base `0e9baef`）· 变异就地改源码、跑完从
+`.radian/scratch/mut/` 的副本还原并 `diff -q` 确认，`git status --short` 只剩本片自己的改动。
+每个变异跑对应的测试目标（`--no-fail-fast`）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SJ1 | `open_job_output` 的 `create_new(true)` 改成 `create(true)`（保留 `O_NOFOLLOW`） | `job_output_security::an_existing_output_file_at_the_next_id_is_not_appended_to`（往已存在的文件里追加） | ✅ failed |
+| SJ2 | 去掉 `custom_flags(O_NOFOLLOW)`（保留 `create_new`） | —（等价变异，见下） | ❌ 未抓住 |
+| SJ3 | 同时去掉 O_EXCL 与 O_NOFOLLOW（ADR 的「去掉 O_EXCL/O_NOFOLLOW」） | `job_output_security::a_planted_symlink_at_the_next_output_file_is_not_followed`（`start` 顺着 symlink 打开，输出落在外部文件） | ✅ failed |
+| SJ4 | 宿主把 jobs 目录改回工作区内（`dir.join(".radian/jobs")`） | `radian-host::session::tests::the_jobs_directory_is_the_sessions_own_and_owner_only` | ✅ failed |
+
+**SJ2（等价变异，诚实记录）**：POSIX 规定 `O_CREAT|O_EXCL` 对已存在的路径（含 symlink）返回
+`EEXIST`；本机 macOS 实测：`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` 与 `O_WRONLY|O_CREAT|O_EXCL`
+对 symlink 都返回 `EEXIST`；`O_NOFOLLOW` 只在 `O_CREAT|O_APPEND`（无 `O_EXCL`）时才把 symlink 变成
+`ELOOP`。所以只留 `create_new` 时 `O_NOFOLLOW` 无可观察后果。ADR 0039 把
+`O_EXCL/O_NOFOLLOW` 当一个变异（SJ3 抓住）；单独去掉 `O_NOFOLLOW` 是纵深防御，没有确定性测试能
+区分它，与上面 M7（`write` 的 `O_NOFOLLOW`）同理。
+
+SJ5（supervisor 在 `Started` 之前 spawn）见下方「决定 6」小节。
+
+## ADR 0039 决定 6：先登记并发 `Started`，supervisor 之后才 spawn（2026-10-16）
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SJ5 | `Jobs::start` 把 insert + `Started` 放回 supervisor/timer spawn 之后（本片前的顺序） | `radian-host::job_notify::a_burst_of_instant_jobs_keeps_every_settle_behind_its_start`（第 117 个 job 现 `job-81330-117 settled before it started`） | ✅ failed |
+
+SJ5 要在 1000 次瞬时 job 里跑出一次线程调度倒序：`Started` 与 `Settled` 由不同线程发出，主线程在
+spawn supervisor 之后还要 insert 并 `send`，所以 supervisor 偶尔先跑完。本机在第 117 次复现。修好后
+supervisor 在 `Started` 之后才 spawn，倒序在构造上不可能；测试仍保留 1000 次以防回归（不依赖时间）。
+`JobNotifier::spawn` 的订阅顺序（SJ6）在 `radian-host/MUTATIONS.md`。
+
+## review fix 1：`job_output` 读完整输出文件（ADR 0039 决定 1 复核，2026-10-16）
+
+工作树 `oc/sec-jobs` · 变异就地改 `jobs.rs` 的 `FileMode::Tail` 分支，跑完从
+`.radian/scratch/mut/jobs.fix1.orig.rs` 还原并 `diff -q` 确认，`git status --short` 干净。
+新测试 `cargo test -p radian-coding --test job_output_file`。
+
+新增的 `job_output_file` 三个用例在**修复前**必失败：`tail_lines`/`from_line`/`max_lines`/
+`pattern` 不是旧 schema 的属性，`args::parse` 直接报 `unknown argument`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SJ7 | `job_output` 的 `tail_lines` 只从 64 KiB ring 取最后几行（不读文件） | `job_output_file::the_file_arguments_read_the_full_output_not_the_ring`（`tail_lines: 100000` 的第一行变成 ring 窗口的 `190638`，而不是文件第 `100001` 行） | ✅ failed |
+
+SJ7 说明「tail 从 ring 也能取到小的尾巴」不足以证明读文件：只有尾巴大于 ring 的窗口时才区分得开，
+所以用例用 `tail_lines: 100000` 钉住起点行号。`from_line: 1, max_lines: 3` 与
+`pattern: ^1234$` 另从 ring 已丢弃的部分各钉一次读文件。
+## ADR 0039 decision 2: fd-relative file tools (2026-10-16, branch `sec/fd-file-tools`)
+
+Base: `d1b1dbe` · worktree `.radian-worktrees/sec-fs` · every mutation run with
+`cargo test -p radian-coding --no-fail-fast`; `git checkout -- crates/radian-coding/src` after
+each; `git status --short` empty at the end. The three mutations the brief asked for, plus two.
+
+| # | Requirement mutated | Mutation | Result |
+|---|---|---|---|
+| M-A | every parent component opened with `O_NOFOLLOW` | drop `O_NOFOLLOW` from the directory-level `openat` flags in `safe_fs::walk_dirs` | ✅ caught by 10 tests: `every_file_tool_refuses_a_parent_symlink_to_outside_and_touches_nothing_there`, `every_file_tool_refuses_a_parent_symlink_inside_and_names_the_target`, `read_cannot_reach_outside_when_the_parent_is_swapped_after_the_check`, `write_and_patch_cannot_reach_outside_when_the_parent_is_swapped_after_the_check`, `list_glob_and_grep_cannot_reach_outside_when_the_base_is_swapped_after_the_check`, `a_symlinked_parent_directory_escape_is_refused`, `write_through_a_symlinked_parent_creates_nothing_outside`, `write_into_an_outside_symlinked_directory_is_refused`, `a_path_through_a_symlink_outside_is_refused`, `cwd_escapes_are_refused` |
+| M-B | no tool re-opens by path after the fd walk | in `read`, after `open_read`, drop the fd and `File::open(root.join(path))` instead | ✅ caught (`read_and_write_use_the_fd_they_opened_even_if_the_parent_is_swapped_afterwards`: the `after_open_hook` seam swaps the parent for a link to the outside sentinel after the open; the mutant reads `SENTINEL-CONTENT`, the real code reads `INSIDE` from the fd). The resolve-hook swap tests do **not** catch this one: they swap before the walk, so the walk itself refuses — which is why the after-open seam exists |
+| M-C | the walk never follows a link | classify entries with a following `fstatat(…, 0)` **and** open children / files without `O_NOFOLLOW` | ✅ caught by 15 tests, including `the_walk_skips_linked_directories_and_files_but_keeps_ignore_rules` and `a_symlink_out_of_the_workspace_is_never_followed` |
+| M-C1 | (single site) classify entries with a following `fstatat` only | | ✅ caught by 10 tests — not an equivalent mutation: the same `fstatat` is what `map_open_error` uses to tell a link from a missing directory, so the error codes change too |
+| M-D | an inside link names its target | make both lexical/realpath classifications return `None` | ✅ caught (`every_file_tool_refuses_a_parent_symlink_inside_and_names_the_target`, `an_absolute_inside_link_target_is_named_relative_to_the_workspace`, `write_refuses_a_symlink_even_inside_the_workspace`, `write_refuses_a_dangling_symlink`) |
+
+What changed for the older rows above: **M7 (`O_NOFOLLOW` on the write open) is now a behaviour
+change** — the walk refuses a link before any open, and the after-open seam shows the fd is
+what gets written — so the "defence in depth, untestable" note no longer applies. The
+parent-directory window the earlier record called "not mitigated at all" is the one M-A/M-B
+cover.

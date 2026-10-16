@@ -161,8 +161,8 @@ find_close = [\"ctrl-x\"]
 /// `tui.input_style`: a known value is applied, an unknown one falls back to the default and
 /// is reported as a skipped key (the `tui.*` rule).
 #[test]
-fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_bar() {
-    // ADR 0035 V3: `bar` is the default.
+fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines() {
+    // ADR 0035: `lines` is the default.
     let mut app = App::new("m", "s");
     let warnings = app
         .apply_config(
@@ -172,7 +172,7 @@ fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_bar() {
         .unwrap();
     assert_eq!(
         app.input_style,
-        radian_tui::render::InputStyle::Bar,
+        radian_tui::render::InputStyle::Lines,
         "an unknown style falls back to the default"
     );
     assert!(
@@ -216,7 +216,7 @@ fn the_dark_theme_keeps_the_original_colors() {
         for x in 0..40 {
             line.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
         }
-        if let Some(col) = line.find("> ") {
+        if let Some(col) = line.find("❯ ") {
             user_marker = buffer.cell((col as u16, y)).map(|c| c.style());
             break;
         }

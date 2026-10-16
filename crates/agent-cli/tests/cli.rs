@@ -5260,6 +5260,61 @@ async fn workspace_shell_cannot_read_the_sessions_directory() {
     );
 }
 
+/// ADR 0039 decision 1: a background job's output file lives in the session's own
+/// `<sessions_dir>/<session-id>.jobs/` directory, which is inside the sessions directory the
+/// sandbox denies reading. A sandboxed shell cannot read it.
+#[tokio::test]
+async fn workspace_shell_cannot_read_a_background_jobs_output_file() {
+    let dir = scratch("shell-deny-jobs");
+    let radian_home = dir.join("rh");
+    let sessions = radian_home.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let session_id = "deny-jobs";
+    let jobs = sessions.join(format!("{session_id}.jobs"));
+    std::fs::create_dir_all(&jobs).unwrap();
+    std::fs::write(jobs.join("job-1.out"), "SECRET-JOB-OUTPUT\n").unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let command = format!("cat {}/job-1.out", jobs.display());
+    let server = MockServer::start(vec![
+        tool_reply("c1", "shell", &json!({ "command": command }).to_string()),
+        text_reply("SAW-DENIED"),
+    ])
+    .await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian_bare(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "--session-id",
+                session_id,
+                "-p",
+                "go",
+            ],
+            &[("RADIAN_HOME", radian_home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("SAW-DENIED"), "{stdout}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        !result.contains("SECRET-JOB-OUTPUT"),
+        "the sandbox leaked a background job's output file: {result}"
+    );
+    assert!(
+        result.contains("exit code:"),
+        "a shell result was expected: {result}"
+    );
+}
+
 /// ADR 0020 acceptance 2: a `--session-dir` that does not exist yet must still be denied. The
 /// host creates it 0700 **before** building the sandbox, because Linux's bwrap can only mask
 /// paths that already exist; without that, the session file (created after the sandbox) would

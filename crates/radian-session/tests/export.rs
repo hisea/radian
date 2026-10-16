@@ -240,3 +240,20 @@ fn reasoning_is_omitted_by_default_in_both_formats_and_included_when_opted_in() 
         assert!(!out.contains(FAKE_KEY), "{out}");
     }
 }
+
+/// ADR 0018, decision 3: a deterministic compaction is marked in the Markdown export
+/// (and its flag round-trips in the JSON export).
+#[test]
+fn a_deterministic_compaction_is_noted_in_the_exports() {
+    let session = Session::open(common::fixture("compaction-deterministic.jsonl")).unwrap();
+    let md = export_markdown(&session, &ExportOptions::new()).unwrap();
+    assert!(
+        md.contains("context compacted without a summary"),
+        "the Markdown notes it: {md}"
+    );
+    let json = export_json(&session, &ExportOptions::new()).unwrap();
+    assert!(
+        json.contains("\"deterministic\": true"),
+        "the JSON carries the flag: {json}"
+    );
+}

@@ -566,6 +566,7 @@ async fn a_resumed_history_matches_the_disk_fold_through_compaction_and_replacem
             tokens_after: 100,
             below_target: false,
             model: "mock".to_owned(),
+            deterministic: false,
         },
         JournalRecord::TranscriptReplaced {
             revision: 1,

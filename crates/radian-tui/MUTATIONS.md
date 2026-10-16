@@ -1556,3 +1556,57 @@ Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个�
 12/12 抓住。ASK2 的两个变异在同一条用例里：待答一行、答完同一条目成块且只有一个块。ASK4-M1/M3 是
 owner 反馈的两个按键问题的回归钉：←/→ 切题（无字段时）与底边提示跟随聚焦状态。`check-glyph-coverage.py`
 的结果（☐/☑ 缺 SF Mono / JetBrains Mono Nerd / Cascadia Code）写在 ADR 0024 的「实施补充」里。
+
+## thin ④：diff 正文的行号、符号、高亮（ADR 0028）
+
+Base：本片 HEAD（`dogfood/thin-diff`）· 就地变异：每个变异先把文件复制到
+`.radian/scratch/mut.<变异>.orig`，用 `python3` 打补丁（带 `assert`），跑命名的测试，再从副本写回并用
+`cmp` 确认逐字节相同（`git status --short` 只剩本片改动）。脚本 `.radian/scratch/mutate.sh`（不提交）。
+测试都带 `--no-fail-fast`。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| D1 | `+` 与上下文行用新文件行号、`-` 行用旧文件行号 | `DiffKind::Added` 改用 `old` 计数 | `diff::a_patch_body_numbers_its_rows_once_per_hunk`、`tools::tests::a_git_diff_body_numbers_from_its_own_hunk_headers` | ✅ |
+| D2 | `@@` 与文件头是弱一级（`frame`），不是强调色 | `diff_role` 的结构行返回 `LineRole::Accent` | `diff::a_diff_row_colors_its_gutter_sign_and_code`、`render::a_git_diff_body_colors_its_line_kinds` | ✅ |
+| D3 | diff 的代码按文件后缀高亮 | `diff_line` 的 highlight 恒为 `None`（`Some` 分支不可达） | `diff::a_diff_row_colors_its_gutter_sign_and_code`（`.rs` 的 `let` 是 `syntax_keyword`） | ✅ |
+| D4 | `patch` 结构化结果的起始行 | `patch.rs::line_of_offset` 的 `+ 1` 改成 `+ 2` | `radian-coding tests/patch.rs` 的四条 hunk 测试（一/多区间、CRLF、首行与末行） | ✅ |
+
+4/4 抓住。**过程记录（D2 的第一轮没抓住，是实现的问题）**：`diff_body` 里 `@@` 与文件头两处直接把角色
+写成 `LineRole::Dim`，没有走 `diff_role`，所以变异 `diff_role` 对带 `@@` 的正文没有影响（只有"无起始行
+退路"那一支会变）。两处改成调用 `diff_role`（结构行的角色只有一个定义处）后立刻抓住。
+
+## thin-ask：问答记录改开口框、标记改圆圈（ADR 0028，2026-10-16）
+
+Base `origin/main` `28f4703`（worktree `.radian-worktrees/thin-ask`）。每个变异就地改完跑
+`cargo test -p radian-tui --lib --no-fail-fast -- <名字>` 与 `--test render ...`，再从
+`.radian/scratch/blocks.rs.new` 写回并 `cmp -s` 逐字节相同。测试先改到新期望、对未改的实现跑过一遍，
+12 条全 FAILED（4 lib + 7 render + 1 question），再动实现。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ASK5-M1 | 开口框又封口（`ask_top` 的延伸段末尾加回 `╮`） | `blocks::tests::the_open_frame_rows_sit_in_the_marker_column`、`blocks::tests::the_ask_bottom_is_the_three_cell_tail` | ✅ |
+| ASK5-M2 | 多选改回 `☐`/`☑`（`AskGlyphs` 的 `multi_on`/`multi_off`） | `blocks::tests::the_ask_glyphs_use_one_circle_pair`、`render::the_ask_panel_uses_one_circle_pair_for_single_multi_and_other` | ✅ |
+| ASK5-M3 | 选项标记又加粗（`ask_body` 的 `{mark} ` 前缀改 `MdStyle::Accent`） | `render::the_transcript_ask_marker_is_never_bold` | ✅ |
+| ASK5-M4 | 正文从第 2 列起（`ask_body` 的 `│ ` 去掉标记后的空格） | `blocks::tests::the_open_frame_rows_sit_in_the_marker_column`、`render::a_declined_ask_shows_the_status_inside_the_block` | ✅ |
+
+4/4 抓住。面板的「标记不加粗」仍由既有的 `the_ask_panel_marker_is_never_bold` 钉住（ASK3-M1）；
+本片把 `AskGlyphs` 的单选/多选/Other 从 `☐`/`☑` 改成 `○`/`◉` 后，这条用例找的格子也从 `☑` 改成 `◉`。
+## thin ⑥：用户行、默认输入框、压缩线（ADR 0035/9、ADR 0028，2026-10-16）
+
+Base：本片 HEAD（`oc/thin-user`）· 就地变异，每个变异后从 `.radian/scratch/render.rs.orig` /
+`blocks.rs.orig` 还原并用 `cmp` 确认逐字节相同。`--no-fail-fast`。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| U6-M1 | 用户行仍带底色（`render.rs::body_style` 的 User 加回背景） | 用户行是前景角色、无底色 | `render::the_user_row_is_a_chevron_and_the_words_with_no_band`、`render::the_user_row_has_no_band_at_80_and_120`、`render::a_selection_draws_the_selection_role_on_its_cells`、`render::the_mono_selection_is_reversed_not_colored`（4 条 FAILED） |
+| U6-M2 | 用户行又加回上下半格留白行 | 用户行只有文字，块间距由容器给 | `blocks::a_user_block_has_no_padding_rows_at_any_glyph_tier`、`blocks::a_blank_edge_line_is_stripped`、`blocks::md_line_count_matches_the_layout`、`render::the_user_row_is_a_chevron_and_the_words_with_no_band`、`render::the_block_layout_snapshot`、`render::thinking_has_one_blank_line_on_both_sides` 等（lib 5 + render 7 条 FAILED） |
+| U6-M3 | 默认输入框回到 `bar`（`InputStyle` 的 `#[default]` 移回 Bar） | 默认是 `lines` | `config::the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines`、`render::the_default_input_style_is_lines`、`render::the_user_row_has_no_band_at_80_and_120`（config 1 + render 2 条 FAILED） |
+| U6-M4 | 压缩线又退回第 3 列（folded 行前加两格） | 压缩线从第 1 列起 | `render::the_compaction_line_starts_at_column_one_in_the_frame_role`、`render::the_block_layout_snapshot`（2 条 FAILED） |
+
+4/4 抓住，无等价变异。行数一致性（`blocks.rs::line_count` 的 User 分支）由
+`blocks::md_line_count_matches_the_layout` 与窗口/选择测试在改前改后都通过来保证。
+`block_gap` 去掉了「用户块靠自己的 pad 分隔」的旧特例（thin 用户行没有 pad，改由容器的 1 行空白
+分隔，与原型 `render-prototype.py` 一致），由 `blocks::the_container_gap_is_one_line_except_within_a_block`
+与 `render::thinking_has_one_blank_line_on_both_sides` 钉住。`apply_selection` 顺带修正：选中段保留它
+来自的 span 的前景色（原先最后一段回退到 `Style::default()`，会把选区尾部的前景色抹掉），由
+`render::a_selection_draws_the_selection_role_on_its_cells` 的「文字保留自己的前景色」断言钉住。

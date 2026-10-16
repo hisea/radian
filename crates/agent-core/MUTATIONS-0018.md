@@ -173,3 +173,25 @@ Base `73975ae` · 在本任务工作树内逐条施加后从副本还原（`cmp`
 压缩设置泄漏进对话请求即红；T2 断言缩短请求的 `settings` 与摘要请求的相同；T3 断言请求级
 `thinking` 覆盖配置的 `adaptive`。三个变异分别落在 Core 的对话路径、Core 的缩短重试路径与
 Anthropic 适配器的插入守卫上，覆盖了这次改动的三条边。
+
+## 修订 8 决定 3：摘要失败时确定性兜底（2026-10-15）
+
+Base `dfa66b7`（oc/compaction-thinking）· 在本任务工作树内逐条施加，改动 `turn.rs` /
+`compaction.rs`，从 `/tmp/cf_turn.rs.bak`、`/tmp/cf_compaction.rs.bak` 还原并用 `cmp` 确认一致
+（不用 `git checkout --`）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| D1 | 从**最新**单元开始丢（`kept.truncate(len - drop)`，`first_kept` 不动） | `compaction_flow::the_deterministic_fallback_truncates_tools_and_drops_the_oldest_first` | ✅ failed |
+| D2 | 拆开原子单元（`first_kept = plan.first_kept + drop`，逐条消息推进而非逐单元） | 同上 | ✅ failed |
+| D3 | 丢掉用户原话（`user_messages` 直接取空） | `compaction_flow::two_invalid_summaries_fall_back_deterministically` | ✅ failed |
+| D4 | 手动路径也兜底（`deterministic_allowed = true`） | `compaction_flow::a_manual_compact_reports_a_summary_failure_instead_of_falling_back` | ✅ failed |
+| D5 | 确定性兜底写 `CompactionUsageRecorded`（`finish_compaction` 里补一条 dummy usage） | `compaction_flow::two_invalid_summaries_fall_back_deterministically`（断言 usage 数为 0） | ✅ failed |
+| D6 | 工具结果不截断（`truncate_tool_result_text` 恒返回 `None`） | `compaction::a_truncated_tool_result_keeps_the_marker_within_the_limit`、`truncate_kept_tool_results_cuts_only_over_long_results` | ✅ failed |
+| D7 | `N` 只数计划切点之外丢掉的条数（`dropped = first_kept - plan.first_kept`，评审修正前的公式） | `compaction_flow::the_deterministic_fallback_counts_the_whole_removed_head`、`the_deterministic_fallback_truncates_tools_and_drops_the_oldest_first` | ✅ failed |
+
+7/7 抓住。D1/D2 由同一条集成测试的两条断言分别覆盖：D1 让最新单元（`go`）消失，D2 让切点落在
+原子单元内部（`validate_history` 拒绝 → 本轮失败）。D5 用 dummy usage 作近似（真实签名相同），
+断言的是「确定性兜底不得留下任何 `CompactionUsage` 记录」。D7 是第一档（`drop = 0`）就达标时的
+计数：新测试的计划头含 1 条用户原话（逐字保留）+ 1 个 assistant/结果单元（共 3 条被移出前缀），
+老公式报 0，新公式报 2；它同时让旧测试的 `3`（只数切点之外）变红，两条一起钉住口径。

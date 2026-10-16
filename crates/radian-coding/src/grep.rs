@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -19,7 +20,7 @@ const SNIFF_BYTES: usize = 8 << 10;
 /// A single line is read, matched and reported on at most this many bytes. A longer line is
 /// matched on its prefix and its reported text carries a `[truncated]` marker, so one enormous
 /// line cannot grow the result without bound. The rest of the line is consumed, never stored.
-const MAX_LINE_BYTES: usize = 8 << 10;
+pub(crate) const MAX_LINE_BYTES: usize = 8 << 10;
 
 #[derive(Deserialize)]
 struct GrepArgs {
@@ -135,38 +136,50 @@ pub(crate) async fn run(
     // `resolve_existing` canonicalizes, so a symlinked `path` that escapes is refused and the
     // base is always inside the workspace.
     let requested = args.path.as_deref().unwrap_or(".");
-    let base = root.resolve_existing(requested)?;
 
-    let mut files: Vec<(PathBuf, String)> = Vec::new();
-    if base.is_file() {
-        if let Some(rel) = search::relative(root.root(), &base) {
-            let rel_string = rel.to_string_lossy().into_owned();
+    // ADR 0039 decision 2: the base and every file are opened through the root's directory
+    // fd; the walk hands back open fds, never paths to re-open.
+    let mut files: Vec<(File, String)> = Vec::new();
+    match root.open_dir(requested) {
+        Ok(base) => {
+            let base_rel = PathBuf::from(requested.trim_start_matches("./").trim_end_matches('/'));
+            let base_rel = if base_rel == Path::new(".") {
+                PathBuf::new()
+            } else {
+                base_rel
+            };
+            search::walk(&base, &base_rel, &mut |found| {
+                let rel = found.relative;
+                if let Some(filter) = &file_filter
+                    && !filter.is_match(&rel)
+                {
+                    return true;
+                }
+                files.push((found.file, rel.to_string_lossy().into_owned()));
+                true
+            });
+            files.sort_by(|a, b| a.1.cmp(&b.1));
+        }
+        Err(failure) if failure.code == "not_a_directory" => {
+            // A file base: the pattern is matched against its own workspace-relative path.
+            let opened = root.open_read(requested)?;
+            if opened.stat.kind != crate::safe_fs::EntryKind::File {
+                return Err(fail(
+                    "not_a_file",
+                    format!("`{requested}` is not a regular file"),
+                ));
+            }
+            let rel: PathBuf = crate::safe_fs::components(Path::new(requested))
+                .map(|parts| parts.iter().collect())
+                .unwrap_or_default();
             if file_filter
                 .as_ref()
-                .is_none_or(|filter| filter.is_match(rel))
+                .is_none_or(|filter| filter.is_match(&rel))
             {
-                files.push((base, rel_string));
+                files.push((opened.file, rel.to_string_lossy().into_owned()));
             }
         }
-    } else {
-        for entry in search::walk(&base).flatten() {
-            if !search::is_regular_file(&entry) {
-                continue;
-            }
-            let Some(rel) = search::relative(root.root(), entry.path()) else {
-                continue;
-            };
-            if let Some(filter) = &file_filter
-                && !filter.is_match(rel)
-            {
-                continue;
-            }
-            files.push((
-                entry.path().to_path_buf(),
-                rel.to_string_lossy().into_owned(),
-            ));
-        }
-        files.sort_by(|a, b| a.1.cmp(&b.1));
+        Err(failure) => return Err(failure),
     }
 
     let per_file_cap = limits.default_grep_matches_per_file;
@@ -174,13 +187,14 @@ pub(crate) async fn run(
     let mut total = 0usize;
     let mut files_matched = 0usize;
     let mut truncated = false;
-    for (path, rel) in &files {
+    for (file, rel) in files {
+        let rel = &rel;
         let budget = per_file_cap.min(cap.saturating_sub(total));
         if budget == 0 {
             truncated = true;
             break;
         }
-        let Scan::Matches { text, matches, cut } = scan_file(&regex, path, rel, context, budget)
+        let Scan::Matches { text, matches, cut } = scan_file(&regex, file, rel, context, budget)
         else {
             continue;
         };
@@ -238,10 +252,7 @@ enum Scan {
 
 /// Searches one file's lines, rendering at most `budget` matches. `cut` is set when a further
 /// match exists that the budget excluded.
-fn scan_file(regex: &Regex, path: &Path, rel: &str, context: usize, budget: usize) -> Scan {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return Scan::Skipped;
-    };
+fn scan_file(regex: &Regex, mut file: File, rel: &str, context: usize, budget: usize) -> Scan {
     let mut sniff = [0u8; SNIFF_BYTES];
     let mut filled = 0usize;
     loop {
@@ -364,7 +375,7 @@ impl Emitter {
 
 /// A line's text without its terminator, lossy-decoded so a non-UTF-8 byte cannot fail the
 /// whole search.
-fn strip_line_end(buf: &[u8]) -> String {
+pub(crate) fn strip_line_end(buf: &[u8]) -> String {
     let mut end = buf.len();
     if end > 0 && buf[end - 1] == b'\n' {
         end -= 1;
@@ -376,7 +387,7 @@ fn strip_line_end(buf: &[u8]) -> String {
 }
 
 /// What [`read_line_capped`] did.
-enum LineRead {
+pub(crate) enum LineRead {
     /// A complete line (ending in `\n`, or the last line at EOF) is in the buffer.
     Complete,
     /// No more bytes: the buffer is empty.
@@ -388,7 +399,7 @@ enum LineRead {
 
 /// Reads one line into `buf`, never holding more than `cap` bytes. The remainder of an
 /// over-long line is consumed and dropped, so the next call reads the following line.
-fn read_line_capped<R: BufRead>(
+pub(crate) fn read_line_capped<R: BufRead>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     cap: usize,

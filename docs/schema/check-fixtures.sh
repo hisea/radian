@@ -171,6 +171,15 @@ EXPECT = {
         uncommitted=[],
         repair={},
     ),
+    "compaction-deterministic.jsonl": dict(
+        outcome="accept",
+        events=8,
+        skips=[],
+        replacement=(5, 1, 2),
+        uncommitted=[],
+        deterministic=True,
+        repair={},
+    ),
     "fork-parent.jsonl": dict(
         outcome="accept",
         events=6,
@@ -193,10 +202,22 @@ EXPECT = {
         task_spawned=(
             3,
             "14222222-2222-4222-8222-222222222222",
-            "/work/example/.radian-worktrees/task-1",
+            "/work/radian-home/worktrees/example-0f3a1c9b7d2e/task-1",
             "slice 1",
         ),
         task_finished=(6, "14222222-2222-4222-8222-222222222222", "completed"),
+    ),
+    "task-finished-error.jsonl": dict(
+        outcome="accept",
+        events=5,
+        skips=[],
+        repair={},
+        task_finished_error=(
+            4,
+            "15222222-2222-4222-8222-222222222222",
+            "completed",
+            "the end-of-task commit failed: this session may only commit to `radian/task-1`, not `other`",
+        ),
     ),
     "task-child.jsonl": dict(
         outcome="accept",
@@ -497,6 +518,13 @@ def check_fixture(name, exp):
             else:
                 if not isinstance(data.get("outcome"), str) or not data["outcome"]:
                     raise Corruption(f"{name}: line {i}: TaskFinished.outcome 必须是非空字符串")
+                # ADR 0039 决定 5/7：`error` 是可选的；出现时必须是非空字符串。
+                if "error" in data and (
+                    not isinstance(data["error"], str) or not data["error"]
+                ):
+                    raise Corruption(
+                        f"{name}: line {i}: TaskFinished.error 必须是非空字符串"
+                    )
         if ev["event"] == "MessageAppended":
             msg = ev["data"].get("message")
             if not isinstance(msg, dict) or len(msg) != 1:
@@ -666,6 +694,14 @@ def check_fixture(name, exp):
             raise Corruption(f"{name}: 期望至少一条未标记（旧）usage 记录")
         if not any(isinstance(mark, bool) for _, mark in got):
             raise Corruption(f"{name}: 期望至少一条带布尔标记的 usage 记录")
+    if exp.get("deterministic"):
+        # ADR 0018 决定 3：确定性兜底的 ContextCompacted 带 deterministic:true，
+        # 且不写 CompactionUsageRecorded（没有模型调用）。
+        compacted = [e for e in events if e["event"] == "ContextCompacted"]
+        if len(compacted) != 1 or compacted[0]["data"].get("deterministic") is not True:
+            raise Corruption(f"{name}: 期望一条 deterministic:true 的 ContextCompacted")
+        if any(e["event"] == "CompactionUsageRecorded" for e in events):
+            raise Corruption(f"{name}: 确定性兜底不得写 CompactionUsageRecorded")
     if "usage_fees" in exp:
         # ADR 0027 / ADR 0007：`fee` 是 usage 记录里**可选**的兄弟字段
         # （micro-dollars 与 incomplete），缺省即旧记录（恢复方按当前目录重算并标估算）。
@@ -792,6 +828,22 @@ def check_fixture(name, exp):
         if finished != [tuple(exp["task_finished"])]:
             raise Corruption(
                 f"{name}: task_finished {finished} != 期望 {[tuple(exp['task_finished'])]}"
+            )
+    if "task_finished_error" in exp:
+        # ADR 0039 决定 7：提交失败写在 TaskFinished 的可选 `error` 里。
+        finished = [
+            (
+                e["seq"],
+                e["data"].get("agent_session_id"),
+                e["data"].get("outcome"),
+                e["data"].get("error"),
+            )
+            for e in events
+            if e["event"] == "TaskFinished"
+        ]
+        if finished != [tuple(exp["task_finished_error"])]:
+            raise Corruption(
+                f"{name}: task_finished_error {finished} != 期望 {[tuple(exp['task_finished_error'])]}"
             )
     if "policy_resolved" in exp:
         resolved = [

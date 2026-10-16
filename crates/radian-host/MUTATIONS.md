@@ -955,3 +955,82 @@ session grant，其他非人类来源照旧在 hook 里被拒。
 1/1 抓住。该测试先于修复写就、在旧分支上失败（标记文件被创建）；修复后无 sandbox 直接回
 `Ask`，命令不执行，请求进待决队列，reason 记「the edge policy was skipped: this task has no
 sandbox」。`run_policy` 里已不存在无沙箱分支。
+## sec-git：ADR 0039 决定 3（宿主不执行任何仓库配置的 filter 命令，2026-10-16）
+
+工作树 `.radian-worktrees/sec-git`，基线 `11e4b01`。变异就地施加，用 `.radian/scratch/mut/` 的
+副本还原（每个变异后 `cmp` 证明与副本一致）；每个变异用
+`cargo test -p radian-host --test git_commit --no-fail-fast -- <过滤>` 与
+`cargo test -p radian-host --test task --no-fail-fast -- creating_and_removing_a_worktree_runs_no_filter`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SG-M1 | 暂存退回 `git add -A` / `git add -- <paths>`（宿主的 `git add` 执行仓库 filter） | `lfs_runs_radians_own_command_and_never_the_configured_one`（配置的 `filter.lfs.clean` 脚本被 `git add` 跑了） | ✅ 1 FAILED |
+| SG-M2 | `lfs` 从仓库配置读 `filter.lfs.clean` 命令串并用 `sh -c` 运行，而不是 Radian 自己的固定 `git-lfs clean -- <path>` | `lfs_runs_radians_own_command_and_never_the_configured_one`（配置的脚本跑了，提交的是脚本输出而不是固定命令的指针） | ✅ 1 FAILED |
+| SG-M3 | `dirty()` 与 task 的 `create_worktree`/`remove_worktree` 去掉 no-filter 覆盖（`git status` / `git worktree add\|remove` 直接跑 filter） | `a_driver_in_info_attributes_never_runs`、`a_driver_in_core_attributes_file_never_runs`（`dirty` 跑了 clean），`creating_and_removing_a_worktree_runs_no_filter`（`worktree add` 跑了 smudge） | ✅ 3 FAILED |
+
+3/3 全抓。SG-M1 由 lfs 那条确定性抓住：`git add` 对 `filter=lfs` 的文件会执行仓库配置里的
+命令，而 lfs 是唯一「被允许、因而不会被 `plan_path` 提前拒绝」的驱动，所以「退回 git add」在这条
+路径上必然跑配置命令。`a_gitattributes_flip_during_commit_never_runs_a_filter` 是并发断言
+（断言「标记永不出现」），在 SG-M1 下 8 次提交里没有恰好撞上 check-attr 与 git add 之间的窗口，
+因此不算 SG-M1 的抓取测试——确定性的抓取是 lfs 那条。
+
+**如实记录（未做变异）**：`GIT_ATTR_SOURCE=<空树>` 不足以关掉 `$GIT_DIR/info/attributes` 与
+`core.attributesFile`（实测见 `.radian/scratch/investigate3.out`），所以实现用「从生效配置枚举
+filter 名字 + 对每个名字 `-c filter.<name>.{clean,smudge,process}=` 与 `required=false`」。这一层
+的测试是 `a_driver_in_info_attributes_never_runs` 与 `a_driver_in_core_attributes_file_never_runs`；
+SG-M3 证明它们确实区分「关掉命令」与「没关」。
+
+## sec-git 复核修订 1：每个宿主 git 调用都走共享 helper（2026-10-16）
+
+工作树 `.radian-worktrees/sec-git`，基线 `c33feca`。变异就地施加，用 `.radian/scratch/mut2/`
+的副本还原（每个变异后 `cmp` 证明与副本一致）；每个变异跑对应的测试。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SG-F1-M1 | 页脚的 `background_git` 退回裸 `Command::new("git") -C dir`（丢掉 no-filter 覆盖） | `contrib::tests::the_git_contributor_never_runs_a_repository_filter`（页脚读跑了 clean filter）；守卫 `every_host_git_call_is_built_from_the_shared_helper`（`contrib.rs` 出现生产裸 git 调用） | ✅ 2 FAILED |
+| SG-F1-M2 | `radian-coding` 的 `git_status`/`git_diff` 退回裸 git（丢掉覆盖） | `the_git_tools_never_run_a_repository_filter`（工具跑了 clean filter） | ✅ 1 FAILED |
+| SG-F1-M3 | gitlink 用 100644 而不是 160000 暂存 | `a_moved_submodule_is_staged_as_a_gitlink_without_running_a_filter`（模式不对） | ✅ 1 FAILED |
+
+3/3 全抓。守卫测试（`crates/radian-coding/tests/host_git.rs`）遍历 `crates/*/src` 里 `#[cfg(test)]`
+之前的部分，`Command::new("git")` 只允许出现在 helper 自己（`host_git.rs`）与沙箱测试 harness
+（`radian-sandbox/src/harness.rs`，其唯一的裸 git 只建测试仓库）；新增一个生产裸 git 调用会让它
+失败，SG-F1-M1 的守卫那条就是证明。
+
+**如实记录（测试的触发条件）**：`git status` 只在**大小相同**的 stat-dirty 文件上才哈希内容、
+从而跑 clean filter；内容大小不同时 git 直接按 stat 判为改动，不跑 filter。所以三个行为测试都用
+「与 index blob 同大小」的改动（`one\n` → `two\n`）。第一次写测试时用了不同大小（`one\ntwo\n`），
+SG-F1-M1 的行为测试假绿（只有守卫抓住）；改成同大小后行为测试也抓住。
+## sec-task：ADR 0039 决定 4/5/7（task worktree 出工作区、spawn 事务、可等待的收尾提交，2026-10-16）
+
+工作树 `.radian-worktrees/build-script`，分支 `dogfood/sec-task`（基线 `origin/main` f72097d；
+变异时 HEAD `f5d5ee38`）。先 `cp` 一份 `crates/radian-host/src/task.rs` 到 `.radian/scratch/`，
+每个变异就地施加后跑一条测试，再 `cp` 还原，最后 `shasum -a 256 -c` 证明与副本逐字节一致。
+命令：`cargo test -p radian-host --test task <测试> --no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S4-1 | `task_worktree_root` 把根放回工作区内（`<ws>/.radian-worktrees`，`home` 也改成工作区） | `the_task_worktree_is_outside_the_workspace_on_a_per_repository_root` | ✅ 抓住 (rc=101) |
+| S4-2 | 新根的每一级都不加 `O_NOFOLLOW`（`open_dir_at` 跟随 symlink） | `a_symlink_under_the_new_root_is_refused` | ✅ 抓住 (rc=101) |
+| S4-3 | spawn 的错误路径不调 `guard.rollback()`（worktree 与 driver 都留下） | `a_failed_spawn_leaves_nothing_behind_and_pairs_a_task_finished` | ✅ 抓住 (rc=101) |
+| S4-4 | 在 `open_session` 之后就 `guard.disarm()`（登记前解除，brief 失败不再回滚） | 同上（`Brief` 那个失败点） | ✅ 抓住 (rc=101) |
+| S4-5 | `remove()` 不等收尾提交（删掉 `await_end_commit`） | `remove_waits_for_the_end_of_task_commit` | ✅ 抓住 (rc=101) |
+| S4-6 | 收尾提交失败被丢掉（finisher 不写 `TaskFinished`） | `a_failing_end_commit_shows_in_task_finished` | ✅ 抓住 (rc=101) |
+
+6/6 全抓。
+
+**S4-4 的第一次尝试（如实记录）**：把 `guard.disarm()` 插在 `let record = Arc::new(TaskRecord …)`
+之前**不**被抓住——那是 brief 之后的最后一句话，四个失败点都已过去，变异不可区分。改成
+`open_session` 之后（brief 之前）立刻解除才被 `Brief` 那个失败点抓住。check 列表里保留了这次
+失败记录，省得后人重复。
+
+**S4-5 的同步方式**：收尾提交被一个 seam（`CommitGate`）卡住，测试用 oneshot 收到「提交已进入」，
+不用 sleep 同步；「仍未被唤醒」用有界 `timeout` 观测。变异（remove 不等）会在提交还卡住时读到
+未提交的工作树并拒绝，因此 `timeout` 返回 Ok，断言失败。
+## ADR 0039 决定 6：通知方在 spawn 之前同步订阅（2026-10-16）
+
+工作树 `oc/sec-jobs`（base `0e9baef`）· 变异就地改 `job_notify.rs`、跑完从
+`.radian/scratch/mut/job_notify.rs.orig` 还原并 `diff -q` 确认，`git status --short` 干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SJ6 | `JobNotifier::spawn` 把 `self.jobs.subscribe()` 放回 `runtime.spawn(async move { … })` 内部 | `job_notify::the_first_job_events_are_not_lost`（首个 job 的 `Started`/`Settled` 都不在 journal 里） | ✅ failed |

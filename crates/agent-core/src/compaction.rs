@@ -537,6 +537,81 @@ fn truncate_chars(text: &str, limit: usize) -> (String, Option<usize>) {
     (text.chars().take(limit).collect(), Some(total - limit))
 }
 
+// ---------- ADR 0018, decision 3: the deterministic fallback ----------
+
+/// The truncation marker appended to a kept tool result (ADR 0018, decision 3). It is
+/// the same shape the summary input writes, so the same cut reads the same either way.
+fn tool_result_truncation_marker(dropped: usize) -> String {
+    format!(" … [truncated {dropped} characters]")
+}
+
+/// Cuts one tool result's text to at most [`TOOL_RESULT_LIMIT_CHARS`] characters, truncation
+/// marker included, using [`truncate_chars`] — the same cut the summary input uses. `None` when
+/// the result already fits.
+///
+/// The marker reserves its own room inside the limit, so the kept result never grows past
+/// [`TOOL_RESULT_LIMIT_CHARS`] (the marker is useless without the count it names).
+pub fn truncate_tool_result_text(text: &str) -> Option<String> {
+    let total = text.chars().count();
+    if total <= TOOL_RESULT_LIMIT_CHARS {
+        return None;
+    }
+    // Reserve the longest marker this text could need, so no rounding of the count can push the
+    // result back over the limit.
+    let reserve = tool_result_truncation_marker(total).chars().count();
+    let limit = TOOL_RESULT_LIMIT_CHARS.saturating_sub(reserve);
+    let (kept, cut) = truncate_chars(text, limit);
+    let cut = cut.expect("the text is over the limit");
+    Some(format!("{kept}{}", tool_result_truncation_marker(cut)))
+}
+
+/// Truncates every tool result in `kept` that is over [`TOOL_RESULT_LIMIT_CHARS`] (ADR 0018
+/// revision 8, decision 3), in place, and reports how many were cut. A cut result keeps only
+/// its textual content: `structured` and non-text parts cannot be cut by character and are
+/// dropped rather than sent whole.
+pub fn truncate_kept_tool_results(kept: &mut [Message]) -> usize {
+    let mut cut = 0;
+    for message in kept.iter_mut() {
+        let Message::Tool { result, .. } = message else {
+            continue;
+        };
+        let Some(text) = truncate_tool_result_text(&result.text()) else {
+            continue;
+        };
+        result.content = vec![ContentPart::text(text)];
+        result.structured = None;
+        cut += 1;
+    }
+    cut
+}
+
+/// The fixed line a deterministic summary carries (ADR 0018, decision 3): what the
+/// fallback dropped and how many kept tool results it cut. It is not a model summary, and a
+/// reader can tell the two apart by it.
+pub fn deterministic_summary_line(dropped: usize, truncated: usize) -> String {
+    format!(
+        "[context compacted without a summary: {dropped} messages dropped, \
+         {truncated} tool results truncated]"
+    )
+}
+
+/// The deterministic fallback's summary text (ADR 0018, decision 3): the previous
+/// model summary **verbatim** (when there is one) followed by [`deterministic_summary_line`].
+/// The previous summary is kept because the fallback must not throw away what an earlier model
+/// summary established. The verbatim user messages are rendered by [`compacted_history`], not
+/// here.
+pub fn deterministic_summary(
+    previous_summary: Option<&str>,
+    dropped: usize,
+    truncated: usize,
+) -> String {
+    let line = deterministic_summary_line(dropped, truncated);
+    match previous_summary.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(previous) => format!("{previous}\n\n{line}"),
+        None => line,
+    }
+}
+
 /// Whether `message` is a compaction summary: a user message whose `origin.kind` is
 /// `"compaction_summary"` (ADR 0018). A host, exporter or reader uses this instead of parsing
 /// the text.
@@ -747,11 +822,30 @@ pub fn select_user_messages(
     newly_summarized: &[Message],
     input_budget: Option<u64>,
 ) -> Vec<RetainedUserMessage> {
+    select_user_messages_tracked(previous, newly_summarized, input_budget).0
+}
+
+/// [`select_user_messages`] plus how many of `newly_summarized`'s user messages the result
+/// carries verbatim.
+///
+/// The deterministic fallback (ADR 0018, decision 3) needs the count to report `N`
+/// in its fixed line: a user message the list carries is still in the new view, so only the
+/// other summarized messages count as dropped. The second element is that many **carried**
+/// messages out of `newly_summarized`, in the same selection the first element encodes, so the
+/// two cannot drift.
+pub fn select_user_messages_tracked(
+    previous: &[RetainedUserMessage],
+    newly_summarized: &[Message],
+    input_budget: Option<u64>,
+) -> (Vec<RetainedUserMessage>, usize) {
     let mut texts: Vec<String> = previous
         .iter()
         .filter(|kept| !is_omitted_marker(&kept.text))
         .map(|kept| kept.text.clone())
         .collect();
+    // Everything from this index on in `texts` comes from `newly_summarized`; the entries before
+    // it are the earlier compaction's own. `carried` counts only the former.
+    let base = texts.len();
     // A previous marker's count is carried forward: those messages are still omitted, and the
     // new marker must name all of them, not just this round's.
     let mut omitted: usize = previous
@@ -764,12 +858,14 @@ pub fn select_user_messages(
         }
     }
     if texts.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let (u, u1) = user_message_budget(input_budget);
 
-    // The first message is the task itself: always kept, cut to `U₁`.
+    // The first message is the task itself: always kept, cut to `U₁`. When it came from
+    // `newly_summarized` (no earlier list), it counts as carried.
     let first = truncate_text(&texts[0], u1).unwrap_or_else(|| texts[0].clone());
+    let mut carried = usize::from(base == 0);
     let mut kept: Vec<String> = Vec::new();
     let mut used = 0u64;
     // From the newest backwards: the newest is always placed, truncated into `U` when it alone
@@ -795,6 +891,9 @@ pub fn select_user_messages(
             break;
         }
         used += entry_tokens;
+        if index + 1 >= base {
+            carried += 1;
+        }
         kept.push(entry);
     }
     kept.reverse();
@@ -807,5 +906,5 @@ pub fn select_user_messages(
         });
     }
     out.extend(kept.into_iter().map(|text| RetainedUserMessage { text }));
-    out
+    (out, carried)
 }

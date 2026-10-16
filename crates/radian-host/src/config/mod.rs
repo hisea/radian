@@ -233,8 +233,10 @@ pub struct GitConfig {
     /// `protected_branches = ["release"]`: branches `git_commit` refuses besides
     /// `main`/`master`.
     pub protected_branches: Vec<String>,
-    /// `allowed_filters = ["lfs"]` (ADR 0030): the `filter.<name>` drivers `git add`
-    /// may run. `None` means the default (`["lfs"]`); an empty list allows none.
+    /// `allowed_filters = ["lfs"]` (ADR 0030, ADR 0039 decision 3): the filter
+    /// drivers `git_commit` may run **itself**, with a fixed command — only `lfs` is known. Any
+    /// other driver, named here or not, is refused, and no command is ever read from the
+    /// repository config. `None` means the default (`["lfs"]`); an empty list allows none.
     pub allowed_filters: Option<Vec<String>>,
 }
 

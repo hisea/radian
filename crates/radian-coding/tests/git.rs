@@ -190,3 +190,46 @@ async fn git_tools_are_not_confused_with_the_other_tools() {
         .unwrap();
     assert!(text(&output).contains("##"), "{}", text(&output));
 }
+
+/// ADR 0039 decision 3: the read-only git tools run in the host, so a model-writable
+/// `.gitattributes` naming a marker filter must not make `git_status`/`git_diff` run the clean
+/// filter of a stat-dirty file.
+#[tokio::test]
+async fn the_git_tools_never_run_a_repository_filter() {
+    let dir = TempDir::new("git-filter");
+    let root = repo(&dir);
+    let marker = common::sentinel_outside(&dir).join("FILTER-RAN");
+    let script = root.join("evil-clean.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(
+        &root,
+        &["config", "filter.evil.clean", script.to_str().unwrap()],
+    );
+    git(
+        &root,
+        &["config", "filter.evil.smudge", script.to_str().unwrap()],
+    );
+    git(&root, &["config", "filter.evil.required", "true"]);
+    std::fs::write(root.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    // `repo()` left tracked.txt stat-dirty; rewrite it (same size as the index blob) so git
+    // hashes the content and runs the clean filter on the status read too.
+    std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+
+    let tools = tools(&root);
+    let status = call(&tools, "git_status", json!({})).await.expect("status");
+    assert!(text(&status).contains("tracked.txt"), "{}", text(&status));
+    let _ = call(&tools, "git_diff", json!({})).await.expect("diff");
+    assert!(
+        !marker.exists(),
+        "git_status/git_diff must not run a repository filter in the host"
+    );
+}

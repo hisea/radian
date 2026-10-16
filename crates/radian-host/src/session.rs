@@ -1156,7 +1156,12 @@ pub async fn open_session(
     // coding tools read the new one on their next call. The host keeps this clone; the tools
     // get another.
     let sandbox_slot = SandboxSlot::from_option(sandbox);
-    let (coding, jobs) = build_coding_tools(coding_root.as_deref(), sandbox_slot.clone())?;
+    // ADR 0039 decision 1: the jobs directory is the session's own, e.g.
+    // `<sessions_dir>/<session-id>.jobs/`. It is a sibling of the session file, so the
+    // sandbox's deny-read rule on the sessions directory covers it.
+    let jobs_dir = session_dir.join(format!("{}.jobs", session_id.as_str()));
+    let (coding, jobs) =
+        build_coding_tools(coding_root.as_deref(), sandbox_slot.clone(), &jobs_dir)?;
     // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
     // there are coding tools. It is its own provider, so a host without `--workspace` still
     // advertises it. `None` is what the model sees as "no such tool".
@@ -1646,6 +1651,7 @@ fn open_journal(
 fn build_coding_tools(
     workspace: Option<&Path>,
     sandbox: SandboxSlot,
+    jobs_dir: &Path,
 ) -> Result<(Option<CodingTools>, Option<Arc<radian_coding::Jobs>>), SessionError> {
     match workspace {
         Some(dir) => {
@@ -1662,9 +1668,19 @@ fn build_coding_tools(
                     SessionError::Message(format!("--workspace {}: {error}", dir.display()))
                 })?
             };
-            // The host creates the registry (from the canonical root) so it can subscribe to
-            // job lifecycle notices and write the durable start/settle records (ADR 0037).
-            let jobs = Arc::new(radian_coding::Jobs::new(tools.root()));
+            // ADR 0039 decision 1: the jobs directory is the **session's own** directory, in
+            // the sessions dir the sandbox already denies reading. It is created 0700 with the
+            // same helper the sessions dir uses, before the registry can write anything, and
+            // passed in — the registry never derives a path from the workspace.
+            crate::ensure_private_dir(jobs_dir).map_err(|error| {
+                SessionError::Message(format!(
+                    "cannot create the jobs directory {}: {error}",
+                    jobs_dir.display()
+                ))
+            })?;
+            // The host creates the registry so it can subscribe to job lifecycle notices and
+            // write the durable start/settle records (ADR 0037).
+            let jobs = Arc::new(radian_coding::Jobs::new(jobs_dir));
             Ok((Some(tools.with_jobs(Arc::clone(&jobs))), Some(jobs)))
         }
         None => Ok((None, None)),
@@ -1731,4 +1747,64 @@ pub fn resumed_access(session_dir: &Path, session_id: &str) -> Option<Preset> {
         }
     }
     tier
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use radian_sandbox::{SandboxMode, SandboxPolicy};
+
+    fn full_access(ws: &Path) -> Sandbox {
+        let policy = SandboxPolicy::new(SandboxMode::FullAccess, ws).expect("full-access policy");
+        Sandbox::from_policy(policy).expect("full-access needs no backend")
+    }
+
+    /// ADR 0039 decision 1: the host builds the registry over the **session's own** jobs
+    /// directory (0700), never over `<workspace>/.radian/jobs`, and the output file lands
+    /// there at 0600.
+    #[cfg(unix)]
+    #[test]
+    fn the_jobs_directory_is_the_sessions_own_and_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("radian-host-jobs-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let jobs_dir = root.join("sessions/sid.jobs");
+
+        let slot = SandboxSlot::from_option(Some(full_access(&ws)));
+        let (_coding, jobs) = build_coding_tools(Some(&ws), slot, &jobs_dir).expect("tools");
+        let jobs = jobs.expect("a registry");
+
+        assert_eq!(
+            jobs.dir(),
+            jobs_dir,
+            "the registry uses the session jobs directory"
+        );
+        assert_eq!(
+            std::fs::metadata(&jobs_dir).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "the jobs directory is 0700"
+        );
+
+        let info = jobs
+            .start(&full_access(&ws), &ws, "echo hi", None)
+            .expect("start the job");
+        let output = jobs.output_path(&info.id);
+        assert!(output.starts_with(&jobs_dir), "{}", output.display());
+        assert_eq!(
+            std::fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the output file is 0600"
+        );
+        assert!(
+            !ws.join(".radian").join("jobs").exists(),
+            "the workspace must not grow a jobs directory"
+        );
+
+        jobs.kill_all();
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

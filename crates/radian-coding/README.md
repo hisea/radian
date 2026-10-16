@@ -17,9 +17,9 @@ contract; this file is the practical summary.
 | `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore` respected, binary files skipped; capped per file and in total. |
 | `git_status` | `Shared` | `git status --porcelain=v1 --branch --untracked-files=all`. |
 | `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. |
-| `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id and an output file (no default timeout); the three `job_*` tools below read, list and stop it (ADR 0037). |
-| `job_output` | `Shared` | Read what a background `shell` job produced since the last call, plus a `[status: …]` line. `wait: true` blocks until the job ends or `timeout_ms` (default 30 s, max 600 s); a wait timeout does **not** kill the job. |
-| `job_list` | `Shared` | List this session's background jobs: id, command first line, state (running / exited n / signal n / killed / timed out), elapsed, output file. |
+| `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id (no default timeout); the three `job_*` tools below read, list and stop it (ADR 0037). Its output goes to the session's own jobs directory, outside the workspace and unreadable from inside the sandbox (ADR 0039 decision 1). |
+| `job_output` | `Shared` | Read what a background `shell` job produced since the last call, plus a `[status: …]` line. `wait: true` blocks until the job ends or `timeout_ms` (default 30 s, max 600 s); a wait timeout does **not** kill the job. The increment is a bounded ring; the full output file is readable only through this tool, by line with `tail_lines`, `from_line`/`max_lines` or `pattern` (capped like `grep`), each naming the file's total line count. |
+| `job_list` | `Shared` | List this session's background jobs: id, command first line, state (running / exited n / signal n / killed / timed out), elapsed. |
 | `job_kill` | `Shared` | SIGTERM the job's whole process group, then SIGKILL after 2 s. A settled job is a no-op. |
 | `ask_user` | `Exclusive` | Ask the user one or more structured questions (single/multi/text) and wait for the answers. Its **own** provider (`AskTools`, not part of `CodingTools`): a host mounts it only when a human is there to answer, and it exists whether or not the host has a workspace (ADR 0024 Q5). The wait races the turn's cancellation and never fabricates an answer. |
 
@@ -86,8 +86,10 @@ a limit that is exceeded keeps its semantic code (`read_limit_exceeded`, `glob_l
 
 `glob` and `grep` are `Shared`, so a batch of searches overlaps instead of queueing behind one
 another (the reason they exist: `shell` is `Exclusive`, and the safe tier has no shell at all).
-Both walk from a workspace-resolved base (`path`, default the workspace root) with the same
-per-entry rules, which `list`/`read` do not have because they look at one path:
+Both walk from a base (`path`, default the workspace root) opened through the workspace root's
+directory fd (ADR 0039 decision 2: every component `openat(O_NOFOLLOW | O_DIRECTORY)`), and the
+walk itself descends by fd and hands matched files back as open fds; nothing is re-opened by
+path. The per-entry rules, which `list`/`read` do not have because they look at one path:
 
 - `.gitignore` (and `.ignore`) files **inside** the tree are respected, with or without a git
   repository; no ignore file **above** the base and no global gitignore is consulted, so the
@@ -122,32 +124,46 @@ result. Matches are capped per file (`default_grep_matches_per_file`) and in tot
 | `git_timeout` | 10 s | A hung git must not hang the turn. |
 | `default_shell_output_bytes` / `max_shell_output_bytes` | 64 KiB / 1 MiB, **per stream** | Aligned with `read`'s default and hard cap. Past the budget the first quarter and the last three quarters are kept and the middle is replaced by a marker naming the discarded bytes; the tail is larger because a failing build's error is at the end. `max_output_bytes` lets the model raise it, clamped to the hard cap. Discarded bytes are reported per stream in the text and in `structured.*_truncated_bytes`. |
 | `default_shell_timeout` / `max_shell_timeout` | 60 s / 600 s | A model-supplied `timeout_secs` is clamped to the maximum, and the clamp is reported. A command that needs longer uses `background: true` (no default timeout). |
-| `MAX_RUNNING_JOBS` / `JOB_RING_BYTES` | 4 / 64 KiB | At most four background jobs run at once (a fifth start is a tool error); each holds a process group, an `.out` file and a bounded ring. The ring only has to cover one `job_output` gap; the file is the full history. |
+| `MAX_RUNNING_JOBS` / `JOB_RING_BYTES` | 4 / 64 KiB | At most four background jobs run at once (a fifth start is a tool error); each holds a process group, a 0600 `.out` file and a bounded ring. The ring only has to cover one `job_output` gap; the file keeps the full history for the host and `job_output` is the model's only read path (ADR 0039 decision 1). |
 
 ## What is enforced, and what is not
 
 Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 
-- absolute paths, `..`, symlink escapes, symlinked-parent escapes are refused with the
-  single code `path_outside_workspace`;
-- a symlinked workspace root works (the root is canonicalized once);
-- `write`/`patch` refuse a symlink at the destination (`path_is_symlink`) and a
-  hard-linked destination (`hard_link_refused`);
-- the write open uses `O_NOFOLLOW` as defence in depth.
+- absolute paths and `..` are refused before any filesystem access (`path_outside_workspace`);
+- **every path is opened through the workspace root's directory fd** (`safe_fs`, ADR 0039
+  decision 2): one `openat(dirfd, name, O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)` per parent, the
+  leaf with `O_NOFOLLOW` (`O_CREAT` for `write`), and the tool reads or writes through that fd.
+  No tool re-opens a path string after a check, so a parent directory swapped for a symlink
+  while the tool runs is refused, not followed (`tests/safe_fs.rs`: a hook between the lexical
+  check and the first `openat` performs the swap; no sleeps);
+- **a symlink anywhere in the path is refused, inside or outside the workspace.** A link whose
+  target stays inside is `path_is_symlink` and the message names the target as a
+  workspace-relative path (``docs/current` is a symlink to `docs/v2`; use that path`), so the
+  model retries in one step; a link that leaves the workspace, or whose target cannot be
+  resolved, is `path_outside_workspace` and the message never prints the outside path. The
+  target is read with `readlinkat` on the same fd and never opened. **Behaviour change
+  (2026-10-16): a symlink inside the workspace is no longer followed by the file tools; use the
+  target path.**
+- a symlinked workspace root works (the root is canonicalized once, then held as an fd);
+- `write`/`patch` check the open fd to be a regular file with one hard link **before**
+  truncating (`hard_link_refused`); `list`/`glob`/`grep` classify entries with
+  `fstatat(AT_SYMLINK_NOFOLLOW)` and descend by fd, so a walk never follows a link out.
 
 **Not** enforced — stated, not hidden:
 
 - **Hard links cannot be read-protected.** A pre-existing hard link inside the workspace to
   an outside file is readable; only `write`/`patch` refuse it (via `nlink > 1`). The tools
   cannot create links, so the link must already exist.
-- **TOCTOU is only partly mitigated.** The final component is protected by `O_NOFOLLOW`; a
-  parent directory swapped for a symlink between canonicalization and the open is not
-  caught.
+- **Hard links inside the workspace are followed for reads** (the fd walk sees a regular
+  file; see above).
 - **Sensitive contents are not filtered.** Reading a secret file puts it in the session
   JSONL (ADR 0006 §11). Treat session files as sensitive.
 - **`git` is a child process** and can read `~/.gitconfig` and the repository. It is told
   not to take optional locks; tests assert `.git` is unchanged, but no sandbox wraps it.
-- Windows: no `O_NOFOLLOW` and no link count; the extra checks are Unix-only.
+- Windows: `safe_fs` falls back to std's path-based opens with no symlink defence and no link
+  count; the fd walk is Unix-only (tested on macOS; Linux uses the same per-component
+  `openat`, `openat2(RESOLVE_BENEATH)` is not used).
 - **`shell`'s confinement is exactly the sandbox's** (tests in `tests/shell.rs`). Under
   `workspace` writes are confined to the workspace, the fake sensitive path in the test
   is unreadable and the network is on (ADR 0016); **the macOS backend leaves `mach-lookup`
