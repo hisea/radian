@@ -1314,6 +1314,63 @@ async fn the_task_worktree_is_outside_the_workspace_on_a_per_repository_root() {
     fixture.registry.remove("t1", true).await.expect("remove");
 }
 
+/// ADR 0039 decision 4: `<repo-key>` hashes the repository's canonical common dir, so two fixtures
+/// in this binary — which share one `RADIAN_HOME` and therefore one `worktrees/` level — still get
+/// two different roots. Two tasks with the same id `t1` are therefore two different directories,
+/// and a file in one never appears in the other. This is the isolation a scanner of the shared
+/// `worktrees/` breaks: it finds whichever `t1` it meets first, another test's.
+#[tokio::test]
+async fn two_fixtures_with_the_same_task_id_do_not_share_a_worktree() {
+    let fixture_a = Fixture::new("same-id-a", "http://127.0.0.1:1/v1");
+    let fixture_b = Fixture::new("same-id-b", "http://127.0.0.1:1/v1");
+    assert_eq!(
+        fixture_a.home, fixture_b.home,
+        "the whole point: one process-wide RADIAN_HOME"
+    );
+    assert_ne!(
+        fixture_a.worktree_root(),
+        fixture_b.worktree_root(),
+        "a per-repository key must give each fixture its own root"
+    );
+    if workspace_sandbox(&fixture_a.lead).is_none() {
+        return; // no sandbox backend here
+    }
+    let a = fixture_a
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn a");
+    let b = fixture_b
+        .registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn b");
+    let (a_worktree, b_worktree) = (a.worktree.clone().unwrap(), b.worktree.clone().unwrap());
+    assert_eq!(a_worktree, fixture_a.worktree_root().join("t1"));
+    assert_eq!(b_worktree, fixture_b.worktree_root().join("t1"));
+    assert_ne!(
+        a_worktree, b_worktree,
+        "the two `t1`s are different directories"
+    );
+
+    std::fs::write(a_worktree.join("only-a.txt"), "a\n").unwrap();
+    assert!(
+        !b_worktree.join("only-a.txt").exists(),
+        "a file in one fixture's worktree must not appear in another's"
+    );
+
+    fixture_a
+        .registry
+        .remove("t1", true)
+        .await
+        .expect("remove a");
+    fixture_b
+        .registry
+        .remove("t1", true)
+        .await
+        .expect("remove b");
+}
+
 /// The model swaps the old in-workspace `.radian-worktrees` for a symlink pointing outside the
 /// workspace: nothing follows it, because the root is elsewhere now (ADR 0039 decision 4).
 #[cfg(unix)]
@@ -2013,18 +2070,6 @@ async fn a_project_level_definition_is_not_read() {
     assert!(error.to_string().contains("proj"), "{error}");
 }
 
-/// The task worktree for `id` under the isolated home. The repo key is opaque to a test, so it
-/// scans the single `worktrees/<repo-key>/` directory.
-fn task_worktree(home: &Path, id: &str) -> Option<PathBuf> {
-    for entry in std::fs::read_dir(home.join("worktrees")).ok()? {
-        let candidate = entry.ok()?.path().join(id);
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
 /// The definition is snapshotted at spawn: a change to the file **after** the definition was
 /// resolved (here, at the registry's `Builder` seam) does not move the running task's body or
 /// its route (ADR 0030 item 4).
@@ -2102,21 +2147,31 @@ async fn a_definition_in_the_task_worktree_is_not_read() {
     let home = isolated_home();
     write_agent(&home, "wt-seam", "---\nname: wt-seam\n---\nSNAPSHOT BODY\n");
     // The worktree exists by the `Builder` seam; plant a different definition of the same name
-    // there, so a worktree read at enforce or session open would pick it up.
-    let plant = home.clone();
-    let seam = Arc::new(move |stage: SpawnStage| {
-        if stage == SpawnStage::Builder {
-            let worktree = task_worktree(&plant, "t1").expect("the worktree exists by Builder");
-            let dir = worktree.join(".radian/agents");
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                dir.join("wt-seam.md"),
-                "---\nname: wt-seam\n---\nWORKTREE BODY\n",
-            )
-            .unwrap();
-        }
-        Ok(())
-    });
+    // there, so a worktree read at enforce or session open would pick it up. `RADIAN_HOME` is one
+    // per process, so the shared `worktrees/` holds every test's `t1`: the seam must use the
+    // **fixture's own** root, not scan the shared level for `t1` (which finds whichever test's
+    // worktree comes first and writes into it — the cross-test leak this pins).
+    let worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let seam = {
+        let worktree = Arc::clone(&worktree);
+        Arc::new(move |stage: SpawnStage| {
+            if stage == SpawnStage::Builder {
+                let worktree = worktree
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone()
+                    .expect("the fixture's own worktree is set before the spawn");
+                let dir = worktree.join(".radian/agents");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(
+                    dir.join("wt-seam.md"),
+                    "---\nname: wt-seam\n---\nWORKTREE BODY\n",
+                )
+                .unwrap();
+            }
+            Ok(())
+        })
+    };
     let fixture = Fixture::with_seams(
         "agent-wt",
         &server.base_url,
@@ -2128,6 +2183,8 @@ async fn a_definition_in_the_task_worktree_is_not_read() {
     if workspace_sandbox(&fixture.lead).is_none() {
         return;
     }
+    *worktree.lock().unwrap_or_else(|error| error.into_inner()) =
+        Some(fixture.worktree_root().join("t1"));
     let mut request = SpawnRequest::new("t1");
     request.agent = Some("wt-seam".to_owned());
     let record = fixture.registry.spawn(request).await.expect("spawn");
