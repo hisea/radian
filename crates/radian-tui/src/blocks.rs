@@ -1175,7 +1175,7 @@ fn layout_unstripped(
         (EntryKind::Reasoning, _) => {
             // The expanded thinking channel (ADR 0028): a header line,
             // then the body as a **single-colour** Markdown layout behind the `│ ` rail.
-            reasoning_body_lines(entry, blocks, modes, body_width, &text, spinner)
+            reasoning_body_lines(entry, blocks, modes, width, &text, spinner)
         }
         (EntryKind::User, _) => {
             // The thin user row (ADR 0035/3): `❯ 文本`, no background,
@@ -2188,10 +2188,16 @@ fn reasoning_body_lines(
     entry: &Entry,
     blocks: &[Block],
     modes: DisplayModes,
-    body_width: usize,
+    width: usize,
     text: &str,
     spinner: crate::spinner::Frame,
 ) -> Vec<BodyLine> {
+    // The prose rows carry the `│ ` rail, so they lay out two columns narrower; a code block
+    // draws its own frame in the marker column (like an Assistant reply), so it uses the full
+    // width.
+    let body_width = width
+        .saturating_sub(crate::render::marker_prefix(EntryKind::Reasoning).width())
+        .max(1);
     let mut lines = vec![BodyLine::prose(
         Vec::new(),
         0,
@@ -2210,20 +2216,28 @@ fn reasoning_body_lines(
                 ));
             }
             Block::Code {
-                start, end, closed, ..
+                start,
+                end,
+                closed,
+                lang,
             } => {
                 let source = &text[*start..*end];
-                // The fence lines are the block's markup (ADR 0035): the opening
-                // fence always, the closing one when the block is closed. `highlight = None`:
-                // the thinking body is never syntax-highlighted.
-                let opening = source.lines().next().unwrap_or("").to_owned();
-                let closing = (*closed)
-                    .then(|| source.lines().last().unwrap_or("").to_owned())
-                    .filter(|_| source.lines().count() > 1);
-                lines.push(BodyLine::fence(opening, *start));
-                lines.extend(code_lines(source, *start, *closed, body_width, None));
-                if let Some(closing) = closing {
-                    lines.push(BodyLine::fence(closing, *start));
+                let md_glyphs = MdGlyphs::for_glyphs(modes.glyphs);
+                // ADR 0035: the same open code frame as an Assistant
+                // reply — a top line titled with the language, a rail on every code row, a
+                // bottom line when the block is closed. `highlight = None`: the thinking body
+                // is never syntax-highlighted (ADR 0028).
+                lines.push(code_frame_top(lang, *start, width, &md_glyphs));
+                lines.extend(code_lines(
+                    source,
+                    *start,
+                    *closed,
+                    width,
+                    &md_glyphs,
+                    None,
+                ));
+                if *closed && source.lines().count() > 1 {
+                    lines.push(code_frame_bottom(*start, &md_glyphs));
                 }
             }
         }
@@ -2374,11 +2388,11 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
                         start, end, closed, ..
                     } => {
                         let source = &text[start..end];
-                        lines.push(source.lines().next().unwrap_or("").to_owned());
-                        lines.extend(code_text_lines(source, closed, body_width));
-                        if closed && source.lines().count() > 1 {
-                            lines.push(source.lines().last().unwrap_or("").to_owned());
-                        }
+                        // The code rows' text, exactly as `reasoning_body_lines` lays them out
+                        // through `code_lines` (the full width; a code block draws its own
+                        // frame). The frame lines are synthesized, absent here as in the
+                        // Assistant path.
+                        lines.extend(code_text_lines(source, closed, width));
                     }
                 }
             }

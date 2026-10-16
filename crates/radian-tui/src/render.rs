@@ -540,11 +540,12 @@ fn render_row(
     // item 2: `›` for unicode, `>` for nerd/ascii; `▸` is not in all six checked fonts).
     let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
     // An expanded thinking row (ADR 0028): the header carries the expand
-    // marker, every other row the `│ ` rail in the marker column, so the body stays at column
-    // 3 whether the channel is folded or expanded. The rail is a code row too (a fence or a
-    // code line keeps it), which is why this comes before the `row.code` case.
+    // marker, every other **prose** row the `│ ` rail in the marker column, so the body stays at
+    // column 3 whether the channel is folded or expanded. A code row keeps its own frame (the
+    // `│ ` rail `code_lines` already writes, or the `╭`/`╰` frame lines of ADR 0035
+    // decision 7), exactly like an Assistant reply, so it takes no reasoning lead.
     let reasoning_body = entry.kind == EntryKind::Reasoning && !placeholder;
-    let lead = if reasoning_body {
+    let lead = if reasoning_body && !row.code {
         if first_text {
             prefix.to_string()
         } else {
@@ -591,7 +592,7 @@ fn render_row(
     let mut spans = Vec::with_capacity(4);
     // The thinking body's rail is structural (the `frame` role); the header keeps the
     // channel's own `reasoning` marker style (ADR 0028).
-    let lead_base = if reasoning_body && !first_text {
+    let lead_base = if reasoning_body && !first_text && !row.code {
         theme.frame
     } else {
         prefix_style
