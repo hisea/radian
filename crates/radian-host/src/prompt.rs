@@ -30,17 +30,18 @@ pub fn builtin_role(name: &str) -> Option<&'static str> {
 }
 
 /// Layer 1: the role prompt. `~/.radian/agents/<name>.md` overrides the built-in of the same
-/// name (the file's body only; frontmatter is ADR 0030's). An unknown name with no file falls
-/// back to `default`.
+/// name; its **body** is layer 1 and its frontmatter is ADR 0030's (parsed by [`crate::agents`],
+/// never sent to the model). An unknown name with no file falls back to `default`. A malformed
+/// file warns and falls back to the built-in: a bad definition must not take the session down.
 pub fn role_prompt(name: Option<&str>, radian_home: Option<&Path>) -> String {
     let name = name.unwrap_or("default");
-    if let Some(home) = radian_home {
-        let path = home.join("agents").join(format!("{name}.md"));
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            return text;
+    match crate::agents::load(name, radian_home) {
+        Ok(def) => def.body,
+        Err(error) => {
+            eprintln!("radian: {error}");
+            builtin_role(name).unwrap_or(DEFAULT_ROLE).to_owned()
         }
     }
-    builtin_role(name).unwrap_or(DEFAULT_ROLE).to_owned()
 }
 
 /// Layer 0a: the runtime facts the host generates from what it actually mounted. Never
@@ -516,6 +517,24 @@ mod tests {
         assert_eq!(role_prompt(None, Some(&dir)), "MY DEFAULT\n");
         assert_eq!(role_prompt(Some("task"), Some(&dir)), TASK_ROLE);
         assert_eq!(role_prompt(Some("nope"), Some(&dir)), DEFAULT_ROLE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0030 O11 / ADR 0036: an `agents/<name>.md` file overrides the built-in and
+    /// its **body** is layer 1; the frontmatter is ADR 0030's and never reaches the model.
+    #[test]
+    fn a_user_file_overrides_the_builtin_body_and_its_frontmatter_is_not_in_the_prompt() {
+        let dir = std::env::temp_dir().join(format!("radian-prompt-fm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::write(
+            dir.join("agents/task.md"),
+            "---\nname: task\nmodel: p/m\n---\nMY TASK BODY\n",
+        )
+        .unwrap();
+        let body = role_prompt(Some("task"), Some(&dir));
+        assert_eq!(body, "MY TASK BODY\n");
+        assert!(!body.contains("model: p/m"), "{body}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

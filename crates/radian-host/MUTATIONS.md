@@ -1090,6 +1090,65 @@ inbox」与「lead 的回合来源被任务事件降低」在 part a 里**不可
 （集成测试在变异下仍通过）。真正 panic 的是 `1e19`（`i64` 秒溢出、但仍是合法 `Duration`），所以测试用
 `1e19`；夹取去掉后集成测试确实 panic。单元测试与平台无关，两种值下都抓住夹取被去掉。
 
+## ADR 0030 切片 7 part a：agent 定义（文件）与 `spawn_task { agent }`（2026-10-16）
+
+工作树 `.radian-worktrees/orch-s7a`（分支 `oc/orch-s7a`）。每条变异就地改，跑完后从
+`.radian/scratch/mut/` 下的副本还原并 `cmp` 确认，结束 `git status --short` 只剩源码改动。
+跑法（`timeout` 包裹，`--no-fail-fast`）：
+
+```sh
+cargo test -p radian-host --lib --no-fail-fast -- prompt::tests::a_user_file_overrides_the_builtin_body_and_its_frontmatter_is_not_in_the_prompt
+cargo test -p radian-host --test task --no-fail-fast -- <下面的测试名>
+```
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S7A-1 | `agents::parse` 的 body 直接取整份文件（`body: text.to_owned()`，frontmatter 留在第 1 层） | ✅ failed | `prompt::tests::a_user_file_overrides_the_builtin_body_and_its_frontmatter_is_not_in_the_prompt` |
+| S7A-2 | `enforce_task_setup` 用 `with_allowed_tools`（加 allow）而不是 `with_denied_tools`（非名单内置工具 deny） | ✅ failed | `a_tools_allow_list_can_only_narrow`（`reader` 的 `write` 由 list 外变回允许；`safe` 里列 `shell` 也不加 allow） |
+| S7A-3 | `resolve` 里 `spawn_ignored: false`（不记录「task 忽略 spawn: true」） | ✅ failed | `a_spawn_resolves_the_agent_definition_and_the_spawn_arguments_override_it` |
+| S7A-4 | `enforce_task_setup` 不取快照 body，改回 `agents::load(name, RADIAN_HOME)` 现读用户目录 | ✅ failed | `a_definition_is_snapshotted_at_spawn`（`Builder` 缝隙在解析之后改文件，现读会看到 `NEW BODY`） |
+| S7A-5 | `enforce_task_setup` 从 task 自己的 worktree（`workspace/.radian/agents/<name>.md`）现读 body | ✅ failed | `a_definition_in_the_task_worktree_is_not_read`（`Builder` 缝隙把同名定义写进 worktree，现读会看到 `WORKTREE BODY`） |
+| S7A-6 | `task_host::build_task` 不把 `ctx.agent` 交给模型工厂（`(host.model)(session_id, slot, ctx.agent)` 换成 `None`） | ✅ failed | `task_host::the_builder_hands_the_agent_definition_to_the_model_factory`（工厂没收到定义，`seen` 为 `None`） |
+
+6/6 抓住。
+
+**S7A-4 / S7A-5 的做法（如实记录）**：最初这两条变异没被抓住——「起会话后改文件」对任何实现都成立，
+因为解析发生在 `spawn` 内。改用注册表的 `SpawnStage::Builder` 测试缝隙：解析在缝隙**之前**完成，缝隙在
+`enforce_task_setup` 与 `open_session` **之前**改用户文件 / 往 task worktree 写同名定义。于是「后面再读盘」
+的变异就会读到新内容，被测试抓住。两次尝试都记录在此：第一次的「事后改文件」版本变异通过（漏洞已在测试里
+补上），第二次的缝隙版本抓住。
+
+**tools 允许名单的边界（如实记录）**：ADR 0030 problem 7 = A 说的是「不在名单里的不挂」。本片把名单实现为
+**权限层的 deny**（`Profile::with_denied_tools`：名单外每个内置工具一条 `deny`），它只能收窄、不能放宽，可测；
+生产 `task_host.rs`（与 origin/main 的 6b2 合并后）仍按宿主常驻工具挂载，没有按名单**物理卸载**的槽。物理卸载
+列入「to decide」。
+
+**与 6b2 合并后的补充（S7A-6）**：`origin/main` 在本片进行中合入了切片 6b2（`crates/radian-host/src/task_host.rs`，
+生产 `TaskBuilder`）。本片按它的 `TaskModelFactory` 接缝把定义交给宿主：工厂签名加 `Option<&SpawnAgent>`，定义的
+`model`/`thinking` 成为任务的 route 与 thinking 级别（route 的凭据由宿主按 `/model` 的同一路径解析，没有复制）；
+`TaskHost` 多一个 `servers` 字段，builder 交出宿主配置的 MCP 集合，registry 只留定义 `mcp` 里点名的（默认仍为 none）。
+
+## ADR 0030 切片 7 part a 复核修订 1：`tools` 卸载与 `skills` 允许名单（2026-10-16）
+
+工作树 `.radian-worktrees/orch-s7a`（分支 `oc/orch-s7a`，基 `5625f6f`）。每条变异就地改，跑单个测试，
+再从 `.radian/scratch/mut/` 的副本 `cp` 还原并 `cmp` 确认；跑完 `git status --short` 只剩源码改动。跑法
+（`timeout` 包裹，`--no-fail-fast`）：
+
+```sh
+cargo test -p radian-host --test task --no-fail-fast -- <下面的测试名>
+```
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| RF1-1 | `open_session` 不把 `tools_allow` 交给 `HostTools`（`with_tool_allow(tools_allow)` 去掉，只剩权限层 deny） | ✅ failed | `a_tools_allow_list_unmounts_the_unlisted_built_ins`（工具规格变成全部内置工具：`ask_user, git_commit, … write`，`<runtime>` 也列出 `write`；模型脚本里对 `write` 的调用变成 `no tool named`） |
+| RF1-2 | `open_session` 忽略 `skills_allow`（`Some(_) => discovery.skills`，不过滤目录） | ✅ failed | `a_skills_allow_list_keeps_only_the_named_skills`（目录里出现 `s7a-two, diagrams, theme-import`，不止名单里的 `s7a-one`） |
+| RF1-3 | 注册表不计算缺失技能名（`let warnings: Vec<String> = Vec::new();`，丢掉了「未找到的技能名」警告） | ✅ failed | `an_unknown_skill_name_is_a_spawn_warning_not_a_failure`（`record.warnings` 为空） |
+
+3/3 抓住。
+
+**`git_commit` 的处理（如实记录）**：`git_commit` 是允许名单宇宙里的一个内置工具（`builtin_tool_names`），
+本片早先已按名单 deny 它。卸载因此也把它卸掉：`tools: [read, list]` 的任务工具规格恰好是 `list, read`，
+`git_commit` 不在其中。O3 的收尾提交由宿主自己完成，不需要任务挂 `git_commit`。
 ## orch-s6b（2026-10-16，ADR 0030 切片 6 b1）：max_tasks 队列、heavy 门、stall
 
 Base：本文件所在分支 `oc/orch-s6b`（在 origin/main + 切片 6a 之上）。变异就地施加：源文件先复制到

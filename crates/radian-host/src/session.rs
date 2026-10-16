@@ -408,6 +408,14 @@ pub struct SessionSetup {
     pub skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     pub skills_disabled: Vec<String>,
+    /// ADR 0030 O11: the agent definition's built-in tool allow-list. `None` mounts every
+    /// built-in the host has; `Some` mounts only the named ones ("not in the list is not
+    /// mounted"). MCP tools are not in this universe — [`SessionSetup::servers`] governs them.
+    pub tools_allow: Option<Vec<String>>,
+    /// ADR 0030 O11: the agent definition's `skills` allow-list. `None` loads every discovered
+    /// skill (today's behaviour); `Some` keeps only the named ones in the catalog, and a name
+    /// discovery did not find is reported at spawn, never a failure.
+    pub skills_allow: Option<Vec<String>>,
     /// The memory injection configuration (ADR 0021). The host builds it
     /// from `[memory.injection]`; `InjectionConfig::default()` is the documented D6 table.
     pub memory_injection: InjectionConfig,
@@ -1126,6 +1134,8 @@ pub async fn open_session(
         skills_extra_paths,
         skills_builtin,
         skills_disabled,
+        tools_allow,
+        skills_allow,
         memory_injection,
         trust,
         resume,
@@ -1351,7 +1361,13 @@ pub async fn open_session(
         for warning in &discovery.warnings {
             memory_warning(warning);
         }
-        discovery.skills
+        // ADR 0030 O11: an agent definition's `skills` list is the allow-list for this session's
+        // catalog. `None` is every discovered skill (the lead and an undefined task). The
+        // missing-name warning is reported at spawn by the registry, not here.
+        match &skills_allow {
+            Some(allow) => skills::restrict_to(discovery.skills, allow),
+            None => discovery.skills,
+        }
     };
     let shared_skills = Arc::new(skills);
     let skills_hooks = Arc::new(SkillsHooks::new(&shared_skills));
@@ -1377,7 +1393,8 @@ pub async fn open_session(
                 allowed_filters.unwrap_or_else(crate::git_commit::default_allowed_filters),
             )
     });
-    let mut tools = HostTools::new(coding, memory_tools, mcp.clone(), git_commit);
+    let mut tools =
+        HostTools::new(coding, memory_tools, mcp.clone(), git_commit).with_tool_allow(tools_allow);
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
         tools = tools.with_ask(ask);

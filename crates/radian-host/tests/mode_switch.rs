@@ -160,6 +160,8 @@ async fn open(
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
             skills_disabled: Vec::new(),
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: options.resume,

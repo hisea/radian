@@ -71,8 +71,8 @@ fn recorder() -> Seen {
 /// The production builder, wired to a mock provider and the two recording sinks.
 fn host(base_url: &str, workspace: &Path, task_seen: Seen) -> TaskHost {
     let base_url = base_url.to_owned();
-    let model: radian_host::TaskModelFactory =
-        Arc::new(move |session_id: &str, slot: Arc<ConfigSlot>| {
+    let model: radian_host::TaskModelFactory = Arc::new(
+        move |session_id: &str, slot: Arc<ConfigSlot>, _agent: Option<&radian_host::SpawnAgent>| {
             let initial = build_model(radian_host::ModelArgs {
                 provider: Provider::OpenAiCompatible,
                 base_url: base_url.clone(),
@@ -100,11 +100,13 @@ fn host(base_url: &str, workspace: &Path, task_seen: Seen) -> TaskHost {
                     thinking_budget: None,
                 },
             ))
-        });
+        },
+    );
     TaskHost {
         session_dir: workspace.join("sessions"),
         model,
         route: ("openai-compatible".into(), "mock".into()),
+        servers: Vec::new(),
         sandbox: None,
         sandbox_deny_read: Vec::new(),
         allow_unix_sockets: Vec::new(),
@@ -162,6 +164,12 @@ impl Fixture {
     }
 
     fn registry(&self, base_url: &str, task_seen: Seen, lead_seen: Seen) -> Arc<TaskRegistry> {
+        self.registry_with_host(host(base_url, &self.scratch, task_seen), lead_seen)
+    }
+
+    /// [`Fixture::registry`] over a caller-supplied [`TaskHost`] (so a test can wrap the model
+    /// factory).
+    fn registry_with_host(&self, host: TaskHost, lead_seen: Seen) -> Arc<TaskRegistry> {
         let session_dir = self.scratch.join("sessions");
         std::fs::create_dir_all(&session_dir).unwrap();
         let journal = Arc::new(
@@ -182,7 +190,7 @@ impl Fixture {
                 "lead",
                 journal,
                 queue,
-                task_builder(host(base_url, &self.scratch, task_seen)),
+                task_builder(host),
             )
             .with_notifier(notifier),
         )
@@ -297,7 +305,7 @@ async fn a_shared_task_has_no_worktree_and_no_network() {
     let registry = fixture.registry(&server.base_url, recorder(), recorder());
 
     let mut request = SpawnRequest::new("t1");
-    request.isolation = radian_host::Isolation::Shared;
+    request.isolation = Some(radian_host::Isolation::Shared);
     request.brief = Some("do it".into());
     let record = registry
         .spawn(request)
@@ -350,4 +358,64 @@ async fn kill_closes_the_task_and_keeps_the_worktree() {
         )),
         "the notifier must see the cancelled TaskFinished: {seen:?}"
     );
+}
+
+/// ADR 0030 O11: the production builder hands the resolved agent definition to the model
+/// factory, so a `spawn_task { agent }` runs the definition's route and thinking level (the
+/// factory resolves that route's credential the same way `/model` does).
+#[tokio::test]
+async fn the_builder_hands_the_agent_definition_to_the_model_factory() {
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let fixture = Fixture::new("factory-agent");
+    let home = isolated_home();
+    let agents = home.join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let def_path = agents.join("route-agent.md");
+    std::fs::write(
+        &def_path,
+        "---\nname: route-agent\nmodel: opencode-go/one\nthinking: low\n---\nBODY\n",
+    )
+    .unwrap();
+
+    // A recorder for the `name / provider / thinking` the factory was handed.
+    type SeenAgent = Arc<Mutex<Option<(String, String, Option<String>)>>>;
+    let seen: SeenAgent = Arc::new(Mutex::new(None));
+    let mut host = host(&server.base_url, &fixture.scratch, recorder());
+    let inner = Arc::clone(&host.model);
+    let seen_factory = Arc::clone(&seen);
+    host.model = Arc::new(
+        move |session_id: &str, slot: Arc<ConfigSlot>, agent: Option<&radian_host::SpawnAgent>| {
+            if let Some(agent) = agent {
+                *seen_factory.lock().unwrap() = Some((
+                    agent.name.clone(),
+                    agent
+                        .model
+                        .as_ref()
+                        .map(|route| route.provider.clone())
+                        .unwrap_or_default(),
+                    agent.thinking.clone(),
+                ));
+            }
+            inner(session_id, slot, agent)
+        },
+    );
+
+    let registry = fixture.registry_with_host(host, recorder());
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("route-agent".into());
+    request.brief = Some("do it".into());
+    let _record = registry.spawn(request).await.expect("spawn");
+    wait_outcome(&registry, "t1").await;
+
+    let seen = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the factory saw an agent");
+    assert_eq!(seen.0, "route-agent");
+    assert_eq!(seen.1, "opencode-go");
+    assert_eq!(seen.2.as_deref(), Some("low"));
+
+    registry.remove("t1", true).await.expect("remove");
+    let _ = std::fs::remove_file(def_path);
 }

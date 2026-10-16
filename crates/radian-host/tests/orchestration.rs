@@ -193,6 +193,8 @@ fn builder(
                     turn_timeout: None,
                     wording: radian_host::CLI_WORDING,
                     capabilities: radian_host::SessionCapability::ALL.to_vec(),
+                    tools_allow: None,
+                    skills_allow: None,
                 },
                 bindings: HostBindings {
                     approvals: radian_host::ApprovalRouting::Queued,
