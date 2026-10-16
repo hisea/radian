@@ -1296,11 +1296,15 @@ pub struct SessionView {
     /// call and the streaming buffer. `SessionView` holds a **read handle** only; the host's
     /// `SessionFacade` owns the projection, and every fact is written there, never here.
     pub projection: Arc<SessionProjection>,
-    /// The call ids of the tools running right now (ADR 0027's status note). A
-    /// batch can run several; the note clears only when the last one finishes, so the footer
-    /// does not say "tool shell running" while the next model request is already in flight.
+    /// The transient footer note ("tool … running", "retrying …", "compacting context", a
+    /// copied-selection count). The tool note is derived from [`SessionView::running_tools`], so
+    /// it can never name a tool that is not running (ADR 0027).
     pub note: Option<String>,
-    running_tools: std::collections::HashSet<String>,
+    /// The tools running right now, in start order: `(call_id, name)`. A batch can run several,
+    /// and they settle in **completion order**, which may differ from start order (agent-core's
+    /// `ToolFinished` contract), so the list — not a single name — is what the note follows: it
+    /// names the last call that is still running.
+    running_tools: Vec<(String, String)>,
     /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
     /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
     /// reason is readable; the user quits with the ordinary keys.
@@ -1430,7 +1434,7 @@ pub struct App {
     pub spinner_kind: crate::spinner::Kind,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
     pub keymap: Keymap,
-    /// How the input area is drawn (config `tui.input_style`), defaulting to `bar`.
+    /// How the input area is drawn (config `tui.input_style`), defaulting to `lines`.
     pub input_style: InputStyle,
     /// The startup phase (ADR 0023 U4): [`Startup::Picking`] while the pre-session `--pick`
     /// overlay is the whole point of the loop, [`Startup::Session`] otherwise.
@@ -1461,6 +1465,54 @@ pub struct App {
     /// The one session view this process holds today (ADR 0030 slice ⓪). A later slice
     /// (ADR 0030 slice ⑥) keeps several and switches between them.
     pub session: SessionView,
+}
+
+impl SessionView {
+    /// Records a call that started (`AgentEvent::ToolStarted`). The note names it: the last
+    /// call to start is the one a user watching the footer most likely wants named. O(1) and
+    /// without a uniqueness scan: the only writer is the core's one `ToolStarted` per call, and
+    /// [`SessionView::finish_tool`] removes *every* entry of the id it is given, so a repeated
+    /// start could not leave a piece behind. (A scan would make a flood of facts quadratic —
+    /// `--flood-facts` sends 20 000 — and starve the loop's draw fairness.)
+    pub(crate) fn start_tool(&mut self, call_id: &str, name: &str) {
+        self.running_tools
+            .push((call_id.to_owned(), name.to_owned()));
+        self.note_for_running_tools();
+    }
+
+    /// Records a settled call (`AgentEvent::ToolFinished`). The note follows the calls that are
+    /// still running: it names the last one of them, and goes when the last of the batch does.
+    /// A note another writer owns (a copy, a retry) is left alone — only the tools' own note is
+    /// rewritten.
+    pub(crate) fn finish_tool(&mut self, call_id: &str) {
+        let note_is_the_tools = self.note == self.tool_note();
+        self.running_tools.retain(|(id, _)| id != call_id);
+        if note_is_the_tools {
+            self.note_for_running_tools();
+        }
+    }
+
+    /// Forgets every running tool at a model-request boundary, where nothing can still be
+    /// running, dropping the note when it was the tools'.
+    pub(crate) fn forget_running_tools(&mut self) {
+        if self.note == self.tool_note() {
+            self.note = None;
+        }
+        self.running_tools.clear();
+    }
+
+    /// The note the tools own: `tool <name> running` for the last still-running call, `None`
+    /// when none runs.
+    fn tool_note(&self) -> Option<String> {
+        self.running_tools
+            .last()
+            .map(|(_, name)| format!("tool {name} running"))
+    }
+
+    /// Rewrites the note from the running set. Called only when the note is the tools'.
+    fn note_for_running_tools(&mut self) {
+        self.note = self.tool_note();
+    }
 }
 
 impl App {
@@ -1518,7 +1570,7 @@ impl App {
                 follow: true,
                 projection: Arc::new(SessionProjection::new()),
                 note: None,
-                running_tools: std::collections::HashSet::new(),
+                running_tools: Vec::new(),
                 session_ended: None,
                 turn_committed: true,
                 pending_fork: None,
@@ -4381,7 +4433,16 @@ impl App {
             }
             // ADR 0027: the local turn timer starts with the model request and
             // stops with its response. The token count is the model's reported output.
-            AgentEvent::ModelRequestStarted { .. } => self.session.timer.request_started(self.now),
+            AgentEvent::ModelRequestStarted { .. } => {
+                // A model request starts only after the batch before it ended (the turn loop is
+                // request -> batch -> request), so nothing in the running set can still be
+                // running here. A call left in it is a `ToolStarted` whose `ToolFinished` never
+                // came — the core discards the results of the calls already running when a
+                // journal append fails (`agent-core/src/turn.rs`, the `journal_failed` path) —
+                // and the note must not outlive the batch it belongs to.
+                self.session.forget_running_tools();
+                self.session.timer.request_started(self.now);
+            }
             AgentEvent::ModelResponseReceived { usage, .. } => {
                 self.session
                     .timer
@@ -4402,16 +4463,14 @@ impl App {
                 ));
             }
             AgentEvent::ToolStarted { call_id, name, .. } => {
-                self.session.running_tools.insert(call_id.clone());
-                self.session.note = Some(format!("tool {name} running"));
+                self.session.start_tool(call_id, name);
             }
             AgentEvent::ToolFinished { call_id, .. } => {
-                // The tool is done. Clear the note only when no other tool in the batch is
-                // still running; otherwise the footer keeps naming a running one.
-                self.session.running_tools.remove(call_id);
-                if self.session.running_tools.is_empty() {
-                    self.session.note = None;
-                }
+                // The tool is done. The note follows the calls that are **still** running: it
+                // moves off the settled one when that was the call it named, and empties when
+                // the last tool of the batch finishes, so the footer never names a settled tool
+                // (the next model request finds it clear).
+                self.session.finish_tool(call_id);
             }
             AgentEvent::TranscriptAppended { message, .. } => self.push_message(message),
             // ADR 0018: compaction is visible to the user as it happens.

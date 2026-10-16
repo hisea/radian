@@ -111,8 +111,9 @@ fn page_down_stops_at_the_bottom_and_resumes_following() {
     let mut app = App::new("m", "s");
     fill(&mut app, 40);
     render(&mut app);
-    // A user block is three lines (pad / text / pad, ADR 0028 R1), so 40 entries are 120
-    // lines: enough pages to reach the top whatever the viewport height is.
+    // A thin user row is one line (ADR 0035) plus the container's blank line between
+    // two of them, so 40 entries are 79 lines: enough pages to reach the top whatever the
+    // viewport height is.
     for _ in 0..100 {
         app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
     }

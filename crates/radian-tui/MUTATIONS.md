@@ -1507,6 +1507,31 @@ Base：本片 HEAD（`oc/thin-roles`）· 就地变异，每个变异后从 `.ra
 
 3/3 抓住，无等价变异。新角色的映射/解析另有正向断言（`theme::file::tests::the_thin_roles_map_to_their_pi_keys`、
 `the_thin_roles_resolve_from_a_theme_file`、`the_thin_roles_are_settable_from_tui_colors`）。
+## status：footer 的 `tool <name> running` note 与 Esc（2026-10-16）
+
+Base `d8e4c28`（worktree `.radian-worktrees/build-script`，分支 `dogfood/status`）· 就地变异：改前把
+`crates/radian-tui/src/app.rs` 复制到 `.radian/scratch/app.rs.status-orig`，变异脚本带 `assert old in s`
+（no-op 会显式 PATCH FAILED）；每条跑完从副本写回并用 `cmp` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S1-M1 | `SessionView::finish_tool` 只清 note、不把 note 移到仍在运行的调用（退回旧行为：`if note_is_the_tools && self.running_tools.is_empty() { self.note = None }`） | `render::the_note_names_a_tool_that_is_still_running`（`left: Some("tool read running")`，应为 `tool shell running`） | ✅ |
+| S1-M2 | `ModelRequestStarted` 不再调用 `forget_running_tools()` | `render::the_tool_note_does_not_survive_the_next_model_request`（note 停在 `Some("tool shell running")`，应为 `None`） | ✅ |
+| E1 | `Action::Escape` 的空输入分支退回 `UpdateResult::none()`（2026-10-14 报告的症状：Esc 什么都不做） | `input::esc_on_an_empty_input_cancels_a_running_turn`（`left: []`，应为 `[Cancel]`） | ✅ |
+
+前两条是修复各自的配对变异，且都只由目标测试抓住（同一文件里另两条 note 测试保持绿色）。E1 没有
+对应的修复（Esc 在 `2b55c50` 与今天都是 `cancel_or_quit_now()`，那条报告复现不出来），它证明这条回归
+测试不是空转：把 Esc 的空输入分支改回「什么都不做」，它立刻失败。
+
+**S1-M3（修一个自己造的回归）**：`start_tool` 最初带一次 `running_tools.iter().any(...)` 去重扫描，
+在 20 000 个 fact 的洪水下是二次的。变异把它加回来（`if !...any(...) { push }`），
+`cargo test -p radian-tui --test pty pty_a_flooding_producer_still_draws_and_answers_keys`
+连跑 5 次：带扫描 **2 次失败**（load 166–178：一次 `the key was not handled`，一次
+`the flood starved the draw: 92 frames in 2 s`），去掉扫描 **5 次全过**（load 194–251）。同一条 pty
+测试也是先抓住这个回归的那一个：合入 `origin/main` 后的整套 `radian-tui` 测试里正是它红。
+去重本身不是必需的：每个 call 的 `ToolStarted` 只有一次，而 `finish_tool` 的 `retain` 会删掉该 id 的
+**每一条**，所以重复的 start 也留不下残渣。
+
 ## ask-box：transcript 的 Ask 块、面板标题、待答一行、标记与两个按键（ADR 0024，2026-10-15）
 
 Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个变异就地改完后跑
@@ -1550,3 +1575,22 @@ Base：本片 HEAD（`dogfood/thin-diff`）· 就地变异：每个变异先把�
 写成 `LineRole::Dim`，没有走 `diff_role`，所以变异 `diff_role` 对带 `@@` 的正文没有影响（只有"无起始行
 退路"那一支会变）。两处改成调用 `diff_role`（结构行的角色只有一个定义处）后立刻抓住。
 
+## thin ⑥：用户行、默认输入框、压缩线（ADR 0035/9、ADR 0028，2026-10-16）
+
+Base：本片 HEAD（`oc/thin-user`）· 就地变异，每个变异后从 `.radian/scratch/render.rs.orig` /
+`blocks.rs.orig` 还原并用 `cmp` 确认逐字节相同。`--no-fail-fast`。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| U6-M1 | 用户行仍带底色（`render.rs::body_style` 的 User 加回背景） | 用户行是前景角色、无底色 | `render::the_user_row_is_a_chevron_and_the_words_with_no_band`、`render::the_user_row_has_no_band_at_80_and_120`、`render::a_selection_draws_the_selection_role_on_its_cells`、`render::the_mono_selection_is_reversed_not_colored`（4 条 FAILED） |
+| U6-M2 | 用户行又加回上下半格留白行 | 用户行只有文字，块间距由容器给 | `blocks::a_user_block_has_no_padding_rows_at_any_glyph_tier`、`blocks::a_blank_edge_line_is_stripped`、`blocks::md_line_count_matches_the_layout`、`render::the_user_row_is_a_chevron_and_the_words_with_no_band`、`render::the_block_layout_snapshot`、`render::thinking_has_one_blank_line_on_both_sides` 等（lib 5 + render 7 条 FAILED） |
+| U6-M3 | 默认输入框回到 `bar`（`InputStyle` 的 `#[default]` 移回 Bar） | 默认是 `lines` | `config::the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines`、`render::the_default_input_style_is_lines`、`render::the_user_row_has_no_band_at_80_and_120`（config 1 + render 2 条 FAILED） |
+| U6-M4 | 压缩线又退回第 3 列（folded 行前加两格） | 压缩线从第 1 列起 | `render::the_compaction_line_starts_at_column_one_in_the_frame_role`、`render::the_block_layout_snapshot`（2 条 FAILED） |
+
+4/4 抓住，无等价变异。行数一致性（`blocks.rs::line_count` 的 User 分支）由
+`blocks::md_line_count_matches_the_layout` 与窗口/选择测试在改前改后都通过来保证。
+`block_gap` 去掉了「用户块靠自己的 pad 分隔」的旧特例（thin 用户行没有 pad，改由容器的 1 行空白
+分隔，与原型 `render-prototype.py` 一致），由 `blocks::the_container_gap_is_one_line_except_within_a_block`
+与 `render::thinking_has_one_blank_line_on_both_sides` 钉住。`apply_selection` 顺带修正：选中段保留它
+来自的 span 的前景色（原先最后一段回退到 `Style::default()`，会把选区尾部的前景色抹掉），由
+`render::a_selection_draws_the_selection_role_on_its_cells` 的「文字保留自己的前景色」断言钉住。
