@@ -161,6 +161,8 @@ async fn open_with_records(
             profile,
             access_builder: None,
             task_agent: false,
+            parent: None,
+            allowed_branch: None,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
@@ -176,6 +178,7 @@ async fn open_with_records(
         },
         HostBindings {
             approvals: radian_host::ApprovalRouting::Direct(Arc::new(AllowAll)),
+            shared_queue: None,
             audit: Arc::new(|_journal| {
                 Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
             }),
@@ -288,6 +291,8 @@ async fn a_local_session_accepts_a_declared_command() {
             profile,
             access_builder: None,
             task_agent: false,
+            parent: None,
+            allowed_branch: None,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
@@ -303,6 +308,7 @@ async fn a_local_session_accepts_a_declared_command() {
         },
         HostBindings {
             approvals: radian_host::ApprovalRouting::Direct(Arc::new(AllowAll)),
+            shared_queue: None,
             audit: Arc::new(|_journal| {
                 Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
             }),
