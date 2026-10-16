@@ -215,6 +215,108 @@ fn after_retries(error: ModelError, retries: u32) -> ModelError {
     }
 }
 
+/// The outcome of one model call under ADR 0017's transient-retry policy: the
+/// retries happen inside this one call, before anything is committed.
+enum ModelCallOutcome {
+    /// The call finished. `Ok` is the response; `Err` is the model error once the retries are
+    /// spent (a transient error that used them already carries its `after N retries` note).
+    Done(Result<ModelResponse, ModelError>),
+    /// The interrupt fired while an attempt was streaming: `text`/`reasoning` are that attempt's
+    /// partial output, which the caller commits as the interrupted prefix.
+    InterruptedInCall {
+        reason: CancelReason,
+        text: String,
+        reasoning: String,
+    },
+    /// The interrupt fired during a retry backoff; the failed attempt's output is discarded.
+    InterruptedInWait(CancelReason),
+}
+
+/// Runs one model call under ADR 0017's transient-retry policy — shared by the turn's
+/// conversation call and the compaction summary call so both honour one rule:
+///
+/// - a transient `ModelError` (`is_transient()`) is retried up to `max_retries` times, with
+///   [`retry_delay`] (2 s/4 s/8 s + jitter, the provider's `Retry-After` honoured), before
+///   anything is committed;
+/// - every wait of this one call, and their total, are capped at [`MAX_RETRY_WAIT`]; once the
+///   total is spent the call stops retrying rather than firing back to back;
+/// - a cancellation during the backoff ends the call at once;
+/// - a given-up transient error is wrapped by [`after_retries`].
+///
+/// `stream` is the sink the adapter's deltas reach (the turn forwards them to the host through
+/// its `StreamTap` and keeps the interrupted attempt's prefix; the summary passes a `NoopSink`
+/// and drops everything). `announce` receives the per-retry [`AgentEvent::ModelRetrying`]; the
+/// summary passes `None` because a host clears its live projection on that event, which is wrong
+/// mid-compaction.
+async fn model_call_with_retries<M: Model>(
+    model: &M,
+    interrupt: &Interrupt,
+    request: &ModelRequest,
+    stream: &dyn EventSink,
+    announce: Option<&dyn EventSink>,
+    max_retries: u32,
+) -> ModelCallOutcome {
+    let mut retries_used: u32 = 0;
+    let mut waited = Duration::ZERO;
+    loop {
+        // A fresh tap per attempt: one attempt's streamed text or reasoning can never leak into
+        // the next, exactly as when the turn owned the tap itself.
+        let tap = StreamTap {
+            host: stream,
+            text: Mutex::new(String::new()),
+            reasoning: Mutex::new(String::new()),
+        };
+        let mcx = ModelContext {
+            cancellation: interrupt.token.child_token(),
+            events: &tap,
+        };
+        match race(interrupt, model.complete(request.clone(), mcx)).await {
+            Raced::Interrupted(reason) => {
+                let (text, reasoning) = tap.take();
+                return ModelCallOutcome::InterruptedInCall {
+                    reason,
+                    text,
+                    reasoning,
+                };
+            }
+            Raced::Done(Ok(response)) => return ModelCallOutcome::Done(Ok(response)),
+            Raced::Done(Err(error)) => {
+                // `waited < MAX_RETRY_WAIT` is the spent-budget stop: once the 60 s of this one
+                // call are used up, `retry_delay` can only return 0, and retrying then would
+                // hammer a provider that just said it is busy. The call fails instead, with the
+                // "after N retries" count of the retries that were really made.
+                if error.is_transient() && retries_used < max_retries && waited < MAX_RETRY_WAIT {
+                    retries_used += 1;
+                    let delay = retry_delay(retries_used, error.retry_after(), waited);
+                    waited += delay;
+                    if let Some(sink) = announce {
+                        sink.emit(AgentEvent::ModelRetrying {
+                            attempt: retries_used,
+                            max: max_retries,
+                            delay,
+                            reason: error.to_string(),
+                        });
+                    }
+                    match race(interrupt, tokio::time::sleep(delay)).await {
+                        Raced::Interrupted(reason) => {
+                            return ModelCallOutcome::InterruptedInWait(reason);
+                        }
+                        // The failed attempt's streamed text and reasoning are a live projection
+                        // only (ADR 0010); the next attempt builds its own tap.
+                        Raced::Done(()) => continue,
+                    }
+                }
+                let error = if retries_used > 0 && error.is_transient() {
+                    after_retries(error, retries_used)
+                } else {
+                    error
+                };
+                return ModelCallOutcome::Done(Err(error));
+            }
+        }
+    }
+}
+
 /// The tool calls of one model response and their results, which are written to the
 /// transcript in call order as soon as every earlier result is known.
 struct Batch {
@@ -748,19 +850,25 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             settings.clone(),
         );
         for attempt in 0..2 {
+            // The summary call carries the same ADR 0017 retry policy as the turn's
+            // conversation call, but each of the two sumlen attempts gets its own retry budget
+            // and its own 60 s cap (the helper is called once per attempt). The retries are
+            // announced to nobody: `ModelRetrying` makes a host clear its live projection, which
+            // is wrong mid-compaction, and a failed attempt has no usage to report (ADR 0017
+            // revision 1, decision 6).
             let noop = NoopSink;
-            let mcx = ModelContext {
-                cancellation: interrupt.token.child_token(),
-                events: &noop,
-            };
-            let response = match race(
+            let response = match model_call_with_retries(
+                &self.agent.model,
                 interrupt,
-                self.agent.model.complete(summary_request.clone(), mcx),
+                &summary_request,
+                &noop,
+                None,
+                self.agent.config.retries,
             )
             .await
             {
-                Raced::Interrupted(reason) => return Ok(SummarizeOutcome::Cancelled(reason)),
-                Raced::Done(Err(error)) => {
+                ModelCallOutcome::Done(Ok(response)) => response,
+                ModelCallOutcome::Done(Err(error)) => {
                     if deterministic_allowed {
                         return Ok(SummarizeOutcome::Fallback);
                     }
@@ -771,7 +879,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                         error,
                     )));
                 }
-                Raced::Done(Ok(response)) => response,
+                ModelCallOutcome::InterruptedInCall { reason, .. }
+                | ModelCallOutcome::InterruptedInWait(reason) => {
+                    return Ok(SummarizeOutcome::Cancelled(reason));
+                }
             };
             // ADR 0018 §计费: the real call is recorded immediately, commit or not, and it is
             // deliberately not a `ModelUsage` (it must not move the budget baseline).
@@ -1495,14 +1606,14 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             budget: self.run.session.context_budget_status().report().cloned(),
         });
         // ADR 0018 §兜底: a provider-reported context overflow compacts to half the reference
-        // and retries this request **once**. A model error commits no partial output (the tap
-        // below is discarded), so the fallback is safe. `overflow_retried` bounds it to one.
+        // and retries this request **once**. A model error commits no partial output (a failed
+        // attempt's output is discarded), so the fallback is safe. `overflow_retried` bounds it
+        // to one.
         let mut overflow_retried = false;
         // ADR 0017: a *transient* failure is retried in place, before anything is
-        // committed, up to `retries` times. `waited` feeds the 60 s total cap.
+        // committed, up to `retries` times; `model_call_with_retries` carries the wait cap and
+        // the give-up note.
         let max_retries = agent.config.retries;
-        let mut retries_used: u32 = 0;
-        let mut waited = Duration::ZERO;
         let response = loop {
             // `T_before`: the projection of the request about to be sent. The fallback needs
             // it even with no configured budget — the window-unknown path is exactly this one.
@@ -1523,23 +1634,26 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                 _ => size.tokens(bytes_per_token),
             };
 
-            let tap = StreamTap {
-                host: events,
-                text: Mutex::new(String::new()),
-                reasoning: Mutex::new(String::new()),
-            };
-            let mcx = ModelContext {
-                cancellation: interrupt.token.child_token(),
-                events: &tap,
-            };
-            match race(&interrupt, agent.model.complete(request.clone(), mcx)).await {
-                Raced::Interrupted(reason) => {
-                    // The model future is gone; whatever it emitted is in the tap. Any
-                    // non-empty prefix — visible text **or** reasoning — becomes an
-                    // interrupted assistant message through the journal before the turn
+            match model_call_with_retries(
+                &agent.model,
+                &interrupt,
+                &request,
+                events,
+                Some(events),
+                max_retries,
+            )
+            .await
+            {
+                ModelCallOutcome::InterruptedInCall {
+                    reason,
+                    text,
+                    reasoning,
+                } => {
+                    // The model future is gone; `text`/`reasoning` hold whatever this attempt
+                    // emitted. Any non-empty prefix — visible text **or** reasoning — becomes
+                    // an interrupted assistant message through the journal before the turn
                     // converges (F3/F5, revised F4: "empty" means both are empty). The append
                     // itself is never cancelled (D3) and runs no hooks.
-                    let (text, reasoning) = tap.take();
                     if !text.is_empty() || !reasoning.is_empty() {
                         let message = Message::Assistant {
                             content: parts_of(text),
@@ -1555,43 +1669,15 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                     }
                     return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
                 }
-                Raced::Done(Err(error)) => {
-                    // ADR 0017: a transient failure is retried here, inside the one
-                    // model call and before anything is committed. The failed attempt's live
-                    // text and reasoning stay in its (dropped) tap, never in the transcript.
-                    //
-                    // `waited < MAX_RETRY_WAIT` is the spent-budget stop: once the 60 s of one
-                    // model call are used up, `retry_delay` can only return 0, and retrying then
-                    // would hammer a provider that just said it is busy. The turn fails instead,
-                    // with the "after N retries" count of the retries that were really made.
-                    if error.is_transient() && retries_used < max_retries && waited < MAX_RETRY_WAIT
-                    {
-                        retries_used += 1;
-                        let delay = retry_delay(retries_used, error.retry_after(), waited);
-                        waited += delay;
-                        events.emit(AgentEvent::ModelRetrying {
-                            attempt: retries_used,
-                            max: max_retries,
-                            delay,
-                            reason: error.to_string(),
-                        });
-                        match race(&interrupt, tokio::time::sleep(delay)).await {
-                            Raced::Interrupted(reason) => {
-                                // Revision 1, item 4: a cancellation during the backoff ends
-                                // the turn `cancelled` at once; nothing of the failed attempt
-                                // is kept.
-                                return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
-                            }
-                            Raced::Done(()) => continue,
-                        }
-                    }
+                ModelCallOutcome::InterruptedInWait(reason) => {
+                    // Revision 1, item 4: a cancellation during the backoff ends the turn
+                    // `cancelled` at once; nothing of the failed attempt is kept.
+                    return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
+                }
+                ModelCallOutcome::Done(Ok(response)) => break response,
+                ModelCallOutcome::Done(Err(error)) => {
                     // The retries are spent (or were never attempted): the turn fails with the
-                    // adapter's error, marked with how many attempts were already made.
-                    let error = if retries_used > 0 && error.is_transient() {
-                        after_retries(error, retries_used)
-                    } else {
-                        error
-                    };
+                    // adapter's error, already marked with how many attempts were made.
                     let ModelError::ContextOverflow(message) = &error else {
                         // ADR 0017: any other model error fails the turn, no compaction.
                         return Err(self.run.fail(RunError::Model(error), events));
@@ -1659,7 +1745,6 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                         }
                     }
                 }
-                Raced::Done(Ok(response)) => break response,
             }
         };
         events.emit(AgentEvent::ModelResponseReceived {

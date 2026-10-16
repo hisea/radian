@@ -67,6 +67,9 @@ fn compaction_agent(
     Arc::new(Agent::new(model, NoTools).with_config(AgentConfig {
         context_budget: Some(ContextBudget::new(budget).with_bytes_per_token(1)),
         auto_compact,
+        // These tests count requests exactly; a transient summary failure is one request here,
+        // not the ADR 0017 retry storm (`compaction_retry.rs` covers the retry).
+        retries: 0,
         ..Default::default()
     }))
 }

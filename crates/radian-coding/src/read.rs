@@ -25,7 +25,9 @@ pub(crate) fn schema() -> serde_json::Value {
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Workspace-relative file path."
+                "description": "Workspace-relative file path, or — read-only — an absolute or \
+                                `~` path under the cargo registry sources or a toolchain's \
+                                `lib/rustlib/src`."
             },
             "max_bytes": {
                 "type": "integer",
@@ -52,7 +54,9 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "read".into(),
-        description: "Read a UTF-8 text file from the workspace. Every returned line is \
+        description: "Read a UTF-8 text file from the workspace. Read-only Rust sources \
+                      (cargo registry, toolchain `lib/rustlib/src`) are also readable when \
+                      named as an absolute or `~` path. Every returned line is \
                       prefixed with its file line number as `N: `. That prefix is NOT part of \
                       the file: remove it before using the text anywhere else, in particular \
                       before passing it as the `old` text of `patch`. For a large file, read it \

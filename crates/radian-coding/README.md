@@ -9,12 +9,12 @@ contract; this file is the practical summary.
 
 | Tool | Concurrency | What it does |
 |---|---|---|
-| `read` | `Shared` | Read a UTF-8 file, bounded by `max_bytes` (default 64 KiB, hard cap 1 MiB). Every returned line is prefixed with its file line number, `N: ` (that prefix is not file content). `offset` (1-based first line) and `limit` (lines) read a large file in sections. Reports `start_line`/`end_line`/`line_truncated` and, when not finished, `next_offset`; a missing file names up to three close names in its directory; refuses non-UTF-8. |
+| `read` | `Shared` | Read a UTF-8 file, bounded by `max_bytes` (default 64 KiB, hard cap 1 MiB). Every returned line is prefixed with its file line number, `N: ` (that prefix is not file content). `offset` (1-based first line) and `limit` (lines) read a large file in sections. Reports `start_line`/`end_line`/`line_truncated` and, when not finished, `next_offset`; a missing file names up to three close names in its directory; refuses non-UTF-8. A cargo-registry or toolchain source file may also be named as an absolute or `~` path (read-only; see below). |
 | `write` | `Exclusive` | Create or overwrite a file with exact content (no newline added). Parent must exist. Never follows a symlink at the destination. |
 | `patch` | `Exclusive` | Replace `old` with `new`. A match is located by layer (exact, then typographic normalisation, then line-by-line ignoring trailing whitespace) and must be unique unless `replace_all` is set. A CRLF file is matched on an LF view and stays CRLF. Zero matches refuse the edit and report the closest region with line numbers. |
-| `list` | `Shared` | List a directory, sorted, with kind and size; symlinks shown but not followed; capped by `max_entries`. |
-| `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore` respected, `.git` skipped, symlinks never followed; capped by `max_results`. |
-| `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore` respected, binary files skipped; capped per file and in total. |
+| `list` | `Shared` | List a directory, sorted, with kind and size; symlinks shown but not followed; capped by `max_entries`. A cargo-registry or toolchain source directory may also be named absolutely or with `~` (read-only). |
+| `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore` respected, `.git` skipped, symlinks never followed; capped by `max_results`. A read-only registry/toolchain base works too, and its results are absolute paths. |
+| `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore` respected, binary files skipped; capped per file and in total. A read-only registry/toolchain base works too, and its results are absolute paths. |
 | `git_status` | `Shared` | `git status --porcelain=v1 --branch --untracked-files=all`. |
 | `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. |
 | `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id (no default timeout); the three `job_*` tools below read, list and stop it (ADR 0037). Its output goes to the session's own jobs directory, outside the workspace and unreadable from inside the sandbox (ADR 0039 decision 1). |
@@ -108,6 +108,30 @@ on its prefix and reported with a `[truncated]` marker, so one enormous line can
 result. Matches are capped per file (`default_grep_matches_per_file`) and in total
 (`max_matches`), each cut named in the text.
 
+## Read-only roots outside the workspace (ADR 0039)
+
+`read`, `grep`, `glob` and `list` also read two roots outside the workspace, **read-only**:
+
+- the cargo registry sources, `$CARGO_HOME/registry/src` (default `~/.cargo/registry/src`);
+- every installed toolchain's `$RUSTUP_HOME/toolchains/*/lib/rustlib/src` (default `~/.rustup`).
+
+A model names one as an **absolute** path or with `~` (a relative path is always
+workspace-relative). `CodingTools` resolves the roots from the process environment once, when
+the tool set is built (`CodingTools::new` / `with_sandbox*`), canonicalizes each root itself and
+holds it as a directory fd; the configured spelling is kept as an alias, so a path written the
+way `CARGO_HOME` was set still matches when canonicalization rewrites it (`/tmp` →
+`/private/tmp`). A path under a root is opened from that root's fd with the same per-component
+`openat(O_NOFOLLOW)` walk the workspace uses, so **a symlink at any level is refused**, and
+`grep`/`glob` results are rendered with the root's prefix (absolute) so they can be passed
+straight back to `read`. A source that does not exist is simply not readable.
+
+`write`, `patch` and `shell`'s `cwd` never accept these roots: a `write`/`patch` destination is
+resolved against the workspace only. Any other absolute path is refused
+(`path_outside_workspace`) with a message naming both readable roots. `tests/read_roots.rs` sets
+`CARGO_HOME`/`RUSTUP_HOME`/`HOME` to a private tree once per binary and never reads the
+developer's real `~/.cargo`/`~/.rustup`; `tests/common`'s `tools()` builds with
+`ReadRoots::none()` so the boundary tests stay hermetic.
+
 ## Limits (`Limits`, all overridable)
 
 | Field | Default | Why |
@@ -131,6 +155,12 @@ result. Matches are capped per file (`default_grep_matches_per_file`) and in tot
 Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 
 - absolute paths and `..` are refused before any filesystem access (`path_outside_workspace`);
+- `read`/`grep`/`glob`/`list` additionally read two **read-only** roots outside the workspace
+  (ADR 0039): `$CARGO_HOME/registry/src` and every
+  `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`. An absolute or `~` path under one is opened from
+  that root's fd with every component `O_NOFOLLOW`; a path under none of them is refused with a
+  message naming both. `write`/`patch` and `shell`'s `cwd` never accept them
+  (`tests/read_roots.rs`);
 - **every path is opened through the workspace root's directory fd** (`safe_fs`, ADR 0039
   decision 2): one `openat(dirfd, name, O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)` per parent, the
   leaf with `O_NOFOLLOW` (`O_CREAT` for `write`), and the tool reads or writes through that fd.

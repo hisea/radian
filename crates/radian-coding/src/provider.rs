@@ -7,6 +7,7 @@ use agent_core::{
 };
 use radian_sandbox::{Sandbox, SandboxMode, SandboxSlot};
 
+use crate::read_roots::ReadRoots;
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
 use crate::{fail, git, glob, grep, jobs, list, patch, read, shell, write};
 
@@ -116,14 +117,23 @@ impl CodingTools {
     /// Canonicalizes `root` (a symlinked root is fine) and validates it is a directory.
     ///
     /// The result has **no** `shell` tool: there is no sandbox, and this slice never runs a
-    /// command without one.
+    /// command without one. The read-only registry and toolchain roots are resolved from the
+    /// environment (ADR 0039).
     pub fn new(root: impl AsRef<std::path::Path>) -> Result<Self, WorkspaceError> {
-        Ok(Self {
-            root: Arc::new(WorkspaceRoot::new(root)?),
-            limits: Limits::default(),
-            sandbox: SandboxSlot::empty(),
-            jobs: None,
-        })
+        Self::with_read_roots(root, ReadRoots::from_env())
+    }
+
+    /// [`CodingTools::new`] with an explicit set of read-only roots instead of the environment
+    /// (`ReadRoots::none()` keeps the file tools workspace-only). For tests and embedders.
+    pub fn with_read_roots(
+        root: impl AsRef<std::path::Path>,
+        read_roots: ReadRoots,
+    ) -> Result<Self, WorkspaceError> {
+        Ok(Self::from_root(
+            WorkspaceRoot::with_read_roots(root, read_roots)?,
+            SandboxSlot::empty(),
+            None,
+        ))
     }
 
     /// The same tools, plus `shell`, confined by `sandbox`.
@@ -147,7 +157,7 @@ impl CodingTools {
         root: impl AsRef<std::path::Path>,
         sandbox: SandboxSlot,
     ) -> Result<Self, CodingToolsError> {
-        let root = WorkspaceRoot::new(root)?;
+        let root = WorkspaceRoot::with_read_roots(root, ReadRoots::from_env())?;
         if let Some(current) = sandbox.get()
             && current.policy().workspace != root.root()
         {
@@ -156,12 +166,18 @@ impl CodingTools {
                 sandbox: current.policy().workspace.clone(),
             });
         }
-        Ok(Self {
+        Ok(Self::from_root(root, sandbox, None))
+    }
+
+    /// Assembles the provider from an already-built root (read-only roots included), the
+    /// sandbox slot and an optional job registry.
+    fn from_root(root: WorkspaceRoot, sandbox: SandboxSlot, jobs: Option<Arc<jobs::Jobs>>) -> Self {
+        Self {
             root: Arc::new(root),
             limits: Limits::default(),
             sandbox,
-            jobs: None,
-        })
+            jobs,
+        }
     }
 
     pub fn with_limits(mut self, limits: Limits) -> Self {

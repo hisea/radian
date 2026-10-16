@@ -19,7 +19,9 @@ pub(crate) fn schema() -> serde_json::Value {
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Workspace-relative directory; defaults to the workspace root."
+                "description": "Workspace-relative directory, or a read-only absolute or `~` \
+                                directory under the cargo registry sources or a toolchain's \
+                                `lib/rustlib/src`; defaults to the workspace root."
             },
             "max_entries": {
                 "type": "integer",
