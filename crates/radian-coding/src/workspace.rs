@@ -112,6 +112,7 @@ impl WorkspaceRoot {
             .dir
             .file(&relative, OpenMode::Read)
             .map_err(|error| self.map_error(user, error))?;
+        safe_fs::run_after_open_hook();
         let stat = safe_fs::fstat(&file).map_err(|e| io_failure(user, e))?;
         Ok(OpenedFile { file, stat })
     }
@@ -142,6 +143,7 @@ impl WorkspaceRoot {
             .dir
             .file(&relative, mode)
             .map_err(|error| self.map_error(user, error))?;
+        safe_fs::run_after_open_hook();
         let stat = safe_fs::fstat(&file).map_err(|e| io_failure(user, e))?;
         if stat.kind != EntryKind::File {
             return Err(fail(

@@ -177,6 +177,30 @@ fn normalise_relative(base: &[OsString], target: &Path) -> Option<PathBuf> {
 static RESOLVE_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>> =
     std::sync::Mutex::new(None);
 
+#[cfg(feature = "testing")]
+static AFTER_OPEN_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>> =
+    std::sync::Mutex::new(None);
+
+/// Test seam: a closure run by the workspace tools right **after** the fd is obtained and
+/// before it is used. The correct implementation keeps using that fd, so whatever the hook
+/// does to the path afterwards cannot change what is read or written; an implementation that
+/// re-opened by path here would follow it. Only built with the `testing` feature.
+#[cfg(feature = "testing")]
+pub fn after_open_hook(hook: Option<Box<dyn Fn() + Send + Sync>>) {
+    *AFTER_OPEN_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
+}
+
+pub(crate) fn run_after_open_hook() {
+    #[cfg(feature = "testing")]
+    if let Some(hook) = AFTER_OPEN_HOOK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
+        hook();
+    }
+}
+
 /// Test seam: installs (or clears) a closure that runs after the lexical check of every open
 /// and before the first `openat`. Only built with the `testing` feature.
 #[cfg(feature = "testing")]
