@@ -38,6 +38,27 @@ fn policy_script(name: &str, script: &str) -> PolicyCommand {
     PolicyCommand::new(name, "/bin/sh").with_args(vec!["-c".into(), script.into()])
 }
 
+/// The sandbox these tests hand the approver so the policy command actually runs. A `full`
+/// policy is not enforced (the `none` backend), but it is still an explicit sandbox: the tests
+/// never exercise the "no sandbox" path here (that is its own test). The workspace is a
+/// dedicated empty directory: building a policy walks the workspace for git metadata, and the
+/// system temp directory is far too large for that.
+fn policy_sandbox() -> Sandbox {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("radian-policy-sandbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    });
+    Sandbox::from_policy(
+        SandboxPolicy::new(radian_sandbox::SandboxMode::FullAccess, dir).expect("a full policy"),
+    )
+    .expect("a sandbox")
+}
+
 /// Polls a queue until the next event appears, waiting on its `watch` instead of sleeping. A
 /// bounded overall wait (20 s) turns "no event was raised" into a failure instead of a hang.
 async fn wait_next(
@@ -77,7 +98,7 @@ async fn a_policy_command_allow_and_deny_decide_and_are_named() {
         "t1",
         ApprovalPolicy::Auto,
         Some(policy_script("safe-commands", "read line; echo allow")),
-        None,
+        Some(policy_sandbox()),
     );
     let outcome = approver.decide(request("r1")).await.unwrap();
     assert_eq!(
@@ -95,7 +116,7 @@ async fn a_policy_command_allow_and_deny_decide_and_are_named() {
         "t1",
         ApprovalPolicy::Auto,
         Some(policy_script("safe-commands", "read line; echo deny")),
-        None,
+        Some(policy_sandbox()),
     );
     let outcome = approver.decide(request("r2")).await.unwrap();
     assert!(
@@ -123,7 +144,7 @@ async fn a_policy_ask_lands_in_the_pending_queue_not_auto() {
         "t1",
         ApprovalPolicy::Auto,
         Some(policy_script("picky", "read line; echo ask")),
-        None,
+        Some(policy_sandbox()),
     ));
     let task_id = "t1";
     let handle = tokio::spawn({
@@ -166,7 +187,7 @@ async fn policy_timeout_nonzero_and_garbage_all_still_ask() {
             "t1",
             ApprovalPolicy::Auto,
             Some(policy),
-            None,
+            Some(policy_sandbox()),
         ));
         let handle = tokio::spawn(async move { approver.decide(request("r-soft")).await });
         let view = wait_next(&queue, &mut rx).await;
@@ -180,6 +201,50 @@ async fn policy_timeout_nonzero_and_garbage_all_still_ask() {
             ApprovalOutcome::Deny { .. }
         ));
     }
+}
+
+/// The security fix (review fix 1): with no sandbox the edge policy command is **never run**. A
+/// policy that would write a marker file and print `allow` leaves no marker, and the request
+/// lands in the pending queue with the skip recorded. Restoring the unsandboxed branch fails
+/// this (the marker appears and the request is allowed).
+#[tokio::test]
+async fn a_policy_command_with_no_sandbox_is_skipped_and_never_runs() {
+    let dir = scratch("no-sandbox-policy");
+    let marker = dir.join("policy-ran");
+    let script = format!("echo allow > {}; echo allow", marker.display());
+    let queue = TaskPendingQueue::new(None);
+    queue.set_timeout(Duration::from_secs(600));
+    let mut rx = queue.subscribe();
+    let approver = Arc::new(TaskApprover::new(
+        Arc::clone(&queue),
+        "t1",
+        ApprovalPolicy::Auto,
+        Some(policy_script("marker", &script)),
+        None,
+    ));
+    let handle = tokio::spawn(async move { approver.decide(request("r-nosandbox")).await });
+    let view = wait_next(&queue, &mut rx).await;
+    assert_eq!(view.kind(), TaskPendingKind::Approval);
+    assert!(
+        !marker.exists(),
+        "the policy command must not run without a sandbox"
+    );
+    match &view.content {
+        TaskPendingContent::Approval(req) => {
+            let reason = req.reason.clone().unwrap_or_default();
+            assert!(reason.contains("no sandbox"), "{reason}");
+        }
+        other => panic!("expected an approval, got {other:?}"),
+    }
+    assert!(!handle.is_finished());
+    queue
+        .deny_approval("t1", &view.request_id, Some("stop".into()))
+        .unwrap();
+    assert!(matches!(
+        handle.await.unwrap().unwrap(),
+        ApprovalOutcome::Deny { .. }
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A plain `auto` task with no edge policy is allowed by the built-in layer, with no event.

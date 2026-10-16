@@ -519,6 +519,13 @@ fn retain_open(state: &mut State) -> bool {
 /// An optional edge policy command (ADR 0030 R1 layer 2): it is run with the pending
 /// request JSON on stdin and answers `allow`, `deny` or `ask` on stdout. `name` is what the
 /// audit records as the policy (`approver = "policy"`, ADR 0006 §5.9).
+///
+/// # Trust
+///
+/// The command must come from the **user's own config** or a **trusted project config**
+/// (ADR 0030 slice 9 / ADR 0031), never from a model tool argument: it is a program Radian
+/// executes on the task's behalf. It is only ever run inside the task's sandbox — with no
+/// sandbox it is skipped and the request goes to the pending queue (see [`run_policy`]).
 #[derive(Debug, Clone)]
 pub struct PolicyCommand {
     pub name: String,
@@ -589,6 +596,7 @@ impl Approver for TaskApprover {
         request: ApprovalRequest,
     ) -> BoxFuture<'_, Result<ApprovalOutcome, ApprovalError>> {
         Box::pin(async move {
+            let mut request = request;
             if let Some(policy) = &self.policy {
                 match run_policy(policy, &request, self.sandbox.as_ref()).await {
                     PolicyVerdict::Allow => {
@@ -605,8 +613,14 @@ impl Approver for TaskApprover {
                             reason: Some(reason),
                         });
                     }
-                    // `ask`, a timeout, a non-zero exit or unparseable output: still ask.
-                    PolicyVerdict::Ask => {}
+                    // `ask`, a timeout, a non-zero exit, unparseable output, or a skipped
+                    // policy: still ask. A note (why it was skipped) is recorded on the pending
+                    // request's reason.
+                    PolicyVerdict::Ask(note) => {
+                        if let Some(note) = note {
+                            request = with_reason(request, &note);
+                        }
+                    }
                 }
             } else if self.mode == ApprovalPolicy::Auto {
                 return Ok(ApprovalOutcome::AllowOnce);
@@ -646,7 +660,10 @@ impl Prompter for TaskPrompter {
 enum PolicyVerdict {
     Allow,
     Deny(String),
-    Ask,
+    /// The request still asks: the verdict is `ask`, a timeout, a non-zero exit, unparseable
+    /// output, or the policy was **skipped** because the task has no sandbox. The optional note
+    /// is attached to the pending request's reason when present.
+    Ask(Option<String>),
 }
 
 /// The JSON shape a policy command reads on stdin. `ApprovalRequest` is not `Serialize`, and the
@@ -662,14 +679,34 @@ struct PolicyRequest<'a> {
     reason: Option<&'a str>,
 }
 
+/// Appends a note to an approval request's reason (ADR 0030 R1 layer 2): used to
+/// record why the edge policy was skipped, so the pending event and its audit trail say so.
+fn with_reason(mut request: ApprovalRequest, note: &str) -> ApprovalRequest {
+    request.reason = Some(match request.reason.take() {
+        Some(existing) => format!("{existing}; {note}"),
+        None => note.to_owned(),
+    });
+    request
+}
+
 /// Runs the edge policy command under the task's sandbox (ADR 0030 R1 layer 2) and
 /// maps its stdout. Any failure — a spawn error, a timeout, a non-zero exit, an unreadable
 /// stdout, or a word other than `allow`/`deny`/`ask` — is `Ask` (never `allow`).
+///
+/// **The command never runs unsandboxed.** A task with no sandbox (for example a `shared` task,
+/// or a host with no backend) skips the policy entirely and the request goes to the pending
+/// queue, so a configured program can never execute on the host outside the execution boundary
+/// (ADR 0030 item 4). The skip is recorded on the pending request's reason.
 async fn run_policy(
     policy: &PolicyCommand,
     request: &ApprovalRequest,
     sandbox: Option<&Sandbox>,
 ) -> PolicyVerdict {
+    let Some(sandbox) = sandbox else {
+        return PolicyVerdict::Ask(Some(
+            "the edge policy was skipped: this task has no sandbox".into(),
+        ));
+    };
     let payload = match serde_json::to_vec(&PolicyRequest {
         request_id: &request.request_id,
         call_id: &request.call_id,
@@ -683,18 +720,11 @@ async fn run_policy(
             bytes.push(b'\n');
             bytes
         }
-        Err(_) => return PolicyVerdict::Ask,
+        Err(_) => return PolicyVerdict::Ask(None),
     };
-    let mut command = match sandbox {
-        Some(sandbox) => match sandbox.command(&policy.program, policy.args.iter()) {
-            Ok(command) => command,
-            Err(_) => return PolicyVerdict::Ask,
-        },
-        None => {
-            let mut command = std::process::Command::new(&policy.program);
-            command.args(&policy.args);
-            command
-        }
+    let mut command = match sandbox.command(&policy.program, policy.args.iter()) {
+        Ok(command) => command,
+        Err(_) => return PolicyVerdict::Ask(None),
     };
     command
         .stdin(std::process::Stdio::piped())
@@ -702,7 +732,7 @@ async fn run_policy(
         .stderr(std::process::Stdio::piped());
     let mut child = match TokioCommand::from(command).kill_on_drop(true).spawn() {
         Ok(child) => child,
-        Err(_) => return PolicyVerdict::Ask,
+        Err(_) => return PolicyVerdict::Ask(None),
     };
     // Keep the write end open across the wait: a command that blocks on a later read is the
     // deterministic "hangs" case (no `sleep` in the test). The payload ends in `\n`, so a
@@ -715,15 +745,15 @@ async fn run_policy(
     let output = match tokio::time::timeout(policy.timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => output,
         // A timeout: the child is killed by `kill_on_drop` when the future is dropped.
-        _ => return PolicyVerdict::Ask,
+        _ => return PolicyVerdict::Ask(None),
     };
     drop(stdin);
     if !output.status.success() {
-        return PolicyVerdict::Ask;
+        return PolicyVerdict::Ask(None);
     }
     match String::from_utf8_lossy(&output.stdout).trim() {
         "allow" => PolicyVerdict::Allow,
         "deny" => PolicyVerdict::Deny("denied by the edge policy".into()),
-        _ => PolicyVerdict::Ask,
+        _ => PolicyVerdict::Ask(None),
     }
 }

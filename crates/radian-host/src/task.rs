@@ -151,6 +151,11 @@ pub struct SpawnRequest {
     pub approval: Option<ApprovalPolicy>,
     /// The optional edge policy command (ADR 0030 R1 layer 2). `None` means no edge
     /// policy: the default in [`SpawnRequest::approval`] decides.
+    ///
+    /// Trust: this command must come from the **user's own config** or a **trusted project
+    /// config** (ADR 0030 slice 9 / ADR 0031), never from a model tool argument — it is a
+    /// program Radian runs for the task. It is only ever run inside the task's sandbox; with no
+    /// sandbox it is skipped and the request goes to the pending queue.
     pub policy: Option<crate::task_pending::PolicyCommand>,
 }
 

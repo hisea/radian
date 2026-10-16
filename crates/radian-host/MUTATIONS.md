@@ -941,3 +941,17 @@ hook 原本在咨询 approver **之前**就拒绝非人类 `ask`（`hooks.rs` �
 `radian-permissions` 不改、`PermissionHooks` 判定顺序照旧，与切片 5 要求的 `Approver` 冲突；
 冲突写在 `.radian/progress/orch-s5.md`。该标志只对 task 路由生效，task 仍不能借用人类
 session grant，其他非人类来源照旧在 hook 里被拒。
+
+## orch-s5 review fix 1：edge policy 命令不得无沙箱运行（2026-10-16）
+
+同一工作树。改前把 `src/task_pending.rs` 复制到 `.radian/scratch/mut-backup/`，改后 `cp` 还原
+并以 `cmp` 证明一致。命令：
+`timeout 240 cargo test -p radian-host --test task_pending a_policy_command_with_no_sandbox_is_skipped_and_never_runs --locked --no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T-S5-F | `run_policy` 恢复「无 sandbox 就直接 `std::process::Command` 在宿主上跑」的旧分支 | `a_policy_command_with_no_sandbox_is_skipped_and_never_runs`（标记文件出现且请求被 allow，不再是待决事件） | ✅ GRABBED (rc=101) |
+
+1/1 抓住。该测试先于修复写就、在旧分支上失败（标记文件被创建）；修复后无 sandbox 直接回
+`Ask`，命令不执行，请求进待决队列，reason 记「the edge policy was skipped: this task has no
+sandbox」。`run_policy` 里已不存在无沙箱分支。
