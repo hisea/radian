@@ -25,6 +25,9 @@ const LR_CHAIN: &str = "flowchart LR\n    A[Input] --> B[Parse] --> C[Draw]\n";
 /// and this layout's drawing.
 const FIVE_LONG: &str = "flowchart LR\n    A[aaaaaaaaaaaaaa] --> B[bbbbbbbbbbbbbb] --> C[cccccccccccccc] --> D[dddddddddddddd] --> E[eeeeeeeeeeeeee]\n";
 const SELF_LOOP: &str = "flowchart TD\n    A[one] --> A\n";
+/// A stadium node, and the same pair turned.
+const STADIUM: &str = "flowchart TD\n    A([Ready?]) --> B[Work]\n";
+const STADIUM_LR: &str = "flowchart LR\n    A([Start]) --> B([End])\n";
 /// A chain plus an edge that skips the middle layer.
 const SKIP: &str = "flowchart TD\n    A[one] --> B[two] --> C[three]\n    A --> C\n";
 /// Two CJK labels: every character is two cells wide.
@@ -437,6 +440,31 @@ fn a_cjk_label_is_sized_by_display_width() {
             rows[text]
         );
     }
+}
+
+/// A stadium node keeps the vendor's rounded corners (ADR 0028) in every
+/// direction: the corner glyph comes from the cell's own screen directions, so a turned layout
+/// gets `╭╮╰╯` at the right places.
+#[test]
+fn a_stadium_keeps_its_corners_rounded() {
+    const TD: &[&str] = &[
+        "╭────────╮",
+        "│ Ready? │",
+        "╰────┬───╯",
+        "     │",
+        "     │",
+        "     ▼",
+        " ┌───┴──┐",
+        " │ Work │",
+        " └──────┘",
+    ];
+    expect(STADIUM, 80, TD);
+    const LR: &[&str] = &[
+        "╭───────╮   ╭─────╮",
+        "│ Start ├──►┤ End │",
+        "╰───────╯   ╰─────╯",
+    ];
+    expect(STADIUM_LR, 80, LR);
 }
 
 /// The layout is a pure function of `(source, width)`: a diagram that needs more than the width
