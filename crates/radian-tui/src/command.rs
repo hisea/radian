@@ -563,10 +563,12 @@ fn tasks_level(typed: &[&str], _partial: &str) -> Level {
             Candidate {
                 insert: "cancel".to_owned(),
                 description: "cancel a task's current turn (keeps its worktree)".to_owned(),
+                current: false,
             },
             Candidate {
                 insert: "kill".to_owned(),
                 description: "close a task's session (keeps its worktree)".to_owned(),
+                current: false,
             },
         ])
     } else {
