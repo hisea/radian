@@ -458,6 +458,15 @@ fn event_data_value(
             "outcome": outcome,
             "error": error,
         }),
+        EventData::NamedAgentStarted {
+            name,
+            agent_session_id,
+            worktree,
+        } => json!({
+            "name": name,
+            "agent_session_id": agent_session_id,
+            "worktree": worktree,
+        }),
         EventData::BackgroundJobStarted {
             job_id,
             command,

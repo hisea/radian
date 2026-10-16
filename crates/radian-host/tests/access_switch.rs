@@ -125,6 +125,7 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             task_agent: false,
             parent: None,
             allowed_branch: None,
+            git_commit_requires_branch: false,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
@@ -155,6 +156,7 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
             task_builder: None,
+            named_builder: None,
         },
     )
     .await
@@ -265,6 +267,7 @@ async fn a_session_without_a_builder_refuses_set_access() {
             task_agent: false,
             parent: None,
             allowed_branch: None,
+            git_commit_requires_branch: false,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
@@ -295,6 +298,7 @@ async fn a_session_without_a_builder_refuses_set_access() {
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
             task_builder: None,
+            named_builder: None,
         },
     )
     .await
