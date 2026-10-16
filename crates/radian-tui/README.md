@@ -192,7 +192,7 @@ bare arrow keys belong to the composer.
 | PageUp / PageDown | scroll the transcript a page |
 | Shift-Up / Shift-Down | scroll the transcript one line |
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
-| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
+| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running `!` command or the running turn; otherwise do nothing — **Esc never quits a session** (quit with two Ctrl-Cs or `/quit`) |
 | Ctrl-C | cancel the running turn; idle with a non-empty input, clear it (into the history); idle with an empty input, arm "press Ctrl-C again to quit" for 2 s (any other key, or the window closing, disarms it; the status bar shows `Press Ctrl-C again to quit`) |
 | Ctrl-P (`toggle_startup`) | fold or unfold the startup information block |
 | Ctrl-N (`menu_next`) | while a completion menu is up, move its highlight down (Ctrl-P is taken, so Ctrl-N is the menu's other key; ) |
@@ -504,7 +504,7 @@ with `[tui.colors]`.
 The history is this session's submitted lines (messages and `/…` commands). A resume rebuilds
 it from the journal's user messages. It is not persisted on its own.
 
-The **draft** is: on a clean exit (Esc/quit, SIGTERM/SIGHUP) a non-empty input is written to
+The **draft** is: on a clean exit (the two-press Ctrl-C quit or `/quit`, SIGTERM/SIGHUP) a non-empty input is written to
 `<session-dir>/<session-id>.draft` (0600, atomic temp-file + rename); `--resume` restores it
 once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (owner
 2026-10-14, see the key table), so a Ctrl-C exit saves the *cleared* input; a signal exit

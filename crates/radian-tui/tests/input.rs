@@ -143,7 +143,8 @@ fn shift_enter_inserts_a_newline() {
 /// The README's key table: `Esc` on an empty input cancels the running turn. The 2026-10-14
 /// report (dogfood `2b55c50`) was that Esc did nothing there while Ctrl-C worked; the branch
 /// answers with the cancel effect, even with a tool of the turn in flight, and a second Esc
-/// does not turn into a quit. Idle, the same key is the immediate quit.
+/// does not turn into a quit. Idle and empty, the same key does nothing at all (owner
+/// 2026-10-16): it quit at once before, and no longer does.
 #[test]
 fn esc_on_an_empty_input_cancels_a_running_turn() {
     let mut app = App::new("m", "s");
@@ -162,10 +163,10 @@ fn esc_on_an_empty_input_cancels_a_running_turn() {
     assert_eq!(press(&mut app, key(KeyCode::Esc)), vec![Effect::Cancel]);
     assert!(!app.quit);
 
-    // Idle and empty, Esc quits at once (the pre-existing escalation).
+    // Idle and empty, Esc does nothing at all: it never quits.
     app.session.projection.set_turn(TurnState::Idle);
-    assert_eq!(press(&mut app, key(KeyCode::Esc)), vec![Effect::Quit]);
-    assert!(app.quit);
+    assert!(press(&mut app, key(KeyCode::Esc)).is_empty());
+    assert!(!app.quit, "Esc must not quit an idle session");
 }
 
 #[test]

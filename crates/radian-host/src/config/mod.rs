@@ -829,14 +829,19 @@ fn parse_model(
                     }
                 }
             }
-            ("context_window", Value::Integer(window)) if *window > 0 => {
-                config.model.context_window = Some(*window as u64);
+            // ADR 0015 (with ADR 0018's "0 or missing is unknown"): a zero window means
+            // **unset**, not a real zero-token window — the guard stays off exactly as if the
+            // key were absent. It is a valid "off" value in the same shape as `retries = 0`
+            // below. A negative or non-integer value is still refused rather than guessed
+            // (fail-closed).
+            ("context_window", Value::Integer(window)) if *window >= 0 => {
+                config.model.context_window = (*window > 0).then_some(*window as u64);
             }
             ("context_window", _) => {
                 return Err(wrong_type(
                     path,
                     "model.context_window",
-                    "a positive integer",
+                    "a non-negative integer",
                 ));
             }
             // ADR 0017: `[model] retries = 3`; `0` disables retrying. A negative or
@@ -1947,6 +1952,19 @@ theme = "light"
         assert_eq!(config.model.retries, Some(0));
         assert!(parse_str("schema_version = 1\n[model]\nretries = -1\n").is_err());
         assert!(parse_str("schema_version = 1\n[model]\nretries = \"3\"\n").is_err());
+    }
+
+    /// ADR 0015 (2026-10-16): `[model] context_window` is a non-negative integer, and `0` means
+    /// **unset** — a valid "off" in the same shape as `retries = 0`, never a zero-token window.
+    /// A negative or non-integer value is refused rather than guessed (fail-closed).
+    #[test]
+    fn context_window_zero_is_unset_and_a_positive_value_is_carried() {
+        let config = parse_str("schema_version = 1\n[model]\ncontext_window = 200000\n").unwrap();
+        assert_eq!(config.model.context_window, Some(200_000));
+        let config = parse_str("schema_version = 1\n[model]\ncontext_window = 0\n").unwrap();
+        assert_eq!(config.model.context_window, None);
+        assert!(parse_str("schema_version = 1\n[model]\ncontext_window = -1\n").is_err());
+        assert!(parse_str("schema_version = 1\n[model]\ncontext_window = \"200000\"\n").is_err());
     }
 
     /// `tui.input_style` is carried as a string; the TUI parses it (the removed `bar` and any

@@ -3519,18 +3519,6 @@ impl App {
         self.session.projection.read().turn()
     }
 
-    /// `Esc`'s escalation (unchanged, ): cancel a running turn, otherwise
-    /// quit at once. Ctrl-C ([`Input::Cancel`]) is the one that asks twice.
-    fn cancel_or_quit_now(&mut self) -> UpdateResult {
-        if self.turn() == TurnState::Running {
-            self.quit_pending = None;
-            UpdateResult::quiet(Effect::Cancel)
-        } else {
-            self.quit = true;
-            UpdateResult::quiet(Effect::Quit)
-        }
-    }
-
     /// Ctrl-C (the `cancel` action), the one action whose meaning depends on the clock
     ///:
     /// - a turn is running: cancel it (unchanged);
@@ -3745,8 +3733,11 @@ impl App {
                 UpdateResult::dirty()
             }
             Action::Escape => {
-                // A non-empty input is cleared first (kept in the history, so `Up` finds it);
-                // an empty one cancels a running turn or quits.
+                // Esc never quits an idle session. In order: the menu and
+                // the find box are closed in `key_input`/`update` above; a non-empty input is
+                // cleared (kept in the history, so `Up` finds it); an empty one cancels the
+                // running `!` command or turn; otherwise it does nothing at all. Quitting is the
+                // two-press Ctrl-C (`cancel`) or `/quit`.
                 if !self.input.is_empty() {
                     let text = std::mem::take(&mut self.input).text();
                     self.session.history.push(text);
@@ -3758,8 +3749,13 @@ impl App {
                     // as a cancelled `BashDone`.
                     self.push_notice("cancelling the command…");
                     UpdateResult::effect(Effect::CancelBash)
+                } else if self.turn() == TurnState::Running {
+                    // Esc cancels the running turn (unchanged). A pending Ctrl-C quit window
+                    // is disarmed, as the old escalation did.
+                    self.quit_pending = None;
+                    UpdateResult::quiet(Effect::Cancel)
                 } else {
-                    self.cancel_or_quit_now()
+                    UpdateResult::none()
                 }
             }
             // The form actions normally arrive as `Input::Form`; a main-layer binding to one

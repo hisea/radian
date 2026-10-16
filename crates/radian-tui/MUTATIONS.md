@@ -1978,3 +1978,17 @@ Base `aedc23f`。变异在 worktree 内直接改，改前把每个文件复制�
 | M4 | 决定 2：`src/mermaid.rs` 只有 `use` 行与可见性两类有记录的改动 | `src/mermaid.rs`: 上游一行 `const MAX_LABEL: usize = 28;` → `27` | `third_party/grok-mermaid` `tests/pristine.rs::the_two_edits_are_the_only_difference_from_upstream` | ✅ 1 failed |
 
 4 条变异，4 条抓住。M4 在 vendored crate 里跑（本 crate 的 `mermaid.rs` 快照测试看不见上游 diff）。
+
+## esc-noquit: `Esc` 不再退出空闲会话＼�
+
+Base: 本 worktree（`oc/esc-noquit`，分支自 `e2a4436`）。变异在 worktree 内直接改 `src/app.rs`，
+改前 `cp src/app.rs .radian/scratch/esc-noquit/app.rs.orig`，改后 `cp` 还原并 `cmp` 一致
+（`git status --short` 变异后只剩被测文件，还原后为那三个改动文件）。命令：
+`timeout 600 cargo test -p radian-tui --locked --no-fail-fast --test quit <test>`。
+
+| # | Requirement mutated | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| EN-M1 | 空闲且输入为空时 `Esc` **什么都不做**（绝不退出） | `app.rs` `Action::Escape` 的空闲分支 `UpdateResult::none()` → `self.quit = true; UpdateResult::quiet(Effect::Quit)` | `quit::esc_never_quits_when_idle_and_empty`（`assert!(!app.quit, …)`：`Esc must not quit an idle session`） | ✅ 1 failed |
+
+1/1 caught。EN-M1 只动空闲分支：运行中的 turn 取消（`update::esc_with_an_empty_input_and_a_running_turn_cancels`）与非空输入清空都不受影响，两个键都仍然绿；`--pick` 选择器的 `Esc` = 退出走的是
+`Input::PickerKey` 另一条路径（`pty::pty_pick_starts_new_and_escape_leaves_no_session`），本改动不碰它，变异也不影响它。
