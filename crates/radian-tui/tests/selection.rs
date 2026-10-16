@@ -28,18 +28,18 @@ fn approval() -> PendingView<PendingRequest> {
     }
 }
 
-/// A transcript at width 30. A user block is pad / text / pad (ADR 0028 R1), so the lines
-/// are: 0-2 the first user block (text on 1), 3 the assistant, 4-6 the second user block
-/// (text on 5).
-const USER1: u16 = 1;
-const ASSISTANT: u16 = 3;
+/// A transcript at width 30. The thin user rows (ADR 0035: no padding rows) are one
+/// line each and an ordinary block, so the container puts one blank line around them: 0 the
+/// first user row, 1 the gap, 2 the assistant, 3 the gap, 4 the second user row.
+const USER1: u16 = 0;
+const ASSISTANT: u16 = 2;
 
 fn app() -> App {
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello there"));
     app.push_message(&Message::assistant("aaaa bbbb cccc dddd"));
     app.push_message(&Message::user("second message"));
-    app.set_viewport(7, 7);
+    app.set_viewport(5, 5);
     app.set_transcript_width(30);
     app
 }
@@ -87,11 +87,12 @@ fn a_copy_across_a_soft_wrap_inserts_no_newline() {
     // "cccc dddd" (lines 1 and 2). Selecting line 1 through line 2 copies the one-line text.
     let mut app = app();
     app.set_transcript_width(12);
-    // Width 12: the user block is pad / "hello" / "there" / pad, the assistant "aaaa bbbb"
-    // (4) / "cccc dddd" (5). Selecting its two lines copies the one-line text.
-    press(&mut app, 4, 2);
-    drag(&mut app, 5, 200);
-    let release = release(&mut app, 5, 200);
+    // Width 12: the first user row wraps to "hello ther" / "e" (rows 0-1), the gap is row 2,
+    // and the assistant "aaaa bbbb" is row 3 / "cccc dddd" row 4. Selecting its two lines
+    // copies the one-line text.
+    press(&mut app, 3, 2);
+    drag(&mut app, 4, 200);
+    let release = release(&mut app, 4, 200);
     assert_eq!(
         release.effects,
         vec![Effect::Copy {
@@ -119,7 +120,7 @@ fn a_backwards_drag_normalizes_to_the_same_copy() {
 fn a_click_clears_the_selection() {
     let mut app = app();
     press(&mut app, 0, 2);
-    drag(&mut app, 1, 25);
+    drag(&mut app, 2, 25);
     assert!(app.session.selection.is_some());
     // A second press on a different cell clears immediately (the same cell inside the
     // double-click window would be a word select, not a clear).
@@ -134,11 +135,11 @@ fn a_click_clears_the_selection() {
 #[test]
 fn a_press_outside_the_transcript_never_starts_one() {
     let mut app = app();
-    // Rows 7.. are the input box and the status bar (viewport height 7).
-    assert!(!press(&mut app, 7, 0).dirty);
+    // Rows 5.. are the input box and the status bar (viewport height 5).
+    assert!(!press(&mut app, 5, 0).dirty);
     assert!(app.session.selection.is_none());
-    drag(&mut app, 8, 3);
-    release(&mut app, 8, 3);
+    drag(&mut app, 6, 3);
+    release(&mut app, 6, 3);
     assert!(app.session.selection.is_none(), "no gesture, no selection");
 }
 
@@ -149,13 +150,13 @@ fn a_press_on_a_modal_never_starts_one() {
     // With the approval modal up the selection is off entirely: even a press inside the
     // shrunk transcript viewport (rows 0..2 are still transcript on screen) starts nothing —
     // the modal owns the input until it is answered.
-    app.set_viewport(2, 6);
+    app.set_viewport(2, 5);
     app.session.scroll = 0;
     app.session.follow = false;
-    assert!(!press(&mut app, 1, 5).dirty);
+    assert!(!press(&mut app, 0, 5).dirty);
     assert!(app.session.selection.is_none());
-    drag(&mut app, 1, 9);
-    release(&mut app, 1, 9);
+    drag(&mut app, 0, 9);
+    release(&mut app, 0, 9);
     assert!(
         app.session.selection.is_none(),
         "the drag would have selected real text"
@@ -483,13 +484,11 @@ fn a_double_click_on_whitespace_selects_the_whitespace_run() {
 }
 
 #[test]
-fn a_selection_across_a_banded_user_block_copies_the_text() {
-    // The band is paint; the copy is still the block's logical text, padding rows included
-    // in the geometry but contributing nothing.
+fn a_selection_from_the_marker_copies_the_text_without_it() {
+    // `❯ ` is drawn in the marker column, never body text (ADR 0035):
+    // a drag that starts on the marker cell copies the users' words from the first char.
     let mut app = app();
-    app.theme.user =
-        ratatui::style::Style::default().bg(ratatui::style::Color::Rgb(0x18, 0x18, 0x20));
-    press(&mut app, 0, 0); // the top padding row
+    press(&mut app, USER1, 0); // the `❯ ` marker cell
     drag(&mut app, ASSISTANT, 25);
     let result = release(&mut app, ASSISTANT, 25);
     assert_eq!(
@@ -500,42 +499,26 @@ fn a_selection_across_a_banded_user_block_copies_the_text() {
     );
 }
 
-/// ADR 0035: a selection that starts or ends on a band's half-cell
-/// padding row copies none of the pad itself and never panics — including with a CJK body,
-/// where the pad's empty text must not index into a multi-byte offset.
+/// The thin user row has no padding rows (ADR 0035), and the `❯ ` marker is drawn
+/// in the marker column, never body text: a selection from the marker cell through a CJK body
+/// copies the words alone and never indexes into a multi-byte offset.
 #[test]
-fn a_selection_from_a_padding_row_copies_no_pad_characters_with_cjk() {
+fn a_marker_selection_copies_no_marker_characters_with_cjk() {
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("中文消息"));
-    app.set_viewport(3, 3);
+    app.set_viewport(1, 1);
     app.set_transcript_width(30);
-    // Line 0 is the top pad, 1 the text, 2 the bottom pad (ADR 0035).
-    // From the top pad into the text: the pad contributes nothing.
+    // Row 0 is the whole row: the marker cells then the text from column 3.
     press(&mut app, 0, 0);
-    drag(&mut app, 1, 20);
-    let result = release(&mut app, 1, 20);
+    drag(&mut app, 0, 20);
+    let result = release(&mut app, 0, 20);
     assert_eq!(
         result.effects,
         vec![Effect::Copy {
             text: "中文消息".into()
         }],
-        "the pad row contributes no character"
+        "the marker contributes no character"
     );
-    // From the text onto the bottom pad: still no pad character, no panic.
-    press(&mut app, 1, 2);
-    drag(&mut app, 2, 4);
-    let result = release(&mut app, 2, 4);
-    assert_eq!(
-        result.effects,
-        vec![Effect::Copy {
-            text: "中文消息".into()
-        }],
-        "ending on the pad copies the text, not the pad"
-    );
-    // A click wholly on a pad row selects nothing.
-    press(&mut app, 0, 3);
-    let result = release(&mut app, 0, 3);
-    assert!(result.effects.is_empty(), "{:?}", result.effects);
 }
 
 #[test]
