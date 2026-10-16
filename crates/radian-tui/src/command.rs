@@ -35,6 +35,8 @@ pub const HELP: &str = "\
 /skill:<name> [args]  run a skill: read its body into the message (ADR 0025)
 /skills               list the discovered skills
 /jobs [kill <id|all>] list this session's background jobs, or stop one/all (ADR 0037)
+/tasks [cancel|kill <id>]
+                      list the task agents, or cancel/kill one (ADR 0030)
 /login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
@@ -64,6 +66,19 @@ pub enum JobsRequest {
     Kill(String),
     /// `/jobs kill all`: stop every running job.
     KillAll,
+}
+
+/// What `/tasks` asked for (ADR 0030 O10/O12). The task registry lives in the host, so the
+/// command is an effect the loop runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TasksRequest {
+    /// `/tasks`: list every live task agent.
+    List,
+    /// `/tasks cancel <id>`: cancel the task's current turn (its worktree is kept).
+    Cancel(String),
+    /// `/tasks kill <id>`: close the task's session and abandon its pending requests, keeping
+    /// its worktree (ADR 0030 O12).
+    Kill(String),
 }
 
 /// What one submitted `/…` line meant. Parsing only: running the command is the loop's job
@@ -114,6 +129,9 @@ pub enum Outcome {
     Skills,
     /// `/jobs`: list the session's background jobs, or stop one/all (ADR 0037 decision 4).
     Jobs(JobsRequest),
+    /// `/tasks`: list the live task agents, or cancel/kill one (ADR 0030 O10/O12). The registry
+    /// lives in the host, so the loop runs it and answers with [`Outcome::Notices`]-style lines.
+    Tasks(TasksRequest),
     /// A user's `!`/`!!` shell command (ADR 0033). The command string runs in the sandbox
     /// (the tier's shell); `exclude_from_context` (`!!`) keeps its output out of the model's
     /// context. Execution is the loop's effect.
@@ -288,6 +306,11 @@ pub fn tree() -> &'static [Command] {
             name: "logout",
             description: "remove a stored credential (asks first)",
             levels: &[logout_level],
+        },
+        Command {
+            name: "tasks",
+            description: "list the task agents, or cancel/kill one",
+            levels: &[tasks_level, tasks_level],
         },
     ];
     TREE
@@ -519,6 +542,25 @@ fn mode_level(_typed: &[&str], _partial: &str) -> Level {
             description: "the lead role: turn goals into work for task agents".to_owned(),
         },
     ])
+}
+
+/// `/tasks`: the two subcommands (ADR 0030 O12). The task id is free text (the loop resolves
+/// it against the registry).
+fn tasks_level(typed: &[&str], _partial: &str) -> Level {
+    if typed.is_empty() {
+        Level::Ready(vec![
+            Candidate {
+                insert: "cancel".to_owned(),
+                description: "cancel a task's current turn (keeps its worktree)".to_owned(),
+            },
+            Candidate {
+                insert: "kill".to_owned(),
+                description: "close a task's session (keeps its worktree)".to_owned(),
+            },
+        ])
+    } else {
+        Level::Free
+    }
 }
 
 /// `/export`: the format, then the path (with `--force` offered as a candidate).
@@ -928,6 +970,7 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/skills") if tokens.len() == 1 => Outcome::Skills,
         Some("/skills") => Outcome::Notices(vec!["usage: /skills (no arguments)".to_owned()]),
         Some("/jobs") => jobs_request(&tokens[1..]),
+        Some("/tasks") => tasks_request(&tokens[1..]),
         Some(other) if other.starts_with("/skill:") => skill_command(other, line),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
@@ -943,6 +986,21 @@ fn jobs_request(args: &[String]) -> Outcome {
             Outcome::Jobs(JobsRequest::Kill(id.clone()))
         }
         _ => Outcome::Notices(vec!["usage: /jobs [kill <id|all>]".to_owned()]),
+    }
+}
+
+/// `/tasks [cancel|kill <id>]` (ADR 0030 O10/O12). No argument lists the tasks; anything else
+/// is a usage notice.
+fn tasks_request(args: &[String]) -> Outcome {
+    match args {
+        [] => Outcome::Tasks(TasksRequest::List),
+        [verb, id] if verb == "cancel" && !id.is_empty() => {
+            Outcome::Tasks(TasksRequest::Cancel(id.clone()))
+        }
+        [verb, id] if verb == "kill" && !id.is_empty() => {
+            Outcome::Tasks(TasksRequest::Kill(id.clone()))
+        }
+        _ => Outcome::Notices(vec!["usage: /tasks [cancel|kill <id>]".to_owned()]),
     }
 }
 

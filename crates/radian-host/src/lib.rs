@@ -172,7 +172,7 @@ pub use task::{
     TaskContext, TaskError, TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession,
     end_of_task_commit, task_sandbox,
 };
-pub use task_host::{TaskHost, TaskModelFactory, task_builder};
+pub use task_host::{TaskHost, TaskModelFactory, task_builder, task_lines};
 pub use task_pending::{
     DEFAULT_PENDING_TIMEOUT, DEFAULT_POLICY_TIMEOUT, PolicyCommand, TaskApprover,
     TaskPendingContent, TaskPendingError, TaskPendingKind, TaskPendingQueue, TaskPendingView,

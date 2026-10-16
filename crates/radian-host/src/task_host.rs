@@ -34,6 +34,7 @@ use radian_session::SessionJournal;
 
 use crate::memory::InjectionConfig;
 use crate::model::SwitchableModel;
+use crate::observer::SessionObserver;
 use crate::projection::SessionProjection;
 use crate::session::{
     ApprovalRouting, HostBindings, SessionCapability, SessionError, SessionId, SessionSetup,
@@ -44,9 +45,8 @@ use crate::trust;
 /// Builds a task's model from the task's session id and a **fresh** config slot. The host
 /// implements this with its own `build_model` closure, so a task's model is the lead's route
 /// built again — never the lead's model object and never a copied credential.
-pub type TaskModelFactory = Arc<
-    dyn Fn(&str, Arc<ConfigSlot>) -> Result<SwitchableModel, String> + Send + Sync,
->;
+pub type TaskModelFactory =
+    Arc<dyn Fn(&str, Arc<ConfigSlot>) -> Result<SwitchableModel, String> + Send + Sync>;
 
 /// Everything the builder needs that the hosts resolve anyway for the lead. One value per host
 /// process (the two hosts construct it once), cloned per task.
@@ -194,7 +194,10 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
 /// The sandbox the builder hands the registry. The registry rebuilds it as a `workspace` policy
 /// with the network off and `.git` read-only (ADR 0030 item 2, ADR 0038 decision 5),
 /// carrying over the lead's deny-read list, Unix-socket whitelist and environment whitelist.
-fn task_sandbox_for(host: &TaskHost, workspace: &std::path::Path) -> Result<Option<Sandbox>, String> {
+fn task_sandbox_for(
+    host: &TaskHost,
+    workspace: &std::path::Path,
+) -> Result<Option<Sandbox>, String> {
     if let Some(lead) = &host.sandbox {
         return task_sandbox(lead, workspace)
             .map(Some)
@@ -202,11 +205,88 @@ fn task_sandbox_for(host: &TaskHost, workspace: &std::path::Path) -> Result<Opti
     }
     // No lead sandbox (the `safe` tier): still give a worktree task a sandbox, with the deny
     // list the host built for the lead, so the task cannot read Radian's private directories.
-    let mut policy = SandboxPolicy::workspace_write(workspace).map_err(|error| error.to_string())?;
+    let mut policy =
+        SandboxPolicy::workspace_write(workspace).map_err(|error| error.to_string())?;
     policy.network = false;
     policy.deny_read = host.sandbox_deny_read.clone();
     policy.allow_unix_sockets = host.allow_unix_sockets.clone();
     Sandbox::from_policy(policy)
         .map(Some)
         .map_err(|error| error.to_string())
+}
+
+/// One line per live task for the TUI's `/tasks` (ADR 0030 O10/O12): the id, its state, where
+/// it runs, its usage and a bounded change summary. The facts come from the task's committed
+/// journal through [`crate::observer::JournalObserver`] — the same read-only view
+/// `task_status` uses — so `/tasks` and the lead's tool agree. Empty when there are no tasks.
+pub fn task_lines(registry: &crate::task::TaskRegistry) -> Vec<String> {
+    registry
+        .ids()
+        .iter()
+        .filter_map(|id| registry.get(id))
+        .map(|record| task_line(&record))
+        .collect()
+}
+
+/// The `/tasks` line for one task.
+fn task_line(record: &Arc<crate::task::TaskRecord>) -> String {
+    let state = if record.running() {
+        "running".to_owned()
+    } else {
+        match record.last_outcome() {
+            Some(outcome) => format!("idle ({outcome:?})"),
+            None => "idle".to_owned(),
+        }
+    };
+    let name = match &record.label {
+        Some(label) => format!("{} ({label})", record.id),
+        None => record.id.clone(),
+    };
+    let where_ = record
+        .worktree
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "the shared workspace".to_owned());
+    let branch = record.branch.as_deref().unwrap_or("-");
+    let usage = match crate::observer::JournalObserver::open(record.session.journal_path()) {
+        Ok(mut observer) => {
+            let _ = observer.poll();
+            let read = observer.projection();
+            match (read.usage_input(), read.usage_output()) {
+                (Some(input), Some(output)) => format!("{input} in / {output} out"),
+                _ => "no usage".to_owned(),
+            }
+        }
+        Err(_) => "no journal".to_owned(),
+    };
+    let diff = record
+        .worktree
+        .as_ref()
+        .and_then(|worktree| {
+            record
+                .start_commit
+                .as_deref()
+                .map(|start| (worktree, start))
+        })
+        .and_then(|(worktree, start)| {
+            let output = radian_coding::host_git::host_git_command(worktree)
+                .ok()?
+                .args(["diff", "--stat", start])
+                .output()
+                .ok()?;
+            output.status.success().then(|| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .last()
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned()
+            })
+        })
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or_else(|| "no changes".to_owned());
+    format!(
+        "{name}  {state}  {}  {where_}  {branch}  {usage}  {diff}",
+        record.isolation.as_str()
+    )
 }

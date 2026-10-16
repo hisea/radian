@@ -1275,9 +1275,10 @@ pub async fn open_session(
         // `TaskFinished` it writes, so the TUI shows a notice line and the CLI one stderr line.
         // The sink is the host's own runtime-events handler (the same one the driver calls).
         let runtime_events = Arc::clone(&runtime_events);
-        let notifier: crate::task::TaskNotifier = Arc::new(move |event: &radian_session::RuntimeEvent| {
-            runtime_events.on_runtime_event(event);
-        });
+        let notifier: crate::task::TaskNotifier =
+            Arc::new(move |event: &radian_session::RuntimeEvent| {
+                runtime_events.on_runtime_event(event);
+            });
         Some(Arc::new(
             crate::task::TaskRegistry::new(
                 workspace.clone(),

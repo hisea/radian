@@ -1410,6 +1410,14 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.turn_running,
         });
     }
+    // ADR 0030 O10: the task-agent count `running/total`, shown only when there is a task, so
+    // an idle status bar does not carry a constant `0/0`.
+    if let Some((running, total)) = app.session.task_counts() {
+        segments.push(Segment {
+            text: format!("tasks {running}/{total}"),
+            style: app.theme.turn_running,
+        });
+    }
     // The transient note ("tool … running", "copied N chars (via OSC 52)", a compaction
     // failure) sits ahead of the long tails: a narrow terminal drops the *rightmost*
     // segments, and a note the user just caused must survive that, not be the first to go.
