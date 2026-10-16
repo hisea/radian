@@ -3435,3 +3435,32 @@ fn the_ask_panel_and_the_transcript_block_use_the_same_markers() {
         "{block_text}"
     );
 }
+
+/// ADR 0003: a reply cut off during reasoning only (empty text, `interrupted`) still has to
+/// tell the user that the turn was interrupted. The `[interrupted]` marker is drawn on the
+/// entry's **last** body line (`render.rs`'s `entry_lines` / `visible_lines`), so the entry
+/// keeps one line for it instead of being skipped as an empty reply.
+#[test]
+fn an_interrupted_reply_with_no_text_still_shows_the_marker() {
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
+    app.push_message(&Message::user("q"));
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: assistant_with("", "a thought", true, vec![]),
+    });
+    let terminal = render(&mut app, 40, 12);
+    let text = screen(&terminal);
+    assert!(
+        text.contains("[interrupted]"),
+        "the cut-off reply keeps its marker:\n{text}"
+    );
+    let thought = row_of(&terminal, "a thought").expect("the thinking body");
+    let marker = row_of(&terminal, "[interrupted]").expect("the marker row");
+    assert_eq!(
+        marker,
+        thought + 2,
+        "one blank row between the thinking block and the marker:\n{text}"
+    );
+}

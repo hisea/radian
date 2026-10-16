@@ -1793,3 +1793,21 @@ restored to a different byte.
 8/8 caught, no misses and no equivalent mutants. Each mutation is a real behaviour change (the
 script asserts its anchor, so a `cargo fmt` shift or a no-op patch fails loudly rather than
 passing as "caught" — the U3/U4 trap); the restoring `cmp` is the guard that nothing leaked.
+
+## empty-turn review fix 1：被中断的空回复保留 `[interrupted]` 标记（ADR 0003，2026-10-16）
+
+Base：`ed858d8`（评审已接受的 head）· 就地变异：先把 `crates/radian-tui/src/blocks.rs` 用 `cp` 存到
+`.radian/scratch/mut/blocks.rs.fix1orig`，用 `python3` 做带 `assert` 的精确文本替换，跑命名的测试
+（`--no-fail-fast`），再 `cp` 写回并 `cmp` 逐字节确认。`--no-fail-fast`。
+
+事实核对：`[interrupted]` 标记画在条目的**最后一行** body 上（`render.rs` 的 `entry_lines` /
+`visible_lines`）。空文本的已提交 assistant 条目 body 本来就是 0 行，所以即使在 skip 之前，这个标记也
+画不出来（没有「最后一行」）。因此修复不能只是「不跳过」：`is_empty_assistant` 排除 interrupted 之外，
+`layout_with` 还要给这种条目留一行（否则它仍然是 0 行、标记无处可画）。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| FX1-M1 | 被中断的空回复不被跳过（保留它的空白行） | `blocks.rs::is_empty_assistant` 去掉 `!entry.interrupted` | `render::an_interrupted_reply_with_no_text_still_shows_the_marker`（标记行的行号 `left: 4, right: 5`）、`blocks::tests::an_empty_committed_assistant_is_skipped_by_the_gaps`（`!is_empty_assistant(&interrupted)`） | ✅ |
+| FX1-M2 | 被中断的空回复留一行给标记 | `blocks.rs::layout_with` 去掉那段 `lines.push(BodyLine::prose(...))`（保留 interrupted 条件） | `render::an_interrupted_reply_with_no_text_still_shows_the_marker`（屏幕没有 `[interrupted]`）、`blocks::tests::an_empty_committed_assistant_is_skipped_by_the_gaps`（`line_count == 1`） | ✅ |
+
+2/2 抓住。新测试在 `ed858d8`（未修复）上先跑过：`contains("[interrupted]")` FAILED。

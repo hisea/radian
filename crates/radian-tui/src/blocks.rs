@@ -716,9 +716,14 @@ pub fn block_gap(prev: Option<&Entry>, next: &Entry) -> usize {
 ///
 /// The entry itself stays in `entries` (`push_message` keeps it: the interrupted marker, usage
 /// and copy-last-reply read it); only its layout and its blank lines are skipped. A **live**
-/// empty entry is drawn as it always was, so a reply that is still starting does not shift.
+/// empty entry is drawn as it always was, so a reply that is still starting does not shift, and
+/// an **interrupted** one is never skipped either: it has to keep the `[interrupted]` marker
+/// visible (ADR 0003), and the layout gives it one line to carry it ([`layout_with`]).
 pub fn is_empty_assistant(entry: &Entry) -> bool {
-    entry.kind == EntryKind::Assistant && !entry.live && entry.text.trim().is_empty()
+    entry.kind == EntryKind::Assistant
+        && !entry.live
+        && !entry.interrupted
+        && entry.text.trim().is_empty()
 }
 
 /// The index of the last entry before `entries[index]` that is not skipped ([`is_empty_assistant`]).
@@ -1107,6 +1112,14 @@ pub fn layout_with(
     // and the search all see the same shape.
     let mut lines = layout_unstripped(entry, blocks, modes, width, spinner);
     strip_edge_blanks(&mut lines);
+    // The `[interrupted]` marker is drawn on the entry's **last** line (ADR 0003, `render.rs`'s
+    // `entry_lines` / `visible_lines`): an interrupted reply whose text is empty (cut off during
+    // reasoning only) would otherwise lose the whole body here and with it the marker. It keeps
+    // one empty line to carry it -- the one blank line the strip above is not allowed to take.
+    // It is not a skipped entry either ([`is_empty_assistant`] excludes interrupted ones).
+    if lines.is_empty() && entry.interrupted && entry.kind == EntryKind::Assistant {
+        lines.push(BodyLine::prose(Vec::new(), 0, String::new()));
+    }
     lines
 }
 
@@ -3901,9 +3914,9 @@ mod tests {
 
     /// A committed text-less assistant reply (only tool calls, or only reasoning) is skipped by
     /// the gap geometry: it has no blank line of its own, and the entry after it is measured
-    /// against the last entry that is not skipped (ADR 0028 rule 1). A **live** empty
-    /// entry is not skipped, and the pair rules (a call and its own result) still hold across a
-    /// skip.
+    /// against the last entry that is not skipped (ADR 0028 rule 1). A **live** or an
+    /// **interrupted** empty entry is not skipped, and the pair rules (a call and its own result)
+    /// still hold across a skip.
     #[test]
     fn an_empty_committed_assistant_is_skipped_by_the_gaps() {
         assert!(is_empty_assistant(&Entry::new(EntryKind::Assistant, "")));
@@ -3914,6 +3927,19 @@ mod tests {
         let mut live = Entry::new(EntryKind::Assistant, "");
         live.live = true;
         assert!(!is_empty_assistant(&live), "a live entry is never skipped");
+        // An interrupted empty reply is not skipped either: it keeps one line for the
+        // `[interrupted]` marker (ADR 0003).
+        let mut interrupted = Entry::new(EntryKind::Assistant, "");
+        interrupted.interrupted = true;
+        assert!(
+            !is_empty_assistant(&interrupted),
+            "an interrupted reply keeps its block"
+        );
+        assert_eq!(
+            line_count(&interrupted, EXPANDED, 20),
+            1,
+            "and it lays out one line for the marker"
+        );
         assert!(!is_empty_assistant(&Entry::new(EntryKind::User, "")));
         assert!(!is_empty_assistant(&Entry::new(EntryKind::Assistant, "x")));
 
