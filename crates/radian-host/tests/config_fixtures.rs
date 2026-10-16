@@ -38,6 +38,8 @@ fn the_reader_matches_the_reference_checker() {
         ("skills-builtin.toml", "accept"),
         ("shell-auto-background.toml", "accept"),
         ("memory-injection.toml", "accept"),
+        ("integrations-herdr.toml", "accept"),
+        ("control.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),
         ("schema-version-lower.toml", "reject"),
@@ -122,6 +124,23 @@ fn the_unknown_fields_are_ignored_but_reported() {
     assert!(config.skipped.contains(&"future_top_level".to_string()));
     assert!(config.skipped.contains(&"model.future_option".to_string()));
     assert!(config.skipped.contains(&"tui.theme".to_string()));
+}
+
+/// `control.toml` (ADR 0030 O6, slice 8): `[control] enabled` is carried, defaulting to true.
+#[test]
+fn the_control_enabled_flag_is_carried() {
+    let (path, text) = fixture("control.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert!(!config.control.enabled);
+    assert!(
+        !config.skipped.iter().any(|key| key.starts_with("control")),
+        "{:?}",
+        config.skipped
+    );
+    // The default, with no `[control]` table at all, is on.
+    let (path, text) = fixture("minimal.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert!(config.control.enabled);
 }
 
 /// The `providers.toml` fixture (ADR 0026 D10) carries named providers; the names are the

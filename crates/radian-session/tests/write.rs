@@ -344,7 +344,8 @@ async fn bench_append_latency() {
             .unwrap();
     }
     let per_append = start.elapsed() / n as u32;
-    println!("append + flush + fsync: {per_append:?} per record ({n} records)");
+    // A `MessageAppended` is not a sync point (ADR 0040), so this measures `write` + `flush`.
+    println!("append + flush (a non-sync record): {per_append:?} per record ({n} records)");
     assert!(
         per_append < std::time::Duration::from_secs(1),
         "sanity bound"
