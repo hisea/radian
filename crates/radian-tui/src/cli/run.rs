@@ -3,6 +3,9 @@
 //! MCP, permissions, trust), the terminal entry, the loop call, and the exit path with its
 //! resume line.
 
+use super::session::{
+    JournalAudit, SessionHost, coding_root, list_sessions, prepare_picker, session_dir,
+};
 use super::*;
 
 pub(super) fn run(

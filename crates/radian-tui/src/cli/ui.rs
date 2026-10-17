@@ -3,6 +3,7 @@
 //! interval and `ui_loop` itself, which reads the resize/wake facts and drives
 //! `App::update`. The `/usage` gate helpers sit with it.
 
+use super::session::SessionHost;
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
