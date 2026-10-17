@@ -23,7 +23,9 @@
 //!   adds them to its redaction list. Config headers already reach it through the config file.
 //! - **Cancellation.** The parent turn's cancellation token kills the child's whole session
 //!   with [`radian_coding::kill_session`] — the same kill path the job supervisor uses — and
-//!   the call returns a `cancelled` failure.
+//!   the call returns a `cancelled` failure. Dropping the call's future (a turn timeout that
+//!   aborts the driver task, say) does the same through a drop guard, because `kill_on_drop`
+//!   alone would signal only the leader.
 //! - **Not promised: survival rules of the OS.** A parent that exits normally drops the child
 //!   handle, which kills the leader (Tokio's `kill_on_drop`); macOS has no `PDEATHSIG`, so a
 //!   parent killed with `SIGKILL` can leave the child running. Its journal is on disk and stays
@@ -293,6 +295,12 @@ impl ToolSession for SubagentSession {
                 )
             })?;
         let pid = child.id();
+        // Declared **after** `child`, so it drops first: if the call's future is dropped while
+        // the child runs (a turn timeout aborts the driver task, say), `kill_on_drop` alone
+        // would SIGKILL only the leader's pid and a process the child started into its own
+        // session would survive. The guard sends the session kill while the leader is still
+        // unreaped, and the child's own drop then reaps it.
+        let mut guard = SessionKillGuard { pid };
         let status = tokio::select! {
             biased;
             _ = cx.cancellation.cancelled() => {
@@ -301,15 +309,20 @@ impl ToolSession for SubagentSession {
                 if let Some(pid) = pid {
                     radian_coding::kill_session(pid);
                 }
+                guard.disarm();
                 let _ = child.wait().await;
                 return Err(ToolFailure::new(
                     "cancelled",
                     format!("the turn was cancelled, so the `{}` subagent child was killed", kind.as_str()),
                 ));
             }
-            status = child.wait() => status.map_err(|error| {
-                ToolFailure::new("wait_failed", format!("the subagent child failed: {error}"))
-            })?,
+            status = child.wait() => {
+                // The leader is reaped: its pid may be reused, so the guard must not fire.
+                guard.disarm();
+                status.map_err(|error| {
+                    ToolFailure::new("wait_failed", format!("the subagent child failed: {error}"))
+                })?
+            }
         };
 
         let journal = self.session_dir.join(format!("{child_id}.jsonl"));
@@ -391,6 +404,30 @@ impl SubagentSession {
         ModelRoute::from_value(&self.route_slot.value()).unwrap_or_else(|| {
             ModelRoute::new(self.parts.provider.clone(), self.parts.model.clone())
         })
+    }
+}
+
+/// Kills the child's whole session when the call's future is dropped before the leader was
+/// reaped. `kill_on_drop` alone signals only the leader's pid, so a process the child started
+/// into its own session survives; the cancel branch already proves the kill must name the
+/// session, not the pid. Callers disarm it as soon as the leader is reaped, so a reused pid is
+/// never signalled.
+struct SessionKillGuard {
+    pid: Option<u32>,
+}
+
+impl SessionKillGuard {
+    /// The leader is reaped (or the kill already happened): nothing left to signal.
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+impl Drop for SessionKillGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            radian_coding::kill_session(pid);
+        }
     }
 }
 

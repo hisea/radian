@@ -1196,3 +1196,4 @@ the_parents_header` (SG-1, end to end).
 |---|---|---|---|
 | SG-1 | the child `env` carrying the parent's `--header` values is never set (`if false`) | ✅ 2 failed | `agent-cli::subagent::the_parents_header_reaches_the_child_and_nothing_else_writes_it` (`the child must send the parent's header`: `left: None`); `radian_host::subagent_headers::the_header_value_reaches_the_child_through_the_environment_not_its_argv` (`EOF while parsing` an empty variable) |
 | SG-2 | `current_route` returns the startup route (the config slot is ignored) | ✅ 1 failed | `radian_host::subagent_route::the_child_runs_the_parents_live_model_route` (the recorded argv names `--model old`; the parent's own request still named `new`, so the switch itself is proven) |
+| SG-3 | `SessionKillGuard::drop` does nothing (plain `kill_on_drop`) | ✅ 1 failed | `radian_host::subagent_drop::dropping_the_call_leaves_no_grandchild_alive` (the logged grandchild pid was still alive after the 10 s bound) |
