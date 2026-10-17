@@ -50,23 +50,16 @@ impl ApprovalRequest {
 
 /// The human's answer. `AllowForSession` is a real-time grant (ADR 0004): it applies to the
 /// next call, is never written into a profile, and is not restored on resume.
+///
+/// An edge-policy variant is deliberately absent: the layer-2 policy approver disappeared with
+/// the orchestration (ADR 0043 decision 4), so an approver can only answer as a human. The
+/// durable `PermissionApprover::Policy` value and the audit's optional `policy` field stay, so an
+/// old journal still reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     AllowOnce,
     AllowForSession,
-    Deny {
-        reason: Option<String>,
-    },
-    /// An external edge policy command decided (ADR 0030 R1 layer 2). The hook
-    /// records `approver = "policy"` and this `name` as the audit's `policy` field
-    /// (ADR 0006 §5.9); `allow` selects allow, otherwise deny. A policy command can never grant
-    /// `AllowForSession`: the session grant is the human's alone, and a task edge policy is not
-    /// a human. `name` is the configured policy name and is never empty.
-    Policy {
-        allow: bool,
-        name: String,
-        reason: Option<String>,
-    },
+    Deny { reason: Option<String> },
 }
 
 /// The approver itself failed. The hook turns this into `HookError`, which Core treats as a

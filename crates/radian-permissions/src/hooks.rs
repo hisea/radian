@@ -342,36 +342,6 @@ impl PermissionHooks {
                 );
                 Ok(ToolDecision::Deny { reason })
             }
-            ApprovalOutcome::Policy {
-                allow,
-                name,
-                reason,
-            } => {
-                // ADR 0030 R1 layer 2 / ADR 0006 §5.9: a policy-command decision is
-                // audited as `approver = "policy"` with the policy's own name. It is not a human
-                // answer, so it can never mint a session grant.
-                let decision = if allow {
-                    ResolvedDecision::Allow
-                } else {
-                    ResolvedDecision::Deny
-                };
-                self.record_named(
-                    &request_id,
-                    &call_id,
-                    decision,
-                    AuditApprover::Policy,
-                    reason.clone(),
-                    Some(name.clone()),
-                );
-                if allow {
-                    Ok(ToolDecision::Allow)
-                } else {
-                    Ok(ToolDecision::Deny {
-                        reason: reason
-                            .unwrap_or_else(|| format!("denied by the edge policy `{name}`")),
-                    })
-                }
-            }
         }
     }
 
@@ -394,28 +364,15 @@ impl PermissionHooks {
         approver: AuditApprover,
         reason: Option<String>,
     ) {
-        self.record_named(request_id, call_id, decision, approver, reason, None);
-    }
-
-    /// [`PermissionHooks::record`] with an explicit policy name (ADR 0030 R1 layer 2):
-    /// set only when `approver = policy` and an edge policy command decided, so the audit names
-    /// which policy (ADR 0006 §5.9). Built-in rules, `auto` and a human leave it unset.
-    fn record_named(
-        &self,
-        request_id: &str,
-        call_id: &str,
-        decision: ResolvedDecision,
-        approver: AuditApprover,
-        reason: Option<String>,
-        policy: Option<String>,
-    ) {
         self.audit.record(&PermissionResolved {
             request_id: request_id.to_owned(),
             call_id: call_id.to_owned(),
             decision,
             approver,
             reason,
-            policy,
+            // No producer since the policy approver went with the orchestration (ADR 0043
+            // decision 4); the field stays so the journal shape and old journals are unchanged.
+            policy: None,
         });
     }
 }

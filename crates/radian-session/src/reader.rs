@@ -175,7 +175,8 @@ pub enum EventData {
         decision: PermissionDecision,
         approver: PermissionApprover,
         reason: Option<String>,
-        /// The named external policy command (ADR 0030 O2 revision 2), when present.
+        /// The named policy command, when present. No producer since ADR 0043 decision 4; an old
+        /// journal that carries it still reads (the value is an opaque `String`).
         policy: Option<String>,
     },
     /// The approval policy was switched in place (ADR 0026 D9). Typed for an exact round

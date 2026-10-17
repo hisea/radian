@@ -180,9 +180,9 @@ pub enum RuntimeEvent {
         decision: PermissionDecision,
         approver: PermissionApprover,
         reason: Option<String>,
-        /// The named external policy command that decided, when `approver = "policy"` and the
-        /// decision came from `orchestration.toml`'s policy command (ADR 0030 O2 revision 2,
-        /// ADR 0006 §5.9). Built-in rules and `auto` leave it `None`.
+        /// The named policy command that decided, when `approver = "policy"` (ADR 0006 §5.9).
+        /// The field stays for old journals; **no producer since ADR 0043 decision 4** (the
+        /// edge-policy layer went with the orchestration), so a new record leaves it `None`.
         policy: Option<String>,
     },
     /// The session's approval policy was switched in place (ADR 0026 D9). Audit only:
