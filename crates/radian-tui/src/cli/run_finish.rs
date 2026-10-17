@@ -224,3 +224,125 @@ pub(super) fn build_startup_screen(
     }
     herdr
 }
+
+/// `run()`'s loop phase: builds the session host, runs the event loop to completion,
+/// restores the terminal, saves the draft, stops the driver and reports the exit reason.
+/// Takes the open session by value and returns the reason line (`None` for `--list`,
+/// which never reaches here).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_loop_and_teardown(
+    cli: &Cli,
+    config: &radian_host::Config,
+    runtime: &tokio::runtime::Runtime,
+    rx: &Receiver<UiEvent>,
+    tx: &Sender<UiEvent>,
+    app: &mut App,
+    session: radian_host::LocalSession,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    mut guard: radian_tui::terminal::TtyGuard,
+    memory_service: &Option<radian_host::memory::MemoryService>,
+    workspace_path: &Path,
+    provider_name: &str,
+    model_name: &str,
+    route_price: &RoutePrice,
+    bash_sandbox: Option<radian_sandbox::Sandbox>,
+    usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    chatgpt_usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    herdr: Option<(HerdrReporter, Option<String>)>,
+    dir: &Path,
+    session_id: &str,
+    secrets: &radian_tui::terminal::SharedSecrets,
+    provider: radian_host::Provider,
+) -> Result<Option<String>, RunError> {
+    // ADR 0008 revision: `/theme` writes to the file this process read, or to the path it
+    // would read when there is no file yet (the write creates it).
+    let theme_write_path = config
+        .source
+        .clone()
+        .or_else(|| radian_host::resolved_config_path(cli.config.as_deref()));
+    let session_host = SessionHost {
+        dir: dir.to_path_buf(),
+        workspace: workspace_path.to_string_lossy().into_owned(),
+        session_id: session_id.to_owned(),
+        secrets: Arc::clone(secrets),
+        journal: Arc::clone(session.journal()),
+        config_snapshot: serde_json::json!({
+            "provider": provider.as_str(),
+            "model": cli.model,
+        }),
+        theme_colors: config.tui.colors.clone(),
+        theme_write_path: theme_write_path.clone(),
+        config_read_only: config.read_only,
+    };
+    mark("startup-set");
+    let session = Arc::new(session);
+    let facade: Arc<dyn radian_host::SessionFacade> =
+        Arc::clone(&session) as Arc<dyn radian_host::SessionFacade>;
+    mark("before-ui-loop");
+    let outcome = ui_loop(
+        &mut *terminal,
+        &mut *app,
+        rx,
+        tx,
+        Phase::Session {
+            workspace: workspace_path,
+            runtime,
+            session: &facade,
+            host: &session_host,
+            memory: memory_service,
+        },
+        (provider_name.to_owned(), model_name.to_owned()),
+        Arc::clone(route_price),
+        &config.providers,
+        config.tui.theme.clone(),
+        cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        bash_sandbox,
+        usage_gate,
+        chatgpt_usage_gate,
+        herdr.map(|(reporter, _)| reporter),
+    );
+    exit_trace("loop-done");
+    // Tell a pending signal task that the loop left on its own, so it does not force-exit.
+    radian_tui::signals::confirm_exit();
+    guard.restore();
+    exit_trace("restored");
+    // The draft is written on every clean exit (normal quit, Ctrl-C, SIGTERM/SIGHUP). A panic
+    // never reaches here, so the panic path does no file I/O.
+    let draft = radian_tui::composer::draft_path(dir, session_id);
+    if let Err(error) = radian_tui::composer::save_draft(&draft, &app.input.text()) {
+        eprintln!("[draft] cannot write {}: {error}", draft.display());
+    }
+
+    session.stop();
+    // The driver task is the session: if it died, the failure is the app's failure. A panic
+    // inside it was caught by the runtime, so `join` reports it, and the message the hook
+    // recorded is printed now that the alternate screen is gone.
+    let joined = runtime.block_on(session.join());
+    exit_trace("stopped");
+    match joined {
+        radian_host::DriverEnd::Ok => {}
+        radian_host::DriverEnd::Failed(error) => {
+            return Err(RunError::Failed(format!("driver: {error}")));
+        }
+        radian_host::DriverEnd::Panicked(message) => {
+            let mut message = format!("the driver task ended unexpectedly: {message}");
+            if let Some(panic) = radian_tui::terminal::last_panic() {
+                // One line: the normal screen gets one reason line (dogfooding D4).
+                message.push_str(": ");
+                message.push_str(&panic);
+            }
+            return Err(RunError::Failed(message));
+        }
+    }
+    // A failure in the UI loop is the app's failure too; the terminal is already restored.
+    let signal = outcome?;
+    let saved = format!(
+        "session {session_id} saved; {}",
+        resume_command(&program_name(), session_id, cli, workspace_path)
+    );
+    exit_trace("run-done");
+    Ok(Some(match signal {
+        Some(signal) => format!("received {}; {saved}", radian_tui::signals::name(signal)),
+        None => saved,
+    }))
+}
