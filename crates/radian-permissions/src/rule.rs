@@ -101,6 +101,19 @@ impl Resource {
     }
 }
 
+/// The name a call is judged under. Two built-in tools were renamed in ADR 0043 decision 3 and
+/// their old names are accepted as aliases for one version; the alias is decided by the **new**
+/// tool's rule (no bypass), so a rule, a session grant or the approver can never single out the
+/// old name. A config rule written against an old name therefore no longer matches: the alias is
+/// checked under the new name only.
+pub fn canonical_tool_name(name: &str) -> &str {
+    match name {
+        "git_status" => "git_diff",
+        "memory_get" => "memory_search",
+        other => other,
+    }
+}
+
 /// Extracts the resource from a call. `command` wins over `path`; a call with neither is
 /// matched by its tool name (MCP and any other parameterless tool).
 pub fn resource_of(call: &ToolCall) -> Resource {

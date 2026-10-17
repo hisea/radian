@@ -78,17 +78,25 @@ fn snapshot_git(root: &Path) -> BTreeMap<String, (u64, std::time::SystemTime, Ve
 }
 
 #[tokio::test]
-async fn git_status_and_diff_report_the_worktree_and_leave_dot_git_untouched() {
+async fn git_diff_stat_reports_the_worktree_and_leaves_dot_git_untouched() {
     let dir = TempDir::new("git-status");
     let root = repo(&dir);
     let tools = tools(&root);
 
     let before = snapshot_git(&root);
 
-    let status = call(&tools, "git_status", json!({})).await.unwrap();
+    let status = call(&tools, "git_diff", json!({"stat": true}))
+        .await
+        .unwrap();
     let status_text = text(&status);
+    // The short status: the branch header, the modified tracked file and the untracked file.
     assert!(status_text.contains("tracked.txt"), "{status_text}");
     assert!(status_text.contains("untracked.txt"), "{status_text}");
+    // The `--stat` summary names the modified file too.
+    assert!(
+        status_text.contains("tracked.txt |"),
+        "the --stat summary: {status_text}"
+    );
 
     let diff = call(&tools, "git_diff", json!({})).await.unwrap();
     let diff_text = text(&diff);
@@ -98,6 +106,31 @@ async fn git_status_and_diff_report_the_worktree_and_leave_dot_git_untouched() {
     assert_eq!(
         before, after,
         ".git must be byte-for-byte and mtime-for-mtime unchanged by read-only git tools"
+    );
+}
+
+/// ADR 0043 decision 3: `git_status` is a one-version alias. It runs `git_diff { stat: true }`
+/// and the result starts with one line naming the rename; everything after that line is the new
+/// call's output, byte for byte.
+#[tokio::test]
+async fn the_git_status_alias_runs_git_diff_stat_and_says_so() {
+    let dir = TempDir::new("git-status-alias");
+    let root = repo(&dir);
+    let tools = tools(&root);
+
+    let alias = call(&tools, "git_status", json!({})).await.unwrap();
+    let alias_text = text(&alias);
+    let (first, rest) = alias_text.split_once('\n').expect("a rename line");
+    assert!(first.contains("renamed"), "{first}");
+    assert!(first.contains("git_diff"), "{first}");
+
+    let new = call(&tools, "git_diff", json!({"stat": true}))
+        .await
+        .unwrap();
+    assert_eq!(
+        rest,
+        text(&new),
+        "the alias is exactly the new call's output"
     );
 }
 
@@ -155,7 +188,9 @@ async fn git_outside_a_repository_is_a_clear_failure() {
     std::fs::create_dir_all(&root).unwrap();
     let tools = tools(&root);
 
-    let failure = call(&tools, "git_status", json!({})).await.unwrap_err();
+    let failure = call(&tools, "git_diff", json!({"stat": true}))
+        .await
+        .unwrap_err();
     assert_eq!(failure.code, "git_failed", "{failure:?}");
     assert!(
         failure.message.contains("not a git repository"),
@@ -172,23 +207,34 @@ async fn git_output_is_capped_with_a_marker() {
         ..Limits::default()
     });
 
-    let output = call(&tools, "git_status", json!({})).await.unwrap();
+    let output = call(&tools, "git_diff", json!({"stat": true}))
+        .await
+        .unwrap();
     assert!(text(&output).ends_with("[git output truncated]\n"));
     assert!(text(&output).len() < 200);
 }
 
 #[tokio::test]
 async fn git_tools_are_not_confused_with_the_other_tools() {
-    // `git_status` ignores extra arguments at the schema level: the spec has no properties.
+    // `git_diff` accepts only its own arguments: an unknown key is refused with the argument
+    // echo, not passed to git.
     let dir = TempDir::new("git-extra");
     let root = repo(&dir);
     let tools = tools(&root);
-    // (Schema validation happens in the core, not here; executing with extra keys is still
-    // fine because the handler reads none.)
-    let output = call(&tools, "git_status", json!({"anything": 1}))
+    let failure = call(&tools, "git_diff", json!({"anything": 1}))
         .await
-        .unwrap();
-    assert!(text(&output).contains("##"), "{}", text(&output));
+        .unwrap_err();
+    assert_eq!(failure.code, "invalid_arguments", "{failure:?}");
+    assert!(
+        failure.message.contains("unknown argument `anything`"),
+        "{}",
+        failure.message
+    );
+    // The alias keeps the old spec: it takes no arguments at all.
+    let failure = call(&tools, "git_status", json!({"anything": 1}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, "invalid_arguments", "{failure:?}");
 }
 
 /// ADR 0039 decision 3: the read-only git tools run in the host, so a model-writable
@@ -225,7 +271,9 @@ async fn the_git_tools_never_run_a_repository_filter() {
     std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
 
     let tools = tools(&root);
-    let status = call(&tools, "git_status", json!({})).await.expect("status");
+    let status = call(&tools, "git_diff", json!({"stat": true}))
+        .await
+        .expect("status");
     assert!(text(&status).contains("tracked.txt"), "{}", text(&status));
     let _ = call(&tools, "git_diff", json!({})).await.expect("diff");
     assert!(

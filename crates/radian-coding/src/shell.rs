@@ -44,7 +44,6 @@ use serde_json::json;
 
 use crate::args;
 use crate::fail;
-use crate::heavy::{HeavyPermit, HeavySlots};
 use crate::jobs::{AdoptedHandle, JobCell, Jobs};
 use crate::provider::Limits;
 use crate::workspace::WorkspaceRoot;
@@ -251,7 +250,6 @@ pub(crate) async fn run(
     sandbox: &Sandbox,
     limits: &Limits,
     jobs: &Jobs,
-    heavy: &HeavySlots,
     arguments: &serde_json::Value,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
@@ -271,15 +269,8 @@ pub(crate) async fn run(
         None => root.root().to_path_buf(),
     };
 
-    // ADR 0030 O8: a command matching a heavy pattern takes a process-level slot before it runs.
-    // The wait respects the turn's cancellation and takes no slot when cancelled.
-    let permit = match heavy.acquire(&args.command, &cx.cancellation).await {
-        Ok(permit) => permit,
-        Err(_) => return Ok(cancelled_waiting_for_slot(&args.command)),
-    };
-
     if args.background.unwrap_or(false) {
-        return start_background(root, sandbox, jobs, &cwd, &args, permit);
+        return start_background(root, sandbox, jobs, &cwd, &args);
     }
 
     let (deadline, clamped) = clamp_timeout(args.timeout_secs, limits);
@@ -300,11 +291,6 @@ pub(crate) async fn run(
         _ => (deadline, None, None),
     };
 
-    // The heavy slot is held while the command runs (ADR 0030 O8). `queued` is read before the
-    // permit may move into an adopted job; when the command runs to completion the permit drops
-    // here, and when it is adopted the job holds it for its whole life.
-    let queued = permit.as_ref().map(HeavyPermit::waited);
-    let mut permit = permit;
     let outcome = execute(
         sandbox,
         &cwd,
@@ -316,7 +302,6 @@ pub(crate) async fn run(
             jobs,
             command: &args.command,
             explicit_deadline,
-            heavy: permit.take(),
         }),
     )
     .await?;
@@ -330,7 +315,6 @@ pub(crate) async fn run(
             clamped,
             output_cap,
             output_clamped,
-            queued,
             &outcome,
         )),
         ExecOutcome::Adopted(info) => Ok(adopted_report(
@@ -342,55 +326,32 @@ pub(crate) async fn run(
             clamped,
             output_cap,
             output_clamped,
-            queued,
             &info,
         )),
-    }
-}
-
-/// The result when a heavy command's wait for a slot was cancelled before it ran (ADR 0030
-/// O8): the command did not run, and the result says so. It mirrors the cancelled shape of a
-/// running command so a host renders both the same way.
-fn cancelled_waiting_for_slot(command: &str) -> ToolOutput {
-    ToolOutput {
-        content: vec![ContentPart::text(format!(
-            "$ {command}\n[cancelled while waiting for a heavy slot; the command did not run]\n"
-        ))],
-        structured: Some(json!({
-            "command": command,
-            "cancelled": true,
-            "heavy_queued": true,
-        })),
     }
 }
 
 /// Starts `command` as a background job (ADR 0037) and returns the one-line acknowledgement:
 /// the job id, the `job_output` hint and the three tools. No default timeout; an explicit
 /// `timeout_secs` kills the job like `job_kill` and settles it as timed out.
-///
-/// A heavy command arrives with `heavy` already held (ADR 0030 O8): the job keeps the slot for
-/// its whole life and drops it on settle, so background heavy jobs queue behind foreground ones
-/// and each other. `job_kill` never consults the gate, so a held slot cannot block a kill.
 fn start_background(
     root: &WorkspaceRoot,
     sandbox: &Sandbox,
     jobs: &Jobs,
     cwd: &Path,
     args: &ShellArgs,
-    heavy: Option<HeavyPermit>,
 ) -> Result<ToolOutput, ToolFailure> {
     let timeout = args
         .timeout_secs
         .map(|secs| Duration::from_secs(secs.max(1)));
-    let queued = heavy.as_ref().map(HeavyPermit::waited);
-    let info = jobs.start(sandbox, cwd, &args.command, timeout, heavy)?;
+    let info = jobs.start(sandbox, cwd, &args.command, timeout)?;
     let cwd_relative = cwd
         .strip_prefix(root.root())
         .ok()
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| ".".into());
-    let mut text = format!(
+    let text = format!(
         "started background job {id}\n\
          its output is {output}\n\
          read it with `job_output` (pass `wait: true` to wait for the end); `job_list` lists \
@@ -401,12 +362,6 @@ fn start_background(
         id = info.id,
         output = info.output,
     );
-    if let Some(queued) = queued {
-        text.push_str(&format!(
-            "[queued for a heavy slot: waited {} ms before starting]\n",
-            queued.as_millis()
-        ));
-    }
     Ok(ToolOutput {
         content: vec![ContentPart::text(text)],
         structured: Some(json!({
@@ -417,7 +372,6 @@ fn start_background(
             "cwd": cwd_relative,
             "sandbox_mode": sandbox.mode().as_str(),
             "timeout_secs": timeout.map(|t| t.as_secs()),
-            "heavy_queued_ms": queued.map(|queued| queued.as_millis() as u64),
         })),
     })
 }
@@ -492,9 +446,6 @@ struct Adopt<'a> {
     /// The explicit `timeout_secs` from the command's start, if any: the adopted job is
     /// killed then, not at the threshold.
     explicit_deadline: Option<Duration>,
-    /// The heavy slot the command already holds (ADR 0030 O8): an adopted job takes it on, so
-    /// the slot is held for the job's whole life and released when it settles.
-    heavy: Option<HeavyPermit>,
 }
 
 async fn execute(
@@ -541,16 +492,13 @@ async fn execute(
                 timed_out = true;
                 kill = true;
             }
-            Some(mut spec) => {
+            Some(spec) => {
                 let remaining = spec
                     .explicit_deadline
                     .map(|deadline| deadline.saturating_sub(started.elapsed()));
-                // ADR 0030 O8: the adopted job takes the heavy slot on (the same permit), so it
-                // is held for the job's whole life and released when the job settles.
-                let heavy = spec.heavy.take();
                 match spec
                     .jobs
-                    .adopt(&supervised, spec.command, started, remaining, heavy)
+                    .adopt(&supervised, spec.command, started, remaining)
                 {
                     Ok(info) => return Ok(ExecOutcome::Adopted(info)),
                     // No free slot (ADR 0037): do not adopt. The call
@@ -1223,7 +1171,6 @@ fn report(
     clamped: bool,
     output_cap: usize,
     output_clamped: bool,
-    queued: Option<Duration>,
     outcome: &Outcome,
 ) -> ToolOutput {
     let stdout = outcome.stdout.render();
@@ -1233,13 +1180,6 @@ fn report(
 
     let mut text = String::new();
     text.push_str(&format!("$ {command}\n"));
-    // ADR 0030 O8: say the command queued for a heavy slot, and for how long.
-    if let Some(queued) = queued {
-        text.push_str(&format!(
-            "[queued for a heavy slot: waited {} ms before running]\n",
-            queued.as_millis()
-        ));
-    }
     if outcome.timed_out {
         text.push_str(&format!(
             "[timed out after {timeout:?}; the whole session was killed. For a command that \
@@ -1327,7 +1267,6 @@ fn report(
             "stderr_total_bytes": outcome.stderr.total,
             "stdout_truncated_bytes": outcome.stdout.discarded(),
             "stderr_truncated_bytes": outcome.stderr.discarded(),
-            "heavy_queued_ms": queued.map(|queued| queued.as_millis() as u64),
             "duration_ms": outcome.duration.as_millis() as u64,
         })),
     }
@@ -1347,19 +1286,10 @@ fn adopted_report(
     clamped: bool,
     output_cap: usize,
     output_clamped: bool,
-    queued: Option<Duration>,
     info: &crate::jobs::AdoptInfo,
 ) -> ToolOutput {
     let mut text = String::new();
     text.push_str(&format!("$ {command}\n"));
-    // ADR 0030 O8: the heavy wait happened before the command started; the adopted job holds
-    // the slot on for its whole life (the permit moved into the job).
-    if let Some(queued) = queued {
-        text.push_str(&format!(
-            "[queued for a heavy slot: waited {} ms before starting]\n",
-            queued.as_millis()
-        ));
-    }
     text.push_str(&format!(
         "[still running after {threshold:?}; moved to the background as job {id} — the same \
          process, not restarted. Its output is {output}. Read it with `job_output` (pass \
@@ -1408,7 +1338,6 @@ fn adopted_report(
             "sandbox_mode": mode.as_str(),
             "auto_background_secs": threshold.as_secs(),
             "adopted_bytes": info.adopted_bytes,
-            "heavy_queued_ms": queued.map(|queued| queued.as_millis() as u64),
         })),
     }
 }

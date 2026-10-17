@@ -1,5 +1,6 @@
-//! The agent's memory tools (ADR 0021 D5/D7): `memory_search`, `memory_get`, `memory_save`
-//! and `memory_revise`.
+//! The agent's memory tools (ADR 0021 D5/D7): `memory_search` (search by keyword, or read
+//! records by id), `memory_save` and `memory_revise`. `memory_get` is a one-version alias for
+//! `memory_search { ids }` (ADR 0043 decision 3).
 //!
 //! Every write is `Source::Agent` — the host decides the source, never the model (invariant
 //! 3) — and the permission layer asks before either write runs (D5). `memory_save` defaults
@@ -110,33 +111,67 @@ impl ToolSession for MemorySession {
 }
 
 impl MemorySession {
+    /// `memory_search`: either a keyword search (`query`) or a full read of records by id
+    /// (`ids`), exactly one of the two (ADR 0043 decision 3 folded `memory_get` in).
     fn search(&self, arguments: &Value) -> Result<ToolOutput, ToolFailure> {
         let args: SearchArgs = parse(arguments)?;
-        let limit = args
-            .limit
-            .unwrap_or(DEFAULT_SEARCH_LIMIT)
-            .min(MAX_SEARCH_LIMIT);
-        let query = SearchQuery {
-            text: Some(args.query),
-            key: None,
-            include_archived: false,
-        };
-        let records = self
-            .service
-            .search(args.scope.into(), &query)
-            .map_err(tool_failure)?;
-        Ok(ToolOutput::text(render_records(
-            &records.into_iter().take(limit).collect::<Vec<_>>(),
-        )))
+        match (&args.query, &args.ids) {
+            (Some(query), None) => {
+                let limit = args
+                    .limit
+                    .unwrap_or(DEFAULT_SEARCH_LIMIT)
+                    .min(MAX_SEARCH_LIMIT);
+                let query = SearchQuery {
+                    text: Some(query.clone()),
+                    key: None,
+                    include_archived: false,
+                };
+                let records = self
+                    .service
+                    .search(args.scope.into(), &query)
+                    .map_err(tool_failure)?;
+                Ok(ToolOutput::text(render_records(
+                    &records.into_iter().take(limit).collect::<Vec<_>>(),
+                )))
+            }
+            (None, Some(ids)) => {
+                let mut records = Vec::with_capacity(ids.len());
+                for id in ids {
+                    records.push(
+                        self.service
+                            .get(ScopeSelection::Default, &MemoryId(id.clone()))
+                            .map_err(tool_failure)?,
+                    );
+                }
+                Ok(ToolOutput::text(render_records(&records)))
+            }
+            (Some(_), Some(_)) => Err(ToolFailure::new(
+                "invalid_arguments",
+                "pass exactly one of `query` (search by keyword) or `ids` (read records by id), \
+                 not both",
+            )),
+            (None, None) => Err(ToolFailure::new(
+                "invalid_arguments",
+                "pass exactly one of `query` (search by keyword) or `ids` (read records by id); \
+                 neither was given",
+            )),
+        }
     }
 
+    /// `memory_get`, the one-version alias for `memory_search { ids: [id] }` (ADR 0043
+    /// decision 3). The result is the new call's output, prefixed with one line naming the
+    /// rename.
     fn get(&self, arguments: &Value) -> Result<ToolOutput, ToolFailure> {
         let args: GetArgs = parse(arguments)?;
         let record = self
             .service
-            .get(ScopeSelection::Default, &MemoryId(args.id))
+            .get(ScopeSelection::Default, &MemoryId(args.id.clone()))
             .map_err(tool_failure)?;
-        Ok(ToolOutput::text(render_records(&[record])))
+        Ok(ToolOutput::text(format!(
+            "{}\n{}",
+            rename_line(&args.id),
+            render_records(&[record])
+        )))
     }
 
     fn save(&self, arguments: &Value) -> Result<ToolOutput, ToolFailure> {
@@ -319,11 +354,22 @@ fn scope_str(scope: &Scope) -> String {
 
 #[derive(Debug, Deserialize)]
 struct SearchArgs {
-    query: String,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    ids: Option<Vec<String>>,
     #[serde(default)]
     scope: ReadScope,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+/// The rename line every `memory_get` alias result starts with.
+fn rename_line(id: &str) -> String {
+    format!(
+        "`memory_get` was renamed: call `memory_search` with `{{\"ids\": [\"{id}\"]}}` for the \
+         same record."
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -392,10 +438,11 @@ fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "memory_search".into(),
             description: format!(
-                "{LOW_TRUST_NOTE} Search durable memory by keyword (every word must match). \
-                 Results carry their scope, source and verification, newest/most relevant \
-                 first, at most `limit` (default {DEFAULT_SEARCH_LIMIT}, max \
-                 {MAX_SEARCH_LIMIT}) records."
+                "{LOW_TRUST_NOTE} Read durable memory. Pass exactly one of `query` (search: \
+                 every word must match) or `ids` (read those records in full). Results carry \
+                 their scope, source and verification. A search returns newest/most relevant \
+                 records first, at most `limit` (default {DEFAULT_SEARCH_LIMIT}, max \
+                 {MAX_SEARCH_LIMIT})."
             ),
             input_schema: json!({
                 "type": "object",
@@ -403,6 +450,12 @@ fn specs() -> Vec<ToolSpec> {
                     "query": {
                         "type": "string",
                         "description": "Keywords; every word must appear in the content or key."
+                    },
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Record ids to read in full (as returned by a search). \
+                                        Pass exactly one of `query` or `ids`."
                     },
                     "scope": {
                         "type": "string",
@@ -417,23 +470,6 @@ fn specs() -> Vec<ToolSpec> {
                         "description": "Maximum records to return."
                     }
                 },
-                "required": ["query"],
-                "additionalProperties": false
-            }),
-            concurrency: ToolConcurrency::Shared,
-        },
-        ToolSpec {
-            name: "memory_get".into(),
-            description: format!("{LOW_TRUST_NOTE} Read one memory record by id."),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "The record id (as returned by memory_search)."
-                    }
-                },
-                "required": ["id"],
                 "additionalProperties": false
             }),
             concurrency: ToolConcurrency::Shared,
@@ -495,7 +531,7 @@ fn specs() -> Vec<ToolSpec> {
                     "expected_revision": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "The revision you are replacing (from memory_get)."
+                        "description": "The revision you are replacing (from memory_search)."
                     },
                     "content": {
                         "type": "string",
@@ -506,6 +542,26 @@ fn specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             concurrency: ToolConcurrency::Exclusive,
+        },
+        // The one-version alias for `memory_get` (ADR 0043 decision 3). It is registered so
+        // Core's preflight accepts the call; the host strips it from every model request, so it
+        // is never advertised.
+        ToolSpec {
+            name: "memory_get".into(),
+            description: "Deprecated alias for `memory_search` with `ids`; kept for one version."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "The record id (as returned by memory_search)."
+                    }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            concurrency: ToolConcurrency::Shared,
         },
     ]
 }
@@ -971,6 +1027,110 @@ mod tests {
         .await
         .unwrap();
         assert!(output_text(&revised).contains("v2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0043 decision 3: `memory_search { ids }` reads those records in full — what
+    /// `memory_get` returned (the whole content, the metadata line).
+    #[tokio::test]
+    async fn memory_search_with_ids_returns_the_full_records() {
+        let (dir, service) = service("ids");
+        service.create_project().unwrap();
+        let first = service
+            .add(
+                WriteScope::Project,
+                Kind::Fact,
+                None,
+                "the first record".into(),
+            )
+            .unwrap();
+        let second = service
+            .add(
+                WriteScope::Project,
+                Kind::Fact,
+                None,
+                "the second record".into(),
+            )
+            .unwrap();
+        let session = session(service).await;
+
+        let output = run(
+            &session,
+            "memory_search",
+            json!({"ids": [first.id.to_string(), second.id.to_string()]}),
+        )
+        .await
+        .unwrap();
+        let text = output_text(&output);
+        assert!(text.starts_with(LOW_TRUST_NOTE), "{text}");
+        assert!(text.contains(&first.id.to_string()), "{text}");
+        assert!(text.contains("the first record"), "{text}");
+        assert!(text.contains(&second.id.to_string()), "{text}");
+        assert!(text.contains("the second record"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0043 decision 3: exactly one of `query` and `ids`; both or neither is a refusal that
+    /// says which two arguments are meant.
+    #[tokio::test]
+    async fn memory_search_refuses_both_query_and_ids_or_neither() {
+        let (dir, service) = service("ids-arity");
+        service.create_project().unwrap();
+        let session = session(service).await;
+
+        let both = run(
+            &session,
+            "memory_search",
+            json!({"query": "x", "ids": ["mem-1"]}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(both.code, "invalid_arguments", "{both:?}");
+        assert!(both.message.contains("exactly one"), "{}", both.message);
+        assert!(both.message.contains("not both"), "{}", both.message);
+
+        let neither = run(&session, "memory_search", json!({})).await.unwrap_err();
+        assert_eq!(neither.code, "invalid_arguments", "{neither:?}");
+        assert!(
+            neither.message.contains("exactly one"),
+            "{}",
+            neither.message
+        );
+        assert!(neither.message.contains("neither"), "{}", neither.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0043 decision 3: `memory_get` is a one-version alias. Its result starts with one line
+    /// naming the rename; the record itself is what `memory_search { ids }` returns.
+    #[tokio::test]
+    async fn the_memory_get_alias_names_the_rename_and_returns_the_record() {
+        let (dir, service) = service("get-alias");
+        service.create_project().unwrap();
+        let record = service
+            .add(WriteScope::Project, Kind::Fact, None, "alias body".into())
+            .unwrap();
+        let session = session(service).await;
+
+        let alias = run(&session, "memory_get", json!({"id": record.id.to_string()}))
+            .await
+            .unwrap();
+        let alias_text = output_text(&alias);
+        let (first, rest) = alias_text.split_once('\n').expect("a rename line");
+        assert!(first.contains("renamed"), "{first}");
+        assert!(first.contains("memory_search"), "{first}");
+
+        let new = run(
+            &session,
+            "memory_search",
+            json!({"ids": [record.id.to_string()]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rest,
+            output_text(&new),
+            "the alias is the new call's output"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

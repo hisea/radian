@@ -9,7 +9,7 @@ use radian_sandbox::{Sandbox, SandboxMode, SandboxSlot};
 
 use crate::read_roots::ReadRoots;
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
-use crate::{fail, git, glob, grep, heavy, jobs, list, patch, read, shell, write};
+use crate::{fail, git, glob, grep, jobs, list, patch, read, shell, write};
 
 /// Resource bounds, all overridable with [`CodingTools::with_limits`]. Defaults are chosen
 /// so a single tool call cannot blow up the model context or the session file.
@@ -118,9 +118,6 @@ pub struct CodingTools {
     /// The background-job registry (ADR 0037). The host supplies one so it can subscribe to
     /// job lifecycle notices; when it does not, `open_session` creates one.
     jobs: Option<Arc<jobs::Jobs>>,
-    /// The heavy-command gate (ADR 0030 O8), or `None` to use the process gate. A test injects
-    /// one with [`CodingTools::with_heavy`]; production leaves it `None`.
-    heavy: Option<Arc<heavy::HeavySlots>>,
 }
 
 impl CodingTools {
@@ -187,7 +184,6 @@ impl CodingTools {
             limits: Limits::default(),
             sandbox,
             jobs,
-            heavy: None,
         }
     }
 
@@ -200,14 +196,6 @@ impl CodingTools {
     /// subscribe to [`jobs::Jobs::subscribe`] and write the durable start/settle records.
     pub fn with_jobs(mut self, jobs: Arc<jobs::Jobs>) -> Self {
         self.jobs = Some(jobs);
-        self
-    }
-
-    /// Uses `heavy` as the heavy-command gate instead of the process gate (ADR 0030 O8). A test
-    /// injects its own so it never touches [`heavy::HeavySlots::process`]; production does not
-    /// call this, so every session shares the process gate.
-    pub fn with_heavy(mut self, heavy: Arc<heavy::HeavySlots>) -> Self {
-        self.heavy = Some(heavy);
         self
     }
 
@@ -243,32 +231,24 @@ impl ToolProvider for CodingTools {
         let shell = sandbox
             .as_ref()
             .map(|sandbox| (sandbox.mode(), sandbox.git_writable_except_exec()));
-        // ADR 0030 O8: every session resolves the *same* process gate unless a test injected one,
-        // so the lead's and every task's heavy commands share one slot pool.
-        let heavy = self
-            .heavy
-            .clone()
-            .unwrap_or_else(heavy::HeavySlots::process);
         Ok(CodingSession {
             root: Arc::clone(&self.root),
             limits: self.limits,
             sandbox: self.sandbox.clone(),
             specs: specs(shell),
             jobs,
-            heavy,
         })
     }
 }
 
 /// One session's view of the built-in tools. Holds the root, the limits, the sandbox, the
-/// specs, the background-job registry (ADR 0037) and the heavy gate (ADR 0030 O8).
+/// specs and the background-job registry (ADR 0037).
 pub struct CodingSession {
     root: Arc<WorkspaceRoot>,
     limits: Limits,
     sandbox: SandboxSlot,
     specs: Vec<ToolSpec>,
     jobs: Arc<jobs::Jobs>,
-    heavy: Arc<heavy::HeavySlots>,
 }
 
 impl CodingSession {
@@ -293,8 +273,8 @@ fn specs(shell: Option<(SandboxMode, bool)>) -> Vec<ToolSpec> {
         list::spec(),
         glob::spec(),
         grep::spec(),
-        git::status_spec(),
         git::diff_spec(),
+        git::status_alias_spec(),
     ];
     if let Some((mode, git_writable)) = shell {
         specs.push(shell::spec(mode, git_writable));
@@ -332,7 +312,6 @@ impl ToolSession for CodingSession {
                         &sandbox,
                         &self.limits,
                         &self.jobs,
-                        &self.heavy,
                         &call.arguments,
                         &cx,
                     )

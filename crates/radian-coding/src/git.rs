@@ -9,11 +9,13 @@ use crate::fail;
 use crate::provider::Limits;
 use crate::workspace::WorkspaceRoot;
 
-pub(crate) fn status_spec() -> ToolSpec {
+/// The one-version alias for the removed `git_status` (ADR 0043 decision 3). It is registered
+/// so Core's preflight accepts a call from a stale client, and the host strips it from every
+/// model request (it is never advertised).
+pub(crate) fn status_alias_spec() -> ToolSpec {
     ToolSpec {
         name: "git_status".into(),
-        description: "Run `git status --porcelain=v1 --branch` in the workspace (read-only). \
-                      Output is capped and never touches .git beyond reading."
+        description: "Deprecated alias for `git_diff` with `stat: true`; kept for one version."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -28,7 +30,9 @@ pub(crate) fn diff_spec() -> ToolSpec {
     ToolSpec {
         name: "git_diff".into(),
         description: "Run `git diff` (optionally `--cached`) in the workspace for the whole \
-                      tree or one workspace-relative path (read-only)."
+                      tree or one workspace-relative path (read-only). With `stat: true`, \
+                      return the working tree status (the short form, untracked files \
+                      included) followed by the `--stat` summary."
             .into(),
         input_schema: diff_schema(),
         concurrency: ToolConcurrency::Shared,
@@ -46,6 +50,12 @@ pub(crate) fn diff_schema() -> serde_json::Value {
             "path": {
                 "type": "string",
                 "description": "Workspace-relative path to limit the diff to."
+            },
+            "stat": {
+                "type": "boolean",
+                "description": "Return the working tree status (`git status --porcelain=v1 \
+                                --branch` with untracked files) followed by the `--stat` \
+                                summary instead of the diff."
             }
         },
         "additionalProperties": false
@@ -56,14 +66,63 @@ pub(crate) fn diff_schema() -> serde_json::Value {
 struct DiffArgs {
     staged: Option<bool>,
     path: Option<String>,
+    stat: Option<bool>,
 }
 
+/// The alias's spec has no properties, so a call that carries any is refused like before.
+fn status_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    })
+}
+
+/// `git_status`, the one-version alias for `git_diff { stat: true }` (ADR 0043 decision 3).
+/// The result is the new call's output, prefixed with one line naming the rename.
 pub(crate) async fn status(
     root: &WorkspaceRoot,
     limits: &Limits,
-    _arguments: &serde_json::Value,
+    arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    let output = run_git(
+    args::parse::<serde_json::Value>("git_status", &status_schema(), arguments)?;
+    let text = stat_text(root, limits, &DiffArgs::default()).await?;
+    Ok(ToolOutput {
+        content: vec![ContentPart::text(format!("{STATUS_RENAME}\n{text}"))],
+        structured: None,
+    })
+}
+
+/// The line every `git_status` alias result starts with.
+const STATUS_RENAME: &str =
+    "`git_status` was renamed: call `git_diff` with `{\"stat\": true}` for the same output.";
+
+pub(crate) async fn diff(
+    root: &WorkspaceRoot,
+    limits: &Limits,
+    arguments: &serde_json::Value,
+) -> Result<ToolOutput, ToolFailure> {
+    let args: DiffArgs = args::parse("git_diff", &diff_schema(), arguments)?;
+    let text = if args.stat.unwrap_or(false) {
+        stat_text(root, limits, &args).await?
+    } else {
+        let argv = diff_argv(root, &args, false)?;
+        run_git(root, limits, &argv).await?
+    };
+    Ok(ToolOutput {
+        content: vec![ContentPart::text(text)],
+        structured: None,
+    })
+}
+
+/// The working tree status followed by the diff's `--stat` summary: what `git_status` returned,
+/// with the summary ADR 0043 decision 3 adds to it.
+async fn stat_text(
+    root: &WorkspaceRoot,
+    limits: &Limits,
+    args: &DiffArgs,
+) -> Result<String, ToolFailure> {
+    let status = run_git(
         root,
         limits,
         &[
@@ -74,19 +133,27 @@ pub(crate) async fn status(
         ],
     )
     .await?;
-    Ok(ToolOutput {
-        content: vec![ContentPart::text(output)],
-        structured: None,
-    })
+    let argv = diff_argv(root, args, true)?;
+    let stat = run_git(root, limits, &argv).await?;
+    let mut text = status;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&stat);
+    Ok(truncate_utf8(text, limits.max_git_output_bytes))
 }
 
-pub(crate) async fn diff(
+/// The `git diff` argv for `args`; `stat` asks for `--stat` (with the same `--cached` and
+/// path options, so the summary describes the diff the call asked for).
+fn diff_argv(
     root: &WorkspaceRoot,
-    limits: &Limits,
-    arguments: &serde_json::Value,
-) -> Result<ToolOutput, ToolFailure> {
-    let args: DiffArgs = args::parse("git_diff", &diff_schema(), arguments)?;
+    args: &DiffArgs,
+    stat: bool,
+) -> Result<Vec<String>, ToolFailure> {
     let mut argv: Vec<String> = vec!["diff".into(), "--no-color".into()];
+    if stat {
+        argv.push("--stat".into());
+    }
     if args.staged.unwrap_or(false) {
         argv.push("--cached".into());
     }
@@ -108,11 +175,7 @@ pub(crate) async fn diff(
         argv.push("--".into());
         argv.push(relative.to_string_lossy().into_owned());
     }
-    let output = run_git(root, limits, &argv).await?;
-    Ok(ToolOutput {
-        content: vec![ContentPart::text(output)],
-        structured: None,
-    })
+    Ok(argv)
 }
 
 /// Runs one `git` invocation. `--no-optional-locks` (and `GIT_OPTIONAL_LOCKS=0`) keeps git

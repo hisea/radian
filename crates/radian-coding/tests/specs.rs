@@ -46,8 +46,11 @@ async fn agent_core_accepts_the_built_in_tool_specs() {
             "list",
             "glob",
             "grep",
-            "git_status",
-            "git_diff"
+            "git_diff",
+            // The one-version alias for the removed `git_status` (ADR 0043 decision 3). It is
+            // registered so a call to the old name passes Core's preflight, and the host strips
+            // it from every model request, so the model never sees it.
+            "git_status"
         ]
     );
 

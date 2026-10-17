@@ -58,7 +58,6 @@ mod ask;
 mod git;
 mod glob;
 mod grep;
-pub mod heavy;
 pub mod host_git;
 mod jobs;
 mod list;
@@ -76,9 +75,6 @@ pub use ask::{
     AskSession, AskTools, MAX_DESCRIPTION_CHARS, MAX_ID_CHARS, MAX_LABEL_CHARS, MAX_OPTIONS,
     MAX_PROMPT_CHARS, MAX_QUESTIONS, PromptError, Prompter, Question, QuestionAnswer, QuestionKind,
     QuestionOption, QuestionReply, QuestionRequest,
-};
-pub use heavy::{
-    DEFAULT_HEAVY_PATTERNS, DEFAULT_HEAVY_SLOTS, HeavyCancelled, HeavyPermit, HeavySlots,
 };
 pub use jobs::{
     JOB_RING_BYTES, JobEvent, JobState, JobSummary, Jobs, MAX_RUNNING_JOBS, OUTPUT_HINT,

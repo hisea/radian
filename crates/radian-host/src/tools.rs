@@ -126,12 +126,16 @@ impl HostTools {
             );
             push("job_list", "list this session's background jobs");
             push("job_kill", "stop a background job's process group");
-            push("git_status", "the working tree status");
-            push("git_diff", "a diff of the working tree");
+            push(
+                "git_diff",
+                "a diff of the working tree; `stat: true` gives the status and a --stat summary",
+            );
         }
         if self.memory.is_some() {
-            push("memory_search", "search durable memory");
-            push("memory_get", "read one memory record");
+            push(
+                "memory_search",
+                "search durable memory, or read records in full by id",
+            );
             push("memory_save", "save a memory record");
             push("memory_revise", "revise a memory record");
         }

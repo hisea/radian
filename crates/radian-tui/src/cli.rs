@@ -1997,7 +1997,7 @@ fn run(
             radian_sandbox::SandboxPolicy::new(radian_sandbox::SandboxMode::FullAccess, &workspace)
                 .expect("a full-access policy");
         let sandbox = radian_sandbox::Sandbox::from_policy(policy).expect("a full-access sandbox");
-        jobs.start(&sandbox, &workspace, command, None, None)
+        jobs.start(&sandbox, &workspace, command, None)
             .expect("start the test job");
         // The command writes its pid (and its child's) before it sleeps; wait for it, bounded.
         let marker = workspace.join("job.pid");
