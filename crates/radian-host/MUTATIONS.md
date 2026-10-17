@@ -1200,3 +1200,21 @@ Each mutation was applied in place under `src/`, the catching test binary was ru
 
 Commands: `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast <name>`;
 `timeout 300 cargo test -p radian-host --locked --test <file>`. 9/9 caught.
+## the `-m provider/model` hint (`startup::provider_in_model_hint`)
+
+The form is `--provider <p> --model <m>`; a `-m`/`--model` value that looks like `<known
+provider>/<rest>` with no `--provider` gets one startup hint and nothing else. Mutations were
+applied in place, each restored from a `cp` in `.radian/scratch/mut/` and confirmed byte-identical
+with `cmp`; MP-2 also rebuilds the spawned binary (`cargo build -p radian-tui --bin radian`)
+because `common::radian_bin()` refuses a stale one.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| MP-1 | the known-provider check is gone (every `a/b` warns) | ✅ 1 failed (`left: Some("…--provider some-org --model foo?")`, `right: None`) | `startup::tests::the_model_hint_fires_only_for_a_known_provider_with_no_provider_flag` |
+| MP-2 | the `--provider` guard is gone (an explicit `--provider` still warns) | ✅ 1 failed (`left: Some("…--provider anthropic --model claude-x?")`, `right: None`) | the same unit test; and `agent-cli::exec::the_model_provider_hint_fires_once_without_a_provider_flag` (`err.contains("did you mean")` where none is allowed) |
+
+Commands: `timeout 570 cargo test -p radian-host --lib --locked --no-fail-fast the_model_hint`
+(both); `timeout 570 cargo test -p agent-cli --test exec --locked --no-fail-fast
+the_model_provider_hint` (MP-2). MP-1 is caught only by the unit test: the CLI test's cases use
+`opencode-go/x` and `anthropic/claude-x`, both real descriptors, so warning on every slash would
+not change its answer.

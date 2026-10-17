@@ -2246,3 +2246,19 @@ Base `61c4afb` · branch `dogfood/tui-lost-input` · worktree `.radian-worktrees
 
 3/3 抓住；恢复后 `git status --short` 只有测试与三处源码改动。`pty_a_resize_does_not_eat_a_typed_key`
 在修复后单独重跑 3 次全过（旧代码/变异下每次失败）。
+
+## a printable single character in the main keymap warns
+
+`Keymap::from_config` keeps a bare printable character bound in the `Main` context (README allows
+single-character bindings) but adds one startup warning: the character cannot be typed in the
+input box. Mutations were applied in place, each restored from a `cp` in `.radian/scratch/mut/`
+and confirmed byte-identical with `cmp`.
+
+Commands: `timeout 570 cargo test -p radian-tui --lib --locked --no-fail-fast
+a_bare_printable_character`; the wiring is also pinned by `--test config
+a_printable_key_in_the_main_view_is_warned_about`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| KB-1 | the printable check is gone (`if action.context() == Context::Main`, so every main binding warns) | ✅ 1 failed (the Ctrl/Alt/Shift loop's `warnings.is_empty()`): `a_bare_printable_character_in_the_main_view_warns` | the same unit test |
+| KB-2 | the warning block is removed entirely | ✅ 1 failed (the `'p'` warning is missing) | the same unit test |

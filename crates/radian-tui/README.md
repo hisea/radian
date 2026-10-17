@@ -488,7 +488,9 @@ with `[tui.colors]`.
 - `keybindings` maps an **action** to one or more key strings; a listed action's keys
   **replace** its defaults. Key strings are `[ctrl-][alt-][shift-]key` (`enter`, `ctrl-j`,
   `alt-enter`, `shift-up`, `pageup`, `space`, a single character, …). An unknown action or key
-  is ignored with a warning; **one key bound to two actions of the same context refuses
+  is ignored with a warning; a **printable single character** bound in the main context (no
+  Ctrl/Alt) is kept but warned about, because it cannot then be typed in the input box;
+  **one key bound to two actions of the same context refuses
   startup** (the message names the key and both actions).
 - Actions: `send`, `newline`, `cursor_left`, `cursor_right`, `word_left`, `word_right`,
   `line_start`, `line_end`, `history_prev`, `history_next`, `delete_before`, `delete_under`,
