@@ -37,3 +37,14 @@ after); each mutation restored with `git checkout --`, `git status --short` empt
 | RR-A | drop the replay entirely (`if let Some(field) = replay` becomes a no-op) | caught (rc=101) | `request::tests::reasoning_is_replayed_only_when_the_model_asks_for_it` |
 | RR-B | keep the replay but skip it for an empty reasoning (drop Q3's `""`) | caught (rc=101) | `request::tests::reasoning_is_replayed_only_when_the_model_asks_for_it` (the `messages[2]` empty-string assertion) |
 | RR-C | replay even when the config is `None` | caught (rc=101) | `request::tests::reasoning_is_not_sent_to_the_provider` (R4) |
+
+## opencode-go's "configured input limit" 400 is an overflow (2026-10-17)
+
+A DeepSeek task agent died at ~287k input tokens on `This text request is too large for the
+model's configured input limit`: the message matched no overflow pattern, so ADR 0018's
+fallback never compacted. Run: `cargo test -p agent-provider-openai-compatible --lib overflow`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| OV-A | the new rule never matches (`if false && ...`; the old code) | caught (rc=101) | `overflow::tests::opencode_gos_input_limit_400_is_an_overflow` |
+| OV-B | drop the `too large` conjunct (any "input limit" counts) | caught (rc=101) | `overflow::tests::the_generic_phrasings_are_not_overflow` |

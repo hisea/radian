@@ -41,6 +41,13 @@ fn is_overflow_message(message: &str) -> bool {
     if PATTERNS.iter().any(|pattern| message.contains(pattern)) {
         return true;
     }
+    // Not in pi's table: opencode-go's gateway (seen 2026-10-17 on deepseek-v4.1-flash at
+    // ~287k input tokens) answers 400 with "This text request is too large for the model's
+    // configured input limit". It names the *input* limit, so it is not the output-limit
+    // "max_tokens is too large" that stays excluded.
+    if message.contains("too large") && message.contains("input limit") {
+        return true;
+    }
     // pi: `/context[_ ]length[_ ]exceeded/i` (generic fallback). The `[_ ]` alternation is
     // written out as its two spellings.
     if message.contains("context length exceeded") || message.contains("context_length_exceeded") {
@@ -152,6 +159,18 @@ mod tests {
     }
 
     #[test]
+    fn opencode_gos_input_limit_400_is_an_overflow() {
+        // The body opencode-go returned on 2026-10-17, verbatim.
+        assert!(classify_overflow(
+            400,
+            r#"{"error":{"type":"server_error","message":"Upstream request failed: [unsupported_request] This text request is too large for the model's configured input limit."}}"#
+        ));
+        assert!(classify_stream_overflow(&json!({
+            "message": "This text request is too large for the model's configured input limit."
+        })));
+    }
+
+    #[test]
     fn the_generic_phrasings_are_not_overflow() {
         for message in [
             "too many tokens",
@@ -161,6 +180,8 @@ mod tests {
             "invalid model",
             // An output-limit error is not an input overflow (ADR 0018's "recognizable" rule).
             "max_tokens is too large",
+            // "input limit" alone (a quota or rate wording) is not enough without "too large".
+            "input limit reached for this minute",
         ] {
             assert!(!is_overflow_message(message), "{message}");
         }
