@@ -1,6 +1,7 @@
-//! Reporting the session's state and display metadata to herdr (ADR 0034 and its revision 1):
-//! [`HerdrReporter`] and its sender thread, the monotonic `seq`, the session identity and the
-//! resume command, and the diffs that queue a report only when something changed.
+//! Reporting the session's state, identity and display metadata to herdr (ADR 0034 and its
+//! revision 1): [`HerdrReporter`] and its sender thread, the monotonic `seq`, the session
+//! identity and the resume command, and the diffs that queue a report only when something
+//! changed.
 
 use std::collections::BTreeMap;
 
