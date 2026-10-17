@@ -4,6 +4,7 @@
 //! result back as an event. With `price_for_applied_change`, the pure rule for re-pricing an
 //! applied model switch.
 
+use super::models::{memory_record_candidates, model_route_candidates, provider_ref_for};
 use super::*;
 
 /// Looks up a route's catalog prices from the warm local cache (ADR 0026 D7, ADR 0027
