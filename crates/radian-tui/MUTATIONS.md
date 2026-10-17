@@ -2306,3 +2306,23 @@ journal 的 fold 会为每个没有已提交结果的调用合成一个崩溃结
 |---|---|---|---|
 | AT-M1 | `JournalObserver::live()` 恒 `false`（活会话也走恢复 fold） | `attach::a_live_sessions_open_calls_show_as_running_and_queued_then_their_results`（屏上出现 `had not started executing`，`running:` 计数为 0） | ✅ 1 failed |
 | AT-M2 | `JournalObserver::live()` 恒 `true`（死会话也当成活） | `attach::a_dead_sessions_open_calls_keep_the_recovery_wording`（屏上没有恢复用语） | ✅ 1 failed |
+
+## `attach` 无 id 时开本工作区的 picker（ADR 0043 第 8 条）
+
+`SESSION_ID` 变可选：没有它就先在**同一个终端**里开这个工作区的 picker（`--pick` 的同一份
+`prepare_picker` 行，加 `without_new()`；workspace 经 `coding_root(None)` 取当前目录，与 `--list`
+同一规则），Enter attach 到选中的会话、Esc/q 不 attach 并以 0 退出；工作区没有会话则在进
+alternate screen **之前**打印一行并以 0 退出。变异在源码原地改（`src/cli/attach.rs` 的
+`workspace_picker`），改前 `cp` 到 `.radian/scratch/mut/`，改后 `cp` 还原并 `cmp` 一致（不用
+`git checkout --`/`restore`）。命令：`timeout 570 cargo test -p radian-tui --locked
+--no-fail-fast --test pty attach_without_an_id`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| AP-1 | 建 picker 时不再 `without_new()`（照 `--pick` 那样带 "new session" 行） | `pty_attach_without_an_id_picks_a_session_and_stays_read_only`（底边框上出现 `· n new ·`；同一测试接着还断言 `n` 仍在过滤、进程不许退出） | ✅ 1 failed |
+| AP-2 | 选定后丢掉 `--follow`（`run_view(..., false)`） | `pty_attach_without_an_id_follows_the_chosen_session`（1 s 内没等到另一个 writer 提交的 `ALPHA-FOLLOWED`） | ✅ 1 failed |
+
+无 id 的**旧代码**（`SESSION_ID` 必填）下这四个测试都失败：clap 打印 `the following required
+arguments were not provided: <SESSION_ID>`，四个测试各在自己的 60 s 等待后断言失败（0 passed /
+4 failed）。核对方式：把 `src/cli.rs`、`src/cli/session.rs`、`src/cli/attach.rs` 换成 `HEAD`
+版本、`--test pty attach_without_an_id` 跑一次，再从 `cp` 副本还原并用 `cmp` 确认一致。

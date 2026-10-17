@@ -796,8 +796,10 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   streaming reply text never appears, only the committed messages? Is `working…` on the last
   line while the turn runs and gone after it? Do PageUp/PageDown, Shift-Up/Down and Ctrl-Home/End
   scroll the way the main view does, does `q` leave without touching the session, and does the
-  footer read `attach · <id> · read-only` with the scroll position? pty automation asserts the
-  text and the one-second follow latency, not the feel.
+  footer read `attach · <id> · read-only` with the scroll position? `radian attach` with no id
+  adds the picker in front in the same terminal: do the rows and the filter feel like `--pick`
+  (there is no `n new`), and does Esc leave cleanly before any choice is made? pty automation
+  asserts the text and the one-second follow latency, not the feel.
 - **radian as a herdr agent** (ADR 0034, slice ④): the pty tests can only watch a fake
   socket, so the real herdr is yours. In a herdr pane (its env sets `HERDR_ENV=1`), start `radian`,
   then from another pane run `herdr agent list` — radian's entry must carry `agent_session` (the
@@ -1217,6 +1219,15 @@ event loop, before any session exists: `Up`/`Down` select, type to filter by id/
   session, `Esc`/`Ctrl-C` quits. It never creates a session file, and the whole process enters
   the alternate screen **once** (the picker and the session share it). `--pick` conflicts with
   `--resume` and `--session-id`. With no sessions it goes straight to a new session and says so.
+- `radian attach [SESSION_ID] [--follow] [--session-dir DIR]` (ADR 0043 slice ①) opens another
+  session **read-only** in the same blocks a `--resume` renders; `--follow` tails the committed
+  events its own process appends, the scroll keys move the transcript, and `q`/Esc/Ctrl-C leave.
+  No input reaches that session (every other key reaches nothing), no socket is opened, and
+  nothing is written. `SESSION_ID` is optional: without it the **same picker** `--pick` shows
+  opens for the current workspace, minus its "new session" row — `Up`/`Down` and type-to-filter
+  select, `Enter` attaches to the choice, `Esc`/`q` leaves without attaching (exit 0). With no
+  sessions in this workspace it prints one line and exits 0 **without** entering the alternate
+  screen.
 
 `--resume`, `--session-id` and `--list` are mutually exclusive pairwise.
 

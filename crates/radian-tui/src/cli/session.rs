@@ -186,20 +186,23 @@ pub(super) fn session_dir(cli: &Cli) -> Result<PathBuf, String> {
 /// only listed in the workspace it was created in, and a bad `--workspace` fails as a workspace
 /// error (dogfooding D1).
 fn session_workspace(cli: &Cli) -> Result<String, String> {
-    radian_host::session_workspace(Some(&coding_root(cli)?.path))
+    radian_host::session_workspace(Some(&coding_root(cli.workspace.as_deref())?.path))
 }
 
 /// The coding root: `--workspace` as given, else the current directory, with the TUI's two
 /// exceptions — `$HOME` becomes `$HOME/tmp` and the filesystem root
 /// is refused. The CLI (`radian exec`) does **not** do this: it is the unattended entry point and
-/// gets no write access by default.
-pub(super) fn coding_root(cli: &Cli) -> Result<radian_tui::workspace::CodingRoot, String> {
+/// gets no write access by default. `workspace` is `None` for a caller that has no flag to pass
+/// (`attach`).
+pub(super) fn coding_root(
+    workspace: Option<&Path>,
+) -> Result<radian_tui::workspace::CodingRoot, String> {
     let cwd = std::env::current_dir()
         .map_err(|error| format!("cannot read the current directory: {error}"))?;
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    radian_tui::workspace::resolve_coding_root(cli.workspace.as_deref(), &cwd, home.as_deref())
+    radian_tui::workspace::resolve_coding_root(workspace, &cwd, home.as_deref())
 }
 
 /// `--list`: this workspace's sessions, newest activity first (the shared table, ADR 0032
