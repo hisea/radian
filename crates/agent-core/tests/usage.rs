@@ -217,6 +217,21 @@ fn usage_value() -> ModelUsage {
     }
 }
 
+/// An assistant reply that carries rate-limit headers but no usage.
+fn reply_with_limits() -> Reply {
+    Reply::Respond(ModelResponse {
+        limits: Some(RateLimits {
+            headers: vec![("x-ratelimit-remaining-requests".into(), "999".into())],
+        }),
+        reasoning: Vec::new(),
+        content: vec![ContentPart::text("limited")],
+        tool_calls: vec![],
+        provider_payload: None,
+        stop_reason: StopReason::EndTurn,
+        usage: None,
+    })
+}
+
 /// An assistant reply that carries usage.
 fn reply_with_usage() -> Reply {
     Reply::Respond(ModelResponse {
@@ -247,6 +262,19 @@ impl AllEvents {
             .iter()
             .filter_map(|e| match e {
                 AgentEvent::ModelResponseReceived { usage, .. } => Some(usage.clone()),
+                _ => None,
+            })
+            .nth(model_call)
+            .unwrap()
+    }
+
+    fn limits_of(&self, model_call: usize) -> Option<RateLimits> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ModelResponseReceived { limits, .. } => Some(limits.clone()),
                 _ => None,
             })
             .nth(model_call)
@@ -309,6 +337,33 @@ async fn usage_lands_in_the_model_response_received_event() {
         .await
         .unwrap();
     assert_eq!(events.usage_of(1), None);
+}
+
+/// ADR 0027 slice ④: the turn hands the response's raw rate-limit headers to the
+/// host on `ModelResponseReceived` (live-only; they are never journaled).
+#[tokio::test]
+async fn limits_land_in_the_model_response_received_event() {
+    let model = ScriptedModel::new([reply_with_limits(), text("plain")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let mut chat = session_with(model, journal.clone()).await;
+    let events = AllEvents::default();
+
+    chat.run_turn("hi", TurnOptions::default(), &events)
+        .await
+        .unwrap();
+    assert_eq!(
+        events.limits_of(0),
+        Some(RateLimits {
+            headers: vec![("x-ratelimit-remaining-requests".into(), "999".into())],
+        })
+    );
+    // Limits are live-only: the journal holds the two messages and nothing else.
+    assert_eq!(journal.records().len(), 2);
+
+    chat.run_turn("again", TurnOptions::default(), &events)
+        .await
+        .unwrap();
+    assert_eq!(events.limits_of(1), None);
 }
 
 #[tokio::test]

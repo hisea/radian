@@ -1751,6 +1751,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             stop_reason: response.stop_reason.clone(),
             tool_calls: response.tool_calls.len(),
             usage: response.usage.clone(),
+            limits: response.limits.clone(),
         });
         // Remember the provider's own prompt size as the next projection's baseline (ADR 0015
         // C1). `prompt_total()` is the whole input, cache reads and cache writes included
@@ -1784,8 +1785,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             provider_payload,
             stop_reason,
             usage,
-            // Rate-limit headers are for the host (ADR 0027 slice ④); the turn loop
-            // has no use for them yet.
+            // Rate-limit headers already reached the host on `ModelResponseReceived` above
+            // (ADR 0027 slice ④); the turn loop has no use for them.
             limits: _,
         } = response;
         let assistant = Message::Assistant {

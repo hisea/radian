@@ -606,6 +606,7 @@ fn a_compaction_usage_reaches_the_footer_totals() {
             input_includes_cache: Some(false),
             ..Default::default()
         }),
+        limits: None,
     });
     assert_eq!(app.session.projection.read().usage_input(), Some(100_000));
     assert_eq!(

@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::budget::BudgetReport;
 use crate::hooks::HookPoint;
 use crate::message::Message;
-use crate::model::{ModelUsage, StopReason};
+use crate::model::{ModelUsage, RateLimits, StopReason};
 use crate::outcome::RunStatus;
 
 /// Why a compaction was requested (ADR 0018). A host uses it to phrase its `[compaction]`
@@ -66,6 +66,10 @@ pub enum AgentEvent {
         tool_calls: usize,
         /// The provider's usage for this response; `None` when it reported none.
         usage: Option<ModelUsage>,
+        /// The provider's raw rate-limit headers for this response (ADR 0027
+        /// slice ④); `None` when it sent none. Live-only, like the event itself: never
+        /// journaled, and not forwarded to control-port subscribers in this slice.
+        limits: Option<RateLimits>,
     },
     /// Emitted in the order calls actually start; `index` is the call's position in its batch.
     ToolStarted {

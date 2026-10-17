@@ -63,6 +63,7 @@ fn slow_max_tokens_reply(text: &str) -> Reply {
         .map(|event| format!("data: {event}\n\n").into_bytes())
         .collect(),
         pause: Duration::from_millis(400),
+        headers: Vec::new(),
     }
 }
 

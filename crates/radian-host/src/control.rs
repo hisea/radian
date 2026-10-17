@@ -574,6 +574,9 @@ fn agent_event_json(event: &AgentEvent) -> Value {
             stop_reason,
             tool_calls,
             usage,
+            // The control port does not forward `limits` in this slice (ADR 0027
+            // slice ④): rate-limit windows are a live footer fact, not a committed one.
+            ..
         } => (
             "model_response_received",
             json!({
