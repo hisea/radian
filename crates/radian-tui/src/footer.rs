@@ -1550,6 +1550,7 @@ mod tests {
             "elapsed",
             "cost",
             "pending",
+            "jobs",
             "mcp",
             "scroll",
         ] {
@@ -1590,8 +1591,9 @@ mod tests {
         // The `631c8dd` `item_priority` table, plus `usage` (ADR 0027):
         // it replaces the usage contribution id, which the table never named and which
         // therefore kept the generic 50. Minus `context_bar` (decision 6 merged it into
-        // `context`, keeping its 85).
-        let expected: [(&str, i64); 19] = [
+        // `context`, keeping its 85), plus `jobs` (the 2026-10-17 note's component: a running
+        // job is as worth keeping as a pending request, so 70 like `pending`).
+        let expected: [(&str, i64); 20] = [
             ("brand", 92),
             ("host", 78),
             ("model", 90),
@@ -1609,6 +1611,7 @@ mod tests {
             ("elapsed", 35),
             ("cost", 40),
             ("pending", 70),
+            ("jobs", 70),
             ("mcp", 55),
             ("scroll", 20),
         ];
@@ -1631,7 +1634,7 @@ mod tests {
     fn the_registry_matches_the_pre_refactor_placeholder_table() {
         // Plus `usage` (ADR 0027), whose one placeholder is the whole
         // line, like a `command` item's `{value}`.
-        let expected: [(&str, &[&str]); 19] = [
+        let expected: [(&str, &[&str]); 20] = [
             ("brand", &["brand"]),
             ("host", &["host"]),
             ("model", &["display_name", "id", "provider"]),
@@ -1652,6 +1655,7 @@ mod tests {
             ("elapsed", &["elapsed"]),
             ("cost", &["usd"]),
             ("pending", &["count"]),
+            ("jobs", &["count", "age"]),
             ("mcp", &["mcp"]),
             ("scroll", &["position", "mode"]),
         ];
@@ -1676,7 +1680,7 @@ mod tests {
     #[test]
     fn the_registry_matches_the_pre_refactor_role_table() {
         let app = app_with_glyphs("nerd");
-        let expected: [(&str, Option<Role>); 19] = [
+        let expected: [(&str, Option<Role>); 20] = [
             ("brand", Some(Role::Text)),
             ("host", Some(Role::NoticeBody)),
             ("model", Some(Role::Model)),
@@ -1696,6 +1700,7 @@ mod tests {
             ("elapsed", Some(Role::Truncation)),
             ("cost", None),
             ("pending", Some(Role::TurnRunning)),
+            ("jobs", None),
             ("mcp", Some(Role::Mcp)),
             ("scroll", None),
         ];
@@ -1732,7 +1737,7 @@ mod tests {
     /// an empty icon in every set.
     #[test]
     fn the_registry_matches_the_pre_refactor_glyph_table() {
-        let expected: [(&str, [&str; 4]); 19] = [
+        let expected: [(&str, [&str; 4]); 20] = [
             ("brand", ["", "", "", ""]),
             ("host", ["@ ", "\u{f109} ", "host ", "💻 "]),
             ("model", ["", "", "", ""]),
@@ -1750,6 +1755,7 @@ mod tests {
             ("elapsed", ["", "\u{f017} ", "t ", "⏱ "]),
             ("cost", ["", "", "", ""]),
             ("pending", ["", "", "", ""]),
+            ("jobs", ["", "", "", ""]),
             ("mcp", ["", "", "", ""]),
             ("scroll", ["", "", "", ""]),
         ];

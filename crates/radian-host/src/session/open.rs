@@ -392,7 +392,7 @@ pub async fn open_session(
             .and_then(|value| value.parse::<u64>().ok())
             .map(std::time::Duration::from_millis),
     );
-    driver.set_runtime_events(runtime_events);
+    driver.set_runtime_events(Arc::clone(&runtime_events));
     // ADR 0021: the per-turn memory addition, placed in the inject lane
     // after the user's turn is claimed and before its first model call.
     driver.set_turn_additions(crate::memory::injection::addition_seam(Arc::clone(
@@ -413,6 +413,9 @@ pub async fn open_session(
     // ADR 0037 slices 3-4: the job notifier. The driver shares its "turn in flight" flag, so
     // the notifier can choose the `inject` lane (busy) or the waking `followup` lane (idle).
     // It writes the durable start/settle records and sends the completion System message.
+    // ADR 0027 slice ③ item 5: it also forwards the start/settle pair on the
+    // live runtime-event sink, which is how the TUI's footer `jobs` item reads them (never
+    // by polling the journal file).
     let turn_running = driver.turn_running_handle();
     let job_notifier = jobs.as_ref().map(|jobs| {
         let notifier = crate::job_notify::JobNotifier::new(
@@ -420,6 +423,7 @@ pub async fn open_session(
             Arc::clone(&inbox),
             Arc::clone(&journal),
             Arc::clone(&turn_running),
+            Arc::clone(&runtime_events),
         );
         notifier.spawn(&runtime);
         notifier

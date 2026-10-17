@@ -4,7 +4,9 @@
 
 use agent_core::{BudgetReport, EventSink, UsageSource};
 use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig, TuiFooterRowConfig};
+use radian_session::RuntimeEvent;
 use radian_tui::App;
+use radian_tui::app::Input;
 use radian_tui::footer::{Footer, Preset};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -457,6 +459,76 @@ fn the_status_item_lists_status_contributions_and_filters_by_keys() {
     let text = row(&only, 11);
     assert!(text.contains("alpha-text"), "{text:?}");
     assert!(!text.contains("beta-text"), "{text:?}");
+}
+
+/// The `jobs` component (ADR 0027's 2026-10-17 note, slice ③ item 5): the
+/// running background jobs and the oldest one's age, fed by the start/settle events — never
+/// by polling the journal file. Empty while none runs, so its row takes no space.
+#[test]
+fn jobs_shows_the_running_count_and_the_oldest_age() {
+    fn started(id: &str) -> Input {
+        Input::Runtime(RuntimeEvent::BackgroundJobStarted {
+            job_id: id.to_string(),
+            command: "make test".to_string(),
+            output: "available through job_output".to_string(),
+        })
+    }
+    fn settled(id: &str) -> Input {
+        Input::Runtime(RuntimeEvent::BackgroundJobSettled {
+            job_id: id.to_string(),
+            state: "exited 0".to_string(),
+            duration_ms: 1_000,
+        })
+    }
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&rows(vec![item("jobs")]));
+    let start = std::time::Instant::now();
+    app.set_now(start);
+    assert!(
+        app.footer.lines(&app, 100).is_empty(),
+        "no running job, no row"
+    );
+
+    // One running job: the count and its age.
+    app.update(started("job-1"));
+    app.set_now(start + std::time::Duration::from_secs(18 * 60));
+    let one = render(&mut app, 80, 12);
+    assert!(
+        row(&one, 11).contains("1 job") && row(&one, 11).contains("18m"),
+        "one job with its age: {}",
+        row(&one, 11)
+    );
+
+    // A second job: the count grows, the age stays the oldest one's.
+    app.update(started("job-2"));
+    let two = render(&mut app, 80, 12);
+    assert!(
+        row(&two, 11).contains("2 jobs") && row(&two, 11).contains("18m"),
+        "two jobs, oldest age: {}",
+        row(&two, 11)
+    );
+
+    // Settling the oldest leaves the younger one's count and age.
+    app.update(settled("job-1"));
+    let younger = render(&mut app, 80, 12);
+    assert!(
+        row(&younger, 11).contains("1 job") && row(&younger, 11).contains("0s"),
+        "the younger job remains: {}",
+        row(&younger, 11)
+    );
+
+    // Settling the last one empties the component: no text, no row, no gap.
+    app.update(settled("job-2"));
+    assert!(
+        app.footer.lines(&app, 100).is_empty(),
+        "no running job, no row"
+    );
+    let empty = render(&mut app, 80, 12);
+    assert!(
+        !screen(&empty).contains("job"),
+        "nothing left behind:\n{}",
+        screen(&empty)
+    );
 }
 
 /// A failed refresh keeps the value and draws it dim (the stale marker).

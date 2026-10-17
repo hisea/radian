@@ -22,6 +22,7 @@ mod cwd;
 mod elapsed;
 mod git_branch;
 mod host;
+mod jobs;
 mod mcp;
 mod model;
 mod pending;
@@ -128,6 +129,7 @@ static COMPONENTS: &[&'static dyn Component] = &[
     &elapsed::Elapsed,
     &cost::Cost,
     &pending::Pending,
+    &jobs::Jobs,
     &mcp::Mcp,
     &scroll::Scroll,
 ];

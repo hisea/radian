@@ -328,6 +328,7 @@ find_next = ["ctrl-g", "shift-enter"]
 | `status` | `{status}` | `status.*` 贡献文本，`keys = ["…"]` 可过滤 |
 | `usage` | `{value}` | **当前 provider** 的用量快照：各窗口的剩余百分比与重置倒计时（ADR 0027）。数据来源在 provider 描述符的 `usage`（`Endpoint`：轮询一个 URL 并解析），组件本身不认识任何 provider；没有来源的 provider 这一行不出现。`tui.usage_period_secs` 0 关闭；旧 id `opencode-go.usage`/`chatgpt.usage` 作为别名保留一个版本，启动时各警告一次。`/usage` 打印同一份快照的**全部**窗口 |
 | `command` item (`[tui.footer.items.<id>] command = "…"`) | `{value}` | the command's first stdout line; JSON `{"text","style","symbol"}` sets the role and symbol (ADR 0027) |
+| `jobs` | `{count}`, `{age}` | 本会话正在跑的后台任务数与最老一个的已运行时长（例 `2 jobs · 18m`；ADR 0027 的 2026-10-17 补记）。数据来自任务的开始/结束事件（`BackgroundJobStarted`/`BackgroundJobSettled`，`JobNotifier` 写 journal 的同时转发到 live runtime-event sink），不轮询 journal 文件；没有运行中的任务时组件为空、不占位。年龄随既有的 footer 刷新（贡献者 tick 重画）更新，不另起计时器。不在任何预设的缺省行里 |
 
 `worktree`/`status` 来自贡献者存储（ADR 0027 C3）：一个 `git` 贡献者每 5 s 在后台刷新
 `git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。每行有一个

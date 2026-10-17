@@ -61,6 +61,7 @@ impl App {
                 projection: Arc::new(SessionProjection::new()),
                 note: None,
                 running_tools: Vec::new(),
+                running_jobs: Vec::new(),
                 session_ended: None,
                 turn_committed: true,
                 pending_fork: None,

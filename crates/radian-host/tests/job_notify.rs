@@ -11,7 +11,7 @@ use radian_coding::{JobEvent, JobState, Jobs, OUTPUT_HINT};
 use radian_host::job_notify::{JobNotifier, MAX_CONSECUTIVE_WAKES, orphan_jobs};
 use radian_runtime::{Inbox, Lane};
 use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
-use radian_session::{EventData, Session, SessionCreatedData, SessionJournal};
+use radian_session::{EventData, RuntimeEvent, Session, SessionCreatedData, SessionJournal};
 use serde_json::json;
 
 fn scratch(label: &str) -> PathBuf {
@@ -50,6 +50,8 @@ fn notifier(dir: &Path) -> (Arc<JobNotifier>, Arc<Jobs>, Arc<Inbox>, Arc<AtomicB
         Arc::clone(&inbox),
         journal(dir),
         Arc::clone(&turn_running),
+        // The live runtime-event sink: these tests do not read it.
+        Arc::new(|_: &RuntimeEvent| {}),
     );
     (notifier, jobs, inbox, turn_running)
 }
@@ -70,6 +72,52 @@ async fn lanes(inbox: &Inbox) -> Vec<Lane> {
         .iter()
         .map(|entry| entry.lane)
         .collect()
+}
+
+/// The start/settle pair reaches the live runtime-event sink (ADR 0027 slice ③
+/// item 5): the TUI's footer `jobs` item reads them there, never by polling the journal file.
+#[tokio::test]
+async fn start_and_settle_reach_the_live_runtime_sink() {
+    use std::sync::Mutex;
+    let dir = scratch("sink");
+    let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_in = Arc::clone(&seen);
+    let notifier = JobNotifier::new(
+        Arc::new(Jobs::new(dir.join("jobs"))),
+        Inbox::new(64),
+        journal(&dir),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(move |event: &RuntimeEvent| {
+            seen_in
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((event.name().to_string(), job_id_of(event)));
+        }),
+    );
+    notifier
+        .deliver(JobEvent::Started {
+            id: "job-1".into(),
+            command: "make test".into(),
+            output: OUTPUT_HINT.into(),
+        })
+        .await;
+    notifier.deliver(settled("job-1", false)).await;
+    assert_eq!(
+        *seen.lock().unwrap_or_else(|e| e.into_inner()),
+        vec![
+            ("BackgroundJobStarted".to_string(), "job-1".to_string()),
+            ("BackgroundJobSettled".to_string(), "job-1".to_string()),
+        ]
+    );
+}
+
+/// The job id a start/settle record carries.
+fn job_id_of(event: &RuntimeEvent) -> String {
+    match event {
+        RuntimeEvent::BackgroundJobStarted { job_id, .. } => job_id.clone(),
+        RuntimeEvent::BackgroundJobSettled { job_id, .. } => job_id.clone(),
+        _ => String::new(),
+    }
 }
 
 /// Busy chooses `inject` (`next_step`, no wake); idle chooses `followup` (`next_turn`, which
@@ -359,6 +407,8 @@ async fn an_ended_session_releases_its_journal() {
         Inbox::new(8),
         Arc::clone(&journal),
         Arc::new(AtomicBool::new(false)),
+        // The live runtime-event sink: this test only watches the registry drop.
+        Arc::new(|_: &RuntimeEvent| {}),
     );
     notifier.spawn(&tokio::runtime::Handle::current());
     // The session ends: the host drops its notifier and its registry.

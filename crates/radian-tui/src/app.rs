@@ -395,6 +395,15 @@ impl UpdateResult {
     }
 }
 
+/// One running background job the footer's `jobs` item shows (ADR 0027 slice ③
+/// item 5): its id and when the TUI saw it start (the loop's clock, so the age ticks with the
+/// existing footer refresh).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunningJob {
+    pub(crate) id: String,
+    pub(crate) started: Instant,
+}
+
 /// The **per-session view** (ADR 0030 slice ⓪): the state that belongs to exactly one
 /// session — its transcript and the entries' caches, its projection handle, its scroll and
 /// selection, its pending turn state, and its mode/tier markers. [`App`] owns one of these
@@ -458,6 +467,11 @@ pub struct SessionView {
     /// `ToolFinished` contract), so the list — not a single name — is what the note follows: it
     /// names the last call that is still running.
     running_tools: Vec<(String, String)>,
+    /// This session's running background jobs, in start order (ADR 0027 slice ③
+    /// item 5): the footer's `jobs` item reads them. A `BackgroundJobStarted` runtime event
+    /// appends with the loop's clock, its settle removes; the age ticks with the existing
+    /// footer refresh (a contributor tick redraws), so no new timer exists for it.
+    pub(crate) running_jobs: Vec<RunningJob>,
     /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
     /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
     /// reason is readable; the user quits with the ordinary keys.
