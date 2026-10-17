@@ -2055,4 +2055,7 @@ committed script): exact-match anchor, `cargo test -p radian-tui --test footer -
 **Old-code check (T1).** The base tree has no `is_command_item`: `resolve_item`'s unknown rule is
 `components::builtin(&id).is_none()`, so a user-written `weather` id is `unknown = true`, its row
 draws the raw id and warns — exactly what T1 reproduces, and why
-`a_command_item_appears_where_its_id_is_placed` is not vacuous.
+`a_command_item_appears_where_its_id_is_placed` is not vacuous. The end-to-end
+`a_printf_fixture_appears_in_the_configured_footer_location` (a real `printf hi` fixture through
+the runner and into the footer) is caught by T1 on the render side and by the `radian-host`
+mutants H1/H5 on the run side.

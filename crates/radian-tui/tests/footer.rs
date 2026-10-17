@@ -1800,3 +1800,60 @@ fn a_command_item_accepts_the_value_placeholder() {
     assert!(row(&terminal, 11).contains("72F"), "{}", row(&terminal, 11));
     assert_eq!(fg_at(&terminal, 11, "72F"), Some(Color::Red));
 }
+
+/// The brief's acceptance, end to end: a fixture `printf hi` command runs through the real
+/// contributor and its first line appears in the footer where its id is placed.
+#[test]
+fn a_printf_fixture_appears_in_the_configured_footer_location() {
+    let dir =
+        std::env::temp_dir().join(format!("radian-tui-command-footer-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("hi.sh");
+    std::fs::write(&script, "#!/bin/sh\nprintf hi\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let store = radian_host::ContributionStore::new();
+    let spec = radian_host::CommandSpec {
+        id: "weather".to_string(),
+        program: script.as_os_str().to_owned(),
+        args: Vec::new(),
+        period: Some(std::time::Duration::from_secs(60)),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let contributor = std::sync::Arc::new(radian_host::CommandContributor::new(
+            spec,
+            radian_host::FooterContext::new(),
+            "sess-1",
+            Some(dir.display().to_string()),
+        ));
+        let mut runner =
+            radian_host::ContributorRunner::new(contributor, std::sync::Arc::clone(&store));
+        runner.tick().await;
+    });
+
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, Some("Mock 5".to_string()), None, None);
+    app.set_contributions(store);
+    let (footer, warnings) = Footer::from_config(&command_item_config(
+        "weather",
+        TuiFooterItemConfig::default(),
+    ));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    app.footer = footer;
+    let terminal = render(&mut app, 60, 12);
+    let line = row(&terminal, 11);
+    assert!(
+        line.contains("hi"),
+        "the fixture's `printf hi` is in the configured location: {line:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
