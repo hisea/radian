@@ -26,6 +26,7 @@ use crate::output::{StdoutError, write_line};
 use crate::provider::ProviderRef;
 use crate::session::{AccessBuilder, SessionCapability, SessionId, SessionSetup};
 use crate::sessions;
+use crate::subagent::SubagentParts;
 use crate::trust;
 use crate::workspace::resolve_workspace;
 
@@ -275,6 +276,15 @@ pub struct LeadSetup {
     /// Rebuilds the profile and sandbox for a run-time tier switch (ADR 0038 slice 2). `None`
     /// for a host with no `/access` command (the CLI): a switch is then refused.
     pub access_builder: Option<AccessBuilder>,
+    /// The `SessionCreated.parent` a derived session records (ADR 0043 decision 1a's subagent
+    /// child). `None` for an ordinary host-opened session.
+    pub parent: Option<radian_session::ForkParent>,
+    /// `subagent` (ADR 0043 decision 1a): the host's launch parameters for a child `radian
+    /// exec`. `None` leaves the tool unmounted.
+    pub subagent: Option<SubagentParts>,
+    /// Only these built-in tools are mounted (`None` mounts every one the host has). The
+    /// hidden `--tools` flag of a derived session uses it; an ordinary session passes `None`.
+    pub tools_allow: Option<Vec<String>>,
     pub memory_root: Option<PathBuf>,
     pub trust: trust::Setup,
     pub resume: bool,
@@ -314,12 +324,13 @@ impl LeadSetup {
             tier: self.tier,
             profile: self.profile,
             access_builder: self.access_builder,
-            parent: None,
+            parent: self.parent,
+            subagent: self.subagent,
             memory_root: self.memory_root,
             skills_extra_paths: settings.skills_extra_paths,
             skills_builtin: settings.skills_builtin,
             skills_disabled: settings.skills_disabled,
-            tools_allow: None,
+            tools_allow: self.tools_allow,
             skills_allow: None,
             memory_injection: settings.memory_injection,
             trust: self.trust,

@@ -65,6 +65,30 @@ wait`, a `job_kill`, a session-exit cleanup); a timeout is notified. On resume, 
 `BackgroundJobStarted` with no settle is injected once as unknown and never re-run. The registry
 also kills every running group on `close()` and on drop (the panic path, `killpg` only).
 
+### Subagent (ADR 0043 decision 1a)
+
+`subagent { agent?, task }` runs one task in a **fresh, blocking child `radian exec`** — the
+current executable, so there is only one binary (ADR 0032) — and returns its last assistant text
+(its journal, cut at 4 000 characters with a visible marker), the child session id and the usage
+and denials its journal recorded. `explore` mounts only `read list glob grep`;
+`general` (the default) mounts the child's ordinary headless set, which is this session's tools
+minus `subagent`. A user-level cheaper model for `explore` is not implemented.
+
+The child gets the parent's **resolved** tier (`--profile` read from the live sandbox slot, so
+`/access` is obeyed) and never a wider one, and `--yes` only while the parent's approval policy
+is `auto`; otherwise the child has no terminal, so every `ask` is denied and the result names
+what was denied. The tool is `Shared`: several calls in one reply are the parallelism. The
+parent turn's cancellation kills the child's whole session through the same `kill_session` /
+`signal_session` path the job supervisor uses. The depth is 1: `open_session` drops the launch
+parts when the session's own `parent` relation is `"subagent"`, so a child never mounts
+`subagent`. `subagent` is `allow` in every tier (it writes nothing itself; the child's own tier
+and approval govern the work).
+
+**Not promised:** a parent killed with `SIGKILL` can leave the child running (macOS has no
+`PDEATHSIG`); the child's journal is on disk and `radian attach <id>` still reads it. `--header`
+values are not forwarded to the child; a provider that needs a CLI-only header must be
+configured in the config file instead.
+
 ## Headers, session ids, MCP config, workspace
 
 | Item | Rule |

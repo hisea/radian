@@ -7963,8 +7963,10 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
             "`{gone}` must not be mounted: {names:?}"
         );
     }
-    // The exact set: a headless session with no `--workspace` mounts the memory tools and the
-    // built-in `skill` (its `theme-import` skill is compiled in), and nothing else.
+    // The exact set: a headless session with no `--workspace` mounts the memory tools, the
+    // built-in `skill` (its `theme-import` skill is compiled in), and `subagent` (ADR 0043
+    // decision 1a — a parent mounts it even with no workspace; only `explore` needs one), and
+    // nothing else.
     let mut got = names.clone();
     got.sort();
     assert_eq!(
@@ -7974,7 +7976,8 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
             "memory_revise",
             "memory_save",
             "memory_search",
-            "skill"
+            "skill",
+            "subagent"
         ],
         "the exact tool set of a fresh headless session: {names:?}"
     );
