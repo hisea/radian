@@ -25,7 +25,7 @@ constrain the code are ADRs under `docs/adr/` (see the index at the end of this 
 | `radian-runtime` | The layer above the turn loop: a durable, bounded inbox (`followup`/`steer`/`inject`/`cancel`) and the per-session driver. | `crates/radian-runtime/README.md`, ADR 0011 |
 | `radian-permissions` | The permission layer: `ApprovalPolicy` + `ToolRuleSet` as one `Hooks` implementation; decides allow / ask / deny. It does not enforce anything. | `crates/radian-permissions/README.md`, ADR 0012 |
 | `radian-sandbox` | OS sandbox backends (macOS `sandbox-exec`, Linux `bubblewrap`) that build a command under a policy and **refuse to run** without a proven backend. | `docs/sandbox.md`, ADR 0012, ADR 0016 |
-| `radian-coding` | Built-in coding tools — `read`, `write`, `patch`, `list`, `glob`, `grep`, `git_status`, `git_diff`, and `shell` (plus `job_output` / `job_list` / `job_kill` for background jobs) only when the host supplies a sandbox — with workspace path confinement. | `crates/radian-coding/README.md` |
+| `radian-coding` | Built-in coding tools — `read`, `write`, `patch`, `list`, `glob`, `grep`, `git_diff` (`stat: true` gives the status and a `--stat` summary), and `shell` (plus `job_output` / `job_list` / `job_kill` for background jobs) only when the host supplies a sandbox — with workspace path confinement. | `crates/radian-coding/README.md` |
 | `radian-memory` | The memory storage layer (ADR 0021 M1): Global/Project scope logs with replay, the source rules (an agent cannot touch a user record), Forget/Purge, the `projects.jsonl` registry and the Markdown import/export view. Host-free: the caller passes `~/.radian/memory/`. | `crates/radian-memory/README.md`, ADR 0021 |
 | `radian-host` | Host plumbing shared by the TUI and the headless command so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, the "built-in tools + MCP" provider, the `~/.radian/` layout and diagnostics, the model catalog, and the memory layer (`MemoryService`, project identity, the agent memory tools, injection, and the shared `radian memory` / `/memory` commands). | `crates/radian-host/README.md` |
 | `agent-cli` | The library behind `radian exec`: the line-prompt chat client with optional built-in tools, MCP servers, session-management commands and the `radian memory` commands. | `crates/agent-cli/README.md` |
@@ -41,9 +41,9 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
   by the sandbox; `sessions/` and `memory/` are denied. `RADIAN_HOME` overrides the
   root. (`--session-dir` / `RADIAN_SESSION_DIR` still override only the sessions directory.)
 - **Memory M1 (ADR 0021)** is implemented: the `radian memory` CLI commands, the TUI `/memory`
-  slash command (same commands), the agent's `memory_search` / `memory_get` / `memory_save` /
-  `memory_revise` tools (writes always ask), and deterministic injection with the
-  `MemoryInjected` audit event.
+  slash command (same commands), the agent's `memory_search` (search by keyword, or read records
+  by id) / `memory_save` / `memory_revise` tools (writes always ask), and deterministic injection
+  with the `MemoryInjected` audit event.
 - **The configuration file (ADR 0008)** is implemented read-only: `--config`/`RADIAN_CONFIG`/
   `~/.radian/config/config.toml`, with `model.*`, `permissions.profile` and `compaction.auto`
   wired as defaults (the command line wins). It never contains a secret value.
@@ -224,7 +224,7 @@ declaration can only **narrow**, never widen.
 
 | Tier | Sandbox | Shell | MCP | Built-in files |
 |---|---|---|---|---|
-| `safe` | none needed — nothing executes | not offered | denied | `read`/`list`/`git_status`/`git_diff` allowed; `write`/`patch` denied |
+| `safe` | none needed — nothing executes | not offered | denied | `read`/`list`/`glob`/`grep`/`git_diff` allowed; `write`/`patch` denied |
 | `workspace` | enforced: macOS seatbelt or Linux bubblewrap, probed at startup | offered, **inside** the sandbox | asks | `write`/`patch` allowed only when the resolved path stays under the workspace |
 | `full` | none — the default (ADR 0043) | offered, **not** sandboxed | allowed | `write`/`patch` as `workspace` |
 

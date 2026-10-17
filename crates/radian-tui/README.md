@@ -1050,7 +1050,7 @@ the terminal). The cost: `RUST_BACKTRACE` is not honoured.
 
 Slice A's panic hook restored the terminal and then called `process::exit(101)`, which skips
 every `Drop`. That was safe only while the TUI owned no child processes. Slice B wires the
-built-in file tools, whose `git_status`/`git_diff` spawn `git`, so the precondition no longer
+built-in file tools, whose `git_diff` spawns `git`, so the precondition no longer
 holds.
 
 `main` now keeps the runtime outside `run`, catches the panic with `catch_unwind`, shuts the
@@ -1232,7 +1232,7 @@ and a malformed argument is reported without echoing its value.
 ## Tools, permissions and the approval dialog
 
 `--workspace DIR` mounts the built-in file and read-only git tools (`read`, `write`, `patch`,
-`list`, `git_status`, `git_diff`) rooted at that directory, plus **`shell`** when a sandbox
+`list`, `git_diff`) rooted at that directory, plus **`shell`** when a sandbox
 could be built. This is the same wiring `agent-cli` uses:
 
 - The sandbox is built **before** the tools: `workspace` and `full` call
@@ -1255,8 +1255,8 @@ could be built. This is the same wiring `agent-cli` uses:
   `mach-lookup` open, so the IPC boundary is not tightened.
 - A `[memory]` startup notice names the project state (the linked project id, or "no project
   linked" with the `radian memory project new`/`relink` hint) and the injection budget
-  (ADR 0021 D2/D6). The agent's four memory tools are mounted and the current memory is
-  injected into the system prompt each turn; `memory_search`/`memory_get` are allowed and
+  (ADR 0021 D2/D6). The agent's three memory tools are mounted and the current memory is
+  injected into the system prompt each turn; `memory_search` is allowed and
   `memory_save`/`memory_revise` ask. A default-scope `memory_save` or `/memory add` that
   **registers** this workspace as a project (ADR 0021) is shown as a `Notice`
   transcript entry — one line naming the new project and its identity key — because stderr
@@ -1541,10 +1541,10 @@ looked up by name in a compile-time registry with a generic fallback:
 | `read` | the path and the line range | a small tool: one line, the text only when expanded or on error |
 | `patch` | the path (`+N −M` in the meta) | the numbered `-old` / `+new` rows, one hunk per replaced range (the `hunks` structured field), no invented context |
 | `write` | the path (`+N −M` in the meta) | the content written |
-| `git_diff` | the file count and `+N −M` | git's unified diff with the numbered gutter |
-| `git_status` / `list` | the entry count | a small tool: one line (the aligned table on expand) |
+| `git_diff` | the file count and `+N −M`, or the entry count under `stat: true` | git's unified diff with the numbered gutter, or the plain status text under `stat: true` |
+| `list` | the entry count | a small tool: one line (the aligned table on expand) |
 | `ask_user` | the open `╭─ ask …` frame | one `prompt → answer` line per question, the chosen option marked `◉` |
-| `memory_search` / `_get` / `_save` / `_revise` | the operation and the record id | the tool's record summary |
+| `memory_search` / `_save` / `_revise` | the record id, the ids read, or the query | the tool's record summary |
 | anything else (MCP included) | the name and the arguments' JSON summary | the result text |
 
 The diff body (ADR 0028) is `│ ` + a right-aligned 4-cell line number +

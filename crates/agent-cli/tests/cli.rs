@@ -8224,13 +8224,12 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
     // The exact set: a headless session with no `--workspace` mounts the memory tools, the
     // built-in `skill` (its `theme-import` skill is compiled in), and `subagent` (ADR 0043
     // decision 1a — a parent mounts it even with no workspace; only `explore` needs one), and
-    // nothing else.
+    // nothing else. ADR 0043 decision 3: `memory_get` is gone; `memory_search` reads by id.
     let mut got = names.clone();
     got.sort();
     assert_eq!(
         got,
         [
-            "memory_get",
             "memory_revise",
             "memory_save",
             "memory_search",
@@ -8239,4 +8238,73 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
         ],
         "the exact tool set of a fresh headless session: {names:?}"
     );
+    assert!(
+        !names.iter().any(|name| name == "memory_get"),
+        "the renamed `memory_get` must not be advertised: {names:?}"
+    );
+}
+
+/// ADR 0043 decision 3, end to end: an old name is never advertised, but a call to it still runs
+/// the new tool and the result starts with one line saying the tool was renamed.
+#[tokio::test]
+async fn the_renamed_git_name_is_accepted_but_never_advertised() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let dir = scratch("renamed-git");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    git(&ws, &["init", "-q"]);
+    git(&ws, &["config", "user.email", "test@example.com"]);
+    git(&ws, &["config", "user.name", "Test"]);
+    std::fs::write(ws.join("tracked.txt"), "one\n").unwrap();
+    git(&ws, &["add", "tracked.txt"]);
+    git(&ws, &["commit", "-q", "-m", "init"]);
+    std::fs::write(ws.join("tracked.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(ws.join("untracked.txt"), "new\n").unwrap();
+
+    let server = MockServer::start(vec![
+        tool_reply("c1", "git_status", "{}"),
+        text_reply("DONE"),
+    ])
+    .await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "status please",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("DONE"), "{stdout}");
+
+    // The model never saw the old name; the new one is there.
+    let names = advertised_tools(&server, 0);
+    assert!(
+        !names.iter().any(|name| name == "git_status"),
+        "the renamed `git_status` must not be advertised: {names:?}"
+    );
+    assert!(names.iter().any(|name| name == "git_diff"), "{names:?}");
+
+    // The call ran as `git_diff { stat: true }` and said so: the rename line, then the short
+    // status (with the untracked file) and the `--stat` summary.
+    let result = tool_result_content(&server, 1);
+    assert!(
+        result.starts_with("`git_status` was renamed"),
+        "the result must open with the rename line: {result}"
+    );
+    assert!(result.contains("untracked.txt"), "{result}");
+    assert!(result.contains("tracked.txt |"), "{result}");
 }

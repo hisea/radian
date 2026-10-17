@@ -15,8 +15,7 @@ contract; this file is the practical summary.
 | `list` | `Shared` | List a directory, sorted, with kind and size; symlinks shown but not followed; capped by `max_entries`. A cargo-registry or toolchain source directory may also be named absolutely or with `~` (read-only). |
 | `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore` respected, `.git` skipped, symlinks never followed; capped by `max_results`. A read-only registry/toolchain base works too, and its results are absolute paths. |
 | `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore` respected, binary files skipped; capped per file and in total. A read-only registry/toolchain base works too, and its results are absolute paths. |
-| `git_status` | `Shared` | `git status --porcelain=v1 --branch --untracked-files=all`. |
-| `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. |
+| `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. `stat: true` returns the working tree status (`git status --porcelain=v1 --branch --untracked-files=all`) followed by the `--stat` summary instead of the diff (ADR 0043 decision 3). |
 | `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id (no default timeout); the three `job_*` tools below read, list and stop it (ADR 0037). Its output goes to the session's own jobs directory, outside the workspace and unreadable from inside the sandbox (ADR 0039 decision 1). |
 | `job_output` | `Shared` | Read what a background `shell` job produced since the last call, plus a `[status: …]` line. `wait: true` blocks until the job ends or `timeout_ms` (default 30 s, max 600 s); a wait timeout does **not** kill the job. The increment is a bounded ring; the full output file is readable only through this tool, by line with `tail_lines`, `from_line`/`max_lines` or `pattern` (capped like `grep`), each naming the file's total line count. |
 | `job_list` | `Shared` | List this session's background jobs: id, command first line, state (running / exited n / signal n / killed / timed out), elapsed. |
@@ -28,6 +27,10 @@ edit's read-modify-write atomic with respect to the other tools and avoids two w
 racing on one file. The read-only tools are `Shared` so a batch of reads/diffs can overlap.
 `ask_user` is `Exclusive` (the default) so a session has at most one pending question: a batch
 with two calls asks them one after the other instead of opening two modals.
+
+`git_status` is a **one-version alias** for `git_diff { stat: true }` (ADR 0043 decision 3): it
+is registered so a call to the old name still runs, it is never advertised to the model, and its
+result starts with one line naming the rename. The permission layer judges it as `git_diff`.
 
 `read` addresses **lines**: `offset` is the 1-based first line, `limit` caps the line count,
 and `max_bytes` still bounds the result. A byte cut that would land mid-line drops the whole

@@ -784,7 +784,9 @@ async fn pty_mounts_only_the_builtin_tools() {
             "`{gone}` must not be mounted: {names:?}"
         );
     }
-    // The built-ins a workspace session mounts are exactly these, and nothing else.
+    // The built-ins a workspace session mounts are exactly these, and nothing else. ADR 0043
+    // decision 3: `git_status` and `memory_get` are renamed; their old names are registered for
+    // one version but never advertised.
     let mut got = names.clone();
     got.sort();
     assert_eq!(
@@ -792,14 +794,12 @@ async fn pty_mounts_only_the_builtin_tools() {
         [
             "ask_user",
             "git_diff",
-            "git_status",
             "glob",
             "grep",
             "job_kill",
             "job_list",
             "job_output",
             "list",
-            "memory_get",
             "memory_revise",
             "memory_save",
             "memory_search",
@@ -812,6 +812,12 @@ async fn pty_mounts_only_the_builtin_tools() {
         ],
         "the exact tool set of a fresh TUI session: {names:?}"
     );
+    for gone in ["git_status", "memory_get"] {
+        assert!(
+            !names.iter().any(|name| name == gone),
+            "the renamed `{gone}` must not be advertised: {names:?}"
+        );
+    }
 }
 
 /// ADR 0026 slice 0b acceptance: with `model.provider` and `model.model` in the config and a

@@ -368,10 +368,12 @@ pub fn renderer_for(name: &str) -> ToolRender {
             compact: false,
         },
         "git_diff" => ToolRender {
-            head: git_diff_head,
-            body: diff_body,
+            head: git_diff_card_head,
+            body: git_diff_card_body,
             compact: false,
         },
+        // The one-version alias (ADR 0043 decision 3): a transcript that already holds a
+        // `git_status` call keeps the card it had — the status + `--stat` shape.
         "git_status" => ToolRender {
             head: list_head,
             body: plain_body,
@@ -671,6 +673,8 @@ mod tests {
             ("write", json!({"path": "a", "content": "x\n"}), "x\n"),
             ("list", json!({"path": "."}), "dir\t0\tsrc\n"),
             ("git_status", json!({}), "M a.rs\n"),
+            ("git_diff", json!({"stat": true}), "M a.rs\n"),
+            ("git_diff", json!({}), "diff --git a/x b/x\n+x\n"),
             ("grep", json!({"pattern": "x"}), "a.rs:1:x\n"),
             ("glob", json!({"pattern": "*"}), "a.rs\n"),
             ("mcp__s__t", json!({}), "one\ntwo"),
@@ -773,6 +777,41 @@ mod tests {
         assert_eq!(meta_parts(&measured, false), vec!["exit 0", "12.4s"]);
     }
 
+    /// ADR 0043 decision 3: `git_diff { stat: true }` draws the card the old `git_status` drew —
+    /// the status/list head and a plain body, not the diff renderer.
+    #[test]
+    fn the_git_diff_stat_card_looks_like_the_old_git_status_card() {
+        let text = "## main\n M a.rs\n?? b.rs\n a.rs | 2 +-\n";
+        let mut stat = card("git_diff", json!({"stat": true}));
+        stat.structured = Some(json!({"entries": 2}));
+        let mut status = card("git_status", json!({}));
+        status.structured = Some(json!({"entries": 2}));
+        assert_eq!(
+            renderer_for("git_diff").head(&stat, text),
+            renderer_for("git_status").head(&status, text)
+        );
+        assert_eq!(renderer_for("git_diff").head(&stat, text), "2 entries");
+        let rows = renderer_for("git_diff").body(&stat, text);
+        assert_eq!(rows.len(), 4);
+        assert!(
+            rows.iter().all(|line| matches!(
+                line,
+                BodyLine::Text {
+                    role: LineRole::Normal,
+                    ..
+                }
+            )),
+            "the status text is plain, not a diff: {rows:?}"
+        );
+        // Without `stat`, `git_diff` keeps the diff head: the counts come from the text.
+        let diff = card("git_diff", json!({}));
+        assert_eq!(
+            renderer_for("git_diff").head(&diff, text),
+            "0 files +0 −0",
+            "the diff head parses the diff counts, and this text has none"
+        );
+    }
+
     #[test]
     fn the_git_diff_head_counts_from_the_text() {
         let text =
@@ -835,6 +874,15 @@ mod tests {
         assert_eq!(
             memory_head(&card("memory_get", json!({"id": "mem-7"})), ""),
             "mem-7"
+        );
+        // ADR 0043 decision 3: `memory_search { ids }` is the renamed `memory_get`.
+        assert_eq!(
+            memory_head(&card("memory_search", json!({"ids": ["mem-7"]})), ""),
+            "mem-7"
+        );
+        assert_eq!(
+            memory_head(&card("memory_search", json!({"ids": ["a", "b"]})), ""),
+            "2 records"
         );
         assert_eq!(
             memory_head(&card("memory_search", json!({"query": "auth flow"})), ""),

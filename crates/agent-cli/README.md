@@ -147,9 +147,9 @@ key. Writes default to Project; `--global` writes a Global record.
 
 ### The agent's own memory tools and injection (ADR 0021 D5/D6)
 
-During a conversation the model also gets four tools: `memory_search` and `memory_get` (read,
-**allowed** by the rules) and `memory_save` and `memory_revise` (write, always **asked**;
-`--yes` answers the ask and the decision is still audited). Agent writes are `source: agent`
+During a conversation the model also gets three tools: `memory_search` (a keyword search, or a
+full read of records by `ids`; **allowed** by the rules), `memory_save` and `memory_revise`
+(write, always **asked**; `--yes` answers the ask and the decision is still audited). Agent writes are `source: agent`
 and `unverified`; a user record is never modified, and a user key still wins. A `memory_save`
 in the default scope registers a git workspace whose project is not registered yet (the same
 notice line as above, on stderr); a directory that is not a project workspace is refused with

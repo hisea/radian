@@ -624,3 +624,70 @@ async fn the_tool_gate_denies_before_the_rules_and_the_approver() {
     assert_eq!(events[0].decision, ResolvedDecision::Deny);
     assert_eq!(events[1].decision, ResolvedDecision::Allow);
 }
+
+// ---------- ADR 0043 decision 3: the one-version tool aliases ----------
+
+/// A renamed tool's old name is judged under the **new** name, so a `deny` on the new tool
+/// denies the alias and an `allow` written for the old name cannot widen it.
+#[tokio::test]
+async fn a_renamed_tool_is_judged_under_its_new_name() {
+    let dir = TempDir::new("alias-deny");
+    // The old name is `allow`ed, the new one `deny`ed: the alias must still be denied.
+    let profile = Profile::custom(
+        Preset::FullAccess,
+        ApprovalPolicy::OnAsk,
+        dir.path(),
+        vec![
+            Rule::new(
+                ToolMatcher::Name("git_status".into()),
+                ResourceMatcher::Any,
+                Action::Allow,
+            ),
+            Rule::new(
+                ToolMatcher::Name("git_diff".into()),
+                ResourceMatcher::Any,
+                Action::Deny,
+            )
+            .with_reason("git_diff is off"),
+            Rule::new(
+                ToolMatcher::Name("memory_get".into()),
+                ResourceMatcher::Any,
+                Action::Allow,
+            ),
+            Rule::new(
+                ToolMatcher::Name("memory_search".into()),
+                ResourceMatcher::Any,
+                Action::Deny,
+            )
+            .with_reason("memory_search is off"),
+        ],
+    )
+    .unwrap();
+    let approver = ScriptedApprover::scripted(Vec::new());
+    let audit = Arc::new(RecordingAudit::default());
+    let hooks = make_hooks(profile, Arc::clone(&approver), Arc::clone(&audit));
+    hooks.set_turn_source(Some(InputSource::User));
+    let cx = ctx();
+
+    for (old, reason) in [
+        ("git_status", "git_diff is off"),
+        ("memory_get", "memory_search is off"),
+    ] {
+        let decision = decide(&hooks, &cx, &call(old, json!({"id": "mem-1"})))
+            .await
+            .unwrap();
+        let ToolDecision::Deny { reason: got } = decision else {
+            panic!("`{old}` must be denied by its new name's rule, got {decision:?}");
+        };
+        assert!(got.contains(reason), "`{old}`: {got}");
+    }
+    assert_eq!(
+        approver.calls(),
+        0,
+        "a deny on the new name must not reach the approver"
+    );
+    let events = audit.events();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events[0].decision, ResolvedDecision::Deny);
+    assert_eq!(events[1].decision, ResolvedDecision::Deny);
+}

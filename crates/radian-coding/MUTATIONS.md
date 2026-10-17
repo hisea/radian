@@ -516,3 +516,37 @@ Run: `cargo test -p radian-coding --test job_session_kill --no-fail-fast` (only 
 SK-4 survives because it is masked: `job_kill`/the timeout/`kill_all` still kill the leader (its group is the leader's), and once the leader dies the supervisor reaps it and kills the whole session (the SK-2 line), so the child that left the group dies anyway. The end state is identical; what SK-4 alone loses is the SIGTERM an escaped child would get during the grace, which no test in this suite can time (the supervisor's SIGKILL follows the leader's death by microseconds). SK-5 pins that reading: with the supervisor's line mutated too, the four background tests fail, so the session signal in `signal_if_reserved` is carried by `supervise` on this path. It is kept as a redundant first step: it is what the ADR 0037 decisions 4 and 6 state (SIGTERM to the whole session, then SIGKILL after the grace; see the ADR's 实施补记 of 2026-10-17), and it does not depend on the leader dying first.
 
 The reuse guard has no test either, before or after this change: every signal is still sent under the leader's `reaped` lock while the leader is unreaped, and no test can force the pid reuse it guards against.
+
+## ADR 0043 slice ③: the tool merge and the deleted heavy gate (2026-10-17)
+
+`git_status` became `git_diff { stat: true }` (with the old name as a one-version alias) and the
+heavy-command gate (`src/heavy.rs`, its `jobs.rs` permit plumbing and the `shell.rs` queueing) is
+deleted, so shell commands no longer queue. The mutations below were applied in place, each
+restored from a `cp` in `.radian/scratch/mut/` and confirmed byte-identical with `cmp` before the
+next one (no `git checkout --`/`restore`/`stash`); `git status --short` was checked after each run.
+
+Run: `cargo test -p radian-coding --test git --test shell_overlap --locked --no-fail-fast`
+(`shell_overlap` runs one test in its own binary, so its `PATH` change reaches no other test).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| HM-1 | the one-slot heavy gate is back in `shell::run` (a process `Semaphore::new(1)` acquired for a command starting with `cargo test`) | ✅ 1 failed (7.1 s: the first stub's bounded barrier wait expired, `exit code: 3`, `barrier timed out waiting for …/second.started and …/third.started`) | `three_heavy_looking_shell_commands_run_at_the_same_time` |
+
+HM-1 is the required "put the heavy gate back with 1 slot" mutation: it fails on the barrier, not
+on a timeout of the test, because the stub's wait is bounded and the test asserts the proof line
+`all three ran` (only three-way overlap produces it).
+
+**The old code, not just the 1-slot mutation** (fix round 1): the same test file was copied into a
+scratch extraction of 29f0387 (`git archive 29f0387 | tar -x -C /tmp/s3-old-29f0387`, its own
+`CARGO_TARGET_DIR`; the worktree's committed state was not touched) and run there with the real
+heavy gate (`heavy.rs:39` `DEFAULT_HEAVY_SLOTS = 2`, `shell.rs:276` `heavy.acquire`):
+
+```
+cargo test -p radian-coding --test shell_overlap --no-fail-fast   # in /tmp/s3-old-29f0387
+test result: FAILED. 0 passed; 1 failed  (4.4 s)
+  the second command … [queued for a heavy slot: waited 0 ms before running]  exit code: 3
+  barrier timed out waiting for …/third.started and …/first.started
+```
+
+Two stubs would **not** have caught this: the old gate's default is two slots, so a two-command
+version of this test passes on 29f0387 (the reason this row now runs three).

@@ -1161,3 +1161,22 @@ restored file with `diff -q`; afterwards `git diff` shows only the intended file
 | TS-1 | `trust::apply` 的 `TrustHereSandbox` 不写 `access::remember_for` | ✅ 1 failed（`access/access.json` 不存在） | `radian-tui::pty::pty_trust_sandbox_choice_writes_the_access_record` |
 
 3/3 抓住。
+
+## ADR 0043 slice ③: `git_status`/`memory_get` vanish, `git_diff { stat }`/`memory_search { ids }` replace them (2026-10-17)
+
+The renamed tools' old names stay registered (Core's preflight refuses an unregistered name before
+any host hook or the provider runs) and are stripped from every model request
+(`HostModel::complete` -> `strip_renamed_tool_aliases`). `memory_search` takes `ids` (a full read)
+or `query` (a search), exactly one. Mutations were applied in place, each restored from a `cp` in
+`.radian/scratch/mut/` and confirmed byte-identical with `cmp`; the one that changes the spawned
+binary was run after `cargo build -p radian-tui --bin radian` (`common::radian_bin()` refuses a
+stale one).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| GV-1 | `strip_renamed_tool_aliases` is a no-op (the old names are advertised again) | ✅ 1 failed (`right: ["memory_revise","memory_save","memory_search","skill","subagent"]`, `left` carries `memory_get`) | `agent-cli::cli::a_headless_exec_mounts_no_orchestration_tools` (also `pty_mounts_only_the_builtin_tools`, `the_renamed_git_name_is_accepted_but_never_advertised`) |
+| GV-2 | the `ids` arm of `memory_search` is ignored (it returns an empty result) | ✅ 1 failed (`No matching memory records.` instead of the two records) | `memory::tools::tests::memory_search_with_ids_returns_the_full_records` |
+
+Commands: `timeout 300 cargo test -p agent-cli --locked --test cli a_headless_exec_mounts_no_orchestration_tools`
+(GV-1); `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast memory_search_with_ids_returns_the_full_records`
+(GV-2).

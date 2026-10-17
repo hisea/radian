@@ -397,6 +397,25 @@ pub(super) fn git_diff_head(_card: &ToolCard, text: &str) -> String {
     format!("{files} files +{added} −{removed}")
 }
 
+/// `git_diff`: the diff head, or the status head when the call asked for `stat: true`
+/// (ADR 0043 decision 3: the old `git_status` card's shape).
+pub(super) fn git_diff_card_head(card: &ToolCard, text: &str) -> String {
+    if is_git_stat(card) {
+        list_head(card, text)
+    } else {
+        git_diff_head(card, text)
+    }
+}
+
+/// `git_diff`'s body: the unified diff, or the plain status text under `stat: true`.
+pub(super) fn git_diff_card_body(card: &ToolCard, text: &str) -> Vec<BodyLine> {
+    if is_git_stat(card) {
+        plain_body(card, text)
+    } else {
+        diff_body(card, text)
+    }
+}
+
 /// Counts a unified diff's files and `+`/`-` lines (the `git_diff` result text; `structured`
 /// is `None` for that tool).
 pub(super) fn diff_counts(text: &str) -> (usize, usize, usize) {
@@ -417,26 +436,29 @@ pub(super) fn diff_counts(text: &str) -> (usize, usize, usize) {
     (files, added, removed)
 }
 
-/// `git_status` / `list`: the entry count.
+/// Whether a card is a `git_diff` call that asked for the status + `--stat` form (the shape the
+/// old `git_status` returned). The `git_status` alias card keeps its own renderer.
+pub(super) fn is_git_stat(card: &ToolCard) -> bool {
+    card.arguments.get("stat").and_then(Value::as_bool) == Some(true)
+}
+
+/// `git_status` / `git_diff { stat: true }` / `list`: the entry count.
 pub(super) fn list_head(card: &ToolCard, _text: &str) -> String {
-    match card.name.as_str() {
-        "git_status" => {
-            let entries = entry_counts(card).0;
-            match entries {
-                Some(n) => format!("{n} entries"),
-                None => String::new(),
-            }
+    if card.name == "git_status" || is_git_stat(card) {
+        let entries = entry_counts(card).0;
+        match entries {
+            Some(n) => format!("{n} entries"),
+            None => String::new(),
         }
-        _ => {
-            let (entries, total) = entry_counts(card);
-            let base = string_field(&card.arguments, "path").unwrap_or_else(|| ".".into());
-            match (entries, total) {
-                (Some(entries), Some(total)) if total > entries => {
-                    format!("{base} ({entries} of {total} entries)")
-                }
-                (Some(entries), _) => format!("{base} ({entries} entries)"),
-                _ => base,
+    } else {
+        let (entries, total) = entry_counts(card);
+        let base = string_field(&card.arguments, "path").unwrap_or_else(|| ".".into());
+        match (entries, total) {
+            (Some(entries), Some(total)) if total > entries => {
+                format!("{base} ({entries} of {total} entries)")
             }
+            (Some(entries), _) => format!("{base} ({entries} entries)"),
+            _ => base,
         }
     }
 }
@@ -489,10 +511,20 @@ pub(super) fn ask_head(card: &ToolCard, _text: &str) -> String {
     }
 }
 
-/// The memory tools: the record id (or the search query) as the title.
+/// The memory tools: the record id, the ids a read asked for, or the search query as the title.
 pub(super) fn memory_head(card: &ToolCard, _text: &str) -> String {
-    string_field(&card.arguments, "id")
-        .or_else(|| string_field(&card.arguments, "key"))
+    if let Some(id) = string_field(&card.arguments, "id") {
+        return id;
+    }
+    if let Some(ids) = card.arguments.get("ids").and_then(Value::as_array) {
+        let ids: Vec<&str> = ids.iter().filter_map(Value::as_str).collect();
+        return match ids.len() {
+            0 => String::new(),
+            1 => ids[0].to_owned(),
+            n => format!("{n} records"),
+        };
+    }
+    string_field(&card.arguments, "key")
         .or_else(|| string_field(&card.arguments, "query"))
         .unwrap_or_default()
 }
