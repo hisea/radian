@@ -401,7 +401,11 @@ fn parse_style_or_warn(
 
 /// Merges `[tui.footer.items.<id>]` into a preset row's item (revision 3): a configured field
 /// overrides the preset's.
-pub(crate) fn merge_into_item(item: &mut Item, config: &TuiFooterItemConfig, warnings: &mut Vec<String>) {
+pub(crate) fn merge_into_item(
+    item: &mut Item,
+    config: &TuiFooterItemConfig,
+    warnings: &mut Vec<String>,
+) {
     if config.disabled {
         item.disabled = true;
     }

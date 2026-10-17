@@ -20,18 +20,18 @@ mod draw;
 mod presets;
 mod rows;
 
-pub use presets::{Preset, export_preset};
-pub use rows::{RowPosition, fold_legacy_widgets};
+use draw::render_row;
 pub(crate) use draw::{
     auto_marker, context_fraction, contrib_role, contribution, contribution_text, inline_styles,
     role_style,
 };
 pub(crate) use presets::preset_footer_rows;
+pub use presets::{Preset, export_preset};
 pub(crate) use rows::{
     Item, ItemStyle, Row, build_rows, canonical_id, is_command_item, merge_into_item,
     parse_item_style,
 };
-use draw::render_row;
+pub use rows::{RowPosition, fold_legacy_widgets};
 
 /// The brand mark for a glyph set (ADR 0027): the Nerd Font `md-alpha_r_circle_
 /// outline`, the plain bold-accent `R` (the same font as the body, so it sits on the baseline),
@@ -823,8 +823,9 @@ mod tests {
     /// table creeps back into either file.
     #[test]
     fn the_render_path_has_no_item_id_tables() {
-        let draw = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/footer/draw.rs"))
-            .expect("footer/draw.rs is readable");
+        let draw =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/footer/draw.rs"))
+                .expect("footer/draw.rs is readable");
         let footer = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/footer.rs"))
             .expect("footer.rs is readable");
         // Only the non-test code: the test module names the removed functions on purpose.
