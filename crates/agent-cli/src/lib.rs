@@ -234,9 +234,10 @@ pub struct Cli {
     /// `--allow-shell-command "git status"`. Only a simple command matches; a composite
     /// (`git status; rm -x`) still asks. There is no allow rule for shell by default.
 
-    /// Override the per-turn model call limit.
-    #[arg(long)]
-    max_model_calls: Option<u32>,
+    /// The per-turn model call limit. The default is shared with the TUI and named in
+    /// `--help`; agent-core's own default is a lower fuse for a host that sets no limit.
+    #[arg(long, value_name = "N", default_value_t = radian_host::DEFAULT_MAX_MODEL_CALLS)]
+    max_model_calls: u32,
 
     /// Per-turn time limit in seconds.
     #[arg(long)]
@@ -409,5 +410,30 @@ pub async fn run(mut cli: Cli, child_headers: Result<Vec<String>, String>) -> i3
             eprintln!("radian: {}", redact(&e.0, &redact_secrets));
             USAGE_ERROR
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// decision 2026-10-17: `radian exec`'s per-turn model call limit defaults to the
+    /// value both hosts share (1000), **not** agent-core's own `DEFAULT_MAX_MODEL_CALLS` (32).
+    /// Mutation: point the field's `default_value_t` at `agent_core::DEFAULT_MAX_MODEL_CALLS`
+    /// → this fails.
+    #[test]
+    fn the_default_model_call_limit_is_the_shared_host_value() {
+        let cli = Cli::try_parse_from(["radian exec", "--model", "m"]).unwrap();
+        assert_eq!(cli.max_model_calls, radian_host::DEFAULT_MAX_MODEL_CALLS);
+        assert_eq!(radian_host::DEFAULT_MAX_MODEL_CALLS, 1000);
+        assert_ne!(
+            radian_host::DEFAULT_MAX_MODEL_CALLS,
+            agent_core::DEFAULT_MAX_MODEL_CALLS,
+            "the host default is deliberately higher than the runtime's own fuse"
+        );
+        let explicit =
+            Cli::try_parse_from(["radian exec", "--model", "m", "--max-model-calls", "5"]).unwrap();
+        assert_eq!(explicit.max_model_calls, 5);
     }
 }

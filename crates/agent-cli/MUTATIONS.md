@@ -411,3 +411,21 @@ token（ADR 0026 禁止）。两个读点都改成走 `redaction_secrets()`（�
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | SG-TERM | `spawn_signals` 不再监听 SIGTERM（空任务） | `a_cancelled_parent_turn_stops_the_command_the_childs_shell_started`、`a_cancelled_parent_turn_stops_the_childs_background_job`（两条都等不到 pid 消失） | ✅ 2 failed |
+
+## `radian exec --max-model-calls` defaults to 1000（与 TUI 共享常量）
+
+`agent-cli` 的 `--max-model-calls` 从 `Option<u32>`（缺省走 core 的 32）改成 `u32` +
+`default_value_t = radian_host::DEFAULT_MAX_MODEL_CALLS`（1000，与 TUI 同一个常量）。轮结束时
+`RunFinished` 的 sink 打印一行命名上限与 flag（`radian_host::budget_exceeded_line`），`one_shot`
+不再重复打印通用状态行。变异在源码原地改，每次从 `/tmp/mut/` 的 `cp` 副本还原并
+`cmp` 逐字节一致；运行都带 `--no-fail-fast`。
+
+命令：`timeout 300 cargo test -p agent-cli --locked --no-fail-fast --lib the_default_model_call_limit`；
+预算行那条要新 binary：先 `cp` 备份、`cargo build -p radian-tui --bin radian`，再
+`timeout 300 cargo test -p agent-cli --locked --no-fail-fast --test exec a_budget_exceeded`，
+之后 `cp` 还原并 `cmp` 一致。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MMC-1 | flag 的默认值回到 `agent_core::DEFAULT_MAX_MODEL_CALLS`（32） | `lib::tests::the_default_model_call_limit_is_the_shared_host_value`（`left: 32, right: 1000`） | ✅ 1 failed |
+| MMC-2 | `ui.rs` 的 `RunStatus::BudgetExceeded` 分支删掉（回到 `[turn] ended as …`） | `exec::a_budget_exceeded_turn_names_the_limit_and_the_flag`（stderr 不含那行） | ✅ 1 failed |

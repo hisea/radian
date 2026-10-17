@@ -1275,10 +1275,13 @@ Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementat
 - `--approval on-ask|always|never` picks the `ApprovalPolicy` (default `on-ask`). `always`
   asks for every call a rule does not deny, which is how the dialog is exercised with the
   built-in tools; `never` turns `ask` into a denial.
-- `--max-model-calls N` is the per-turn model call limit. The TUI defaults to **1000**,
-  not the core's 32: an interactive coding turn reads many files and a human can cancel, but
-  it stays a fuse, because the context-budget guard does not stop a loop of small calls. When a turn hits it, the pending tool calls are answered with
-  "the model call budget is used up" and the turn ends; a new message starts a fresh count.
+- `--max-model-calls N` is the per-turn model call limit, shared with `radian exec` (both
+  default to **1000**, `radian_host::DEFAULT_MAX_MODEL_CALLS`), not the core's 32: a coding turn
+  reads many files and a human can cancel, but it stays a fuse, because the context-budget guard
+  does not stop a loop of small calls. When a turn hits it, the pending tool calls are answered
+  with "the model call budget is used up" and the turn ends; a new message starts a fresh
+  count, and the TUI shows one notice naming the limit and the flag
+  (`the turn used its 1000 model calls; raise the limit with --max-model-calls N`).
   Tested by `pty_max_model_calls_limits_the_turn`.
 - `-y`/`--yes` answers every `ask` with "allow once" and shows no dialog, the same as
   `radian exec --yes`. It removes the question only: `deny` rules still deny, the sandbox still

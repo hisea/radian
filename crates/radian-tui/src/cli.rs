@@ -162,11 +162,12 @@ struct Cli {
     #[arg(help_heading = "Permissions", long, short = 'y')]
     yes: bool,
 
-    /// The per-turn model call limit. The core's default (`DEFAULT_MAX_MODEL_CALLS`, 32) is a
-    /// fuse for unattended runs; an interactive coding session reads many files per turn and
-    /// a human can cancel, so the TUI defaults much higher. It is still a fuse: a loop of
+    /// The per-turn model call limit. The default is shared with `radian exec`
+    /// (`radian_host::DEFAULT_MAX_MODEL_CALLS`) and named in `--help`; the core's own default
+    /// (32) is a lower fuse for a host that sets no limit. A coding session reads many files
+    /// per turn and a human can cancel, so it is much higher. It is still a fuse: a loop of
     /// small calls is not stopped by the context budget (which only triggers compaction).
-    #[arg(help_heading = "Model", long, value_name = "N", default_value_t = TUI_DEFAULT_MAX_MODEL_CALLS)]
+    #[arg(help_heading = "Model", long, value_name = "N", default_value_t = radian_host::DEFAULT_MAX_MODEL_CALLS)]
     max_model_calls: u32,
 
     /// Allow a shell command prefix without asking, repeatable (e.g. `--allow-shell-command
@@ -484,10 +485,6 @@ fn reserved(name: &str) -> ExitCode {
 fn run_agent_cli(cli: agent_cli::Cli) -> ExitCode {
     ExitCode::from(agent_cli::run_blocking(cli) as u8)
 }
-
-/// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision
-/// 2026-10-12, dogfooding finding D6).
-const TUI_DEFAULT_MAX_MODEL_CALLS: u32 = 1000;
 
 /// How many facts one loop turn processes before it draws. Bounded so a producer that keeps the
 /// channel busy cannot starve the frame (ADR 0023 U2's draw fairness): the fairness pty test
@@ -1178,6 +1175,7 @@ fn run(
     };
     validate_session_id(&session_id)?;
     app.session.session_id = session_id.clone();
+    app.session.max_model_calls = cli.max_model_calls;
     let user_headers = parse_headers(&header_args, &session_id)?;
     // Header values and **every** key in `auth.json` must not reach the panic log or an export
     // (dogfooding D4; ADR 0013 T4). The startup provider's key alone is not enough: a session
@@ -3186,10 +3184,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_model_call_limit_is_the_tui_one_not_the_cores() {
+    fn the_default_model_call_limit_is_shared_with_exec() {
         let cli = Cli::try_parse_from(["radian", "--model", "m"]).unwrap();
-        assert_eq!(cli.max_model_calls, TUI_DEFAULT_MAX_MODEL_CALLS);
-        assert_eq!(TUI_DEFAULT_MAX_MODEL_CALLS, 1000);
+        assert_eq!(cli.max_model_calls, radian_host::DEFAULT_MAX_MODEL_CALLS);
+        assert_eq!(radian_host::DEFAULT_MAX_MODEL_CALLS, 1000);
         let cli =
             Cli::try_parse_from(["radian", "--model", "m", "--max-model-calls", "5"]).unwrap();
         assert_eq!(cli.max_model_calls, 5);

@@ -83,7 +83,7 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         let tx = audit_tx.clone();
         Arc::new(move |_journal| JournalAudit::new(tx.clone()) as Arc<dyn AuditSink>)
     };
-    let ui = Arc::new(Ui::default());
+    let ui = Arc::new(Ui::new(setup.max_model_calls));
     let projection = Arc::new(radian_host::SessionProjection::new());
     let signals = spawn_signals();
     let driver_ended = Arc::new(Notify::new());
@@ -238,7 +238,7 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
                 "access": setup.profile.as_str(),
             }),
             turn_options: TurnOptions {
-                max_model_calls: setup.max_model_calls,
+                max_model_calls: Some(setup.max_model_calls),
                 deadline: None,
                 ..TurnOptions::default()
             },

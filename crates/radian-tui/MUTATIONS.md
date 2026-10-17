@@ -2262,3 +2262,15 @@ a_printable_key_in_the_main_view_is_warned_about`.
 |---|---|---|---|
 | KB-1 | the printable check is gone (`if action.context() == Context::Main`, so every main binding warns) | ✅ 1 failed (the Ctrl/Alt/Shift loop's `warnings.is_empty()`): `a_bare_printable_character_in_the_main_view_warns` | the same unit test |
 | KB-2 | the warning block is removed entirely | ✅ 1 failed (the `'p'` warning is missing) | the same unit test |
+
+## 预算行作为 notice（`radian exec` 默认 1000 那一项）
+
+`RunFinished` 且 `BudgetExceeded` 时 `App` push 一条 notice（`radian_host::budget_exceeded_line`，
+与 `radian exec` stderr 同一句，命名上限与 flag）；此前 TUI 对该状态什么都不显示。变异在源码原地
+改，从 `/tmp/mut/` 的 `cp` 副本还原并 `cmp` 一致（不用 `git checkout --`/`restore`）。命令：
+`timeout 300 cargo test -p radian-tui --locked --no-fail-fast --lib a_budget_exceeded`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MC-3 | `app/transcript.rs` 的 `BudgetExceeded` notice 删掉（`if false`） | `app::transcript::tests::a_budget_exceeded_turn_shows_the_notice_naming_the_flag`（"a notice" 找不到） | ✅ 1 failed |
+

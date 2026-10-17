@@ -29,6 +29,12 @@ use crate::oauth_chatgpt;
 /// Overridable.
 pub const DEFAULT_MAX_TOKENS: u32 = 16384;
 
+/// The per-turn model call limit both `radian exec` and the TUI use when `--max-model-calls`
+/// is not given. One constant in the crate both hosts depend on, so
+/// the two binaries cannot drift. `agent-core`'s `DEFAULT_MAX_MODEL_CALLS` (32) stays the
+/// runtime's own fuse for a host that configures no limit. Overridable with `--max-model-calls`.
+pub const DEFAULT_MAX_MODEL_CALLS: u32 = 1000;
+
 /// Anthropic's manual extended thinking requires `budget_tokens >= 1024` and
 /// `budget_tokens < max_tokens` (wire notes §2.3). Interleaved thinking, which relaxes this,
 /// is not enabled by this adapter, so the regular rule is checked **host-side, before the

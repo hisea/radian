@@ -108,7 +108,7 @@ pub use contrib::{
     spawn_gated as spawn_contributor_gated, spawn_once as spawn_contributor_once,
 };
 pub use control::{ControlServer, ControlTarget, SUBSCRIBER_BUFFER, SocketGuard};
-pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
+pub use describe::{CLI_WORDING, TUI_WORDING, Wording, budget_exceeded_line, describe};
 pub use diagnostics::{
     CleanReport, MAX_TOTAL_BYTES, RETENTION, append, cache_dir, clean, clean_startup, clean_with,
     diagnostics_dir, is_diagnostic_file, now_millis, panic_log_name,
@@ -130,10 +130,11 @@ pub use job_notify::{
 };
 pub use mcp::load_mcp_config;
 pub use model::{
-    COMPACTION_THINKING_CURRENT, ChatGptModel, DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET,
-    ModelArgs, Provider, RouteContext, SwitchableModel, Thinking, build_model,
-    check_provider_flags, compaction_settings_for, compaction_settings_for_route, redact_base_url,
-    resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref, route_replays_reasoning,
+    COMPACTION_THINKING_CURRENT, ChatGptModel, DEFAULT_MAX_MODEL_CALLS, DEFAULT_MAX_TOKENS,
+    HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext, SwitchableModel, Thinking,
+    build_model, check_provider_flags, compaction_settings_for, compaction_settings_for_route,
+    redact_base_url, resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref,
+    route_replays_reasoning,
 };
 pub use oauth_chatgpt::{
     BrowserLogin, CallbackListener, DevicePoll, DeviceStart, Endpoints as OAuthEndpoints,

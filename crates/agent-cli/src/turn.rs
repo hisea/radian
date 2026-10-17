@@ -102,6 +102,9 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> i32 {
     }
     match run.ui.last_status() {
         Some(RunStatus::Completed) => 0,
+        // The `RunFinished` sink already printed the budget line (it names the limit and the
+        // flag), so this does not repeat it; the exit code is still a failed turn.
+        Some(RunStatus::BudgetExceeded) => 1,
         Some(status) => {
             eprintln!("radian: the turn ended as {status:?}");
             1

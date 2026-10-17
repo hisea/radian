@@ -241,7 +241,7 @@ impl App {
             AgentEvent::CompactionSkipped { .. } => {
                 self.session.compacting = false;
             }
-            AgentEvent::RunFinished { status: _ } => {
+            AgentEvent::RunFinished { status } => {
                 // The turn is over. A pending approval is not cleared here: the permission
                 // layer raced the wait against the turn's cancellation, so its waiter is gone,
                 // the queue drops the element and wakes the UI (ADR 0023 U7). Driving the modal
@@ -250,6 +250,14 @@ impl App {
                 self.session.note = None;
                 self.session.running_tools.clear();
                 self.session.compacting = false;
+                // ADR 0015: the per-turn **call-count** budget (not the context window). The
+                // one line names the limit and the flag; it is the same wording `radian exec`
+                // prints. The TUI showed nothing for this status before.
+                if matches!(status, agent_core::RunStatus::BudgetExceeded) {
+                    self.push_notice(radian_host::budget_exceeded_line(
+                        self.session.max_model_calls,
+                    ));
+                }
                 // ADR 0033: a `!` submitted behind the turn starts now.
                 if let Some((command, exclude_from_context)) = self.session.queued_bash.take() {
                     effects.extend(self.begin_bash(command, exclude_from_context).effects);
@@ -728,5 +736,35 @@ mod tests {
             .map(|entry| entry.result)
             .collect();
         assert_eq!(calls, vec![Some(false), Some(false)]);
+    }
+
+    /// ADR 0015: a turn that ends `BudgetExceeded` shows one notice naming the limit it ran
+    /// under and the flag that raises it — the same sentence `radian exec` prints on stderr.
+    /// The TUI showed nothing for this status before.
+    #[test]
+    fn a_budget_exceeded_turn_shows_the_notice_naming_the_flag() {
+        let mut app = App::new("m", "s");
+        app.session.max_model_calls = 7;
+        app.apply_event(&AgentEvent::RunFinished {
+            status: agent_core::RunStatus::BudgetExceeded,
+        });
+        let notice = app
+            .session
+            .entries
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Notice)
+            .map(|entry| entry.text.clone())
+            .expect("a notice");
+        assert_eq!(
+            notice,
+            "the turn used its 7 model calls; raise the limit with --max-model-calls N"
+        );
+
+        // A completed turn shows no such notice.
+        let mut app = App::new("m", "s");
+        app.apply_event(&AgentEvent::RunFinished {
+            status: agent_core::RunStatus::Completed,
+        });
+        assert!(app.session.entries.is_empty());
     }
 }

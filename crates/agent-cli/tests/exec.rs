@@ -84,6 +84,64 @@ async fn run(mut child: Child) -> (i32, String, String) {
     )
 }
 
+/// ADR 0015: a turn that runs out of model calls ends `BudgetExceeded`, and `radian exec`
+/// prints one line naming the limit it ran under and the flag that raises it (the same sentence
+/// the TUI shows as a notice). It is not repeated by the loop's own end-of-turn line.
+#[tokio::test]
+async fn a_budget_exceeded_turn_names_the_limit_and_the_flag() {
+    use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
+
+    // One response that declares a tool call: with the limit at 1, that call is not run (there
+    // is no budget to report its result back), so no tool needs to exist.
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(
+            serde_json::json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                "function": {"name": "read", "arguments": "{}"}}]}),
+            None,
+        ),
+        chunk(serde_json::json!({}), Some("tool_calls")),
+    ])])
+    .await;
+    let env = Env::fresh("budget-line");
+    let (code, out, err) = run(spawn_in(
+        &[
+            "exec",
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--max-model-calls",
+            "1",
+            "-p",
+            "hi",
+        ],
+        &env,
+    ))
+    .await;
+
+    assert_eq!(code, 1, "a budget-exceeded turn exits 1: {err}");
+    assert!(out.is_empty(), "stdout carries only model text: {out}");
+    assert!(
+        err.contains("the turn used its 1 model calls; raise the limit with --max-model-calls N"),
+        "the budget line names the limit and the flag: {err}"
+    );
+    assert!(
+        !err.contains("[turn] ended as BudgetExceeded")
+            && !err.contains("radian: the turn ended as BudgetExceeded"),
+        "exactly one line, no generic status repeat: {err}"
+    );
+}
+
+/// `--help` names the default of `--max-model-calls` (the shared host value).
+#[tokio::test]
+async fn exec_help_names_the_max_model_calls_default() {
+    let env = Env::fresh("help");
+    let (code, out, err) = run(spawn_in(&["exec", "--help"], &env)).await;
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("--max-model-calls"), "{out}");
+    assert!(out.contains("1000"), "the help names the default: {out}");
+}
+
 #[tokio::test]
 async fn the_top_level_memory_is_the_same_as_radian_exec_memory() {
     // The direction: `radian memory …` and `radian exec memory …` are one code path, so

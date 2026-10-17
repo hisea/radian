@@ -410,6 +410,9 @@ pub struct SessionView {
     pub model_display: Option<String>,
     /// The provider's name for the footer's `{provider}` placeholder. Set once at startup.
     pub provider: Option<String>,
+    /// The per-turn model call limit this session runs under (the CLI flag or its default).
+    /// Used for the notice a `BudgetExceeded` turn shows. Set once at startup.
+    pub max_model_calls: u32,
     /// The session's working directory (the footer's `{path_home}`) and the git branch the
     /// host read for it. Both are startup facts; the branch is refreshed by the host.
     pub cwd: Option<PathBuf>,
