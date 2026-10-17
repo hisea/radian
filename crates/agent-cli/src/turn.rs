@@ -14,7 +14,8 @@ use tokio::sync::{Notify, mpsc};
 
 use super::approval::TERMINAL_SOURCE;
 use super::events::{
-    Next, TurnEnd, force_exit, next_event, report_error, report_task, shutdown, wait_for_turn,
+    Next, SIGTERM, TurnEnd, force_exit, next_event, report_error, report_task, shutdown, terminate,
+    wait_for_turn,
 };
 use super::redact::redact;
 use super::ui::{LineHub, Ui};
@@ -41,7 +42,7 @@ pub(crate) struct Run {
     pub(crate) hooks: Arc<PermissionHooks>,
     pub(crate) ui: Arc<Ui>,
     pub(crate) driver_ended: Arc<Notify>,
-    pub(crate) signals: mpsc::UnboundedReceiver<()>,
+    pub(crate) signals: mpsc::UnboundedReceiver<i32>,
     /// The session facade (ADR 0023 U5): its driver handle, its journal and its projection.
     pub(crate) session: Arc<radian_host::LocalSession>,
     pub(crate) secrets: Vec<String>,
@@ -86,6 +87,9 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> i32 {
     )
     .await
     {
+        TurnEnd::Terminated => {
+            return terminate(&run.inbox, &run.session, &run.secrets, SIGTERM).await;
+        }
         TurnEnd::Forced => return force_exit(&run.session).await,
         TurnEnd::DriverEnded => return report_task(&run.session, &run.secrets).await,
         TurnEnd::Done => {}
@@ -122,14 +126,19 @@ fn compact_request(line: &str) -> Option<Option<String>> {
 }
 
 /// Runs a manual `/compact` between turns (ADR 0018) and prints the result. Ctrl-C cancels the
-/// in-flight summarizer; nothing is committed then.
-async fn run_compact(run: &mut Run, instructions: Option<String>) {
+/// in-flight summarizer; nothing is committed then. Returns the signal that asked this process
+/// to stop, if one arrived while the summarizer ran (SIGTERM, ADR 0043 decision 1a fix round 1 B).
+async fn run_compact(run: &mut Run, instructions: Option<String>) -> Option<i32> {
     let mut compact = Box::pin(run.inbox.compact(instructions));
+    let mut stop = None;
     let result = loop {
         tokio::select! {
             result = &mut compact => break result,
-            Some(()) = run.signals.recv() => {
+            Some(signal) = run.signals.recv() => {
                 run.inbox.cancel(CancelCause::Requested);
+                if signal == SIGTERM {
+                    stop = Some(signal);
+                }
             }
         }
     };
@@ -144,6 +153,7 @@ async fn run_compact(run: &mut Run, instructions: Option<String>) {
         }
         Err(message) => eprintln!("[compaction] failed: {message}"),
     }
+    stop
 }
 
 pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
@@ -166,6 +176,9 @@ pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
         .await
         {
             Next::Leave => break,
+            Next::Terminated => {
+                return terminate(&run.inbox, &run.session, &run.secrets, SIGTERM).await;
+            }
             Next::Forced => return force_exit(&run.session).await,
             Next::DriverEnded => return report_task(&run.session, &run.secrets).await,
             Next::Again => continue,
@@ -181,7 +194,9 @@ pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
                 // Only a whole line whose first word is exactly `/compact` counts; `-p` mode
                 // has no such command.
                 if let Some(instructions) = compact_request(line) {
-                    run_compact(run, instructions).await;
+                    if let Some(signal) = run_compact(run, instructions).await {
+                        return terminate(&run.inbox, &run.session, &run.secrets, signal).await;
+                    }
                     continue;
                 }
                 // A turn in flight gets the line as a steer (it changes this turn's

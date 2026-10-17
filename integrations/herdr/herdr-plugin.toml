@@ -1,0 +1,55 @@
+# The Radian herdr plugin (ADR 0034).
+#
+# Local use:    herdr plugin link integrations/herdr
+# From GitHub:  herdr plugin install hisea/radian/integrations/herdr
+#
+# The scripts call only `$HERDR_BIN_PATH` (the running herdr) and `radian`; they never read
+# radian's session files or credentials.
+id = "radian"
+name = "Radian"
+version = "0.1.0"
+description = "Start Radian in a pane, and read another Radian session beside it."
+# Decision 4: the pinned minimum, so a herdr without `pane.report_metadata` refuses the plugin
+# instead of silently dropping what radian reports.
+min_herdr_version = "0.9.5"
+
+[[actions]]
+id = "start"
+title = "Start radian here"
+command = ["scripts/start.sh"]
+
+[[actions]]
+id = "start-worktree"
+title = "Start radian in a new worktree"
+command = ["scripts/start-worktree.sh"]
+
+# Optional and **off by default**: the hook starts radian in the pane of a worktree this plugin
+# creates, but only after the plugin's own config file turns it on (decision 4). The gate is the
+# script's first check, so a linked-but-unconfigured plugin does nothing.
+#
+#   dir=$(herdr plugin config-dir radian); mkdir -p "$dir"; echo 'start_worktree = true' > "$dir/radian.toml"
+[[events]]
+on = "worktree.created"
+command = ["scripts/worktree-created.sh"]
+
+# The workspace's session table (ADR 0043 slice ⑧): `radian --list` prints it and exits.
+[[panes]]
+id = "sessions"
+title = "Radian: sessions"
+placement = "split"
+command = ["radian", "--list"]
+
+# Read-only view of one session (ADR 0043 slice ⑧): `radian attach <id> --follow`.
+#
+# A herdr plugin pane runs a fixed argv, so the id cannot be a literal in the manifest: open it
+# with the id in the environment, and the script passes it to `radian attach` unchanged.
+#
+#   herdr plugin pane open --plugin radian --entrypoint attach --env RADIAN_ATTACH_SESSION=<id>
+[[panes]]
+id = "attach"
+title = "Radian: attach"
+placement = "split"
+command = ["scripts/attach.sh"]
+
+# Decision 4: no default key bindings. A user who wants one adds `[[keys.command]]` to their own
+# herdr config; the plugin ships none.

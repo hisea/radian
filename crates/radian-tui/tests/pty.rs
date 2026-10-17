@@ -10203,6 +10203,32 @@ impl HerdrSocket {
         }
     }
 
+    /// Waits for any request of `method`.
+    fn wait_for_method(&self, method: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self
+                .snapshot()
+                .iter()
+                .any(|value| value["method"] == method)
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Every request of `method`, in arrival order.
+    fn of_method(&self, method: &str) -> Vec<serde_json::Value> {
+        self.snapshot()
+            .into_iter()
+            .filter(|value| value["method"] == method)
+            .collect()
+    }
+
     fn wait_for_release(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -10306,6 +10332,293 @@ async fn pty_herdr_reports_the_turn_states_and_releases() {
     assert_eq!(first["params"]["resume_argv"][0], "radian");
     assert_eq!(first["params"]["resume_argv"][1], "--resume");
     assert_eq!(first["params"]["resume_argv"][2], "herdr-turn");
+}
+
+/// ADR 0034: the display metadata goes as `pane.report_metadata` - every key
+/// once, then only the key that changed, with no cost, token totals, paths or command text
+/// anywhere in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_metadata_changes() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("herdr-meta");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = dir.path().join("sessions");
+    let secret = "echo HERDR-METADATA-SECRET";
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "shell", &json!({"command": secret}).to_string()),
+        text_reply("HERDR-META-DONE"),
+    ])
+    .await;
+    let sock = HerdrSocket::start("meta");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "herdr-meta",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &env_refs,
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_method("pane.report_metadata", wait_positive()),
+        "the metadata report: {:?}",
+        sock.snapshot()
+    );
+    let first = sock.of_method("pane.report_metadata").remove(0);
+    assert_eq!(first["params"]["source"], "radian");
+    assert_eq!(first["params"]["agent"], "radian");
+    assert_eq!(first["params"]["display_agent"], "radian");
+    assert_eq!(first["params"]["tokens"]["model"], "mock");
+    assert_eq!(first["params"]["tokens"]["pending"], "0");
+    assert!(
+        first["params"]["tokens"]["tier"].is_string(),
+        "the tier token: {first}"
+    );
+    // No `tasks` token (ADR 0043 removed in-process tasks), and no cost or token totals.
+    let text = serde_json::to_string(&first).unwrap();
+    for forbidden in [
+        "tasks",
+        "cost",
+        "usage",
+        "tokens_input",
+        "command",
+        ".jsonl",
+    ] {
+        assert!(!text.contains(forbidden), "{forbidden} in {text}");
+    }
+
+    // A tool call waits for an approval: the pending count changes, and the next metadata report
+    // carries that key only.
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", wait_positive()),
+        "the approval box:\n{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("blocked", wait_positive()),
+        "{:?}",
+        sock.snapshot()
+    );
+    let second = sock
+        .of_method("pane.report_metadata")
+        .into_iter()
+        .find(|value| value["params"]["tokens"]["pending"] == "1")
+        .unwrap_or_else(|| panic!("a pending change: {:?}", sock.snapshot()));
+    assert_eq!(
+        second["params"]["tokens"].as_object().unwrap().len(),
+        1,
+        "only the changed key: {second}"
+    );
+    // Decision 2: the blocked label names the category, so the sidebar need not expand it.
+    assert_eq!(second["params"]["state_labels"]["blocked"], "approval");
+    assert!(
+        !serde_json::to_string(&sock.snapshot())
+            .unwrap()
+            .contains(secret),
+        "the command text must never be sent"
+    );
+    pty.quit();
+}
+
+/// ADR 0034: a structured question labels `blocked` as `question` - the
+/// category, never the question's body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_labels_a_question_as_question() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("herdr-question");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = dir.path().join("sessions");
+    let server = MockServer::start(ask_reply("HERDR-ASK-DONE")).await;
+    let sock = HerdrSocket::start("question");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "herdr-question",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &env_refs,
+        60,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("How should it load?", wait_positive()),
+        "the question form:\n{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("blocked", wait_positive()),
+        "{:?}",
+        sock.snapshot()
+    );
+    let blocked = sock
+        .of_method("pane.report_metadata")
+        .into_iter()
+        .find(|value| value["params"]["state_labels"]["blocked"] == "question")
+        .unwrap_or_else(|| panic!("a question label: {:?}", sock.snapshot()));
+    assert_eq!(blocked["params"]["tokens"].as_object().unwrap().len(), 1);
+    let state = sock
+        .snapshot()
+        .into_iter()
+        .find(|value| value["params"]["state"] == "blocked")
+        .expect("a blocked state report");
+    assert_eq!(state["params"]["message"], "question");
+    assert!(
+        !serde_json::to_string(&sock.snapshot())
+            .unwrap()
+            .contains("How should it load?"),
+        "the question body must never be sent"
+    );
+    pty.quit();
+}
+
+/// ADR 0034: the session identity goes as its own
+/// `pane.report_agent_session`, after the state report that holds the pane (herdr refuses a
+/// `resume_argv` from a reporter that does not hold the pane yet).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_the_session_identity() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("HERDR-IDENTITY-OK")]).await;
+    let dir = TempDir::new("herdr-identity");
+    let sock = HerdrSocket::start("identity");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "herdr-identity",
+        ],
+        &env_refs,
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_method("pane.report_agent_session", wait_positive()),
+        "the session identity report: {:?}",
+        sock.snapshot()
+    );
+    let methods: Vec<String> = sock
+        .snapshot()
+        .iter()
+        .map(|value| value["method"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    let state_at = methods
+        .iter()
+        .position(|method| method == "pane.report_agent")
+        .expect("a state report");
+    let session_at = methods
+        .iter()
+        .position(|method| method == "pane.report_agent_session")
+        .expect("a session report");
+    assert!(state_at < session_at, "{methods:?}");
+    let identity = sock.of_method("pane.report_agent_session").remove(0);
+    assert_eq!(identity["params"]["pane_id"], "w1:p1");
+    assert_eq!(identity["params"]["source"], "radian");
+    assert_eq!(identity["params"]["agent"], "radian");
+    assert_eq!(identity["params"]["agent_session_id"], "herdr-identity");
+    assert_eq!(identity["params"]["resume_argv"][0], "radian");
+    assert_eq!(identity["params"]["resume_argv"][1], "--resume");
+    assert_eq!(identity["params"]["resume_argv"][2], "herdr-identity");
+    pty.quit();
+}
+
+/// ADR 0034: the input-to-`working` path must not wait for the model's
+/// first token (`herdr agent prompt --wait` gives it 5 s). The mock never sends one, so a report
+/// that waited for a token would never arrive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_working_within_a_second_of_the_input() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let dir = TempDir::new("herdr-gate");
+    let sock = HerdrSocket::start("gate");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "herdr-gate",
+        ],
+        &env_refs,
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("idle", wait_positive()),
+        "the startup idle report"
+    );
+    let sent = Instant::now();
+    pty.send(b"hello\r");
+    let early = sock.wait_for_state("working", WAIT_LATENCY_BOUND);
+    assert!(
+        early,
+        "working within {:?}, not at the first token: {:?}",
+        WAIT_LATENCY_BOUND,
+        sock.snapshot()
+    );
+    assert!(
+        sent.elapsed() < Duration::from_secs(2),
+        "the working report took {:?}",
+        sent.elapsed()
+    );
+    pty.quit();
 }
 
 /// An approval is `blocked` with the tool name only; the command text is never sent.

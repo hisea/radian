@@ -82,7 +82,9 @@ pub use jobs::{
 };
 pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits};
 pub use read_roots::ReadRoots;
-pub use shell::{UserBash, kill_session, own_session, run_user_bash, signal_session};
+pub use shell::{
+    UserBash, kill_session, own_session, run_user_bash, signal_session, stop_leader, wait_for_exit,
+};
 pub use workspace::{WorkspaceError, WorkspaceRoot};
 
 use agent_core::ToolFailure;
