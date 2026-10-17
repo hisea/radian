@@ -14,7 +14,7 @@ impl Component for Tokens {
     }
 
     fn placeholders(&self) -> &'static [&'static str] {
-        &["in", "out", "cache", "cache_write"]
+        &["in", "out", "cache", "cache_write", "in_arrow", "out_arrow"]
     }
 
     fn glyphs(&self) -> [&'static str; 4] {
@@ -27,14 +27,22 @@ impl Component for Tokens {
 
     fn data(&self, app: &App, _item: &Item) -> Option<ItemData> {
         let session = app.session.projection.read();
-        // The default format is a tier default (ADR 0027 item 2): the unicode and
-        // emoji tiers' arrows, or `^`/`v`. A user-configured format always wins.
+        // The default format is a tier default (ADR 0027 item 2's unicode arrows,
+        // or `^`/`v`). A preset or user-configured format that needs the arrows without the
+        // default's `R` uses the `{in_arrow}`/`{out_arrow}` placeholders instead, so the
+        // format stays one static string under every glyph set (the `full` preset does this).
+        let (in_arrow, out_arrow) = match app.footer_glyphs() {
+            Glyphs::Unicode | Glyphs::Emoji => ("↑", "↓"),
+            Glyphs::Nerd | Glyphs::Ascii => ("^", "v"),
+        };
         let default_format = match app.footer_glyphs() {
             Glyphs::Unicode | Glyphs::Emoji => "↑{in} ↓{out} R{cache}",
             Glyphs::Nerd | Glyphs::Ascii => "^{in} v{out} R{cache}",
         };
         Some(
             ItemData::new(default_format)
+                .value("in_arrow", in_arrow)
+                .value("out_arrow", out_arrow)
                 .value(
                     "in",
                     session

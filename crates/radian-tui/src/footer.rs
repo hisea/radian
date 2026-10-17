@@ -109,15 +109,6 @@ impl Glyphs {
         }
     }
 
-    /// The token arrows: the unicode and emoji tiers use `↑`/`↓` (revision 6 item 2; both are
-    /// in all six checked fonts), the other tiers keep `^`/`v`.
-    pub fn token_arrows(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Unicode | Self::Emoji => ("↑", "↓"),
-            Self::Nerd | Self::Ascii => ("^", "v"),
-        }
-    }
-
     /// The marker column's **folded** spelling (ADR 0035's 2026-10-16 "折叠标记统一" note): the
     /// thinking channel's folded one-liner and an expandable tool head that shows only its head
     /// both take it. `◼ ` on the unicode, nerd and emoji tiers, `+ ` under `ascii`. `◼`/`◻`
@@ -195,7 +186,8 @@ pub enum Preset {
     /// the identity row, and the numbers row.
     #[default]
     Deck,
-    /// The revision-1 two-row preset: the identity row and the numbers row.
+    /// The revision-1 two-row preset: the identity row and the numbers row (owner
+    /// 2026-10-17: `full` also shows `jobs`, this session's running background jobs).
     Full,
     /// The earlier two-row preset: model/cwd/branch/context bar/reasoning, then tokens/cost.
     Pi,
@@ -501,7 +493,7 @@ impl Footer {
         }
         let rows: Vec<Row> = if config.rows.is_empty() {
             // The built-in preset, then the per-field `items` config on top.
-            let mut rows = preset_rows(preset, glyphs);
+            let mut rows = preset_footer_rows(preset, &mut warnings);
             for row in &mut rows {
                 for item in row.left.iter_mut().chain(row.right.iter_mut()) {
                     if let Some(field) = items.get(&item.id) {
@@ -515,53 +507,15 @@ impl Footer {
             }
             rows
         } else {
-            config
-                .rows
-                .iter()
-                .map(|row| {
-                    let position = match row.position.as_deref() {
-                        None => RowPosition::Footer,
-                        Some(name) => RowPosition::parse(name).unwrap_or_else(|| {
-                            warnings.push(format!(
-                                "tui.footer.rows: position {name:?} is not one of \
-                                 footer|above_input|below_input; using footer"
-                            ));
-                            RowPosition::Footer
-                        }),
-                    };
-                    Row {
-                        left: row
-                            .left
-                            .iter()
-                            .filter_map(|item| {
-                                resolve_item(
-                                    item,
-                                    &items,
-                                    &command_ids,
-                                    &mut aliased,
-                                    &mut warnings,
-                                )
-                            })
-                            .collect(),
-                        right: row
-                            .right
-                            .iter()
-                            .filter_map(|item| {
-                                resolve_item(
-                                    item,
-                                    &items,
-                                    &command_ids,
-                                    &mut aliased,
-                                    &mut warnings,
-                                )
-                            })
-                            .collect(),
-                        separator: row.separator.clone().unwrap_or_else(|| separator.clone()),
-                        separator_style: separator_style.clone(),
-                        position,
-                    }
-                })
-                .collect()
+            build_rows(
+                &config.rows,
+                &separator,
+                &separator_style,
+                &items,
+                &command_ids,
+                &mut aliased,
+                &mut warnings,
+            )
         };
         (
             Self {
@@ -585,12 +539,15 @@ impl Footer {
     }
 
     /// The footer's lines at `width`. The `classic` preset is the renderer's (it draws the
-    /// pre-ADR one-line status bar); `pi` builds its rows here. Only rows positioned at the
-    /// footer (ADR 0027); the input-adjacent rows draw through
+    /// pre-ADR one-line status bar, so a `classic` footer has no rows). Only rows positioned at
+    /// the footer (ADR 0027); the input-adjacent rows draw through
     /// [`Footer::above_input_lines`] and [`Footer::below_input_lines`].
     pub fn lines(&self, app: &App, width: usize) -> Vec<Line<'static>> {
+        let mut empty_warnings = Vec::new();
+        let preset;
         let rows: Cow<'_, [Row]> = if self.rows.is_empty() {
-            Cow::Owned(preset_rows(self.preset, self.glyphs))
+            preset = preset_footer_rows(self.preset, &mut empty_warnings);
+            Cow::Owned(preset)
         } else {
             Cow::Borrowed(&self.rows)
         };
@@ -634,134 +591,115 @@ impl Footer {
     }
 }
 
-/// The built-in rows for a preset (ADR 0027 C2 and revision 1; a configured `rows` overrides
-/// them entirely). `classic` is drawn by the renderer, so its rows are unused.
-fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
-    let (token_in, token_out) = glyphs.token_arrows();
-    let item = |id: &str| Item {
-        id: id.to_string(),
-        icon: None,
-        symbol_style: None,
-        format: None,
-        style: None,
-        priority: components::priority(id),
-        thresholds: components::thresholds(id),
-        params: Vec::new(),
-        disabled: false,
-        unknown: false,
-    };
-    let with_format = |id: &str, format: &str| Item {
-        format: Some(format.to_string()),
-        ..item(id)
-    };
-    // A preset row with no symbol at all (revision 3's numbers row has none).
-    let no_symbol = |id: &str, format: &str| Item {
-        icon: Some(String::new()),
-        format: Some(format.to_string()),
-        ..item(id)
-    };
-    let row = |left: Vec<Item>, right: Vec<Item>| Row {
-        left,
-        right,
-        separator: " · ".to_string(),
-        separator_style: ItemStyle::Role(Role::FooterSeparator),
-        position: RowPosition::Footer,
-    };
+/// One built-in preset's TOML (ADR 0027): `deck`, `full`, `pi`
+/// and `classic` are data files under `crates/radian-tui/presets/`, shipped in the binary.
+fn preset_source(preset: Preset) -> &'static str {
     match preset {
-        Preset::Deck => vec![
-            // Row 1: the current provider's usage (ADR 0027). With no
-            // snapshot the item is empty and `lines` drops the whole row, so it never leaves a
-            // blank line.
-            row(vec![item("usage")], Vec::new()),
-            // Row 2: identity, with the context bar and reasoning on the right. The bar is
-            // the `context` component's `{bar}` (ADR 0027 merged
-            // `context_bar` into it); the empty icon keeps the nerd/ascii sets symbol-free,
-            // exactly as the old id drew.
-            row(
-                vec![
-                    item("model"),
-                    with_format("cwd", "{repo}"),
-                    with_format("git_branch", "{branch}{dirty}"),
-                    item("worktree"),
-                ],
-                vec![no_symbol("context", "{bar} {percent}%"), item("reasoning")],
-            ),
-            // Row 3: the numbers, right-aligned, single spaces (revision 3's sample
-            // `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M`).
-            Row {
-                separator: " ".to_string(),
-                ..row(
-                    Vec::new(),
-                    vec![
-                        with_format(
-                            "tokens",
-                            &format!("{token_in}{{in}} {token_out}{{out}} R{{cache}}"),
-                        ),
-                        item("cost"),
-                        no_symbol("context", "{percent}%/{budget}"),
-                    ],
-                )
-            },
-        ],
-        Preset::Full => vec![
-            Row {
-                // The identity row (ADR 0027).
-                left: vec![
-                    item("brand"),
-                    item("host"),
-                    item("model"),
-                    item("reasoning"),
-                    with_format("cwd", "{repo}"),
-                    with_format("git_branch", "{branch}{dirty}"),
-                    item("session"),
-                ],
-                right: Vec::new(),
-                separator: " · ".to_string(),
-                separator_style: ItemStyle::Role(Role::FooterSeparator),
-                position: RowPosition::Footer,
-            },
-            Row {
-                // The numbers row: tokens (in/out/cache), speed, cost, context (share/window
-                // with the auto-compaction marker), elapsed.
-                left: vec![
-                    with_format(
-                        "tokens",
-                        &format!("{token_in}{{in}} {token_out}{{out}} {{cache}}"),
-                    ),
-                    item("speed"),
-                    item("cost"),
-                    with_format("context", "{percent}%/{budget}{auto}"),
-                    item("elapsed"),
-                ],
-                right: Vec::new(),
-                separator: " · ".to_string(),
-                separator_style: ItemStyle::Role(Role::FooterSeparator),
-                position: RowPosition::Footer,
-            },
-        ],
-        Preset::Pi => vec![
-            Row {
-                left: vec![
-                    item("model"),
-                    item("cwd"),
-                    item("git_branch"),
-                    no_symbol("context", "{bar} {percent}%"),
-                ],
-                right: vec![item("reasoning")],
-                separator: " · ".to_string(),
-                separator_style: ItemStyle::Role(Role::FooterSeparator),
-                position: RowPosition::Footer,
-            },
-            Row {
-                left: vec![item("tokens"), item("cost")],
-                right: Vec::new(),
-                separator: " · ".to_string(),
-                separator_style: ItemStyle::Role(Role::FooterSeparator),
-                position: RowPosition::Footer,
-            },
-        ],
-        Preset::Classic => Vec::new(),
+        Preset::Deck => include_str!("../presets/deck.toml"),
+        Preset::Full => include_str!("../presets/full.toml"),
+        Preset::Pi => include_str!("../presets/pi.toml"),
+        Preset::Classic => include_str!("../presets/classic.toml"),
     }
+}
+
+/// The shipped TOML of a named preset, for `radian footer export <preset>` (ADR 0027
+/// revision 14 decision 2): the exact file bytes, so a user can paste them under
+/// `[tui.footer]` and get the same footer. `Err` names the four presets.
+pub fn export_preset(name: &str) -> Result<&'static str, String> {
+    match Preset::parse(name) {
+        Some(preset) => Ok(preset_source(preset)),
+        None => Err(format!(
+            "unknown footer preset {name:?}; expected one of deck, full, pi, classic"
+        )),
+    }
+}
+
+/// Parses a built-in preset with the user's config parser (ADR 0027):
+/// the file holds the config's `[tui.footer]` section verbatim, so it is parsed by
+/// `radian_host::config::parse` exactly like a user config. A preset that fails to parse (or
+/// skips a key) is a programming error: the all-four-parse test fails on it, so this never
+/// runs with a bad file outside a broken build.
+fn preset_config(preset: Preset) -> TuiFooterConfig {
+    let text = format!("schema_version = 1\n{}", preset_source(preset));
+    let config =
+        radian_host::config::parse(std::path::Path::new("<built-in footer preset>"), &text)
+            .expect("a built-in footer preset parses");
+    assert!(
+        config.skipped.is_empty(),
+        "a built-in footer preset has no skipped keys: {:?}",
+        config.skipped
+    );
+    config.tui.footer
+}
+
+/// The built-in preset's rows, resolved like user-configured rows. A `Footer` with no rows
+/// (only `Footer::default()`, before any config is applied) draws these through `lines`;
+/// `from_config` builds them the same way and then merges the user's per-field `items` config
+/// on top, exactly as the old Rust tables did.
+fn preset_footer_rows(preset: Preset, warnings: &mut Vec<String>) -> Vec<Row> {
+    let preset_cfg = preset_config(preset);
+    let separator = preset_cfg
+        .separator
+        .clone()
+        .unwrap_or_else(|| " · ".to_string());
+    build_rows(
+        &preset_cfg.rows,
+        &separator,
+        &ItemStyle::Role(Role::FooterSeparator),
+        &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
+        &mut std::collections::BTreeSet::new(),
+        warnings,
+    )
+}
+
+/// Builds `Row`s from parsed row configs: one shared path for user-configured rows and for
+/// preset TOML rows (ADR 0027). A preset keeps its own separator
+/// default (a user's `separator` never applied to the old Rust tables either); a bare id
+/// takes the per-field `items` config, an inline table is used as written.
+#[allow(clippy::too_many_arguments)]
+fn build_rows(
+    row_cfgs: &[TuiFooterRowConfig],
+    default_separator: &str,
+    separator_style: &ItemStyle,
+    items: &std::collections::BTreeMap<String, TuiFooterItemConfig>,
+    command_ids: &std::collections::BTreeSet<String>,
+    aliased: &mut std::collections::BTreeSet<String>,
+    warnings: &mut Vec<String>,
+) -> Vec<Row> {
+    row_cfgs
+        .iter()
+        .map(|row| {
+            let position = match row.position.as_deref() {
+                None => RowPosition::Footer,
+                Some(name) => RowPosition::parse(name).unwrap_or_else(|| {
+                    warnings.push(format!(
+                        "tui.footer.rows: position {name:?} is not one of \
+                         footer|above_input|below_input; using footer"
+                    ));
+                    RowPosition::Footer
+                }),
+            };
+            Row {
+                left: row
+                    .left
+                    .iter()
+                    .filter_map(|item| resolve_item(item, items, command_ids, aliased, warnings))
+                    .collect(),
+                right: row
+                    .right
+                    .iter()
+                    .filter_map(|item| resolve_item(item, items, command_ids, aliased, warnings))
+                    .collect(),
+                separator: row
+                    .separator
+                    .clone()
+                    .unwrap_or_else(|| default_separator.to_string()),
+                separator_style: separator_style.clone(),
+                position,
+            }
+        })
+        .collect()
 }
 
 /// The current id a configured item id means. Two earlier-version ids keep working for one
@@ -1475,13 +1413,16 @@ mod tests {
     }
 
     /// The unicode tier only draws glyphs the six checked fonts all have. Every item glyph
-    /// (from the built-in presets), the spinner frames, the separators, the context bar and
+    /// (from the built-in presets' TOML), the spinner frames, the separators, the context bar and
     /// the auto marker are checked.
     #[test]
     fn unicode_tier_glyphs_are_all_verified_covered() {
         let mut glyphs: Vec<char> = Vec::new();
         for preset in [Preset::Deck, Preset::Full, Preset::Pi] {
-            for row in preset_rows(preset, Glyphs::Unicode) {
+            // The presets are TOML now (ADR 0027); the parsed rows are
+            // what the renderer reads, so the coverage check reads them too.
+            let config = preset_config(preset);
+            for row in &config.rows {
                 for item in row.left.iter().chain(row.right.iter()) {
                     let glyph = components::builtin(&item.id).map_or("", |component| {
                         components::glyph_of(component, Glyphs::Unicode)
@@ -1492,7 +1433,7 @@ mod tests {
                         glyphs.extend(format.chars());
                     }
                 }
-                glyphs.extend(row.separator.chars());
+                glyphs.extend(row.separator.as_deref().unwrap_or(" · ").chars());
             }
         }
         glyphs.extend(brand_mark(Glyphs::Unicode).chars());
@@ -1661,7 +1602,10 @@ mod tests {
             ("session", &["id"]),
             ("context", &["bar", "percent", "used", "budget", "auto"]),
             ("usage", &["value"]),
-            ("tokens", &["in", "out", "cache", "cache_write"]),
+            (
+                "tokens",
+                &["in", "out", "cache", "cache_write", "in_arrow", "out_arrow"],
+            ),
             ("speed", &["speed"]),
             ("elapsed", &["elapsed"]),
             ("cost", &["usd"]),
