@@ -6,7 +6,6 @@
 use super::*;
 
 impl App {
-
     /// Enters the pre-session `--pick` phase: the picker overlay is pushed **focused** (it is
     /// the whole point of the phase) and [`Startup`] becomes [`Startup::Picking`].
     pub fn start_picking(&mut self, mut picker: Picker) {
@@ -67,7 +66,10 @@ impl App {
     }
 
     /// Removes the topmost overlay matching `pick`. Returns it, or `None` when absent.
-    pub(super) fn remove_overlay(&mut self, mut pick: impl FnMut(&Overlay) -> bool) -> Option<Overlay> {
+    pub(super) fn remove_overlay(
+        &mut self,
+        mut pick: impl FnMut(&Overlay) -> bool,
+    ) -> Option<Overlay> {
         let index = self.layers.iter().rposition(|layer| match layer {
             Layer::Overlay(overlay) => pick(overlay),
             _ => false,
