@@ -9063,7 +9063,7 @@ fn pty_a_session_started_from_the_filesystem_root_is_refused() {
             // Linux): both end the drain.
             Err(_) => break,
         }
-    };
+    }
     let text = String::from_utf8_lossy(&drained);
     assert!(text.contains("filesystem root"), "{text}");
     assert!(text.contains("--workspace"), "{text}");

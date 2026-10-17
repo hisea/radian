@@ -655,10 +655,7 @@ mod tests {
         path
     }
 
-    fn retry_contributor(
-        program: &std::path::Path,
-        dir: &std::path::Path,
-    ) -> CommandContributor {
+    fn retry_contributor(program: &std::path::Path, dir: &std::path::Path) -> CommandContributor {
         CommandContributor::new(
             CommandSpec {
                 id: "thing".to_owned(),
