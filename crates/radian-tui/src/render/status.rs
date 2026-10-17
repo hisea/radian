@@ -150,7 +150,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
 /// and never pushes the model off the screen. The last segment is never dropped, so a very
 /// narrow terminal still shows something.
 fn fit_segments(segments: Vec<Segment>, width: usize, theme: &Theme) -> Line<'static> {
-    const SEP: &str = " │ ";
+    const SEP: &str = " · ";
     let measure = |segments: &[Segment]| -> usize {
         segments
             .iter()

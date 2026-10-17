@@ -10,7 +10,7 @@ model = "m-1"
 
 [tui.footer]
 preset = "pi"
-separator = " │ "
+separator = " · "
 glyphs = "unicode"
 # ADR 0027 item 4: `off` (default) or `percentage` (the left/right gap shows the
 # context usage).

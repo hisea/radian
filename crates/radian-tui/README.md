@@ -259,7 +259,7 @@ find_next = ["ctrl-g", "shift-enter"]
   `reasoning` on the right, then
   `tokens`/`cost`/`context` on the right), `full` (revision 1's two rows), `pi` (the earlier two
   rows) or `classic` (today's one line, byte-for-byte). `separator` joins items (default
-  `" │ "`, any string), each row may override it, and `separator_style` styles it (default the
+  `" · "`, any string), each row may override it, and `separator_style` styles it (default the
   `footer_separator` role, dim). `glyphs` is `unicode` (default), `nerd`, `ascii` or
   `emoji` (ADR 0027: unicode icons where they exist, emoji where they
   read better — `💻` host, `🧠` reasoning, `#` session, `🚀` speed, `⏱` elapsed, `⚡` brand —
@@ -372,7 +372,7 @@ check: its glyphs come from the system emoji font, not the six reference fonts.
 | `│` | U+2502 | tool block body rail / open frames | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `╭` `╰` | U+256D/70 | open frame corners (ADR 0035/7) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `…` | U+2026 | truncation | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `·` | U+00B7 | footer separator (ADR 0027) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |

@@ -421,7 +421,7 @@ def input_rows(b, opt):
 
 
 def footer_rows(b, opt):
-    sep = (" │ ", DIM, "", None)
+    sep = (" · ", DIM, "", None)
     b.line([("Usage: 5h: 80% · 7d: 19% · 30d: 40% · 5h ↺1h35m", DIM, "", None)])
     left = [(" glm-5.3-flash", TEXT, "", None), sep, (" radian", MUTED, "", None), sep,
             (" adr/0030-rev2 +2", MUTED, "", None), sep, (" render-study", MUTED, "", None)]

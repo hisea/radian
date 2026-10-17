@@ -453,7 +453,7 @@ impl Footer {
         let separator = config
             .separator
             .clone()
-            .unwrap_or_else(|| " │ ".to_string());
+            .unwrap_or_else(|| " · ".to_string());
         let separator_style = match config.separator_style.as_deref() {
             None => ItemStyle::Role(Role::FooterSeparator),
             Some(name) => parse_item_style(name).unwrap_or_else(|error| {
@@ -654,7 +654,7 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
     let row = |left: Vec<Item>, right: Vec<Item>| Row {
         left,
         right,
-        separator: " │ ".to_string(),
+        separator: " · ".to_string(),
         separator_style: ItemStyle::Role(Role::FooterSeparator),
         position: RowPosition::Footer,
     };
@@ -710,7 +710,7 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     item("session"),
                 ],
                 right: Vec::new(),
-                separator: " │ ".to_string(),
+                separator: " · ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
                 position: RowPosition::Footer,
             },
@@ -728,7 +728,7 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     item("elapsed"),
                 ],
                 right: Vec::new(),
-                separator: " │ ".to_string(),
+                separator: " · ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
                 position: RowPosition::Footer,
             },
@@ -742,14 +742,14 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     no_symbol("context", "{bar} {percent}%"),
                 ],
                 right: vec![item("reasoning")],
-                separator: " │ ".to_string(),
+                separator: " · ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
                 position: RowPosition::Footer,
             },
             Row {
                 left: vec![item("tokens"), item("cost")],
                 right: Vec::new(),
-                separator: " │ ".to_string(),
+                separator: " · ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
                 position: RowPosition::Footer,
             },
@@ -1370,7 +1370,7 @@ mod tests {
     /// failed tool head, `•` for a one-line tool head). Each one is checked against the six
     /// fonts by `scripts/check-glyph-coverage.py` and listed in the README's coverage table. A
     /// new glyph makes this test fail until it is re-checked and added here.
-    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓•╭╰…▄▀";
+    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓•╭╰…▄▀·";
 
     /// The documented exceptions to the coverage rule (ADR 0027/10 and ADR 0035's
     /// 2026-10-16 notes): the owner picked the arc and the pulse after seeing them, braille is
