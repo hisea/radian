@@ -792,6 +792,14 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   box? Is the list readable at your width (10 rows plus `+N more`), does Esc close it without
   clearing the line, and does typing dismiss it? pty automation asserts the text and the keys,
   not the feel.
+- **`radian attach <id> --follow`** (ADR 0043 slice ①): start a session and ask it to run a long
+  command (a `shell` call with `sleep 30`), then in a second terminal attach to it. Does the tool
+  head appear in the attached view when the call starts and settle when it ends — while the
+  streaming reply text never appears, only the committed messages? Is `working…` on the last
+  line while the turn runs and gone after it? Do PageUp/PageDown, Shift-Up/Down and Ctrl-Home/End
+  scroll the way the main view does, does `q` leave without touching the session, and does the
+  footer read `attach · <id> · read-only` with the scroll position? pty automation asserts the
+  text and the one-second follow latency, not the feel.
 
 ### Thin redesign (ADR 0028, slice ⑦): one step per shape
 

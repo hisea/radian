@@ -10827,3 +10827,291 @@ async fn pty_mode_lead_switches_the_role_prompt_from_the_next_turn() {
         "only `<role>` may differ across the switch"
     );
 }
+
+// ---------- ADR 0043 slice ①: `radian attach` ----------
+
+/// The journal the attach tests read, returned with its writer **still open**: the appender
+/// really is a different process from the reader, and the writer's lock is held the whole time
+/// (attach never takes it — a reader that locked would block here). The messages are
+/// `ATTACH-OLD-USER`/`ATTACH-OLD-REPLY` followed by `extra` filler replies.
+async fn attach_session(dir: &Path, id: &str, extra: usize) -> radian_session::SessionJournal {
+    use agent_core::TranscriptJournal;
+    let path = dir.join(format!("{id}.jsonl"));
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        id,
+        radian_session::SessionCreatedData::new(dir.to_string_lossy().into_owned(), json!({})),
+    )
+    .expect("create the session file");
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user("ATTACH-OLD-USER"),
+        })
+        .await
+        .unwrap();
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 1,
+            message: agent_core::Message::assistant("ATTACH-OLD-REPLY"),
+        })
+        .await
+        .unwrap();
+    for index in 0..extra {
+        journal
+            .append(agent_core::JournalRecord::Message {
+                index: index + 2,
+                message: agent_core::Message::assistant(format!("ATTACH-FILLER-{index}")),
+            })
+            .await
+            .unwrap();
+    }
+    journal
+}
+
+/// The entries of `dir`, sorted; empty when the directory does not exist.
+fn dir_entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// `run/` under the app's `RADIAN_HOME`: where a control-port socket would appear. attach must
+/// never create one (it reads the journal directly, ADR 0043 D15).
+fn run_entries(home: &Path) -> Vec<String> {
+    dir_entries(&home.join("run"))
+}
+
+/// A1: `attach --follow` shows the committed messages of a journal **another process** is
+/// appending, and follows a new line within a second. The second turn's `working…` line comes
+/// from the durable `TurnStarted` and leaves with its `TurnFinished`.
+///
+/// Mutation: drop the follow (read the file once, never poll the tail again) → the new message
+/// and `working…` never arrive and the disappearance is never seen → FAILED.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_attach_follow_shows_new_committed_events() {
+    let _serial = pty_guard();
+    use agent_core::TranscriptJournal;
+    let dir = TempDir::new("attach-follow");
+    let journal = attach_session(dir.path(), "attach-me", 0).await;
+
+    let mut pty = Pty::spawn(
+        &[
+            "attach",
+            "attach-me",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--follow",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("ATTACH-OLD-REPLY", 10),
+        "the committed history is not on screen:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("attach · attach-me · read-only", 10),
+        "the attach footer is not on screen:\n{}",
+        pty.screen()
+    );
+
+    // A second turn opens; its first committed message follows the `TurnStarted`.
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::TurnStarted {
+            turn_id: "t-2".to_owned(),
+        })
+        .await
+        .unwrap();
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 2,
+            message: agent_core::Message::assistant("ATTACH-FOLLOW-NEW"),
+        })
+        .await
+        .unwrap();
+    assert!(
+        pty.wait_for_screen("ATTACH-FOLLOW-NEW", 1),
+        "the appended message did not arrive within a second:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("working…", 1),
+        "the open turn's `working…` line did not arrive within a second:\n{}",
+        pty.screen()
+    );
+
+    // The turn finishes: the durable line goes away.
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::TurnFinished {
+            turn_id: "t-2".to_owned(),
+            outcome: radian_session::TurnOutcome::Completed,
+            reason: None,
+            stop_reason: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        pty.wait_until_gone("working…", 1),
+        "the finished turn still shows `working…`:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"q");
+    assert_eq!(pty.wait_for_exit(3), Some(0), "q must quit the view");
+}
+
+/// A session id becomes a file name, so a path-like id must be refused before anything is read:
+/// one level above the session directory sits a real, readable session (the decoy), and its
+/// text must never reach the screen. The refusal is the same rule `--resume` applies
+/// (`validate_session_id`).
+///
+/// Mutation: drop the validation and build the path from the raw id → the decoy is opened, its
+/// `ATTACH-OLD-USER` shows, and the refusal line is missing → FAILED.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_attach_refuses_a_path_like_id_without_reading_it() {
+    let _serial = pty_guard();
+    let scratch = TempDir::new("attach-bad-id");
+    // `<scratch>/decoy.jsonl`, which is where `attach ../decoy` would resolve to.
+    let _decoy = attach_session(scratch.path(), "decoy", 0).await;
+    let sessions = scratch.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+
+    let mut pty = Pty::spawn(
+        &[
+            "attach",
+            "../decoy",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_raw("must be 1-128 characters of [A-Za-z0-9._-]", 5),
+        "the one-line id refusal is not on the terminal:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !String::from_utf8_lossy(&pty.raw()).contains("ATTACH-OLD-USER"),
+        "the file outside the session directory was read:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        {
+            assert!(
+                pty.wait_for_exit(3).is_some(),
+                "the refusal did not end the process:\n{}",
+                pty.screen()
+            );
+            // `wait_for_exit` reports the shell wrapper's status; the app's own code is the
+            // `EXITED:<n>` line it printed.
+            pty.app_exit_code()
+        },
+        Some(2),
+        "the refusal exits non-zero:\n{}",
+        pty.screen()
+    );
+}
+/// stays up, the journal's bytes are identical, no file appears in the session directory and
+/// no control-port socket is created. attach has no input path at all, so this holds by
+/// construction; the test is what keeps it so.
+///
+/// Mutation: route any of these keys anywhere (a command, a write, a control-port connection)
+/// → the byte, run/ or directory assertion FAILED.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_attach_swallows_every_other_key() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("attach-keys");
+    let home = TempDir::new("attach-keys-home");
+    // Held for the whole test: the writer lock stays taken, so a reader that tried to lock
+    // would block instead of showing the transcript.
+    let _journal = attach_session(dir.path(), "keys-me", 40).await;
+    let path = dir.path().join("keys-me.jsonl");
+
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "attach",
+            "keys-me",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("ATTACH-FILLER-39", 10),
+        "the committed history is not on screen:\n{}",
+        pty.screen()
+    );
+    let before_bytes = std::fs::metadata(&path).unwrap().len();
+    let before_run = run_entries(home.path());
+    let before_sessions = dir_entries(dir.path());
+
+    // Letters, punctuation, Enter, Tab, ctrl-f/ctrl-p, an arrow sequence and a bare Escape
+    // sequence's prefix are all neither scroll nor quit keys. Esc and Ctrl-C are the quit keys
+    // and are not sent.
+    for key in [
+        b"x".as_slice(),
+        b"/".as_slice(),
+        b"1".as_slice(),
+        b"!".as_slice(),
+        b"\r".as_slice(),
+        b"\t".as_slice(),
+        b"\x06".as_slice(),
+        b"\x10".as_slice(),
+        b"\x1b[A".as_slice(),
+    ] {
+        pty.send(key);
+    }
+    // PageUp is a scroll key: it moves the view and nothing else. Its effect on the footer is
+    // also the **synchronization** — keys are handled in the order they arrive, so the footer
+    // showing `paused` proves every key sent above it has been processed by now.
+    pty.send(b"\x1b[5~");
+    assert!(
+        pty.wait_for_screen("paused", 5),
+        "page up did not pause the follow:\n{}",
+        pty.screen()
+    );
+
+    // So the assertions below are about keys the app has already handled.
+    assert!(
+        pty.wait_for_screen("attach · keys-me · read-only", 2),
+        "the view stopped drawing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.child.try_wait().unwrap().is_none(),
+        "attach must not quit on a key it ignores"
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        before_bytes,
+        "a key press changed the journal"
+    );
+    assert_eq!(
+        run_entries(home.path()),
+        before_run,
+        "a key press opened a control-port connection"
+    );
+    assert_eq!(
+        dir_entries(dir.path()),
+        before_sessions,
+        "a key press created a file"
+    );
+
+    pty.send(b"q");
+    assert_eq!(pty.wait_for_exit(3), Some(0), "q must quit the view");
+}
