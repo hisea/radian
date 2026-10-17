@@ -19,6 +19,8 @@ pub(super) struct HerdrReporter {
     /// The token values herdr holds, as this process put them there: the diff base for
     /// "only the changed keys" (revision 1 decision 1).
     last_tokens: BTreeMap<String, String>,
+    /// The last `blocked` label sent (revision 1 decision 2).
+    last_label: Option<String>,
     /// `display_agent` is constant, so it rides the first metadata report only.
     display_agent_sent: bool,
 }
@@ -41,12 +43,12 @@ impl HerdrReporter {
             }
             self.reporter.report(&report, self.seq.next());
         }
-        self.report_metadata(app);
+        self.report_metadata(app, trust);
     }
 
-    /// Queues a `pane.report_metadata` when a token changed (revision 1 decision 1). An empty
-    /// diff queues nothing, so a live session sends nothing at all.
-    fn report_metadata(&mut self, app: &App) {
+    /// Queues a `pane.report_metadata` when a token or the `blocked` label changed (revision 1
+    /// decisions 1 and 2). An empty diff queues nothing, so a live session sends nothing at all.
+    fn report_metadata(&mut self, app: &App, trust: bool) {
         let changed = radian_host::herdr::token_diff(&self.last_tokens, &metadata_tokens(app));
         for (name, value) in &changed {
             match value {
@@ -58,9 +60,17 @@ impl HerdrReporter {
                 }
             }
         }
+        let label = radian_host::herdr::blocked_label(app.herdr_blocked().as_ref(), trust);
+        let mut state_labels = BTreeMap::new();
+        if let Some(label) = &label
+            && self.last_label.as_deref() != Some(label.as_str())
+        {
+            self.last_label = Some(label.clone());
+            state_labels.insert("blocked".to_owned(), label.clone());
+        }
         let metadata = radian_host::herdr::Metadata {
             tokens: changed,
-            state_labels: BTreeMap::new(),
+            state_labels,
             display_agent: (!self.display_agent_sent).then(|| radian_host::herdr::AGENT.to_owned()),
         };
         if metadata.is_empty() {
@@ -125,6 +135,7 @@ pub(super) fn herdr_reporter(
             resume,
             last: None,
             last_tokens: BTreeMap::new(),
+            last_label: None,
             display_agent_sent: false,
         },
         note,

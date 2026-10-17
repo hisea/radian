@@ -233,6 +233,19 @@ impl Metadata {
     }
 }
 
+/// The value under `blocked` for `state_labels` (ADR revision 1 decision 2): the H2 category, so
+/// the herdr sidebar shows which kind of wait it is. `None` when nothing is blocking.
+pub fn blocked_label(blocked: Option<&Blocked>, trust_modal: bool) -> Option<String> {
+    if trust_modal {
+        return Some("trust".to_owned());
+    }
+    match blocked {
+        Some(Blocked::Approval(_)) => Some("approval".to_owned()),
+        Some(Blocked::Question) => Some("question".to_owned()),
+        None => None,
+    }
+}
+
 /// Which of the current token values differ from what herdr was last told (ADR revision 1
 /// decision 1: "only the keys that changed"). A key that is unknown now but was reported before is
 /// cleared (`Some(None)`); a key that is unknown and was never reported is left out entirely.
@@ -904,6 +917,20 @@ mod tests {
         // Nothing changed: nothing is queued.
         let diff = token_diff(&last, &BTreeMap::new());
         assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn the_blocked_label_is_the_h2_category() {
+        assert_eq!(
+            blocked_label(Some(&Blocked::Approval("shell".into())), false),
+            Some("approval".to_owned())
+        );
+        assert_eq!(
+            blocked_label(Some(&Blocked::Question), false),
+            Some("question".to_owned())
+        );
+        assert_eq!(blocked_label(None, true), Some("trust".to_owned()));
+        assert_eq!(blocked_label(None, false), None);
     }
 
     /// The two kinds share the sender, and a later request of one kind does not drop a pending

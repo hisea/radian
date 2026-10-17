@@ -10416,9 +10416,81 @@ async fn pty_herdr_reports_metadata_changes() {
         1,
         "only the changed key: {second}"
     );
+    // Decision 2: the blocked label names the category, so the sidebar need not expand it.
+    assert_eq!(second["params"]["state_labels"]["blocked"], "approval");
     assert!(
-        !serde_json::to_string(&sock.snapshot()).unwrap().contains(secret),
+        !serde_json::to_string(&sock.snapshot())
+            .unwrap()
+            .contains(secret),
         "the command text must never be sent"
+    );
+    pty.quit();
+}
+
+/// ADR 0034: a structured question labels `blocked` as `question` - the
+/// category, never the question's body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_labels_a_question_as_question() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("herdr-question");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = dir.path().join("sessions");
+    let server = MockServer::start(ask_reply("HERDR-ASK-DONE")).await;
+    let sock = HerdrSocket::start("question");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "herdr-question",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &env_refs,
+        60,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("How should it load?", wait_positive()),
+        "the question form:\n{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("blocked", wait_positive()),
+        "{:?}",
+        sock.snapshot()
+    );
+    let blocked = sock
+        .of_method("pane.report_metadata")
+        .into_iter()
+        .find(|value| value["params"]["state_labels"]["blocked"] == "question")
+        .unwrap_or_else(|| panic!("a question label: {:?}", sock.snapshot()));
+    assert_eq!(blocked["params"]["tokens"].as_object().unwrap().len(), 1);
+    let state = sock
+        .snapshot()
+        .into_iter()
+        .find(|value| value["params"]["state"] == "blocked")
+        .expect("a blocked state report");
+    assert_eq!(state["params"]["message"], "question");
+    assert!(
+        !serde_json::to_string(&sock.snapshot())
+            .unwrap()
+            .contains("How should it load?"),
+        "the question body must never be sent"
     );
     pty.quit();
 }
