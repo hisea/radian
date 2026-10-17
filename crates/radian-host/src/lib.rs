@@ -14,6 +14,7 @@ pub mod atomic_write;
 pub mod auth;
 mod catalog;
 pub mod chatgpt_usage;
+pub mod command_footer;
 pub mod config;
 pub mod context;
 pub mod contrib;
@@ -95,18 +96,24 @@ pub use catalog::{
     resolve_offline, write_provider_models,
 };
 pub use chatgpt_usage::{ChatGptUsage, USAGE_BASE as CHATGPT_USAGE_BASE};
+pub use command_footer::{
+    COMMAND_TIMEOUT, CommandContributor, CommandSpec, FooterContext, FooterSnapshot,
+    MAX_OUTPUT_BYTES, command_specs, parse_command as parse_footer_command,
+};
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{
-    CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ControlConfig, ModelConfig,
-    PermissionsConfig, RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
-    parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
+    CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ConfigOrigin, ControlConfig,
+    ModelConfig, PermissionsConfig, RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig,
+    load as load_config, load_in_workspace as load_config_in_workspace, parse as parse_config,
+    resolve_allow_unix_sockets, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path,
 };
 pub use context::{ContextFiles, LoadedFile, load as load_context_files};
 pub use contrib::{
-    Contribution, ContributionStore, ContributorRunner, GitContributor, Segment, SegmentRole,
-    StatusContributor, Tick, spawn as spawn_contributor, spawn_gated as spawn_contributor_gated,
+    Contribution, ContributionStore, ContributorRunner, GitContributor, NOTICE_AFTER, Segment,
+    SegmentRole, StatusContributor, Tick, spawn as spawn_contributor,
+    spawn_gated as spawn_contributor_gated, spawn_once as spawn_contributor_once,
 };
 pub use control::{ControlServer, ControlTarget, SUBSCRIBER_BUFFER, SocketGuard};
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};

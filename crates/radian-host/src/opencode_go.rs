@@ -247,6 +247,7 @@ impl OpencodeGoUsage {
             item: "opencode-go.usage".to_owned(),
             segments: vec![Segment::new(text, SegmentRole::Normal)],
             stale: false,
+            symbol: None,
         }])
     }
 }
@@ -256,8 +257,8 @@ impl StatusContributor for OpencodeGoUsage {
         "opencode-go"
     }
 
-    fn items(&self) -> &'static [&'static str] {
-        &["opencode-go.usage"]
+    fn items(&self) -> Vec<String> {
+        vec!["opencode-go.usage".to_owned()]
     }
 
     fn period(&self) -> Duration {

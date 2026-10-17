@@ -664,8 +664,11 @@ fn run(
     }
     // ADR 0008: the config file provides defaults; every CLI flag wins. A refused file fails
     // startup before any session file exists.
+    // The config's provenance (ADR 0027, ADR 0031) is classified against
+    // the workspace: only a **user-level** file may enable a footer `command` item.
     let config =
-        radian_host::load_config(cli.config.as_deref()).map_err(|error| error.to_string())?;
+        radian_host::load_config_in_workspace(cli.config.as_deref(), Some(&workspace_path))
+            .map_err(|error| error.to_string())?;
     if config.read_only {
         eprintln!(
             "[config] schema_version {} is newer than the supported v{}; reading it read-only",
@@ -737,6 +740,12 @@ fn run(
         radian_host::user_home().as_deref(),
     );
     config_warnings.extend(socket_warnings);
+    // ADR 0027: the configured footer `command` items, parsed once. A
+    // project-level command is refused here with a warning; the specs that survive are spawned as
+    // background producers later (their values travel only through the contribution store).
+    let (command_specs, command_warnings) =
+        radian_host::command_specs(&config.tui.footer, config.origin);
+    config_warnings.extend(command_warnings);
     match &config.source {
         Some(path) => eprintln!("[config] {}", path.display()),
         None => eprintln!("[config] none"),
@@ -1779,6 +1788,38 @@ fn run(
         None
     };
     app.set_contributions(Arc::clone(&contributions));
+    // ADR 0027: the out-of-process footer `command` items. Each runs on
+    // its own background producer; its value enters the contribution store and nowhere else, so
+    // the renderer needs no special case. The command's stdin facts come from a snapshot the loop
+    // publishes (a safe handoff, never the app itself), published once here before the first run
+    // and again before every frame.
+    let footer_context = radian_host::FooterContext::new();
+    footer_context.set(app.footer_snapshot());
+    app.set_footer_context(Arc::clone(&footer_context));
+    for spec in command_specs {
+        let once = spec.period.is_none();
+        let contributor = Arc::new(radian_host::CommandContributor::new(
+            spec,
+            Arc::clone(&footer_context),
+            session_id.clone(),
+            Some(workspace_path.to_string_lossy().into_owned()),
+        ));
+        if once {
+            radian_host::spawn_contributor_once(
+                runtime.handle(),
+                contributor,
+                Arc::clone(&contributions),
+                Arc::clone(&on_tick),
+            );
+        } else {
+            radian_host::spawn_contributor(
+                runtime.handle(),
+                contributor,
+                Arc::clone(&contributions),
+                Arc::clone(&on_tick),
+            );
+        }
+    }
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
     let (mut guard, mut terminal) = match startup_terminal {
@@ -2660,6 +2701,10 @@ fn draw_frame(
     if let Some(millis) = SLOW_DRAW.get() {
         std::thread::sleep(Duration::from_millis(*millis));
     }
+    // ADR 0027: hand the background `command` items the footer's live
+    // facts. One pure state read and one lock write, before the frame; a command reads the latest
+    // snapshot when it next runs, so the UI never waits for one.
+    app.publish_footer_context();
     if FREEZE_DRAW.get().is_some_and(|path| path.exists()) {
         return Ok(true);
     }

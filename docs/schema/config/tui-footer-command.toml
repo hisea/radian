@@ -1,0 +1,22 @@
+# ADR 0027: an out-of-process footer item.
+# `[tui.footer.items.<id>] command = "<executable or command line>"` runs a user command as the
+# user (unsandboxed) and shows its first stdout line; `period` is its refresh period in seconds
+# (15–3600; 0 = run once at startup). The reader keeps both as item parameters; only a
+# **user-level** config may enable a command (a project-level file is refused with a warning).
+schema_version = 1
+
+[tui.footer]
+preset = "deck"
+glyphs = "unicode"
+
+[tui.footer.items.weather]
+command = "printf 72F"
+symbol = "w "
+period = 300
+
+[tui.footer.items.host_tag]
+command = "hostname"
+period = 0
+
+[[tui.footer.rows]]
+left = ["model", "weather", "host_tag"]

@@ -35,6 +35,24 @@ pub enum SegmentRole {
     Accent,
 }
 
+impl SegmentRole {
+    /// Parses a contribution style name (ADR 0027): a footer `command`'s
+    /// JSON `style` names one of the six roles a contribution may ask for, with common aliases. A
+    /// colour literal is **not** accepted: a contribution carries a theme role, never a raw
+    /// colour (ADR 0029).
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "normal" | "text" => Self::Normal,
+            "dim" | "dimmed" | "muted" => Self::Dim,
+            "warn" | "warning" => Self::Warn,
+            "ok" | "success" => Self::Ok,
+            "error" | "err" => Self::Error,
+            "accent" => Self::Accent,
+            _ => return None,
+        })
+    }
+}
+
 /// One styled piece of a contribution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
@@ -52,12 +70,16 @@ impl Segment {
 }
 
 /// One contributor's answer for one item. `stale` is set by the runner when a refresh failed:
-/// the segments are the last good value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// the segments are the last good value. `symbol` is an optional glyph drawn before the text
+/// (ADR 0027: a footer `command` may return `{"text","style","symbol"}`);
+/// it is plain text, never an escape sequence, so the theme and the footer's width measurement
+/// stay the only owners of colour and layout.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Contribution {
     pub item: String,
     pub segments: Vec<Segment>,
     pub stale: bool,
+    pub symbol: Option<String>,
 }
 
 /// The shared contribution store: producers write, the UI reads a snapshot. The dirty/revision
@@ -78,19 +100,32 @@ impl ContributionStore {
     /// Replaces one item's contribution, clearing `stale`. Returns whether the **value**
     /// changed: an identical value writes nothing and does not wake the UI.
     pub fn write(&self, item: &str, segments: Vec<Segment>) -> bool {
+        self.write_contribution(Contribution {
+            item: item.to_owned(),
+            segments,
+            stale: false,
+            symbol: None,
+        })
+    }
+
+    /// Replaces one item's whole contribution, including an optional `symbol` (ADR 0027 revision
+    /// 14 decision 4: a footer `command`'s JSON symbol). Clears `stale`. Returns whether the
+    /// **value** changed.
+    pub fn write_contribution(&self, contribution: Contribution) -> bool {
+        let item = contribution.item.clone();
         let mut items = self.items.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(current) = items.get(item)
+        if let Some(current) = items.get(&item)
             && !current.stale
-            && current.segments == segments
+            && current.segments == contribution.segments
+            && current.symbol == contribution.symbol
         {
             return false;
         }
         items.insert(
-            item.to_owned(),
+            item,
             Contribution {
-                item: item.to_owned(),
-                segments,
                 stale: false,
+                ..contribution
             },
         );
         drop(items);
@@ -167,8 +202,10 @@ impl ContributionStore {
 pub trait StatusContributor: Send + Sync {
     /// The contributor's stable id (for notices).
     fn id(&self) -> &'static str;
-    /// The item ids it provides (ADR 0027 C2 names them in a footer row or a widget).
-    fn items(&self) -> &'static [&'static str];
+    /// The item ids it provides (ADR 0027 C2 names them in a footer row or a widget). Owned so a
+    /// contributor whose item id comes from configuration (a footer `command` item, ADR 0027
+    /// revision 14 decision 4) can answer without leaking a `&'static str`.
+    fn items(&self) -> Vec<String>;
     /// How often the runner refreshes it.
     fn period(&self) -> Duration;
     /// One refresh. `Err` keeps the last value and marks it stale.
@@ -220,7 +257,7 @@ impl ContributorRunner {
                 self.failures = 0;
                 let mut changed = false;
                 for contribution in contributions {
-                    changed |= self.store.write(&contribution.item, contribution.segments);
+                    changed |= self.store.write_contribution(contribution);
                 }
                 Tick {
                     changed,
@@ -231,7 +268,7 @@ impl ContributorRunner {
                 self.failures += 1;
                 let mut changed = false;
                 for item in self.contributor.items() {
-                    changed |= self.store.mark_stale(item);
+                    changed |= self.store.mark_stale(&item);
                 }
                 Tick {
                     changed,
@@ -265,6 +302,24 @@ pub fn spawn(
                 on_tick(tick);
             }
             tokio::time::sleep(runner.period()).await;
+        }
+    })
+}
+
+/// Runs a contributor **once** at startup and never again (ADR 0027:
+/// `period = 0` means "startup only"). The task finishes after its one refresh; a failed
+/// refresh still marks the value stale. Use this instead of [`spawn`] for a one-shot producer.
+pub fn spawn_once(
+    handle: &tokio::runtime::Handle,
+    contributor: Arc<dyn StatusContributor>,
+    store: Arc<ContributionStore>,
+    on_tick: Arc<dyn Fn(Tick) + Send + Sync>,
+) -> tokio::task::JoinHandle<()> {
+    handle.spawn(async move {
+        let mut runner = ContributorRunner::new(contributor, store);
+        let tick = runner.tick().await;
+        if tick.changed || tick.notice.is_some() {
+            on_tick(tick);
         }
     })
 }
@@ -435,14 +490,17 @@ impl StatusContributor for GitContributor {
         "git"
     }
 
-    fn items(&self) -> &'static [&'static str] {
-        &[
+    fn items(&self) -> Vec<String> {
+        [
             "git_branch",
             "worktree",
             "git_root",
             "git_modified",
             "git_untracked",
         ]
+        .iter()
+        .map(|item| (*item).to_owned())
+        .collect()
     }
 
     fn period(&self) -> Duration {
@@ -470,6 +528,7 @@ impl StatusContributor for GitContributor {
                     item: "git_branch".to_owned(),
                     segments: vec![Segment::new(branch, SegmentRole::Normal)],
                     stale: false,
+                    symbol: None,
                 });
             }
             if let Some(name) = worktree {
@@ -479,6 +538,7 @@ impl StatusContributor for GitContributor {
                     item: "worktree".to_owned(),
                     segments: vec![Segment::new(name, SegmentRole::Normal)],
                     stale: false,
+                    symbol: None,
                 });
             }
             if let Some(repo) = repo {
@@ -486,6 +546,7 @@ impl StatusContributor for GitContributor {
                     item: "git_root".to_owned(),
                     segments: vec![Segment::new(repo, SegmentRole::Normal)],
                     stale: false,
+                    symbol: None,
                 });
             }
             if let Some((modified, untracked)) = changes {
@@ -493,11 +554,13 @@ impl StatusContributor for GitContributor {
                     item: "git_modified".to_owned(),
                     segments: vec![Segment::new(modified.to_string(), SegmentRole::Normal)],
                     stale: false,
+                    symbol: None,
                 });
                 contributions.push(Contribution {
                     item: "git_untracked".to_owned(),
                     segments: vec![Segment::new(untracked.to_string(), SegmentRole::Normal)],
                     stale: false,
+                    symbol: None,
                 });
             }
             Ok(contributions)
@@ -557,8 +620,8 @@ mod tests {
         fn id(&self) -> &'static str {
             "scripted"
         }
-        fn items(&self) -> &'static [&'static str] {
-            &["thing"]
+        fn items(&self) -> Vec<String> {
+            vec!["thing".to_owned()]
         }
         fn period(&self) -> Duration {
             Duration::from_secs(1)
@@ -578,6 +641,7 @@ mod tests {
             item: "thing".to_owned(),
             segments: vec![Segment::new(text, SegmentRole::Normal)],
             stale: false,
+            symbol: None,
         }]
     }
 

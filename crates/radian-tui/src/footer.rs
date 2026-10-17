@@ -393,6 +393,24 @@ impl Footer {
             }),
         };
         let transparent = config.transparent.unwrap_or(false);
+        // The ids configured as out-of-process `command` items (ADR 0027).
+        // Such an id is not an unknown-id typo: until the background producer publishes a value
+        // the item hides (never a raw id), and `{value}` is its one placeholder. Only an id no
+        // built-in claims can be a command item — a built-in always wins its id.
+        let command_ids: std::collections::BTreeSet<String> = config
+            .items
+            .iter()
+            .filter(|(id, item)| components::builtin(id).is_none() && is_command_item(item))
+            .map(|(id, _)| id.clone())
+            .chain(
+                config
+                    .rows
+                    .iter()
+                    .flat_map(|row| row.left.iter().chain(row.right.iter()))
+                    .filter(|item| components::builtin(&item.id).is_none() && is_command_item(item))
+                    .map(|item| item.id.clone()),
+            )
+            .collect();
         let rows: Vec<Row> = if config.rows.is_empty() {
             // The built-in preset, then the per-field `items` config on top.
             let mut rows = preset_rows(preset, glyphs);
@@ -416,12 +434,16 @@ impl Footer {
                     left: row
                         .left
                         .iter()
-                        .filter_map(|item| resolve_item(item, &config.items, &mut warnings))
+                        .filter_map(|item| {
+                            resolve_item(item, &config.items, &command_ids, &mut warnings)
+                        })
                         .collect(),
                     right: row
                         .right
                         .iter()
-                        .filter_map(|item| resolve_item(item, &config.items, &mut warnings))
+                        .filter_map(|item| {
+                            resolve_item(item, &config.items, &command_ids, &mut warnings)
+                        })
                         .collect(),
                     separator: row.separator.clone().unwrap_or_else(|| separator.clone()),
                     separator_style: separator_style.clone(),
@@ -611,10 +633,17 @@ fn is_bare(config: &TuiFooterItemConfig) -> bool {
         && !config.disabled
 }
 
+/// Whether a configured item carries a `command` (ADR 0027): the id is an
+/// out-of-process footer component.
+fn is_command_item(config: &TuiFooterItemConfig) -> bool {
+    config.params.iter().any(|(key, _)| key == "command")
+}
+
 /// Resolves one configured item, recording its warnings. `None` when it is disabled.
 fn resolve_item(
     config: &TuiFooterItemConfig,
     items: &std::collections::BTreeMap<String, TuiFooterItemConfig>,
+    command_ids: &std::collections::BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) -> Option<Item> {
     // A bare id takes the per-field `items` config; an inline table is used as written.
@@ -627,7 +656,10 @@ fn resolve_item(
         return None;
     }
     let id = effective.id.clone();
-    if components::builtin(&id).is_none() {
+    // A `command` id is known (its producer publishes it); an ordinary id no built-in claims is
+    // shown raw until a contributor publishes it, with one warning.
+    let command = command_ids.contains(&id);
+    if !command && components::builtin(&id).is_none() {
         warnings.push(format!(
             "tui.footer: unknown item {id:?}; showing it as written unless a contributor \
              publishes it"
@@ -654,7 +686,7 @@ fn resolve_item(
         }
     }
     if let Some(format) = &effective.format {
-        validate_format(&id, format, warnings);
+        validate_format(&id, format, command, warnings);
     }
     Some(Item {
         id: id.clone(),
@@ -668,7 +700,7 @@ fn resolve_item(
         thresholds,
         params: effective.params.clone(),
         disabled: false,
-        unknown: components::builtin(&id).is_none(),
+        unknown: !command && components::builtin(&id).is_none(),
     })
 }
 
@@ -709,7 +741,7 @@ fn merge_into_item(item: &mut Item, config: &TuiFooterItemConfig, warnings: &mut
         item.symbol_style = Some(symbol_style);
     }
     if let Some(format) = &config.format {
-        validate_format(&item.id, format, warnings);
+        validate_format(&item.id, format, false, warnings);
         item.format = Some(format.clone());
     }
     if let Some(style) = parse_style_or_warn(config.style.as_deref(), &item.id, "style", warnings) {
@@ -732,8 +764,14 @@ fn merge_into_item(item: &mut Item, config: &TuiFooterItemConfig, warnings: &mut
 }
 
 /// Warns about an unknown placeholder or a bad inline style in a format, once at parse time.
-fn validate_format(id: &str, format: &str, warnings: &mut Vec<String>) {
-    let known = components::placeholders(id).unwrap_or(&[]);
+fn validate_format(id: &str, format: &str, command: bool, warnings: &mut Vec<String>) {
+    // A command item's data is the store's `{value}` (ADR 0027); every
+    // other id takes the component registry's placeholder list.
+    let known: &[&str] = if command {
+        &["value"]
+    } else {
+        components::placeholders(id).unwrap_or(&[])
+    };
     for placeholder in placeholders(format) {
         if !known.contains(&placeholder.as_str()) {
             warnings.push(format!(
@@ -784,7 +822,7 @@ fn placeholders(format: &str) -> Vec<String> {
 
 /// The used fraction of the context window, `None` when either the budget or the usage report
 /// is unknown (ADR 0027 item 4: the gap gauge and the `context` item share it).
-fn context_fraction(session: &radian_host::ProjectionRead<'_>) -> Option<f64> {
+pub(crate) fn context_fraction(session: &radian_host::ProjectionRead<'_>) -> Option<f64> {
     let budget = session.context_window()?;
     let used = session.budget()?.projected_tokens;
     (budget > 0).then(|| used as f64 / budget as f64)
@@ -955,7 +993,7 @@ fn render_item(app: &App, item: &Item) -> Option<Piece> {
     let segments = expand_spans(&format, &data).unwrap_or_else(|_| vec![(format.clone(), None)]);
     let default_style = default_style(app, item, &data, component);
     let mut spans: Vec<(String, Style)> = Vec::new();
-    let symbol = symbol_for(app, item, component);
+    let symbol = symbol_for(app, item, &data, component);
     if !symbol.is_empty() {
         let style = item
             .symbol_style
@@ -977,10 +1015,13 @@ fn render_item(app: &App, item: &Item) -> Option<Piece> {
     })
 }
 
-/// The item's own `symbol`/`icon`, else the component's default glyph under the footer's set.
-fn symbol_for(app: &App, item: &Item, component: &dyn Component) -> String {
+/// The item's own `symbol`/`icon` first, then a symbol the data carries (a command's JSON
+/// `symbol`, ADR 0027), then the component's default glyph under the
+/// footer's set.
+fn symbol_for(app: &App, item: &Item, data: &ItemData, component: &dyn Component) -> String {
     item.icon
         .clone()
+        .or_else(|| data.symbol.clone())
         .unwrap_or_else(|| components::glyph_of(component, app.footer_glyphs()).to_string())
 }
 

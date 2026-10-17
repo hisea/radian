@@ -18,6 +18,7 @@
 | `tui-input-style.toml` | ADR 0035 与 2026-10-16 补充：`tui.input_style = "lines" | "box"`（默认 `lines`；`box` 是半包框）。`bar` 已移除：写下它与其他未知值一样警告回退 `lines`。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0035 |
 | `tui-footer.toml` | ADR 0027 C2：`[tui.footer]` 的 preset/separator/glyphs/context_line/transparent 与 `[[tui.footer.rows]]` 的 left/right（字符串或表两种条目写法、icon/format/style/priority/thresholds 与条目专属参数）。 | **接受**，0 拒绝；未知条目 id 由 TUI 原样显示并警告，不拒绝文件。 | §2 / ADR 0027 |
 | `tui-footer-items.toml` | ADR 0027：`[tui.footer.items.<id>]` 的 symbol/style/symbol_style/format/disabled，`separator_style`（角色或 starship 颜色），`tui.usage_period_secs`。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
+| `tui-footer-command.toml` | ADR 0027：`[tui.footer.items.<id>] command = "<可执行文件或命令行>"` 与 `period = <秒>`（15–3600；`0` = 只在启动时跑一次）。读取器把两者作为条目参数原样携带；**只有用户级配置**能启用 `command`（项目级文件被拒绝并警告）。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
 | `tui-widgets.toml` | ADR 0027 C3：`[tui.widgets]` 的 `above_input`/`below_input` 在输入框上/下放一行贡献者条目（条目 id）。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
 | `providers.toml` | ADR 0026 D10:`[providers.<名字>]` 具名 provider(`kind` + `base_url`),`model.provider = "<名字>"` 选用。ADR 0014 Q2:同名表下 `reasoning_replay` 可覆盖目录的推理回传字段(字段名串,或 `false` 关掉)。 | **接受**，0 拒绝；名字非法/与内建重名是另一个拒绝场景（读取器报 `providers.<name>` 错误）。 | §2 / ADR 0026 D10 / ADR 0014 Q2 |
 | `model-retries.toml` | ADR 0017:`[model] retries = 3` 是暂时性模型错误在一次模型调用内部(提交前)的重试上限;默认 3,`0` 关闭。非负整数,负数/非整数拒绝。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0017 |
