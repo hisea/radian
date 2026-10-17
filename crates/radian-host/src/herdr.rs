@@ -3,14 +3,19 @@
 //!
 //! The socket protocol (herdr 0.9.5, protocol 22; `docs/socket-api.mdx` v0.9.5): newline-
 //! delimited JSON over a Unix socket, one request per line, and the response echoes the
-//! request's `id`. We use three methods - `pane.report_agent` (lifecycle state),
+//! request's `id`. We use four methods - `pane.report_agent` (lifecycle state),
+//! `pane.report_agent_session` (session identity, ADR 0034),
 //! `pane.report_metadata` (display-only: `display_agent`, `state_labels`, `tokens`) and
 //! `pane.release_agent` - and never parse the response beyond "a line arrived".
 //!
-//! The shape below was captured from the reference client, the `herdr` 0.9.5 CLI, with
-//! `HERDR_SOCKET_PATH` pointed at a test listener (`herdr pane report-metadata ...`, 2026-10-17):
+//! The shapes below were captured from the reference client, the `herdr` 0.9.5 CLI, with
+//! `HERDR_SOCKET_PATH` pointed at a test listener (`herdr pane report-agent-session ... -- radian
+//! --resume sid` and `herdr pane report-metadata ...`, 2026-10-17):
 //!
 //! ```text
+//! {"id":"cli:request","method":"pane.report_agent_session","params":{"pane_id":"w1:p1",
+//!  "source":"radian","agent":"radian","seq":11,"agent_session_id":"sid-123",
+//!  "agent_session_path":"/tmp/x.jsonl","resume_argv":["radian","--resume","sid-123"]}}
 //! {"id":"cli:request","method":"pane.report_metadata","params":{"pane_id":"w1:p1",
 //!  "source":"radian","agent":"radian","applies_to_source":"radian","display_agent":"radian",
 //!  "state_labels":{"blocked":"approval"},"tokens":{"model":"gpt-5","context":"42%"},
@@ -213,6 +218,42 @@ pub fn report_line(env: &HerdrEnv, report: &Report, seq: u64, id: &str) -> Strin
     line(&serde_json::json!({ "id": id, "method": "pane.report_agent", "params": params }))
 }
 
+/// The session identity alone (ADR 0034): `pane.report_agent_session`, sent
+/// at startup and on a session change. herdr needs it as its own method to mark the pane's entry
+/// as an active named agent (`herdr agent prompt` refuses a pane without one); the state report
+/// keeps carrying `agent_session_id`/`agent_session_path` as before.
+pub fn agent_session_line(
+    env: &HerdrEnv,
+    session: &SessionIdentity,
+    resume_argv: Option<&[String]>,
+    seq: u64,
+    id: &str,
+) -> String {
+    let mut params = serde_json::json!({
+        "pane_id": env.pane_id,
+        "source": SOURCE,
+        "agent": AGENT,
+        "seq": seq,
+        "agent_session_id": session.id,
+        "agent_session_path": session.path.to_string_lossy(),
+    });
+    if let Some(argv) = resume_argv {
+        params.as_object_mut().expect("an object").insert(
+            "resume_argv".into(),
+            serde_json::Value::Array(
+                argv.iter()
+                    .map(|arg| serde_json::Value::String(arg.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    line(&serde_json::json!({
+        "id": id,
+        "method": "pane.report_agent_session",
+        "params": params,
+    }))
+}
+
 /// The display-only metadata radian reports (ADR 0034 and 2). Every field
 /// is optional: only what changed is queued, so an empty `Metadata` is never sent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -386,6 +427,7 @@ impl Seq {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     State,
+    Session,
     Metadata,
 }
 
@@ -474,6 +516,15 @@ impl Reporter {
         self.queue(Request {
             kind: Kind::State,
             line: report_line(&self.env, report, seq, &self.id()),
+            retry: true,
+        });
+    }
+
+    /// Queues the session identity (ADR 0034).
+    pub fn session(&self, session: &SessionIdentity, resume_argv: Option<&[String]>, seq: u64) {
+        self.queue(Request {
+            kind: Kind::Session,
+            line: agent_session_line(&self.env, session, resume_argv, seq, &self.id()),
             retry: true,
         });
     }
@@ -844,6 +895,34 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_session_line_has_the_captured_shape() {
+        let session = SessionIdentity {
+            id: "sid-123".into(),
+            path: PathBuf::from("/tmp/x.jsonl"),
+        };
+        let argv = vec![
+            "radian".to_owned(),
+            "--resume".to_owned(),
+            "sid-123".to_owned(),
+        ];
+        let text = agent_session_line(&env(), &session, Some(&argv), 11, "r");
+        let value: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(value["method"], "pane.report_agent_session");
+        assert_eq!(value["params"]["pane_id"], "w1:p1");
+        assert_eq!(value["params"]["source"], "radian");
+        assert_eq!(value["params"]["agent"], "radian");
+        assert_eq!(value["params"]["seq"], 11);
+        assert_eq!(value["params"]["agent_session_id"], "sid-123");
+        assert_eq!(value["params"]["agent_session_path"], "/tmp/x.jsonl");
+        assert_eq!(value["params"]["resume_argv"][2], "sid-123");
+        // A rejected resume command is left out; the identity still goes.
+        let without = agent_session_line(&env(), &session, None, 12, "r");
+        let value: serde_json::Value = serde_json::from_str(without.trim()).unwrap();
+        assert!(value["params"].get("resume_argv").is_none());
+        assert_eq!(value["params"]["agent_session_id"], "sid-123");
+    }
+
+    #[test]
     fn the_metadata_line_carries_only_what_changed() {
         let mut tokens = BTreeMap::new();
         tokens.insert("model".to_owned(), Some("gpt-5".to_owned()));
@@ -933,8 +1012,8 @@ mod tests {
         assert_eq!(blocked_label(None, false), None);
     }
 
-    /// The two kinds share the sender, and a later request of one kind does not drop a pending
-    /// request of another.
+    /// The three kinds share the sender, and a later request of one kind does not drop a pending
+    /// request of another: the startup state report still reaches herdr first.
     #[test]
     fn the_slots_keep_the_latest_per_kind_and_the_queue_order() {
         let (socket, listener) = listener("kinds");
@@ -944,13 +1023,12 @@ mod tests {
         };
         let reporter = Reporter::with_timeouts(env, TEST_TIMEOUT, TEST_TIMEOUT);
         reporter.report(&Report::new(State::Idle), 1);
-        let mut tokens = BTreeMap::new();
-        tokens.insert("model".to_owned(), Some("a".to_owned()));
-        reporter.metadata(
-            &Metadata {
-                tokens,
-                ..Metadata::default()
+        reporter.session(
+            &SessionIdentity {
+                id: "sid".into(),
+                path: PathBuf::from("/tmp/x.jsonl"),
             },
+            None,
             2,
         );
         reporter.metadata(&Metadata::default(), 3); // empty: nothing queued
@@ -967,7 +1045,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(second_line.trim()).unwrap()["method"],
-            "pane.report_metadata"
+            "pane.report_agent_session"
         );
         reporter.shutdown();
         let _ = std::fs::remove_file(&socket);

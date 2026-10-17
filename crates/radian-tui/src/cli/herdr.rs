@@ -83,6 +83,15 @@ impl HerdrReporter {
     pub(super) fn release(&self) {
         self.reporter.release(self.seq.next());
     }
+
+    /// Reports the session identity as its own `pane.report_agent_session` (revision 1 decision
+    /// 6): herdr marks the pane as an active named agent by it, which is what `herdr agent prompt`
+    /// needs. The startup order matters - the state report must already hold the pane, or herdr
+    /// refuses the `resume_argv` - so the caller runs this after the first `maybe_report`.
+    pub(super) fn report_session(&self) {
+        self.reporter
+            .session(&self.session, self.resume.as_deref(), self.seq.next());
+    }
 }
 
 /// The metadata tokens radian reports (revision 1 decision 1): `model` (the id, the short name),

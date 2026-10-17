@@ -10495,6 +10495,68 @@ async fn pty_herdr_labels_a_question_as_question() {
     pty.quit();
 }
 
+/// ADR 0034: the session identity goes as its own
+/// `pane.report_agent_session`, after the state report that holds the pane (herdr refuses a
+/// `resume_argv` from a reporter that does not hold the pane yet).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_the_session_identity() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("HERDR-IDENTITY-OK")]).await;
+    let dir = TempDir::new("herdr-identity");
+    let sock = HerdrSocket::start("identity");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "herdr-identity",
+        ],
+        &env_refs,
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_method("pane.report_agent_session", wait_positive()),
+        "the session identity report: {:?}",
+        sock.snapshot()
+    );
+    let methods: Vec<String> = sock
+        .snapshot()
+        .iter()
+        .map(|value| value["method"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    let state_at = methods
+        .iter()
+        .position(|method| method == "pane.report_agent")
+        .expect("a state report");
+    let session_at = methods
+        .iter()
+        .position(|method| method == "pane.report_agent_session")
+        .expect("a session report");
+    assert!(state_at < session_at, "{methods:?}");
+    let identity = sock.of_method("pane.report_agent_session").remove(0);
+    assert_eq!(identity["params"]["pane_id"], "w1:p1");
+    assert_eq!(identity["params"]["source"], "radian");
+    assert_eq!(identity["params"]["agent"], "radian");
+    assert_eq!(identity["params"]["agent_session_id"], "herdr-identity");
+    assert_eq!(identity["params"]["resume_argv"][0], "radian");
+    assert_eq!(identity["params"]["resume_argv"][1], "--resume");
+    assert_eq!(identity["params"]["resume_argv"][2], "herdr-identity");
+    pty.quit();
+}
+
 /// An approval is `blocked` with the tool name only; the command text is never sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
