@@ -172,6 +172,10 @@ pub fn command_specs(
         let Some(command) = param(item, "command") else {
             continue;
         };
+        // A disabled item is hidden everywhere, so its command is never run.
+        if item.disabled {
+            continue;
+        }
         if origin == ConfigOrigin::Project {
             warnings.push(format!(
                 "tui.footer.items.{id}.command is ignored: only user-level configuration may \
@@ -562,5 +566,36 @@ mod tests {
         assert!(parse_output("{\"text\": }").is_err());
         assert!(parse_output(r#"{"style":"warn"}"#).is_err(), "no text");
         assert!(parse_output(r#"{"text":"x","style":"neon"}"#).is_err());
+    }
+
+    fn footer_with(id: &str, params: &[(&str, &str)], disabled: bool) -> TuiFooterConfig {
+        let mut footer = TuiFooterConfig::default();
+        footer.items.insert(
+            id.to_owned(),
+            crate::config::TuiFooterItemConfig {
+                id: id.to_owned(),
+                disabled,
+                params: params
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                    .collect(),
+                ..Default::default()
+            },
+        );
+        footer
+    }
+
+    #[test]
+    fn a_disabled_command_is_not_a_spec_and_a_malformed_one_warns() {
+        let footer = footer_with("x", &[("command", "printf hi")], true);
+        let (specs, warnings) = command_specs(&footer, ConfigOrigin::User);
+        assert!(specs.is_empty(), "a disabled item's command never runs");
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let footer = footer_with("x", &[("command", "printf 'unterminated")], false);
+        let (specs, warnings) = command_specs(&footer, ConfigOrigin::User);
+        assert!(specs.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("command"), "{warnings:?}");
     }
 }

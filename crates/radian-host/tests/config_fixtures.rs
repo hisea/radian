@@ -33,6 +33,7 @@ fn the_reader_matches_the_reference_checker() {
     let cases = [
         ("minimal.toml", "accept"),
         ("tui-theme-colors.toml", "accept"),
+        ("tui-footer-command.toml", "accept"),
         ("providers.toml", "accept"),
         ("model-retries.toml", "accept"),
         ("skills-extra-paths.toml", "accept"),

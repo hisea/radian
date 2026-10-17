@@ -1495,8 +1495,9 @@ source files is empty after the run.
 | H11 | the stdin JSON carries every documented fact | `context_percent` is written as `null` | `command_footer::the_stdin_is_the_documented_json_context` FAILED |
 | H12 | the output never reaches a journal | a `std::fs::write("/tmp/radian-footer-journal", &buffer)` added in `run` | `command_footer::the_command_runner_has_no_journal_or_herdr_path` FAILED (`command_footer.rs` reached `std::fs`/journal) |
 | H13 | the command line is split with no shell | whitespace no longer separates words (the join branch is a no-op) | lib `command_footer::tests::command_lines_split_without_a_shell` FAILED (`printf hi` became one argv word) |
+| H14 | a `disabled = true` command item is never run | the disabled check in `command_specs` is removed | lib `command_footer::tests::a_disabled_command_is_not_a_spec_and_a_malformed_one_warns` FAILED |
 
-13/13 caught; every mutated file compared byte-identical after its mutation.
+14/14 caught; every mutated file compared byte-identical after its mutation.
 
 **Old-code check.** The runner module and its tests are new, so on the pre-change tree the
 command tests do not compile (no `command_footer` module). The behaviours they pin are the
