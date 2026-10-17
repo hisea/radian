@@ -294,6 +294,19 @@ fn structured(output: &ToolOutput) -> Value {
     output.structured.clone().expect("structured output")
 }
 
+/// What the model reads: the result's text parts. The providers never send `structured`.
+fn model_text(output: &ToolOutput) -> String {
+    output
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            agent_core::ContentPart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn text_reply(text: &str) -> Reply {
     Reply::sse(&[
         chunk(json!({"role": "assistant", "content": text}), None),
@@ -412,6 +425,20 @@ async fn wait_task_returns_a_question_then_the_finish() {
     assert_eq!(value["task"], "t1");
     assert_eq!(value["questions"][0]["prompt"], "Which branch?");
     let request_id = value["request_id"].as_str().unwrap().to_owned();
+    // The lead can only answer what it can read: the request id must be in the text.
+    assert!(
+        model_text(&output).contains(&request_id),
+        "the request id must reach the model: {}",
+        model_text(&output)
+    );
+    // The question holds the task's turn open: it is running (the driver forwards the turn
+    // start to the host since 2026-10-17; before, `running` stayed false for the whole turn).
+    let status = structured(
+        &run_tool(&session, "task_status", json!({"id": "t1"}))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(status["running"], true, "{status}");
 
     run_tool(
         &session,
@@ -794,17 +821,37 @@ async fn status_and_list_report_every_task() {
     request.brief = Some("do it".into());
     fixture.registry.spawn(request).await.expect("spawn");
 
-    let status = structured(
-        &run_tool(&session, "task_status", json!({"id": "t1"}))
-            .await
-            .unwrap(),
-    );
+    let status_output = run_tool(&session, "task_status", json!({"id": "t1"}))
+        .await
+        .unwrap();
+    let status = structured(&status_output);
     assert_eq!(status["task"], "t1");
     assert!(status["state"].is_string(), "{status}");
-    let list = structured(&run_tool(&session, "list_tasks", json!({})).await.unwrap());
+    assert!(status["usage"].is_object(), "ADR 0030 O4's usage: {status}");
+    // The facts must reach the model, not only the structured value it never sees.
+    let text = model_text(&status_output);
+    for field in [
+        "\"last_tool\"",
+        "\"last_write\"",
+        "\"summary\"",
+        "\"usage\"",
+        "\"diff_stat\"",
+    ] {
+        assert!(
+            text.contains(field),
+            "{field} is missing from the text: {text}"
+        );
+    }
+    let list_output = run_tool(&session, "list_tasks", json!({})).await.unwrap();
+    let list = structured(&list_output);
     let tasks = list["tasks"].as_array().expect("a tasks array");
     assert_eq!(tasks.len(), 1, "{list}");
     assert_eq!(tasks[0]["task"], "t1");
+    assert!(
+        model_text(&list_output).contains("\"task\":\"t1\""),
+        "list_tasks must name each task in its text: {}",
+        model_text(&list_output)
+    );
     fixture.registry.remove("t1", true).await.expect("remove");
 }
 

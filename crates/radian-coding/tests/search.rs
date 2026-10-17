@@ -333,10 +333,43 @@ async fn grep_caps_the_context_argument() {
     dir.write("ws/a.txt", "hit\n");
     let tools = tools(&root);
 
-    let failure = call(&tools, "grep", json!({"pattern": "hit", "context": 99}))
+    // Above the limit is cut, not refused (a refused call cost the model a round trip).
+    let out = call(&tools, "grep", json!({"pattern": "hit", "context": 99}))
         .await
-        .unwrap_err();
-    assert_eq!(failure.code, "invalid_arguments", "{failure:?}");
+        .unwrap();
+    assert!(text(&out).contains("a.txt:1:hit"), "{}", text(&out));
+    assert!(
+        text(&out).contains("[context cut to 30 lines]"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(out.structured.as_ref().unwrap()["context"], 30);
+    // A request within the limit says nothing about a cut.
+    let within = call(&tools, "grep", json!({"pattern": "hit", "context": 30}))
+        .await
+        .unwrap();
+    assert!(!text(&within).contains("context cut"), "{}", text(&within));
+}
+
+/// The schema the model validates against must not refuse a large `context` before the tool
+/// can cut it (agent-core validates arguments against the spec before the call).
+#[tokio::test]
+async fn grep_schema_does_not_cap_context_below_the_cut() {
+    let dir = TempDir::new("grep-schema");
+    let root = dir.file("ws");
+    dir.write("ws/a.txt", "x\n");
+    let session = tools(&root).open_session().await.unwrap();
+    let schema = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "grep")
+        .expect("grep spec")
+        .input_schema
+        .clone();
+    assert!(
+        schema["properties"]["context"].get("maximum").is_none(),
+        "{schema}"
+    );
 }
 
 // ---------- grep: output, options, binary and regex errors ----------

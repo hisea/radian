@@ -585,6 +585,36 @@ pub async fn run(
     call: &ToolCall,
     cx: ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
+    dispatch(lead, call, cx).await.map(with_visible_facts)
+}
+
+/// How much of a lead tool's `structured` facts the model-visible text carries. Every field in
+/// it is already bounded (`TASK_SUMMARY_LIMIT_CHARS`, `TASK_DETAIL_LIMIT_CHARS`); this caps the
+/// whole document, e.g. a `list_tasks` over many tasks.
+pub const LEAD_FACTS_LIMIT_CHARS: usize = 24_000;
+
+/// Appends a lead tool's `structured` facts to its text as one JSON line. The providers send a
+/// tool result's text only (`ToolResult.structured` never reaches the model), so a fact that
+/// lived only there - a wait result's `request_id`, `task_status`'s last tool, last write,
+/// summary and diff - was invisible to the lead (found 2026-10-17: the lead could not answer a
+/// task's question). The structured value itself is unchanged for the journal and hosts.
+fn with_visible_facts(mut output: ToolOutput) -> ToolOutput {
+    let Some(structured) = &output.structured else {
+        return output;
+    };
+    let (facts, truncated) = truncate_chars(&structured.to_string(), LEAD_FACTS_LIMIT_CHARS);
+    let marker = if truncated { " [truncated]" } else { "" };
+    output.content.push(agent_core::ContentPart::text(format!(
+        "facts: {facts}{marker}"
+    )));
+    output
+}
+
+async fn dispatch(
+    lead: &LeadSession,
+    call: &ToolCall,
+    cx: ToolContext<'_>,
+) -> Result<ToolOutput, ToolFailure> {
     match call.name.as_str() {
         "spawn_task" => lead.spawn(call).await,
         "send_agent" => lead.send_agent(call).await,
@@ -1300,6 +1330,9 @@ struct Observed {
     last_event_ts: Option<String>,
     last_write_ts: Option<String>,
     last_assistant: Option<String>,
+    /// The task's token totals and fee so far (ADR 0030 O4's `usage`); `null` fields are
+    /// unknown, never a measured zero.
+    usage: Value,
 }
 
 impl Observed {
@@ -1311,11 +1344,17 @@ impl Observed {
             };
         };
         let _ = observer.poll();
-        let (state, last_tool) = {
+        let (state, last_tool, usage) = {
             let read = observer.projection();
             (
                 read.turn().label().to_owned(),
                 read.last_tool().map(|tool| tool.name.clone()),
+                json!({
+                    "input": read.usage_input(),
+                    "output": read.usage_output(),
+                    "cache_read": read.usage_cache_read(),
+                    "cost_micros": read.cost_micros(),
+                }),
             )
         };
         let last_assistant = observer
@@ -1341,6 +1380,7 @@ impl Observed {
             last_event_ts: observer.last_event_ts().map(str::to_owned),
             last_write_ts: observer.last_write_ts().map(str::to_owned),
             last_assistant,
+            usage,
         }
     }
 }
@@ -1391,6 +1431,7 @@ fn observed_status(record: &Arc<TaskRecord>) -> Value {
         "last_tool": observed.last_tool,
         "last_event": observed.last_event_ts,
         "last_write": observed.last_write_ts,
+        "usage": observed.usage,
         "summary": summary,
         "summary_truncated": summary_truncated,
         "isolation": record.isolation.as_str(),

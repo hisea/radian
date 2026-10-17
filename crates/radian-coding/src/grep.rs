@@ -57,8 +57,7 @@ pub(crate) fn schema() -> serde_json::Value {
             "context": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 10,
-                "description": "Lines of context to show before and after each match; defaults to 0."
+                "description": "Lines of context to show before and after each match; defaults to 0. A larger value than the limit (30) is cut to it, not refused."
             },
             "max_matches": {
                 "type": "integer",
@@ -103,18 +102,12 @@ pub(crate) async fn run(
         Some(pattern) => Some(search::compile_glob(pattern)?),
         None => None,
     };
-    let context = args.context.unwrap_or(0);
-    if context as usize > limits.max_grep_context {
-        return Err(args::invalid(
-            "grep",
-            arguments,
-            [format!(
-                "`context` {context} exceeds the {} line limit",
-                limits.max_grep_context
-            )],
-        ));
-    }
-    let context = context as usize;
+    // A model asking for more context than the limit gets the limit, not a refused call: the
+    // schema's old `maximum` made 7 dogfood calls fail validation on 2026-10-17 (asks of 12-30),
+    // each costing a model round trip. The cut is said in the output.
+    let requested = usize::try_from(args.context.unwrap_or(0)).unwrap_or(usize::MAX);
+    let context = requested.min(limits.max_grep_context);
+    let context_cut = requested > context;
     let cap = match args.max_matches {
         Some(0) => {
             return Err(fail(
@@ -215,6 +208,12 @@ pub(crate) async fn run(
             truncated = true;
             break;
         }
+    }
+    if context_cut {
+        out.push_str(&format!(
+            "[context cut to {} lines]\n",
+            limits.max_grep_context
+        ));
     }
     if truncated {
         out.push_str(&format!("[truncated: showing the first {total} matches]\n"));

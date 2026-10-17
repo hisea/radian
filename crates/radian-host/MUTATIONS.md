@@ -1547,3 +1547,25 @@ byte-identical afterwards.
 real backend" mutation, which the ADR's own `sandbox inherited` substring would not catch on its
 own (the generic line contains it too, as the backend's name) — so the unit test pins the whole
 inherited wording.
+## oauth-redact: a `chatgpt` token refreshed mid-session must be redactable too (2026-10-16)
+
+Owner report: every redaction list is read from `resolved_keys()` at startup, so about an hour
+into a session (the first `ensure_fresh` refresh, `model.rs:204`) the list no longer carries the
+access token the session is using. Run: `cargo test -p radian-host --locked --no-fail-fast
+--test oauth_chatgpt a_refresh_registers`. The mutation edits `src/oauth_chatgpt.rs` in place,
+saving a copy to `.radian/scratch/mut/` first and comparing the restored file with `cmp`; after
+the run `git status --short` shows only the intended files.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| OR-H1 | `oauth_chatgpt::store_token` drops its two `secrets::register(...)` lines (the refresh still writes the pair, nothing registers it) | ✅ 1 failed | `a_refresh_registers_the_new_tokens_for_redaction` (`registered_secrets()` is `[]`, so `contains(&fresh_access)` fails) |
+
+## Lead tools: the facts reach the model; `running` and `usage` (2026-10-17, out-of-batch fix for the Sol lead's report)
+
+The providers send a tool result's text only, so `task_status`/`list_tasks` facts and a wait result's `request_id` (only in `structured`) never reached the lead; `running` was false for a whole turn because the driver never forwarded `TurnStarted` to the host. Run: `cargo test -p radian-host --test lead_tools`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| LV-1 | `run` returns `dispatch(..)` without `with_visible_facts` (the old code) | caught (rc=101) | `status_and_list_report_every_task`, `wait_task_returns_a_question_then_the_finish` (the request id is not in the text) |
+| LV-2 | `observed_status` drops `usage` | caught (rc=101) | `status_and_list_report_every_task` |
+| LV-3 | the driver journals `TurnStarted` but does not forward it to the sink (the old code) | caught (rc=101) | `wait_task_returns_a_question_then_the_finish` (`running` false while the question holds the turn); also radian-runtime `the_runtime_events_sink_hears_the_turn_start_before_its_end` |

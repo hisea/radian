@@ -823,3 +823,35 @@ async fn the_summary_settings_follow_a_switch_to_an_openai_route() {
         requests[1].settings
     );
 }
+
+// ---------- the host's runtime-events sink sees the turn start ----------
+
+/// The host sink hears `TurnStarted` before `TurnFinished` (a task's `running` flag and the
+/// control port's event stream both key on it; until 2026-10-17 only the journal got it, so a
+/// task reported `running: false` for its whole turn).
+#[tokio::test]
+async fn the_runtime_events_sink_hears_the_turn_start_before_its_end() {
+    let model = ScriptedModel::new([text("done")]);
+    let (mut driver, env) = open_env("sink-start", model, MemTools::new()).await;
+    let seen: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+    let finished = Arc::new(tokio::sync::Notify::new());
+    let (sink_seen, sink_finished) = (Arc::clone(&seen), Arc::clone(&finished));
+    driver.set_runtime_events(Arc::new(move |event: &radian_session::RuntimeEvent| {
+        let name = match event {
+            radian_session::RuntimeEvent::TurnStarted { .. } => "TurnStarted",
+            radian_session::RuntimeEvent::TurnFinished { .. } => "TurnFinished",
+            _ => return,
+        };
+        sink_seen.lock().unwrap().push(name);
+        if name == "TurnFinished" {
+            sink_finished.notify_one();
+        }
+    }));
+    let handle = tokio::spawn(async move { driver.run().await });
+    env.inbox.followup("go", InputSource::User).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), finished.notified())
+        .await
+        .expect("the sink hears the turn end");
+    handle.abort();
+    assert_eq!(*seen.lock().unwrap(), vec!["TurnStarted", "TurnFinished"]);
+}

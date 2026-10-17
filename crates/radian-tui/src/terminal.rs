@@ -269,7 +269,9 @@ static PANIC_LOG: Mutex<Option<PanicLog>> = Mutex::new(None);
 /// The session's shared redaction list: header values and every key in `auth.json`. `/login`
 /// appends to it when it saves a key mid-session, and both the
 /// panic hook and an export read it live; nothing ever removes an entry, so a value that
-/// appeared stays redacted even after `/logout`.
+/// appeared stays redacted even after `/logout`. A value this list cannot carry — a `chatgpt`
+/// token refreshed mid-session (`radian_host::secrets`) — is merged in by [`shared_secrets`]
+/// on every read instead.
 pub type SharedSecrets = std::sync::Arc<std::sync::RwLock<Vec<String>>>;
 
 struct PanicLog {
@@ -278,14 +280,30 @@ struct PanicLog {
     secrets: SharedSecrets,
 }
 
-/// Snapshot the shared list. **Poison-safe**: a panic while a writer held the lock must not
-/// turn redaction off (failing open is the wrong direction for a redaction list), so the guard
-/// is taken through `into_inner` instead of being dropped. Every reader goes through here.
+/// Snapshot the shared list **plus every value registered since it was built**. Every reader
+/// goes through here — the panic hook, the model-error line and an export/picker — so the
+/// merge lives here too.
+///
+/// **Poison-safe**: a panic while a writer held the lock must not turn redaction off (failing
+/// open is the wrong direction for a redaction list), so the guard is taken through
+/// `into_inner` instead of being dropped.
+///
+/// The registry part is not optional: `resolved_keys` was read once, at startup, and a
+/// `chatgpt` access token that expires mid-session is refreshed by `ensure_fresh` and written
+/// to `auth.json` after that (ADR 0026 — an OAuth token is redacted
+/// exactly like an API key). A copy taken at startup would stop covering the token in use about
+/// an hour into the session; `/login` covers its own case by appending to this list.
 pub fn shared_secrets(secrets: &SharedSecrets) -> Vec<String> {
-    secrets
+    let mut list = secrets
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
+        .clone();
+    for value in radian_host::registered_secrets() {
+        if !list.contains(&value) {
+            list.push(value);
+        }
+    }
+    list
 }
 
 /// The message of the last panic, if any, collapsed to one line (the terminal gets one line;

@@ -2098,3 +2098,20 @@ worktree `.radian-worktrees/inherited-sandbox`，分支 `dogfood/inherited-sandb
 5/5 抓住。IS-4 与 IS-6 由同一个测试抓住：前者让真实后端名从摘要里消失，后者让环境变量能选中
 `inherited`，两者都让摘要行写成 `inherited`。IS-7 是 acceptance 5 的两个方向之一：清单里的测试在沙箱
 内必须打标记后返回，去掉一个既少一行标记、又让测试在它跑不了的环境里真跑（于是失败）。
+## oauth-redact：会话中刷新出来的 token 也必须脱敏（2026-10-16）
+
+Base `5cfb0b1` · worktree `.radian-worktrees/oauth-redact`。每个脱敏名单只在启动时读一次
+`resolved_keys()`；`chatgpt` 的 access token 在会话里被 `ensure_fresh` 刷新（约一小时后第一次）
+并写回 `auth.json`，而写入的两个新值不进任何已建好的名单，于是 panic log、模型报错和导出都不再
+脱敏**正在使用**的那个 token（ADR 0026 禁止）。变异直接改 `src/terminal.rs`，改前
+`cp` 到 `.radian/scratch/mut/`，改后 `cp` 还原并 `cmp` 一致（`git status --short` 跑完只剩被测的
+两个文件）。命令：`timeout 300 cargo test -p radian-tui --locked --no-fail-fast --test redaction`。
+
+| # | Requirement mutated | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| OR-T1 | 决定 3：启动后才 `register` 的值同样要脱敏 | `terminal.rs` 的 `shared_secrets` 删掉合并 `radian_host::registered_secrets()` 的循环 | `redaction::a_value_registered_after_the_list_was_built_is_still_redacted`（输出里留着 `late-access-token-…`） | ✅ 1 failed |
+
+1/1 caught。这条测试放在独立的集成二进制（`tests/redaction.rs`）而不是 `terminal.rs` 的
+`mod tests`：注册表是进程级的，同一个二进制里加值会让 `terminal.rs` 两条对
+`shared_secrets` 做 `==` 全等断言的测试变得不确定。
+
