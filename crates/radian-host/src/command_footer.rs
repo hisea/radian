@@ -65,6 +65,16 @@ pub const DEFAULT_PERIOD_SECS: u64 = 60;
 /// process's memory without bound. Only the first line (at most [`MAX_OUTPUT_BYTES`]) is kept.
 const STDOUT_READ_CAP: u64 = 64 * 1024;
 
+/// How long a spawn that fails with `ETXTBSY` ("Text file busy", [`std::io::ErrorKind::ExecutableFileBusy`])
+/// is retried: 20 attempts 10 ms apart. On Linux, executing a script that any process still
+/// holds open for writing fails, and in a multi-threaded runner another thread's `fork` can
+/// inherit the script's write fd for the instant between its create and close. The holder
+/// always closes within milliseconds (a fixture write, an editor save), so the bound is never
+/// reached in practice; it only stops a permanently-held file from stalling the tick past
+/// [`COMMAND_TIMEOUT`].
+const SPAWN_BUSY_RETRIES: u32 = 20;
+const SPAWN_BUSY_PAUSE: Duration = Duration::from_millis(10);
+
 /// The variables a command item inherits, on top of `PATH` (the MCP child baseline). There is no
 /// shared MCP allow-list constant to reuse — an MCP server's inherited names come from its own
 /// `--mcp-config` entry (`McpServerConfig::inherit_env`) — so this is the footer command's own
@@ -327,6 +337,13 @@ impl CommandContributor {
 
     /// Runs the command once and returns its parsed first line. Every failure is a generic,
     /// redacted message: the command's output, stderr and stdin never travel in it.
+    ///
+    /// Two Linux races are handled, not reported: a spawn that fails with `ETXTBSY` is retried
+    /// (another thread's `fork` inherited the script's write fd for the instant between its
+    /// create and close), and an `EPIPE` on the stdin write is ignored (a command that exits
+    /// without reading stdin closed the pipe first; its output is still collected below). Both
+    /// hit a real user too: a fast command that ignores stdin, or a save of the script at the
+    /// tick moment, must not mark the value stale.
     async fn run(&self, stdin_json: String) -> Result<CommandOutput, String> {
         let mut command = tokio::process::Command::new(&self.program);
         command
@@ -343,15 +360,10 @@ impl CommandContributor {
         if let Some(cwd) = &self.radian_cwd {
             command.env("RADIAN_CWD", cwd);
         }
-        let mut child = command
-            .spawn()
-            .map_err(|_| "the footer command could not be started".to_owned())?;
+        let mut child = spawn_retrying_txtbsy(&mut command).await?;
         let run = async move {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_json.as_bytes())
-                    .await
-                    .map_err(|_| "the footer command's stdin failed".to_owned())?;
+                write_stdin(&mut stdin, stdin_json.as_bytes()).await?;
                 // Closing stdin signals end-of-input; the child may read it before writing.
                 drop(stdin);
             }
@@ -414,6 +426,42 @@ impl StatusContributor for CommandContributor {
                 usage: None,
             }])
         })
+    }
+}
+
+/// Spawns the command, retrying an `ETXTBSY` spawn (see [`SPAWN_BUSY_RETRIES`]). Every other
+/// spawn error is the generic redacted failure.
+async fn spawn_retrying_txtbsy(
+    command: &mut tokio::process::Command,
+) -> Result<tokio::process::Child, String> {
+    let mut attempts = 0;
+    loop {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && attempts < SPAWN_BUSY_RETRIES =>
+            {
+                attempts += 1;
+                tokio::time::sleep(SPAWN_BUSY_PAUSE).await;
+            }
+            Err(_) => return Err("the footer command could not be started".to_owned()),
+        }
+    }
+}
+
+/// Writes the stdin document, tolerating a child that already exited: a command that never
+/// reads stdin (the common `printf` fixture) closes the pipe on exit and the write then fails
+/// with `EPIPE`, but the child's output is still in flight and is collected by the caller.
+/// Any other write error is the generic redacted failure.
+async fn write_stdin(
+    stdin: &mut (impl tokio::io::AsyncWrite + Unpin),
+    stdin_json: &[u8],
+) -> Result<(), String> {
+    match stdin.write_all(stdin_json).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(_) => Err("the footer command's stdin failed".to_owned()),
     }
 }
 
@@ -582,5 +630,99 @@ mod tests {
         assert!(specs.is_empty());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("command"), "{warnings:?}");
+    }
+
+    fn retry_scratch(label: &str) -> std::path::PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "radian-command-footer-retry-{}-{label}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn retry_script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    fn retry_contributor(
+        program: &std::path::Path,
+        dir: &std::path::Path,
+    ) -> CommandContributor {
+        CommandContributor::new(
+            CommandSpec {
+                id: "thing".to_owned(),
+                program: program.as_os_str().to_owned(),
+                args: Vec::new(),
+                period: Some(Duration::from_secs(60)),
+            },
+            FooterContext::new(),
+            "sess-1",
+            Some(dir.display().to_string()),
+        )
+    }
+
+    /// An `ETXTBSY` spawn is retried until the writer closes (a Linux-only failure mode: macOS
+    /// has no "text file busy" on exec). The script is held open for writing before `run`
+    /// starts, so the first attempt always fails; a closer thread drops the hold after 30 ms
+    /// while the runner retries for up to 200 ms. The sleeps only set the overlap's wide
+    /// margins, never an ordering: the hold predates the first attempt, and the budget
+    /// outlives any scheduling jitter of the close.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_txtbsy_spawn_is_retried_until_the_writer_closes() {
+        let dir = retry_scratch("busy");
+        let script = retry_script(&dir, "busy.sh", "printf hi");
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&script)
+            .unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            drop(held);
+        });
+        let output = retry_contributor(&script, &dir)
+            .run("{}".to_owned())
+            .await
+            .expect("the retry outlives the writer's hold");
+        assert_eq!(output.text, "hi");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An `EPIPE` on the stdin write is not a run failure: the read end is dropped first, then
+    /// the send buffer is saturated so the kernel must report the closed pipe. No timing is
+    /// involved: once the buffer is full the next write cannot succeed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_closed_stdin_pipe_is_not_a_run_failure() {
+        let (mut writer, reader) = tokio::net::UnixStream::pair().unwrap();
+        drop(reader);
+        let chunk = vec![0u8; 65536];
+        loop {
+            match writer.write_all(&chunk).await {
+                Ok(()) => {}
+                Err(error) => {
+                    assert_eq!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe,
+                        "a write past a dropped reader is EPIPE"
+                    );
+                    break;
+                }
+            }
+        }
+        write_stdin(&mut writer, b"{}")
+            .await
+            .expect("EPIPE on stdin is tolerated");
     }
 }

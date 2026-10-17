@@ -1291,3 +1291,29 @@ Commands: `timeout 570 cargo test -p radian-host --lib --locked --no-fail-fast t
 the_model_provider_hint` (MP-2). MP-1 is caught only by the unit test: the CLI test's cases use
 `opencode-go/x` and `anthropic/claude-x`, both real descriptors, so warning on every slash would
 not change its answer.
+
+## Footer command runner: `ETXTBSY` retry + `EPIPE` tolerance (2026-10-17, linux-flakes)
+
+The out-of-process footer `command` runner (`src/command_footer.rs`) had two Linux races, both
+measured in this worktree before the fix (30 sequential
+`cargo test -p radian-host --test command_footer` runs: 6/30 suites failed in the quiet loop,
+21/30 in the loaded loop; every failure a first-tick `store.get("thing").unwrap()` on `None`,
+plus one wrong-notice-text failure at `command_footer.rs:460`): a spawn failing with
+`ExecutableFileBusy` (os error 26, `ETXTBSY` — another thread's `fork` inherited the script's
+write fd for the instant between its create and close), and an `EPIPE` ("stdin failed") on the
+stdin write when a fast `printf` fixture exits before the parent writes. Both hit a real user
+too (a fast command that ignores stdin, or a save of the script at the tick moment), so the
+fix is in the product code: `spawn_retrying_txtbsy` retries an `ExecutableFileBusy` spawn up
+to 20 times 10 ms apart, and `write_stdin` tolerates `BrokenPipe`. Mutations applied in place
+in this worktree, each restored from `/tmp/command_footer.fixed` and confirmed with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| CF-R1 | `spawn_retrying_txtbsy` spawns once (the retry loop is gone) | ✅ 1 failed (`the retry outlives the writer's hold: "the footer command could not be started"`) | `command_footer::tests::a_txtbsy_spawn_is_retried_until_the_writer_closes` (Linux-only: holds the script open for writing, drops the hold after 30 ms against the 200 ms retry budget) |
+| CF-R2 | `write_stdin` reports every write error (the `BrokenPipe` arm is gone) | ✅ 1 failed (`EPIPE on stdin is tolerated: "the footer command's stdin failed"`) | `command_footer::tests::a_closed_stdin_pipe_is_not_a_run_failure` (drops the read end of a `UnixStream` pair, saturates the send buffer so the kernel must report `EPIPE`; no timing involved) |
+
+Commands: `timeout 300 cargo test -p radian-host --lib --no-fail-fast a_txtbsy` (CF-R1);
+`timeout 300 cargo test -p radian-host --lib --no-fail-fast a_closed_stdin` (CF-R2). 2/2 caught.
+The pty root-refusal drain fix in the same task is test-helper-only
+(`crates/radian-tui/tests/pty.rs`: drain the master after `try_wait` succeeds), so it has rate
+proof but no mutation entry.
