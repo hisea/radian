@@ -28,10 +28,8 @@ mod tool_card;
 
 pub(crate) use ask::AskGlyphs;
 use ask::{ask_block, ask_pending_line, is_ask_entry};
-pub use layout::{
-    blocks_for, body_text_lines, layout, layout_with, line_count, line_count_cached,
-};
 pub(crate) use layout::parse_blocks_for;
+pub use layout::{blocks_for, body_text_lines, layout, layout_with, line_count, line_count_cached};
 #[cfg(test)]
 pub(crate) use layout::{body_text_lines_for_test, layout_for_test};
 pub(crate) use markdown::DiagramOutcome;
@@ -725,8 +723,8 @@ pub fn expanded(entry: &Entry, global: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::layout::tests::EXPANDED;
+    use super::*;
 
     /// A streaming append re-parses only the trailing open block: the closed prefix is copied
     /// from `prev` verbatim (ADR 0028 R1). A sentinel in `prev` proves it, because a re-parse
@@ -968,5 +966,4 @@ mod tests {
             assert_eq!(pair[0].end(), pair[1].start(), "{pair:?}");
         }
     }
-
 }

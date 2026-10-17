@@ -20,27 +20,27 @@ mod transcript;
 mod wrap;
 
 use approval::approval_height;
+pub use approval::{
+    APPROVAL_KEYS, MIN_APPROVAL_HEIGHT, approval_body, approval_cap, approval_text,
+};
 use input::{
     BOX_PROMPT, BoxGlyphs, FIND_BOX_HEIGHT, INPUT_HINT, INPUT_PROMPT, input_height,
     input_inner_width, input_status_spans, input_visible_rows, prompt_width,
-};
-use panels::{access_height, login_height, question_height, trust_height};
-use status::{status_height, status_lines};
-use transcript::apply_selection;
-pub use approval::{
-    APPROVAL_KEYS, MIN_APPROVAL_HEIGHT, approval_body, approval_cap, approval_text,
 };
 pub use input::{COMPLETION_MAX_LINES, InputStyle, completion_rows, completion_visible_rows};
 pub use panels::{
     QUESTION_KEYS, access_panel, login_panel, logout_panel, question_panel, trust_panel,
 };
+use panels::{access_height, login_height, question_height, trust_height};
+use status::{status_height, status_lines};
+use transcript::apply_selection;
 pub use transcript::{
     display_lines, highlight, split_label, transcript_lines, transcript_lines_with, visible_lines,
     visible_lines_with,
 };
 pub(crate) use transcript::{display_text, marker_prefix, spinner_style};
-pub use wrap::{WrappedLine, wrap, wrap_char_offsets, wrap_line_count};
 pub(crate) use wrap::clip_display;
+pub use wrap::{WrappedLine, wrap, wrap_char_offsets, wrap_line_count};
 
 /// Draws one frame. Also feeds the measured transcript size back into `app` so scroll keys
 /// operate on wrapped lines.
