@@ -345,11 +345,13 @@ fn event_data_value(
             message_id,
             lane,
             source,
+            wake,
         } => json!({
             "message": serde_json::to_value(message)?,
             "message_id": message_id,
             "lane": lane,
             "source": source,
+            "wake": wake,
         }),
         EventData::InputClaimed {
             message_ids,
