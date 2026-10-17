@@ -1503,3 +1503,15 @@ source files is empty after the run.
 command tests do not compile (no `command_footer` module). The behaviours they pin are the
 mutants above; H5/H12 are the two the brief names (a failure keeps the last value; the output
 must never reach a journal).
+
+## ADR 0027 slice ① fix round `footer-s1-fix1`: H10 removed (2026-10-16)
+
+decision A of the fix round `footer-s1-fix1`: **v1 has no project config layer** (ADR 0031;
+`config::resolve_path` chooses only `--config` > `RADIAN_CONFIG` > `~/.radian/config/config.toml`,
+all user-chosen). The provenance seam (`ConfigOrigin`, `classify_origin`, `Config.origin`,
+`load_in_workspace`) and `command_specs`'s `origin` parameter were removed, so the project-level
+`command` refusal no longer exists. The **H10** row above is therefore **removed**: its requirement
+is gone, not failed. Every `command` from any current source is accepted
+(`config_fixtures::the_command_fixture_carries_command_and_period`, minus its former project half).
+When a project-level config layer is added, a `command` must be refused there, and that slice owns
+the test. No other row in this file is touched.

@@ -2059,3 +2059,23 @@ draws the raw id and warns — exactly what T1 reproduces, and why
 `a_printf_fixture_appears_in_the_configured_footer_location` (a real `printf hi` fixture through
 the runner and into the footer) is caught by T1 on the render side and by the `radian-host`
 mutants H1/H5 on the run side.
+
+### ADR 0027 slice ① fix round `footer-s1-fix1`: the registry tables vs `631c8dd` (2026-10-16)
+
+Same in-place driver as above: exact-match anchor, `cargo test -p radian-tui --lib --locked
+--no-fail-fast <name>`, restore from a byte-for-byte backup (`.radian/progress/*.bak`).
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| P1 | every built-in's default priority matches the `631c8dd` `item_priority` table | `Model`'s `priority` override is dropped (back to the refactor's 50 fallback) | `footer::tests::the_registry_matches_the_pre_refactor_priority_table` FAILED (`priority for model`: left 50, right 90) |
+| P2 | `context_bar`'s default glyph is empty in every set (the old `glyph` table had no `context_bar` row) | `ContextBar::glyphs` is given `context`'s `["", "\u{f035b} ", "[", ""]` | `footer::tests::the_registry_matches_the_pre_refactor_glyph_table` FAILED (`default glyphs for context_bar`: left `["", "\u{f035b} ", "["]`, right `["", "", ""]`) |
+
+2/2 caught; `crates/radian-tui/src/footer/components/model.rs` and `.../context_bar.rs` compared
+byte-identical (same sha) after each mutation.
+
+The five pin tests this fix round adds — `the_registry_matches_the_pre_refactor_priority_table`,
+`..._placeholder_table`, `..._role_table`, `..._threshold_table`, `..._glyph_table` — compare every
+built-in id against the `631c8dd` tables. Priority is the **required** fix: `brand` (92), `model`
+(90) and `host` (78) had lost their overrides and fell back to 50. The glyph comparison found a
+second regression (`context_bar`), restored here. The placeholder, role and threshold tables
+already matched the old values.
