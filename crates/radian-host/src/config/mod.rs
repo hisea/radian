@@ -566,11 +566,70 @@ impl Default for ControlConfig {
     }
 }
 
+/// Where a configuration file came from, for the provenance gate (ADR 0027
+/// decision 4, ADR 0031). A **project-level** file may have arrived with a cloned repository,
+/// so the settings that run code as the user (today only the footer `command` item) are
+/// refused from one. There is no project config *loader* today (ADR 0031 verified this): the
+/// only way a file can be project-level is that it lives inside the workspace, whichever path
+/// selected it. An explicit `--config` path is **not** project-level merely because it is not
+/// the default; only its location decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfigOrigin {
+    /// The user's own configuration: the default `$RADIAN_HOME/config/config.toml`, a file
+    /// outside the workspace, or no file at all. Fully trusted.
+    #[default]
+    User,
+    /// A file inside the project workspace (and not under `$RADIAN_HOME`). ADR 0031's gate
+    /// applies: a project-provided resource is not trusted by default.
+    Project,
+}
+
+/// Classifies a resolved configuration path (ADR 0027). Pure: the caller
+/// passes the workspace and the Radian home, so the rule is testable without the environment.
+///
+/// * no source, or a source not inside `workspace` -> [`ConfigOrigin::User`];
+/// * a source inside `workspace` -> [`ConfigOrigin::Project`], **unless** it is also inside
+///   `radian_home` (the user's own `~/.radian/config/config.toml` must stay trusted even when
+///   Radian is run from the home directory).
+///
+/// A path that cannot be canonicalized is compared lexically, so this never fails.
+pub fn classify_origin(
+    source: Option<&Path>,
+    workspace: Option<&Path>,
+    radian_home: Option<&Path>,
+) -> ConfigOrigin {
+    let Some(source) = source else {
+        return ConfigOrigin::User;
+    };
+    let Some(workspace) = workspace else {
+        return ConfigOrigin::User;
+    };
+    // Canonicalize where possible so a symlinked workspace or source is compared by identity;
+    // fall back to the given paths so a not-yet-existing workspace still classifies.
+    let canon = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let source = canon(source);
+    let workspace = canon(workspace);
+    if !source.starts_with(&workspace) {
+        return ConfigOrigin::User;
+    }
+    if let Some(home) = radian_home {
+        let home = canon(home);
+        if source.starts_with(&home) {
+            return ConfigOrigin::User;
+        }
+    }
+    ConfigOrigin::Project
+}
+
 /// One parsed configuration file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
     /// The path actually read, or `None` when there was no file.
     pub source: Option<PathBuf>,
+    /// Where the file came from (ADR 0027): user-level or a project file
+    /// inside the workspace. [`load`] cannot know the workspace, so it reports
+    /// [`ConfigOrigin::User`]; [`load_in_workspace`] classifies the path.
+    pub origin: ConfigOrigin,
     /// The file's `schema_version`, when read.
     pub schema_version: Option<u64>,
     /// True when the file's version is **higher** than supported: the known keys are
@@ -623,13 +682,28 @@ pub fn resolve_path(
 /// (it is never created). The command line's `--config` wins over `RADIAN_CONFIG`, which wins
 /// over `~/.radian/config/config.toml`.
 pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
+    load_in_workspace(explicit, None)
+}
+
+/// Like [`load`], but classifies the file's [`ConfigOrigin`] against `workspace`: a config file
+/// inside the workspace (and not under `$RADIAN_HOME`) is **project-level** (ADR 0027 revision
+/// 14 decision 4, ADR 0031). The reading behaviour is identical to [`load`].
+pub fn load_in_workspace(
+    explicit: Option<&Path>,
+    workspace: Option<&Path>,
+) -> Result<Config, ConfigError> {
     let env = std::env::var(RADIAN_CONFIG_ENV).ok();
     let home = crate::home::radian_home();
     let path = resolve_path(explicit, env.as_deref(), home.as_deref());
     match path {
         None => Ok(Config::default()),
         Some(path) => match std::fs::read_to_string(&path) {
-            Ok(text) => parse(&path, &text),
+            Ok(text) => {
+                let mut config = parse(&path, &text)?;
+                config.origin =
+                    classify_origin(config.source.as_deref(), workspace, home.as_deref());
+                Ok(config)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(error) => Err(ConfigError::Read {
                 path,

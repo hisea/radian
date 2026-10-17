@@ -45,6 +45,10 @@ pub(crate) struct ItemData {
     pub(crate) default_format: String,
     pub(crate) numeric: Option<u64>,
     pub(crate) fixed_style: Option<Style>,
+    /// An optional symbol the data itself carries (ADR 0027: a footer
+    /// `command`'s JSON `symbol`). A configured `icon`/`symbol` on the item wins over it, and the
+    /// component's own glyph is the last fallback.
+    pub(crate) symbol: Option<String>,
 }
 
 impl ItemData {
@@ -54,6 +58,7 @@ impl ItemData {
             default_format: default_format.into(),
             numeric: None,
             fixed_style: None,
+            symbol: None,
         }
     }
 
@@ -69,6 +74,11 @@ impl ItemData {
 
     pub(crate) fn fixed_style(mut self, style: Style) -> Self {
         self.fixed_style = Some(style);
+        self
+    }
+
+    pub(crate) fn symbol(mut self, symbol: Option<String>) -> Self {
+        self.symbol = symbol;
         self
     }
 }
@@ -212,15 +222,24 @@ impl Component for StoreComponent<'_> {
     }
 
     fn data(&self, app: &App, _item: &Item) -> Option<ItemData> {
-        let (text, role, stale) = super::contribution(app, self.id)?;
-        let role = if stale {
+        let contribution = app.contributions.get(self.id)?;
+        if contribution.segments.is_empty() {
+            return None;
+        }
+        let text: String = contribution
+            .segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect();
+        let role = if contribution.stale {
             Role::Truncation
         } else {
-            super::contrib_role(role)
+            super::contrib_role(contribution.segments[0].role)
         };
         Some(
             ItemData::new("{value}")
                 .value("value", text)
+                .symbol(contribution.symbol.clone())
                 .fixed_style(super::role_style(app, role)),
         )
     }

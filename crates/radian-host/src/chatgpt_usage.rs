@@ -196,6 +196,7 @@ impl ChatGptUsage {
             item: "chatgpt.usage".to_owned(),
             segments: vec![Segment::new(text, SegmentRole::Normal)],
             stale: false,
+            symbol: None,
         }])
     }
 }
@@ -205,8 +206,8 @@ impl StatusContributor for ChatGptUsage {
         "chatgpt"
     }
 
-    fn items(&self) -> &'static [&'static str] {
-        &["chatgpt.usage"]
+    fn items(&self) -> Vec<String> {
+        vec!["chatgpt.usage".to_owned()]
     }
 
     fn period(&self) -> Duration {
