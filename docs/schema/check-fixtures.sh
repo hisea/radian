@@ -62,6 +62,14 @@ EXPECT = {
     ),
     "unknown-enum-values.jsonl": dict(outcome="accept", events=6, skips=[], repair={}),
     "ask-user.jsonl": dict(outcome="accept", events=8, skips=[], repair={}),
+    "inbox-wake.jsonl": dict(
+        outcome="accept",
+        events=3,
+        skips=[],
+        # ADR 0011：`wake` 是可选字段。(seq, wake)——一条带它、一条旧记录没有。
+        inbox_wake=[(1, True), (2, None)],
+        repair={},
+    ),
     "memory-injected.jsonl": dict(
         outcome="accept",
         events=6,
@@ -639,6 +647,23 @@ def check_fixture(name, exp):
             raise Corruption(
                 f"{name}: memory_injected {got} != 期望 {exp['memory_injected']}"
             )
+    if "inbox_wake" in exp:
+        # ADR 0011 / ADR 0006 §5.5：`wake` 是 InboxEnqueued 的**可选**字段，缺省即
+        # 旧记录。这里逐条钉住带字段与缺字段两种形状，并检查类型。
+        got = []
+        for e in events:
+            if e["event"] != "InboxEnqueued":
+                continue
+            data = e["data"]
+            if "wake" in data and not isinstance(data["wake"], bool):
+                raise Corruption(f"{name}: seq {e['seq']}: InboxEnqueued.wake 不是布尔值")
+            got.append((e["seq"], data.get("wake")))
+        if got != [tuple(x) for x in exp["inbox_wake"]]:
+            raise Corruption(f"{name}: inbox_wake {got} != 期望 {exp['inbox_wake']}")
+        if not any(wake is None for _, wake in got):
+            raise Corruption(f"{name}: 期望至少一条旧记录（没有 wake 字段）")
+        if not any(isinstance(wake, bool) for _, wake in got):
+            raise Corruption(f"{name}: 期望至少一条带布尔 wake 的记录")
     if "approval_changed" in exp:
         changed = [
             (e["seq"], e["data"].get("policy"))

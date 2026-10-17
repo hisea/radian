@@ -189,3 +189,20 @@ Base `6df1351` · 在本任务工作树内施加后从副本还原（`cmp` 确�
 1/1 抓住。去掉那一行后，Anthropic 路由的摘要仍带启动路由的 `reasoning_effort`，反向则仍带
 `thinking`，两个方向的测试都红（`left` 是启动形式、`right` 是当前路由形式）。这正是审查指出的
 bug：provider 会以 400 拒绝，压缩随之失败。
+
+## ADR 0011：a leftover sleeping steer opens the next turn (2026-10-17)
+
+Base `1d1e7d8` · mutations applied in this worktree, each saved to `/tmp` with `cp`, applied,
+run, then restored with `cp` and confirmed with `cmp` (`git status --short` empty after) ·
+`--no-fail-fast` · only the catching binary ran
+(`cargo test -p radian-runtime --test leftover_steer`).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| L1 | `claim_next_turn` drops the idle rule (claims `next_turn` only, as before the revision) | `leftover_steer::a_waking_steer_left_at_the_end_of_a_turn_opens_the_next_one` (the ADR's test 1: the driver sleeps after turn 1, no second turn) and `leftover_steer::a_resumed_waking_next_step_entry_opens_a_turn_on_open` | ✅ 2 failed |
+| L2 | `Inbox::inject` passes `wake = true` (an inject is treated as waking) | `leftover_steer::an_idle_inject_does_not_open_a_turn_and_is_absorbed_by_the_next_followup` (a turn starts on the idle inject) | ✅ failed |
+| L3 | the reader ignores the old-journal default (`d.wake.unwrap_or(true)` instead of the lane: `next_turn` true, `next_step` false) | `leftover_steer::an_old_journal_next_step_entry_without_wake_does_not_open_a_turn` (the entry reads as waking and opens a turn) | ✅ failed |
+
+3/3 caught, none equivalent. The revision's own doc-comment says every surviving decision is
+pinned by a test: L1 by tests 1 and 3, L2 by test 2, L3 by test 4.
+
