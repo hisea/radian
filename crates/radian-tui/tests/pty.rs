@@ -12001,13 +12001,17 @@ fn pty_a_resize_does_not_eat_a_typed_key() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The resize lands while the input thread is idle and the text follows in one write, so
     // crossterm's read buffers the tail of it: that buffered key was the one the coalescer ate.
     pty.resize(31, 110);
     pty.send(b"abcdef");
     assert!(
-        pty.wait_for_screen("abcdef", 5),
+        pty.wait_for_screen("abcdef", wait_positive()),
         "a key was dropped after the resize:\n{}",
         pty.screen()
     );
@@ -12040,18 +12044,18 @@ async fn pty_a_submit_after_the_driver_ended_says_the_session_is_dead() {
         110,
     );
     assert!(
-        pty.wait_for_screen("the session ended: driver panicked", 15),
+        pty.wait_for_screen("the session ended: driver panicked", wait_positive()),
         "{}",
         pty.screen()
     );
     pty.send(b"hello there\r");
     assert!(
-        pty.wait_for_screen("message was not sent", 10),
+        pty.wait_for_screen("message was not sent", wait_positive()),
         "the submit was silently swallowed:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("radian --resume ended-submit", 10),
+        pty.wait_for_screen("radian --resume ended-submit", wait_positive()),
         "the notice does not say how to continue:\n{}",
         pty.screen()
     );
@@ -12073,7 +12077,9 @@ async fn pty_a_submit_after_the_driver_ended_says_the_session_is_dead() {
     // Every submit says so again.
     pty.send(b"\r");
     assert!(
-        pty.wait_until(10, |screen| screen.matches("message was not sent").count()
+        pty.wait_until(wait_positive(), |screen| screen
+            .matches("message was not sent")
+            .count()
             >= 2),
         "the second submit was silent:\n{}",
         pty.screen()
