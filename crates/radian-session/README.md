@@ -28,7 +28,7 @@ same lock, `seq` counter and sync-point decision (ADR 0040); `next_seq()`, `sess
   runtime's events are appended concurrently.
 - Group commit (ADR 0040): every append is `write` + `flush`; only the sync points
   (`SessionCreated`, `ToolExecutionStarted`, `TurnFinished`, `TurnFailed`,
-  `TranscriptReplacementCommitted`/`Aborted`, `TaskSpawned`) `fsync`, and close/`Drop`
+  `TranscriptReplacementCommitted`/`Aborted`) `fsync`, and close/`Drop`
   `fsync`s the tail. A group of records becomes durable together, so a step fsyncs 2–3 times
   instead of once per record.
 - A new file is created owner-only (0600) at creation time, not chmod'ed afterwards.

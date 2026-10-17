@@ -1,10 +1,9 @@
 # The process control port (ADR 0030 O6, slice 8)
 
 Every Radian process that hosts an interactive (`radian`) or line (`radian exec`) session opens
-a Unix socket and serves a small JSON-lines protocol on it. It is the seam an external
-orchestrator (herdr-style) or a project script uses to drive a session without a TUI: enqueue
-inputs, cancel, list task agents, spawn and wait for one, read a task's committed status, and
-follow the committed events.
+a Unix socket and serves a small JSON-lines protocol on it. It is the seam an external driver
+(a project script, herdr, or `radian attach`) uses to drive or observe a session without a TUI:
+enqueue inputs, cancel, list the hosted session, and follow the committed events.
 
 There is **no** separate `radian serve` in this version: the process that owns a session owns
 its socket. (`radian serve` and `radian mcp` remain reserved subcommands.)
@@ -69,23 +68,12 @@ and an unknown verb (including `"approve"`) returns an error and changes nothing
 | `steer` | `text`, `source?` | redirects the running turn |
 | `inject` | `text`, `source?` | adds context without waking an idle session |
 | `cancel` | — | cancels the running turn (idempotent) |
-| `list_sessions` | — | `sessions`: the hosting `main` session and one row per live task agent |
-| `spawn_task` | `brief`, `task?`, `isolation?`, `label?`, `approval?`, `as?` | starts a task agent (see below) |
-| `wait_task` | `task`, `timeout_secs?` | blocks until the task asks, finishes or the timeout elapses |
-| `task_status` | `task` | the task's committed state and change summary |
+| `list_sessions` | — | `sessions`: the hosting `main` session (one process serves one session) |
 | `subscribe` | — | response `{"id":n,"ok":true}`, then event lines (see below) |
 
-`spawn_task`, `wait_task` and `task_status` go through the same `TaskRegistry` the lead model
-tools use (ADR 0030 O4); they are answered only when the hosting session is a **lead** (it was
-started with a task builder). A session without one answers with an error.
-
-`spawn_task`'s `as` names the lead that owns the task. Only `main` exists today, so `as` must be
-absent or `"main"` (ADR 0030 O13). The task id is named `task` on the wire (the request `id` is
-the request's own id).
-
-`task_status` returns the observer's committed facts (`state`, `last_event`, `last_write`,
-`summary`, `diff_stat`, …) plus a bounded `git diff --stat`, exactly as the lead's `task_status`
-tool does.
+The task verbs of ADR 0030 (`spawn_task`, `wait_task`, `task_status`) were removed with the
+in-process orchestration by ADR 0043 decision 1; the port now serves input, cancellation,
+listing and event streaming only.
 
 ### `subscribe`
 
@@ -104,12 +92,10 @@ One client may issue requests and subscribe on the same connection. The per-clie
 **bounded**: a subscriber that falls behind is disconnected and its connection is closed; the
 session never waits on a client.
 
-## Example: spawn a task and wait for it
+## Example: send a turn and follow the events
 
 ```sh
 sock="$RADIAN_HOME/run/$$.sock"  # the hosting process's pid, not the shell's
-printf '%s\n' '{"id":1,"verb":"spawn_task","brief":"fix the failing test","task":"t1"}' |
-  nc -U "$sock"
-printf '%s\n' '{"id":2,"verb":"wait_task","task":"t1","timeout_secs":600}' |
-  nc -U "$sock"
+printf '%s\n' '{"id":1,"verb":"subscribe"}' | nc -U "$sock"
+printf '%s\n' '{"id":2,"verb":"followup","text":"run the tests"}' | nc -U "$sock"
 ```

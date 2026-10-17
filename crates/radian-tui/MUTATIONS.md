@@ -1420,20 +1420,6 @@ build script 产出**逐字节相同**，md5 `34b85cf9241b1ceb6672355035c27c40`�
 | BS-M3 | `third_party/syntaxes/TOML.sublime-syntax` 的注释 scope 改成 `constant.numeric.toml`，重新生成 dump | `highlight::the_vendored_grammars_highlight_a_fixed_snippet_identically`（Comment → Number） | ✅（1 FAILED） |
 
 BS-M1/M2 覆盖「旧的 dump 不会被静默用掉」，BS-M3 覆盖「重新生成真的改变了行为时看得见」。
-## mode-cmd：`/mode` 的查询与切换（ADR 0038 切片 ③，2026-10-15）
-
-Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 每个变异在就地改完后跑
-`cargo test -p radian-tui --test mode --no-fail-fast`（或 `--test pty pty_mode_lead`），再从
-`/tmp/mut/app.rs.bak` 还原并用 `diff -q` 确认逐字节相同。
-
-| # | 变异 | 抓住它的测试 | 结果 |
-|---|---|---|---|
-| MD-M1 | `/mode <name>` 忽略名字，永远发出 `SetMode { General }` | `mode::mode_switches_without_confirmation` | ✅ |
-| MD-M2 | `/mode`（无参数）不读投影，固定打印 `mode: general` | `mode::mode_with_no_argument_reports_the_current_mode` | ✅ |
-
-2/2 抓住。`pty::pty_mode_lead_switches_the_role_prompt_from_the_next_turn`（真 TUI、mock 模型）
-覆盖上一层的接线：`/mode lead` 的 layer 1 在下一次请求里变成 lead 角色提示词，`<role>` 之外的字节
-不变；它连跑 5 次全绿。
 ## sandbox-unix-sockets：TUI 把 `allow_unix_sockets` 交给沙箱（ADR 0016，2026-10-15）
 
 Base `acbc455`（`origin/main`）· 就地变异：改前 `cp` 到 scratchpad，改后从副本写回并 `cmp` 逐字节相同。
@@ -1827,19 +1813,6 @@ Base：`ed858d8`（评审已接受的 head）· 就地变异：先把 `crates/ra
 | FX1-M2 | 被中断的空回复留一行给标记 | `blocks.rs::layout_with` 去掉那段 `lines.push(BodyLine::prose(...))`（保留 interrupted 条件） | `render::an_interrupted_reply_with_no_text_still_shows_the_marker`（屏幕没有 `[interrupted]`）、`blocks::tests::an_empty_committed_assistant_is_skipped_by_the_gaps`（`line_count == 1`） | ✅ |
 
 2/2 抓住。新测试在 `ed858d8`（未修复）上先跑过：`contains("[interrupted]")` FAILED。
-## ADR 0030 片 6b2：TUI 的任务视图（2026-10-16）
-
-Base `2f41f69` · 直接改源码、跑单个测试、从 `.radian/scratch/mut/` 副本 `cp` 还原，
-`git status --short` 跑完为空。
-
-| # | Requirement | Mutation | Caught by | Result |
-|---|---|---|---|---|
-| S6B2-1 | 宿主不再传 builder，lead tools 不挂载 | `cli.rs` 的 `task_builder: Some(task_builder)` 改回 `None` | `pty_the_tui_mounts_the_task_tools` | ✅ |
-| S6B2-2 | 没有 task 时不显示计数 | `footer.rs` 的 `tasks` item 从 `task_counts().map(..)` 改成恒 `Some(0/0)` | `task_events_become_notices_and_move_the_count`（无 task 时屏幕出现 `tasks`） | ✅ |
-| S6B2-3 | `/tasks cancel` 要真的 cancel | `command.rs` 的 `cancel` 分支返回 `TasksRequest::List` | `tasks_parses_list_cancel_and_kill`、`a_submitted_tasks_line_is_the_loop_effect` | ✅ |
-
-3/3 抓住。S6B2-1 的 pty 测试会重编 `radian` 二进制并检查第一次模型请求的 tools 含全部
-`LEAD_TOOL_NAMES`。
 ## pulse-slow: the breath's period 1.4 s -> 2.0 s and 12 -> 16 samples
 
 Worktree `.radian-worktrees/pulse-slow`, branch `oc/pulse-slow`. In-place mutation: `cp` the file
