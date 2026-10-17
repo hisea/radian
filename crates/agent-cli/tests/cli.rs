@@ -8097,11 +8097,10 @@ async fn pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo() {
     assert_stty_has_echo(stty);
 }
 
-/// ADR 0030 slice 6b2: a headless lead (`radian exec`) mounts the lead tools from the start, so
-/// every lead tool name is in the model's list. The mode gate still refuses the calls (a
-/// `general` turn), which is pinned in `radian-host`'s `lead_tools` tests.
+/// ADR 0043 slice ⓪A: a headless `radian exec` mounts neither `git_commit` nor any task/lead/
+/// named tool; its list is the built-in tools only.
 #[tokio::test]
-async fn a_headless_lead_mounts_the_task_tools() {
+async fn a_headless_exec_mounts_no_orchestration_tools() {
     let server = MockServer::start(vec![text_reply("hi")]).await;
     let (code, _, stderr) = feed_and_wait(
         spawn_radian(
@@ -8113,10 +8112,28 @@ async fn a_headless_lead_mounts_the_task_tools() {
     .await;
     assert_eq!(code, 0, "{stderr}");
     let names = advertised_tools(&server, 0);
-    for lead in radian_host::LEAD_TOOL_NAMES {
+    assert!(
+        !names.iter().any(|name| name == "git_commit"),
+        "`git_commit` must not be mounted: {names:?}"
+    );
+    for gone in [
+        "spawn_task",
+        "wait_task",
+        "wait_any",
+        "list_tasks",
+        "task_status",
+        "cancel_task",
+        "remove_task",
+        "integrate_task",
+        "answer_task",
+        "deny_task_approval",
+        "escalate_approval",
+        "send_agent",
+        "wait_agent",
+    ] {
         assert!(
-            names.iter().any(|name| name == lead),
-            "`{lead}` is not mounted by a headless lead: {names:?}"
+            !names.iter().any(|name| name == gone),
+            "`{gone}` must not be mounted: {names:?}"
         );
     }
 }

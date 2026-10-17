@@ -26,9 +26,6 @@ pub const HELP: &str = "\
 /access [safe|workspace|full]
                       show or switch the permission tier (ADR 0038); the switch takes effect
                       at the next tool call, and `full` asks for confirmation
-/mode [general|lead]
-                      show or switch the working mode (ADR 0038); `lead` is the project-lead
-                      role prompt, and the switch takes effect at the next turn
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
@@ -36,10 +33,6 @@ pub const HELP: &str = "\
 /skill:<name> [args]  run a skill: read its body into the message (ADR 0025)
 /skills               list the discovered skills
 /jobs [kill <id|all>] list this session's background jobs, or stop one/all (ADR 0037)
-/tasks [cancel|kill <id>]
-                      list the task agents, or cancel/kill one (ADR 0030)
-/send [<name> <text>] send a task to a named agent, creating it on first use; no argument
-                      lists the known definitions (ADR 0030 O12)
 /login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
@@ -69,35 +62,6 @@ pub enum JobsRequest {
     Kill(String),
     /// `/jobs kill all`: stop every running job.
     KillAll,
-}
-
-/// What `/tasks` asked for (ADR 0030 O10/O12). The task registry lives in the host, so the
-/// command is an effect the loop runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TasksRequest {
-    /// `/tasks`: list every live task agent.
-    List,
-    /// `/tasks cancel <id>`: cancel the task's current turn (its worktree is kept).
-    Cancel(String),
-    /// `/tasks kill <id>`: close the task's session and abandon its pending requests, keeping
-    /// its worktree (ADR 0030 O12).
-    Kill(String),
-}
-
-/// What `/send` asked for (ADR 0030 O12, slice 7b). The named-agent registry lives in the host,
-/// so the command is an effect the loop runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SendRequest {
-    /// `/send`: list the known agent definitions (`~/.radian/agents/*.md` plus the built-ins).
-    List,
-    /// `/send <name> <text>`: send `text` to the named agent, creating it on first use.
-    Send { name: String, text: String },
-}
-
-/// The source a `/send` input carries (ADR 0030 O12): the human typed it, so `User`. The loop
-/// enqueues with this; a diagnostic here, not a policy the command can loosen.
-pub fn send_source() -> agent_core::InputSource {
-    agent_core::InputSource::User
 }
 
 /// What one submitted `/…` line meant. Parsing only: running the command is the loop's job
@@ -140,9 +104,6 @@ pub enum Outcome {
     /// `/access [safe|workspace|full]` (ADR 0038 slice 2): show the current tier and where it
     /// came from (`None`), or switch to a named tier (`Some`).
     Access(Option<String>),
-    /// `/mode [general|lead]` (ADR 0038 slice 3): show the current mode (`None`), or switch to
-    /// a named one (`Some`). The switch takes effect at the next turn.
-    ModeSwitch(Option<String>),
     /// `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and sends
     /// `<skill name=…>…</skill>` + `args` as one user message. `args` is the raw remainder,
     /// verbatim.
@@ -151,13 +112,6 @@ pub enum Outcome {
     Skills,
     /// `/jobs`: list the session's background jobs, or stop one/all (ADR 0037 decision 4).
     Jobs(JobsRequest),
-    /// `/tasks`: list the live task agents, or cancel/kill one (ADR 0030 O10/O12). The registry
-    /// lives in the host, so the loop runs it and answers with [`Outcome::Notices`]-style lines.
-    Tasks(TasksRequest),
-    /// `/send <name> <text>` (ADR 0030 O12, slice 7b): send a task to a named agent, creating it
-    /// from its definition on first use; `/send` with no argument lists the known definitions.
-    /// The named-agent registry lives in the host, so the loop runs it.
-    Send(SendRequest),
     /// A user's `!`/`!!` shell command (ADR 0033). The command string runs in the sandbox
     /// (the tier's shell); `exclude_from_context` (`!!`) keeps its output out of the model's
     /// context. Execution is the loop's effect.
@@ -306,11 +260,6 @@ pub fn tree() -> &'static [Command] {
             levels: &[access_level],
         },
         Command {
-            name: "mode",
-            description: "show or switch the working mode (ADR 0038)",
-            levels: &[mode_level],
-        },
-        Command {
             name: "export",
             description: "export this session (default md, default <workspace>/radian-<id>.<ext>)",
             levels: &[export_level, export_level],
@@ -340,16 +289,6 @@ pub fn tree() -> &'static [Command] {
             name: "logout",
             description: "remove a stored credential (asks first)",
             levels: &[logout_level],
-        },
-        Command {
-            name: "tasks",
-            description: "list the task agents, or cancel/kill one",
-            levels: &[tasks_level, tasks_level],
-        },
-        Command {
-            name: "send",
-            description: "send a task to a named agent, creating it on first use",
-            levels: &[send_level, send_level],
         },
     ];
     TREE
@@ -573,48 +512,6 @@ fn access_level(_typed: &[&str], _partial: &str) -> Level {
             current: false,
         },
     ])
-}
-
-/// `/mode`: the two modes (ADR 0038 slice 3).
-fn mode_level(_typed: &[&str], _partial: &str) -> Level {
-    Level::Ready(vec![
-        Candidate {
-            insert: "general".to_owned(),
-            description: "the default role: a coding agent in this workspace".to_owned(),
-            current: false,
-        },
-        Candidate {
-            insert: "lead".to_owned(),
-            description: "the lead role: turn goals into work for task agents".to_owned(),
-            current: false,
-        },
-    ])
-}
-
-/// `/tasks`: the two subcommands (ADR 0030 O12). The task id is free text (the loop resolves
-/// it against the registry).
-fn tasks_level(typed: &[&str], _partial: &str) -> Level {
-    if typed.is_empty() {
-        Level::Ready(vec![
-            Candidate {
-                insert: "cancel".to_owned(),
-                description: "cancel a task's current turn (keeps its worktree)".to_owned(),
-                current: false,
-            },
-            Candidate {
-                insert: "kill".to_owned(),
-                description: "close a task's session (keeps its worktree)".to_owned(),
-                current: false,
-            },
-        ])
-    } else {
-        Level::Free
-    }
-}
-
-/// `/send`: the agent name and the text are free (the definitions live in the host).
-fn send_level(_typed: &[&str], _partial: &str) -> Level {
-    Level::Free
 }
 
 /// `/export`: the format, then the path (with `--force` offered as a candidate).
@@ -1041,12 +938,9 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/logout") => Outcome::Logout(logout_provider(&tokens[1..])),
         Some("/auto") | Some("/yolo") => auto_toggle(&tokens[1..]),
         Some("/access") => access_request(&tokens[1..]),
-        Some("/mode") => mode_request(&tokens[1..]),
         Some("/skills") if tokens.len() == 1 => Outcome::Skills,
         Some("/skills") => Outcome::Notices(vec!["usage: /skills (no arguments)".to_owned()]),
         Some("/jobs") => jobs_request(&tokens[1..]),
-        Some("/tasks") => tasks_request(&tokens[1..]),
-        Some("/send") => send_request(&tokens[1..]),
         Some(other) if other.starts_with("/skill:") => skill_command(other, line),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
@@ -1062,34 +956,6 @@ fn jobs_request(args: &[String]) -> Outcome {
             Outcome::Jobs(JobsRequest::Kill(id.clone()))
         }
         _ => Outcome::Notices(vec!["usage: /jobs [kill <id|all>]".to_owned()]),
-    }
-}
-
-/// `/tasks [cancel|kill <id>]` (ADR 0030 O10/O12). No argument lists the tasks; anything else
-/// is a usage notice.
-fn tasks_request(args: &[String]) -> Outcome {
-    match args {
-        [] => Outcome::Tasks(TasksRequest::List),
-        [verb, id] if verb == "cancel" && !id.is_empty() => {
-            Outcome::Tasks(TasksRequest::Cancel(id.clone()))
-        }
-        [verb, id] if verb == "kill" && !id.is_empty() => {
-            Outcome::Tasks(TasksRequest::Kill(id.clone()))
-        }
-        _ => Outcome::Notices(vec!["usage: /tasks [cancel|kill <id>]".to_owned()]),
-    }
-}
-
-/// `/send [<name> <text>]` (ADR 0030 O12, slice 7b). No argument lists the known definitions; a
-/// name needs at least one word of text. The text is the remaining tokens joined with spaces.
-fn send_request(args: &[String]) -> Outcome {
-    match args {
-        [] => Outcome::Send(SendRequest::List),
-        [name, rest @ ..] if !rest.is_empty() => Outcome::Send(SendRequest::Send {
-            name: name.clone(),
-            text: rest.join(" "),
-        }),
-        _ => Outcome::Notices(vec!["usage: /send <name> <text>".to_owned()]),
     }
 }
 
@@ -1185,16 +1051,6 @@ fn access_request(args: &[String]) -> Outcome {
         (None, _) => Outcome::Access(None),
         (Some(name), None) => Outcome::Access(Some(name.clone())),
         _ => Outcome::Notices(vec!["usage: /access [safe|workspace|full]".to_owned()]),
-    }
-}
-
-/// `/mode [general|lead]` (ADR 0038 slice 3). No argument is the query; one name is the
-/// switch; anything else is a usage notice.
-fn mode_request(args: &[String]) -> Outcome {
-    match (args.first(), args.get(1)) {
-        (None, _) => Outcome::ModeSwitch(None),
-        (Some(name), None) => Outcome::ModeSwitch(Some(name.clone())),
-        _ => Outcome::Notices(vec!["usage: /mode [general|lead]".to_owned()]),
     }
 }
 

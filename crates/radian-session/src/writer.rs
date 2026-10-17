@@ -174,7 +174,6 @@ const EVT_CONTEXT_COMPACTED: (&str, bool) = ("ContextCompacted", false);
 /// beside the core's own event constants.
 const EVT_TURN_FINISHED: &str = "TurnFinished";
 const EVT_TURN_FAILED: &str = "TurnFailed";
-const EVT_TASK_SPAWNED: &str = "TaskSpawned";
 
 /// Whether an append of `event` is a durability boundary (ADR 0040 decision 2): every record
 /// written before it in this writer is on disk when its append returns. Everything else is
@@ -193,8 +192,6 @@ fn must_sync(event: &str) -> bool {
         // The replacement commit (ADR 0019) and the abort its `resume` writes.
         EVT_TRANSCRIPT_REPLACEMENT_COMMITTED.0,
         EVT_TRANSCRIPT_REPLACEMENT_ABORTED.0,
-        // Written before the task's worktree/session exist (ADR 0030).
-        EVT_TASK_SPAWNED,
     ]
     .contains(&event)
 }
@@ -1276,7 +1273,6 @@ mod tests {
             "TurnFailed",
             "TranscriptReplacementCommitted",
             "TranscriptReplacementAborted",
-            "TaskSpawned",
         ];
         let non_sync = [
             "InboxEnqueued",
@@ -1298,10 +1294,8 @@ mod tests {
             "SessionForked",
             "ProjectTrustChanged",
             "UserBash",
-            "GitCommitted",
             "BackgroundJobStarted",
             "BackgroundJobSettled",
-            "TaskFinished",
         ];
         for name in sync {
             assert!(must_sync(name), "{name} must be a sync point");

@@ -111,12 +111,6 @@ pub enum ConfigError {
         name: String,
         reason: String,
     },
-    /// `[orchestration]` (ADR 0030 slice 9): a wrong-typed key. Refused (the ADR 0008 discipline:
-    /// a bad value is never guessed at); an unknown key is only a warning.
-    Orchestration {
-        path: PathBuf,
-        message: String,
-    },
 }
 
 impl fmt::Display for ConfigError {
@@ -186,9 +180,6 @@ impl fmt::Display for ConfigError {
             ConfigError::InvalidProviderName { path, name, reason } => {
                 write!(f, "{}: providers.{name}: {reason}", path.display())
             }
-            ConfigError::Orchestration { path, message } => {
-                write!(f, "{}: {message}", path.display())
-            }
         }
     }
 }
@@ -236,28 +227,6 @@ pub struct CompactionConfig {
 /// home, neither of which belongs in a TOML value). A directory that is not listed here is
 /// never scanned — in particular `~/.claude/skills` is read only when it appears in this list
 /// (ruling 2).
-/// `[git]` (ADR 0030 R10).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GitConfig {
-    /// `protected_branches = ["release"]`: branches `git_commit` refuses besides
-    /// `main`/`master`.
-    pub protected_branches: Vec<String>,
-    /// `allowed_filters = ["lfs"]` (ADR 0030, ADR 0039 decision 3): the filter
-    /// drivers `git_commit` may run **itself**, with a fixed command — only `lfs` is known. Any
-    /// other driver, named here or not, is refused, and no command is ever read from the
-    /// repository config. `None` means the default (`["lfs"]`); an empty list allows none.
-    pub allowed_filters: Option<Vec<String>>,
-}
-
-impl GitConfig {
-    /// The effective `allowed_filters`: the configured list, or the default (`["lfs"]`).
-    pub fn allowed_filters(&self) -> Vec<String> {
-        self.allowed_filters
-            .clone()
-            .unwrap_or_else(crate::git_commit::default_allowed_filters)
-    }
-}
-
 /// `[shell]` (ADR 0037): the shell tool's limits a host exposes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShellConfig {
@@ -586,14 +555,8 @@ pub struct Config {
     pub skills: SkillsConfig,
     /// `[memory]` (ADR 0021): the injection keys this revision adds.
     pub memory: MemoryConfig,
-    /// `[git]` (ADR 0030 R10): the branches `git_commit` refuses besides `main`/`master`.
-    pub git: GitConfig,
     /// `[shell]` (ADR 0037): the shell tool's limits.
     pub shell: ShellConfig,
-    /// `[orchestration]` (ADR 0030 slice 9): the user-level orchestration config. A project-level
-    /// `<workspace>/.radian/orchestration.toml` overrides it key by key when the workspace is
-    /// trusted (ADR 0031).
-    pub orchestration: crate::orchestration::OrchestrationConfig,
     pub tui: TuiConfig,
     /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
     /// resolve them through `radian_host::provider::resolve_provider`.
@@ -701,9 +664,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "compaction" => parse_compaction(value, path, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
             "memory" => parse_memory(value, path, &mut config)?,
-            "git" => parse_git(value, &mut config)?,
             "shell" => parse_shell(value, &mut config)?,
-            "orchestration" => parse_orchestration(value, path, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
             "providers" => parse_providers(value, path, &mut config)?,
             // Known by the ADR, not wired in this slice: the hosts take MCP servers from
@@ -1035,38 +996,6 @@ fn parse_compaction(value: &Value, path: &Path, config: &mut Config) -> Result<(
     Ok(())
 }
 
-/// `[skills] extra_paths = ["…"]` (ADR 0025 slice 4). The strings are kept raw; the host
-/// resolves them with [`resolve_extra_paths`]. A non-string or empty entry is a structural
-/// error (an empty path would silently resolve to the config directory); an unknown key under
-/// `[skills]` is skipped and named on the startup line, like every other unknown key.
-/// Parses `[git]` (ADR 0030 R10). An unknown key or a non-string entry is skipped, never a
-/// refusal (the `tui.*` rule's spirit: a preference never blocks startup).
-fn parse_git(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
-    let Some(table) = value.as_table() else {
-        return Ok(());
-    };
-    for (key, value) in table {
-        if let ("protected_branches", Value::Array(branches)) = (key.as_str(), value) {
-            for branch in branches {
-                if let Value::String(branch) = branch {
-                    config.git.protected_branches.push(branch.clone());
-                }
-            }
-        }
-        // ADR 0030: the filter drivers `git_commit` may run. `[]` allows none.
-        if let ("allowed_filters", Value::Array(filters)) = (key.as_str(), value) {
-            let mut names = Vec::with_capacity(filters.len());
-            for filter in filters {
-                if let Value::String(filter) = filter {
-                    names.push(filter.clone());
-                }
-            }
-            config.git.allowed_filters = Some(names);
-        }
-    }
-    Ok(())
-}
-
 /// Parses `[shell]` (ADR 0037). A non-integer or negative `auto_background_secs`
 /// (or an unknown key) is skipped and named on the startup line, never a refusal (the
 /// preferences rule: a bad limit must not block startup).
@@ -1086,24 +1015,6 @@ fn parse_shell(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
         }
     }
     Ok(())
-}
-
-/// Parses `[orchestration]` (ADR 0030 slice 9, O7/O8). The keys are shared with the project-level
-/// `<workspace>/.radian/orchestration.toml` (see [`crate::orchestration`]). A wrong-typed key is
-/// refused (never guessed at); an unknown key is skipped and named on the startup line (the
-/// preferences rule).
-fn parse_orchestration(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
-    match crate::orchestration::OrchestrationConfig::from_table(value) {
-        Ok(parsed) => {
-            config.skipped.extend(parsed.skipped.iter().cloned());
-            config.orchestration = parsed;
-            Ok(())
-        }
-        Err(message) => Err(ConfigError::Orchestration {
-            path: path.to_path_buf(),
-            message,
-        }),
-    }
 }
 
 fn parse_memory(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
@@ -1150,6 +1061,10 @@ fn parse_memory(value: &Value, path: &Path, config: &mut Config) -> Result<(), C
     Ok(())
 }
 
+/// `[skills] extra_paths = ["…"]` (ADR 0025 slice 4). The strings are kept raw; the host
+/// resolves them with [`resolve_extra_paths`]. A non-string or empty entry is a structural
+/// error (an empty path would silently resolve to the config directory); an unknown key under
+/// `[skills]` is skipped and named on the startup line, like every other unknown key.
 fn parse_skills(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
     let Some(table) = value.as_table() else {
         return Err(wrong_type(path, "skills", "a table"));
@@ -2305,31 +2220,6 @@ theme = "light"
             error.to_string().contains("openai-compatible|anthropic"),
             "{error}"
         );
-    }
-
-    /// ADR 0030: `[git] allowed_filters` is carried; the default (`["lfs"]`) applies
-    /// when it is absent, and `[]` allows none.
-    #[test]
-    fn the_git_allowed_filters_are_carried_with_an_lfs_default() {
-        let config = parse_str(concat!(
-            "schema_version = 1\n",
-            "[git]\n",
-            "protected_branches = [\"release\"]\n",
-            "allowed_filters = [\"lfs\", \"custom\"]\n",
-        ))
-        .unwrap();
-        assert_eq!(config.git.protected_branches, vec!["release".to_string()]);
-        assert_eq!(
-            config.git.allowed_filters(),
-            vec!["lfs".to_string(), "custom".to_string()]
-        );
-        // Absent: the default.
-        let config =
-            parse_str("schema_version = 1\n[git]\nprotected_branches = [\"release\"]\n").unwrap();
-        assert_eq!(config.git.allowed_filters(), vec!["lfs".to_string()]);
-        // An empty list allows none.
-        let config = parse_str("schema_version = 1\n[git]\nallowed_filters = []\n").unwrap();
-        assert!(config.git.allowed_filters().is_empty());
     }
 
     /// ADR 0037: `[shell] auto_background_secs` is carried; `0` means off, unset

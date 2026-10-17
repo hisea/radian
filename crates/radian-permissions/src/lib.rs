@@ -39,7 +39,7 @@ pub use audit::{
     ResolvedDecision,
 };
 pub use hooks::{PermissionHooks, ToolGate, policy_change_event, runtime_event};
-pub use profile::{ApprovalPolicy, Preset, Profile, ProfileError, task_hard_deny_rules};
+pub use profile::{ApprovalPolicy, Preset, Profile, ProfileError};
 pub use rule::{
     Action, Evaluated, Resource, ResourceMatcher, Rule, ToolMatcher, evaluate, resource_of,
 };

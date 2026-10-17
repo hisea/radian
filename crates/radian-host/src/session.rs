@@ -242,14 +242,6 @@ pub trait SessionFacade: Send + Sync {
     /// (`{"access": …}`) is queued for the driver to journal at the turn boundary.
     fn set_access(&self, tier: Preset) -> Result<(), CommandRefused>;
 
-    /// Switch the session's working mode (ADR 0038 decision 1's `/mode`). Layer 1 (the role
-    /// prompt) changes at the **next** model request: the change is queued for the next turn
-    /// boundary and journaled as a `ConfigChanged` (`{"mode": …}`), so a resume restores it.
-    /// Session only — never written to a config file. A task agent's role comes from its brief
-    /// and cannot be switched, and neither can a session whose layer 1 is fixed (`--system`,
-    /// an explicit role).
-    fn set_mode(&self, mode: crate::prompt::Mode) -> Result<(), CommandRefused>;
-
     /// The discovered skills, in discovery order (ADR 0025 S1). The UI lists them (`/skills`)
     /// and completes their names (`/skill:`); the host owns the list because it owns discovery.
     fn skills(&self) -> &[Skill];
@@ -349,19 +341,11 @@ pub struct SessionSetup {
     /// call ran under, which the host can only resolve offline. `None` means no price is
     /// resolved, so a resumed session's tokens are restored but its fee stays hidden.
     pub price_for: Option<RoutePrice>,
-    /// Branch names the `git_commit` tool refuses besides `main`/`master` (ADR 0030 R10).
-    pub protected_branches: Vec<String>,
-    /// Filter drivers `git add` may run (`[git] allowed_filters`, ADR 0030). `None`
-    /// means the default (`["lfs"]`); an empty list allows none.
-    pub allowed_filters: Option<Vec<String>>,
     /// The resolved `[shell] auto_background_secs` (ADR 0037): a **foreground**
     /// `shell` call still running after this is adopted by the job registry in place. `None`
     /// disables adoption (the config's `0`, or a host that does not set it).
     pub shell_auto_background: Option<Duration>,
     pub servers: Vec<McpServerConfig>,
-    /// The role prompt's name (ADR 0036): `default`, `task` or `lead`. `None` is
-    /// `default`. `--system` replaces this layer only.
-    pub role: Option<String>,
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
     pub auto_compact: bool,
@@ -386,26 +370,10 @@ pub struct SessionSetup {
     /// Rebuilds the profile and sandbox for a run-time tier switch (ADR 0038 slice 2). `None`
     /// for a host that has no `/access` command (the CLI): a switch is then refused.
     pub access_builder: Option<AccessBuilder>,
-    /// `true` when this session is a **task agent** (ADR 0030 O2: opened by a lead's
-    /// `spawn_task`, one brief per session). `radian-host`'s `TaskRegistry` sets it; it is the
-    /// flag `/mode` is refused behind (a task agent's role comes from its brief), and it is the
-    /// flag that makes `git_commit` refuse `main`/`master` (ADR 0038 decision 4).
-    pub task_agent: bool,
     /// The `SessionCreated.parent` a derived session records (ADR 0022's fork, ADR 0030 O2's
     /// task agent). `None` for an ordinary session. A `relation: "task"` parent names the lead
     /// and its `TaskSpawned` seq; a fork's names its parent and fork point.
     pub parent: Option<ForkParent>,
-    /// When set, `git_commit` may only commit to this branch (a task agent's `radian/<id>`,
-    /// ADR 0030 O3). `None` for a session with no branch restriction.
-    pub allowed_branch: Option<String>,
-    /// Whether `git_commit` commits only to this session's **own** branch (ADR 0030 O3).
-    /// `true` for every agent the orchestration opens (a task agent, a named agent): when the
-    /// session has a branch (a worktree's `radian/...`) the tool is mounted and restricted to
-    /// it; when it has none (an `isolation = "shared"` agent, which runs in the human's own
-    /// workspace) the tool is **not mounted at all** — a shared agent must not be able to
-    /// commit onto whatever branch the human has checked out. `false` for the human's own
-    /// interactive `general`/`lead` session, which may commit on its checked-out branch.
-    pub git_commit_requires_branch: bool,
     /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
     pub memory_root: Option<PathBuf>,
     /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
@@ -456,13 +424,6 @@ pub enum ApprovalRouting {
     Queued,
     /// Directly, by this approver (the CLI's line prompt: no queue, no modal).
     Direct(Arc<dyn Approver>),
-    /// A task agent (ADR 0030 slice 5): its approval asks go to the task-side pending queue, and
-    /// its `ask_user` questions likewise, never to the human's queue. Only an escalation the
-    /// lead performs reaches the human queue (ADR 0030 R9 / revision 6).
-    Task {
-        approver: Arc<dyn Approver>,
-        prompter: Arc<dyn radian_coding::Prompter>,
-    },
 }
 
 /// What the host injects. Everything here is host-specific; nothing is a session fact.
@@ -495,15 +456,6 @@ pub struct HostBindings {
     /// write registered, and how to join it to a previous one). The CLI prints it to stderr
     /// and the TUI shows it as a notice.
     pub memory_notice_line: Arc<dyn Fn(&str) + Send + Sync>,
-    /// Builds the host-specific parts of a **task** session (ADR 0030 slice 6). `Some` mounts
-    /// the lead's task tools from the start for an interactive (non-task) session, behind the
-    /// `/mode` gate (ADR 0038 decision 1); `None` mounts none. A task session never mounts them
-    /// (depth limit 2), whatever its builder returns.
-    pub task_builder: Option<crate::task::TaskBuilder>,
-    /// Builds the host-specific parts of a **named** session (ADR 0030 O12, slice 7 part b).
-    /// `Some` builds the lead's named-agent registry, so the session can create and command
-    /// named agents (`send_agent`); `None` has no named agents. A task session never gets one.
-    pub named_builder: Option<crate::named::NamedBuilder>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).
@@ -566,21 +518,9 @@ pub struct LocalSession {
     sandbox_slot: SandboxSlot,
     /// Rebuilds the profile and sandbox for a tier switch. `None` refuses `set_access`.
     access_builder: Option<AccessBuilder>,
-    /// Whether this session is a task agent (ADR 0030 O2): `set_mode` refuses then.
-    task_agent: bool,
-    /// The lead's task registry (ADR 0030 slice 6), or `None` for a session with no lead tools.
-    lead: Option<Arc<crate::task::TaskRegistry>>,
-    /// The lead's named-agent registry (ADR 0030 O12), or `None` for a session with none.
-    named: Option<Arc<crate::named::NamedRegistry>>,
     /// Whether a turn is running right now (the driver's own flag, `false` before the first
-    /// turn). A named agent's `/send` and `wait_agent` read it to tell "busy" from "idle".
+    /// turn).
     turn_running: Arc<std::sync::atomic::AtomicBool>,
-    /// Whether layer 1 is fixed for the session (`--system` or an explicit role): `set_mode`
-    /// refuses then.
-    role_fixed: bool,
-    /// Layer 0b's hook (ADR 0038 decision 1): `set_mode` recomputes `<session>` together with
-    /// the layer-1 change, through the same seam `/reload` will use (ADR 0036).
-    facts_hooks: Arc<crate::prompt::SessionFactsHooks>,
     projection: Arc<SessionProjection>,
     /// The pending approvals and questions (ADR 0023 U7).
     queue: Arc<SessionQueue>,
@@ -637,20 +577,8 @@ impl LocalSession {
         self.jobs.clone()
     }
 
-    /// The lead's task registry (ADR 0030 slice 6), or `None` for a session with no lead tools
-    /// (a task agent, or a host that supplied no task builder). The lead's tools are the model's
-    /// interface to it; this is for the host (the TUI's task count, `/tasks`).
-    pub fn lead_tasks(&self) -> Option<&Arc<crate::task::TaskRegistry>> {
-        self.lead.as_ref()
-    }
-
-    /// The lead's named-agent registry (ADR 0030 O12), or `None`. For the host's `/send`.
-    pub fn named_agents(&self) -> Option<&Arc<crate::named::NamedRegistry>> {
-        self.named.as_ref()
-    }
-
     /// Whether a turn is running right now (the driver's flag). `false` before the first turn and
-    /// between turns; a named agent's `send` uses it to choose "queued" over "started".
+    /// between turns.
     pub fn turn_running(&self) -> bool {
         self.turn_running.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -800,10 +728,6 @@ impl LocalSession {
     /// Asks the driver to stop gracefully (idempotent) and aborts this session's pending
     /// requests.
     pub fn stop(&self) {
-        // ADR 0030 O12: a lead's named agents close with it; their worktrees stay on disk.
-        if let Some(named) = &self.named {
-            named.close_all();
-        }
         self.close_pending();
         if let Some(stop) = self.driver.stop.lock().unwrap().take() {
             let _ = stop.send(());
@@ -930,48 +854,6 @@ impl SessionFacade for LocalSession {
         // The status bar reads the tier from the projection; keep it in step. The startup
         // source marker is a startup fact and is not re-applied here.
         self.projection.set_tier(Some(tier.as_str().to_string()));
-        Ok(())
-    }
-
-    fn set_mode(&self, mode: crate::prompt::Mode) -> Result<(), CommandRefused> {
-        if !self
-            .capabilities
-            .contains(&SessionCapability::AnswerRequest)
-        {
-            return Err(CommandRefused {
-                command: "set-mode".into(),
-                capability: Some(SessionCapability::AnswerRequest.as_str().to_string()),
-                reason: "this session does not declare the `answer` capability".into(),
-            });
-        }
-        // A task agent is told what to do by its brief; its role is the orchestrator's, not the
-        // user's to switch (ADR 0030 O12, ADR 0038 decision 1).
-        if self.task_agent {
-            return Err(CommandRefused {
-                command: "set-mode".into(),
-                capability: None,
-                reason: "a task agent's role comes from its brief and cannot be switched".into(),
-            });
-        }
-        if self.role_fixed {
-            return Err(CommandRefused {
-                command: "set-mode".into(),
-                capability: None,
-                reason: "this session's role layer is fixed for the whole session".into(),
-            });
-        }
-        // Layer 1 is not swapped here: the hook reads the mode from the config slot, and the
-        // driver applies this queued change at the next turn boundary (ADR 0026 D5,
-        // ADR 0038 slice 3), so the switch takes effect on the next turn's first model request
-        // and never mid-turn. The durable record is that same `ConfigChanged`.
-        self.config_queue
-            .push(serde_json::json!({ "mode": mode.as_str() }));
-        // ADR 0036: the mode switch recomputes `<session>` too. Its bytes do not
-        // name the mode, so this only matters if a live read (the date, the git state) moved;
-        // doing it here is what keeps the ADR's rule (0a/2/3 fixed, 0b recomputed on an
-        // explicit switch) true for `/mode` as it is for `/model`.
-        self.facts_hooks.refresh();
-        self.projection.set_mode(Some(mode.as_str().to_string()));
         Ok(())
     }
 
@@ -1138,8 +1020,6 @@ pub async fn open_session(
         before_driver,
         memory_warning,
         memory_notice_line,
-        task_builder,
-        named_builder,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -1149,7 +1029,6 @@ pub async fn open_session(
         coding_root,
         model,
         servers,
-        role,
         system_prompt,
         context_budget,
         auto_compact,
@@ -1160,10 +1039,7 @@ pub async fn open_session(
         tier,
         profile,
         access_builder,
-        task_agent,
         parent,
-        allowed_branch,
-        git_commit_requires_branch,
         memory_root,
         skills_extra_paths,
         skills_builtin,
@@ -1182,14 +1058,11 @@ pub async fn open_session(
         config_queue,
         budget_for,
         price_for,
-        protected_branches,
-        allowed_filters,
         shell_auto_background,
     } = setup;
 
     // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
-    // tools and the hooks, because both route through it. A task agent is handed the lead's
-    // queue (ADR 0030 O2), so its approvals and questions arrive in one order with the lead's.
+    // tools and the hooks, because both route through it.
     let queue: Arc<SessionQueue> = shared_queue.unwrap_or_else(|| Arc::new(PendingQueue::new()));
     let origin = session_id.as_str().to_string();
 
@@ -1231,14 +1104,9 @@ pub async fn open_session(
     // there are coding tools. It is its own provider, so a host without `--workspace` still
     // advertises it. `None` is what the model sees as "no such tool".
     let ask = ask_user.then(|| {
-        // A task agent's questions go to the task-side pending queue (ADR 0030 slice 5), not to
-        // the human's; every other session asks through its own pending queue.
-        let task_prompter = match &approvals {
-            ApprovalRouting::Task { prompter, .. } => Some(Arc::clone(prompter)),
-            _ => None,
-        };
-        let prompter: Arc<dyn radian_coding::Prompter> = task_prompter
-            .unwrap_or_else(|| Arc::new(QueuedPrompter::new(Arc::clone(&queue), origin.clone())));
+        // Questions are asked through this session's own pending queue.
+        let prompter: Arc<dyn radian_coding::Prompter> =
+            Arc::new(QueuedPrompter::new(Arc::clone(&queue), origin.clone()));
         radian_coding::AskTools::new(prompter)
     });
     let injection_config = memory_injection;
@@ -1315,63 +1183,7 @@ pub async fn open_session(
     }
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
-    // The lead's task registry (ADR 0030 slice 6): built here because it needs the session's
-    // journal (its `TaskSpawned`/`TaskFinished` land there) and the shared pending queue. A task
-    // agent never builds one.
-    let lead_mounted = !task_agent && task_builder.is_some();
-    let lead_registry = if lead_mounted {
-        let builder = task_builder.expect("lead_mounted implies a task builder");
-        // ADR 0030 O10: the registry tells the host's live view about every `TaskSpawned` and
-        // `TaskFinished` it writes, so the TUI shows a notice line and the CLI one stderr line.
-        // The sink is the host's own runtime-events handler (the same one the driver calls).
-        let runtime_events = Arc::clone(&runtime_events);
-        let notifier_events = Arc::clone(&runtime_events);
-        let notifier: crate::task::TaskNotifier =
-            Arc::new(move |event: &radian_session::RuntimeEvent| {
-                notifier_events.on_runtime_event(event);
-            });
-        // ADR 0030 O7 / slice 9: the registry's hook points (`task_spawned`, `task_finished`,
-        // `stalled`) go through the same control-wrapped sink, so a subscriber sees them with
-        // their stable hook names.
-        let hook_events = Arc::clone(&runtime_events);
-        let hook_notifier: crate::task::HookNotifier =
-            Arc::new(move |name: &str, data: &serde_json::Value| {
-                hook_events.on_hook_event(name, data);
-            });
-        Some(Arc::new(
-            crate::task::TaskRegistry::new(
-                workspace.clone(),
-                session_id.as_str(),
-                Arc::clone(&journal),
-                Arc::clone(&queue),
-                builder,
-            )
-            .with_notifier(notifier)
-            .with_hook_notifier(hook_notifier),
-        ))
-    } else {
-        None
-    };
-
-    // The lead's named-agent registry (ADR 0030 O12, slice 7b): built the same way, over the
-    // lead's workspace, journal and queue. A task agent never builds one.
-    let named_registry = if task_agent {
-        None
-    } else {
-        named_builder.map(|builder| {
-            Arc::new(crate::named::NamedRegistry::new(
-                workspace.clone(),
-                Arc::clone(&journal),
-                Arc::clone(&queue),
-                builder,
-            ))
-        })
-    };
-
-    // ADR 0030 O8: the built-in coding tools are built here, after the registry has installed
-    // the process heavy gate, so this session's `shell` (the lead's, and every task's through
-    // its own `open_session`) queues on the same slots. The registry resolves the process gate
-    // at construction; [`radian_coding::HeavySlots::process`] then returns it for every session.
+    // The built-in coding tools are built here.
     let (coding, jobs) = build_coding_tools(
         coding_root.as_deref(),
         sandbox_slot.clone(),
@@ -1380,40 +1192,18 @@ pub async fn open_session(
     )?;
 
     // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line
-    // prompt answers them directly. A task agent routes to its own task approver (ADR 0030
-    // slice 5), which is the one case a non-human turn may reach the approver.
-    let task_routing = matches!(&approvals, ApprovalRouting::Task { .. });
-    // ADR 0030 slice 6: an interactive session whose host supplied a task builder mounts the
-    // lead tools **from the start** (ADR 0030 item 5); a task agent never does
-    // (depth limit 2). The profile allows the tool names and the mode gate refuses them
-    // outside `lead`, so `/mode` never adds or removes a tool (ADR 0038 decision 1).
-    //
-    // ADR 0030: `integrate_task`'s permission is `merge_needs_human`. With
-    // the default `true` it is deliberately left **unmatched**, so the rules resolve to `ask` — a
-    // human approval with this session as the origin, and a refusal (never an auto-allow) for a
-    // non-`User` turn. `false` adds the `allow` rule.
-    let profile = if lead_mounted {
-        let merge_needs_human = lead_registry
-            .as_ref()
-            .map(|registry| registry.orchestration().merge_needs_human)
-            .unwrap_or(true);
-        profile.with_allowed_tools(&crate::lead_tools::lead_allowed_tools(merge_needs_human))
-    } else {
-        profile
-    };
+    // prompt answers them directly.
     let approver: Arc<dyn Approver> = match approvals {
         ApprovalRouting::Queued => {
             Arc::new(QueuedApprover::new(Arc::clone(&queue), origin.clone()))
         }
         ApprovalRouting::Direct(approver) => approver,
-        ApprovalRouting::Task { approver, .. } => approver,
     };
     let hooks = Arc::new(PermissionHooks::new(
         profile,
         Some(approver),
         audit(Arc::clone(&journal)),
     ));
-    hooks.set_task_approver(task_routing);
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),
     // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).
@@ -1429,9 +1219,8 @@ pub async fn open_session(
         for warning in &discovery.warnings {
             memory_warning(warning);
         }
-        // ADR 0030 O11: an agent definition's `skills` list is the allow-list for this session's
-        // catalog. `None` is every discovered skill (the lead and an undefined task). The
-        // missing-name warning is reported at spawn by the registry, not here.
+        // An agent definition's `skills` list is the allow-list for this session's catalog.
+        // `None` is every discovered skill.
         match &skills_allow {
             Some(allow) => skills::restrict_to(discovery.skills, allow),
             None => discovery.skills,
@@ -1450,42 +1239,13 @@ pub async fn open_session(
     );
     let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
-    // ADR 0030 R10: pin the repository now, before the model runs. A workspace that is not a
-    // git repository does not mount `git_commit` at all. ADR 0030 O3: an agent that may commit
-    // only to its own branch does not mount `git_commit` when it has none (a `shared` agent in
-    // the human's workspace); the human's own interactive session (`false`) always mounts it.
-    let git_commit = if git_commit_requires_branch && allowed_branch.is_none() {
-        None
-    } else {
-        crate::git_commit::RepoPin::resolve(&workspace).map(|pin| {
-            crate::git_commit::GitCommitTools::new(workspace.clone(), Arc::clone(&journal), pin)
-                .with_allowed_branch(allowed_branch)
-                .with_require_branch(git_commit_requires_branch)
-                .with_refuse_main(task_agent)
-                .with_protected_branches(protected_branches)
-                .with_allowed_filters(
-                    allowed_filters.unwrap_or_else(crate::git_commit::default_allowed_filters),
-                )
-        })
-    };
-    let mut tools =
-        HostTools::new(coding, memory_tools, mcp.clone(), git_commit).with_tool_allow(tools_allow);
+    let mut tools = HostTools::new(coding, memory_tools, mcp.clone()).with_tool_allow(tools_allow);
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
         tools = tools.with_ask(ask);
     }
     if !shared_skills.is_empty() {
         tools = tools.with_skills(SkillTools::new(Arc::clone(&shared_skills)));
-    }
-    // ADR 0030 slice 6: mount the lead tools from the start and gate them on the mode. The tools
-    // stay in the model's list in every mode (`/mode` never adds or removes one, revision 5 item
-    // 5); the gate turns a call into a "switch with /mode lead" refusal in `general`.
-    if let Some(registry) = &lead_registry {
-        tools = tools.with_lead(
-            crate::lead_tools::LeadTools::new(Arc::clone(registry))
-                .with_named(named_registry.clone()),
-        );
-        hooks.set_tool_gate(Some(lead_mode_gate(Arc::clone(&config_slot))));
     }
     // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> lists
     // the tools this host actually mounted and the tier/sandbox facts; 1 <role> is the role
@@ -1506,28 +1266,19 @@ pub async fn open_session(
         unix_sockets_restricted: workspace_mode,
     });
     let role_override = system_prompt.clone();
-    let role_layer = match &role_override {
-        Some(system) => system.clone(),
-        None => crate::prompt::role_prompt(role.as_deref(), radian_home().as_deref()),
-    };
+    let role_layer = role_override
+        .clone()
+        .unwrap_or_else(|| crate::prompt::DEFAULT_ROLE.to_owned());
     let system_prompt = Some(crate::prompt::assemble(
         &runtime_layer,
         &role_layer,
         &context.section,
     ));
-    // ADR 0038 decision 1: `/mode` swaps layer 1 only, at the next turn's first model request.
-    // The hook reads the mode from the same config slot `/model` writes, so the switch is
-    // journaled and replayed by the driver like any other change, and it can never land
-    // mid-turn. Layer 1 is fixed when `--system` (or an explicit role) set it for the session,
-    // and the hook then rebuilds exactly that layer — the same bytes the assemble above made.
     let role_hooks = Arc::new(crate::prompt::RoleHooks::new(
         &runtime_layer,
         &context.section,
         role_override,
-        role.clone(),
-        Some(Arc::clone(&config_slot)),
     ));
-    let role_fixed = role_hooks.fixed();
     let agent_config = AgentConfig {
         system_prompt,
         context_budget,
@@ -1655,14 +1406,6 @@ pub async fn open_session(
             .map(|budget| budget.input_budget_tokens),
     );
     projection.set_tier(Some(tier.as_str().to_string()));
-    // ADR 0038 decision 1: the mode in force, as the slot has it after the resume replay (the
-    // driver applied the journal's last `{"mode": …}` change before this line). `/mode` with no
-    // argument prints it.
-    projection.set_mode(Some(
-        crate::prompt::Mode::of(&config_slot.value())
-            .as_str()
-            .to_string(),
-    ));
     // F3 (ADR 0027): a resumed session folds its journal's usage records back into
     // the projection. The projection's only other writer is the live event sink, so without
     // this `--resume` showed `-` for the tokens and hid `cost` until the next response — the
@@ -1730,12 +1473,7 @@ pub async fn open_session(
         hooks,
         sandbox_slot,
         access_builder,
-        task_agent,
-        lead: lead_registry,
-        named: named_registry,
         turn_running,
-        role_fixed,
-        facts_hooks,
         projection,
         queue,
         memory,
@@ -1756,24 +1494,7 @@ pub async fn open_session(
     })
 }
 
-/// The gate that keeps the lead tools behind `lead` mode (ADR 0030 slice 6, ADR 0038 decision
-/// 1): a call to one of them is denied unless the session's mode is `lead`. The mode comes from
-/// the driver's config slot, which `/mode` only moves at a **turn boundary**, so the switch
-/// takes effect on the next turn and never mid-turn. Deny-only: no rule, grant or approver can
-/// widen it.
-fn lead_mode_gate(slot: Arc<radian_runtime::ConfigSlot>) -> radian_permissions::ToolGate {
-    Arc::new(move |tool: &str| {
-        if crate::lead_tools::LEAD_TOOL_NAMES.contains(&tool)
-            && crate::prompt::Mode::of(&slot.value()) != crate::prompt::Mode::Lead
-        {
-            Some("the lead tools are off outside lead mode: switch with /mode lead".to_owned())
-        } else {
-            None
-        }
-    })
-}
-
-/// The agent's hook chain (ADR 0025 S6, ADR 0038 decision 1): the role hook writes layers 0a, 1
+/// The agent's hook chain (ADR 0025 S6): the role hook writes layers 0a, 1
 /// and 2 first, then the permission rules run, then the memory section is appended, then the
 /// skills section. The order is a promise — the role layer comes first, and the sections must be
 /// deterministic with memory before skills — so it lives in this one function, which

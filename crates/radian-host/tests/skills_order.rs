@@ -93,15 +93,13 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         Arc::new(NoopAudit),
     ));
 
-    // The role hook (ADR 0038 decision 1) writes layers 0a, 1 and 2 and runs first; a fixed
-    // role source and an empty project are enough here, because this test is about the order of
+    // The role hook (ADR 0036) writes layers 0a, 1 and 2 and runs first; an empty
+    // project and the built-in role are enough here, because this test is about the order of
     // the sections the other hooks append.
-    let role = Arc::new(radian_host::RoleHooks::with_role_source(
+    let role = Arc::new(radian_host::RoleHooks::new(
         "<runtime>\n</runtime>",
         "",
-        Arc::new(|_mode| "ROLE".to_owned()),
-        Arc::new(radian_host::Mode::default),
-        false,
+        None,
     ));
 
     // The volatile `<session>` facts (ADR 0036 D1): appended last.

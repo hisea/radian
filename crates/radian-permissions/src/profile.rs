@@ -193,16 +193,6 @@ impl Profile {
         &self.rules
     }
 
-    /// Extends this profile with the ADR 0030 R1 **hard-deny** command list. The
-    /// registry calls this on whatever profile the task builder supplied, so no definition
-    /// file, project config or edge policy can relax it: `deny` outranks `ask`/`allow`, and
-    /// `ApprovalPolicy` never lowers a `deny`. The rules use the conservative `deny` matcher
-    /// ([`crate::shell::deny_matches`]), so a segment of a composite command is enough to deny.
-    pub fn with_task_hard_deny(mut self) -> Self {
-        self.rules.extend(task_hard_deny_rules());
-        self
-    }
-
     /// Allows these tool names in **every** tier, with the normal rule priority (ADR 0030 slice
     /// 6): the lead tools `spawn_task`, `wait_task`, … write no workspace file and run no
     /// repository command themselves — the task worktree and its sandbox are the boundary — so
@@ -318,38 +308,6 @@ fn always_allowed() -> Vec<Rule> {
                 ResourceMatcher::Any,
                 Action::Allow,
             )
-        })
-        .collect()
-}
-
-/// The ADR 0030 R1 hard-deny command list, as `deny` rules on the `shell` tool. These
-/// are checked before any edge policy and cannot be relaxed. The matcher is conservative over
-/// every shell segment ([`crate::shell::deny_matches`]): a `deny` command rule also matches inside
-/// a quoted or composite command, so `sh -c 'git push'` is denied too.
-pub fn task_hard_deny_rules() -> Vec<Rule> {
-    const DENIED: &[&[&str]] = &[
-        &["git", "push"],
-        // Merge/checkout against the lead workspace or a user branch: the task has its own
-        // worktree and never needs another branch's content in it.
-        &["git", "merge"],
-        &["git", "checkout", "main"],
-        &["git", "checkout", "master"],
-        // `git checkout -- <path>` / `git checkout .` are the destructive restore forms.
-        &["git", "checkout", "--"],
-        &["git", "checkout", "."],
-        &["git", "reset", "--hard"],
-        &["git", "restore"],
-        &["git", "stash"],
-    ];
-    DENIED
-        .iter()
-        .map(|prefix| {
-            Rule::new(
-                ToolMatcher::Name("shell".into()),
-                ResourceMatcher::CommandPrefix(prefix.iter().map(|w| (*w).to_owned()).collect()),
-                Action::Deny,
-            )
-            .with_reason("a task agent may not run this (ADR 0030 R1)")
         })
         .collect()
 }
