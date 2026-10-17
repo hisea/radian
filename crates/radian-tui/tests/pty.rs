@@ -2120,10 +2120,14 @@ async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
 /// reports is really the outer one's: a write outside the profile's writable subtree fails, one
 /// inside succeeds. The profile is the smallest that lets the TUI start (measured on macOS 27,
 /// 2026-10-16); `(deny default)` is what makes the nested `sandbox-exec` probe impossible.
+///
+/// The test is not skipped inside another sandbox: a nested `sandbox-exec` cannot start there
+/// (that is the whole point), so it runs the bin directly and checks the one thing still
+/// checkable — that the outer sandbox **this test's own process** is in is inherited and named.
+/// The write checks need a profile whose writable subtree is known, so they run only outside.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_an_outer_sandbox_is_inherited_instead_of_refused() {
-    skip_inside_sandbox!("pty_an_outer_sandbox_is_inherited_instead_of_refused");
     let _serial = pty_guard();
     let dir = TempDir::new("inherited");
     let ws = dir.path().join("ws");
@@ -2138,23 +2142,33 @@ async fn pty_an_outer_sandbox_is_inherited_instead_of_refused() {
     std::fs::create_dir_all(&tmp).unwrap();
     let leak = outside.join("leak");
     let server = MockServer::start(vec![text_reply("never")]).await;
-    let argv = vec![
-        SANDBOX_EXEC.to_owned(),
-        "-p".to_owned(),
-        outer_profile(&ws),
-        "--".to_owned(),
-        BIN.to_owned(),
-        "--model".to_owned(),
-        "mock".to_owned(),
-        "--base-url".to_owned(),
-        server.base_url.clone(),
-        "--session-dir".to_owned(),
-        ws.join("sessions").to_str().unwrap().to_owned(),
-        "--session-id".to_owned(),
-        "inherited".to_owned(),
-        "--workspace".to_owned(),
-        ws.to_str().unwrap().to_owned(),
-    ];
+    let outer = !radian_sandbox::confined_by_outer_sandbox();
+    let mut argv: Vec<String> = Vec::new();
+    if outer {
+        argv.extend([
+            SANDBOX_EXEC.to_owned(),
+            "-p".to_owned(),
+            outer_profile(&ws),
+            "--".to_owned(),
+        ]);
+    }
+    argv.push(BIN.to_owned());
+    argv.extend(
+        [
+            "--model",
+            "mock",
+            "--base-url",
+            server.base_url.as_str(),
+            "--session-dir",
+            ws.join("sessions").to_str().unwrap(),
+            "--session-id",
+            "inherited",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
     let mut pty = Pty::spawn_argv(
         &argv,
         &[
@@ -2182,37 +2196,39 @@ async fn pty_an_outer_sandbox_is_inherited_instead_of_refused() {
         "the startup line must say the sandbox is inherited:\n{startup}"
     );
 
-    // A write outside the writable subtree is denied by the **outer** sandbox (the `!` command
-    // reports the shell's exit status through a file it is allowed to write).
-    pty.send(
-        format!(
-            "!printf x > {}; echo $? > ./outside_status\r",
-            leak.display()
-        )
-        .as_bytes(),
-    );
-    let status = ws.join("outside_status");
-    assert!(
-        wait_for_bang_file(&mut pty, &status),
-        "the `!` command outside the workspace did not finish:\n{}",
-        pty.screen()
-    );
-    let code = std::fs::read_to_string(&status).unwrap();
-    assert_ne!(
-        code.trim(),
-        "0",
-        "the outer sandbox must deny a write outside the writable subtree"
-    );
-    assert!(!leak.exists(), "a file outside the workspace was created");
+    if outer {
+        // A write outside the writable subtree is denied by the **outer** sandbox (the `!`
+        // command reports the shell's exit status through a file it is allowed to write).
+        pty.send(
+            format!(
+                "!printf x > {}; echo $? > ./outside_status\r",
+                leak.display()
+            )
+            .as_bytes(),
+        );
+        let status = ws.join("outside_status");
+        assert!(
+            wait_for_bang_file(&mut pty, &status),
+            "the `!` command outside the workspace did not finish:\n{}",
+            pty.screen()
+        );
+        let code = std::fs::read_to_string(&status).unwrap();
+        assert_ne!(
+            code.trim(),
+            "0",
+            "the outer sandbox must deny a write outside the writable subtree"
+        );
+        assert!(!leak.exists(), "a file outside the workspace was created");
 
-    // The same command inside the writable subtree succeeds.
-    pty.send(b"!printf x > ./inside\r");
-    let inside = ws.join("inside");
-    assert!(
-        wait_for_bang_file(&mut pty, &inside),
-        "the `!` command inside the workspace did not finish:\n{}",
-        pty.screen()
-    );
+        // The same command inside the writable subtree succeeds.
+        pty.send(b"!printf x > ./inside\r");
+        let inside = ws.join("inside");
+        assert!(
+            wait_for_bang_file(&mut pty, &inside),
+            "the `!` command inside the workspace did not finish:\n{}",
+            pty.screen()
+        );
+    }
 
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -2930,6 +2946,12 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
 /// so macOS showed `workspace · none`. the summary says the plain words
 /// ("macOS sandbox" / "Linux sandbox") and the expanded `profile:` line keeps the exact
 /// backend name.
+///
+/// ADR 0016 acceptance 4 rides along: the process is started with the environment
+/// variables someone might expect to select the `inherited` backend (`RADIAN_SANDBOXED`,
+/// `RADIAN_SANDBOX_INHERIT`). Detection may only ask the kernel, so outside a sandbox the real
+/// backend is still the one probed and named. Mutation: reading an environment variable in
+/// `confined_by_outer_sandbox` (the summary would read `inherited`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
@@ -2940,7 +2962,7 @@ async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![text_reply("never")]).await;
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -2953,6 +2975,7 @@ async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
             "--workspace",
             ws.to_str().unwrap(),
         ],
+        &[("RADIAN_SANDBOXED", "1"), ("RADIAN_SANDBOX_INHERIT", "1")],
         30,
         120,
     );
