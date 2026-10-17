@@ -45,6 +45,7 @@ impl App {
                 model_name: model_name.into(),
                 model_display: None,
                 provider: None,
+                max_model_calls: radian_host::DEFAULT_MAX_MODEL_CALLS,
                 cwd: None,
                 git_branch: None,
                 model_price: None,

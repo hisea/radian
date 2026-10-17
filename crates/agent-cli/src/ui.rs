@@ -69,9 +69,20 @@ pub(crate) struct Ui {
     /// True while the approval prompt may read stdin (so the prompt loop must not).
     approval_may_read: AtomicBool,
     last_status: StdMutex<Option<RunStatus>>,
+    /// The resolved per-turn model call limit (the CLI flag or its default), so a
+    /// `BudgetExceeded` turn names the number it ran under.
+    max_model_calls: u32,
 }
 
 impl Ui {
+    /// One UI over a run whose per-turn model call limit is `max_model_calls`.
+    pub(crate) fn new(max_model_calls: u32) -> Self {
+        Self {
+            max_model_calls,
+            ..Self::default()
+        }
+    }
+
     /// True while a turn is in flight.
     pub(crate) fn busy(&self) -> bool {
         self.busy.load(Ordering::Relaxed)
@@ -202,6 +213,13 @@ impl EventSink for Ui {
                         // wait for either.
                         eprintln!("radian: cancelled ({status:?}); type another line or /exit")
                     }
+                    // ADR 0015: the per-turn **call-count** budget (not the context window).
+                    // The one line names the number of calls the turn used and the flag that
+                    // raises it; `one_shot` does not repeat it.
+                    RunStatus::BudgetExceeded => eprintln!(
+                        "radian: {}",
+                        radian_host::budget_exceeded_line(self.max_model_calls)
+                    ),
                     other => eprintln!("[turn] ended as {other:?}"),
                 }
                 self.finished.notify_one();

@@ -54,7 +54,7 @@ pub(super) fn startup_preamble(
     // startup. A failure is one line, never a fault.
     radian_host::clean_startup();
     let dir = session_dir(cli)?;
-    let workspace_root = coding_root(cli)?;
+    let workspace_root = coding_root(cli.workspace.as_deref())?;
     let workspace_path = radian_host::resolve_workspace(Some(&workspace_root.path))?;
     // ADR 0020 decision 5: never move a user's data; print a copy-pasteable command instead.
     if cli.session_dir.is_none()

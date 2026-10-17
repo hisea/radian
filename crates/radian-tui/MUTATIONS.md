@@ -2317,3 +2317,48 @@ with `cmp`.
 Commands: `timeout 300 cargo test -p radian-tui --locked --no-fail-fast --test footer
 rate_limit_headers` (UH-T1); the full `--test footer` suite runs green on the fixed code (62
 passed). UH-T1 is the slice's "no特判" acceptance: a `Headers` provider must not need an endpoint.
+## 预算行作为 notice（`radian exec` 默认 1000 那一项）
+
+`RunFinished` 且 `BudgetExceeded` 时 `App` push 一条 notice（`radian_host::budget_exceeded_line`，
+与 `radian exec` stderr 同一句，命名上限与 flag）；此前 TUI 对该状态什么都不显示。变异在源码原地
+改，从 `/tmp/mut/` 的 `cp` 副本还原并 `cmp` 一致（不用 `git checkout --`/`restore`）。命令：
+`timeout 300 cargo test -p radian-tui --locked --no-fail-fast --lib a_budget_exceeded`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MC-3 | `app/transcript.rs` 的 `BudgetExceeded` notice 删掉（`if false`） | `app::transcript::tests::a_budget_exceeded_turn_shows_the_notice_naming_the_flag`（"a notice" 找不到） | ✅ 1 failed |
+
+
+## `attach` 把活会话的未决工具调用显示为 queued/running（ADR 0043 D14）
+
+journal 的 fold 会为每个没有已提交结果的调用合成一个崩溃结果（ADR 0002）；活会话（有 writer
+持有文件锁，`radian_session::session_is_live`）里那正是运行时已请求未开始（`queued`）或已开始
+未结束（`running`）的调用，所以改显示成 `queued:`/`running:` 行，settle 提交后由真实结果替换；
+只有**不是**活会话才出恢复用语。变异在源码原地改，从 `/tmp/mut/` 的 `cp` 副本还原并 `cmp` 一致
+（不用 `git checkout --`/`restore`）。命令：`timeout 400 cargo test -p radian-tui --locked
+--no-fail-fast --test attach sessions_open_calls`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| AT-M1 | `JournalObserver::live()` 恒 `false`（活会话也走恢复 fold） | `attach::a_live_sessions_open_calls_show_as_running_and_queued_then_their_results`（屏上出现 `had not started executing`，`running:` 计数为 0） | ✅ 1 failed |
+| AT-M2 | `JournalObserver::live()` 恒 `true`（死会话也当成活） | `attach::a_dead_sessions_open_calls_keep_the_recovery_wording`（屏上没有恢复用语） | ✅ 1 failed |
+
+## `attach` 无 id 时开本工作区的 picker（ADR 0043 第 8 条）
+
+`SESSION_ID` 变可选：没有它就先在**同一个终端**里开这个工作区的 picker（`--pick` 的同一份
+`prepare_picker` 行，加 `without_new()`；workspace 经 `coding_root(None)` 取当前目录，与 `--list`
+同一规则），Enter attach 到选中的会话、Esc/q 不 attach 并以 0 退出；工作区没有会话则在进
+alternate screen **之前**打印一行并以 0 退出。变异在源码原地改（`src/cli/attach.rs` 的
+`workspace_picker`），改前 `cp` 到 `.radian/scratch/mut/`，改后 `cp` 还原并 `cmp` 一致（不用
+`git checkout --`/`restore`）。命令：`timeout 570 cargo test -p radian-tui --locked
+--no-fail-fast --test pty attach_without_an_id`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| AP-1 | 建 picker 时不再 `without_new()`（照 `--pick` 那样带 "new session" 行） | `pty_attach_without_an_id_picks_a_session_and_stays_read_only`（底边框上出现 `· n new ·`；同一测试接着还断言 `n` 仍在过滤、进程不许退出） | ✅ 1 failed |
+| AP-2 | 选定后丢掉 `--follow`（`run_view(..., false)`） | `pty_attach_without_an_id_follows_the_chosen_session`（1 s 内没等到另一个 writer 提交的 `ALPHA-FOLLOWED`） | ✅ 1 failed |
+
+无 id 的**旧代码**（`SESSION_ID` 必填）下这四个测试都失败：clap 打印 `the following required
+arguments were not provided: <SESSION_ID>`，四个测试各在自己的 60 s 等待后断言失败（0 passed /
+4 failed）。核对方式：把 `src/cli.rs`、`src/cli/session.rs`、`src/cli/attach.rs` 换成 `HEAD`
+版本、`--test pty attach_without_an_id` 跑一次，再从 `cp` 副本还原并用 `cmp` 确认一致。

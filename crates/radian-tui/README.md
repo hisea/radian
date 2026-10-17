@@ -805,8 +805,10 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   streaming reply text never appears, only the committed messages? Is `working…` on the last
   line while the turn runs and gone after it? Do PageUp/PageDown, Shift-Up/Down and Ctrl-Home/End
   scroll the way the main view does, does `q` leave without touching the session, and does the
-  footer read `attach · <id> · read-only` with the scroll position? pty automation asserts the
-  text and the one-second follow latency, not the feel.
+  footer read `attach · <id> · read-only` with the scroll position? `radian attach` with no id
+  adds the picker in front in the same terminal: do the rows and the filter feel like `--pick`
+  (there is no `n new`), and does Esc leave cleanly before any choice is made? pty automation
+  asserts the text and the one-second follow latency, not the feel.
 - **radian as a herdr agent** (ADR 0034, slice ④): the pty tests can only watch a fake
   socket, so the real herdr is yours. In a herdr pane (its env sets `HERDR_ENV=1`), start `radian`,
   then from another pane run `herdr agent list` — radian's entry must carry `agent_session` (the
@@ -1226,6 +1228,15 @@ event loop, before any session exists: `Up`/`Down` select, type to filter by id/
   session, `Esc`/`Ctrl-C` quits. It never creates a session file, and the whole process enters
   the alternate screen **once** (the picker and the session share it). `--pick` conflicts with
   `--resume` and `--session-id`. With no sessions it goes straight to a new session and says so.
+- `radian attach [SESSION_ID] [--follow] [--session-dir DIR]` (ADR 0043 slice ①) opens another
+  session **read-only** in the same blocks a `--resume` renders; `--follow` tails the committed
+  events its own process appends, the scroll keys move the transcript, and `q`/Esc/Ctrl-C leave.
+  No input reaches that session (every other key reaches nothing), no socket is opened, and
+  nothing is written. `SESSION_ID` is optional: without it the **same picker** `--pick` shows
+  opens for the current workspace, minus its "new session" row — `Up`/`Down` and type-to-filter
+  select, `Enter` attaches to the choice, `Esc`/`q` leaves without attaching (exit 0). With no
+  sessions in this workspace it prints one line and exits 0 **without** entering the alternate
+  screen.
 
 `--resume`, `--session-id` and `--list` are mutually exclusive pairwise.
 
@@ -1297,10 +1308,13 @@ Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementat
 - `--approval on-ask|always|never` picks the `ApprovalPolicy` (default `on-ask`). `always`
   asks for every call a rule does not deny, which is how the dialog is exercised with the
   built-in tools; `never` turns `ask` into a denial.
-- `--max-model-calls N` is the per-turn model call limit. The TUI defaults to **1000**,
-  not the core's 32: an interactive coding turn reads many files and a human can cancel, but
-  it stays a fuse, because the context-budget guard does not stop a loop of small calls. When a turn hits it, the pending tool calls are answered with
-  "the model call budget is used up" and the turn ends; a new message starts a fresh count.
+- `--max-model-calls N` is the per-turn model call limit, shared with `radian exec` (both
+  default to **1000**, `radian_host::DEFAULT_MAX_MODEL_CALLS`), not the core's 32: a coding turn
+  reads many files and a human can cancel, but it stays a fuse, because the context-budget guard
+  does not stop a loop of small calls. When a turn hits it, the pending tool calls are answered
+  with "the model call budget is used up" and the turn ends; a new message starts a fresh
+  count, and the TUI shows one notice naming the limit and the flag
+  (`the turn used its 1000 model calls; raise the limit with --max-model-calls N`).
   Tested by `pty_max_model_calls_limits_the_turn`.
 - `-y`/`--yes` answers every `ask` with "allow once" and shows no dialog, the same as
   `radian exec --yes`. It removes the question only: `deny` rules still deny, the sandbox still

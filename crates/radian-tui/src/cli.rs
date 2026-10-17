@@ -347,9 +347,11 @@ enum RadianCommand {
     /// opened, and nothing is written.
     Attach {
         /// The session id: the name of its file in the session directory. An exact id, like
-        /// `--resume` (no prefix matching).
+        /// `--resume` (no prefix matching). Omitted, this workspace's session picker opens and
+        /// Enter attaches to the choice (Esc/q leaves without attaching; no session file is
+        /// created either way).
         #[arg(value_name = "SESSION_ID")]
-        session_id: String,
+        session_id: Option<String>,
         /// Keep reading: show the committed events the session's own process appends, until
         /// `q`/Esc/Ctrl-C. Without it the view reads once and stays still.
         #[arg(long)]
@@ -426,7 +428,7 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
             session_id,
             follow,
             session_dir,
-        } => run_attach(session_dir.as_deref(), &session_id, follow),
+        } => run_attach(session_dir.as_deref(), session_id.as_deref(), follow),
         // Reserved names (ADR 0032): the shape is fixed now so scripts and docs can use it.
         // ADR 0043 shelved ADR 0030's control port and MCP server mode, so nothing implements
         // them; a usage-class refusal (2), never a silent no-op.

@@ -110,6 +110,20 @@ impl JournalObserver {
         &self.history
     }
 
+    /// How many of [`JournalObserver::history`]'s messages are the committed transcript. The
+    /// repaired suffix after it (ADR 0002) is one result per call with no committed result
+    /// message yet — an open call of a running turn, or one a crash left unanswered.
+    pub fn committed_len(&self) -> usize {
+        self.tail.committed_len()
+    }
+
+    /// Whether a live session process holds the file's writer lock (ADR 0043 D14): a read-only,
+    /// non-blocking probe, used to tell a running session's open tool calls from a crash's
+    /// synthesised results. Never blocks the writer and never writes.
+    pub fn live(&self) -> bool {
+        radian_session::session_is_live(self.tail.path())
+    }
+
     /// The path being observed.
     pub fn path(&self) -> &Path {
         self.tail.path()

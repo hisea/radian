@@ -293,3 +293,16 @@ Base: `d2d0f7f` · worktree `.radian-worktrees/group-commit` · `writer.rs` 先 
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
 | OA-1 | `reader.rs`：未知事件不论 `critical` 一律 `Err(UnknownCritical)`（不再 `skipped.push`） | ✅ 2 failed（`UnknownCritical { line: 4, event: "TaskSpawned" }`） | `an_old_lead_journal_with_task_events_still_opens_and_replays`、`the_resume_path_opens_the_old_journal_and_appends` |
+
+## 会话存活探测 `session_is_live`（ADR 0043 D14 的 attach 用）
+
+读侧探测：`File::open` + **共享** flock 立即释放；持有独占锁的 writer 在时得 `EWOULDBLOCK`
+（活），否则不是（死）。只用共享锁，所以两个读者同时探测互不干扰，也绝不阻塞 writer。变异在
+源码原地改，从 `/tmp/mut/` 的 `cp` 副本还原并以 `git diff --stat`
+确认；运行带 `--no-fail-fast`。
+
+命令：`timeout 300 cargo test -p radian-session --locked --no-fail-fast --lib the_liveness_probe`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| LIVE-1 | `session_is_live` 直接 `return false` | `writer::tests::the_liveness_probe_follows_the_writer_lock`（writer 持锁却说不是活） | ✅ 1 failed |

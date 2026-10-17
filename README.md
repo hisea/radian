@@ -161,10 +161,10 @@ Resume a session written by either host (the common flags have short forms; `-m`
   -r demo
 ```
 
-`--list` prints this workspace's sessions and exits without entering the terminal. The TUI's
-per-turn model-call fuse is `--max-model-calls` (default 1000, far above the core's 32).
-Keys, the approval box, the status bar and the context-budget wording are in
-`crates/radian-tui/README.md`.
+`--list` prints this workspace's sessions and exits without entering the terminal. The
+per-turn model-call fuse is `--max-model-calls` (default 1000, far above the core's 32, for
+both the TUI and `radian exec`). Keys, the approval box, the status bar and the
+context-budget wording are in `crates/radian-tui/README.md`.
 
 The common flags in full: `-m`/`--model`, `-w`/`--workspace`, `-r`/`--resume`, `-l`/`--list`
 and `-y`/`--yes` (`-V` is `--version`).

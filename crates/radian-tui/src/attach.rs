@@ -18,10 +18,19 @@
 //! "waiting for approval" line: the runtime journals only the *decision*
 //! (`PermissionResolved`), so an open approval is not a durable fact.
 //!
+//! **An open tool call.** The fold synthesises an error result for every call with no committed
+//! result message (ADR 0002): on a **live** session that is exactly a call the runtime has
+//! requested but not started (`queued`) or started but not settled (`running`), so showing the
+//! crash wording there would be wrong. The view probes whether a live writer holds the file's
+//! lock ([`radian_session::session_is_live`]): while it does, the synthesised results of open
+//! calls are shown as `queued`/`running` lines and the real result replaces them when the settle
+//! commits during `--follow`; only a session that is **not** live gets the recovery wording.
+//!
 //! **What it does with input.** Scrolling and quitting only (scroll keys as the main TUI binds
 //! them, plus `q`/Esc/Ctrl-C). Every other key is swallowed: no input event, no command, no
 //! write — the view holds no inbox and no command path at all.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use agent_core::Message;
@@ -50,6 +59,19 @@ pub enum AttachKey {
     Ignored,
 }
 
+/// The `queued`/`running` state of an open call, from the fold's synthesised result (ADR 0002).
+/// The synthesised `not_started_after_crash` code means no `ToolExecutionStarted` was recorded
+/// (`queued`); any other code — `outcome_unknown_after_crash`, or a real settled result whose
+/// `Message::Tool` is not committed yet — means the call had started (`running`). A real
+/// result in the suffix settles within the next commit, so it is transient.
+fn open_call_state(result: &agent_core::ToolResult) -> &'static str {
+    if result.error_code.as_deref() == Some("not_started_after_crash") {
+        "queued"
+    } else {
+        "running"
+    }
+}
+
 /// The read-only view of one session file.
 pub struct AttachView {
     /// The entry store and the scroll position. `App` is the TUI's own view state, so the
@@ -59,8 +81,18 @@ pub struct AttachView {
     /// The committed facts, read-only over the journal file.
     observer: JournalObserver,
     id: String,
-    /// How many of the observer's history messages are already entries.
+    /// How many **committed** messages of the observer's history are already entries. The
+    /// repaired suffix after them is not counted here: it is rebuilt from the open calls.
     pushed: usize,
+    /// Every declared tool call seen so far, `call_id -> (name, arguments)`, for an open
+    /// call's line. Maintained as committed messages are pushed.
+    calls: HashMap<String, (String, serde_json::Value)>,
+    /// The `queued`/`running` lines currently at the transcript's tail (a live session's open
+    /// calls), in call order: kept so a no-op read can be told from a change and the block
+    /// rebuilt.
+    pending: Vec<String>,
+    /// Whether a live session process held the file's writer lock at the last read.
+    live: bool,
     /// Whether the `working…` entry is currently the transcript's last entry.
     working: bool,
 }
@@ -76,6 +108,9 @@ impl AttachView {
             observer,
             id: id.to_owned(),
             pushed: 0,
+            calls: HashMap::new(),
+            pending: Vec::new(),
+            live: false,
             working: false,
         };
         view.rebuild();
@@ -105,16 +140,79 @@ impl AttachView {
 
     /// Rebuilds every entry from the observer's history: the initial load and the rare case
     /// where the history is **replaced** (a compaction commits a `TranscriptReplaced` segment,
-    /// ADR 0019) rather than extended.
+    /// ADR 0019), shrinks, or the session's live state flips (a live session's open calls are
+    /// shown differently from a crash's).
     fn rebuild(&mut self) {
         self.app = App::new("", self.id.clone());
+        self.calls.clear();
+        self.pending.clear();
+        self.working = false;
+        self.live = self.observer.live();
         let history = self.observer.history().to_vec();
-        for message in &history {
+        let committed = self.observer.committed_len().min(history.len());
+        self.push_committed(&history[..committed]);
+        self.pushed = committed;
+        // The repaired suffix (ADR 0002): one result per call with no committed result yet.
+        let repairs = &history[committed..];
+        if self.live {
+            let desired = self.pending_lines(repairs);
+            for line in &desired {
+                self.app
+                    .session
+                    .entries
+                    .push(Entry::new(EntryKind::Notice, line.clone()));
+            }
+            self.pending = desired;
+        } else {
+            // Not live: the fold's recovery wording is the truth (the turn really did not
+            // finish). A static file does not change, so these are pushed once here.
+            for message in repairs {
+                self.app.push_message(message);
+            }
+        }
+        self.append_working();
+    }
+
+    /// Pushes committed messages as entries, remembering every declared call for an open call's
+    /// line. A `Message::Tool` result pairs with its own call (ADR 0028 R4) inside
+    /// [`App::push_message`], so a settled call's real result replaces its `queued`/`running`
+    /// line as soon as the commit is folded.
+    fn push_committed(&mut self, messages: &[Message]) {
+        for message in messages {
+            if let Message::Assistant { tool_calls, .. } = message {
+                for call in tool_calls {
+                    self.calls
+                        .insert(call.id.clone(), (call.name.clone(), call.arguments.clone()));
+                }
+            }
             self.app.push_message(message);
         }
-        self.pushed = history.len();
-        self.working = false;
-        self.append_working();
+    }
+
+    /// The `queued`/`running` line of each open call in the repaired suffix, in call order.
+    fn pending_lines(&self, repairs: &[Message]) -> Vec<String> {
+        repairs
+            .iter()
+            .filter_map(|message| {
+                let Message::Tool { result, .. } = message else {
+                    return None;
+                };
+                let state = open_call_state(result);
+                let label = self
+                    .calls
+                    .get(&result.call_id)
+                    .map(|(name, arguments)| {
+                        let card = crate::tools::ToolCard::new(
+                            result.call_id.clone(),
+                            name.clone(),
+                            arguments.clone(),
+                        );
+                        crate::tools::call_text(&card, "")
+                    })
+                    .unwrap_or_else(|| result.call_id.clone());
+                Some(format!("{state}: {label}"))
+            })
+            .collect()
     }
 
     /// Appends the `working…` line when a turn is open and it is not there yet.
@@ -157,20 +255,52 @@ impl AttachView {
                     | EventData::TranscriptReplacementCommitted { .. }
             )
         });
-        if update.reset || replaced || update.history.len() < self.pushed {
+        // The live state decides how an open call is shown, so a flip rebuilds too.
+        let live = self.observer.live();
+        if update.reset || replaced || update.history.len() < self.pushed || live != self.live {
             self.rebuild();
             return Ok(true);
         }
-        let was_working = self.working;
-        self.drop_working();
-        let mut changed = false;
-        if update.history.len() > self.pushed {
-            for message in &update.history[self.pushed..] {
-                self.app.push_message(message);
+        if !live {
+            // No writer holds the file: the open calls the last rebuild pushed (the fold's
+            // recovery wording) stay, and a static journal does not change between polls. The
+            // `working…` line still follows the durable turn state, so a `TurnStarted` or
+            // `TurnFinished` must move it. A committed change here (a session that ran and
+            // exited between two polls) rebuilds once from the new fold.
+            if update.history_changed {
+                self.rebuild();
+                return Ok(true);
             }
-            self.pushed = update.history.len();
+            let was_working = self.working;
+            self.drop_working();
+            self.append_working();
+            return Ok(self.working != was_working);
+        }
+        let committed = self.observer.committed_len().min(update.history.len());
+        let was_working = self.working;
+        let prev_pending = std::mem::take(&mut self.pending);
+        self.drop_working();
+        // The previous pending block sits right below the `working…` line.
+        for _ in 0..prev_pending.len() {
+            self.app.session.entries.pop();
+        }
+        let mut changed = false;
+        if committed > self.pushed {
+            self.push_committed(&update.history[self.pushed..committed]);
+            self.pushed = committed;
             changed = true;
         }
+        let desired = self.pending_lines(&update.history[committed..]);
+        if desired != prev_pending {
+            changed = true;
+        }
+        for line in &desired {
+            self.app
+                .session
+                .entries
+                .push(Entry::new(EntryKind::Notice, line.clone()));
+        }
+        self.pending = desired;
         self.append_working();
         Ok(changed || self.working != was_working)
     }

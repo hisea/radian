@@ -29,7 +29,7 @@ pub(crate) struct Setup {
     pub(crate) provider: Provider,
     pub(crate) servers: Vec<McpServerConfig>,
     pub(crate) system_prompt: Option<String>,
-    pub(crate) max_model_calls: Option<u32>,
+    pub(crate) max_model_calls: u32,
     pub(crate) turn_timeout_secs: Option<u64>,
     /// The input budget `B` (ADR 0018), or `None` when no window is known (the budget is
     /// then off, not given a guessed default).

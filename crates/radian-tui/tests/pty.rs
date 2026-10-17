@@ -329,6 +329,14 @@ impl Pty {
         Self::spawn_full_mode(args, envs, TestConfig::Classic, rows, cols)
     }
 
+    /// Like [`Pty::spawn_with_env`], with the app started **from** `cwd`: a test that depends on
+    /// the current directory (the default workspace, `attach`'s picker) sets it here.
+    fn spawn_in(args: &[&str], envs: &[(&str, &str)], cwd: &Path, rows: u16, cols: u16) -> Self {
+        let mut argv = vec![BIN.to_owned()];
+        argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+        Self::spawn_argv_in(&argv, envs, TestConfig::Classic, Some(cwd), rows, cols)
+    }
+
     /// Like [`Pty::spawn`], writing **no** config file: the app runs its real defaults (the
     /// two-row `pi` footer, ADR 0027 C2). A test about the shipped default must use this.
     fn spawn_bare(args: &[&str], envs: &[(&str, &str)], rows: u16, cols: u16) -> Self {
@@ -370,6 +378,18 @@ impl Pty {
         rows: u16,
         cols: u16,
     ) -> Self {
+        Self::spawn_argv_in(argv, envs, config, None, rows, cols)
+    }
+
+    /// [`Pty::spawn_argv`], with the pty's shell started in `cwd` (the app inherits it).
+    fn spawn_argv_in(
+        argv: &[String],
+        envs: &[(&str, &str)],
+        config: TestConfig<'_>,
+        cwd: Option<&Path>,
+        rows: u16,
+        cols: u16,
+    ) -> Self {
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -384,6 +404,11 @@ impl Pty {
         cmd.arg("sh");
         for arg in argv {
             cmd.arg(arg);
+        }
+        // The shell (and so the app) starts in `cwd`: the current directory is the workspace an
+        // app derives from it (`attach`'s picker, the default workspace).
+        if let Some(cwd) = cwd {
+            cmd.cwd(cwd);
         }
         // Keep the environment small and deterministic; the mock server needs no key.
         cmd.env_clear();
@@ -5184,6 +5209,32 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
     assert!(!draft.exists(), "a resume consumes the draft");
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// Appends `count` committed filler replies to the session `id`, the last one `{id}-END` (the
+/// tail marker a test can look for). A transcript taller than the pty matters twice: a scroll
+/// key has somewhere to go (the attach view's footer only leaves `follow` when it can move),
+/// and a session that is not attached to is never on screen. Returns the writer, still holding
+/// the file's lock, so the caller can append again while a reader watches.
+async fn fill_session(dir: &Path, id: &str, count: usize) -> radian_session::SessionJournal {
+    use agent_core::TranscriptJournal;
+    let path = dir.join(format!("{id}.jsonl"));
+    let journal = radian_session::SessionJournal::resume(&path, id).expect("resume to append");
+    for index in 0..count {
+        let text = if index + 1 == count {
+            format!("{id}-END")
+        } else {
+            format!("{id}-FILLER-{index}")
+        };
+        journal
+            .append(agent_core::JournalRecord::Message {
+                index: index + 2,
+                message: agent_core::Message::assistant(text),
+            })
+            .await
+            .unwrap();
+    }
+    journal
 }
 
 /// Waits until `path`'s contents contain `needle`. The file is the synchronization (the app
@@ -12067,6 +12118,37 @@ fn run_entries(home: &Path) -> Vec<String> {
     dir_entries(&home.join("run"))
 }
 
+/// The `.jsonl` files of `dir` with their bytes, by name: the read-only checks compare this
+/// before and after a run. The picker's own `index.db` cache is not a session file and is
+/// deliberately not compared (ADR 0006 §10: the index is a disposable cache over the JSONL).
+fn jsonl_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, std::fs::read(&path).unwrap())
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// The `--resume <id>` hint the picker draws on its top border: the **selected** row's id.
+fn picker_hint(screen: &str) -> Option<String> {
+    let rest = screen.split_once("--resume ")?.1;
+    let id: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
 /// A1: `attach --follow` shows the committed messages of a journal **another process** is
 /// appending, and follows a new line within a second. The second turn's `working…` line comes
 /// from the durable `TurnStarted` and leaves with its `TurnFinished`.
@@ -12303,6 +12385,357 @@ async fn pty_attach_swallows_every_other_key() {
         Some(0),
         "q must quit the view"
     );
+}
+
+// ---------- ADR 0043: `radian attach` without an id (the workspace picker) ----------
+
+/// Without an id, `attach` opens this workspace's picker — the `--pick` rows, with no "new
+/// session" row — and `Enter` attaches read-only to the choice: the picked session's committed
+/// transcript appears, the keys the view ignores reach nothing, and neither journal changes.
+///
+/// Mutation: open the picker with its "new session" row (leave `without_new` off the built
+/// picker) → the `n new` hint is drawn and `n` leaves instead of filtering → FAILED.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_attach_without_an_id_picks_a_session_and_stays_read_only() {
+    let _serial = pty_guard();
+    let scratch = TempDir::new("attach-pick");
+    let sessions = scratch.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = scratch.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_session(&sessions, "alpha", &workspace, "ALPHA-HISTORY").await;
+    seed_session(&sessions, "beta", &workspace, "BETA-HISTORY").await;
+    // Both transcripts are taller than the pty (see `fill_session`), so a scroll key has
+    // somewhere to go and the tail marker of the session that was *not* attached to must never
+    // appear.
+    fill_session(&sessions, "alpha", 40).await;
+    fill_session(&sessions, "beta", 40).await;
+    let before = jsonl_files(&sessions);
+
+    let mut pty = Pty::spawn_in(
+        &["attach", "--session-dir", sessions.to_str().unwrap()],
+        &[],
+        &ws,
+        24,
+        100,
+    );
+    // Both of this workspace's sessions are listed: the picker, not a refusal.
+    assert!(
+        pty.wait_for_screen("alpha", wait_positive()),
+        "the picker did not list alpha:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("beta", wait_positive()),
+        "the picker did not list beta:\n{}",
+        pty.screen()
+    );
+    // No "new session" row: attach creates nothing, so it offers neither the hint nor the key.
+    assert!(
+        !pty.screen().contains("n new"),
+        "the attach picker offers a new session:\n{}",
+        pty.screen()
+    );
+    // `n` is an ordinary filter character here: it narrows the list and the process stays up.
+    // (With a new-session row it would leave instead — exit 0 with no attach.)
+    pty.send(b"n");
+    assert!(
+        pty.wait_for_screen("filter: n", wait_positive()),
+        "`n` did not filter:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_until(wait_positive(), |screen| !screen.contains("alpha")),
+        "the filter did not narrow the list:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.child.try_wait().unwrap().is_none(),
+        "`n` must not start or leave anything:\n{}",
+        pty.screen()
+    );
+
+    // Backspace clears the filter. The panel's top border names the **selected** row
+    // (`--resume <id>`), so the second row is whichever id the hint names after one Down —
+    // the list's own order (newest activity first) is not this test's business.
+    pty.send(&[0x7f]);
+    assert!(
+        pty.wait_for_screen("alpha", wait_positive()),
+        "backspace did not restore the list:\n{}",
+        pty.screen()
+    );
+    let first = picker_hint(&pty.screen()).expect("the first row's --resume hint is drawn");
+    pty.send(b"\x1b[B");
+    assert!(
+        pty.wait_until(wait_positive(), |screen| {
+            picker_hint(screen).is_some_and(|id| id != first)
+        }),
+        "Down did not move to the second row:\n{}",
+        pty.screen()
+    );
+    let second = picker_hint(&pty.screen()).expect("the second row's --resume hint is drawn");
+    assert!(
+        ["alpha", "beta"].contains(&second.as_str()),
+        "the hint names a session that was not seeded: {second:?}\n{}",
+        pty.screen()
+    );
+    // The row that was left behind, whose history and tail must not be on screen.
+    let other = if first == "beta" {
+        "BETA-HISTORY"
+    } else {
+        "ALPHA-HISTORY"
+    };
+    // Enter attaches to the choice: its transcript, read-only.
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen(&format!("attach · {second} · read-only"), wait_positive()),
+        "Enter did not attach to the second row:\n{}",
+        pty.screen()
+    );
+    // The transcript is the picked session's, scrolled to its tail (the `{id}-END` marker), and
+    // the other session's is nowhere.
+    assert!(
+        pty.wait_for_screen(&format!("{second}-END"), wait_positive()),
+        "the picked session's transcript is not on screen:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains(&format!("{first}-END")),
+        "the attached view shows the other session:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains(other),
+        "the attached view shows the other session's history:\n{}",
+        pty.screen()
+    );
+    // Typing reaches nothing: every key is swallowed. The PageUp that follows is also the
+    // synchronization — keys are handled in order, so `paused` proves they were all handled —
+    // and it keeps the view alive.
+    for key in [
+        b"x".as_slice(),
+        b"1".as_slice(),
+        b"\r".as_slice(),
+        b"\t".as_slice(),
+        b"/".as_slice(),
+        b"\x1b[A".as_slice(),
+    ] {
+        pty.send(key);
+    }
+    pty.send(b"\x1b[5~");
+    assert!(
+        pty.wait_for_screen("paused", wait_positive()),
+        "the attached view stopped handling keys:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.child.try_wait().unwrap().is_none(),
+        "a key quit the attached view:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        jsonl_files(&sessions),
+        before,
+        "the attached view wrote a session file"
+    );
+
+    // Esc leaves the view with exit 0; nothing was written on either path.
+    pty.send(&[0x1b]);
+    assert_eq!(
+        pty.wait_for_exit(wait_positive()),
+        Some(0),
+        "Esc must quit the view:\n{}",
+        pty.screen()
+    );
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_eq!(
+        jsonl_files(&sessions),
+        before,
+        "attach wrote a session file"
+    );
+}
+
+/// `Esc` at the picker, before any choice, leaves with exit 0 and creates nothing: no session
+/// file appears or changes (the picker is not the `--pick` screen, which may start a session).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_attach_without_an_id_escapes_the_picker_without_writing() {
+    let _serial = pty_guard();
+    let scratch = TempDir::new("attach-pick-esc");
+    let sessions = scratch.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = scratch.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_session(&sessions, "alpha", &workspace, "ALPHA-HISTORY").await;
+    seed_session(&sessions, "beta", &workspace, "BETA-HISTORY").await;
+    let before = jsonl_files(&sessions);
+
+    let mut pty = Pty::spawn_in(
+        &["attach", "--session-dir", sessions.to_str().unwrap()],
+        &[],
+        &ws,
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("beta", wait_positive()),
+        "the picker did not list beta:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "Esc did not leave the picker:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        pty.app_exit_code(),
+        Some(0),
+        "Esc at the picker is a clean quit:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        jsonl_files(&sessions),
+        before,
+        "Esc at the picker wrote a session file"
+    );
+}
+
+/// `--follow` is honoured on the picker path too: after the choice, a line the session's own
+/// writer commits appears in the attached view within a second — the same bound the id form's
+/// follow test pins.
+///
+/// Mutation: drop `follow` when the choice is made (attach without the flag) → the appended
+/// line never arrives → FAILED.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_attach_without_an_id_follows_the_chosen_session() {
+    let _serial = pty_guard();
+    use agent_core::TranscriptJournal;
+    let scratch = TempDir::new("attach-pick-follow");
+    let sessions = scratch.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = scratch.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_session(&sessions, "alpha", &workspace, "ALPHA-HISTORY").await;
+    // The writer stays open for the rest of the test: the line it commits after the attach is a
+    // real append by another process (ADR 0040), exactly what `--follow` is for.
+    let journal = fill_session(&sessions, "alpha", 0).await;
+
+    let mut pty = Pty::spawn_in(
+        &[
+            "attach",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--follow",
+        ],
+        &[],
+        &ws,
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("alpha", wait_positive()),
+        "the picker did not list alpha:\n{}",
+        pty.screen()
+    );
+    // Type-to-filter, then Enter: the one matching row is the choice.
+    pty.send(b"alp");
+    assert!(
+        pty.wait_for_screen("filter: alp", wait_positive()),
+        "the filter did not apply:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("attach · alpha · read-only", wait_positive()),
+        "Enter did not attach to alpha:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("ALPHA-HISTORY", wait_positive()),
+        "the committed history is not on screen:\n{}",
+        pty.screen()
+    );
+
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 2,
+            message: agent_core::Message::assistant("ALPHA-FOLLOWED"),
+        })
+        .await
+        .unwrap();
+    assert!(
+        pty.wait_for_screen("ALPHA-FOLLOWED", WAIT_LATENCY_BOUND),
+        "the appended message did not arrive within a second:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"q");
+    assert_eq!(
+        pty.wait_for_exit(wait_positive()),
+        Some(0),
+        "q must quit the view"
+    );
+}
+
+/// With no sessions, `attach` says so in one line and exits 0 **without entering the alternate
+/// screen**; nothing at all is created, not even the session directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_attach_without_an_id_and_no_sessions_says_so_without_a_screen() {
+    let _serial = pty_guard();
+    let scratch = TempDir::new("attach-pick-none");
+    // Never created: `attach` must not create it either.
+    let sessions = scratch.path().join("sessions");
+    let ws = scratch.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let mut pty = Pty::spawn_in(
+        &["attach", "--session-dir", sessions.to_str().unwrap()],
+        &[],
+        &ws,
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_raw(
+            "radian: no sessions for this workspace; nothing to attach",
+            wait_positive()
+        ),
+        "the one-line notice is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "attach did not exit:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        pty.app_exit_code(),
+        Some(0),
+        "nothing to attach is not a failure:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !String::from_utf8_lossy(&pty.raw()).contains("\x1b[?1049h"),
+        "an empty workspace entered the alternate screen:\n{}",
+        pty.screen()
+    );
+    assert!(!sessions.exists(), "attach created the session directory");
 }
 
 // ---------- lost input: a resize must not eat a typed key ----------

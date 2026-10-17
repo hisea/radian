@@ -131,6 +131,17 @@ pub fn sandbox_word(mode: SandboxMode, backend: Option<&str>) -> String {
     }
 }
 
+/// The one line both hosts show when a turn ends `BudgetExceeded` — it ran out of model calls
+/// (ADR 0015: this is the call-count budget, not the context window). The number is the limit
+/// the turn ran under; the flag is how to raise it. Shared so `radian exec` (stderr) and the
+/// TUI (a notice) cannot drift; the host frames it its own way (`radian: …` on stderr).
+pub fn budget_exceeded_line(max_model_calls: u32) -> String {
+    format!(
+        "the turn used its {max_model_calls} model calls; raise the limit with \
+         --max-model-calls N"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

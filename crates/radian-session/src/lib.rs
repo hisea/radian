@@ -58,7 +58,11 @@ pub use runtime::{
     RuntimeEvent, TurnOutcome, TurnReason,
 };
 pub use tail::{JournalTail, TailUpdate};
-pub use writer::{ForkParent, SessionCreatedData, SessionJournal, WriteError, now_utc};
+/// ADR 0043 D14: whether a live session process holds the file's writer lock (the reader-side
+/// probe `radian attach` uses).
+pub use writer::{
+    ForkParent, SessionCreatedData, SessionJournal, WriteError, now_utc, session_is_live,
+};
 
 /// Fault-injection seams, compiled only with the `testing` feature. Off by default so a
 /// production build cannot arm them (ADR 0019 §7's failed-abort-write path).
