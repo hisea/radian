@@ -77,8 +77,8 @@ struct Cli {
     #[arg(help_heading = "TUI", long)]
     system: Option<String>,
 
-    /// Model name sent to the API. Required unless the config file's `model.model` provides
-    /// it.
+    /// The model name sent to the API — a bare name, never `<provider>/<model>`; choose the
+    /// provider with `--provider`. Required unless the config file's `model.model` provides it.
     #[arg(help_heading = "Model", long, short = 'm')]
     model: Option<String>,
 
@@ -929,6 +929,16 @@ fn run(
         .ok_or_else(|| {
             "no model: pass --model, or set model.model in the config file".to_string()
         })?;
+    // `-m/--model` takes a bare model name; the form is `--provider <p>
+    // --model <m>`. A value that looks like a known provider's `<provider>/<model>` with no
+    // `--provider` gets one startup hint (never a refusal, never a change in meaning).
+    if let Some(hint) = radian_host::provider_in_model_hint(
+        cli.model.as_deref(),
+        cli.provider.as_deref(),
+        &config.providers,
+    ) {
+        startup_log.line(hint);
+    }
     // ADR 0038 decision 3 and ADR 0043 decision 2: the tier and where it came from. The
     // command line wins, then the resumed session's journal, then the remembered per-project
     // record, then the config default, then the built-in `full`. The remembered record is a

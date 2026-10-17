@@ -57,7 +57,8 @@ const USAGE_ERROR: i32 = 2;
     subcommand_negates_reqs = true
 )]
 pub struct Cli {
-    /// Model name sent to the API. Required to run a conversation (`-p` or interactive)
+    /// The model name sent to the API — a bare name, never `<provider>/<model>`; choose the
+    /// provider with `--provider`. Required to run a conversation (`-p` or interactive)
     /// unless the config file's `model.model` provides it; the print-and-exit modes
     /// (`--list`, `--export`, `--search`, `--fork`) do not need a model and do not read the
     /// key.

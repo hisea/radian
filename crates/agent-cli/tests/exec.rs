@@ -169,6 +169,51 @@ async fn the_missing_credential_hint_names_radian_login() {
 }
 
 #[tokio::test]
+async fn the_model_provider_hint_fires_once_without_a_provider_flag() {
+    // `-m/--model` takes a bare model name; the form is `--provider <p>
+    // --model <m>`. A known provider prefix with no `--provider` gets one hint — on the TUI's
+    // startup log and on `radian exec`'s stderr — and the run still refuses for the missing
+    // credential, which is where these stop (no network, no session file).
+    let hint = "did you mean --provider opencode-go --model x?";
+    let env = Env::fresh("model-hint");
+
+    // The TUI's `-m`.
+    let (code, out, err) = run(spawn_in(&["-m", "opencode-go/x"], &env)).await;
+    assert_eq!(code, 2, "the credential refusal is a usage error: {err}");
+    assert!(out.is_empty(), "{out}");
+    assert_eq!(
+        err.matches("did you mean").count(),
+        1,
+        "exactly one hint: {err}"
+    );
+    assert!(err.contains(hint), "{err}");
+
+    // `radian exec --model`: the same hint on the same stderr path.
+    let (code, out, err) = run(spawn_in(&["exec", "--model", "opencode-go/x"], &env)).await;
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert_eq!(err.matches("did you mean").count(), 1, "{err}");
+
+    // An explicit `--provider` is the supported spelling of a real `provider/model` id: no hint.
+    let (_, _, err) = run(spawn_in(
+        &[
+            "exec",
+            "--provider",
+            "opencode-go",
+            "--model",
+            "anthropic/claude-x",
+        ],
+        &env,
+    ))
+    .await;
+    assert!(!err.contains("did you mean"), "{err}");
+
+    // A bare model name gets none either.
+    let (_, _, err) = run(spawn_in(&["exec", "--model", "plain-name"], &env)).await;
+    assert!(!err.contains("did you mean"), "{err}");
+}
+
+#[tokio::test]
 async fn a_missing_workspace_is_refused_with_the_radian_prefix() {
     // A startup refusal names the program `radian:` (ADR 0032's prefix change) and exits 2.
     let env = Env::fresh("missing-workspace");
