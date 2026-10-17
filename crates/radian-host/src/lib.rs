@@ -114,8 +114,8 @@ pub use diagnostics::{
 };
 pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_overflow};
 pub use headers::{
-    CHILD_HEADERS_ENV, SESSION_PLACEHOLDER, child_headers_from_env, encode_child_headers,
-    parse_headers,
+    CHILD_HEADERS_ENV, SESSION_PLACEHOLDER, encode_child_headers, parse_headers,
+    take_child_headers_from_env,
 };
 pub use home::{
     RADIAN_HOME_ENV, access_dir_for, cache_dir_for, catalog_cache, catalog_cache_for, config_dir,

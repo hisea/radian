@@ -18,14 +18,32 @@ pub fn encode_child_headers(headers: &[String]) -> String {
     serde_json::to_string(headers).unwrap_or_else(|_| "[]".to_owned())
 }
 
-/// The parent's raw `--header` arguments as [`CHILD_HEADERS_ENV`] carried them, or `[]` when the
-/// variable is unset. The values stay unresolved here: the child expands `{session_id}` itself,
-/// so its headers name its own session, exactly as a config file's headers do. A malformed
-/// value is refused without echoing it (a bug in the parent, or a stray variable).
-pub fn child_headers_from_env() -> Result<Vec<String>, String> {
+/// Takes the parent's raw `--header` arguments out of [`CHILD_HEADERS_ENV`] — the variable is
+/// **removed from this process's environment** in the same call — or `[]` when it is unset.
+///
+/// The values stay unresolved here: the child expands `{session_id}` itself, so its headers name
+/// its own session, exactly as a config file's headers do. A malformed value is refused without
+/// echoing it (a bug in the parent, or a stray variable).
+///
+/// Taking the value out of the environment is the point (ADR 0043 decision 1a, fix round 1 A):
+/// they are secrets, and a variable left behind would be inherited by everything this child
+/// starts. The child reads it here and keeps only the parsed headers, which its own startup adds
+/// to the redaction list.
+///
+/// # Thread safety
+///
+/// `std::env::remove_var` is `unsafe` (edition 2024): the process environment is not thread-safe
+/// against a concurrent `getenv`/`setenv`. The contract is on the caller — call this while the
+/// process still has one thread. The CLI calls it at the top of `run_blocking`, before it builds
+/// the Tokio runtime, which is what starts this process's other threads; nothing before that
+/// point in the `radian exec` path spawns a thread.
+pub fn take_child_headers_from_env() -> Result<Vec<String>, String> {
     let Some(raw) = std::env::var_os(CHILD_HEADERS_ENV) else {
         return Ok(Vec::new());
     };
+    // SAFETY: the caller guarantees the process is still single-threaded (see above), so no
+    // other thread can be reading or writing the environment while this runs.
+    unsafe { std::env::remove_var(CHILD_HEADERS_ENV) };
     serde_json::from_str(&raw.to_string_lossy()).map_err(|_| {
         format!(
             "{CHILD_HEADERS_ENV} is not the JSON array of `NAME=VALUE` strings a subagent parent \

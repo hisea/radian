@@ -69,7 +69,13 @@ impl Drop for Env {
 }
 
 fn spawn_parent(env: &Env, args: &[&str]) -> Child {
-    Command::new(common::radian_bin())
+    spawn_parent_env(env, args, &[])
+}
+
+/// [`spawn_parent`] with extra environment (e.g. `RADIAN_CONFIG`, which the child inherits too).
+fn spawn_parent_env(env: &Env, args: &[&str], extra: &[(&str, String)]) -> Child {
+    let mut command = Command::new(common::radian_bin());
+    command
         .arg("exec")
         .args(args)
         .env_remove("OPENAI_API_KEY")
@@ -82,9 +88,11 @@ fn spawn_parent(env: &Env, args: &[&str]) -> Child {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn radian")
+        .kill_on_drop(true);
+    for (key, value) in extra {
+        command.env(key, value);
+    }
+    command.spawn().expect("spawn radian")
 }
 
 /// Writes no input, closes stdin, and waits with a cap so a stuck process fails the test.
@@ -538,6 +546,165 @@ async fn a_cancelled_parent_turn_kills_the_child() {
         "the child process {child_pid} must be gone after the parent turn was cancelled"
     );
     let _ = run(parent).await;
+}
+
+/// ADR 0043 1a (gap 1, fix round 1 A): the child reads the parent's header variable at startup
+/// and **removes it from its own environment**, so a `shell` command it starts cannot inherit
+/// the secret. The config names the variable in `[sandbox] allow_env` — that is the only way the
+/// value could reach such a command, and without it this test would pass against the old code
+/// too. The mutation (leaving the variable in the child's environment) writes the secret into
+/// the file this asserts is clean.
+#[tokio::test]
+async fn the_childs_own_environment_no_longer_carries_the_parents_header() {
+    const SECRET: &str = "child-env-secret-9";
+    let env = Env::new("child-env");
+    let dump = env.home.join("dump.txt");
+    let command = format!(
+        "printf '%s' \"$RADIAN_CHILD_HEADERS\" > '{}'",
+        dump.display()
+    );
+    let server = MockServer::start(vec![
+        tool_reply("p1", "subagent", r#"{"task":"LEAK-TASK"}"#),
+        tool_reply("c1", "shell", &json!({"command": command}).to_string()),
+        text_reply("CHILD-DONE"),
+        text_reply("PARENT-DONE"),
+    ])
+    .await;
+    let config = env.home.join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[sandbox]\nallow_env = [\"RADIAN_CHILD_HEADERS\"]\n",
+    )
+    .unwrap();
+    let workspace = env.workspace.to_str().unwrap().to_owned();
+    let (code, stdout, stderr) = run(spawn_parent_env(
+        &env,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            &workspace,
+            "--header",
+            &format!("X-Test={SECRET}"),
+            "--yes",
+            "--session-id",
+            "parent",
+            "-p",
+            "go",
+        ],
+        &[("RADIAN_CONFIG", config.to_string_lossy().into_owned())],
+    ))
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("PARENT-DONE"), "{stdout}");
+
+    // The child did read the header: its own request carries it.
+    let index = child_request(&server, "LEAK-TASK");
+    assert_eq!(
+        server.requests()[index].header("x-test"),
+        Some(SECRET),
+        "the child must send the parent's header"
+    );
+
+    // ... and its environment no longer holds it, so the command that named it did not get it.
+    let dump = std::fs::read_to_string(&dump).unwrap_or_default();
+    assert!(
+        !dump.contains(SECRET),
+        "the child's own environment must not carry the header: {dump}"
+    );
+}
+
+/// ADR 0043 1a (gap 1, fix round 1 A, the belt and braces): an MCP server the child starts must
+/// not inherit the parent's header secret, even when the config names the variable in
+/// `inherit_env` — the spawn clears the environment, so a name in that list is the only path
+/// left. The wrapper around the repo's mcp fixture appends the variable to a file; both the
+/// parent's and the child's server process write there, and neither may see the secret. The
+/// mutation (removing neither the child's startup removal nor the spawn's own removal) writes it.
+#[tokio::test]
+async fn an_mcp_server_the_child_starts_does_not_get_the_parents_header() {
+    const SECRET: &str = "mcp-env-secret-5";
+    let server = MockServer::start(vec![
+        tool_reply("p1", "subagent", r#"{"task":"MCP-TASK"}"#),
+        text_reply("CHILD-DONE"),
+        text_reply("PARENT-DONE"),
+    ])
+    .await;
+    let env = Env::new("mcp-env");
+    let fixture = common::target_dir().join("mcp-fixture");
+    assert!(
+        fixture.exists(),
+        "mcp-fixture is not built; run: cargo build -p agent-extensions --bin mcp-fixture"
+    );
+    let dump = env.home.join("mcp-env.txt");
+    let wrapper = env.home.join("mcp-wrapper.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$RADIAN_CHILD_HEADERS\" >> '{dump}'\nexec '{fixture}'\n",
+            dump = dump.display(),
+            fixture = fixture.display(),
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).unwrap();
+    }
+    let config = env.home.join("mcp.json");
+    std::fs::write(
+        &config,
+        json!({"servers": [{
+            "id": "fx",
+            "command": wrapper,
+            "inherit_env": ["RADIAN_CHILD_HEADERS"],
+            "env": {"FIXTURE_LOG": env.home.join("fixture.log")},
+            "call_timeout_secs": 30
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let workspace = env.workspace.to_str().unwrap().to_owned();
+    let (code, stdout, stderr) = run(spawn_parent(
+        &env,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            &workspace,
+            "--header",
+            &format!("X-Test={SECRET}"),
+            "--mcp-config",
+            config.to_str().unwrap(),
+            "--session-id",
+            "parent",
+            "-p",
+            "go",
+        ],
+    ))
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("PARENT-DONE"), "{stdout}");
+
+    // The child read the header: its own request carries it.
+    let index = child_request(&server, "MCP-TASK");
+    assert_eq!(
+        server.requests()[index].header("x-test"),
+        Some(SECRET),
+        "the child must send the parent's header"
+    );
+
+    // Neither MCP server process (the parent's or the child's) inherited the variable.
+    let dump = std::fs::read_to_string(&dump).unwrap_or_default();
+    assert!(
+        !dump.contains(SECRET),
+        "an MCP server must not inherit the parent's header: {dump}"
+    );
 }
 
 /// ADR 0043 1a (gap 1): a `--header` on the parent's command line reaches the child. The value

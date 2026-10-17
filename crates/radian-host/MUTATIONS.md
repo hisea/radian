@@ -1197,3 +1197,21 @@ the_parents_header` (SG-1, end to end).
 | SG-1 | the child `env` carrying the parent's `--header` values is never set (`if false`) | ✅ 2 failed | `agent-cli::subagent::the_parents_header_reaches_the_child_and_nothing_else_writes_it` (`the child must send the parent's header`: `left: None`); `radian_host::subagent_headers::the_header_value_reaches_the_child_through_the_environment_not_its_argv` (`EOF while parsing` an empty variable) |
 | SG-2 | `current_route` returns the startup route (the config slot is ignored) | ✅ 1 failed | `radian_host::subagent_route::the_child_runs_the_parents_live_model_route` (the recorded argv names `--model old`; the parent's own request still named `new`, so the switch itself is proven) |
 | SG-3 | `SessionKillGuard::drop` does nothing (plain `kill_on_drop`) | ✅ 1 failed | `radian_host::subagent_drop::dropping_the_call_leaves_no_grandchild_alive` (the logged grandchild pid was still alive after the 10 s bound) |
+
+## Fix round 1 A: the forwarded header must not outlive the child's startup (2026-10-17)
+
+`RADIAN_CHILD_HEADERS` is read and **removed from the child's own environment** at the top of
+`run_blocking`, before the Tokio runtime exists (so the process still has one thread), and the MCP
+spawn in `agent-extensions` removes the name again (belt and braces: that spawn already
+`env_clear`s, so a name in `inherit_env` is the only path left). Mutations were applied in place,
+restored from a `cp` under `/tmp/radian-fix1/mut/` and confirmed byte-identical with `cmp`; every
+run was made after `cargo build -p radian-tui --bin radian` and `cargo build -p agent-extensions
+--bin mcp-fixture` (the harness refuses a stale binary).
+
+Commands: `timeout 300 cargo test -p agent-cli --locked --no-fail-fast --test subagent <name>`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| FH-1 | `take_child_headers_from_env` reads the variable but does not `remove_var` it | ✅ 1 failed (the child's `shell` command wrote `["X-Test=child-env-secret-9"]` into the dump file) | `agent-cli::subagent::the_childs_own_environment_no_longer_carries_the_parents_header` |
+| FH-2 | the MCP spawn's `env_remove("RADIAN_CHILD_HEADERS")` is dropped | ⚠️ not caught alone (with FH-1 fixed the variable is already out of the child's environment, so `inherit_env` copies nothing) | none — the belt and braces is observable only together with FH-1 |
+| FH-1+FH-2 | both removals gone | ✅ 1 failed (the MCP server's env dump held `["X-Test=mcp-env-secret-5"]`) | `agent-cli::subagent::an_mcp_server_the_child_starts_does_not_get_the_parents_header` |

@@ -77,7 +77,10 @@ pub(crate) struct Setup {
     pub(crate) base_url: Option<String>,
 }
 
-pub(crate) async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
+pub(crate) async fn setup(
+    cli: &Cli,
+    child_headers: Result<Vec<String>, String>,
+) -> Result<Setup, SetupError> {
     // ADR 0008: the config file provides defaults; every CLI flag wins. A refused file (a
     // plaintext secret, an unknown permission value, an older schema_version) fails startup
     // before any session file exists.
@@ -313,10 +316,11 @@ pub(crate) async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         .collect();
     header_args.extend(cli.header.iter().cloned());
     // ADR 0043 decision 1a: a subagent child cannot see the parent's `--header` (argv is
-    // world-readable), so the tool passes them through the environment. The values are still
-    // unresolved here, so `{session_id}` expands to **this** process's id, exactly as a config
-    // file's headers do.
-    header_args.extend(radian_host::child_headers_from_env().map_err(SetupError)?);
+    // world-readable), so the tool passes them through the environment. `run_blocking` already
+    // took them out of this process's environment (fix round 1 A), so the values are here and
+    // nowhere else; they are still unresolved, so `{session_id}` expands to **this** process's
+    // id, exactly as a config file's headers do.
+    header_args.extend(child_headers.map_err(SetupError)?);
     let uses_placeholder = header_args
         .iter()
         .any(|item| item.contains(SESSION_PLACEHOLDER));

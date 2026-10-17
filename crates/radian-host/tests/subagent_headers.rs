@@ -49,7 +49,7 @@ fn stub(dir: &Path, argv_path: &Path, env_path: &Path) -> PathBuf {
 }
 
 /// The parent's `--header` value reaches the child through the environment and the child's own
-/// startup re-parses it (`radian_host::child_headers_from_env`). The mutation (not forwarding
+/// startup re-parses it (`radian_host::take_child_headers_from_env`). The mutation (not forwarding
 /// it) leaves the variable unset and fails the environment assertion; a forwarding that put the
 /// value in argv would fail the argv assertion.
 #[tokio::test]
