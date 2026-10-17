@@ -36,9 +36,7 @@ fn upstream() -> Vec<serde_json::Value> {
 fn kept_upstream() -> Vec<serde_json::Value> {
     upstream()
         .into_iter()
-        .filter(|model| {
-            !DROPPED_PER_MODELS_DEV.contains(&model["id"].as_str().expect("id"))
-        })
+        .filter(|model| !DROPPED_PER_MODELS_DEV.contains(&model["id"].as_str().expect("id")))
         .collect()
 }
 

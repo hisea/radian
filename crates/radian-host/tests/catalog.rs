@@ -170,7 +170,9 @@ async fn no_cache_and_a_failed_fetch_uses_the_bundled_snapshot() {
     assert_eq!(window.budget, Some(983_616));
     assert_eq!(server.requests().len(), 1, "it did try to fetch");
     assert!(
-        window.describe().contains("from bundled snapshot (2026-10-17)"),
+        window
+            .describe()
+            .contains("from bundled snapshot (2026-10-17)"),
         "{}",
         window.describe()
     );

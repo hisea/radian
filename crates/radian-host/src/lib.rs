@@ -81,9 +81,10 @@ pub use catalog::{
     CACHE_TTL, CATALOG_SNAPSHOT, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit,
     ModelPrice, OUTPUT_RESERVATION_CAP, PriceRates, PriceTier, ProviderInfo, ProviderModels,
     SNAPSHOT_DATE, Window, WindowCheck, WindowQuery, WindowSource, bundled_catalog, cache_path,
-    check_context_window_flag, fetch_provider_models, host_of, input_budget, output_ceiling_warning,
-    output_reservation, protocol_catalog, provider_for_host, provider_models_cache,
-    provider_models_stale, read_provider_models, resolve, resolve_offline, write_provider_models,
+    check_context_window_flag, fetch_provider_models, host_of, input_budget,
+    output_ceiling_warning, output_reservation, protocol_catalog, provider_for_host,
+    provider_models_cache, provider_models_stale, read_provider_models, resolve, resolve_offline,
+    write_provider_models,
 };
 pub use chatgpt_usage::{
     ChatGptUsage, USAGE_BASE as CHATGPT_USAGE_BASE, USAGE_URL as CHATGPT_USAGE_URL,

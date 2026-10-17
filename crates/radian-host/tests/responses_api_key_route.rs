@@ -88,7 +88,10 @@ async fn a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_rou
     assert_eq!(args.provider, Provider::ChatGpt);
     assert_eq!(args.base_url, server.base_url);
     assert_eq!(args.api_key.as_deref(), Some("sk-opencode-test"));
-    assert!(!args.chatgpt_oauth, "an API key is not the ChatGPT OAuth route");
+    assert!(
+        !args.chatgpt_oauth,
+        "an API key is not the ChatGPT OAuth route"
+    );
     assert!(
         args.headers
             .iter()
@@ -119,7 +122,10 @@ async fn a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_rou
         vec![agent_core::ContentPart::text("route-ok")]
     );
     let recorded = &server.requests()[0];
-    assert_eq!(recorded.header("authorization"), Some("Bearer sk-opencode-test"));
+    assert_eq!(
+        recorded.header("authorization"),
+        Some("Bearer sk-opencode-test")
+    );
     for name in ["chatgpt-account-id", "openai-beta", "originator"] {
         assert!(recorded.header(name).is_none(), "{name} must not be sent");
     }

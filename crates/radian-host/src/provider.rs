@@ -412,8 +412,9 @@ impl ProviderRef {
             }
             Self::BuiltIn(descriptor) => {
                 match catalog.and_then(|catalog| catalog.npm(descriptor.id, model)) {
-                    Some(npm) => Protocol::from_npm(npm)
-                        .ok_or_else(|| unsupported_api_message(npm)),
+                    Some(npm) => {
+                        Protocol::from_npm(npm).ok_or_else(|| unsupported_api_message(npm))
+                    }
                     None => Ok(descriptor.protocol_for(model)),
                 }
             }
@@ -843,11 +844,7 @@ const OPENAI_MODELS: &[DescriptorModel] = &[
     openai_model("gpt-3.5-turbo", "GPT-3.5-turbo"),
 ];
 
-const fn model(
-    id: &'static str,
-    name: &'static str,
-    protocol: Protocol,
-) -> DescriptorModel {
+const fn model(id: &'static str, name: &'static str, protocol: Protocol) -> DescriptorModel {
     DescriptorModel {
         id,
         name,
@@ -1535,22 +1532,31 @@ mod tests {
         let builtin = ProviderRef::BuiltIn(go);
         // The catalog's npm wins over the table for every one of these.
         assert_eq!(
-            builtin.resolve_protocol(Some(&catalog), "chat-model").unwrap(),
+            builtin
+                .resolve_protocol(Some(&catalog), "chat-model")
+                .unwrap(),
             Protocol::OpenAiCompatible
         );
         assert_eq!(
-            builtin.resolve_protocol(Some(&catalog), "anth-model").unwrap(),
+            builtin
+                .resolve_protocol(Some(&catalog), "anth-model")
+                .unwrap(),
             Protocol::Anthropic
         );
         assert_eq!(
-            builtin.resolve_protocol(Some(&catalog), "resp-model").unwrap(),
+            builtin
+                .resolve_protocol(Some(&catalog), "resp-model")
+                .unwrap(),
             Protocol::Responses
         );
         // `@ai-sdk/google` has no adapter: refused, never silently sent as chat.
         let error = builtin
             .resolve_protocol(Some(&catalog), "google-model")
             .unwrap_err();
-        assert_eq!(error, "radian does not support this model's API (@ai-sdk/google)");
+        assert_eq!(
+            error,
+            "radian does not support this model's API (@ai-sdk/google)"
+        );
         // A model the catalog does not carry falls back to the built-in table.
         assert_eq!(
             builtin
@@ -1597,8 +1603,7 @@ mod tests {
         .unwrap();
         assert_eq!(responses.protocol, Protocol::Responses);
         assert_eq!(
-            responses.base_url,
-            "https://opencode.ai/inference/go/openai/v1",
+            responses.base_url, "https://opencode.ai/inference/go/openai/v1",
             "the catalog's api must not be used"
         );
         let chat = resolve_route(
@@ -1645,7 +1650,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(route.protocol, Protocol::Responses);
-        assert_eq!(route.protocol_notice.as_deref(), Some("protocol from models.dev"));
+        assert_eq!(
+            route.protocol_notice.as_deref(),
+            Some("protocol from models.dev")
+        );
         // Both agree on muse-spark-1.3-contributor (Responses), so there is nothing to say.
         let agree = resolve_route(
             "opencode-go",
@@ -1712,18 +1720,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(responses.protocol, Protocol::Responses);
-        assert_eq!(responses.base_url, "https://opencode.ai/inference/go/openai/v1");
+        assert_eq!(
+            responses.base_url,
+            "https://opencode.ai/inference/go/openai/v1"
+        );
         // A model neither the catalog nor the list names uses the descriptor default.
-        let unknown_model = resolve_route(
-            "opencode-go",
-            "future-model",
-            None,
-            None,
-            &[],
-            "s1",
-            None,
-        )
-        .unwrap();
+        let unknown_model =
+            resolve_route("opencode-go", "future-model", None, None, &[], "s1", None).unwrap();
         assert_eq!(unknown_model.protocol, Protocol::OpenAiCompatible);
     }
 
@@ -1868,7 +1871,9 @@ mod tests {
             Protocol::OpenAiCompatible
         );
         assert_eq!(
-            provider.endpoint_for(Protocol::OpenAiCompatible, None).unwrap(),
+            provider
+                .endpoint_for(Protocol::OpenAiCompatible, None)
+                .unwrap(),
             "https://corp.example/v1"
         );
         // The reserved name is the built-in generic, never a lookup.

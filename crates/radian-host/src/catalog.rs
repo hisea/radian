@@ -1,15 +1,21 @@
-//! The models.dev catalog: where a model's context window comes from (ADR 0018 §目录).
+//! The models.dev catalog: where a model's context window comes from (ADR 0018 §目录), and —
+//! since ADR 0026 — the `provider.npm` that decides a built-in descriptor's wire
+//! protocol.
 //!
 //! The window is **not** guessed from the model name. It is either the host's explicit
 //! `--context-window`, a lookup in the public models.dev catalog matched by
-//! `(provider, model)`, or — for a provider models.dev does not carry (`chatgpt`) — the numbers
-//! the route's own descriptor table cites ([`crate::DescriptorModel::limit`], read from
-//! `@oh-my-pi/pi-catalog`'s `openai-codex` block). The catalog is fetched over a read-only GET
-//! with no key, no header and no user data, cached owner-only under the same cache root as the
-//! diagnostics (ADR 0013 decision 4), and refreshed at most once every [`CACHE_TTL`].
+//! `(provider, model)`, the **bundled snapshot** compiled in with `include_str!` as the last
+//! fallback (ADR 0026), or — for a provider models.dev does not carry
+//! (`chatgpt`) — the numbers the route's own descriptor table cites
+//! ([`crate::DescriptorModel::limit`], read from `@oh-my-pi/pi-catalog`'s `openai-codex` block).
+//! The catalog is fetched over a read-only GET with no key, no header and no user data, cached
+//! owner-only under the same cache root as the diagnostics (ADR 0013 decision 4), and refreshed
+//! at most once every [`CACHE_TTL`].
 //!
-//! The fetch is deliberately allowed to fail: a missing or stale catalog leaves the window
-//! unknown and the guard off (ADR 0015), never a guessed number.
+//! The fetch is deliberately allowed to fail: a missing or stale catalog falls back to the
+//! cached copy, then to the bundled snapshot, never to a guessed number. The `provider.api`
+//! field is deliberately **not** parsed: radian never trusts the catalog's base URL (ADR 0026
+//! revision 2 decision 2).
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -458,7 +464,10 @@ impl Catalog {
                             .get("name")
                             .and_then(Value::as_str)
                             .map(str::to_owned),
-                        npm: provider.get("npm").and_then(Value::as_str).map(str::to_owned),
+                        npm: provider
+                            .get("npm")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
                         env: provider
                             .get("env")
                             .and_then(Value::as_array)
@@ -513,10 +522,7 @@ impl Catalog {
     pub fn npm(&self, provider: &str, model: &str) -> Option<&str> {
         let provider_entry = self.providers.get(provider)?;
         let model_entry = provider_entry.models.get(model)?;
-        model_entry
-            .npm
-            .as_deref()
-            .or(provider_entry.npm.as_deref())
+        model_entry.npm.as_deref().or(provider_entry.npm.as_deref())
     }
 
     /// The provider's catalog metadata (display name, `env`), if present.
@@ -850,9 +856,9 @@ pub async fn resolve(query: &WindowQuery) -> Window {
         && let Some(limit) = catalog.limit(&provider, &query.model)
     {
         let price = catalog.price(&provider, &query.model);
-        let source = source
-            .as_ref()
-            .map_or(WindowSource::Unknown, |s| s.window_source(&provider, &query.model));
+        let source = source.as_ref().map_or(WindowSource::Unknown, |s| {
+            s.window_source(&provider, &query.model)
+        });
         return build_window(
             limit.context,
             limit.input,
@@ -1431,7 +1437,10 @@ mod tests {
         assert_eq!(info.name.as_deref(), Some("OpenCode Go"));
         assert_eq!(info.env, ["OPENCODE_API_KEY"]);
         // `anthropic` carries no `name` when the catalog omits one.
-        assert_eq!(catalog.provider_info("anthropic").unwrap().name.as_deref(), Some("Anthropic"));
+        assert_eq!(
+            catalog.provider_info("anthropic").unwrap().name.as_deref(),
+            Some("Anthropic")
+        );
         assert_eq!(catalog.provider_info("nope"), None);
 
         assert_eq!(

@@ -1180,3 +1180,22 @@ stale one).
 Commands: `timeout 300 cargo test -p agent-cli --locked --test cli a_headless_exec_mounts_no_orchestration_tools`
 (GV-1); `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast memory_search_with_ids_returns_the_full_records`
 (GV-2).
+
+## ADR 0026: protocol from the models.dev `npm`, hard-coded per-protocol base URLs, the bundled snapshot, Responses with an API key (2026-10-17)
+
+Each mutation was applied in place under `src/`, the catching test binary was run alone with
+`--no-fail-fast`, and the source was restored from a `cp` in `/tmp/mut/` and confirmed with `cmp`.
+
+| # | Mutation | Result | Test(s) that caught it |
+|---|---|---|---|
+| R2-1 | `ProviderRef::resolve_protocol` ignores the catalog (always `Ok(descriptor.protocol_for(model))`) | ✅ 4 failed | `provider::tests::the_catalog_npm_decides_the_protocol_and_an_unknown_one_is_refused`, `provider::tests::the_bundled_snapshot_decides_the_protocol_with_no_cache`, `provider::tests::the_catalogs_api_field_is_never_used_for_the_endpoint`, `responses_api_key_route::a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_route` |
+| R2-2 | the catalog's `api` field is parsed again and used as the endpoint (`resolve_route_for`) | ✅ 1 failed | `provider::tests::the_catalogs_api_field_is_never_used_for_the_endpoint` |
+| R2-3 | the bundled snapshot level is dropped from `load`/`resolve_offline` (no cache → nothing) | ✅ 4 failed | `catalog::no_cache_and_a_failed_fetch_uses_the_bundled_snapshot`, `catalog::offline_never_fetches`, `chatgpt_window::an_offline_switch_to_a_chatgpt_model_resolves_the_table`, `chatgpt_window::a_descriptor_without_numbers_is_answered_by_the_catalog_not_the_table` |
+| R2-4 | `build_model` ignores `chatgpt_oauth` and always builds the ChatGPT OAuth model (reuses its header builder) | ✅ 3 failed | `responses_api_key::an_api_key_responses_route_sends_the_bearer_and_no_codex_headers`, `responses_api_key::a_text_turn_and_a_tool_turn_run_over_the_api_key_responses_route`, `responses_api_key_route::a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_route` |
+| R2-5 | `Catalog::npm` drops the provider-level fallback (entry-level only) | ✅ 2 failed | `catalog::tests::the_npm_is_the_entrys_value_then_the_providers`, `catalog::tests::the_bundled_snapshot_parses_with_its_date` |
+| R2-6 | `Protocol::from_npm` maps an unknown `npm` to chat instead of refusing | ✅ 3 failed | `provider::tests::the_catalog_npm_decides_the_protocol_and_an_unknown_one_is_refused`, `provider::tests::the_bundled_snapshot_decides_the_protocol_with_no_cache`, `responses_api_key_route::a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_route` |
+| R2-7 | the `protocol from models.dev` notice never fires | ✅ 1 failed | `provider::tests::the_catalog_overruling_the_table_is_noticed` |
+| R2-8 | a resynced table row drifts (`grok-4.7` back to `go_openai`) | ✅ 2 failed | `opencode_go_models::the_opencode_go_builtins_match_upstream`, `provider::tests::opencode_go_maps_models_to_the_three_protocols` |
+
+Commands: `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast <name>`;
+`timeout 300 cargo test -p radian-host --locked --test <file>`. 8/8 caught.

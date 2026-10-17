@@ -83,10 +83,7 @@ async fn an_api_key_responses_route_sends_the_bearer_and_no_codex_headers() {
         recorded.path, "/responses",
         "the Responses adapter appends `/responses` to the base"
     );
-    assert_eq!(
-        recorded.header("authorization"),
-        Some("Bearer sk-test-key")
-    );
+    assert_eq!(recorded.header("authorization"), Some("Bearer sk-test-key"));
     for name in ["chatgpt-account-id", "openai-beta", "originator"] {
         assert!(
             recorded.header(name).is_none(),
@@ -140,14 +137,14 @@ async fn a_text_turn_and_a_tool_turn_run_over_the_api_key_responses_route() {
     assert_eq!(tool.stop_reason, StopReason::ToolUse);
     assert_eq!(tool.tool_calls.len(), 1);
     assert_eq!(tool.tool_calls[0].name, "read");
-    assert_eq!(tool.tool_calls[0].arguments, serde_json::json!({"path": "x"}));
+    assert_eq!(
+        tool.tool_calls[0].arguments,
+        serde_json::json!({"path": "x"})
+    );
 
     // Every request went the same way: the Bearer key and no Codex header.
     for recorded in server.requests() {
-        assert_eq!(
-            recorded.header("authorization"),
-            Some("Bearer sk-test-key")
-        );
+        assert_eq!(recorded.header("authorization"), Some("Bearer sk-test-key"));
         assert!(recorded.header("originator").is_none());
         assert!(recorded.header("openai-beta").is_none());
         assert!(recorded.header("chatgpt-account-id").is_none());
