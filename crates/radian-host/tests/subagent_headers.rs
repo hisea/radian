@@ -15,7 +15,7 @@ use agent_core::{CancellationToken, NoopSink, ToolCall, ToolContext, ToolProvide
 use radian_host::{SubagentParts, SubagentTools};
 use radian_permissions::{ApprovalPolicy, NoopAudit, Profile};
 use radian_sandbox::SandboxSlot;
-use serde_json::json;
+use serde_json::{Value, json};
 
 const SECRET: &str = "argv-header-secret-7";
 
@@ -80,6 +80,7 @@ async fn the_header_value_reaches_the_child_through_the_environment_not_its_argv
         workspace,
         None,
         SandboxSlot::empty(),
+        radian_runtime::ConfigSlot::new(Value::Null),
         permissions,
     );
     let session = tools.open_session().await.expect("open the tool session");

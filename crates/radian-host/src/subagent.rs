@@ -15,6 +15,9 @@
 //! - **The parent's approval is not inherited into an answer.** `--yes` is passed only while
 //!   the parent's permission hooks are `auto`; otherwise the child is headless with no terminal,
 //!   so its `ask` is denied (fail closed) and the result names what was denied.
+//! - **The parent's live route, never the startup one.** Each call reads the parent's model
+//!   route out of the same config slot a `/model` switch lands in (ADR 0026 D5) and passes
+//!   `--provider`/`--model`, so a child started after a switch runs the new model.
 //! - **The parent's `--header` values.** They are secrets, so they reach the child through its
 //!   environment ([`crate::headers::CHILD_HEADERS_ENV`]), never its argv; the child's startup
 //!   adds them to its redaction list. Config headers already reach it through the config file.
@@ -40,6 +43,7 @@ use agent_core::{
     ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
 use radian_permissions::{ApprovalPolicy, PermissionHooks};
+use radian_runtime::{ConfigSlot, ModelRoute};
 use radian_sandbox::{SandboxMode, SandboxSlot};
 use serde::Deserialize;
 use serde_json::json;
@@ -90,10 +94,14 @@ pub struct SubagentTools {
     workspace: PathBuf,
     coding_root: Option<PathBuf>,
     sandbox: SandboxSlot,
+    /// The parent's live model-route slot (ADR 0026 D5): the driver applies a `/model` change
+    /// to it at a turn boundary, so a child started after a switch names the new route.
+    route_slot: Arc<ConfigSlot>,
     permissions: Arc<PermissionHooks>,
 }
 
 impl SubagentTools {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         parts: SubagentParts,
         session_dir: PathBuf,
@@ -101,6 +109,7 @@ impl SubagentTools {
         workspace: PathBuf,
         coding_root: Option<PathBuf>,
         sandbox: SandboxSlot,
+        route_slot: Arc<ConfigSlot>,
         permissions: Arc<PermissionHooks>,
     ) -> Self {
         Self {
@@ -110,6 +119,7 @@ impl SubagentTools {
             workspace,
             coding_root,
             sandbox,
+            route_slot,
             permissions,
         }
     }
@@ -193,6 +203,7 @@ impl ToolProvider for SubagentTools {
             workspace: self.workspace.clone(),
             coding_root: self.coding_root.clone(),
             sandbox: self.sandbox.clone(),
+            route_slot: Arc::clone(&self.route_slot),
             permissions: Arc::clone(&self.permissions),
             specs: vec![spec()],
         })
@@ -209,6 +220,8 @@ pub struct SubagentSession {
     /// The parent's live sandbox slot (ADR 0038 slice 2), so a `/access` switch narrows the
     /// next child too.
     sandbox: SandboxSlot,
+    /// The parent's live model route (ADR 0026 D5), read at call time for the same reason.
+    route_slot: Arc<ConfigSlot>,
     permissions: Arc<PermissionHooks>,
     specs: Vec<ToolSpec>,
 }
@@ -326,13 +339,14 @@ impl SubagentSession {
             args.push("--tools".into());
             args.push("read,list,glob,grep".into());
         }
-        if !self.parts.model.is_empty() {
+        let route = self.current_route();
+        if !route.model.is_empty() {
             args.push("--model".into());
-            args.push(self.parts.model.clone());
+            args.push(route.model);
         }
-        if !self.parts.provider.is_empty() {
+        if !route.provider.is_empty() {
             args.push("--provider".into());
-            args.push(self.parts.provider.clone());
+            args.push(route.provider);
         }
         if let Some(base_url) = &self.parts.base_url {
             args.push("--base-url".into());
@@ -367,6 +381,16 @@ impl SubagentSession {
         args.push("-p".into());
         args.push(task.to_owned());
         args
+    }
+
+    /// The route the child is told to use **right now** (ADR 0043 1a point 2): the config
+    /// slot's model change when a `/model` switch landed (ADR 0026 D5), else the startup
+    /// route. The slot is the same one the driver writes and the parent's own model reads, so
+    /// the two can never drift.
+    fn current_route(&self) -> ModelRoute {
+        ModelRoute::from_value(&self.route_slot.value()).unwrap_or_else(|| {
+            ModelRoute::new(self.parts.provider.clone(), self.parts.model.clone())
+        })
     }
 }
 
