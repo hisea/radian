@@ -2403,12 +2403,7 @@ struct LoopContext<'a> {
 impl LoopContext<'_> {
     /// Feeds one event to the app. Returns whether the frame is dirty; the effects it produced
     /// are appended to `effects`.
-    fn handle(
-        &mut self,
-        event: UiEvent,
-        app: &mut App,
-        effects: &mut Vec<Effect>,
-    ) -> bool {
+    fn handle(&mut self, event: UiEvent, app: &mut App, effects: &mut Vec<Effect>) -> bool {
         // ADR 0027: the loop is the only place that reads the wall clock for the
         // footer's `speed`/`elapsed`; the timer itself is pure.
         app.set_now(std::time::Instant::now());
