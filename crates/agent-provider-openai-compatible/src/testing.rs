@@ -4,6 +4,8 @@
 //! and it records every request it receives. Replies are used in order, one per request.
 
 use std::collections::VecDeque;
+use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,6 +33,63 @@ pub enum Reply {
         headers: Vec<(String, String)>,
         body: String,
     },
+    /// A barrier: this request waits until every `Reply::Barrier` sharing the same [`Barrier`]
+    /// has arrived (or the barrier's own timeout expires), then gets `reply`. Queue one of
+    /// these per expected request; a test asserts [`Barrier::peak`] to prove they overlapped.
+    Barrier { barrier: Barrier, reply: Box<Reply> },
+}
+
+/// A one-shot rendezvous over the mock's requests. It records how many requests waited at the
+/// same time, so "three child processes overlapped" is a recorded fact and not a guess.
+#[derive(Clone)]
+pub struct Barrier {
+    state: Arc<BarrierState>,
+    timeout: Duration,
+}
+
+struct BarrierState {
+    /// Requests currently inside the wait.
+    waiting: AtomicUsize,
+    /// The most that were inside at once.
+    peak: AtomicUsize,
+    barrier: tokio::sync::Barrier,
+}
+
+impl fmt::Debug for Barrier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Barrier")
+            .field("waiting", &self.state.waiting.load(Ordering::SeqCst))
+            .field("peak", &self.peak())
+            .finish()
+    }
+}
+
+impl Barrier {
+    /// `needed` parties; a wait gives up after `timeout` (which is only a hang guard — a real
+    /// overlap releases at once).
+    pub fn new(needed: usize, timeout: Duration) -> Self {
+        Self {
+            state: Arc::new(BarrierState {
+                waiting: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                barrier: tokio::sync::Barrier::new(needed),
+            }),
+            timeout,
+        }
+    }
+
+    /// The most requests that were inside the barrier at the same time.
+    pub fn peak(&self) -> usize {
+        self.state.peak.load(Ordering::SeqCst)
+    }
+
+    /// Waits for the other parties, counting this request as inside while it waits.
+    async fn wait(&self) {
+        let waiting = self.state.waiting.fetch_add(1, Ordering::SeqCst) + 1;
+        self.state.peak.fetch_max(waiting, Ordering::SeqCst);
+        let _ = tokio::time::timeout(self.timeout, self.state.barrier.wait()).await;
+        self.state.waiting.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Reply {
@@ -165,6 +224,10 @@ async fn respond(stream: &mut TcpStream, reply: Option<Reply>) -> std::io::Resul
             headers,
             body,
         }) => write_plain(stream, code, &headers, &body).await,
+        Some(Reply::Barrier { barrier, reply }) => {
+            barrier.wait().await;
+            Box::pin(respond(stream, Some(*reply))).await
+        }
         Some(Reply::Sse { pieces, pause }) => {
             stream.write_all(head.as_bytes()).await?;
             for piece in pieces {

@@ -1608,6 +1608,21 @@ fn run(
                 tier: tier.preset(),
                 profile,
                 access_builder: Some(access_builder),
+                parent: None,
+                subagent: Some(radian_host::SubagentParts {
+                    executable: std::env::current_exe().ok(),
+                    provider: provider_name.clone(),
+                    model: model_name.clone(),
+                    base_url: provider_ref
+                        .takes_base_url_override()
+                        .then(|| route.base_url.clone()),
+                    config: cli.config.clone(),
+                    max_tokens: cli.max_tokens,
+                    thinking: cli.thinking.clone(),
+                    mcp_config: cli.mcp_config.clone(),
+                    trust: trust_setup.resolved.decision.as_bool(),
+                }),
+                tools_allow: None,
                 memory_root,
                 trust: trust_setup,
                 resume: resume.is_some(),

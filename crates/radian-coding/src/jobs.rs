@@ -48,7 +48,8 @@ use crate::fail;
 use crate::heavy::HeavyPermit;
 use crate::provider::Limits;
 use crate::shell::{
-    Supervised, lock_bool, sandboxed_command, signal_session, wait_for_exit_without_reaping,
+    Supervised, lock_bool, own_session, sandboxed_command, signal_session,
+    wait_for_exit_without_reaping,
 };
 
 /// How many background jobs may run at once in one session (ADR 0037 decision 7). A job costs
@@ -875,19 +876,7 @@ fn configure_group(process: &mut Command) {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: `setsid` has no memory-safety preconditions and runs between fork and exec.
-        unsafe {
-            process.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
+    own_session(process);
 }
 
 /// Waits for the leader without reaping it, kills the whole session, reaps, drains the readers,

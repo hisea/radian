@@ -60,6 +60,16 @@ impl ForkParent {
         }
     }
 
+    /// A one-shot subagent child's parent (ADR 0043 decision 1a): the parent session and the
+    /// seq it was spawned at (`0` when the spawning call does not know a boundary).
+    pub fn subagent(session_id: impl Into<String>, seq: u64) -> Self {
+        Self {
+            session_id: session_id.into(),
+            seq,
+            relation: "subagent".to_owned(),
+        }
+    }
+
     /// The relation. A `parent` without one reads back as `"fork"` (ADR 0006 §7a).
     pub fn relation(&self) -> &str {
         &self.relation

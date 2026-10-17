@@ -15,6 +15,7 @@ use radian_coding::{AskSession, AskTools, CodingSession, CodingTools};
 
 use crate::memory::{MemorySession, MemoryTools};
 use crate::skills::tools::{SkillSession, SkillTools};
+use crate::subagent::{SubagentSession, SubagentTools};
 
 pub struct HostTools {
     coding: Option<CodingTools>,
@@ -24,6 +25,9 @@ pub struct HostTools {
     ask: Option<AskTools>,
     /// `skill` (ADR 0025 S3). Read-only, so it is mounted whenever skills were discovered.
     skills: Option<SkillTools>,
+    /// `subagent` (ADR 0043 decision 1a). Mounted only in a parent session; `open_session`
+    /// never passes it for a session whose `parent` relation is `"subagent"` (depth 1).
+    subagent: Option<SubagentTools>,
     mcp: McpToolProvider,
     /// ADR 0030 O11: the agent definition's built-in tool allow-list. `None` (the default)
     /// mounts every built-in the host has; `Some` mounts only these names — the others are not
@@ -44,6 +48,7 @@ impl HostTools {
             memory,
             ask: None,
             skills: None,
+            subagent: None,
             mcp,
             tool_allow: None,
         }
@@ -77,6 +82,14 @@ impl HostTools {
     /// has no `skill` at all, so a host with no skills does not advertise it.
     pub fn with_skills(mut self, skills: SkillTools) -> Self {
         self.skills = Some(skills);
+        self
+    }
+
+    /// Mounts `subagent` (ADR 0043 decision 1a). A child session never receives this: the
+    /// caller (`open_session`) drops the launch parts when the session's `parent` relation is
+    /// `"subagent"`, which is the depth-1 rule.
+    pub fn with_subagent(mut self, subagent: SubagentTools) -> Self {
+        self.subagent = Some(subagent);
         self
     }
 
@@ -128,6 +141,13 @@ impl HostTools {
         if self.skills.is_some() {
             push("skill", "read one of the discovered skills");
         }
+        if self.subagent.is_some() {
+            push(
+                "subagent",
+                "run one task in a fresh blocking child session (`explore` is read-only) and \
+                 return its last assistant text",
+            );
+        }
         // ADR 0030 O11: an allow-list narrows what is even listed in layer 0a; a built-in it
         // does not name is not mounted and must not appear here.
         if self.tool_allow.is_some() {
@@ -142,12 +162,14 @@ pub struct HostSession {
     memory: Option<MemorySession>,
     ask: Option<AskSession>,
     skills: Option<SkillSession>,
+    subagent: Option<SubagentSession>,
     mcp: McpSession,
     specs: Vec<ToolSpec>,
     coding_names: HashSet<String>,
     memory_names: HashSet<String>,
     ask_names: HashSet<String>,
     skill_names: HashSet<String>,
+    subagent_names: HashSet<String>,
 }
 
 impl ToolProvider for HostTools {
@@ -172,11 +194,16 @@ impl ToolProvider for HostTools {
             Some(skills) => Some(skills.open_session().await?),
             None => None,
         };
+        let subagent = match &self.subagent {
+            Some(subagent) => Some(subagent.open_session().await?),
+            None => None,
+        };
 
         let mut coding_names = HashSet::new();
         let mut memory_names = HashSet::new();
         let mut ask_names = HashSet::new();
         let mut skill_names = HashSet::new();
+        let mut subagent_names = HashSet::new();
         let mut built_in_specs: Vec<ToolSpec> = Vec::new();
         if let Some(coding) = &coding {
             for spec in coding.tool_specs() {
@@ -202,6 +229,12 @@ impl ToolProvider for HostTools {
                 built_in_specs.push(spec.clone());
             }
         }
+        if let Some(subagent) = &subagent {
+            for spec in subagent.tool_specs() {
+                subagent_names.insert(spec.name.clone());
+                built_in_specs.push(spec.clone());
+            }
+        }
         // ADR 0030 O11: an allow-list is a physical unmount. Drop every unlisted built-in spec
         // **and** its dispatch name, so a call to it is an unknown tool, not merely denied. MCP
         // specs are dynamic and are never filtered here (the definition's `mcp` list governs
@@ -211,6 +244,7 @@ impl ToolProvider for HostTools {
             memory_names.retain(|name| self.allows(name));
             ask_names.retain(|name| self.allows(name));
             skill_names.retain(|name| self.allows(name));
+            subagent_names.retain(|name| self.allows(name));
             built_in_specs.retain(|spec| self.allows(&spec.name));
         }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
@@ -220,12 +254,14 @@ impl ToolProvider for HostTools {
             memory,
             ask,
             skills,
+            subagent,
             mcp,
             specs,
             coding_names,
             memory_names,
             ask_names,
             skill_names,
+            subagent_names,
         })
     }
 }
@@ -246,6 +282,14 @@ impl ToolSession for HostSession {
                 None => Err(ToolFailure::new(
                     "unknown_tool",
                     format!("`{}` has no skill session", call.name),
+                )),
+            }
+        } else if self.subagent_names.contains(&call.name) {
+            match &self.subagent {
+                Some(subagent) => subagent.execute(call, cx).await,
+                None => Err(ToolFailure::new(
+                    "unknown_tool",
+                    format!("`{}` has no subagent session", call.name),
                 )),
             }
         } else if self.ask_names.contains(&call.name) {

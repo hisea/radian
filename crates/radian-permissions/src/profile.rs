@@ -298,9 +298,12 @@ fn read_only() -> Vec<Rule> {
 /// Fixed `allow` in every tier (ADR 0024 Q6 and ADR 0025 S3): `ask_user` writes nothing and
 /// runs nothing, and `skill` only reads a `SKILL.md` that discovery already accepted — a skill
 /// **is not a permission**, so reading one never prompts and grants nothing. Both still go
-/// through the ordinary hook path.
+/// through the ordinary hook path. `subagent` (ADR 0043 decision 1a) is here for a different
+/// reason: the tool itself writes no file and runs no workspace command; it starts a child
+/// session whose own tier and approval decide everything it may do. A parent prompt would only
+/// add a second gate that a headless parent cannot answer.
 fn always_allowed() -> Vec<Rule> {
-    ["ask_user", "skill"]
+    ["ask_user", "skill", "subagent"]
         .into_iter()
         .map(|name| {
             Rule::new(
@@ -384,6 +387,23 @@ mod tests {
         ] {
             let tier = profile.preset.as_str();
             assert_eq!(action(&profile, "ask_user"), Action::Allow, "{tier}");
+        }
+    }
+
+    /// ADR 0043 decision 1a: `subagent` writes nothing and runs no workspace command itself;
+    /// the child's own tier and approval govern what it does. Every tier allows it, so a
+    /// headless parent that cannot answer an `ask` can still use it. Removing the rule would
+    /// make it fall through to the default `ask` and be denied without a terminal.
+    #[test]
+    fn subagent_is_allowed_in_every_tier() {
+        let ws = std::env::temp_dir();
+        for profile in [
+            Profile::safe(&ws).unwrap(),
+            Profile::workspace_write(&ws).unwrap(),
+            Profile::full_access(&ws).unwrap(),
+        ] {
+            let tier = profile.preset.as_str();
+            assert_eq!(action(&profile, "subagent"), Action::Allow, "{tier}");
         }
     }
 

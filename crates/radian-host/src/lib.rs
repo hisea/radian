@@ -45,6 +45,7 @@ mod session_id;
 pub mod sessions;
 pub mod skills;
 pub mod startup;
+pub mod subagent;
 mod tools;
 pub mod trust;
 pub mod usage;
@@ -180,6 +181,7 @@ pub use skills::{
     completion_candidates, discover, discover_with_extras, expand, has_skill_file, notices,
     prompt_section,
 };
+pub use subagent::{MAX_CONCLUSION_CHARS, SubagentParts, SubagentSession, SubagentTools};
 pub use startup::{
     LeadSetup, ListError, SessionSettings, is_local_base_url, list_sessions, session_dir,
     session_workspace,

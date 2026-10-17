@@ -493,6 +493,71 @@ fn assert_empty_dir(dir: &Path, what: &str) {
     );
 }
 
+// ---------- a subagent child's journal ----------
+
+/// ADR 0043 decision 1a: the session a `subagent` call starts is an ordinary journal file with
+/// `SessionCreated.parent { relation = "subagent" }`, so `radian attach <child id>` shows it —
+/// there is no live session to hold and no socket involved, only the committed facts. This
+/// drives the real full-screen `attach` under a pty and looks for the child's assistant text.
+#[test]
+fn attach_shows_a_subagent_child_session() {
+    let scratch = Scratch::new("subagent-child");
+    let sessions = scratch.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let child_id = "attach-sid";
+    let lines = vec![
+        envelope(
+            0,
+            "SessionCreated",
+            true,
+            serde_json::json!({
+                "workspace": "/w",
+                "config_snapshot": {"access": "workspace"},
+                "parent": {"session_id": "parent-sid", "seq": 0, "relation": "subagent"},
+            }),
+        ),
+        envelope(1, "TurnStarted", true, serde_json::json!({"turn_id": "t-1"})),
+        envelope(
+            2,
+            "MessageAppended",
+            true,
+            appended(0, agent_core::Message::user("CHILD-INPUT")),
+        ),
+        envelope(
+            3,
+            "MessageAppended",
+            true,
+            appended(1, agent_core::Message::assistant("CHILD-CONCLUSION-OK")),
+        ),
+        envelope(
+            4,
+            "TurnFinished",
+            true,
+            serde_json::json!({"turn_id": "t-1", "outcome": "completed"}),
+        ),
+    ];
+    std::fs::write(
+        sessions.join(format!("{child_id}.jsonl")),
+        format!("{}\n", lines.join("\n")),
+    )
+    .unwrap();
+
+    let mut pty = Pty::spawn(
+        &[
+            "attach",
+            child_id,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+        ],
+        scratch.path(),
+    );
+    assert!(
+        pty.first_frame("CHILD-CONCLUSION-OK", 60).is_some(),
+        "`radian attach <child>` must show the child's assistant text"
+    );
+    pty.quit();
+}
+
 // ---------- A4: the first-frame budget ----------
 
 /// A minimal pty for the first-frame measurement: `libc::openpty` + a direct spawn (no shell),

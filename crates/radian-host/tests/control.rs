@@ -147,6 +147,7 @@ impl Fixture {
                     .with_approval(ApprovalPolicy::Auto),
                 access_builder: None,
                 parent: None,
+                subagent: None,
                 memory_root: None,
                 skills_extra_paths: Vec::new(),
                 skills_builtin: true,

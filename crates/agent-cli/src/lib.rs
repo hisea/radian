@@ -273,6 +273,22 @@ pub struct Cli {
     /// Do not trust this workspace's project resources for this process only (ADR 0031 T3).
     #[arg(long)]
     no_trust: bool,
+
+    /// Hidden: the parent session of a derived session (ADR 0043 decision 1a's subagent child).
+    /// Written to `SessionCreated.parent` with `relation = "subagent"`; a session with this
+    /// parent never mounts `subagent` itself (depth 1).
+    #[arg(long, value_name = "SESSION_ID", hide = true)]
+    parent: Option<String>,
+
+    /// Hidden: the parent seq the derived session records (0 when the spawner knows no turn
+    /// boundary).
+    #[arg(long, value_name = "SEQ", default_value_t = 0, hide = true)]
+    parent_seq: u64,
+
+    /// Hidden: mount only these built-in tools, comma-separated. The `explore` subagent child
+    /// is started with `read,list,glob,grep`; a name not listed is not mounted at all.
+    #[arg(long = "tools", value_name = "NAME,...", hide = true)]
+    tools: Option<String>,
 }
 
 /// Why startup failed. The message must not contain the key.
@@ -792,6 +808,10 @@ struct Setup {
     /// `[control] enabled` (ADR 0030 O6, slice 8): whether this process binds its control
     /// socket at `$RADIAN_HOME/run/<pid>.sock`.
     control_enabled: bool,
+    /// The endpoint a subagent child is told to use (`--base-url`): the parent's effective base
+    /// URL, only for a provider that takes an override. `None` lets the child resolve it from
+    /// the config, the auth entry or the provider default, exactly as the parent did.
+    base_url: Option<String>,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -1210,6 +1230,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         config_path: config.source.clone(),
         config_skipped: config.skipped.clone(),
         control_enabled: config.control.enabled,
+        base_url: provider_ref
+            .takes_base_url_override()
+            .then(|| route.base_url.clone()),
         allow_unix_sockets: {
             let (paths, warnings) = radian_host::resolve_allow_unix_sockets(
                 &config.sandbox.allow_unix_sockets,
@@ -1595,6 +1618,36 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     }
     eprintln!("{}", radian_host::trust::status_line(&trust_setup));
 
+    // ADR 0043 decision 1a: the child `radian exec` this session may start. The model, the
+    // provider and the (generic-provider) endpoint are the parent's resolved ones; the key is
+    // not passed — the child reads the same `auth.json`. `--config` is forwarded only when it
+    // was explicit, and a child is told to trust the workspace only when the parent does.
+    let subagent_parts = radian_host::SubagentParts {
+        executable: std::env::current_exe().ok(),
+        provider: setup.provider_id.clone(),
+        model: setup.model_name.clone(),
+        base_url: setup.base_url.clone(),
+        config: cli.config.clone(),
+        max_tokens: cli.max_tokens,
+        thinking: cli.thinking.clone(),
+        mcp_config: cli.mcp_config.clone(),
+        trust: trust_setup.resolved.decision.as_bool(),
+    };
+    // ADR 0043 decision 1a point 1 and 6: `--parent` is the lineage record; the seq is 0
+    // because the tool runs inside a turn, not at a turn boundary.
+    let parent = cli
+        .parent
+        .as_ref()
+        .map(|id| radian_session::ForkParent::subagent(id.clone(), cli.parent_seq));
+    // The hidden `--tools` list is a physical unmount (the `explore` child's four read tools).
+    let tools_allow = cli.tools.as_deref().map(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<String>>()
+    });
+
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
     // with its own bindings. ADR 0032 slice 5: `LeadSetup::setup` fills what every host-opened
     // session shares; what this host decides itself is written here.
@@ -1619,12 +1672,19 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             tier: profile_arg.preset(),
             profile: permission_profile,
             access_builder: None,
+            parent,
+            subagent: Some(subagent_parts),
+            tools_allow,
             memory_root,
             trust: trust_setup,
             resume: cli.resume.is_some(),
             config_snapshot: serde_json::json!({
                 "provider": setup.provider.as_str(),
                 "model": setup.model_name,
+                // ADR 0043 1a: the tier the session started in. A child records it here, so
+                // `SessionCreated` answers "which tier did the parent give me?" without asking
+                // the process (and a test can read it after the child exits).
+                "access": setup.profile.as_str(),
             }),
             turn_options: TurnOptions {
                 max_model_calls: setup.max_model_calls,

@@ -44,6 +44,7 @@ use crate::pending::{
 use crate::projection::{ProjectionRead, SessionProjection};
 use crate::skills::tools::SkillTools;
 use crate::skills::{self, Skill, SkillsHooks};
+use crate::subagent::{SubagentParts, SubagentTools};
 use crate::tools::HostTools;
 use crate::trust;
 
@@ -370,10 +371,15 @@ pub struct SessionSetup {
     /// Rebuilds the profile and sandbox for a run-time tier switch (ADR 0038 slice 2). `None`
     /// for a host that has no `/access` command (the CLI): a switch is then refused.
     pub access_builder: Option<AccessBuilder>,
-    /// The `SessionCreated.parent` a derived session records (ADR 0022's fork, ADR 0030 O2's
-    /// task agent). `None` for an ordinary session. A `relation: "task"` parent names the lead
-    /// and its `TaskSpawned` seq; a fork's names its parent and fork point.
+    /// The `SessionCreated.parent` a derived session records (ADR 0022's fork, ADR 0043
+    /// decision 1a's subagent child). `None` for an ordinary session. A `relation: "subagent"`
+    /// parent is also the depth-1 marker: `open_session` never mounts `subagent` in that
+    /// session.
     pub parent: Option<ForkParent>,
+    /// The `subagent` tool's launch parameters (ADR 0043 decision 1a). `None` for a host that
+    /// cannot start a child. Ignored, so the tool is not mounted, when [`SessionSetup::parent`]
+    /// says this session is itself a subagent child.
+    pub subagent: Option<SubagentParts>,
     /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
     pub memory_root: Option<PathBuf>,
     /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
@@ -1040,6 +1046,7 @@ pub async fn open_session(
         profile,
         access_builder,
         parent,
+        subagent: subagent_parts,
         memory_root,
         skills_extra_paths,
         skills_builtin,
@@ -1246,6 +1253,23 @@ pub async fn open_session(
     }
     if !shared_skills.is_empty() {
         tools = tools.with_skills(SkillTools::new(Arc::clone(&shared_skills)));
+    }
+    // ADR 0043 decision 1a: `subagent` exists in a parent session only. The depth-1 rule is
+    // here, at the one place a session is established: a session whose own `parent` relation is
+    // `"subagent"` never mounts the tool, so a child cannot start a grandchild.
+    let is_subagent_child = parent
+        .as_ref()
+        .is_some_and(|parent| parent.relation() == "subagent");
+    if !is_subagent_child && let Some(parts) = subagent_parts {
+        tools = tools.with_subagent(SubagentTools::new(
+            parts,
+            session_dir.clone(),
+            session_id.as_str(),
+            workspace.clone(),
+            coding_root.clone(),
+            sandbox_slot.clone(),
+            Arc::clone(&hooks),
+        ));
     }
     // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> lists
     // the tools this host actually mounted and the tier/sandbox facts; 1 <role> is the role

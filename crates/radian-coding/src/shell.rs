@@ -1042,6 +1042,41 @@ pub(crate) fn signal_group(pid: u32, signal: i32) {
     }
 }
 
+/// Puts `process` in its own session and process group (`setsid`), with no controlling
+/// terminal. The same rule `shell` and background jobs use; public so ADR 0043's `subagent`
+/// child (spawned by `radian-host`) cannot drift from it.
+pub fn own_session(process: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setsid` has no memory-safety preconditions and runs between fork and exec.
+        unsafe {
+            process.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = process;
+    }
+}
+
+#[cfg(unix)]
+const SIGKILL: i32 = libc::SIGKILL;
+#[cfg(not(unix))]
+const SIGKILL: i32 = 9;
+
+/// SIGKILLs every process in session `sid` ([`signal_session`]). The caller must hold the
+/// leader **unreaped**, exactly as the job supervisor does, so a reused session id is never
+/// hit. ADR 0043's subagent cancellation uses this; it is not a second kill path.
+pub fn kill_session(sid: u32) {
+    signal_session(sid, SIGKILL);
+}
+
 /// Sends `signal` to **every process in session `sid`**: the process group `sid` first (one
 /// syscall, and it also reaches a member that appears after the enumeration), then every process
 /// the enumeration finds in that session.
@@ -1057,7 +1092,7 @@ pub(crate) fn signal_group(pid: u32, signal: i32) {
 /// pid, so every process found here is the job's. A member that exits between the enumeration and
 /// its `kill` can only turn that `kill` into a no-op; the window is a few microseconds and is the
 /// same one `killpg` has.
-pub(crate) fn signal_session(sid: u32, signal: i32) {
+pub fn signal_session(sid: u32, signal: i32) {
     #[cfg(unix)]
     {
         signal_group(sid, signal);
