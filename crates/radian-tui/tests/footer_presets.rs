@@ -109,6 +109,78 @@ fn full_shows_jobs_while_deck_does_not() {
     );
 }
 
+/// `radian footer export <preset>` prints the preset's TOML exactly (item 3): using the
+/// export as the config's `[tui.footer]` section gives the same footer the preset resolves to.
+#[test]
+fn exported_presets_round_trip_through_the_user_config() {
+    for preset in PRESETS {
+        let exported = radian_tui::footer::export_preset(preset).expect("a shipped preset");
+        let text = format!("schema_version = 1\n{exported}");
+        let path = std::path::Path::new("round-trip");
+        let config =
+            radian_host::config::parse(path, &text).expect("the export parses as a user config");
+        assert!(
+            config.skipped.is_empty(),
+            "{preset}: the export has no skipped keys: {:?}",
+            config.skipped
+        );
+        let mut via_export = App::new("mock", "s");
+        via_export.apply_footer(&config.tui.footer);
+        let mut direct = App::new("mock", "s");
+        direct.apply_footer(&TuiFooterConfig {
+            preset: Some(preset.to_string()),
+            ..Default::default()
+        });
+        // The export carries the rows, not the preset name (so `preset` differs): what must
+        // match is the footer itself — the same rows, the same rendered lines.
+        assert_eq!(
+            via_export.footer, direct.footer,
+            "{preset}: the export resolves to the preset's rows"
+        );
+        for width in [40usize, 100] {
+            assert_eq!(
+                via_export.footer.lines(&via_export, width),
+                direct.footer.lines(&direct, width),
+                "{preset}: the export draws the preset's lines at width {width}"
+            );
+        }
+    }
+}
+
+/// An unknown preset is an error naming the four (item 3).
+#[test]
+fn an_unknown_preset_names_the_four() {
+    let error = radian_tui::footer::export_preset("bogus").unwrap_err();
+    for preset in PRESETS {
+        assert!(
+            error.contains(preset),
+            "the error names {preset}: {error:?}"
+        );
+    }
+}
+
+/// A parse error in a built-in preset is a test failure, never a runtime surprise (item 4):
+/// all four ship parseable by the user's config parser, with no skipped keys.
+#[test]
+fn all_four_built_in_presets_parse() {
+    for preset in PRESETS {
+        let exported = radian_tui::footer::export_preset(preset).expect("a shipped preset");
+        let text = format!("schema_version = 1\n{exported}");
+        let path = std::path::Path::new("built-in");
+        let config = radian_host::config::parse(path, &text).expect("a built-in preset parses");
+        assert!(
+            config.skipped.is_empty(),
+            "{preset}: no skipped keys: {:?}",
+            config.skipped
+        );
+        if preset == "classic" {
+            assert!(config.tui.footer.rows.is_empty(), "classic carries no rows");
+        } else {
+            assert!(!config.tui.footer.rows.is_empty(), "{preset} carries rows");
+        }
+    }
+}
+
 fn golden_for(preset: &str, glyphs: &str, width: u16) -> &'static str {
     match (preset, glyphs, width) {
         ("deck", "unicode", 40) => include_str!("golden/footer/deck-unicode-40.txt"),

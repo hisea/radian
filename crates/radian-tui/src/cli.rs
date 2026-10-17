@@ -335,6 +335,13 @@ enum RadianCommand {
         command: ThemeCommand,
     },
 
+    /// Footer tools (ADR 0027): `radian footer export <preset>`
+    /// prints a built-in preset's TOML exactly, so a user can copy and edit it.
+    Footer {
+        #[command(subcommand)]
+        command: FooterCommand,
+    },
+
     /// View another session read-only (ADR 0043 slice ①): its committed transcript, rendered
     /// with the same blocks a `--resume` uses. No input reaches the session, no socket is
     /// opened, and nothing is written.
@@ -359,6 +366,19 @@ enum RadianCommand {
     /// Reserved; not implemented. Would serve the session's tools over MCP; it refuses with a
     /// usage-class exit code.
     Mcp,
+}
+
+/// The `radian footer` subcommands (ADR 0027).
+#[derive(clap::Subcommand, Debug)]
+enum FooterCommand {
+    /// Print a built-in preset's TOML exactly (`deck`/`full`/`pi`/`classic`): using it as
+    /// the config's `[tui.footer]` section gives the same footer, so it is the starting
+    /// point for a user customization.
+    Export {
+        /// The preset to print: one of `deck`, `full`, `pi`, `classic`.
+        #[arg(value_name = "PRESET")]
+        preset: String,
+    },
 }
 
 /// The `radian theme` subcommands (ADR 0029).
@@ -415,6 +435,7 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
             }))
         }
         RadianCommand::Theme { command } => run_theme(command),
+        RadianCommand::Footer { command } => run_footer(command),
         RadianCommand::Attach {
             session_id,
             follow,
@@ -471,6 +492,24 @@ fn run_theme(command: ThemeCommand) -> ExitCode {
                 }
             }
         }
+    }
+}
+
+/// Runs `radian footer export <preset>` (ADR 0027): prints the
+/// preset's TOML exactly (exit 0). An unknown preset names the four on stderr (exit 2,
+/// a usage error, ADR 0032 A3).
+fn run_footer(command: FooterCommand) -> ExitCode {
+    match command {
+        FooterCommand::Export { preset } => match radian_tui::footer::export_preset(&preset) {
+            Ok(toml) => {
+                print!("{toml}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("radian: {error}");
+                ExitCode::from(2)
+            }
+        },
     }
 }
 

@@ -5,6 +5,7 @@
 # pi` prints this file exactly, and using it as the config's `[tui.footer]` section gives
 # this footer.
 [tui.footer]
+preset = "pi"
 separator = " · "
 
 [[tui.footer.rows]]
