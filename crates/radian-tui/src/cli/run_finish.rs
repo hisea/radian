@@ -1,0 +1,226 @@
+//! How a run builds its first frame: the test hooks, the resumed history, the draft,
+//! the startup block and the trust modal.
+//! Split from `cli.rs`'s `run()` (ADR 0043 decision 5): extractions, not pure moves.
+//! No behaviour change: the block, the safety lines and the modal read the same facts
+//! in the same order, and the herdr reporter is built exactly once.
+
+use super::*;
+
+/// `run()`'s startup-screen phase: applies the test hooks, renders the resumed history,
+/// restores the draft, builds the startup block and pushes the trust modal when the
+/// workspace needs a decision. Returns the herdr reporter for the event loop.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_startup_screen(
+    cli: &Cli,
+    app: &mut App,
+    session: &radian_host::LocalSession,
+    history: &[agent_core::Message],
+    dir: &Path,
+    session_id: &str,
+    resume: &Option<String>,
+    workspace_root: &radian_tui::workspace::CodingRoot,
+    workspace_path: &Path,
+    window: &radian_host::Window,
+    model_name: &str,
+    tier: radian_tui::profile::Tier,
+    access_source: radian_tui::profile::AccessSource,
+    config: &radian_host::Config,
+    startup_approval: &radian_host::StartupApproval,
+    pick_notice: bool,
+    config_warnings: &[String],
+    tx: &Sender<UiEvent>,
+    startup_log: &mut StartupLog,
+) -> Option<(HerdrReporter, Option<String>)> {
+    if let Some(path) = &cli.block_input {
+        let _ = BLOCK_INPUT.set(path.clone());
+    }
+    if let Some(path) = &cli.freeze_draw {
+        let _ = FREEZE_DRAW.set(path.clone());
+    }
+    if let Some(millis) = cli.slow_draw {
+        let _ = SLOW_DRAW.set(millis);
+    }
+    if let Some(count) = cli.flood_facts {
+        // Test hook (`--flood-facts`): a producer that fills the channel as fast as it can, for
+        // the draw-fairness test. Real producers are bounded by the turn structure; this one is
+        // not, which is exactly what makes the fairness rule testable.
+        let flood = tx.clone();
+        std::thread::spawn(move || {
+            for index in 0..count {
+                let event = AgentEvent::ToolStarted {
+                    index: 0,
+                    call_id: format!("flood-{index}"),
+                    name: "flood".into(),
+                };
+                if flood.send(UiEvent::Agent(event)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    // `/memory` runs against the same service the agent's tools and injection use.
+    app.set_memory_enabled(session.facts().memory_enabled);
+    for message in history {
+        app.push_message(message);
+    }
+    mark("entries-built");
+    app.prefill_history(history);
+    mark("prefill");
+    // A draft from a previous exit is restored once, when resuming the same session.
+    if resume.is_some() {
+        let path = radian_tui::composer::draft_path(dir, session_id);
+        match radian_tui::composer::take_draft(&path) {
+            Ok(Some(text)) => app.input.set_text(&text),
+            Ok(None) => {}
+            Err(error) => {
+                startup_log.line(format!("[draft] cannot read {}: {error}", path.display()))
+            }
+        }
+    }
+    // the startup information is one collapsible block (wordmark, one
+    // information line, the safety lines that never fold, one Tip) instead of a wall of
+    // notices. The full lines are what the notices used to be; the summary keeps each field
+    // to a word or two.
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let workspace_line = workspace_root.note.as_ref().map(|note| {
+        format!(
+            "workspace: {} ({note})",
+            radian_tui::workspace::display_coding_root(workspace_root, home.as_deref())
+        )
+    });
+    // The context window (ADR 0018) and the loaded context files (ADR 0036 C2) are separate
+    // lines; `context:` is the files, matching the ADR's wording.
+    let context_line = format!("context window: {}", window.describe());
+    let session_line = match resume {
+        Some(id) => format!(
+            "resumed session {id} ({} messages) · Enter sends · Ctrl-C cancels a turn · \
+             Ctrl-C again quits",
+            history.len()
+        ),
+        None => format!(
+            "new session {session_id} · Enter sends · Ctrl-C cancels a turn · Ctrl-C again quits"
+        ),
+    };
+    let sandbox_facts = session.facts().sandbox_facts.clone();
+    // The host computed this from the real backend (ADR 0027): searching the description text
+    // reported `none` on macOS, because the `workspace` tier's sentence does not name it.
+    let sandbox_word = session.facts().sandbox_word.clone();
+    let budget = window
+        .budget
+        .map_or_else(|| "unknown".to_string(), |b| b.to_string());
+    let mut summary = format!(
+        "{}{} · {sandbox_word} · context {budget} · memory {} · ask_user {}",
+        tier.as_str(),
+        access_source.suffix(),
+        if session.facts().memory_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        if session.facts().ask_user {
+            "on"
+        } else {
+            "off"
+        },
+    );
+    if let Some(note) = &workspace_root.note {
+        summary.push_str(" · ");
+        summary.push_str(note);
+    }
+    // ADR 0034: report to herdr when this process runs inside a herdr pane. The first report
+    // is the current state (idle, or blocked while the trust prompt waits) with the session
+    // identity and the resume command.
+    let mut herdr = herdr_reporter(
+        config,
+        session_id,
+        session.journal_path(),
+        &resume_extra_args(cli, workspace_path),
+    );
+    let herdr_note = herdr.as_ref().and_then(|(_, note)| note.clone());
+    if let Some((reporter, _)) = herdr.as_mut() {
+        reporter.maybe_report(app);
+    }
+    let mut startup_lines = vec![
+        format!("profile: {}", session.facts().profile_line),
+        sandbox_facts,
+        context_line,
+        format!("context: {}", session.facts().context_line),
+    ];
+    // ADR 0034 H1: the startup line says reporting is on, and names a rejected resume command.
+    if herdr.is_some() {
+        startup_lines.push(match &herdr_note {
+            Some(reason) => format!("herdr: reporting (no resume: {reason})"),
+            None => "herdr: reporting".to_owned(),
+        });
+    }
+    if let Some(line) = &workspace_line {
+        startup_lines.push(line.clone());
+    }
+    startup_lines.push(session.facts().memory_notice.clone());
+    startup_lines.push(session.facts().ask_user_line());
+    // ADR 0026 D9: the startup line names the auto policy whichever way it was chosen.
+    if startup_approval.policy == radian_permissions::ApprovalPolicy::Auto {
+        startup_lines.push(
+            "auto: tool calls are approved without asking; deny rules and the sandbox still \
+             apply"
+                .to_string(),
+        );
+    }
+    if pick_notice {
+        startup_lines.push("no sessions for this workspace yet; starting a new one".to_string());
+    }
+    startup_lines.push(session_line);
+    // ADR 0031 T3: the trust state, in the startup block (same style as `ask_user: off`).
+    startup_lines.push(radian_host::trust::status_line(&session.trust()));
+    // The startup diagnostics the `--pick` path could not print: the
+    // alternate screen was already up, so they were collected instead (`StartupLog`). They
+    // belong to the startup block, next to the trust line that was already carried here. On a
+    // plain run the log collected nothing: the same lines were printed before the terminal.
+    startup_lines.extend(startup_log.take());
+    // The safety lines are never folded away: a workspace boundary that
+    // was not the user's choice, and every config-file warning/ignored key. The config
+    // warnings are also printed before the alternate screen, where a crash can still show
+    // them.
+    let mut safety = Vec::new();
+    if let Some(line) = &workspace_line {
+        safety.push(line.clone());
+    }
+    // The policy warnings (a config `auto` ignored under `full`, a suppressed restore) are
+    // never folded either: they explain why the session's approvals behave as they do.
+    for warning in &startup_approval.warnings {
+        safety.push(warning.clone());
+    }
+    for warning in config_warnings {
+        safety.push(format!("config: {warning}"));
+    }
+    let banner = if config.tui.banner.unwrap_or(true) {
+        let path = radian_tui::workspace::display_coding_root(workspace_root, home.as_deref());
+        radian_tui::startup::banner_rows(env!("CARGO_PKG_VERSION"), model_name, &path)
+    } else {
+        Vec::new()
+    };
+    let tip = config
+        .tui
+        .tips
+        .unwrap_or(true)
+        .then(|| radian_tui::startup::tip_for(session_id).to_string());
+    mark("before-startup");
+    app.set_startup(radian_tui::startup::StartupScreen {
+        banner,
+        banner_narrow: format!("{} radian {}", app.brand_mark(), env!("CARGO_PKG_VERSION")),
+        summary,
+        lines: startup_lines,
+        safety,
+        tip,
+        expanded: false,
+    });
+    // ADR 0031 T3: ask once, after the terminal is up and the startup screen is built, when
+    // the workspace has project resources and no saved decision. Until it is answered the
+    // session is untrusted (nothing project-provided is loaded).
+    if session.trust().needs_ask {
+        app.push_trust_modal(session.trust().workspace.clone());
+    }
+    herdr
+}
