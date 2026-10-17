@@ -958,96 +958,20 @@ fn run(
         &session_id,
         &mut startup_log,
     );
-    // A plain run enters the terminal only now: every fallible check above, and the session
-    // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
-    let (mut guard, mut terminal) = match startup_terminal {
-        Some(pair) => pair,
-        None => {
-            let pair = enter_terminal(mouse)?;
-            spawn_input_thread(tx.clone());
-            pair
-        }
-    };
-    mark("terminal-ready");
-    // ADR 0023 U7: the queue's changes are a wake-up source. A push, an answer, an abort and
-    // a waiter that gave up all bump it, so the UI re-reads the head and the modal matches the
-    // queue even when nothing else happened.
-    {
-        let mut changes = session.queue().subscribe();
-        let pending_tx = tx.clone();
-        runtime.spawn(async move {
-            while changes.changed().await.is_ok() {
-                if pending_tx.send(UiEvent::Pending).is_err() {
-                    break;
-                }
-            }
-        });
-    }
-    if cli.panic_after_enter {
-        panic!("radian: panic path test");
-    }
-    if let Some(message) = &cli.panic_message {
-        panic!("{message}");
-    }
-    if let Some(secs) = cli.panic_with_child {
-        // Test hook: a child in its own process group is running when the panic happens.
-        // The panic path must leave no orphan behind.
-        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
-        runtime.spawn(async move {
-            let mut command = tokio::process::Command::new("sleep");
-            command
-                .arg(secs.to_string())
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
-            #[cfg(unix)]
-            command.process_group(0);
-            let mut child = command.spawn().expect("spawn the test child");
-            let _ = pid_tx.send(child.id().unwrap_or(0));
-            let _ = child.wait().await;
-        });
-        let pid = runtime
-            .block_on(pid_rx)
-            .map_err(|_| "the test child did not start".to_string())?;
-        std::fs::write(dir.join("child.pid"), pid.to_string())
-            .map_err(|e| format!("child.pid: {e}"))?;
-        panic!("radian: panic path test with a child in flight");
-    }
-    if let Some(command) = &cli.panic_with_background_job {
-        // Test hook: a background job is running when the panic happens. The panic path must
-        // kill its whole process group (ADR 0037 decision 6). The registry is reached through
-        // the host facade; the command runs under a `full` sandbox (this is a test hook).
-        let jobs = session
-            .jobs_registry()
-            .expect("the session has coding tools");
-        let workspace = session.workspace().to_path_buf();
-        let policy =
-            radian_sandbox::SandboxPolicy::new(radian_sandbox::SandboxMode::FullAccess, &workspace)
-                .expect("a full-access policy");
-        let sandbox = radian_sandbox::Sandbox::from_policy(policy).expect("a full-access sandbox");
-        jobs.start(&sandbox, &workspace, command, None)
-            .expect("start the test job");
-        // The command writes its pid (and its child's) before it sleeps; wait for it, bounded.
-        let marker = workspace.join("job.pid");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while std::fs::read_to_string(&marker).is_err() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the test job never wrote job.pid"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("radian: panic path test with a background job in flight");
-    }
-    let memory_service = session.memory().cloned();
-    // The history of a resumed session is rendered before the first frame, so the transcript
-    // shows it from the start. `open_session` already recovered exactly this transcript
-    // (`agent_core::recover` over the same journal records `Session::history` folds), so the
-    // host takes it instead of re-opening and re-folding the file (resume-perf B).
-    let history = std::mem::take(&mut session.history);
-
-    mark("history-read");
+    let run_ready::TerminalReady {
+        mut guard,
+        mut terminal,
+        memory_service,
+        history,
+    } = run_ready::enter_terminal_and_history(
+        &cli,
+        runtime,
+        &tx,
+        &dir,
+        mouse,
+        startup_terminal,
+        &mut session,
+    )?;
     if let Some(path) = &cli.block_input {
         let _ = BLOCK_INPUT.set(path.clone());
     }
