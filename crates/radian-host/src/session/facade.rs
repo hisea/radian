@@ -120,8 +120,6 @@ impl DriverEnd {
     }
 }
 
-/// The driver's task handle: the host asks it to stop or aborts it, and waits once.
-
 /// Why a session could not be opened.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
