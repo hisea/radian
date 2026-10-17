@@ -79,6 +79,13 @@ fn structured(output: &ToolOutput) -> Value {
 const CHILD_LEAVES_THE_GROUP: &str =
     "timeout 60 sleep 600 & echo $$ > leader.pid; echo $! > child.pid; wait";
 
+/// The leader starts the child that leaves the group, then blocks on the test's fifo and exits 0:
+/// on this path the supervisor's **own** kill is what has to reach the child (no `job_kill` and
+/// no timeout fires). The fifo is what makes the shape observable: the leader is still alive when
+/// the test reads the pids, and the kill runs only once the test lets it exit.
+const LEADER_EXITS_WITH_A_CHILD: &str = "timeout 60 sleep 600 & echo $$ > leader.pid; echo $! > \
+     child.pid; cat gate > /dev/null; exit 0";
+
 fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
     unsafe { libc::kill(pid, 0) == 0 }
@@ -151,6 +158,24 @@ fn session_members(_sid: i32) -> Vec<i32> {
     Vec::new()
 }
 
+/// `mkfifo(3)`: the gate a test uses to hold a command open without sleeping.
+fn mkfifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a path");
+    // SAFETY: mkfifo takes a NUL-terminated path and a mode.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+}
+
+/// Opens a fifo for writing; blocks until the command's `cat` opens it.
+fn release_fifo(path: &Path) {
+    use std::io::Write;
+    let mut fifo = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open the fifo for writing");
+    fifo.write_all(b"go\n").expect("release the fifo");
+}
+
 /// Kills only the pids this test started, if a failed assertion left one behind. Never a pid
 /// from the environment, never a name or a pattern.
 struct Leftovers(Vec<i32>);
@@ -210,9 +235,10 @@ async fn session_empties(sid: i32, limit: Duration) -> bool {
     }
 }
 
-/// Reads both pids the job printed and asserts the shape: the child is in the job's session but
-/// **not** in its process group. Without that, a group-only kill would suffice and the test
-/// would prove nothing.
+/// Reads both pids the job printed and waits (bounded) for the shape: the child is in the job's
+/// session but **not** in its process group. Without that, a group-only kill would suffice and
+/// the test would prove nothing. The shell writes `$!` before the child `exec`s, and GNU
+/// `timeout` calls `setpgid` only once it runs, so the shape is polled rather than sampled once.
 async fn escaping_pids(root: &Path) -> (i32, i32) {
     let leader = wait_for_pid(root, "leader.pid").await;
     let child = wait_for_pid(root, "child.pid").await;
@@ -221,11 +247,18 @@ async fn escaping_pids(root: &Path) -> (i32, i32) {
         "the job must be running (leader {leader}, child {child})"
     );
     let leader_group = group_of(leader).expect("the leader's group");
-    let child_group = group_of(child).expect("the child's group");
-    assert_ne!(
-        child_group, leader_group,
-        "the child (pid {child}) must have left the job's process group, else the test is vacuous"
-    );
+    let start = Instant::now();
+    loop {
+        if group_of(child).is_some_and(|child_group| child_group != leader_group) {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the child (pid {child}) never left the job's process group {leader_group}, so the \
+             test would be vacuous"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     assert_eq!(
         session_of(child),
         session_of(leader),
@@ -320,7 +353,7 @@ async fn a_background_timeout_reaches_a_child_that_left_the_process_group() {
     let tools = transparent_tools(&root);
     let session = tools.open_session().await.expect("session");
 
-    let (id, leader, child, _guard) = start_background(&session, &root, Some(2)).await;
+    let (id, leader, child, _guard) = start_background(&session, &root, Some(3)).await;
 
     let text = settle(&session, &id).await;
     assert!(text.contains("[status: timed out]"), "{text}");
@@ -358,7 +391,48 @@ async fn a_session_end_cleanup_reaches_a_child_that_left_the_process_group() {
     );
 }
 
-// ---------- 4. a foreground timeout ----------
+// ---------- 4. the leader exits on its own ----------
+
+/// The supervisor's own kill (the path `job_kill` and the timeout do not take) must reach the
+/// child that left the process group: the job still prints `exited 0`, and the child is gone.
+#[tokio::test]
+async fn a_natural_exit_reaches_a_child_that_left_the_process_group() {
+    let dir = TempDir::new("session-kill-exit");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+
+    mkfifo(&root.join("gate"));
+    let output = exec(
+        &session,
+        "shell",
+        json!({"command": LEADER_EXITS_WITH_A_CHILD, "background": true}),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("start the job");
+    let value = structured(&output);
+    let id = value["job_id"].as_str().expect("a job id").to_owned();
+
+    // The leader is blocked on the fifo, so the shape is observable before the kill runs.
+    let (leader, child) = escaping_pids(&root).await;
+    let _guard = Leftovers(vec![leader, child]);
+
+    release_fifo(&root.join("gate"));
+    let text = settle(&session, &id).await;
+    assert!(text.contains("[status: exited 0]"), "{text}");
+    assert!(
+        gone_within(child, Duration::from_secs(10)).await,
+        "the child (pid {child}) survived the leader's natural exit"
+    );
+    assert!(
+        session_empties(leader, Duration::from_secs(10)).await,
+        "session {leader} still has members after the leader's natural exit"
+    );
+}
+
+// ---------- 5. a foreground timeout ----------
 
 /// A foreground `shell` call that times out kills the whole session: the escaped child is gone
 /// when the call returns, and nothing is left in the session.
@@ -373,7 +447,7 @@ async fn a_foreground_timeout_reaches_a_child_that_left_the_process_group() {
     let call = exec(
         &session,
         "shell",
-        json!({"command": CHILD_LEAVES_THE_GROUP, "timeout_secs": 2}),
+        json!({"command": CHILD_LEAVES_THE_GROUP, "timeout_secs": 3}),
         CancellationToken::new(),
     );
     let pids = escaping_pids(&root);
