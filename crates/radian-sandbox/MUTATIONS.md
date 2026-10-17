@@ -186,3 +186,27 @@ cargo 记它通过，于是矩阵里那段 acceptance 1（包括「`sandbox-exec
 0016 修订 2 背景表一致），命中时打印同样的固定标记后返回。`macos_escape_matrix` 的跳过行为保持不变
 （它另有目的：矩阵本来就要在沙箱外持有资源）。变异与还原：只改 `crates/radian-sandbox/src/lib.rs`，
 跑完把保存的原文（`.radian/mut/`）写回并 `cmp` 逐字节一致（SHA256 恢复前后相同）。
+
+## ADR 0043 切片 ⓪B：linked worktree 的 git 目录可写（macOS，2026-10-17）
+
+worktree `<home>/Code/radian/.radian-worktrees/s0b-gitdir`，分支 `dogfood/s0b-gitdir`。每个变异
+只改 `crates/radian-sandbox/src/seatbelt.rs`，跑完从副本（`.radian/mut/seatbelt.rs.orig`）还原并
+`cmp` 逐字节一致（SHA256 前后相同）。跑
+`cargo test -p radian-sandbox --locked --no-fail-fast --test git_writable`（macOS-only；每条命令带
+`FullAccess` 对照）。测试 1/2 = 新加的
+`linked_worktree_outside_the_workspace_{allows_native_git,denies_exec_and_non_git_paths}`（workspace
+**就是** linked worktree，host 仓库与 common dir 在它之外）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| LWT-1 | 去掉新加的 allow（`WritableExceptExec` 下不发 `(allow file-write* (subpath <git dir>))`） | 测试 1，`worktree_merge_ff_only`（原生 git 在 worktree 里写 common dir 的 refs / per-worktree 的 index 被拒） | ✅ 1 test FAILED |
+| LWT-2 | allow 发成 common dir 的**父目录**（放宽到 host 仓库根） | 测试 2，`host_working_tree`（host 工作树里的文件本在工作区外、非 git 元数据，必须拒） | ✅ 1 test FAILED |
+| LWT-3 | 把 allow 挪到 deny **之后** | 测试 2，`worktree_gitdir`（嵌套的 per-worktree allow 反压 common dir 的 `worktrees/<name>/gitdir` deny）；另有两个既有测试也失败 | ✅ 3 tests FAILED |
+| LWT-4 | 只为**工作区内**的 git 目录发 `hooks/` deny（common dir 在工作区外就跳过） | 测试 2，`common_hook` | ✅ 1 test FAILED |
+
+4/4 抓住。LWT-3 是顺序形态的漏洞：`read_only` 按路径排序，common dir 恒在 per-worktree gitdir
+**之前**，所以"每个条目 allow 紧跟自己的 deny"这种单遍写法会让后者的 allow 反压前者的
+`worktrees/[^/]+/gitdir` deny——实现必须**先发全部 allow、再发全部 deny**。LWT-4 与 GW-1 同类
+（`hooks/` deny 缺失），但只有当 common dir 在工作区之外时才漏；新测试的 `common_hook` 正是这个
+形态（既有测试的 common dir 在工作区内，抓不住它）。
+
