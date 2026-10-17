@@ -39,6 +39,24 @@ impl Protocol {
             Self::Responses => Provider::ChatGpt,
         }
     }
+
+    /// The models.dev `npm` this protocol is selected by (ADR 0026):
+    /// `@ai-sdk/openai` is the Responses API since AI SDK 5. Any other value is unsupported and
+    /// the model is refused rather than guessed at.
+    pub fn from_npm(npm: &str) -> Option<Self> {
+        match npm {
+            "@ai-sdk/openai-compatible" => Some(Self::OpenAiCompatible),
+            "@ai-sdk/anthropic" => Some(Self::Anthropic),
+            "@ai-sdk/openai" => Some(Self::Responses),
+            _ => None,
+        }
+    }
+}
+
+/// The refusal a built-in descriptor's model gets when the catalog names an `npm` Radian has no
+/// adapter for (ADR 0026): explicit, never a silent fallback to chat.
+pub fn unsupported_api_message(npm: &str) -> String {
+    format!("radian does not support this model's API ({npm})")
 }
 
 /// How a provider is logged into (ADR 0026 D3). Only [`LoginMethod::ApiKey`] is implemented in
@@ -57,14 +75,14 @@ pub enum LoginMethod {
     DeviceCode,
 }
 
-/// One model in a descriptor's built-in list. `protocol` and `base_url` are per model because
-/// `opencode-go` serves both protocols on different paths.
+/// One model in a descriptor's built-in list. `protocol` is the **fallback** the model uses
+/// when the catalog has no entry for it (ADR 0026); the catalog's `npm`
+/// decides the protocol whenever the catalog carries the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DescriptorModel {
     pub id: &'static str,
     pub name: &'static str,
     pub protocol: Protocol,
-    pub base_url: &'static str,
     /// The window numbers this descriptor's own upstream table carries, when it carries any:
     /// the `contextWindow` / `maxTokens` pair of the `openai-codex` entry in
     /// `@oh-my-pi/pi-catalog/src/models.json` for `chatgpt`. [`ModelLimit::default()`] (all
@@ -164,8 +182,10 @@ impl ProviderDescriptor {
         self.models.iter().find(|entry| entry.id == model)
     }
 
-    /// The protocol `model` uses: the built-in entry's protocol, or the descriptor's default
-    /// for a model the list does not name (always known, never `None`).
+    /// The protocol `model` uses **when the catalog cannot answer** (ADR 0026): the
+    /// built-in entry's protocol, or the descriptor's default for a model the list does not
+    /// name (always known, never `None`). [`ProviderRef::resolve_protocol`] consults the catalog
+    /// first and falls back to this.
     pub fn protocol_for(&self, model: &str) -> Protocol {
         self.model(model)
             .map_or(self.default_protocol, |entry| entry.protocol)
@@ -363,7 +383,9 @@ impl ProviderRef {
         }
     }
 
-    /// The wire protocol of `model`: the descriptor's choice, or the named provider's kind.
+    /// The wire protocol the built-in table (or a named provider's `kind`) gives `model`,
+    /// **ignoring the catalog** (ADR 0026): the fallback [`Self::resolve_protocol`]
+    /// uses for a model the catalog does not carry, and what a route's notice compares against.
     pub fn protocol_for(&self, model: &str) -> Protocol {
         match self {
             Self::BuiltIn(descriptor) => descriptor.protocol_for(model),
@@ -371,19 +393,58 @@ impl ProviderRef {
         }
     }
 
-    /// The endpoint `model` talks to: per-model for a descriptor that lists it, else the
-    /// descriptor default; a named provider has exactly one endpoint.
-    pub fn base_url_for(&self, model: &str, auth_base_url: Option<&str>) -> String {
+    /// The wire protocol of `model` (ADR 0026): a built-in descriptor's
+    /// model takes it from the catalog entry's `npm` when the catalog carries the model, and
+    /// from the built-in table otherwise; an `npm` Radian has no adapter for is refused. A named
+    /// provider is untouched (D10/decision 5): its declared `kind` decides.
+    pub fn resolve_protocol(
+        &self,
+        catalog: Option<&crate::Catalog>,
+        model: &str,
+    ) -> Result<Protocol, String> {
         match self {
-            Self::BuiltIn(descriptor) => auth_base_url
-                .map(str::to_owned)
-                .or_else(|| {
-                    descriptor
-                        .model(model)
-                        .map(|entry| entry.base_url.to_owned())
-                })
-                .unwrap_or_else(|| descriptor.default_base_url.to_owned()),
-            Self::Named(named) => named.base_url.clone(),
+            Self::Named(named) => Ok(named.protocol),
+            // The generic descriptor names no built-in models: the user typed the id and the
+            // endpoint, so the catalog's `npm` must not dictate its protocol (ADR 0026
+            // revision 2 decision 5's spirit — only a descriptor's own model list is gated).
+            Self::BuiltIn(descriptor) if descriptor.id == GENERIC_ID => {
+                Ok(descriptor.protocol_for(model))
+            }
+            Self::BuiltIn(descriptor) => {
+                match catalog.and_then(|catalog| catalog.npm(descriptor.id, model)) {
+                    Some(npm) => {
+                        Protocol::from_npm(npm).ok_or_else(|| unsupported_api_message(npm))
+                    }
+                    None => Ok(descriptor.protocol_for(model)),
+                }
+            }
+        }
+    }
+
+    /// The endpoint `model` talks to (ADR 0026): the auth entry's base URL
+    /// when it carries one, else the hard-coded per-(descriptor, protocol) base; a named
+    /// provider has exactly one endpoint. The catalog's own `api` field is never used.
+    pub fn endpoint_for(
+        &self,
+        protocol: Protocol,
+        auth_base_url: Option<&str>,
+    ) -> Result<String, String> {
+        match self {
+            Self::BuiltIn(descriptor) => {
+                if let Some(base) = auth_base_url {
+                    return Ok(base.to_owned());
+                }
+                descriptor_base_url(descriptor.id, protocol)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        format!(
+                            "radian has no {} endpoint for provider `{}`",
+                            protocol.adapter_name(),
+                            descriptor.id
+                        )
+                    })
+            }
+            Self::Named(named) => Ok(named.base_url.clone()),
         }
     }
 
@@ -518,12 +579,15 @@ fn chatgpt_headers(session_id: &str) -> Vec<(String, String)> {
     ]
 }
 
-/// The OpenAI-compatible base URL `opencode-go` serves, from the dogfood command and the
-/// `opencode-go` extension's `DEFAULT_API.baseUrl`.
-const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
-/// The Anthropic-protocol base URL `opencode-go` serves (no `/v1`), from the extension's
-/// `NPM_TO_API`.
-const OPENCODE_GO_ANTHROPIC_BASE: &str = "https://opencode.ai/zen/go";
+/// The base URL `opencode-go` serves its OpenAI **chat** and **Responses** protocols on (ADR
+/// 0026 revision 2 decision 2): everything before `/chat/completions` / `/responses`. This is
+/// models.dev's `api` value for the provider — but radian writes it here and never reads it.
+const OPENCODE_GO_OPENAI_BASE: &str = "https://opencode.ai/inference/go/openai/v1";
+/// The base URL `opencode-go` serves Anthropic Messages on: everything before `/v1/messages`,
+/// which is what the Anthropic adapter appends (`agent-provider-anthropic/src/model.rs:73`). So
+/// models.dev's `…/anthropic/v1` value is **not** used verbatim — the adapter's own convention
+/// would double the `/v1`. Verified by reading that file; not by a live request.
+const OPENCODE_GO_ANTHROPIC_BASE: &str = "https://opencode.ai/inference/go/anthropic";
 const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 
@@ -647,17 +711,29 @@ const THINKING_LOW_MED_HIGH: ThinkingMap = &[
     ("max", None),
 ];
 
-/// `opencode-go`'s built-in list, from `monotykamary/pi-opencode-go-provider@cdd8a70`
-/// `models.json` (accessed 2026-10-14): `api: "anthropic-messages"` → [`Protocol::Anthropic`],
-/// everything else → [`Protocol::OpenAiCompatible`]. Six of the 32 models use Anthropic, and
-/// every `thinkingLevelMap` upstream carries is kept verbatim (ADR 0026 D11; the structural
-/// test `opencode_go_models_match_upstream` reads the same fields from the same commit).
+/// `opencode-go`'s built-in list, resynced to the **models.dev** snapshot of 2026-10-17
+/// (ADR 0026): the model ids and their wire protocols are models.dev's,
+/// the `thinkingLevelMap`s are `monotykamary/pi-opencode-go-provider@cdd8a70` `models.json`
+/// (accessed 2026-10-14), which models.dev does not carry. Directory and table disagreeing is
+/// resolved in the catalog's favour at run time, so a row here is only the fallback for a model
+/// the catalog does not carry.
+///
+/// Measured against the snapshot: `@ai-sdk/openai-compatible` (20, the provider default) →
+/// [`Protocol::OpenAiCompatible`]; `@ai-sdk/anthropic` (6) → [`Protocol::Anthropic`];
+/// `@ai-sdk/openai` (5: grok-4.7, gpt-5.6-luna, gpt-6-luna, muse-spark-1.2/1.3-contributor) →
+/// [`Protocol::Responses`]. `beam-free` and `step-5-preview` were added; `deepseek-v4-flash`
+/// and `grok-4.6` are gone from the snapshot and dropped here;
+/// `gemini-4-argon-contributor` (`@ai-sdk/google`) is deliberately **not** listed — when the
+/// catalog carries it, the route is refused with [`unsupported_api_message`] rather than sent
+/// as chat.
+///
+/// Structural test: `crates/radian-host/tests/opencode_go_models.rs`.
 const OPENCODE_GO_MODELS: &[DescriptorModel] = &[
     go_openai("mimo-v2.6-pro", "MiMo-V2.6-Pro"),
     go_openai("mimo-v2.5", "MiMo V2.5"),
     DescriptorModel {
         thinking: THINKING_UP_TO_XHIGH,
-        ..go_openai("grok-4.7", "Grok 4.7")
+        ..go_responses("grok-4.7", "Grok 4.7")
     },
     go_openai("longcat-2.5-preview-free", "LongCat 2.5 Preview Free"),
     DescriptorModel {
@@ -698,7 +774,7 @@ const OPENCODE_GO_MODELS: &[DescriptorModel] = &[
     go_anthropic("minimax-m3", "MiniMax-M3"),
     DescriptorModel {
         thinking: THINKING_LOW_TO_MAX,
-        ..go_openai("gpt-5.6-luna", "GPT-5.6 Luna")
+        ..go_responses("gpt-5.6-luna", "GPT-5.6 Luna")
     },
     DescriptorModel {
         thinking: THINKING_LOW_MED_XHIGH,
@@ -714,7 +790,7 @@ const OPENCODE_GO_MODELS: &[DescriptorModel] = &[
     },
     DescriptorModel {
         thinking: THINKING_MINIMAL_TO_XHIGH,
-        ..go_openai("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor")
+        ..go_responses("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor")
     },
     DescriptorModel {
         thinking: THINKING_LOW_TO_MAX,
@@ -722,7 +798,7 @@ const OPENCODE_GO_MODELS: &[DescriptorModel] = &[
     },
     DescriptorModel {
         thinking: THINKING_LOW_TO_MAX,
-        ..go_openai("gpt-6-luna", "GPT-6 Luna")
+        ..go_responses("gpt-6-luna", "GPT-6 Luna")
     },
     DescriptorModel {
         thinking: THINKING_HIGH_MAX,
@@ -734,7 +810,7 @@ const OPENCODE_GO_MODELS: &[DescriptorModel] = &[
     },
     DescriptorModel {
         thinking: THINKING_MINIMAL_TO_XHIGH,
-        ..go_openai("muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor")
+        ..go_responses("muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor")
     },
     DescriptorModel {
         thinking: THINKING_LOW_MED_HIGH,
@@ -745,15 +821,11 @@ const OPENCODE_GO_MODELS: &[DescriptorModel] = &[
         ..go_openai("glm-5.3", "GLM-5.3")
     },
     go_openai("kimi-k2.7-code", "Kimi K2.7 Code"),
-    DescriptorModel {
-        thinking: THINKING_UP_TO_XHIGH,
-        ..go_openai("grok-4.6", "Grok 4.6")
-    },
     go_anthropic("qwen3.7-plus", "Qwen3.7 Plus"),
-    DescriptorModel {
-        thinking: THINKING_LOW_HIGH_MAX,
-        ..go_openai("deepseek-v4-flash", "DeepSeek V4 Flash")
-    },
+    // Added when the list was resynced to the 2026-10-17 snapshot; upstream cdd8a70 has no
+    // `thinkingLevelMap` for either, so neither carries one.
+    go_openai("beam-free", "Beam Free"),
+    go_openai("step-5-preview", "Step 5 Preview"),
 ];
 
 /// The models.dev cache's model names, kept as a small built-in fallback (the full list is
@@ -765,24 +837,23 @@ const ANTHROPIC_MODELS: &[DescriptorModel] = &[
     anthropic_model("claude-opus-4-5", "Claude Opus 4.5 (latest)"),
 ];
 
+/// The `openai` descriptor's built-in list. models.dev's `openai` provider is `@ai-sdk/openai`
+/// (AI SDK 5's default model is the Responses API), so since ADR 0026 every model
+/// here is [`Protocol::Responses`]; the 2026-10-17 snapshot carries all four. The table is the
+/// fallback the catalog cannot be for, so it agrees with the catalog and the startup line does
+/// not report a disagreement.
 const OPENAI_MODELS: &[DescriptorModel] = &[
-    openai_model("gpt-5.4", "GPT-5.4"),
-    openai_model("gpt-5.4-pro", "GPT-5.4 Pro"),
-    openai_model("gpt-5.5-pro", "GPT-5.5 Pro"),
-    openai_model("gpt-3.5-turbo", "GPT-3.5-turbo"),
+    openai_responses_model("gpt-5.4", "GPT-5.4"),
+    openai_responses_model("gpt-5.4-pro", "GPT-5.4 Pro"),
+    openai_responses_model("gpt-5.5-pro", "GPT-5.5 Pro"),
+    openai_responses_model("gpt-3.5-turbo", "GPT-3.5-turbo"),
 ];
 
-const fn model(
-    id: &'static str,
-    name: &'static str,
-    protocol: Protocol,
-    base_url: &'static str,
-) -> DescriptorModel {
+const fn model(id: &'static str, name: &'static str, protocol: Protocol) -> DescriptorModel {
     DescriptorModel {
         id,
         name,
         protocol,
-        base_url,
         // The numbers of every non-`chatgpt` descriptor come from models.dev (ADR 0018).
         limit: ModelLimit::UNKNOWN,
         thinking: &[],
@@ -809,25 +880,51 @@ pub const ANTHROPIC_THINKING: ThinkingMap = &[
 ];
 
 const fn go_openai(id: &'static str, name: &'static str) -> DescriptorModel {
-    model(id, name, Protocol::OpenAiCompatible, OPENCODE_GO_BASE)
+    model(id, name, Protocol::OpenAiCompatible)
 }
 
 const fn go_anthropic(id: &'static str, name: &'static str) -> DescriptorModel {
-    model(id, name, Protocol::Anthropic, OPENCODE_GO_ANTHROPIC_BASE)
+    model(id, name, Protocol::Anthropic)
+}
+
+/// A model models.dev lists as `@ai-sdk/openai` on `opencode-go`: the Responses API on the same
+/// base URL as the chat models (ADR 0026).
+const fn go_responses(id: &'static str, name: &'static str) -> DescriptorModel {
+    model(id, name, Protocol::Responses)
 }
 
 const fn anthropic_model(id: &'static str, name: &'static str) -> DescriptorModel {
-    model(id, name, Protocol::Anthropic, ANTHROPIC_BASE)
+    model(id, name, Protocol::Anthropic)
 }
 
-const fn openai_model(id: &'static str, name: &'static str) -> DescriptorModel {
-    model(id, name, Protocol::OpenAiCompatible, OPENAI_BASE)
+/// An `openai` model: models.dev's `openai` provider is `@ai-sdk/openai`, which AI SDK 5 sends
+/// as the Responses API (ADR 0026).
+const fn openai_responses_model(id: &'static str, name: &'static str) -> DescriptorModel {
+    model(id, name, Protocol::Responses)
 }
 
 /// Everything before `/responses` (the adapter's own convention, `OpenAiResponsesConfig::base_url`'s
 /// doc comment gives this exact example): the real request goes to
 /// `{CHATGPT_BASE}/responses` = `https://chatgpt.com/backend-api/codex/responses`.
 const CHATGPT_BASE: &str = "https://chatgpt.com/backend-api/codex";
+
+/// The hard-coded base URL of a built-in `descriptor` for `protocol` (ADR 0026
+/// decision 2). `None` when that descriptor has no endpoint for that protocol. The catalog's
+/// own `api` field is deliberately **not** consulted: a one-line data change must not be able
+/// to redirect a request that carries the user's key.
+pub fn descriptor_base_url(descriptor_id: &str, protocol: Protocol) -> Option<&'static str> {
+    match (descriptor_id, protocol) {
+        ("opencode-go", Protocol::OpenAiCompatible | Protocol::Responses) => {
+            Some(OPENCODE_GO_OPENAI_BASE)
+        }
+        ("opencode-go", Protocol::Anthropic) => Some(OPENCODE_GO_ANTHROPIC_BASE),
+        ("anthropic", Protocol::Anthropic) => Some(ANTHROPIC_BASE),
+        ("openai", Protocol::OpenAiCompatible | Protocol::Responses) => Some(OPENAI_BASE),
+        ("openai-compatible", Protocol::OpenAiCompatible) => Some(OPENAI_BASE),
+        ("chatgpt", Protocol::Responses) => Some(CHATGPT_BASE),
+        _ => None,
+    }
+}
 
 const fn chatgpt_model(
     id: &'static str,
@@ -839,7 +936,6 @@ const fn chatgpt_model(
         id,
         name,
         protocol: Protocol::Responses,
-        base_url: CHATGPT_BASE,
         limit,
         thinking,
     }
@@ -936,7 +1032,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
     ProviderDescriptor {
         id: "opencode-go",
         display_name: "OpenCode Go",
-        default_base_url: OPENCODE_GO_BASE,
+        default_base_url: OPENCODE_GO_OPENAI_BASE,
         login: LoginMethod::ApiKey { extra_fields: &[] },
         thinking: &[],
         default_protocol: Protocol::OpenAiCompatible,
@@ -1034,6 +1130,10 @@ pub struct Route {
     pub base_url: String,
     /// The headers for every request, `{session_id}` already expanded.
     pub headers: Vec<(String, String)>,
+    /// A one-line startup notice when the **catalog** decided this route's wire protocol and it
+    /// differs from the built-in table's ([`ProviderRef::resolve_protocol`]): `"protocol from
+    /// models.dev"` (ADR 0026). `None` when the table stands.
+    pub protocol_notice: Option<String>,
 }
 
 impl Route {
@@ -1056,6 +1156,7 @@ pub fn resolve_route(
     auth_base_url: Option<&str>,
     header_args: &[(String, String)],
     session_id: &str,
+    catalog: Option<&crate::Catalog>,
 ) -> Result<Route, String> {
     let descriptor = descriptor(descriptor_id).ok_or_else(|| {
         format!(
@@ -1074,12 +1175,16 @@ pub fn resolve_route(
         auth_base_url,
         header_args,
         session_id,
+        catalog,
     )
 }
 
 /// [`resolve_route`] for a [`ProviderRef`]: a named provider's endpoint and protocol come
 /// from its declaration, so `--base-url`/`--header` (and config `model.base_url`/`headers`)
 /// are refused for it too — they are the generic provider's dials (ADR 0026 D10).
+///
+/// `catalog` is where a built-in descriptor's wire protocol comes from when it carries the
+/// model (ADR 0026); `None` uses the built-in table.
 pub fn resolve_route_for(
     provider: &ProviderRef,
     model: &str,
@@ -1087,6 +1192,7 @@ pub fn resolve_route_for(
     auth_base_url: Option<&str>,
     header_args: &[(String, String)],
     session_id: &str,
+    catalog: Option<&crate::Catalog>,
 ) -> Result<Route, String> {
     let generic = provider.takes_base_url_override();
     if !generic && base_url_override.is_some() {
@@ -1103,16 +1209,27 @@ pub fn resolve_route_for(
             provider.id()
         ));
     }
+    let protocol = provider.resolve_protocol(catalog, model)?;
+    // ADR 0026: when the catalog's `npm` overrules the built-in table,
+    // the startup line says so once. A model the catalog does not carry keeps the table's
+    // protocol, so there is nothing to report.
+    let protocol_notice = (matches!(provider, ProviderRef::BuiltIn(_))
+        && !generic
+        && catalog.is_some_and(|catalog| catalog.npm(provider.id(), model).is_some())
+        && protocol != provider.protocol_for(model))
+    .then(|| "protocol from models.dev".to_owned());
     let base_url = if generic {
         // `--base-url`/config wins, then the credential entry's base URL, then the descriptor.
         base_url_override
             .map(str::to_owned)
             .or_else(|| auth_base_url.map(str::to_owned))
             .unwrap_or_else(|| {
-                ProviderRef::BuiltIn(descriptor(GENERIC_ID).unwrap()).base_url_for(model, None)
+                descriptor_base_url(GENERIC_ID, Protocol::OpenAiCompatible)
+                    .expect("the generic descriptor has a base URL")
+                    .to_owned()
             })
     } else {
-        provider.base_url_for(model, auth_base_url)
+        provider.endpoint_for(protocol, auth_base_url)?
     };
     let mut headers = provider.request_headers(session_id);
     if generic {
@@ -1125,9 +1242,10 @@ pub fn resolve_route_for(
             ProviderRef::Named(_) => GENERIC_ID,
         },
         model: model.to_owned(),
-        protocol: provider.protocol_for(model),
+        protocol,
         base_url,
         headers,
+        protocol_notice,
     })
 }
 
@@ -1209,6 +1327,20 @@ mod tests {
             descriptor("anthropic").unwrap().default_base_url,
             "https://api.anthropic.com"
         );
+        // models.dev's `openai` provider is `@ai-sdk/openai`, so its models are Responses
+        // (ADR 0026), on the OpenAI base.
+        for model in descriptor("openai").unwrap().models {
+            assert_eq!(model.protocol, Protocol::Responses, "{}", model.id);
+        }
+        assert_eq!(
+            descriptor_base_url("openai", Protocol::Responses),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(
+            descriptor_base_url("anthropic", Protocol::Responses),
+            None,
+            "the anthropic descriptor has no Responses endpoint"
+        );
     }
 
     /// ADR 0026 slice 3: the descriptor exists, uses the Responses protocol, every
@@ -1223,8 +1355,11 @@ mod tests {
         assert!(!chatgpt.models.is_empty(), "the built-in model list");
         for model in chatgpt.models {
             assert_eq!(model.protocol, Protocol::Responses, "{}", model.id);
-            assert_eq!(model.base_url, CHATGPT_BASE, "{}", model.id);
         }
+        assert_eq!(
+            descriptor_base_url("chatgpt", Protocol::Responses),
+            Some(CHATGPT_BASE)
+        );
         assert_eq!(chatgpt.protocol_for("gpt-5.4"), Protocol::Responses);
         assert_eq!(Protocol::Responses.adapter(), Provider::ChatGpt);
         assert_eq!(Protocol::Responses.adapter_name(), "openai-responses");
@@ -1294,7 +1429,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_go_maps_models_to_both_protocols() {
+    fn opencode_go_maps_models_to_the_three_protocols() {
         let go = descriptor("opencode-go").unwrap();
         assert_eq!(
             go.protocol_for("deepseek-v4.1-flash"),
@@ -1303,30 +1438,301 @@ mod tests {
         assert_eq!(go.protocol_for("claude-haiku-5-5"), Protocol::Anthropic);
         assert_eq!(go.protocol_for("qwen3.7-plus"), Protocol::Anthropic);
         assert_eq!(go.protocol_for("mimo-v2.6-pro"), Protocol::OpenAiCompatible);
+        // ADR 0026: the five `@ai-sdk/openai` models are Responses in the table too.
+        for model in [
+            "grok-4.7",
+            "gpt-5.6-luna",
+            "gpt-6-luna",
+            "muse-spark-1.2-contributor",
+            "muse-spark-1.3-contributor",
+        ] {
+            assert_eq!(go.protocol_for(model), Protocol::Responses, "{model}");
+        }
+        // The two models the 2026-10-17 snapshot added; the two it dropped are gone.
+        assert!(go.model("beam-free").is_some());
+        assert!(go.model("step-5-preview").is_some());
+        assert!(go.model("deepseek-v4-flash").is_none());
+        assert!(go.model("grok-4.6").is_none());
+        assert!(
+            go.model("gemini-4-argon-contributor").is_none(),
+            "the Google model is refused through the catalog, never listed here"
+        );
         // A model the list does not name uses the descriptor default (openai-compatible).
         assert_eq!(go.protocol_for("not-a-model"), Protocol::OpenAiCompatible);
-        // The Anthropic models point at the `/zen/go` base, the others at `/zen/go/v1`.
+        // The base URL is per (descriptor, protocol): chat and Responses share the OpenAI base,
+        // Anthropic has its own, and neither is models.dev's `api` verbatim.
         assert_eq!(
-            go.model("claude-haiku-5-5").unwrap().base_url,
-            "https://opencode.ai/zen/go"
+            descriptor_base_url("opencode-go", Protocol::OpenAiCompatible),
+            Some("https://opencode.ai/inference/go/openai/v1")
         );
         assert_eq!(
-            go.model("deepseek-v4.1-flash").unwrap().base_url,
-            "https://opencode.ai/zen/go/v1"
+            descriptor_base_url("opencode-go", Protocol::Responses),
+            Some("https://opencode.ai/inference/go/openai/v1")
+        );
+        assert_eq!(
+            descriptor_base_url("opencode-go", Protocol::Anthropic),
+            Some("https://opencode.ai/inference/go/anthropic"),
+            "the Anthropic adapter appends `/v1/messages`, so the base stops before `/v1`"
         );
         // The Anthropic protocol maps to the Anthropic adapter.
         assert_eq!(Protocol::Anthropic.adapter_name(), "anthropic");
         assert_eq!(Protocol::Anthropic.adapter(), Provider::Anthropic);
     }
 
+    /// ADR 0026: with no cache, the bundled snapshot alone decides the
+    /// protocol — chat, Anthropic and Responses — and refuses the one it has no adapter for.
+    #[test]
+    fn the_bundled_snapshot_decides_the_protocol_with_no_cache() {
+        let snapshot = crate::bundled_catalog();
+        let builtin = ProviderRef::BuiltIn(descriptor("opencode-go").unwrap());
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(snapshot), "deepseek-v4.1-flash")
+                .unwrap(),
+            Protocol::OpenAiCompatible
+        );
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(snapshot), "claude-haiku-5-5")
+                .unwrap(),
+            Protocol::Anthropic
+        );
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(snapshot), "muse-spark-1.3-contributor")
+                .unwrap(),
+            Protocol::Responses
+        );
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(snapshot), "gemini-4-argon-contributor")
+                .unwrap_err(),
+            "radian does not support this model's API (@ai-sdk/google)"
+        );
+        // The snapshot's endpoint is hard-coded per protocol, not read from it.
+        let route = resolve_route(
+            "opencode-go",
+            "muse-spark-1.3-contributor",
+            None,
+            None,
+            &[],
+            "s",
+            Some(snapshot),
+        )
+        .unwrap();
+        assert_eq!(route.protocol, Protocol::Responses);
+        assert_eq!(route.base_url, "https://opencode.ai/inference/go/openai/v1");
+    }
+
+    /// The shipped table and the bundled snapshot agree, so no startup prints `protocol from
+    /// models.dev` (ADR 0026). The notice is for genuine upstream drift,
+    /// not for a table that was not resynced to the snapshot it ships with.
+    #[test]
+    fn the_built_in_table_agrees_with_the_bundled_snapshot() {
+        let snapshot = crate::bundled_catalog();
+        for descriptor in descriptors() {
+            for model in descriptor.models {
+                let route = resolve_route(
+                    descriptor.id,
+                    model.id,
+                    None,
+                    None,
+                    &[],
+                    "s",
+                    Some(snapshot),
+                )
+                .unwrap_or_else(|error| panic!("{}/{}: {error}", descriptor.id, model.id));
+                assert_eq!(
+                    route.protocol_notice, None,
+                    "{}/{}: the table and the snapshot disagree",
+                    descriptor.id, model.id
+                );
+            }
+        }
+    }
+
+    /// A catalog with only the `opencode-go` facts the protocol tests need.
+    fn catalog(text: &str) -> crate::Catalog {
+        crate::Catalog::parse(text).expect("the test catalog parses")
+    }
+
+    /// ADR 0026: a built-in descriptor's model takes its protocol from
+    /// the catalog's `npm`, and an `npm` with no adapter is refused by name.
+    #[test]
+    fn the_catalog_npm_decides_the_protocol_and_an_unknown_one_is_refused() {
+        let catalog = catalog(
+            r#"{
+                "opencode-go": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "models": {
+                        "chat-model": {"limit": {"context": 5}},
+                        "anth-model": {"limit": {"context": 5},
+                            "provider": {"npm": "@ai-sdk/anthropic"}},
+                        "resp-model": {"limit": {"context": 5},
+                            "provider": {"npm": "@ai-sdk/openai"}},
+                        "google-model": {"limit": {"context": 5},
+                            "provider": {"npm": "@ai-sdk/google"}}
+                    }
+                }
+            }"#,
+        );
+        let go = descriptor("opencode-go").unwrap();
+        let builtin = ProviderRef::BuiltIn(go);
+        // The catalog's npm wins over the table for every one of these.
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(&catalog), "chat-model")
+                .unwrap(),
+            Protocol::OpenAiCompatible
+        );
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(&catalog), "anth-model")
+                .unwrap(),
+            Protocol::Anthropic
+        );
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(&catalog), "resp-model")
+                .unwrap(),
+            Protocol::Responses
+        );
+        // `@ai-sdk/google` has no adapter: refused, never silently sent as chat.
+        let error = builtin
+            .resolve_protocol(Some(&catalog), "google-model")
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "radian does not support this model's API (@ai-sdk/google)"
+        );
+        // A model the catalog does not carry falls back to the built-in table.
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(&catalog), "muse-spark-1.3-contributor")
+                .unwrap(),
+            Protocol::Responses,
+            "the table's own protocol"
+        );
+        assert_eq!(
+            builtin.resolve_protocol(None, "claude-haiku-5-5").unwrap(),
+            Protocol::Anthropic
+        );
+    }
+
+    /// ADR 0026: the catalog's `api` field is never the endpoint. The
+    /// route goes to the hard-coded (descriptor, protocol) base even when the catalog names a
+    /// different host for the model.
+    #[test]
+    fn the_catalogs_api_field_is_never_used_for_the_endpoint() {
+        let catalog = catalog(
+            r#"{
+                "opencode-go": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "api": "https://evil.example/v1",
+                    "models": {
+                        "resp-model": {"limit": {"context": 5},
+                            "provider": {"npm": "@ai-sdk/openai",
+                                         "api": "https://evil.example/responses"}},
+                        "chat-model": {"limit": {"context": 5},
+                            "api": "https://evil.example/chat"}
+                    }
+                }
+            }"#,
+        );
+        let responses = resolve_route(
+            "opencode-go",
+            "resp-model",
+            None,
+            None,
+            &[],
+            "s",
+            Some(&catalog),
+        )
+        .unwrap();
+        assert_eq!(responses.protocol, Protocol::Responses);
+        assert_eq!(
+            responses.base_url, "https://opencode.ai/inference/go/openai/v1",
+            "the catalog's api must not be used"
+        );
+        let chat = resolve_route(
+            "opencode-go",
+            "chat-model",
+            None,
+            None,
+            &[],
+            "s",
+            Some(&catalog),
+        )
+        .unwrap();
+        assert_eq!(chat.base_url, "https://opencode.ai/inference/go/openai/v1");
+        // The notice fires only when the catalog overrules the table (here it does not).
+        assert_eq!(chat.protocol_notice, None);
+    }
+
+    /// ADR 0026: when the catalog's `npm` disagrees with the built-in
+    /// table, the catalog wins and the route carries the one-line notice.
+    #[test]
+    fn the_catalog_overruling_the_table_is_noticed() {
+        let catalog = catalog(
+            r#"{
+                "opencode-go": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "models": {
+                        "muse-spark-1.3-contributor": {"limit": {"context": 5},
+                            "provider": {"npm": "@ai-sdk/openai"}},
+                        "mimo-v2.6-pro": {"limit": {"context": 5},
+                            "provider": {"npm": "@ai-sdk/openai"}}
+                    }
+                }
+            }"#,
+        );
+        // The table says chat for mimo-v2.6-pro; the catalog says Responses.
+        let route = resolve_route(
+            "opencode-go",
+            "mimo-v2.6-pro",
+            None,
+            None,
+            &[],
+            "s",
+            Some(&catalog),
+        )
+        .unwrap();
+        assert_eq!(route.protocol, Protocol::Responses);
+        assert_eq!(
+            route.protocol_notice.as_deref(),
+            Some("protocol from models.dev")
+        );
+        // Both agree on muse-spark-1.3-contributor (Responses), so there is nothing to say.
+        let agree = resolve_route(
+            "opencode-go",
+            "muse-spark-1.3-contributor",
+            None,
+            None,
+            &[],
+            "s",
+            Some(&catalog),
+        )
+        .unwrap();
+        assert_eq!(agree.protocol, Protocol::Responses);
+        assert_eq!(agree.protocol_notice, None);
+    }
+
     #[test]
     fn a_route_picks_the_adapter_base_url_and_headers() {
-        // opencode-go: an openai-compatible model on /zen/go/v1, with the session and client
-        // headers.
-        let route =
-            resolve_route("opencode-go", "deepseek-v4.1-flash", None, None, &[], "s1").unwrap();
+        // opencode-go: an openai-compatible model on the inference base, with the session and
+        // client headers.
+        let route = resolve_route(
+            "opencode-go",
+            "deepseek-v4.1-flash",
+            None,
+            None,
+            &[],
+            "s1",
+            None,
+        )
+        .unwrap();
         assert_eq!(route.protocol, Protocol::OpenAiCompatible);
-        assert_eq!(route.base_url, "https://opencode.ai/zen/go/v1");
+        assert_eq!(route.base_url, "https://opencode.ai/inference/go/openai/v1");
         assert_eq!(
             route.headers,
             vec![
@@ -1334,14 +1740,41 @@ mod tests {
                 ("x-opencode-client".to_owned(), "radian".to_owned())
             ]
         );
-        // Its Anthropic model goes to /zen/go with the Anthropic adapter.
-        let anthropic =
-            resolve_route("opencode-go", "claude-haiku-5-5", None, None, &[], "s1").unwrap();
+        // Its Anthropic model goes to the Anthropic base with the Anthropic adapter.
+        let anthropic = resolve_route(
+            "opencode-go",
+            "claude-haiku-5-5",
+            None,
+            None,
+            &[],
+            "s1",
+            None,
+        )
+        .unwrap();
         assert_eq!(anthropic.protocol, Protocol::Anthropic);
-        assert_eq!(anthropic.base_url, "https://opencode.ai/zen/go");
-        // A model the list does not name uses the descriptor default.
+        assert_eq!(
+            anthropic.base_url,
+            "https://opencode.ai/inference/go/anthropic"
+        );
+        // Its Responses model shares the OpenAI base (the adapter appends `/responses`).
+        let responses = resolve_route(
+            "opencode-go",
+            "muse-spark-1.3-contributor",
+            None,
+            None,
+            &[],
+            "s1",
+            None,
+        )
+        .unwrap();
+        assert_eq!(responses.protocol, Protocol::Responses);
+        assert_eq!(
+            responses.base_url,
+            "https://opencode.ai/inference/go/openai/v1"
+        );
+        // A model neither the catalog nor the list names uses the descriptor default.
         let unknown_model =
-            resolve_route("opencode-go", "future-model", None, None, &[], "s1").unwrap();
+            resolve_route("opencode-go", "future-model", None, None, &[], "s1", None).unwrap();
         assert_eq!(unknown_model.protocol, Protocol::OpenAiCompatible);
     }
 
@@ -1350,12 +1783,12 @@ mod tests {
         let headers = vec![("x-custom".to_owned(), "1".to_owned())];
         // A non-generic descriptor refuses both.
         assert!(
-            resolve_route("opencode-go", "m", Some("https://x"), None, &[], "s")
+            resolve_route("opencode-go", "m", Some("https://x"), None, &[], "s", None)
                 .unwrap_err()
                 .contains("--base-url")
         );
         assert!(
-            resolve_route("anthropic", "m", None, None, &headers, "s")
+            resolve_route("anthropic", "m", None, None, &headers, "s", None)
                 .unwrap_err()
                 .contains("--header")
         );
@@ -1367,6 +1800,7 @@ mod tests {
             None,
             &headers,
             "s",
+            None,
         )
         .unwrap();
         assert_eq!(route.base_url, "https://example.com/v1");
@@ -1387,18 +1821,36 @@ mod tests {
             Some("https://auth"),
             &[],
             "s",
+            None,
         )
         .unwrap();
         assert_eq!(with_override.base_url, "https://cli");
         let with_auth =
-            resolve_route(GENERIC_ID, "m", None, Some("https://auth"), &[], "s").unwrap();
+            resolve_route(GENERIC_ID, "m", None, Some("https://auth"), &[], "s", None).unwrap();
         assert_eq!(with_auth.base_url, "https://auth");
-        let default = resolve_route(GENERIC_ID, "m", None, None, &[], "s").unwrap();
+        let default = resolve_route(GENERIC_ID, "m", None, None, &[], "s", None).unwrap();
         assert_eq!(default.base_url, "https://api.openai.com/v1");
         // An unknown descriptor is refused with the list.
-        let error = resolve_route("nope", "m", None, None, &[], "s").unwrap_err();
+        let error = resolve_route("nope", "m", None, None, &[], "s", None).unwrap_err();
         assert!(error.contains("unknown provider"), "{error}");
         assert!(error.contains("opencode-go"), "{error}");
+    }
+
+    /// A built-in descriptor still honors a base URL from the credential entry's `env` (the
+    /// only override a non-generic route accepts), so an existing user config keeps working.
+    #[test]
+    fn a_built_in_route_takes_the_auth_entries_base_url_override() {
+        let route = resolve_route(
+            "opencode-go",
+            "deepseek-v4.1-flash",
+            None,
+            Some("https://mirror.example/v1"),
+            &[],
+            "s",
+            None,
+        )
+        .unwrap();
+        assert_eq!(route.base_url, "https://mirror.example/v1");
     }
 
     #[test]
@@ -1466,7 +1918,12 @@ mod tests {
             provider.protocol_for("any-model"),
             Protocol::OpenAiCompatible
         );
-        assert_eq!(provider.base_url_for("m", None), "https://corp.example/v1");
+        assert_eq!(
+            provider
+                .endpoint_for(Protocol::OpenAiCompatible, None)
+                .unwrap(),
+            "https://corp.example/v1"
+        );
         // The reserved name is the built-in generic, never a lookup.
         let (generic, warning) = resolve_provider(GENERIC_ID, &config, None).unwrap();
         assert!(matches!(generic, ProviderRef::BuiltIn(_)));
@@ -1494,7 +1951,10 @@ mod tests {
         let auth = env("https://auth.example/v1", Some("anthropic"));
         let (provider, warning) = resolve_provider("solo", &BTreeMap::new(), Some(&auth)).unwrap();
         assert!(warning.is_none());
-        assert_eq!(provider.base_url_for("m", None), "https://auth.example/v1");
+        assert_eq!(
+            provider.endpoint_for(Protocol::Anthropic, None).unwrap(),
+            "https://auth.example/v1"
+        );
         assert_eq!(provider.protocol_for("m"), Protocol::Anthropic);
 
         // `RADIAN_KIND` defaults to openai-compatible when absent.
@@ -1513,7 +1973,10 @@ mod tests {
             decl("anthropic", "https://config.example"),
         );
         let (provider, warning) = resolve_provider("solo", &config, Some(&auth)).unwrap();
-        assert_eq!(provider.base_url_for("m", None), "https://config.example");
+        assert_eq!(
+            provider.endpoint_for(Protocol::Anthropic, None).unwrap(),
+            "https://config.example"
+        );
         let warning = warning.expect("both sources warn");
         assert!(warning.contains("config"), "{warning}");
 
@@ -1539,19 +2002,19 @@ mod tests {
             decl("openai-compatible", "https://corp.example/v1"),
         );
         let (provider, _) = resolve_provider("corp", &config, None).unwrap();
-        let route = resolve_route_for(&provider, "m1", None, None, &[], "s1").unwrap();
+        let route = resolve_route_for(&provider, "m1", None, None, &[], "s1", None).unwrap();
         assert_eq!(route.base_url, "https://corp.example/v1");
         assert_eq!(route.protocol, Protocol::OpenAiCompatible);
         assert!(route.headers.is_empty(), "a named provider has no headers");
         // The generic-only dials are refused.
         assert!(
-            resolve_route_for(&provider, "m", Some("https://x"), None, &[], "s")
+            resolve_route_for(&provider, "m", Some("https://x"), None, &[], "s", None)
                 .unwrap_err()
                 .contains("--base-url")
         );
         let headers = vec![("x".to_owned(), "1".to_owned())];
         assert!(
-            resolve_route_for(&provider, "m", None, None, &headers, "s")
+            resolve_route_for(&provider, "m", None, None, &headers, "s", None)
                 .unwrap_err()
                 .contains("--header")
         );

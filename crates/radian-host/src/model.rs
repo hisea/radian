@@ -144,6 +144,10 @@ pub struct ModelArgs {
     /// `openai-compatible` only: the assistant-message field the model requires its reasoning
     /// replayed under (ADR 0014 Q1). `None` sends no reasoning.
     pub reasoning_replay: Option<String>,
+    /// Whether a [`Provider::ChatGpt`] route authenticates by the `chatgpt` descriptor's OAuth
+    /// (ADR 0026) or by a plain `Authorization: Bearer` from `auth.json` (ADR 0026
+    /// revision 2 decision 4). Ignored for the other two protocols.
+    pub chatgpt_oauth: bool,
 }
 
 /// Either provider behind one `Model`. `Model` is not object safe, so this is an enum and not
@@ -151,7 +155,12 @@ pub struct ModelArgs {
 pub enum HostModel {
     OpenAi(OpenAiCompatible),
     Anthropic(Anthropic),
+    /// A Responses route over OAuth (`ChatGptModel`).
     ChatGpt(ChatGptModel),
+    /// A Responses route over a plain API key (ADR 0026): a built-in
+    /// descriptor's `@ai-sdk/openai` model with `Authorization: Bearer <key>` and the
+    /// descriptor's own headers, none of the ChatGPT ones.
+    Responses(OpenAiResponses),
 }
 
 impl Model for HostModel {
@@ -165,6 +174,7 @@ impl Model for HostModel {
             Self::OpenAi(model) => model.complete(request, cx).await,
             Self::Anthropic(model) => model.complete(request, cx).await,
             Self::ChatGpt(model) => model.complete(request, cx).await,
+            Self::Responses(model) => model.complete(request, cx).await,
         }
     }
 }
@@ -537,6 +547,24 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
                 .map_err(|e| format!("--base-url {shown_url}: {e}"))
         }
         Provider::ChatGpt => {
+            if !args.chatgpt_oauth {
+                // ADR 0026: a built-in descriptor's Responses model
+                // authenticated by an API key. The key is the whole credential — no OAuth, no
+                // `chatgpt-account-id`, no `OpenAI-Beta`, no `originator` (those belong to the
+                // `chatgpt` OAuth route, whose descriptor is the only one that sets them) — and
+                // `include`/`store` stay as the adapter builds them.
+                let mut config = OpenAiResponsesConfig::new(base_url, &args.model);
+                if let Some(key) = &args.api_key {
+                    config = config.with_header("Authorization", format!("Bearer {key}"));
+                }
+                for (name, value) in &args.headers {
+                    config = config.with_header(name.clone(), value.clone());
+                }
+                config.reasoning_effort = args.reasoning_effort;
+                return OpenAiResponses::new(config)
+                    .map(HostModel::Responses)
+                    .map_err(|e| format!("--base-url {shown_url}: {e}"));
+            }
             // No network or file I/O here (ADR 0026): the access token
             // and account id are resolved fresh on every `complete()` call, never at build
             // time — see `ChatGptModel`'s doc comment for why that is the right place and
@@ -678,6 +706,9 @@ impl RouteContext {
             .as_ref()
             .and_then(|credential| credential.env.get(crate::RADIAN_BASE_URL))
             .map(String::as_str);
+        // ADR 0026: the wire protocol comes from the catalog (the cache,
+        // else the bundled snapshot); a model the catalog does not carry uses the table.
+        let catalog = crate::protocol_catalog();
         let route = crate::resolve_route_for(
             &provider_ref,
             model,
@@ -685,6 +716,7 @@ impl RouteContext {
             auth_base_url,
             &self.user_headers,
             &self.session_id,
+            Some(&catalog),
         )?;
         // The thinking level is clamped against **this route's** map (ADR 0026 D11): the same
         // level can mean different wire values — or nothing — on different models.
@@ -708,6 +740,9 @@ impl RouteContext {
             thinking,
             reasoning_effort,
             reasoning_replay,
+            // The `chatgpt` descriptor is the only OAuth Responses route; every other Responses
+            // route uses the key from `auth.json` (ADR 0026).
+            chatgpt_oauth: provider_name == crate::oauth_chatgpt::PROVIDER_ID,
         })
     }
 }

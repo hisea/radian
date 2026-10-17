@@ -157,3 +157,38 @@ verbatim in the slice's brief):
 - The error is returned as `ModelError::Protocol` (never retried); every other `429` stays
   `ModelError::Unavailable` (ADR 0017).
 
+## 8. The API-key route vs the Codex route (ADR 0026)
+
+Where the request goes, field by field, when a **built-in descriptor's** `@ai-sdk/openai` model
+is sent to a Responses endpoint other than `chatgpt.com` (e.g. `opencode-go`'s
+`…/inference/go/openai/v1/responses`) with `Authorization: Bearer <key>` from `auth.json`.
+
+| Field | Codex (current, chatgpt descriptor) | API-key route | Why |
+|---|---|---|---|
+| `model`, `input`, `stream`, `instructions`, `tools` | sent | sent | standard Responses; nothing Codex-only |
+| `store: false` | sent | sent | standard Responses (`pi-catalog` `request-transformer.ts:387`); radian is stateless either way |
+| `include: ["reasoning.encrypted_content"]` | sent | sent | standard Responses; it is what makes the returned `reasoning` item replayable (ADR 0014 R10). **Unsure** on a non-OpenAI proxy (below) |
+| `reasoning.effort` / `reasoning.summary` | sent when set | sent when set | standard Responses; the value comes from the model's own `thinkingLevelMap` |
+| `Authorization` | OAuth access token (per call) | `Bearer <key>` | decision 4 |
+| `chatgpt-account-id` | sent (per call) | **not sent** | Codex-only header (`codex.ts:12-39`) |
+| `OpenAI-Beta: responses=experimental` | sent | **not sent** | Codex-only |
+| `originator` | sent | **not sent** | Codex-only |
+| `session_id` (chatgpt's own routing header) | sent | **not sent** (opencode-go sends `x-opencode-session`/`x-opencode-client` instead) | per descriptor |
+| `end_turn` (in responses) | read | read | **Codex-only** on the wire; a server that never sends it simply never pauses |
+
+No request-body code changed for this route: every body field the adapter writes is the standard
+Responses vocabulary, and the three Codex-only **headers** are the descriptor's (only
+`chatgpt_headers` sets them). What the API-key route must **not** send is exactly those headers,
+and `radian-host`'s `build_model` (the `HostModel::Responses` branch) builds the header set the
+same way for both routes minus them.
+
+### Unsure (cannot be decided from this repo; never contacted)
+
+- Whether a non-OpenAI Responses proxy (`opencode-go`) accepts `include: ["reasoning.encrypted_content"]`,
+  `store: false`, or the `reasoning.effort` values above `high` (`xhigh`, `max`, which the
+  opencode-go `thinkingLevelMap`s carry). The request is built as the Codex one is, minus the
+  Codex headers; a 4xx would be the provider's own error (ADR 0017), not a silent fallback.
+- Whether `reasoning.effort: "minimal"` is accepted by the OpenAI Responses API itself
+  (`openai`'s models carry no `thinkingLevelMap`, so radian sends no `reasoning` object for them
+  — this only matters if a map is added).
+
