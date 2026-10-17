@@ -137,11 +137,12 @@ pub struct ChatGptUsage {
     client: reqwest::Client,
 }
 
-/// The descriptor's `Endpoint` build for `chatgpt`: the session id the headers carry. There is
-/// no stored secret to hand over — the fetch renews the oauth entry itself, per call.
+/// The descriptor's `Endpoint` build for `chatgpt`: the descriptor's endpoint and the session id
+/// the headers carry. There is no stored secret to hand over — the fetch renews the oauth entry
+/// itself, per call.
 pub fn endpoint(args: &UsageArgs) -> Box<dyn UsageFetcher> {
     Box::new(ChatGptUsage::with_url(
-        USAGE_URL,
+        args.url.clone(),
         args.session_id.clone(),
         Endpoints::default(),
     ))

@@ -1093,13 +1093,15 @@ mod tests {
         assert_eq!(usage_item_alias("model"), None);
     }
 
-    /// The fetch a descriptor builds names the descriptor's own id: the `usage` component draws
-    /// a snapshot only while it belongs to the current route's provider.
+    /// The fetch a descriptor builds names the descriptor's own id, and is built from the
+    /// descriptor's own URL: the `usage` component draws a snapshot only while it belongs to
+    /// the current route's provider.
     #[test]
     fn a_built_fetch_names_its_own_provider() {
         for id in ["opencode-go", "chatgpt"] {
             let endpoint = usage_endpoint(id).expect("a declared source");
             let fetcher = (endpoint.build)(&UsageArgs {
+                url: endpoint.url.to_owned(),
                 session_id: "sess-1".to_owned(),
                 secret: Some("sk-not-used-by-this-test".to_owned()),
             });

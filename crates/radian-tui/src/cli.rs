@@ -1758,6 +1758,7 @@ fn run(
         radian_host::spawn_usage_gated(
             runtime.handle(),
             (endpoint.build)(&radian_host::UsageArgs {
+                url: endpoint.url.to_owned(),
                 session_id: session_id.clone(),
                 secret: Some(key.key.clone()),
             }),
@@ -1786,6 +1787,7 @@ fn run(
         radian_host::spawn_usage_gated(
             runtime.handle(),
             (endpoint.build)(&radian_host::UsageArgs {
+                url: endpoint.url.to_owned(),
                 session_id: session_id.clone(),
                 secret: None,
             }),

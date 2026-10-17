@@ -212,11 +212,11 @@ pub struct OpencodeGoUsage {
 }
 
 /// The descriptor's `Endpoint` build for opencode-go: the key the TUI resolved from `auth.json`
-/// and the fixed endpoint. The period is the runner's, not the fetch's.
+/// and the descriptor's endpoint. The period is the runner's, not the fetch's.
 pub fn endpoint(args: &UsageArgs) -> Box<dyn UsageFetcher> {
     Box::new(OpencodeGoUsage::with_url(
         args.secret.clone().unwrap_or_default(),
-        USAGE_URL,
+        args.url.clone(),
     ))
 }
 

@@ -96,10 +96,13 @@ pub trait UsageFetcher: Send + Sync {
     fn fetch(&self) -> Pin<Box<dyn Future<Output = Result<UsageSnapshot, String>> + Send + '_>>;
 }
 
-/// The facts one `Endpoint` fetch is built from (ADR 0027). The secret
-/// stays in the process: it is handed to a fetch, never to a journal, a log line or the store
-/// (ADR 0027 C4).
+/// The facts one `Endpoint` fetch is built from (ADR 0027): the
+/// endpoint's URL (the descriptor's, so there is one source for it) and the session's own
+/// facts. The secret stays in the process: it is handed to a fetch, never to a journal, a log
+/// line or the store (ADR 0027 C4).
 pub struct UsageArgs {
+    /// The URL to poll.
+    pub url: String,
     /// The routed session id (the chatgpt fetch's `session_id` header).
     pub session_id: String,
     /// The provider's resolved secret, when its spawn gate found one (the api key for
