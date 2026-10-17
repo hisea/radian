@@ -145,8 +145,8 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
         }
         SandboxMode::FullAccess => {
             "**The command is NOT sandboxed** (`full`): it can read and write \
-             anywhere the user can, including the network. The user chose this mode \
-             explicitly; it is never a default."
+             anywhere the user can, including the network. No OS sandbox wraps it; that is \
+             the built-in default (ADR 0043) and `--profile workspace` turns one on."
         }
     };
     ToolSpec {

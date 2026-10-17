@@ -379,7 +379,8 @@ impl AccessChoice {
 }
 
 /// The `/access full` confirmation's state: the highlighted option. The default is `cancel`
-///.
+/// (owner rule: opening the sandbox's absence must never be the pre-selected answer, so Enter
+/// cannot do it).
 pub struct AccessWizard {
     pub cursor: usize,
 }
