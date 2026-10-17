@@ -104,7 +104,9 @@ pub enum JobState {
     Signaled(i32),
     /// `job_kill` (or a session-end cleanup) stopped it.
     Killed,
-    /// Its `timeout_secs` elapsed.
+    /// Its deadline elapsed (the `job_kill`-style stop). Only an adopted foreground call's
+    /// `timeout_secs` sets one now (ADR 0037; revision 2 for explicit
+    /// background jobs).
     TimedOut,
 }
 
@@ -257,8 +259,9 @@ impl Jobs {
     }
 
     /// Starts `command` in the background under `sandbox`. One approval covers its whole life
-    /// (the caller has already been approved for this tool call). `timeout` is the optional
-    /// `timeout_secs`; without it a background job has **no** timeout.
+    /// (the caller has already been approved for this tool call). `timeout` is an optional job
+    /// deadline; the `shell` tool no longer passes one, because an explicit `background: true`
+    /// `timeout_secs` is ignored (ADR 0037), so production always passes `None`.
     pub fn start(
         &self,
         sandbox: &Sandbox,

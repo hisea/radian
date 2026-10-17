@@ -2265,3 +2265,18 @@ Base `2e513ef` · branch `dogfood/s4-herdr`。变异在源码原地改，每次�
 `XDG_CONFIG_HOME` 下 `herdr plugin link integrations/herdr` 成功（返回解析后的 manifest，只有一条
 `manifest does not declare platforms` warning）；把 `min_herdr_version` 去掉后同一命令失败于
 `plugin min_herdr_version is required`。
+## a printable single character in the main keymap warns
+
+`Keymap::from_config` keeps a bare printable character bound in the `Main` context (README allows
+single-character bindings) but adds one startup warning: the character cannot be typed in the
+input box. Mutations were applied in place, each restored from a `cp` in `.radian/scratch/mut/`
+and confirmed byte-identical with `cmp`.
+
+Commands: `timeout 570 cargo test -p radian-tui --lib --locked --no-fail-fast
+a_bare_printable_character`; the wiring is also pinned by `--test config
+a_printable_key_in_the_main_view_is_warned_about`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| KB-1 | the printable check is gone (`if action.context() == Context::Main`, so every main binding warns) | ✅ 1 failed (the Ctrl/Alt/Shift loop's `warnings.is_empty()`): `a_bare_printable_character_in_the_main_view_warns` | the same unit test |
+| KB-2 | the warning block is removed entirely | ✅ 1 failed (the `'p'` warning is missing) | the same unit test |

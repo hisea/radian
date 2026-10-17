@@ -550,3 +550,24 @@ test result: FAILED. 0 passed; 1 failed  (4.4 s)
 
 Two stubs would **not** have caught this: the old gate's default is two slots, so a two-command
 version of this test passes on 29f0387 (the reason this row now runs three).
+
+## ADR 0037: an explicit background `timeout_secs` is ignored (2026-10-17)
+
+`shell::start_background` no longer forwards `timeout_secs` to the job registry, so a
+`background: true` command has no deadline; the schema and the acknowledgement say so. This is the
+one-directional check the revision asks for (restore the deadline). The mutation was applied in
+place, restored from a `cp` in `.radian/scratch/mut/` and confirmed byte-identical with `cmp`
+before the next step (no `git checkout --`/`restore`/`stash`); `git status --short` was checked
+after each run.
+
+Run: `cargo test -p radian-coding --test jobs --locked --no-fail-fast a_background_timeout_secs_is_ignored`
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| BG-1 | `start_background` passes the deadline again (`jobs.start(…, args.timeout_secs.map(Duration::from_secs))`) | ✅ 1 failed (1.0 s: the job settled at the restored 1 s deadline, so `job_output wait` returned `[status: timed out]` where the test asserts `[status: running]`) | `a_background_timeout_secs_is_ignored` |
+
+BG-1 is also the "old code" failure the brief asks for: the pre-revision code passed the deadline
+unconditionally, so the same test fails on it for the same reason. The other half of the revision
+(`a_foreground_timeout_secs_still_kills_the_command`) is the unchanged foreground path; the
+revision-1 adoption-deadline test (`an_adopted_job_is_killed_by_the_original_timeout`) is green
+without change.

@@ -88,6 +88,32 @@ fn a_keymap_conflict_is_a_startup_error() {
     );
 }
 
+/// a printable single character bound in the main view would swallow that
+/// character in the composer, so the config application returns a warning for it (the binding is
+/// kept; only the warning is added). A Ctrl/Alt binding is not a typed character, so it is silent.
+#[test]
+fn a_printable_key_in_the_main_view_is_warned_about() {
+    for (bindings, warned) in [
+        ("toggle_reasoning = [\"p\"]\n", true),
+        ("toggle_reasoning = [\"ctrl-y\"]\n", false),
+    ] {
+        let text = format!("schema_version = 1\n[tui.keybindings]\n{bindings}");
+        let mut app = App::new("m", "s");
+        let warnings = app.apply_config(&config(&text), false).unwrap();
+        let found: Vec<&String> = warnings
+            .iter()
+            .filter(|warning| warning.contains("cannot be typed in the input box"))
+            .collect();
+        assert_eq!(found.len(), usize::from(warned), "{bindings}: {warnings:?}");
+        if warned {
+            assert!(
+                found[0].contains("'p'") && found[0].contains("toggle_reasoning"),
+                "{found:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn the_approval_keys_cannot_be_taken_over_by_the_keymap() {
     // The config binds `y` to cancel; during a prompt `y` still means "allow once".
