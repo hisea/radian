@@ -503,7 +503,7 @@ A child that calls `setpgid` — GNU `timeout` does, and so does a shell's job c
 
 Five tests in `tests/job_session_kill.rs`, one per stop path (`job_kill`, `timeout_secs`, session-end `kill_all`, the leader's own natural exit, a foreground timeout). The escaping child is built by the test itself — `perl -e 'use POSIX; setpgid(0,0); exec @ARGV' sleep 600` — because GNU `timeout` is coreutils (a homebrew install), not a macOS tool; a missing `perl` fails the test with a clear message, never skips. Each test asserts the shape **first** — the child is in its own process group but in the job's session — then that the child is gone and the session is empty; a child that never left the group would make the test vacuous. Against the pre-fix code (8845f383) all five fail on the direct assertion (0 passed; 5 failed).
 
-Run: `cargo test -p radian-coding --test job_session_kill --no-fail-fast` (only this binary; mutations in `src/jobs.rs` / `src/shell.rs`, restored from `.radian/scratch/mut/*.orig` and compared byte-for-byte).
+Run: `cargo test -p radian-coding --test job_session_kill --no-fail-fast` (only this binary; mutations in `src/jobs.rs` / `src/shell.rs`, restored from `.radian/scratch/mut/*.orig` and compared byte-for-byte). Note: every run above went through `cargo test`, which relinks the executable. Running `target/debug/deps/job_session_kill-*` **directly** right after restoring a source file runs the *previous* build — `cargo clippy` does not relink it — which looks exactly like five new failures (measured: 0 passed, 24 s per run, the pre-fix timing). Relink with `cargo test … --no-run` first if a direct run is ever needed.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
