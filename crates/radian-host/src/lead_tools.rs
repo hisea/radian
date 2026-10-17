@@ -626,6 +626,32 @@ struct SpawnArgs {
     base: Option<String>,
 }
 
+impl SpawnArgs {
+    /// An empty or blank optional field means the field was left out. GPT models fill every
+    /// optional string with `""` when they have no value (seen 2026-10-17: `agent: ""` was
+    /// refused as "no agent definition ``" before the lead retried with `task`).
+    fn without_blank_fields(mut self) -> Self {
+        for field in [
+            &mut self.id,
+            &mut self.isolation,
+            &mut self.label,
+            &mut self.approval,
+            &mut self.agent,
+            &mut self.model,
+            &mut self.profile,
+            &mut self.base,
+        ] {
+            if field
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                *field = None;
+            }
+        }
+        self
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WaitArgs {
@@ -713,7 +739,7 @@ struct IntegrateArgs {
 
 impl LeadSession {
     async fn spawn(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
-        let args: SpawnArgs = parse(call)?;
+        let args = parse::<SpawnArgs>(call)?.without_blank_fields();
         if args.brief.trim().is_empty() {
             return Err(invalid("`brief` must not be empty"));
         }

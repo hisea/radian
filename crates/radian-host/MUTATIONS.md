@@ -1469,3 +1469,12 @@ worktree 只 checkout `radian/integration`，且 `integrate_task` 只在它上�
 | MUT10-11 | `with_lead_name` 忽略名字 | ✅ failed | `a_named_lead_uses_a_per_lead_integration_branch`（分支/目录名不是 `radian/integration-dev`） |
 
 11/11（含上表 9 条）全部抓住。
+
+## `spawn_task`: a blank optional field is the field left out (2026-10-17)
+
+The GPT lead sent `agent: ""` (and `""` for other optional fields) on every first spawn and was
+refused with "no agent definition ``". Run: `cargo test -p radian-host --test lead_tools spawn_task`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| SB-A | `spawn` parses `SpawnArgs` without `.without_blank_fields()` (the old code) | caught (rc=101) | `spawn_task_treats_blank_optional_fields_as_omitted` |

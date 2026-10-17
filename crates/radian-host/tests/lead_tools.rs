@@ -1581,6 +1581,30 @@ fn tool_result(server: &MockServer, n: usize, call_id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A model that fills every optional field with `""` (GPT does) gets the defaults, not a refusal:
+/// `agent: ""` is the default `task` role, and a blank `model`/`profile`/`base`/`label`/`id`/
+/// `isolation`/`approval` is the field left out.
+#[tokio::test]
+async fn spawn_task_treats_blank_optional_fields_as_omitted() {
+    let fixture = Fixture::new("spawn-blank", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let session = fixture.lead_session().await;
+    let output = run_tool(
+        &session,
+        "spawn_task",
+        json!({"brief": "x", "agent": "", "model": "", "profile": " ", "base": "",
+               "label": "", "id": "", "isolation": "", "approval": ""}),
+    )
+    .await
+    .expect("blank optional fields are the defaults");
+    let value = structured(&output);
+    let task = value["task"].as_str().expect("a generated task id");
+    assert!(!task.is_empty());
+    fixture.registry.remove(task, true).await.expect("remove");
+}
+
 /// `spawn_task { agent }` resolves a user-level definition and records it (ADR 0030 O11): the
 /// result names the definition and says a `spawn: true` definition was ignored for the task
 /// (depth limit 2). The definition's effect on model/profile/tools is pinned by
