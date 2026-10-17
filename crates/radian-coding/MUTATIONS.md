@@ -496,3 +496,23 @@ GPT fills every optional field (`tail_lines: 1`, `from_line: 1`, `max_lines: 300
 | JM-2 | `mode: tail` reads the range instead | caught (rc=101) | `mode_names_the_read_and_ignores_the_other_fields` (only the last line) |
 
 A third mutation (count a blank `pattern` as a read) survived: `args::parse` already drops an optional `""` (args.rs:58-69), so the extra filter was redundant and was removed; the test pins the parse rule for GPT's calls.
+
+## a stop signals the job's whole session, not only its process group (2026-10-17)
+
+A child that calls `setpgid` — GNU `timeout` does, and so does a shell's job control — leaves the job's process group but **keeps its session**, so the group-only kill left it running with PPID 1 (dogfood: the lead's `timeout -k 30 2400 cargo test` outlived the 600 s job kill; a `mcp-fixture` survived a group kill the same way). `shell::signal_session` now signals the session: the group first, then every process whose session is the job's (`proc_listallpids` + `getsid` on macOS, `/proc/<pid>/stat` field 6 on Linux, unverified).
+
+Five tests in `tests/job_session_kill.rs`, one per stop path (`job_kill`, `timeout_secs`, session-end `kill_all`, the leader's own natural exit, a foreground timeout). The escaping child is built by the test itself — `perl -e 'use POSIX; setpgid(0,0); exec @ARGV' sleep 600` — because GNU `timeout` is coreutils (a homebrew install), not a macOS tool; a missing `perl` fails the test with a clear message, never skips. Each test asserts the shape **first** — the child is in its own process group but in the job's session — then that the child is gone and the session is empty; a child that never left the group would make the test vacuous. Against the pre-fix code (8845f383) all five fail on the direct assertion (0 passed; 5 failed).
+
+Run: `cargo test -p radian-coding --test job_session_kill --no-fail-fast` (only this binary; mutations in `src/jobs.rs` / `src/shell.rs`, restored from `.radian/scratch/mut/*.orig` and compared byte-for-byte). Note: every run above went through `cargo test`, which relinks the executable. Running `target/debug/deps/job_session_kill-*` **directly** right after restoring a source file runs the *previous* build — `cargo clippy` does not relink it — which looks exactly like five new failures (measured: 0 passed, 24 s per run, the pre-fix timing). Relink with `cargo test … --no-run` first if a direct run is ever needed.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| SK-1 | the enumeration finds nothing (macOS `session_members` returns `Vec::new()` at once) | caught (rc=101, 0/5) | all five: only the group signal is left |
+| SK-2 | the supervisor's own kill stays group-only (`supervise`: `signal_session` -> `signal_group`) | caught (rc=101, 4/5) | `a_natural_exit_reaches_a_child_that_left_the_process_group` |
+| SK-3 | the foreground kill stays group-only (`kill_group` -> `signal_group`) | caught (rc=101, 4/5) | `a_foreground_timeout_reaches_a_child_that_left_the_process_group` |
+| SK-4 | `signal_if_reserved` stays group-only (`kill_all` and `terminate`), **alone** | survives: masked by the session SIGKILL that follows, end state identical; kept as a redundant first step | none — see below |
+| SK-5 | SK-2 and SK-4 together (every `jobs.rs` signal group-only) | caught (rc=101, 4/5) | the four background paths (the foreground path is a different helper) |
+
+SK-4 survives because it is masked: `job_kill`/the timeout/`kill_all` still kill the leader (its group is the leader's), and once the leader dies the supervisor reaps it and kills the whole session (the SK-2 line), so the child that left the group dies anyway. The end state is identical; what SK-4 alone loses is the SIGTERM an escaped child would get during the grace, which no test in this suite can time (the supervisor's SIGKILL follows the leader's death by microseconds). SK-5 pins that reading: with the supervisor's line mutated too, the four background tests fail, so the session signal in `signal_if_reserved` is carried by `supervise` on this path. It is kept as a redundant first step: it is what the ADR 0037 decisions 4 and 6 state (SIGTERM to the whole session, then SIGKILL after the grace; see the ADR's 实施补记 of 2026-10-17), and it does not depend on the leader dying first.
+
+The reuse guard has no test either, before or after this change: every signal is still sent under the leader's `reaped` lock while the leader is unreaped, and no test can force the pid reuse it guards against.

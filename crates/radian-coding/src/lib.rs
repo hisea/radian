@@ -46,7 +46,8 @@
 //!   the tool as full credential isolation (ADR 0012). `full-access` is **not** confined at
 //!   all: it is the caller's explicit choice, never a default, and the tool description says
 //!   so. The tool's own guarantees are narrower and always hold: a command runs in its own
-//!   process group which is killed on timeout, cancellation and leader exit; the host's
+//!   session, which is killed on timeout, cancellation and leader exit (so a child that left
+//!   its process group, like GNU `timeout`, is reached too); the host's
 //!   environment is filtered to the sandbox whitelist in every mode; and each stream's output
 //!   is read as a stream, retaining only a bounded head and a trimmed tail, so a command that
 //!   prints gigabytes cannot grow this process's memory.

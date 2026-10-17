@@ -14,11 +14,13 @@
 //! `O_CREAT|O_EXCL|O_NOFOLLOW` with mode 0600, and the model reads it only through
 //! `job_output`; the fields that used to carry a path carry [`OUTPUT_HINT`] instead.
 //!
-//! The process-group invariant is the same one [`crate::shell`] uses: the leader is kept
-//! **unreaped** while its group is reserved, and every signal is sent under the `reaped`
-//! mutex, so a group id can never be reused under a kill. `job_kill` sends SIGTERM, then
-//! SIGKILL after [`KILL_GRACE`]; a natural exit or a timeout kills the whole group the same
-//! way. Killing never touches the `.out` file.
+//! The session invariant is the same one [`crate::shell`] uses: the leader is kept
+//! **unreaped** while its session is reserved, and every signal is sent under the `reaped`
+//! mutex, so a session id can never be reused under a kill. A stop signals the leader's whole
+//! **session**, not only its process group (a child that calls `setpgid`, like GNU `timeout`,
+//! leaves the group but keeps the session): `job_kill` sends SIGTERM, then SIGKILL after
+//! [`KILL_GRACE`]; a natural exit, a timeout or a session-end cleanup stops the whole session
+//! the same way. Killing never touches the `.out` file.
 //!
 //! Slice 3 will subscribe to settled jobs through [`Jobs::subscribe`]; this slice does not
 //! wire the inbox.
@@ -46,7 +48,7 @@ use crate::fail;
 use crate::heavy::HeavyPermit;
 use crate::provider::Limits;
 use crate::shell::{
-    Supervised, lock_bool, sandboxed_command, signal_group, wait_for_exit_without_reaping,
+    Supervised, lock_bool, sandboxed_command, signal_session, wait_for_exit_without_reaping,
 };
 
 /// How many background jobs may run at once in one session (ADR 0037 decision 7). A job costs
@@ -137,7 +139,7 @@ pub(crate) struct JobCell {
     command: String,
     started: Instant,
     state: JobState,
-    /// Set by `job_kill`/the timeout before the group is signalled, so the supervisor can
+    /// Set by `job_kill`/the timeout before the session is signalled, so the supervisor can
     /// label the settle. `None` means the leader exited on its own.
     termination: Option<Termination>,
     ring: Ring,
@@ -146,18 +148,19 @@ pub(crate) struct JobCell {
     /// The registry-computed output file (ADR 0039 decision 1). `job_output`'s file arguments
     /// read this path; it is never built from a model-supplied string.
     output: PathBuf,
-    /// The process group id (the leader's pid).
-    pgid: u32,
+    /// The session id, which is also the process group id: the leader's pid, since it called
+    /// `setsid` (this is what a stop signals, see [`crate::shell::signal_session`]).
+    sid: u32,
     /// How many `job_output wait=true` calls are blocked on this job right now. A settle with
     /// a waiter is one the model already gets through the wait, so it is not notified again.
     waiters: usize,
     /// Shared with the supervisor: `true` once the leader has been reaped. Every signal is
-    /// sent while holding this, so a reused group id can never be signalled.
+    /// sent while holding this, so a reused session id can never be signalled.
     reaped: Arc<Mutex<bool>>,
     /// Flipped to `true` when the job settles; `job_output`'s `wait` awaits it.
     settled: tokio::sync::watch::Sender<bool>,
     /// The heavy slot this job holds for its whole life (ADR 0030 O8), dropped on settle. A
-    /// held slot never blocks `job_kill`: the kill signals the process group and does not read
+    /// held slot never blocks `job_kill`: the kill signals the job's session and does not read
     /// the gate.
     heavy: Option<HeavyPermit>,
 }
@@ -324,7 +327,7 @@ impl Jobs {
             ring: Ring::default(),
             read_offset: 0,
             output: output.clone(),
-            pgid: pid,
+            sid: pid,
             reaped: Arc::new(Mutex::new(false)),
             waiters: 0,
             settled,
@@ -460,7 +463,7 @@ impl Jobs {
             ring: Ring::default(),
             read_offset: 0,
             output: output.clone(),
-            pgid: supervised.pid,
+            sid: supervised.pid,
             // The **same** reaped flag as the foreground supervisor, so `job_kill`/
             // `kill_all` signal under the exact lock the reaping holds (the one kill path).
             reaped: Arc::clone(&supervised.reaped),
@@ -611,7 +614,7 @@ impl Jobs {
         }
     }
 
-    /// `job_kill`: SIGTERM the group, SIGKILL after the grace. A settled job is a no-op.
+    /// `job_kill`: SIGTERM the session, SIGKILL after the grace. A settled job is a no-op.
     pub(crate) fn kill(&self, id: &str) -> Result<KillResult, ToolFailure> {
         let cell = self.get(id)?;
         let settled = {
@@ -643,10 +646,9 @@ impl Jobs {
         ))
     }
 
-    /// Session end: SIGKILL every running job's group. No file I/O (ADR 0037 decision 6), so
-    /// it is safe on the panic path; the supervisor reaps each leader and settles the state.
-    /// Session end: SIGKILL every running job's group. No file I/O (ADR 0037 decision 6), so
-    /// it is safe on the panic path; the supervisor reaps each leader and settles the state.
+    /// Session end: SIGKILL every running job's whole session. No file I/O (ADR 0037
+    /// decision 6), so it is safe on the panic path; the supervisor reaps each leader and
+    /// settles the state.
     ///
     /// A session-exit cleanup is a **kill**: it marks `termination = Killed` so the settle is
     /// `killed` and `notify: false` (ADR 0037 decision 4: a session-exit settle is not
@@ -657,15 +659,15 @@ impl Jobs {
             state.jobs.values().cloned().collect()
         };
         for cell in cells {
-            let (pgid, reaped) = {
+            let (sid, reaped) = {
                 let mut cell = lock(&cell);
                 if !cell.state.is_running() {
                     continue;
                 }
                 cell.termination = Some(Termination::Killed);
-                (cell.pgid, Arc::clone(&cell.reaped))
+                (cell.sid, Arc::clone(&cell.reaped))
             };
-            signal_if_reserved(pgid, SIGKILL, &reaped);
+            signal_if_reserved(sid, SIGKILL, &reaped);
         }
     }
 
@@ -686,7 +688,7 @@ impl Jobs {
 
 impl Drop for Jobs {
     /// The safety net for a session that is dropped without `close` (a panic unwind, an early
-    /// return): kill every running group. `killpg` only, no file I/O.
+    /// return): kill every running session. Session-wide signals only, no file I/O.
     fn drop(&mut self) {
         self.kill_all();
     }
@@ -888,9 +890,9 @@ fn configure_group(process: &mut Command) {
     }
 }
 
-/// Waits for the leader without reaping it, kills the whole group, reaps, drains the readers,
+/// Waits for the leader without reaping it, kills the whole session, reaps, drains the readers,
 /// then records the settle. The `reaped` lock is held across the kill and the reap, so a
-/// concurrent `job_kill` can never signal a reused group id.
+/// concurrent `job_kill` can never signal a reused session id.
 fn supervise(
     pid: u32,
     mut child: Child,
@@ -907,8 +909,8 @@ fn supervise(
     let status = {
         let mut guard = lock_bool(&reaped);
         // The leader is a zombie (or still running, if we were asked to kill): either way its
-        // pid and group are still reserved.
-        signal_group(pid, SIGKILL);
+        // pid, its group and its session are still reserved.
+        signal_session(pid, SIGKILL);
         let status = child.wait().ok();
         *guard = true;
         status
@@ -988,31 +990,32 @@ fn status_signal(_status: ExitStatus) -> i32 {
     -1
 }
 
-/// Marks a running job as killed/timed out and stops its group: SIGTERM, then SIGKILL after
+/// Marks a running job as killed/timed out and stops its session: SIGTERM, then SIGKILL after
 /// [`KILL_GRACE`]. A no-op on an already-settled job.
 fn terminate(cell: &Arc<Mutex<JobCell>>, kind: Termination) {
-    let (pgid, reaped) = {
+    let (sid, reaped) = {
         let mut cell = lock(cell);
         if !cell.state.is_running() {
             return;
         }
         cell.termination = Some(kind);
-        (cell.pgid, Arc::clone(&cell.reaped))
+        (cell.sid, Arc::clone(&cell.reaped))
     };
-    signal_if_reserved(pgid, SIGTERM, &reaped);
+    signal_if_reserved(sid, SIGTERM, &reaped);
     let reaped = Arc::clone(&reaped);
     thread::spawn(move || {
         thread::sleep(KILL_GRACE);
-        signal_if_reserved(pgid, SIGKILL, &reaped);
+        signal_if_reserved(sid, SIGKILL, &reaped);
     });
 }
 
-/// Sends `signal` only while the leader is still unreaped, holding the same lock the
-/// supervisor holds across its kill-and-reap, so a reused group id is never signalled.
-fn signal_if_reserved(pgid: u32, signal: i32, reaped: &Arc<Mutex<bool>>) {
+/// Sends `signal` to the job's whole session only while the leader is still unreaped, holding
+/// the same lock the supervisor holds across its kill-and-reap, so a reused session id is never
+/// signalled.
+fn signal_if_reserved(sid: u32, signal: i32, reaped: &Arc<Mutex<bool>>) {
     let guard = lock_bool(reaped);
     if !*guard {
-        signal_group(pgid, signal);
+        signal_session(sid, signal);
     }
 }
 
@@ -1158,9 +1161,10 @@ pub(crate) fn kill_schema() -> serde_json::Value {
 pub(crate) fn kill_spec() -> ToolSpec {
     ToolSpec {
         name: "job_kill".into(),
-        description: "Stop a background `shell` job: SIGTERM to its whole process group, then \
-                      SIGKILL after 2 seconds. The job settles as killed. Killing a job that \
-                      has already finished is a no-op that says so."
+        description: "Stop a background `shell` job: SIGTERM to its whole session (every \
+                      process the job started, including a child that left its process group), \
+                      then SIGKILL after 2 seconds. The job settles as killed. Killing a job \
+                      that has already finished is a no-op that says so."
             .into(),
         input_schema: kill_schema(),
         concurrency: ToolConcurrency::Shared,
