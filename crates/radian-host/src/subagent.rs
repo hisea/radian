@@ -33,8 +33,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use agent_core::{
-    Message, ModelUsage, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure, ToolOutput,
-    ToolProvider, ToolSession, ToolSpec,
+    Message, ModelUsage, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure,
+    ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
 use radian_permissions::{ApprovalPolicy, PermissionHooks};
 use radian_sandbox::{SandboxMode, SandboxSlot};
@@ -285,13 +285,7 @@ impl ToolSession for SubagentSession {
 
         let journal = self.session_dir.join(format!("{child_id}.jsonl"));
         let report = read_child_report(&journal);
-        let text = render_result(
-            kind,
-            &child_id,
-            status.code(),
-            status.success(),
-            &report,
-        );
+        let text = render_result(kind, &child_id, status.code(), status.success(), &report);
         Ok(ToolOutput::text(text))
     }
 }
@@ -470,17 +464,15 @@ fn read_child_report(path: &Path) -> ChildReport {
                     names.insert(call_id.to_owned(), name.to_owned());
                 }
             }
-            Some("PermissionResolved") => {
-                if value["data"]["decision"].as_str() == Some("deny") {
-                    let call_id = value["data"]["call_id"].as_str().unwrap_or_default();
-                    let name = names
-                        .get(call_id)
-                        .cloned()
-                        .unwrap_or_else(|| call_id.to_owned());
-                    let reason = value["data"]["reason"].as_str().map(str::to_owned);
-                    if !report.denied.iter().any(|(seen, _)| *seen == name) {
-                        report.denied.push((name, reason));
-                    }
+            Some("PermissionResolved") if value["data"]["decision"].as_str() == Some("deny") => {
+                let call_id = value["data"]["call_id"].as_str().unwrap_or_default();
+                let name = names
+                    .get(call_id)
+                    .cloned()
+                    .unwrap_or_else(|| call_id.to_owned());
+                let reason = value["data"]["reason"].as_str().map(str::to_owned);
+                if !report.denied.iter().any(|(seen, _)| *seen == name) {
+                    report.denied.push((name, reason));
                 }
             }
             _ => {}
@@ -524,9 +516,7 @@ fn render_result(
             .collect();
         out.push_str(&format!("\n[denied: {}]", denied.join("; ")));
     }
-    out.push_str(&format!(
-        "\n[view it with `radian attach {child_id}`]"
-    ));
+    out.push_str(&format!("\n[view it with `radian attach {child_id}`]"));
     out
 }
 
@@ -553,7 +543,8 @@ mod tests {
     /// skipped, and usage records are summed field by field.
     #[test]
     fn the_report_is_the_last_assistant_text_and_the_summed_usage() {
-        let dir = std::env::temp_dir().join(format!("radian-subagent-report-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("radian-subagent-report-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("c.jsonl");
         let lines = [
@@ -580,7 +571,8 @@ mod tests {
     /// that asked for it.
     #[test]
     fn denied_calls_are_named_by_tool() {
-        let dir = std::env::temp_dir().join(format!("radian-subagent-denied-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("radian-subagent-denied-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("d.jsonl");
         let lines = [

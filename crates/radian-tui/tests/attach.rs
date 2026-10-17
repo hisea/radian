@@ -505,7 +505,7 @@ fn attach_shows_a_subagent_child_session() {
     let sessions = scratch.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
     let child_id = "attach-sid";
-    let lines = vec![
+    let lines = [
         envelope(
             0,
             "SessionCreated",
@@ -516,7 +516,12 @@ fn attach_shows_a_subagent_child_session() {
                 "parent": {"session_id": "parent-sid", "seq": 0, "relation": "subagent"},
             }),
         ),
-        envelope(1, "TurnStarted", true, serde_json::json!({"turn_id": "t-1"})),
+        envelope(
+            1,
+            "TurnStarted",
+            true,
+            serde_json::json!({"turn_id": "t-1"}),
+        ),
         envelope(
             2,
             "MessageAppended",

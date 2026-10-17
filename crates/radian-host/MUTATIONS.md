@@ -1128,3 +1128,24 @@ restored file with `diff -q`; afterwards `git diff` shows only the intended file
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
 | OA-2 | `tools.rs`：`open_session` 把 `git_commit` 的 spec 重新 push 进 `specs`（重新挂载） | ✅ 1 failed（`git_commit` must not be mounted: [..., "git_commit"]） | `a_headless_exec_mounts_no_orchestration_tools` |
+
+## ADR 0043 slice ⓪a：`subagent`（2026-10-17）
+
+`src/subagent.rs` 与 `src/session.rs` 的六条变异；每条 `cp` 到 `.radian/scratch/mut/`，改后
+`cp` 还原并 `cmp` 一致。改到会影响运行中子进程的变异版前，先
+`cargo build -p radian-tui --bin radian`（`common::radian_bin()` 会拒绝过期二进制），再跑
+`timeout 300 cargo test -p agent-cli --locked --test subagent --no-fail-fast <test>`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| SA-1 | `session.rs`：去掉深度检查（`if !is_subagent_child && let Some(parts) = subagent_parts` → 只看 `parts`，子会话也挂 `subagent`） | ✅ 1 failed（子会话的工具表里有 `subagent`） | `a_general_child_has_no_subagent_tool` |
+| SA-2 | `subagent.rs`：`--profile` 恒为 `full`（不读父的 sandbox slot） | ✅ 1 failed（`left: "full"`，`right: "workspace"`） | `a_child_records_the_parents_tier` |
+| SA-3 | `subagent.rs`：`subagent` 的 `ToolConcurrency` 从 `Shared` 改 `Exclusive` | ✅ 1 failed（barrier 记录的并发峰值 `left: 1`，`right: 3`；耗时 21.6 s，两个 10 s 超时） | `three_subagent_calls_in_one_reply_run_at_the_same_time` |
+| SA-4 | `subagent.rs`：删掉 `tokio::select!` 的取消分支（只 `child.wait()`，不传播取消） | ✅ 1 failed（3 s 内子进程还在；restore 后手动 kill 了日志里的 pid） | `a_cancelled_parent_turn_kills_the_child` |
+| SA-5 | `subagent.rs`：父非 auto 也给子 `--yes`（`if true`） | ✅ 1 failed（结果里没有 `denied:` 行） | `a_non_auto_parent_denies_the_childs_ask_and_says_so` |
+| SA-6 | `subagent.rs`：`explore` 不再传隐藏 `--tools`（挂子会话的普通工具集） | ✅ 1 failed（`left: [...17 个...]`，`right: ["glob","grep","list","read"]`） | `an_explore_child_has_only_the_four_read_tools_and_write_is_refused` |
+
+6/6 抓住。SA-4 说明取消必须**主动**杀死子会话：只靠 future 被 drop 时的
+`kill_on_drop`（5 s grace 之后）不足以让「父取消 → 子进程立刻消失」成立，测试的 3 s
+期限正是照 `DEFAULT_TOOL_CANCEL_GRACE` 定的有界轮询。SA-1 的检查点在
+`open_session`，所以它同时说明「子不能再起子」是建立会话时的物理不挂载，而不是运行时的判断。

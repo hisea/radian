@@ -525,7 +525,11 @@ async fn a_cancelled_parent_turn_kills_the_child() {
         .expect("the child pid");
 
     sigint(&parent);
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // The deadline is shorter than the core's 5 s `DEFAULT_TOOL_CANCEL_GRACE`: the tool's own
+    // cancellation branch kills the session at once, while a tool that ignores the token would
+    // only be dropped (and its leader killed by `kill_on_drop`) after the grace. A bounded
+    // poll, not a guess: the kill is a few milliseconds of process scheduling.
+    let deadline = Instant::now() + Duration::from_secs(3);
     while alive(child_pid) && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
