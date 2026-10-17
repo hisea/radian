@@ -268,7 +268,7 @@ async fn the_first_job_events_are_not_lost() {
     let sandbox = full_access(&ws);
 
     let info = jobs
-        .start(&sandbox, &ws, "true", None)
+        .start(&sandbox, &ws, "true")
         .expect("start the first job");
     await_delivery(&inbox).await;
 
@@ -312,9 +312,7 @@ async fn a_burst_of_instant_jobs_keeps_every_settle_behind_its_start() {
         // Keep every settle on the idle lane, so `await_delivery` is the message the notifier
         // sends after writing both records.
         notifier.reset_wakes();
-        let info = jobs
-            .start(&sandbox, &ws, "true", None)
-            .expect("an instant job");
+        let info = jobs.start(&sandbox, &ws, "true").expect("an instant job");
         ids.push(info.id);
         await_delivery(&inbox).await;
     }

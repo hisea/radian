@@ -58,9 +58,7 @@ fn the_output_file_is_owner_only_and_under_the_jobs_directory() {
     let sandbox = full_access(&ws);
     let jobs = Jobs::new(&jobs_dir);
 
-    let info = jobs
-        .start(&sandbox, &ws, "echo hi", None)
-        .expect("start the job");
+    let info = jobs.start(&sandbox, &ws, "echo hi").expect("start the job");
     let output = jobs.output_path(&info.id);
     // `start` creates the file before it returns, so its metadata is available at once.
     assert!(output.exists(), "the output file is created");
@@ -94,9 +92,7 @@ fn a_planted_symlink_at_the_next_output_file_is_not_followed() {
     let jobs = Jobs::new(&jobs_dir);
 
     // Learn the next id: the probe consumes `n`, so the job below takes `n + 1`.
-    let probe = jobs
-        .start(&sandbox, &ws, "true", None)
-        .expect("a probe job");
+    let probe = jobs.start(&sandbox, &ws, "true").expect("a probe job");
     let predicted = next_id(&probe.id);
 
     let outside = dir.file("outside.txt");
@@ -107,7 +103,7 @@ fn a_planted_symlink_at_the_next_output_file_is_not_followed() {
         &outside,
     );
 
-    let result = jobs.start(&sandbox, &ws, "echo LEAK", None);
+    let result = jobs.start(&sandbox, &ws, "echo LEAK");
 
     assert_eq!(
         std::fs::read_to_string(&outside).unwrap(),
@@ -146,13 +142,11 @@ fn an_existing_output_file_at_the_next_id_is_not_appended_to() {
     let sandbox = full_access(&ws);
     let jobs = Jobs::new(&jobs_dir);
 
-    let probe = jobs
-        .start(&sandbox, &ws, "true", None)
-        .expect("a probe job");
+    let probe = jobs.start(&sandbox, &ws, "true").expect("a probe job");
     let planted = jobs.output_path(&next_id(&probe.id));
     std::fs::write(&planted, "PREEXISTING\n").unwrap();
 
-    let result = jobs.start(&sandbox, &ws, "echo LEAK", None);
+    let result = jobs.start(&sandbox, &ws, "echo LEAK");
 
     assert_eq!(
         std::fs::read_to_string(&planted).unwrap(),

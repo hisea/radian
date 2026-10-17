@@ -11763,8 +11763,11 @@ async fn pty_ctrl_c_stops_a_running_bang() {
 #[test]
 fn the_bang_command_runs_through_the_sandboxed_executor() {
     skip_inside_sandbox!("the_bang_command_runs_through_the_sandboxed_executor");
-    let source =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli.rs")).unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/cli/loop_context.rs"
+    ))
+    .unwrap();
     assert!(
         source.contains("radian_coding::run_user_bash"),
         "the loop must reuse the shell tool's sandboxed executor"
