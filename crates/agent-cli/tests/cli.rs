@@ -1459,6 +1459,9 @@ async fn answering_y_approves_and_the_tool_runs() {
                 &server.base_url,
                 "--mcp-config",
                 config.to_str().unwrap(),
+                // MCP asks under `workspace`; `full` allows it (ADR 0012/0043).
+                "--profile",
+                "workspace",
             ],
             &[],
         ),
@@ -1488,6 +1491,8 @@ async fn answering_n_denies_the_call() {
                 &server.base_url,
                 "--mcp-config",
                 config.to_str().unwrap(),
+                "--profile",
+                "workspace",
             ],
             &[],
         ),
@@ -1550,6 +1555,8 @@ async fn one_shot_without_a_terminal_denies_without_waiting() {
             "go",
             "--mcp-config",
             config.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &[],
     );
@@ -1920,6 +1927,8 @@ async fn cancelling_at_the_approval_prompt_does_not_swallow_the_next_line() {
             &server.base_url,
             "--mcp-config",
             config.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &[],
     );

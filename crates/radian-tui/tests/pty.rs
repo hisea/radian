@@ -2291,6 +2291,10 @@ async fn pty_an_outer_sandbox_is_inherited_instead_of_refused() {
             "inherited",
             "--workspace",
             ws.to_str().unwrap(),
+            // ADR 0043: the inherited backend belongs to the `workspace` tier, which is no
+            // longer the default.
+            "--profile",
+            "workspace",
         ]
         .into_iter()
         .map(str::to_owned),
@@ -3042,6 +3046,9 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
             "notice",
             "--workspace",
             ws.to_str().unwrap(),
+            // This notice belongs to the `workspace` tier's facts (ADR 0043: not the default).
+            "--profile",
+            "workspace",
         ],
         30,
         110,
@@ -3637,6 +3644,9 @@ fn pty_a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
             "nested-session",
             "--workspace",
             ws.to_str().unwrap(),
+            // The deny-read boundary is the `workspace` tier's (ADR 0020/0043).
+            "--profile",
+            "workspace",
         ],
         20,
         100,
@@ -10576,7 +10586,7 @@ async fn pty_bangbang_stays_out_of_the_context() {
 }
 
 /// ADR 0033 + ADR 0012: a `!` command really is confined — a write outside the workspace
-/// fails (the default tier is `workspace-write`).
+/// fails under `--profile workspace`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_bang_is_confined_to_the_workspace() {
@@ -10589,7 +10599,13 @@ async fn pty_bang_is_confined_to_the_workspace() {
          base_url = \"{}\"\n",
         server.base_url
     );
-    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    let mut pty = Pty::spawn_with_config(
+        &["--profile", "workspace"],
+        &[("OPENAI_API_KEY", "sk-test")],
+        &config,
+        24,
+        100,
+    );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     pty.send(format!("!echo x > {escape}\r").as_bytes());
     assert!(
@@ -10872,7 +10888,8 @@ async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
     assert_eq!(pty.app_exit_code(), Some(0));
 
     // A workspace file with the same content, and a fresh HOME with no store, must not set the
-    // tier: a cloned repository cannot ship a line that opens the sandbox.
+    // tier: a cloned repository cannot ship a line that opens (or narrows) the sandbox. The
+    // built-in default is `full` (ADR 0043).
     let home2 = dir.path().join("home2");
     std::fs::create_dir_all(&home2).unwrap();
     std::fs::create_dir_all(ws.join(".radian")).unwrap();
@@ -10900,12 +10917,12 @@ async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
         110,
     );
     assert!(
-        pty.wait_for_screen("workspace", 15),
-        "the workspace file must be ignored:\n{}",
+        pty.wait_for_screen("no sandbox", 15),
+        "the default tier must be `full`: {:?}",
         pty.screen()
     );
     assert!(
-        !pty.screen().contains("full (project)"),
+        !pty.screen().contains("(project)"),
         "a workspace file must not set the tier:\n{}",
         pty.screen()
     );
