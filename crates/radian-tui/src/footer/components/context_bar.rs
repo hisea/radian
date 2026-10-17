@@ -39,7 +39,10 @@ impl Component for ContextBar {
     }
 
     fn glyphs(&self) -> [&'static str; 4] {
-        ["", "\u{f035b} ", "[", ""]
+        // The pre-refactor `glyph` table had no `context_bar` row, so its default icon was empty
+        // in every set (only `context` carried the gauge icon). `context` and `context_bar` share
+        // a `data`; the icons are not shared.
+        ["", "", "", ""]
     }
 
     fn priority(&self) -> i64 {

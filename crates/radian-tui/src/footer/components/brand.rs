@@ -22,6 +22,11 @@ impl Component for Brand {
         ["", "", "", ""]
     }
 
+    fn priority(&self) -> i64 {
+        // ADR 0027: the pre-refactor `item_priority` table's value.
+        92
+    }
+
     fn role(&self, app: &App) -> Option<Role> {
         // ADR 0027/8: the brand is a bold accent mark. The theme's accent role is
         // `notice_label`, so the mark follows a theme switch; a configured `tui.brand` keeps

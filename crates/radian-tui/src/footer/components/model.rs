@@ -26,6 +26,11 @@ impl Component for Model {
         ["", "", "", ""]
     }
 
+    fn priority(&self) -> i64 {
+        // ADR 0027: the pre-refactor `item_priority` table's value.
+        90
+    }
+
     fn role(&self, _app: &App) -> Option<Role> {
         Some(Role::Model)
     }

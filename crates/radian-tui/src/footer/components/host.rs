@@ -23,6 +23,11 @@ impl Component for Host {
         ["@ ", "\u{f109} ", "host ", ""]
     }
 
+    fn priority(&self) -> i64 {
+        // ADR 0027: the pre-refactor `item_priority` table's value.
+        78
+    }
+
     fn role(&self, _app: &App) -> Option<Role> {
         Some(Role::NoticeBody)
     }

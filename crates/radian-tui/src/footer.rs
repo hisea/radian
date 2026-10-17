@@ -1442,6 +1442,189 @@ mod tests {
         }
     }
 
+    /// ADR 0027: the registry must reproduce the pre-refactor per-id tables
+    /// from `631c8dd` exactly. The refactor dropped the `item_priority` overrides of `brand`,
+    /// `model` and `host`, so they silently fell back to the generic 50; this pins **every**
+    /// built-in id's default priority, so a missing override fails here instead of only changing a
+    /// narrow-terminal truncation order.
+    #[test]
+    fn the_registry_matches_the_pre_refactor_priority_table() {
+        // The `631c8dd` `item_priority` table.
+        let expected: [(&str, i64); 20] = [
+            ("brand", 92),
+            ("host", 78),
+            ("model", 90),
+            ("reasoning", 60),
+            ("tier", 75),
+            ("cwd", 80),
+            ("git_branch", 70),
+            ("worktree", 70),
+            ("status", 45),
+            ("session", 65),
+            ("context", 85),
+            ("context_bar", 85),
+            ("tokens", 50),
+            ("speed", 55),
+            ("elapsed", 35),
+            ("cost", 40),
+            ("pending", 70),
+            ("tasks", 72),
+            ("mcp", 55),
+            ("scroll", 20),
+        ];
+        assert_eq!(
+            components::ids().len(),
+            expected.len(),
+            "registry/table size"
+        );
+        for (id, priority) in expected {
+            assert_eq!(components::priority(id), priority, "priority for {id}");
+        }
+        // An id no component claims keeps the table's `_` arm.
+        assert_eq!(components::priority("no.such.id"), 50);
+    }
+
+    /// ADR 0027: the registry's `placeholders` must match the `631c8dd`
+    /// `item_placeholders` table, id for id.
+    #[test]
+    fn the_registry_matches_the_pre_refactor_placeholder_table() {
+        let expected: [(&str, &[&str]); 20] = [
+            ("brand", &["brand"]),
+            ("host", &["host"]),
+            ("model", &["display_name", "id", "provider"]),
+            ("reasoning", &["level"]),
+            ("tier", &["tier"]),
+            (
+                "cwd",
+                &["path", "path_home", "basename", "repo", "worktree"],
+            ),
+            ("git_branch", &["branch", "dirty", "modified", "untracked"]),
+            ("worktree", &["worktree"]),
+            ("status", &["status"]),
+            ("session", &["id"]),
+            ("context", &["bar", "percent", "used", "budget", "auto"]),
+            ("context_bar", &["bar", "percent", "used", "budget", "auto"]),
+            ("tokens", &["in", "out", "cache", "cache_write"]),
+            ("speed", &["speed"]),
+            ("elapsed", &["elapsed"]),
+            ("cost", &["usd"]),
+            ("pending", &["count"]),
+            ("tasks", &["running", "total"]),
+            ("mcp", &["mcp"]),
+            ("scroll", &["position", "mode"]),
+        ];
+        assert_eq!(
+            components::ids().len(),
+            expected.len(),
+            "registry/table size"
+        );
+        for (id, placeholders) in expected {
+            assert_eq!(
+                components::placeholders(id),
+                Some(placeholders),
+                "placeholders for {id}"
+            );
+        }
+    }
+
+    /// ADR 0027: the registry's default role must match the `631c8dd`
+    /// `default_role` table. The `nerd` glyph set with no `tui.brand` is exactly the case the old
+    /// plain values were reached in (`brand` is the one conditional: `text` here, the accent role
+    /// under `unicode` or a configured brand, ADR 0027/8).
+    #[test]
+    fn the_registry_matches_the_pre_refactor_role_table() {
+        let app = app_with_glyphs("nerd");
+        let expected: [(&str, Option<Role>); 20] = [
+            ("brand", Some(Role::Text)),
+            ("host", Some(Role::NoticeBody)),
+            ("model", Some(Role::Model)),
+            ("reasoning", None),
+            ("tier", Some(Role::Tier)),
+            ("cwd", None),
+            ("git_branch", None),
+            ("worktree", None),
+            ("status", None),
+            ("session", None),
+            ("context", Some(Role::Budget)),
+            ("context_bar", Some(Role::Budget)),
+            ("tokens", Some(Role::Usage)),
+            ("speed", Some(Role::Usage)),
+            ("elapsed", Some(Role::Truncation)),
+            ("cost", None),
+            ("pending", Some(Role::TurnRunning)),
+            ("tasks", Some(Role::TurnRunning)),
+            ("mcp", Some(Role::Mcp)),
+            ("scroll", None),
+        ];
+        for (id, role) in expected {
+            let component = components::builtin(id).expect("registered");
+            assert_eq!(component.role(&app), role, "default role for {id}");
+        }
+    }
+
+    /// ADR 0027: the registry's default thresholds must match the `631c8dd`
+    /// `default_thresholds` table (`context`/`context_bar`/`cost` at 70/90; every other id empty).
+    #[test]
+    fn the_registry_matches_the_pre_refactor_threshold_table() {
+        let numeric = vec![
+            (70, ItemStyle::Role(Role::BudgetOver)),
+            (90, ItemStyle::Role(Role::ToolResultError)),
+        ];
+        for id in components::ids() {
+            let expected = if matches!(id, "context" | "context_bar" | "cost") {
+                numeric.clone()
+            } else {
+                Vec::new()
+            };
+            assert_eq!(components::thresholds(id), expected, "thresholds for {id}");
+        }
+    }
+
+    /// ADR 0027: the registry's default glyph in the three selectable sets
+    /// must match the `631c8dd` `glyph` table (`emoji`, index 3, is not selectable until slice ③
+    /// and stays empty). The refactor gave `context_bar` the `context` icons; the old table had no
+    /// `context_bar` row, so its default icon was empty in every set.
+    #[test]
+    fn the_registry_matches_the_pre_refactor_glyph_table() {
+        let expected: [(&str, [&str; 3]); 20] = [
+            ("brand", ["", "", ""]),
+            ("host", ["@ ", "\u{f109} ", "host "]),
+            ("model", ["", "", ""]),
+            ("reasoning", ["* ", "\u{f0eb} ", "* "]),
+            ("tier", ["", "", ""]),
+            ("cwd", ["", "", ""]),
+            ("git_branch", ["", "\u{e0a0} ", ""]),
+            ("worktree", ["", "", ""]),
+            ("status", ["", "", ""]),
+            ("session", ["# ", "", "# "]),
+            ("context", ["", "\u{f035b} ", "["]),
+            ("context_bar", ["", "", ""]),
+            ("tokens", ["", "", ""]),
+            ("speed", ["\u{bb} ", "\u{f0e7} ", "spd "]),
+            ("elapsed", ["", "\u{f017} ", "t "]),
+            ("cost", ["", "", ""]),
+            ("pending", ["", "", ""]),
+            ("tasks", ["", "", ""]),
+            ("mcp", ["", "", ""]),
+            ("scroll", ["", "", ""]),
+        ];
+        assert_eq!(
+            components::ids().len(),
+            expected.len(),
+            "registry/table size"
+        );
+        for (id, glyphs) in expected {
+            let component = components::builtin(id).expect("registered");
+            let [unicode, nerd, ascii, emoji] = component.glyphs();
+            assert_eq!(
+                [unicode, nerd, ascii],
+                glyphs,
+                "default glyphs for {id} (unicode/nerd/ascii)"
+            );
+            assert_eq!(emoji, "", "{id}'s emoji glyph is not selectable yet");
+        }
+    }
+
     /// ADR 0027: the draw path has no item-id tables. The pre-refactor
     /// dispatch (`item_placeholders`, `item_priority`, `default_thresholds`, the
     /// `CONTRIBUTION_ITEMS` list, …) is gone; the renderer reaches every item through
