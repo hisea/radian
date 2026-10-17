@@ -66,6 +66,19 @@ pub trait SandboxBackend: Send + Sync {
     fn git_writable_except_exec(&self, _policy: &SandboxPolicy) -> bool {
         false
     }
+
+    /// Whether this backend **denies** outbound Unix socket connections when the network is
+    /// on (ADR 0016). The default is `false`: a backend that does not filter
+    /// Unix-socket connects must never claim it does, so the `<runtime>` prompt layer —
+    /// via [`Sandbox::restricts_unix_sockets`] — cannot tell the model that outbound Unix
+    /// sockets are denied when they are reachable. macOS `seatbelt` returns the policy's
+    /// network flag (the deny rule is only emitted with `(allow network*)`); Linux `bwrap`
+    /// keeps the default `false` (pathname sockets stay reachable through the shared
+    /// `--ro-bind / /`, abstract sockets through the shared network namespace in
+    /// `workspace`), as do the `inherited` and transparent backends.
+    fn restricts_unix_sockets(&self, _policy: &SandboxPolicy) -> bool {
+        false
+    }
 }
 
 /// The backend used for `FullAccess`: it wraps nothing. It is never chosen for an enforced
@@ -283,6 +296,16 @@ impl Sandbox {
     /// without the carve-out) keeps the read-only wording.
     pub fn git_writable_except_exec(&self) -> bool {
         self.backend.git_writable_except_exec(&self.policy)
+    }
+
+    /// Whether outbound Unix socket connections are denied under this sandbox (ADR 0016
+    /// revision 1). This is the **effective** answer for this session: the policy may list
+    /// [`SandboxPolicy::allow_unix_sockets`], but only a backend that enforces the deny
+    /// reports `true`. The `<runtime>` prompt layer reads this, so a session whose sockets
+    /// stay reachable (any `workspace` session on a backend without the filter, Linux)
+    /// never tells the model otherwise.
+    pub fn restricts_unix_sockets(&self) -> bool {
+        self.backend.restricts_unix_sockets(&self.policy)
     }
 
     pub fn probe(&self) -> &ProbeReport {

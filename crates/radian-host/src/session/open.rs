@@ -112,6 +112,13 @@ pub async fn open_session(
     // comes from the real backend name, not from searching the description text (which does
     // not name the backend in the `workspace` tier).
     let (profile_line, sandbox_facts) = describe(tier.sandbox_mode(), sandbox.as_ref(), wording);
+    // The `<runtime>` Unix-socket sentence follows the backend's effective answer (ADR 0016
+    // revision 1 as accepted for Linux: bwrap does not restrict Unix sockets), the way
+    // `git_writable_except_exec` already asks the backend (ADR 0038 slice ④) — never the
+    // tier alone, which would claim a deny the backend does not enforce.
+    let unix_sockets_restricted = sandbox
+        .as_ref()
+        .is_some_and(|sandbox| sandbox.restricts_unix_sockets());
     let sandbox_word = sandbox_word(
         tier.sandbox_mode(),
         sandbox.as_ref().map(Sandbox::backend_name),
@@ -308,7 +315,7 @@ pub async fn open_session(
         tier: tier.as_str(),
         sandbox: &sandbox_facts,
         network: workspace_mode,
-        unix_sockets_restricted: workspace_mode,
+        unix_sockets_restricted,
     });
     let role_override = system_prompt.clone();
     let role_layer = role_override

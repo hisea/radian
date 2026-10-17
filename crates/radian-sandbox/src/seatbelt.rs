@@ -34,6 +34,16 @@ impl SandboxBackend for Seatbelt {
         matches!(policy.git_access, GitAccess::WritableExceptExec)
     }
 
+    /// macos-seatbelt is where the ADR 0016 Unix-socket deny is implemented, so it
+    /// reports the policy's network flag as the effective answer: the
+    /// `(deny network-outbound (remote unix-socket))` rule is only emitted with
+    /// `(allow network*)`, and without the network every outbound socket is already denied.
+    /// The `<runtime>` prompt layer reads this via
+    /// [`crate::Sandbox::restricts_unix_sockets`], so the sentence stays exactly as today.
+    fn restricts_unix_sockets(&self, policy: &SandboxPolicy) -> bool {
+        policy.network
+    }
+
     fn probe(&self) -> Result<ProbeReport, SandboxError> {
         if !Path::new(SANDBOX_EXEC).exists() {
             return Err(SandboxError::BackendUnavailable {
@@ -447,6 +457,24 @@ mod tests {
         assert!(
             !profile.contains(&format!("(deny file-write* (subpath \"{quoted}\"))")),
             "the whole .git must stay writable under WritableExceptExec:\n{profile}"
+        );
+    }
+
+    /// ADR 0016: the macOS backend reports the policy's network flag as the
+    /// effective Unix-socket answer — the `(deny network-outbound (remote unix-socket))`
+    /// rule is only emitted with `(allow network*)`, so a `workspace` session keeps
+    /// today's `<runtime>` sentence and this wiring changes nothing there.
+    #[test]
+    fn the_effective_unix_socket_answer_follows_the_network_flag() {
+        let mut p = policy();
+        assert!(
+            !SEATBELT.restricts_unix_sockets(&p),
+            "no network, no Unix-socket deny to enforce"
+        );
+        p.network = true;
+        assert!(
+            SEATBELT.restricts_unix_sockets(&p),
+            "the network-on profile denies outbound Unix sockets"
         );
     }
 

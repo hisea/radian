@@ -188,3 +188,33 @@ fn set_env(command: &mut Command, name: &str, fallback: &str) {
 fn shell_quote(path: &std::path::Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Linux backend never claims to restrict Unix sockets (the accepted gap): pathname
+    /// sockets stay reachable through the shared `--ro-bind / /`, and abstract sockets
+    /// through the shared network namespace in `workspace` — so the `<runtime>` layer must
+    /// carry no deny sentence there. The old tier-driven flag said otherwise on this
+    /// machine.
+    #[test]
+    fn the_linux_backend_does_not_restrict_unix_sockets() {
+        let ws = std::env::temp_dir().join(format!(
+            "radian-bwrap-sockets-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws = std::fs::canonicalize(&ws).unwrap();
+        for network in [true, false] {
+            let policy = SandboxPolicy::new(SandboxMode::WorkspaceWrite, &ws)
+                .unwrap()
+                .network(network);
+            assert!(
+                !BWRAP.restricts_unix_sockets(&policy),
+                "network = {network}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+}

@@ -25,7 +25,8 @@ pub struct Runtime<'a> {
     /// The sandbox facts line (the host's `describe`).
     pub sandbox: &'a str,
     pub network: bool,
-    /// Whether outbound Unix sockets are denied (the `workspace` tier).
+    /// Whether outbound Unix sockets are denied (the backend's effective answer for this
+    /// session — [`radian_sandbox::Sandbox::restricts_unix_sockets`] — not the tier alone).
     pub unix_sockets_restricted: bool,
 }
 
@@ -454,6 +455,76 @@ mod tests {
             .filter(|line| !line.starts_with("model: "))
             .collect();
         assert_eq!(before, after, "only the model line moves");
+    }
+
+    /// A backend whose Unix-socket answer is fixed, so the `<runtime>` sentence is driven
+    /// from the backend rather than the tier.
+    struct SocketsBackend(bool);
+
+    impl radian_sandbox::SandboxBackend for SocketsBackend {
+        fn name(&self) -> &'static str {
+            "test-sockets"
+        }
+
+        fn probe(&self) -> Result<radian_sandbox::ProbeReport, radian_sandbox::SandboxError> {
+            Ok(radian_sandbox::ProbeReport {
+                backend: self.name(),
+                detail: "test".into(),
+            })
+        }
+
+        fn command(
+            &self,
+            policy: &radian_sandbox::SandboxPolicy,
+            program: &std::ffi::OsStr,
+            args: &[std::ffi::OsString],
+        ) -> Result<std::process::Command, radian_sandbox::SandboxError> {
+            let mut command = std::process::Command::new(program);
+            command.args(args).current_dir(&policy.workspace);
+            Ok(command)
+        }
+
+        fn restricts_unix_sockets(&self, _policy: &radian_sandbox::SandboxPolicy) -> bool {
+            self.0
+        }
+    }
+
+    static SOCKETS_DENIED: SocketsBackend = SocketsBackend(true);
+    static SOCKETS_OPEN: SocketsBackend = SocketsBackend(false);
+
+    /// The `<runtime>` Unix-socket sentence follows the backend's effective answer, not the
+    /// tier: a `workspace` session on a backend that does not restrict Unix sockets (Linux
+    /// bwrap, the `false` half) carries no sentence even with the network on; on one that
+    /// does (macOS seatbelt, the `true` half) the sentence stays exactly as today.
+    /// Setting the flag from the tier again fails the `false` half.
+    #[test]
+    fn the_runtime_unix_socket_sentence_follows_the_backend() {
+        let dir = std::env::temp_dir().join(format!(
+            "radian-prompt-sockets-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (backend, expect_sentence) in [(&SOCKETS_DENIED, true), (&SOCKETS_OPEN, false)] {
+            let sandbox = radian_sandbox::Sandbox::from_backend(
+                backend,
+                radian_sandbox::SandboxMode::WorkspaceWrite,
+                &dir,
+            )
+            .expect("a test sandbox");
+            let layer = runtime_layer(&Runtime {
+                tools: &[],
+                tier: "workspace",
+                sandbox: "test",
+                network: true,
+                unix_sockets_restricted: sandbox.restricts_unix_sockets(),
+            });
+            assert_eq!(
+                layer.contains("Outbound Unix socket connections are denied"),
+                expect_sentence,
+                "{layer}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ADR 0039 decision 3: `session_layer` reads the branch and dirtiness with the shared
