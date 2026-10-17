@@ -837,11 +837,16 @@ const ANTHROPIC_MODELS: &[DescriptorModel] = &[
     anthropic_model("claude-opus-4-5", "Claude Opus 4.5 (latest)"),
 ];
 
+/// The `openai` descriptor's built-in list. models.dev's `openai` provider is `@ai-sdk/openai`
+/// (AI SDK 5's default model is the Responses API), so since ADR 0026 every model
+/// here is [`Protocol::Responses`]; the 2026-10-17 snapshot carries all four. The table is the
+/// fallback the catalog cannot be for, so it agrees with the catalog and the startup line does
+/// not report a disagreement.
 const OPENAI_MODELS: &[DescriptorModel] = &[
-    openai_model("gpt-5.4", "GPT-5.4"),
-    openai_model("gpt-5.4-pro", "GPT-5.4 Pro"),
-    openai_model("gpt-5.5-pro", "GPT-5.5 Pro"),
-    openai_model("gpt-3.5-turbo", "GPT-3.5-turbo"),
+    openai_responses_model("gpt-5.4", "GPT-5.4"),
+    openai_responses_model("gpt-5.4-pro", "GPT-5.4 Pro"),
+    openai_responses_model("gpt-5.5-pro", "GPT-5.5 Pro"),
+    openai_responses_model("gpt-3.5-turbo", "GPT-3.5-turbo"),
 ];
 
 const fn model(id: &'static str, name: &'static str, protocol: Protocol) -> DescriptorModel {
@@ -892,8 +897,10 @@ const fn anthropic_model(id: &'static str, name: &'static str) -> DescriptorMode
     model(id, name, Protocol::Anthropic)
 }
 
-const fn openai_model(id: &'static str, name: &'static str) -> DescriptorModel {
-    model(id, name, Protocol::OpenAiCompatible)
+/// An `openai` model: models.dev's `openai` provider is `@ai-sdk/openai`, which AI SDK 5 sends
+/// as the Responses API (ADR 0026).
+const fn openai_responses_model(id: &'static str, name: &'static str) -> DescriptorModel {
+    model(id, name, Protocol::Responses)
 }
 
 /// Everything before `/responses` (the adapter's own convention, `OpenAiResponsesConfig::base_url`'s
@@ -1320,6 +1327,20 @@ mod tests {
             descriptor("anthropic").unwrap().default_base_url,
             "https://api.anthropic.com"
         );
+        // models.dev's `openai` provider is `@ai-sdk/openai`, so its models are Responses
+        // (ADR 0026), on the OpenAI base.
+        for model in descriptor("openai").unwrap().models {
+            assert_eq!(model.protocol, Protocol::Responses, "{}", model.id);
+        }
+        assert_eq!(
+            descriptor_base_url("openai", Protocol::Responses),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(
+            descriptor_base_url("anthropic", Protocol::Responses),
+            None,
+            "the anthropic descriptor has no Responses endpoint"
+        );
     }
 
     /// ADR 0026 slice 3: the descriptor exists, uses the Responses protocol, every
@@ -1501,6 +1522,33 @@ mod tests {
         .unwrap();
         assert_eq!(route.protocol, Protocol::Responses);
         assert_eq!(route.base_url, "https://opencode.ai/inference/go/openai/v1");
+    }
+
+    /// The shipped table and the bundled snapshot agree, so no startup prints `protocol from
+    /// models.dev` (ADR 0026). The notice is for genuine upstream drift,
+    /// not for a table that was not resynced to the snapshot it ships with.
+    #[test]
+    fn the_built_in_table_agrees_with_the_bundled_snapshot() {
+        let snapshot = crate::bundled_catalog();
+        for descriptor in descriptors() {
+            for model in descriptor.models {
+                let route = resolve_route(
+                    descriptor.id,
+                    model.id,
+                    None,
+                    None,
+                    &[],
+                    "s",
+                    Some(snapshot),
+                )
+                .unwrap_or_else(|error| panic!("{}/{}: {error}", descriptor.id, model.id));
+                assert_eq!(
+                    route.protocol_notice, None,
+                    "{}/{}: the table and the snapshot disagree",
+                    descriptor.id, model.id
+                );
+            }
+        }
     }
 
     /// A catalog with only the `opencode-go` facts the protocol tests need.

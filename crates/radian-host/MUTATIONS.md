@@ -1196,6 +1196,7 @@ Each mutation was applied in place under `src/`, the catching test binary was ru
 | R2-6 | `Protocol::from_npm` maps an unknown `npm` to chat instead of refusing | ✅ 3 failed | `provider::tests::the_catalog_npm_decides_the_protocol_and_an_unknown_one_is_refused`, `provider::tests::the_bundled_snapshot_decides_the_protocol_with_no_cache`, `responses_api_key_route::a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_route` |
 | R2-7 | the `protocol from models.dev` notice never fires | ✅ 1 failed | `provider::tests::the_catalog_overruling_the_table_is_noticed` |
 | R2-8 | a resynced table row drifts (`grok-4.7` back to `go_openai`) | ✅ 2 failed | `opencode_go_models::the_opencode_go_builtins_match_upstream`, `provider::tests::opencode_go_maps_models_to_the_three_protocols` |
+| R2-9 | the `openai` table drifts from the snapshot (its models back to chat) | ✅ 2 failed | `provider::tests::the_built_in_table_agrees_with_the_bundled_snapshot`, `provider::tests::the_built_ins_are_registered` |
 
 Commands: `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast <name>`;
-`timeout 300 cargo test -p radian-host --locked --test <file>`. 8/8 caught.
+`timeout 300 cargo test -p radian-host --locked --test <file>`. 9/9 caught.
