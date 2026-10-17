@@ -17,6 +17,10 @@ use ratatui::text::{Line, Span};
 use crate::app::App;
 use crate::theme::Role;
 
+mod components;
+
+use components::{Component, ItemData};
+
 /// The brand mark for a glyph set (ADR 0027): the Nerd Font `md-alpha_r_circle_
 /// outline`, the plain bold-accent `R` (the same font as the body, so it sits on the baseline),
 /// or the ASCII word `rad`. `㎭` (U+33AD) is East-Asian-Wide and its fallback glyph sits off the
@@ -203,7 +207,7 @@ impl Preset {
 /// One item's style (ADR 0027): a theme role (follows the theme) or a fixed
 /// starship-style color (does not). The theme stays the only color source for a role.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ItemStyle {
+pub(crate) enum ItemStyle {
     Role(Role),
     Fixed(Style),
 }
@@ -219,22 +223,26 @@ impl ItemStyle {
 
 /// One resolved item.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Item {
+pub(crate) struct Item {
     /// The configured id as written (an unknown id is shown raw).
-    id: String,
-    /// The item's own `icon`/`symbol`, else the built-in glyph for the id.
-    icon: Option<String>,
+    pub(crate) id: String,
+    /// The item's own `icon`/`symbol`, else the component's default glyph for the id.
+    pub(crate) icon: Option<String>,
     /// The symbol's own style, when it differs from the text's (revision 3).
-    symbol_style: Option<ItemStyle>,
-    format: Option<String>,
-    style: Option<ItemStyle>,
-    priority: i64,
-    thresholds: Vec<(i64, ItemStyle)>,
-    params: Vec<(String, String)>,
+    pub(crate) symbol_style: Option<ItemStyle>,
+    pub(crate) format: Option<String>,
+    pub(crate) style: Option<ItemStyle>,
+    pub(crate) priority: i64,
+    pub(crate) thresholds: Vec<(i64, ItemStyle)>,
+    /// The component's own parameters (`context_bar`'s `width`/`fill`/`empty`, `status`'s
+    /// `keys`), read by its `data`.
+    pub(crate) params: Vec<(String, String)>,
     /// `disabled = true` in `[tui.footer.items.<id>]` hides the item everywhere.
-    disabled: bool,
-    /// `false` for an unknown id: the item shows its id text.
-    known: bool,
+    pub(crate) disabled: bool,
+    /// No built-in component claims this id *and* the user wrote it: an unresolved id shows its
+    /// id text raw (ADR 0008). A preset's id (or one a contributor later publishes) is not
+    /// unknown: it simply hides until it has data.
+    pub(crate) unknown: bool,
 }
 
 /// A starship-style style (ADR 0027): space-separated modifiers and colors. A
@@ -478,11 +486,11 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
         symbol_style: None,
         format: None,
         style: None,
-        priority: item_priority(id),
-        thresholds: default_thresholds(id),
+        priority: components::priority(id),
+        thresholds: components::thresholds(id),
         params: Vec::new(),
         disabled: false,
-        known: true,
+        unknown: false,
     };
     let with_format = |id: &str, format: &str| Item {
         format: Some(format.to_string()),
@@ -619,10 +627,10 @@ fn resolve_item(
         return None;
     }
     let id = effective.id.clone();
-    let known = item_is_known(&id);
-    if !known {
+    if components::builtin(&id).is_none() {
         warnings.push(format!(
-            "tui.footer: unknown item {id:?}; showing it as written"
+            "tui.footer: unknown item {id:?}; showing it as written unless a contributor \
+             publishes it"
         ));
     }
     let style = parse_style_or_warn(effective.style.as_deref(), &id, "style", warnings);
@@ -634,7 +642,7 @@ fn resolve_item(
     );
     let mut thresholds = Vec::new();
     if effective.thresholds.is_empty() {
-        thresholds = default_thresholds(&id);
+        thresholds = components::thresholds(&id);
     } else {
         for (at, name) in &effective.thresholds {
             match parse_item_style(name) {
@@ -654,11 +662,13 @@ fn resolve_item(
         symbol_style,
         format: effective.format.clone(),
         style,
-        priority: effective.priority.unwrap_or_else(|| item_priority(&id)),
+        priority: effective
+            .priority
+            .unwrap_or_else(|| components::priority(&id)),
         thresholds,
         params: effective.params.clone(),
         disabled: false,
-        known,
+        unknown: components::builtin(&id).is_none(),
     })
 }
 
@@ -723,8 +733,9 @@ fn merge_into_item(item: &mut Item, config: &TuiFooterItemConfig, warnings: &mut
 
 /// Warns about an unknown placeholder or a bad inline style in a format, once at parse time.
 fn validate_format(id: &str, format: &str, warnings: &mut Vec<String>) {
+    let known = components::placeholders(id).unwrap_or(&[]);
     for placeholder in placeholders(format) {
-        if !item_placeholders(id).contains(&placeholder.as_str()) {
+        if !known.contains(&placeholder.as_str()) {
             warnings.push(format!(
                 "tui.footer: item {id:?} has unknown placeholder {{{placeholder}}}; showing \
                  the format as written"
@@ -757,38 +768,6 @@ fn parse_style(name: &str) -> Option<Role> {
     })
 }
 
-/// The built-in item ids (ADR 0027 C2; `worktree`/`status` are slice 2).
-fn item_is_known(id: &str) -> bool {
-    !item_placeholders(id).is_empty()
-}
-
-/// The placeholders an item defines; empty for an unknown id.
-fn item_placeholders(id: &str) -> &'static [&'static str] {
-    match id {
-        "brand" => &["brand"],
-        "host" => &["host"],
-        "model" => &["display_name", "id", "provider"],
-        "reasoning" => &["level"],
-        "tier" => &["tier"],
-        "cwd" => &["path", "path_home", "basename", "repo", "worktree"],
-        "git_branch" => &["branch", "dirty", "modified", "untracked"],
-        "worktree" => &["worktree"],
-        "status" => &["status"],
-        "session" => &["id"],
-        "context" => &["bar", "percent", "used", "budget", "auto"],
-        "context_bar" => &["bar", "percent", "used", "budget", "auto"],
-        "tokens" => &["in", "out", "cache", "cache_write"],
-        "speed" => &["speed"],
-        "elapsed" => &["elapsed"],
-        "cost" => &["usd"],
-        "pending" => &["count"],
-        "tasks" => &["running", "total"],
-        "mcp" => &["mcp"],
-        "scroll" => &["position", "mode"],
-        _ => &[],
-    }
-}
-
 fn placeholders(format: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = format;
@@ -803,80 +782,12 @@ fn placeholders(format: &str) -> Vec<String> {
     out
 }
 
-/// The default truncation priority: higher survives a narrow terminal longer.
-fn item_priority(id: &str) -> i64 {
-    match id {
-        "brand" => 92,
-        "model" => 90,
-        "context" | "context_bar" => 85,
-        "cwd" => 80,
-        "tier" => 75,
-        "host" => 78,
-        "git_branch" | "worktree" | "pending" => 70,
-        "tasks" => 72,
-        "status" => 45,
-        "session" => 65,
-        "reasoning" => 60,
-        "mcp" => 55,
-        "speed" => 55,
-        "tokens" => 50,
-        "cost" => 40,
-        "elapsed" => 35,
-        "scroll" => 20,
-        _ => 50,
-    }
-}
-
 /// The used fraction of the context window, `None` when either the budget or the usage report
 /// is unknown (ADR 0027 item 4: the gap gauge and the `context` item share it).
 fn context_fraction(session: &radian_host::ProjectionRead<'_>) -> Option<f64> {
     let budget = session.context_window()?;
     let used = session.budget()?.projected_tokens;
     (budget > 0).then(|| used as f64 / budget as f64)
-}
-
-/// An item's default theme role (the classic status bar's assignments, kept so a default
-/// footer reads the same way). `None` means the terminal's default style.
-fn default_role(id: &str) -> Option<Role> {
-    Some(match id {
-        "brand" => Role::Text,
-        "host" => Role::NoticeBody,
-        "model" => Role::Model,
-        "speed" => Role::Usage,
-        "elapsed" => Role::Truncation,
-        "tier" => Role::Tier,
-        "tokens" => Role::Usage,
-        "mcp" => Role::Mcp,
-        "context" | "context_bar" => Role::Budget,
-        "pending" => Role::TurnRunning,
-        "tasks" => Role::TurnRunning,
-        _ => return None,
-    })
-}
-
-/// The role for the `reasoning` item at `level` (ADR 0027 C2, one role per level).
-fn reasoning_role(level: &str) -> Role {
-    match level {
-        "off" => Role::ReasoningOff,
-        "minimal" => Role::ReasoningMinimal,
-        "low" => Role::ReasoningLow,
-        "medium" => Role::ReasoningMedium,
-        "high" => Role::ReasoningHigh,
-        "xhigh" => Role::ReasoningXhigh,
-        "max" => Role::ReasoningMax,
-        _ => Role::ReasoningMedium,
-    }
-}
-
-/// The default 70/90 thresholds for the numeric items (ADR 0027 C2).
-fn default_thresholds(id: &str) -> Vec<(i64, ItemStyle)> {
-    match id {
-        "context" | "context_bar" | "cost" => vec![
-            (70, ItemStyle::Role(Role::BudgetOver)),
-            (90, ItemStyle::Role(Role::ToolResultError)),
-        ],
-        _ => Vec::new(),
-    }
 }
 
 /// One rendered item: its styled spans (symbol + text) and its truncation priority.
@@ -1014,9 +925,16 @@ fn width_of(text: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(text)
 }
 
-/// One item's styled spans, or `None` when it has no data (never a fabricated number).
+/// One item's styled spans, or `None` when it has no data (never a fabricated number). The
+/// renderer dispatches **only** through the component registry (ADR 0027):
+/// an unknown id is shown raw (ADR 0008), and a contributor's id reaches its dynamic component.
 fn render_item(app: &App, item: &Item) -> Option<Piece> {
-    if !item.known {
+    let Some(resolved) = components::lookup(app, &item.id) else {
+        // No component and no contributor value: an id the user wrote shows raw (ADR 0008); a
+        // preset's id simply hides until a contributor publishes it.
+        if !item.unknown {
+            return None;
+        }
         let style = item
             .style
             .as_ref()
@@ -1026,20 +944,18 @@ fn render_item(app: &App, item: &Item) -> Option<Piece> {
             spans: vec![(item.id.clone(), style)],
             priority: item.priority,
         });
-    }
-    if let Some((text, style)) = contribution_item(app, item) {
-        return Some(with_symbol(app, item, text, style));
-    }
-    let data = item_data(app, &item.id, item)?;
+    };
+    let component = resolved.get();
+    let data = component.data(app, item)?;
     let format = item
         .format
         .clone()
-        .unwrap_or_else(|| data.default_format.to_string());
+        .unwrap_or_else(|| data.default_format.clone());
     // An unknown placeholder or inline style was warned about at parse time: show it raw.
     let segments = expand_spans(&format, &data).unwrap_or_else(|_| vec![(format.clone(), None)]);
-    let default_style = item_default_style(app, item, &data);
+    let default_style = default_style(app, item, &data, component);
     let mut spans: Vec<(String, Style)> = Vec::new();
-    let symbol = symbol_for(app, item);
+    let symbol = symbol_for(app, item, component);
     if !symbol.is_empty() {
         let style = item
             .symbol_style
@@ -1061,45 +977,18 @@ fn render_item(app: &App, item: &Item) -> Option<Piece> {
     })
 }
 
-/// The item's own `symbol`/`icon`, else the built-in glyph for its id under the footer's set.
-fn symbol_for(app: &App, item: &Item) -> String {
+/// The item's own `symbol`/`icon`, else the component's default glyph under the footer's set.
+fn symbol_for(app: &App, item: &Item, component: &dyn Component) -> String {
     item.icon
         .clone()
-        .unwrap_or_else(|| glyph(&item.id, app.footer_glyphs()).to_string())
+        .unwrap_or_else(|| components::glyph_of(component, app.footer_glyphs()).to_string())
 }
 
-/// A contribution's text with the item's symbol prepended (ADR 0027's `symbol`).
-fn with_symbol(app: &App, item: &Item, text: String, style: Style) -> Piece {
-    let mut spans = Vec::new();
-    let symbol = symbol_for(app, item);
-    if !symbol.is_empty() {
-        let symbol_style = item
-            .symbol_style
-            .as_ref()
-            .map(|s| s.resolve(app))
-            .unwrap_or(style);
-        spans.push((symbol, symbol_style));
-    }
-    spans.push((text, style));
-    Piece {
-        spans,
-        priority: item.priority,
-    }
-}
-
-/// The item's default style: the reasoning level's role, a threshold, the configured style, or
-/// the item's built-in role.
-fn item_default_style(app: &App, item: &Item, data: &ItemData) -> Style {
-    if item.id == "reasoning" {
-        let level = app
-            .session
-            .next_thinking
-            .as_deref()
-            .or(app.session.thinking_level.as_deref());
-        return role_style(
-            app,
-            level.map(reasoning_role).unwrap_or(Role::ReasoningMedium),
-        );
+/// The item's style: a style the data itself decided (a contribution's role, a reasoning level),
+/// else a threshold, else the configured `style`, else the component's default role (ADR 0027 C2).
+fn default_style(app: &App, item: &Item, data: &ItemData, component: &dyn Component) -> Style {
+    if let Some(style) = data.fixed_style {
+        return style;
     }
     if let Some((_, style)) = item
         .thresholds
@@ -1112,13 +1001,8 @@ fn item_default_style(app: &App, item: &Item, data: &ItemData) -> Style {
     if let Some(style) = &item.style {
         return style.resolve(app);
     }
-    // ADR 0027/8: the brand is a bold accent mark. The theme's accent role is
-    // `notice_label` (the `accent` style alias maps to it), so the mark follows a theme switch.
-    // A configured `tui.brand` keeps this style in every glyph set.
-    if item.id == "brand" && (app.footer_glyphs() == Glyphs::Unicode || app.brand.is_some()) {
-        return role_style(app, Role::NoticeLabel);
-    }
-    default_role(&item.id)
+    component
+        .role(app)
         .map(|role| role_style(app, role))
         .unwrap_or_default()
 }
@@ -1126,68 +1010,6 @@ fn item_default_style(app: &App, item: &Item, data: &ItemData) -> Style {
 fn role_style(app: &App, role: Role) -> Style {
     let mut theme = app.theme.clone();
     *role.style_mut(&mut theme)
-}
-
-/// The items whose value comes from the contributor store (ADR 0027 C3).
-const CONTRIBUTION_ITEMS: [&str; 3] = ["git_branch", "worktree", "status"];
-
-/// One item whose data is a contribution: its text and its style, or `None` when the
-/// contributor has no value (the item hides). The symbol is prepended by `render_item`.
-fn contribution_item(app: &App, item: &Item) -> Option<(String, Style)> {
-    if !CONTRIBUTION_ITEMS.contains(&item.id.as_str()) {
-        // Any other id a contributor publishes (C3/C4): its store text, stale drawn dim.
-        let (text, role, stale) = contribution(app, &item.id)?;
-        let role = if stale {
-            Role::Truncation
-        } else {
-            contrib_role(role)
-        };
-        return Some((text, role_style(app, role)));
-    }
-    let (text, role, stale) = match item.id.as_str() {
-        "git_branch" => {
-            let (branch, role, stale) = match contribution(app, "git_branch") {
-                Some(contribution) => contribution,
-                // The host's one-shot value, when no contributor is running.
-                None => (app.session.git_branch.clone()?, SegmentRole::Normal, false),
-            };
-            // ADR 0027: the change counts from the same background refresh.
-            let modified =
-                contribution_text(app, "git_modified").and_then(|text| text.parse::<u64>().ok());
-            let untracked =
-                contribution_text(app, "git_untracked").and_then(|text| text.parse::<u64>().ok());
-            let dirty = match (modified.unwrap_or(0), untracked.unwrap_or(0)) {
-                (0, 0) => String::new(),
-                (modified, untracked) => format!(" ?{}", modified + untracked),
-            };
-            let format = item.format.as_deref().unwrap_or("{branch}");
-            let text = format
-                .replace("{branch}", &branch)
-                .replace("{dirty}", &dirty)
-                .replace(
-                    "{modified}",
-                    &modified.map_or_else(String::new, |count| count.to_string()),
-                )
-                .replace(
-                    "{untracked}",
-                    &untracked.map_or_else(String::new, |count| count.to_string()),
-                );
-            (text, role, stale)
-        }
-        "worktree" => {
-            let (name, role, stale) = contribution(app, "worktree")?;
-            let format = item.format.as_deref().unwrap_or("worktree {worktree}");
-            (format.replace("{worktree}", &name), role, stale)
-        }
-        "status" => status_contribution(app, item)?,
-        _ => return None,
-    };
-    let role = if stale {
-        Role::Truncation
-    } else {
-        contrib_role(role)
-    };
-    Some((text, role_style(app, role)))
 }
 
 /// One store item's joined text, for the items that only need the value (`cwd`'s `{repo}`).
@@ -1209,36 +1031,6 @@ fn contribution(app: &App, item: &str) -> Option<(String, SegmentRole, bool)> {
     Some((text, contribution.segments[0].role, contribution.stale))
 }
 
-/// The `status` item (ADR 0027 C2/C3): the text of every `status.*` contribution, filtered by
-/// `keys = ["…"]` when the item has it. Nothing published means the item hides.
-fn status_contribution(app: &App, item: &Item) -> Option<(String, SegmentRole, bool)> {
-    let keys: Option<Vec<&str>> = item
-        .params
-        .iter()
-        .find(|(name, _)| name == "keys")
-        .map(|(_, value)| value.split(',').map(str::trim).collect());
-    let mut parts = Vec::new();
-    let mut stale = false;
-    for contribution in app.contributions.snapshot() {
-        let Some(key) = contribution.item.strip_prefix("status.") else {
-            continue;
-        };
-        if keys.as_ref().is_some_and(|keys| !keys.contains(&key)) {
-            continue;
-        }
-        let text: String = contribution
-            .segments
-            .iter()
-            .map(|segment| segment.text.as_str())
-            .collect();
-        if !text.is_empty() {
-            parts.push(text);
-        }
-        stale |= contribution.stale;
-    }
-    (!parts.is_empty()).then(|| (parts.join(" "), SegmentRole::Normal, stale))
-}
-
 /// The theme role a contribution's segment role maps to (ADR 0029: colors from the theme).
 fn contrib_role(role: SegmentRole) -> Role {
     match role {
@@ -1251,285 +1043,23 @@ fn contrib_role(role: SegmentRole) -> Role {
     }
 }
 
-/// The facts one item reads.
-struct ItemData<'a> {
-    values: Vec<(&'a str, String)>,
-    default_format: &'a str,
-    /// A numeric value for thresholds (the context percentage).
-    numeric: Option<u64>,
-}
-
-fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>> {
-    let session = app.session.projection.read();
-    match id {
-        // ADR 0027/8: `tui.brand` when set, else the brand mark per glyph set.
-        "brand" => Some(ItemData {
-            values: vec![("brand", app.brand_mark().to_string())],
-            default_format: "{brand}",
-            numeric: None,
-        }),
-        "host" => Some(ItemData {
-            values: vec![("host", app.hostname.clone()?)],
-            default_format: "{host}",
-            numeric: None,
-        }),
-        "speed" => {
-            let speed = crate::timing::format_speed(app.session.timer.speed(app.now)?);
-            Some(ItemData {
-                values: vec![("speed", speed)],
-                default_format: "{speed}",
-                numeric: None,
-            })
+/// The `{auto}` marker (ADR 0027): shown only while automatic compaction is on. The
+/// ASCII set uses a word, the others a glyph (`\u{27f2}` is missing from five of the six fonts,
+/// so `~` stands in).
+fn auto_marker(app: &App) -> String {
+    if app.auto_compact {
+        if app.footer_glyphs() == Glyphs::Ascii {
+            " auto".to_string()
+        } else {
+            " ~".to_string()
         }
-        "elapsed" => {
-            let elapsed = crate::timing::format_duration(app.session.timer.elapsed(app.now)?);
-            Some(ItemData {
-                values: vec![("elapsed", elapsed)],
-                default_format: "{elapsed}",
-                numeric: None,
-            })
-        }
-        "model" => Some(ItemData {
-            values: vec![
-                (
-                    "display_name",
-                    app.session
-                        .model_display
-                        .clone()
-                        .unwrap_or_else(|| app.session.model_name.clone()),
-                ),
-                ("id", app.session.model_name.clone()),
-                ("provider", app.session.provider.clone().unwrap_or_default()),
-            ],
-            default_format: "{display_name}",
-            numeric: None,
-        }),
-        "reasoning" => {
-            let level = app
-                .session
-                .next_thinking
-                .as_deref()
-                .or(app.session.thinking_level.as_deref())?;
-            Some(ItemData {
-                values: vec![("level", level.to_string())],
-                default_format: "{level}",
-                numeric: None,
-            })
-        }
-        "tier" => {
-            let tier = session.tier()?;
-            Some(ItemData {
-                values: vec![("tier", tier.to_string())],
-                default_format: "{tier}",
-                numeric: None,
-            })
-        }
-        "cwd" => {
-            let path = app.session.cwd.as_deref()?;
-            let text = path.display().to_string();
-            let home_text = std::env::var("HOME")
-                .ok()
-                .and_then(|home| text.strip_prefix(&home).map(|rest| format!("~{rest}")))
-                .unwrap_or_else(|| text.clone());
-            let base = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| text.clone());
-            // ADR 0027: `{repo}` and `{worktree}` come from the git contributor
-            // (background-refreshed, never a git call here). Empty when not in a repo/worktree.
-            // `{repo}` falls back to the directory's own name outside a repository, so the
-            // item still shows something useful (ADR 0027).
-            let repo = contribution_text(app, "git_root").unwrap_or_else(|| base.clone());
-            let worktree = contribution_text(app, "worktree").unwrap_or_default();
-            Some(ItemData {
-                values: vec![
-                    ("path", text),
-                    ("path_home", home_text),
-                    ("basename", base),
-                    ("repo", repo),
-                    ("worktree", worktree),
-                ],
-                default_format: "{path_home}",
-                numeric: None,
-            })
-        }
-        "git_branch" => {
-            let branch = app.session.git_branch.as_deref()?;
-            Some(ItemData {
-                values: vec![("branch", branch.to_string()), ("dirty", String::new())],
-                default_format: "{branch}",
-                numeric: None,
-            })
-        }
-        "session" => Some(ItemData {
-            values: vec![("id", app.session.session_id.clone())],
-            default_format: "{id}",
-            numeric: None,
-        }),
-        "context" | "context_bar" => {
-            let budget = session.context_window();
-            let report = session.budget();
-            let used = report.map(|report| report.projected_tokens);
-            let fraction = context_fraction(&session).unwrap_or(0.0);
-            // One decimal (ADR 0027): `41.3%`.
-            let percent = format!("{:.1}", fraction * 100.0);
-            let bar = if id == "context_bar" {
-                render_bar(item, fraction)
-            } else {
-                String::new()
-            };
-            // ADR 0027: `{auto}` is the auto-compaction marker, shown only while
-            // automatic compaction is on (the ASCII set uses a word, the others a glyph).
-            let auto = if app.auto_compact {
-                if app.footer_glyphs() == Glyphs::Ascii {
-                    " auto".to_string()
-                } else {
-                    // `⟲` (U+27F2) is missing from five of the six fonts (revision 4): `~`.
-                    " ~".to_string()
-                }
-            } else {
-                String::new()
-            };
-            Some(ItemData {
-                values: vec![
-                    ("bar", bar),
-                    ("auto", auto),
-                    ("percent", percent.clone()),
-                    (
-                        "used",
-                        used.map_or_else(|| "-".to_string(), crate::timing::format_tokens),
-                    ),
-                    (
-                        "budget",
-                        budget.map_or_else(|| "-".to_string(), crate::timing::format_tokens),
-                    ),
-                ],
-                default_format: if id == "context_bar" {
-                    "{bar} {percent}%"
-                } else {
-                    "{used}/{budget}"
-                },
-                numeric: report.map(|_| (fraction * 100.0).round() as u64),
-            })
-        }
-        "tokens" => Some(ItemData {
-            values: vec![
-                (
-                    "in",
-                    session
-                        .usage_input()
-                        .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
-                ),
-                (
-                    "out",
-                    session
-                        .usage_output()
-                        .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
-                ),
-                // ADR 0027: the cache-read total (the provider's own report). `-`
-                // when the provider never reported one, never a fabricated 0.
-                (
-                    "cache",
-                    session
-                        .usage_cache_read()
-                        .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
-                ),
-                // F8 (ADR 0027): the cache-**write** total. It is billed at its own
-                // (often higher) rate, so it is available to a format that wants to show it —
-                // but it is deliberately **not** in the default format, which stays as narrow
-                // as it was (see the "cache_write shows only when asked for" test).
-                (
-                    "cache_write",
-                    session
-                        .usage_cache_write()
-                        .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
-                ),
-            ],
-            // The default format is a tier default (ADR 0027 item 2): the unicode
-            // tier's arrows, or `^`/`v`. A user-configured format always wins.
-            default_format: match app.footer_glyphs() {
-                Glyphs::Unicode => "↑{in} ↓{out} R{cache}",
-                Glyphs::Nerd | Glyphs::Ascii => "^{in} v{out} R{cache}",
-            },
-            numeric: None,
-        }),
-        // ADR 0027: the fee the session has accumulated, each call priced at the
-        // rate in force when it arrived (`radian_host::cost`). Nothing billed yet means the
-        // item hides; never `$0.00` for a model whose price we do not know (v5 §5).
-        "cost" => {
-            let micros = session.cost_micros()?;
-            // ADR 0027 and 3: a total with a missing rate is incomplete
-            // (`≥`), and a total re-priced from old records is an estimate (`~`). The estimate
-            // wins when both hold (`~≥` would be unreadable). A recorded, complete total has no
-            // marker.
-            let marker = if session.cost_estimated() {
-                "~"
-            } else if session.cost_incomplete() {
-                "≥"
-            } else {
-                ""
-            };
-            Some(ItemData {
-                values: vec![(
-                    "usd",
-                    format!("{marker}{}", crate::timing::format_cost(micros)),
-                )],
-                default_format: "{usd}",
-                numeric: Some(micros / 1_000_000),
-            })
-        }
-        "pending" => (app.pending > 0).then(|| ItemData {
-            values: vec![("count", app.pending.to_string())],
-            default_format: "{count} pending",
-            numeric: Some(app.pending as u64),
-        }),
-        // ADR 0030 O10: the live task-agent count `running/total`. Absent with no tasks, so it
-        // never reads `0/0`.
-        "tasks" => app.session.task_counts().map(|(running, total)| ItemData {
-            values: vec![
-                ("running", running.to_string()),
-                ("total", total.to_string()),
-            ],
-            default_format: "tasks {running}/{total}",
-            numeric: Some(total as u64),
-        }),
-        "mcp" => Some(ItemData {
-            values: vec![(
-                "mcp",
-                crate::app::mcp_text(session.mcp_configured(), session.mcp_open()),
-            )],
-            default_format: "{mcp}",
-            numeric: None,
-        }),
-        "scroll" => {
-            let position = if app.session.max_scroll == 0 {
-                "all".to_string()
-            } else {
-                format!("{}/{}", app.session.scroll, app.session.max_scroll)
-            };
-            Some(ItemData {
-                values: vec![
-                    ("position", position),
-                    (
-                        "mode",
-                        if app.session.follow {
-                            "follow"
-                        } else {
-                            "paused"
-                        }
-                        .to_string(),
-                    ),
-                ],
-                default_format: "{position} {mode}",
-                numeric: None,
-            })
-        }
-        _ => None,
+    } else {
+        String::new()
     }
 }
 
 /// Expands the `{placeholder}`s in a plain string (used inside a `[text]` segment).
-fn expand_placeholders(text: &str, data: &ItemData<'_>) -> Result<String, String> {
+fn expand_placeholders(text: &str, data: &ItemData) -> Result<String, String> {
     let mut out = String::new();
     let mut rest = text;
     while let Some(open) = rest.find('{') {
@@ -1554,10 +1084,7 @@ fn expand_placeholders(text: &str, data: &ItemData<'_>) -> Result<String, String
 /// Expands a format into styled segments: `{placeholder}` from the item's data, and
 /// `[text](style)` with an inline style (ADR 0027). An unknown placeholder or a bad
 /// inline style is an error; the caller warned at parse time and shows the format raw.
-fn expand_spans(
-    format: &str,
-    data: &ItemData<'_>,
-) -> Result<Vec<(String, Option<ItemStyle>)>, String> {
+fn expand_spans(format: &str, data: &ItemData) -> Result<Vec<(String, Option<ItemStyle>)>, String> {
     let mut out: Vec<(String, Option<ItemStyle>)> = Vec::new();
     let mut plain = String::new();
     let mut i = 0;
@@ -1618,54 +1145,6 @@ fn inline_styles(format: &str) -> Vec<String> {
     out
 }
 
-/// The context bar: `width` cells, `fill` for the used part and `empty` for the rest.
-fn render_bar(item: &Item, fraction: f64) -> String {
-    let param = |key: &str| {
-        item.params
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| value.as_str())
-    };
-    let width: usize = param("width")
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(10);
-    let fill = param("fill").unwrap_or("━");
-    let empty = param("empty").unwrap_or("─");
-    let used = ((fraction.clamp(0.0, 1.0)) * width as f64).round() as usize;
-    let used = used.min(width);
-    format!("{}{}", fill.repeat(used), empty.repeat(width - used))
-}
-
-/// The default glyph for an item under the configured set. Only the items with a meaningful
-/// icon carry one; the rest are plain text.
-fn glyph(id: &str, glyphs: Glyphs) -> &'static str {
-    match (id, glyphs) {
-        // ADR 0027 and 6: the unicode icons must exist in all six mainstream coding
-        // fonts (see the README's coverage table), so `⌂ ◷ ◫ ◐ ⛁ ⬡` are replaced or dropped.
-        // `@ # *` and `»` are in every one; the rest are text-only.
-        ("host", Glyphs::Unicode) => "@ ",
-        ("host", Glyphs::Nerd) => "\u{f109} ",
-        ("host", Glyphs::Ascii) => "host ",
-        ("speed", Glyphs::Unicode) => "\u{bb} ",
-        ("speed", Glyphs::Nerd) => "\u{f0e7} ",
-        ("speed", Glyphs::Ascii) => "spd ",
-        ("elapsed", Glyphs::Unicode) => "",
-        ("elapsed", Glyphs::Nerd) => "\u{f017} ",
-        ("elapsed", Glyphs::Ascii) => "t ",
-        ("context", Glyphs::Unicode) => "",
-        ("context", Glyphs::Nerd) => "\u{f035b} ",
-        ("context", Glyphs::Ascii) => "[",
-        ("reasoning", Glyphs::Unicode) => "* ",
-        ("reasoning", Glyphs::Nerd) => "\u{f0eb} ",
-        ("reasoning", Glyphs::Ascii) => "* ",
-        ("git_branch", Glyphs::Nerd) => "\u{e0a0} ",
-        ("session", Glyphs::Unicode) => "# ",
-        ("session", Glyphs::Ascii) => "# ",
-        ("tier", Glyphs::Unicode) => "",
-        _ => "",
-    }
-}
-
 /// One `[tui.widgets]` slot as a line (ADR 0027 C3): the configured item ids in order, joined
 /// by the footer's separator. `None` when none of them has data, so the row takes no space.
 pub fn widget_line(app: &App, ids: &[String]) -> Option<Line<'static>> {
@@ -1679,11 +1158,11 @@ pub fn widget_line(app: &App, ids: &[String]) -> Option<Line<'static>> {
             symbol_style: None,
             format: None,
             style: None,
-            priority: item_priority(id),
-            thresholds: default_thresholds(id),
+            priority: components::priority(id),
+            thresholds: components::thresholds(id),
             params: Vec::new(),
             disabled: false,
-            known: item_is_known(id),
+            unknown: components::builtin(id).is_none(),
         };
         if let Some(piece) = render_item(app, &item) {
             pieces.push(piece);
@@ -1739,11 +1218,11 @@ mod tests {
             symbol_style: None,
             format: None,
             style: None,
-            priority: item_priority(id),
+            priority: components::priority(id),
             thresholds: Vec::new(),
             params: Vec::new(),
             disabled: false,
-            known: true,
+            unknown: false,
         }
     }
 
@@ -1754,7 +1233,8 @@ mod tests {
         for (name, expected) in [("unicode", "R"), ("nerd", "\u{f0c20}"), ("ascii", "rad")] {
             let app = app_with_glyphs(name);
             let item = bare_item("brand");
-            let data = item_data(&app, "brand", &item).expect("brand data");
+            let component = components::builtin("brand").expect("the brand component");
+            let data = component.data(&app, &item).expect("brand data");
             let value = data
                 .values
                 .iter()
@@ -1813,7 +1293,10 @@ mod tests {
         for preset in [Preset::Deck, Preset::Full, Preset::Pi] {
             for row in preset_rows(preset, Glyphs::Unicode) {
                 for item in row.left.iter().chain(row.right.iter()) {
-                    glyphs.extend(glyph(&item.id, Glyphs::Unicode).chars());
+                    let glyph = components::builtin(&item.id).map_or("", |component| {
+                        components::glyph_of(component, Glyphs::Unicode)
+                    });
+                    glyphs.extend(glyph.chars());
                     if let Some(format) = &item.format {
                         // The default formats carry no glyph beyond ASCII; keep them honest.
                         glyphs.extend(format.chars());
@@ -1849,5 +1332,114 @@ mod tests {
                 ch as u32
             );
         }
+    }
+
+    /// ADR 0027: one registry, one entry per built-in component, every id
+    /// unique and findable, and every component declares at least one placeholder (the old
+    /// `item_is_known` rule). The set is the documented C2 items plus `git_branch`/`worktree`/
+    /// `status`, which are ordinary components now.
+    #[test]
+    fn the_registry_lists_every_builtin_once() {
+        let ids = components::ids();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "duplicate component id: {ids:?}");
+        for id in &ids {
+            let component = components::builtin(id).expect("findable by its own id");
+            assert_eq!(component.id(), *id);
+            assert!(
+                !components::placeholders(id).unwrap().is_empty(),
+                "{id} declares no placeholders"
+            );
+        }
+        for expected in [
+            "brand",
+            "host",
+            "model",
+            "reasoning",
+            "tier",
+            "cwd",
+            "git_branch",
+            "worktree",
+            "status",
+            "session",
+            "context",
+            "context_bar",
+            "tokens",
+            "speed",
+            "elapsed",
+            "cost",
+            "pending",
+            "tasks",
+            "mcp",
+            "scroll",
+        ] {
+            assert!(
+                ids.contains(&expected),
+                "the registry is missing {expected}"
+            );
+        }
+    }
+
+    /// ADR 0027: the draw path has no item-id tables. The pre-refactor
+    /// dispatch (`item_placeholders`, `item_priority`, `default_thresholds`, the
+    /// `CONTRIBUTION_ITEMS` list, …) is gone; the renderer reaches every item through
+    /// `components::lookup`. The positive control pins that the lookup call is there, so this
+    /// test cannot pass because dispatch moved nowhere.
+    #[test]
+    fn the_render_path_has_no_item_id_tables() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/footer.rs"))
+            .expect("footer.rs is readable");
+        // Only the non-test code: the test module names the removed functions on purpose.
+        let code = source
+            .split_once("\n#[cfg(test)]")
+            .map_or(source.as_str(), |(before, _)| before);
+        for forbidden in [
+            "fn item_placeholders",
+            "fn item_priority",
+            "fn default_thresholds",
+            "fn default_role",
+            "fn item_data",
+            "fn contribution_item",
+            "const CONTRIBUTION_ITEMS",
+            "fn item_is_known",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "{forbidden} is back: the render path must not special-case item ids"
+            );
+        }
+        assert!(
+            code.contains("components::lookup("),
+            "the renderer dispatches through the component registry"
+        );
+    }
+
+    /// ADR 0027: an arbitrary id a contributor publishes resolves through
+    /// the registry's dynamic fallback, not an id list. `git_branch`/`worktree`/`status` are
+    /// built-in components; a brand-new id resolves only once the store holds it.
+    #[test]
+    fn an_arbitrary_store_id_resolves_through_the_registry() {
+        let app = App::new("mock", "s");
+        assert!(
+            components::builtin("custom.thing").is_none(),
+            "no built-in claims an arbitrary id"
+        );
+        assert!(
+            components::lookup(&app, "custom.thing").is_none(),
+            "no value yet: nothing to resolve"
+        );
+        app.contributions.write(
+            "custom.thing",
+            vec![radian_host::Segment::new(
+                "hi",
+                radian_host::SegmentRole::Normal,
+            )],
+        );
+        assert!(
+            components::lookup(&app, "custom.thing").is_some(),
+            "the store value resolves through the dynamic component"
+        );
     }
 }

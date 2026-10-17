@@ -3871,10 +3871,19 @@ impl App {
                 return UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork));
             }
         }
-        if matches!(event, RuntimeEvent::ConfigChanged { .. }) {
+        if let RuntimeEvent::ConfigChanged { change, .. } = event {
             // The driver applied the queued change: the status bar's `next:` promise is done.
             self.session.next_model = None;
             self.session.next_thinking = None;
+            // Owner addendum (ADR 0027 slice ①): an applied model switch must follow
+            // through to the footer's `model` item, or it keeps showing the startup model. The
+            // session's model facts are updated exactly as startup sets them (`cli.rs`): the
+            // model id and provider from the applied route, with no separate display name.
+            if let Some(route) = radian_host::ModelRoute::from_value(change) {
+                self.session.model_name = route.model;
+                self.session.provider = Some(route.provider);
+                self.session.model_display = None;
+            }
         }
         if let RuntimeEvent::TurnFailed { message, .. } = event {
             self.session.entries.push(Entry::new(

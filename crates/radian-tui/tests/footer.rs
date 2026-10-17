@@ -1537,3 +1537,63 @@ fn the_context_fill_without_a_budget_is_spaces() {
     let terminal = render(&mut app, 60, 8);
     assert!(!row(&terminal, 7).contains('─'), "no budget, no gauge");
 }
+
+/// Owner addendum (ADR 0027 slice ①): after a `/model` switch the driver emits a
+/// model `ConfigChanged`. The footer's `model` item must then show the new model, so the
+/// session's model facts follow the applied route exactly as startup sets them (`cli.rs`'s
+/// `set_footer_facts`): the model id, the provider, no separate display name. Before this fix
+/// the item kept reading the startup model (`old-model`).
+#[test]
+fn the_footer_model_follows_an_applied_switch() {
+    let mut app = App::new("old-model", "s");
+    app.set_footer_facts(
+        None,
+        None,
+        Some("opencode-go".to_string()),
+        Some("high".to_string()),
+    );
+    let before = render(&mut app, 80, 12);
+    assert!(
+        screen(&before).contains("old-model"),
+        "the startup model shows first: {}",
+        screen(&before)
+    );
+    app.update(radian_tui::app::Input::Runtime(
+        radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: radian_host::ModelRoute::new("anthropic", "claude-new").to_value(),
+        },
+    ));
+    assert_eq!(app.session.model_name, "claude-new", "the model id follows");
+    assert_eq!(
+        app.session.provider.as_deref(),
+        Some("anthropic"),
+        "the provider follows"
+    );
+    let after = render(&mut app, 80, 12);
+    let text = screen(&after);
+    assert!(
+        text.contains("claude-new"),
+        "the footer shows the switch: {text}"
+    );
+    assert!(!text.contains("old-model"), "the old model is gone: {text}");
+}
+
+/// ADR 0027: an arbitrary id a contributor publishes renders through the
+/// registry's dynamic fallback, not an id list. Before the refactor a store id outside
+/// `CONTRIBUTION_ITEMS` was drawn raw; now the store value is an ordinary component.
+#[test]
+fn an_arbitrary_store_id_renders_through_the_dynamic_component() {
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&rows(vec![item("custom.thing")]));
+    // No value yet: an id the user wrote shows raw (ADR 0008), warned once at parse.
+    let before = render(&mut app, 60, 12);
+    assert!(
+        row(&before, 11).contains("custom.thing"),
+        "{}",
+        row(&before, 11)
+    );
+    publish(&app, "custom.thing", "hello");
+    let after = render(&mut app, 60, 12);
+    assert_eq!(row(&after, 11).trim_end(), "hello");
+}
