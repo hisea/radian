@@ -1729,6 +1729,20 @@ mod tests {
         }
     }
 
+    /// ADR 0027 (slice ⑤ item 4): a parse error in a built-in preset
+    /// is a test failure, never a runtime surprise. The loader parses all four TOML files with
+    /// the user's config parser (`preset_config` panics otherwise, and this test fails first);
+    /// each preset carries its documented rows: deck 3, full 2, pi 2, classic none.
+    #[test]
+    fn all_four_built_in_presets_load_their_rows() {
+        let mut warnings = Vec::new();
+        assert_eq!(preset_footer_rows(Preset::Deck, &mut warnings).len(), 3);
+        assert_eq!(preset_footer_rows(Preset::Full, &mut warnings).len(), 2);
+        assert_eq!(preset_footer_rows(Preset::Pi, &mut warnings).len(), 2);
+        assert_eq!(preset_footer_rows(Preset::Classic, &mut warnings).len(), 0);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
     /// ADR 0027: the draw path has no item-id tables. The pre-refactor
     /// dispatch (`item_placeholders`, `item_priority`, `default_thresholds`, the
     /// `CONTRIBUTION_ITEMS` list, …) is gone; the renderer reaches every item through
