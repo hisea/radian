@@ -530,8 +530,23 @@ Run: `cargo test -p radian-coding --test git --test shell_overlap --locked --no-
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| HM-1 | the one-slot heavy gate is back in `shell::run` (a process `Semaphore::new(1)` acquired for a command starting with `cargo test`) | ✅ 1 failed (3.7 s: the first stub's bounded barrier wait expired, `exit code: 3`, `barrier timed out waiting for …/second.started`) | `two_heavy_looking_shell_commands_run_at_the_same_time` |
+| HM-1 | the one-slot heavy gate is back in `shell::run` (a process `Semaphore::new(1)` acquired for a command starting with `cargo test`) | ✅ 1 failed (7.1 s: the first stub's bounded barrier wait expired, `exit code: 3`, `barrier timed out waiting for …/second.started and …/third.started`) | `three_heavy_looking_shell_commands_run_at_the_same_time` |
 
 HM-1 is the required "put the heavy gate back with 1 slot" mutation: it fails on the barrier, not
 on a timeout of the test, because the stub's wait is bounded and the test asserts the proof line
-`both ran` (only real overlap produces it).
+`all three ran` (only three-way overlap produces it).
+
+**The old code, not just the 1-slot mutation** (fix round 1): the same test file was copied into a
+scratch extraction of 29f0387 (`git archive 29f0387 | tar -x -C /tmp/s3-old-29f0387`, its own
+`CARGO_TARGET_DIR`; the worktree's committed state was not touched) and run there with the real
+heavy gate (`heavy.rs:39` `DEFAULT_HEAVY_SLOTS = 2`, `shell.rs:276` `heavy.acquire`):
+
+```
+cargo test -p radian-coding --test shell_overlap --no-fail-fast   # in /tmp/s3-old-29f0387
+test result: FAILED. 0 passed; 1 failed  (4.4 s)
+  the second command … [queued for a heavy slot: waited 0 ms before running]  exit code: 3
+  barrier timed out waiting for …/third.started and …/first.started
+```
+
+Two stubs would **not** have caught this: the old gate's default is two slots, so a two-command
+version of this test passes on 29f0387 (the reason this row now runs three).

@@ -1,14 +1,17 @@
 //! ADR 0043 decision 4: the heavy-command gate is gone, so `shell` commands run without
 //! queueing.
 //!
-//! Two commands that *look* heavy to the deleted matcher (`cargo build`/`cargo test`/`cargo
-//! clippy`) must overlap. `cargo` is a **stub** on `PATH` (a real `cargo test` is not wanted
-//! here), and the two stubs cross a barrier made of marker files: each writes its own marker and
-//! then waits for the other's, so only real concurrency lets both finish. No test-side sleep and
-//! no polling; the stub's wait is bounded, so a serialized run fails instead of hanging.
+//! Three commands that *look* heavy to the deleted matcher (`cargo build`/`cargo test`/`cargo
+//! clippy`) must all run at the same time. `cargo` is a **stub** on `PATH` (a real `cargo test`
+//! is not wanted here), and the three stubs cross a barrier made of marker files: each writes its
+//! own marker and then waits for both others', so only real three-way concurrency lets any of
+//! them finish. No test-side sleep and no polling; the stub's wait is bounded, so a serialized
+//! run fails instead of hanging.
 //!
-//! The mutation this catches is exactly the deleted gate: put a one-slot gate back in
-//! `shell::run` and the first command times out on the barrier while the second is not started.
+//! Three, not two, because the deleted gate's default was `DEFAULT_HEAVY_SLOTS = 2`: two
+//! commands overlapped even under the old gate, so a two-command test would pass on the old code
+//! and prove nothing. With three, the old code starts two and queues the third, the two wait for
+//! the third's marker, and the test fails exactly there.
 
 mod common;
 
@@ -23,25 +26,26 @@ use serde_json::json;
 /// The stub's bounded barrier wait. A serialized run reaches the bound and exits 3.
 const BARRIER_ITERATIONS: u32 = 400_000;
 
-/// A `cargo` stub: `cargo test <my-marker> <other-marker>`. It writes its marker, then waits
-/// (bounded, no sleep) for the other stub's marker, then prints the proof line.
+/// A `cargo` stub: `cargo test <my-marker> <other-marker> <other-marker>`. It writes its marker,
+/// then waits (bounded, no sleep) for the two other stubs' markers, then prints the proof line.
 fn stub() -> String {
     format!(
         "#!/bin/sh\n\
-         # Drop the `test` subcommand, keeping the two marker paths.\n\
+         # Drop the `test` subcommand, keeping the three marker paths.\n\
          shift\n\
          mine=$1\n\
-         other=$2\n\
+         other1=$2\n\
+         other2=$3\n\
          : > \"$mine\"\n\
          i=0\n\
-         while [ ! -e \"$other\" ]; do\n\
+         while [ ! -e \"$other1\" ] || [ ! -e \"$other2\" ]; do\n\
          \x20 i=$((i+1))\n\
          \x20 if [ \"$i\" -ge {BARRIER_ITERATIONS} ]; then\n\
-         \x20   echo \"barrier timed out waiting for $other\" >&2\n\
+         \x20   echo \"barrier timed out waiting for $other1 and $other2\" >&2\n\
          \x20   exit 3\n\
          \x20 fi\n\
          done\n\
-         echo \"both ran\"\n"
+         echo \"all three ran\"\n"
     )
 }
 
@@ -116,7 +120,7 @@ impl Drop for PathFront {
 }
 
 #[tokio::test]
-async fn two_heavy_looking_shell_commands_run_at_the_same_time() {
+async fn three_heavy_looking_shell_commands_run_at_the_same_time() {
     let dir = TempDir::new("shell-overlap");
     let ws = dir.path().to_path_buf();
     let bin = ws.join("bin");
@@ -133,31 +137,56 @@ async fn two_heavy_looking_shell_commands_run_at_the_same_time() {
     let tools = transparent_tools(&ws);
     let first = ws.join("first.started");
     let second = ws.join("second.started");
-    // Both commands are heavy-looking: the deleted gate matched `cargo test` as a prefix.
+    let third = ws.join("third.started");
+    // Every command is heavy-looking: the deleted gate matched `cargo test` as a prefix, and its
+    // default was two slots.
     let a = call(
         &tools,
-        format!("cargo test {} {}", first.display(), second.display()),
+        format!(
+            "cargo test {} {} {}",
+            first.display(),
+            second.display(),
+            third.display()
+        ),
     );
     let b = call(
         &tools,
-        format!("cargo test {} {}", second.display(), first.display()),
+        format!(
+            "cargo test {} {} {}",
+            second.display(),
+            third.display(),
+            first.display()
+        ),
     );
-    let (a, b) = tokio::join!(a, b);
+    let c = call(
+        &tools,
+        format!(
+            "cargo test {} {} {}",
+            third.display(),
+            first.display(),
+            second.display()
+        ),
+    );
+    let (a, b, c) = tokio::join!(a, b, c);
 
     let a = a.unwrap_or_else(|e| panic!("the first command failed: {e}"));
     let b = b.unwrap_or_else(|e| panic!("the second command failed: {e}"));
-    for (name, output) in [("first", &a), ("second", &b)] {
+    let c = c.unwrap_or_else(|e| panic!("the third command failed: {e}"));
+    for (name, output) in [("first", &a), ("second", &b), ("third", &c)] {
         let text = text_of(output);
         assert!(
-            text.contains("both ran"),
-            "the {name} command must finish only after the other's marker exists: {text}"
+            text.contains("all three ran"),
+            "the {name} command must finish only after both other markers exist: {text}"
         );
         assert!(
             text.contains("exit code: 0"),
             "the {name} command exited nonzero: {text}"
         );
     }
-    assert!(first.exists() && second.exists(), "both stubs started");
+    assert!(
+        first.exists() && second.exists() && third.exists(),
+        "all three stubs started"
+    );
     // Nothing was queued: the shell result carries no queue marker (the field the deleted gate
     // wrote is gone).
     assert!(
