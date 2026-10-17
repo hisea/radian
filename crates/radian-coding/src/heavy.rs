@@ -14,7 +14,7 @@
 //!   The gate shapes load; it is not a security boundary.
 //! - It gates **shell** commands (foreground and background, ADR 0037). A background job holds
 //!   its slot for the job's whole life and drops it on settle; `job_kill` still stops the job
-//!   (it signals the process group and never consults the gate), so a held slot cannot block a
+//!   (it signals the job's session and never consults the gate), so a held slot cannot block a
 //!   kill.
 //! - The slice 9 **verify runner** will call [`HeavySlots::acquire`] directly, on the same
 //!   process gate, so a task's verify commands queue behind its shell builds. That runner does

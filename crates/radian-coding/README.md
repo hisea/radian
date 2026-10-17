@@ -20,7 +20,7 @@ contract; this file is the practical summary.
 | `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id (no default timeout); the three `job_*` tools below read, list and stop it (ADR 0037). Its output goes to the session's own jobs directory, outside the workspace and unreadable from inside the sandbox (ADR 0039 decision 1). |
 | `job_output` | `Shared` | Read what a background `shell` job produced since the last call, plus a `[status: …]` line. `wait: true` blocks until the job ends or `timeout_ms` (default 30 s, max 600 s); a wait timeout does **not** kill the job. The increment is a bounded ring; the full output file is readable only through this tool, by line with `tail_lines`, `from_line`/`max_lines` or `pattern` (capped like `grep`), each naming the file's total line count. |
 | `job_list` | `Shared` | List this session's background jobs: id, command first line, state (running / exited n / signal n / killed / timed out), elapsed. |
-| `job_kill` | `Shared` | SIGTERM the job's whole process group, then SIGKILL after 2 s. A settled job is a no-op. |
+| `job_kill` | `Shared` | SIGTERM the job's whole session (every process it started, including a child that left its process group), then SIGKILL after 2 s. A settled job is a no-op. |
 | `ask_user` | `Exclusive` | Ask the user one or more structured questions (single/multi/text) and wait for the answers. Its **own** provider (`AskTools`, not part of `CodingTools`): a host mounts it only when a human is there to answer, and it exists whether or not the host has a workspace (ADR 0024 Q5). The wait races the turn's cancellation and never fabricates an answer. |
 
 `write`/`patch` are `Exclusive` because they mutate files: running them alone keeps each
@@ -201,7 +201,8 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
   open, so the IPC boundary is not tightened and this is not full credential isolation**
   (ADR 0012). `full` runs the command unconfined; it is only reachable because the caller
   named it when building the sandbox, and the tool description says "NOT sandboxed".
-  Independently of the mode, the tool kills the whole process group on timeout,
+  Independently of the mode, the tool kills the whole **session** (every process the command
+  started, including a child that left its process group, like GNU `timeout`) on timeout,
   cancellation and leader exit, and filters the environment to the sandbox whitelist, so a
   model-controlled shell never inherits the host's API keys. Output is read as a stream:
   only a bounded head and a trimmed tail are retained, so a command that prints gigabytes

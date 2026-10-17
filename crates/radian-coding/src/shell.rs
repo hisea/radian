@@ -16,13 +16,15 @@
 //!   this module applies the same whitelist itself. A model-controlled shell never inherits
 //!   the host's API keys in either mode.
 //! - The command runs in its own **session and process group** (`setsid`), so it has no
-//!   controlling terminal and its whole group is killed on exit, timeout or cancellation.
-//!   `setsid` rather than `process_group(0)`: std applies `setpgid(0, 0)` before any
-//!   `pre_exec` closure runs, and a process-group leader cannot `setsid` (EPERM). `setsid`
-//!   already creates a new group, so `killpg` still reaches the whole tree. No controlling
-//!   terminal also means a sandboxed command cannot `TIOCSTI` its way into the host terminal
-//!   (ADR 0016). A command that deliberately escapes the group some other way is out of
-//!   scope; the drain is bounded so even that cannot hang the tool.
+//!   controlling terminal and its whole session is killed on exit, timeout or cancellation
+//!   ([`signal_session`]: a child that calls `setpgid`, like GNU `timeout`, keeps the session
+//!   and is reached even though it left the group). `setsid` rather than `process_group(0)`:
+//!   std applies `setpgid(0, 0)` before any `pre_exec` closure runs, and a process-group leader
+//!   cannot `setsid` (EPERM). `setsid` already creates a new group, so `killpg(pid, ...)` still
+//!   reaches the whole group in one syscall. No controlling terminal also means a sandboxed
+//!   command cannot `TIOCSTI` its way into the host terminal (ADR 0016). A command that
+//!   deliberately escapes the **session** (its own `setsid`) is out of scope; the drain is
+//!   bounded so even that cannot hang the tool.
 //! - Output is capped; the model is told how many bytes were discarded.
 
 use std::fs::File;
@@ -47,9 +49,9 @@ use crate::jobs::{AdoptedHandle, JobCell, Jobs};
 use crate::provider::Limits;
 use crate::workspace::WorkspaceRoot;
 
-/// How long the supervisor waits for the output readers after the group is killed. The
+/// How long the supervisor waits for the output readers after the session is killed. The
 /// readers end at EOF once every writer is dead; the bound only matters if something escaped
-/// the process group, and it keeps that from hanging the tool.
+/// the session, and it keeps that from hanging the tool.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// How long the tool waits for the supervisor to reap the killed leader. SIGKILL is
@@ -67,7 +69,8 @@ pub(crate) fn schema() -> serde_json::Value {
             "timeout_secs": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "How long the command may run before its process group is \
+                "description": "How long the command may run before its whole session \
+                                (every process it started) is \
                                 killed. Clamped to the configured maximum. Ignored for \
                                 `background: true` unless given, in which case the job is \
                                 killed like `job_kill` and settles as timed out. For a \
@@ -157,7 +160,7 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
              output is \
              capped: past the budget the start and the end are kept and the middle is \
              replaced by a marker naming the discarded bytes (the end is always kept, \
-             because that is where a failing command's error is). The process group is \
+             because that is where a failing command's error is). The whole session is \
              killed on timeout or cancellation. The timeout is clamped to the configured \
              maximum (600 s by default); for a command that needs longer use `background: \
              true`, which has no default timeout. A foreground command still running after the \
@@ -788,9 +791,9 @@ impl Default for Outcome {
 }
 
 /// A child in its own process group. The supervisor thread waits for the leader to exit
-/// *without* reaping it, kills the whole group while the leader is still a zombie (so the
-/// group id cannot have been reused), then reaps and drains. [`Supervised::kill_tree`] takes
-/// the same lock, so a timeout or cancellation can only signal a group that is still
+/// *without* reaping it, kills its whole session while the leader is still a zombie (so the
+/// session id cannot have been reused), then reaps and drains. [`Supervised::kill_tree`] takes
+/// the same lock, so a timeout or cancellation can only signal a session that is still
 /// reserved.
 ///
 /// A foreground command adopted by the job registry (ADR 0037) keeps this same
@@ -923,7 +926,7 @@ impl Supervised {
         self.done.changed().await.is_ok()
     }
 
-    /// Kills the group unless the leader has already been reaped.
+    /// Kills the whole session unless the leader has already been reaped.
     fn kill_tree(&self) {
         let guard = lock(&self.reaped);
         if !*guard {
@@ -1039,11 +1042,136 @@ pub(crate) fn signal_group(pid: u32, signal: i32) {
     }
 }
 
-/// Sends SIGKILL to process group `pid`. Unix only in practice; other platforms have no
-/// verified backend for the enforced modes.
+/// Sends `signal` to **every process in session `sid`**: the process group `sid` first (one
+/// syscall, and it also reaches a member that appears after the enumeration), then every process
+/// the enumeration finds in that session.
+///
+/// A child that calls `setpgid` leaves the process group but **keeps the session** — GNU
+/// `timeout` does exactly that, and so does a shell's own job control — so a group-only signal
+/// leaves it running, reparented to pid 1 (dogfood bug 2026-10-17: `timeout -k 30 2400 cargo
+/// test` outlived the kill of the job's group). A child that calls `setsid` itself leaves the
+/// session as well; no session-scoped signal can reach it, and that is out of scope.
+///
+/// The caller holds the leader's `reaped` flag (see [`crate::jobs`]): while the leader is
+/// unreaped its pid stays reserved, and a session id is only ever created from its own leader's
+/// pid, so every process found here is the job's. A member that exits between the enumeration and
+/// its `kill` can only turn that `kill` into a no-op; the window is a few microseconds and is the
+/// same one `killpg` has.
+pub(crate) fn signal_session(sid: u32, signal: i32) {
+    #[cfg(unix)]
+    {
+        signal_group(sid, signal);
+        for pid in session_members(sid) {
+            // The leader is in group `sid` and was signalled above.
+            if pid == sid {
+                continue;
+            }
+            if let Ok(pid) = libc::pid_t::try_from(pid) {
+                // SAFETY: `kill` takes plain integers and has no memory-safety preconditions.
+                unsafe {
+                    libc::kill(pid, signal);
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (sid, signal);
+    }
+}
+
+/// Every process whose session id is `sid`. macOS asks libproc and `getsid(2)`; Linux reads
+/// `/proc/<pid>/stat`; a platform with no enumeration returns nothing, and [`signal_session`]'s
+/// group signal is then all there is.
+#[cfg(target_os = "macos")]
+fn session_members(sid: u32) -> Vec<u32> {
+    use std::mem::size_of;
+    let mut out = Vec::new();
+    // `proc_listallpids(NULL, 0)` returns the buffer size in bytes; with a buffer it returns the
+    // number of pids it wrote into it (measured on macOS 27).
+    // SAFETY: the size query writes nothing; the fill call is handed the buffer and its length.
+    let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if needed <= 0 {
+        return out;
+    }
+    let mut pids = vec![0 as libc::c_int; needed as usize / size_of::<libc::c_int>() + 64];
+    let written = unsafe {
+        libc::proc_listallpids(
+            pids.as_mut_ptr().cast(),
+            (pids.len() * size_of::<libc::c_int>()) as libc::c_int,
+        )
+    };
+    if written <= 0 {
+        return out;
+    }
+    // `written` is a pid count; clamping keeps the slice in bounds even if an SDK counted
+    // something else, and a zero entry is skipped either way.
+    for &pid in &pids[..(written as usize).min(pids.len())] {
+        if pid > 0 && process_session(pid as u32) == Some(sid) {
+            out.push(pid as u32);
+        }
+    }
+    out
+}
+
+/// `getsid(2)`: the session a live process is in, or `None` if it is gone. Measured on macOS 27:
+/// it answers for a process in **another** session, with no privilege (BSD does not enforce
+/// POSIX's `EPERM` for a different session).
+#[cfg(target_os = "macos")]
+fn process_session(pid: u32) -> Option<u32> {
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    // SAFETY: `getsid` takes a pid and has no memory-safety preconditions.
+    let sid = unsafe { libc::getsid(pid) };
+    (sid >= 0).then_some(sid as u32)
+}
+
+/// Every process whose session id is `sid`, from `/proc`. Unverified here: Linux cannot be run on
+/// this machine (the code only has to keep compiling for it).
+#[cfg(target_os = "linux")]
+fn session_members(sid: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if session_of_stat(pid) == Some(sid) {
+            out.push(pid);
+        }
+    }
+    out
+}
+
+/// Field 6 of `/proc/<pid>/stat`, the session. `comm` (field 2) may hold spaces and parentheses,
+/// so everything up to the **last** `)` is skipped; after it the fields are
+/// `state ppid pgrp session`.
+#[cfg(target_os = "linux")]
+fn session_of_stat(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(3)?
+        .parse()
+        .ok()
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn session_members(_sid: u32) -> Vec<u32> {
+    Vec::new()
+}
+
+/// Sends SIGKILL to every process of session `pid`. Unix only in practice; other platforms have
+/// no verified backend for the enforced modes.
 fn kill_group(pid: u32) {
     #[cfg(unix)]
-    signal_group(pid, libc::SIGKILL);
+    signal_session(pid, libc::SIGKILL);
     #[cfg(not(unix))]
     let _ = pid;
 }
@@ -1079,13 +1207,13 @@ fn report(
     }
     if outcome.timed_out {
         text.push_str(&format!(
-            "[timed out after {timeout:?}; the process group was killed. For a command that \
+            "[timed out after {timeout:?}; the whole session was killed. For a command that \
              needs longer, use `background: true` (no default timeout) and `job_output` with \
              `wait: true`.\n"
         ));
     }
     if outcome.cancelled {
-        text.push_str("[cancelled; the process group was killed]\n");
+        text.push_str("[cancelled; the whole session was killed]\n");
     }
     if outcome.slots_full {
         text.push_str(
