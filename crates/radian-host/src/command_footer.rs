@@ -332,16 +332,6 @@ impl CommandContributor {
         }
     }
 
-    /// The item id this contributor provides.
-    pub fn item_id(&self) -> &str {
-        &self.id
-    }
-
-    /// Whether this contributor runs once at startup (`period = 0`).
-    pub fn is_once(&self) -> bool {
-        self.period.is_none()
-    }
-
     /// Runs the command once and returns its parsed first line. Every failure is a generic,
     /// redacted message: the command's output, stderr and stdin never travel in it.
     async fn run(&self, stdin_json: String) -> Result<CommandOutput, String> {
