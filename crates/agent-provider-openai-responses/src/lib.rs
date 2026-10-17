@@ -2,7 +2,11 @@
 //! streaming.
 //!
 //! This is the protocol ChatGPT-subscription (Codex) turns use
-//! (`https://chatgpt.com/backend-api/codex/responses`), not Chat Completions. The adapter knows
+//! (`https://chatgpt.com/backend-api/codex/responses`), not Chat Completions. Since ADR 0026
+//! revision 2 it is also the protocol of a **built-in descriptor's** `@ai-sdk/openai` model
+//! (e.g. `opencode-go`'s `muse-spark-1.3-contributor`), where the caller passes a plain
+//! `Authorization: Bearer <key>` and none of the Codex-only headers (decision 4; the field-by-
+//! field comparison is `docs/providers/openai-responses-wire-notes.md` §8). The adapter knows
 //! nothing about OAuth: the caller supplies the whole header set (`Authorization`,
 //! `chatgpt-account-id`, `OpenAI-Beta`, `originator`) as configuration, so the login/token
 //! machinery stays in the host (ADR 0026).

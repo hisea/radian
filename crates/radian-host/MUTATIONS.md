@@ -1237,3 +1237,40 @@ Commands: `timeout 400 cargo test -p radian-host --locked --no-fail-fast --test 
 | TS-1 | the cancel path sends SIGKILL straight away (the graceful step is skipped) | ✅ 3 failed | `radian_host::subagent_stop::cancelling_the_call_stops_what_the_child_started` (the escaped grandchild was still alive after 10 s); `agent-cli::subagent::a_cancelled_parent_turn_stops_the_command_the_childs_shell_started` and `..._stops_the_childs_background_job` (both timed out waiting for the pid to go) |
 | TS-2 | the drop guard sends SIGKILL straight away | ✅ 1 failed | `radian_host::subagent_stop::dropping_the_call_stops_what_the_child_started` (the escaped grandchild was still alive). `radian_host::subagent_drop::dropping_the_call_leaves_no_grandchild_alive` still passes: it pins the fallback. |
 | TS-3 | `radian exec` installs no SIGTERM listener (the kernel's default action kills the child at once; this mutation lives in `crates/agent-cli/src/events.rs`, see that crate's MUTATIONS.md) | ✅ 2 failed | both `agent-cli` tests above (the command and the job outlived the cancelled turn). The two `subagent_stop` tests still pass: their stub handles SIGTERM itself. |
+## ADR 0026: protocol from the models.dev `npm`, hard-coded per-protocol base URLs, the bundled snapshot, Responses with an API key (2026-10-17)
+
+Each mutation was applied in place under `src/`, the catching test binary was run alone with
+`--no-fail-fast`, and the source was restored from a `cp` in `/tmp/mut/` and confirmed with `cmp`.
+
+| # | Mutation | Result | Test(s) that caught it |
+|---|---|---|---|
+| R2-1 | `ProviderRef::resolve_protocol` ignores the catalog (always `Ok(descriptor.protocol_for(model))`) | ✅ 4 failed | `provider::tests::the_catalog_npm_decides_the_protocol_and_an_unknown_one_is_refused`, `provider::tests::the_bundled_snapshot_decides_the_protocol_with_no_cache`, `provider::tests::the_catalogs_api_field_is_never_used_for_the_endpoint`, `responses_api_key_route::a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_route` |
+| R2-2 | the catalog's `api` field is parsed again and used as the endpoint (`resolve_route_for`) | ✅ 1 failed | `provider::tests::the_catalogs_api_field_is_never_used_for_the_endpoint` |
+| R2-3 | the bundled snapshot level is dropped from `load`/`resolve_offline` (no cache → nothing) | ✅ 4 failed | `catalog::no_cache_and_a_failed_fetch_uses_the_bundled_snapshot`, `catalog::offline_never_fetches`, `chatgpt_window::an_offline_switch_to_a_chatgpt_model_resolves_the_table`, `chatgpt_window::a_descriptor_without_numbers_is_answered_by_the_catalog_not_the_table` |
+| R2-4 | `build_model` ignores `chatgpt_oauth` and always builds the ChatGPT OAuth model (reuses its header builder) | ✅ 3 failed | `responses_api_key::an_api_key_responses_route_sends_the_bearer_and_no_codex_headers`, `responses_api_key::a_text_turn_and_a_tool_turn_run_over_the_api_key_responses_route`, `responses_api_key_route::a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_route` |
+| R2-5 | `Catalog::npm` drops the provider-level fallback (entry-level only) | ✅ 2 failed | `catalog::tests::the_npm_is_the_entrys_value_then_the_providers`, `catalog::tests::the_bundled_snapshot_parses_with_its_date` |
+| R2-6 | `Protocol::from_npm` maps an unknown `npm` to chat instead of refusing | ✅ 3 failed | `provider::tests::the_catalog_npm_decides_the_protocol_and_an_unknown_one_is_refused`, `provider::tests::the_bundled_snapshot_decides_the_protocol_with_no_cache`, `responses_api_key_route::a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_route` |
+| R2-7 | the `protocol from models.dev` notice never fires | ✅ 1 failed | `provider::tests::the_catalog_overruling_the_table_is_noticed` |
+| R2-8 | a resynced table row drifts (`grok-4.7` back to `go_openai`) | ✅ 2 failed | `opencode_go_models::the_opencode_go_builtins_match_upstream`, `provider::tests::opencode_go_maps_models_to_the_three_protocols` |
+| R2-9 | the `openai` table drifts from the snapshot (its models back to chat) | ✅ 2 failed | `provider::tests::the_built_in_table_agrees_with_the_bundled_snapshot`, `provider::tests::the_built_ins_are_registered` |
+
+Commands: `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast <name>`;
+`timeout 300 cargo test -p radian-host --locked --test <file>`. 9/9 caught.
+## the `-m provider/model` hint (`startup::provider_in_model_hint`)
+
+The form is `--provider <p> --model <m>`; a `-m`/`--model` value that looks like `<known
+provider>/<rest>` with no `--provider` gets one startup hint and nothing else. Mutations were
+applied in place, each restored from a `cp` in `.radian/scratch/mut/` and confirmed byte-identical
+with `cmp`; MP-2 also rebuilds the spawned binary (`cargo build -p radian-tui --bin radian`)
+because `common::radian_bin()` refuses a stale one.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| MP-1 | the known-provider check is gone (every `a/b` warns) | ✅ 1 failed (`left: Some("…--provider some-org --model foo?")`, `right: None`) | `startup::tests::the_model_hint_fires_only_for_a_known_provider_with_no_provider_flag` |
+| MP-2 | the `--provider` guard is gone (an explicit `--provider` still warns) | ✅ 1 failed (`left: Some("…--provider anthropic --model claude-x?")`, `right: None`) | the same unit test; and `agent-cli::exec::the_model_provider_hint_fires_once_without_a_provider_flag` (`err.contains("did you mean")` where none is allowed) |
+
+Commands: `timeout 570 cargo test -p radian-host --lib --locked --no-fail-fast the_model_hint`
+(both); `timeout 570 cargo test -p agent-cli --test exec --locked --no-fail-fast
+the_model_provider_hint` (MP-2). MP-1 is caught only by the unit test: the CLI test's cases use
+`opencode-go/x` and `anthropic/claude-x`, both real descriptors, so warning on every slash would
+not change its answer.

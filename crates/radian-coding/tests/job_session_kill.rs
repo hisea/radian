@@ -307,20 +307,27 @@ async fn escaping_pids(root: &Path) -> (i32, i32) {
     (leader, child)
 }
 
+/// Tools whose foreground calls are adopted once they run past `threshold` (ADR 0037
+/// revision 1). An adopted job's explicit `timeout_secs` is the only deadline left after
+/// revision 2, so this is how the timeout stop path is reached.
+fn adopting_tools(ws: &Path, threshold: Duration) -> CodingTools {
+    transparent_tools(ws).with_limits(Limits {
+        auto_background_after: Some(threshold),
+        ..Limits::default()
+    })
+}
+
 /// Starts [`child_leaves_the_group`] as a background job and returns
 /// `(job_id, leader pid, child pid, guard)`.
-async fn start_background(
-    session: &CodingSession,
-    root: &Path,
-    timeout_secs: Option<u64>,
-) -> (String, i32, i32, Leftovers) {
-    let mut args = json!({"command": child_leaves_the_group(), "background": true});
-    if let Some(secs) = timeout_secs {
-        args["timeout_secs"] = json!(secs);
-    }
-    let output = exec(session, "shell", args, CancellationToken::new())
-        .await
-        .expect("start the job");
+async fn start_background(session: &CodingSession, root: &Path) -> (String, i32, i32, Leftovers) {
+    let output = exec(
+        session,
+        "shell",
+        json!({"command": child_leaves_the_group(), "background": true}),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("start the job");
     let value = structured(&output);
     assert_eq!(value["background"], json!(true), "{value}");
     let id = value["job_id"].as_str().expect("a job id").to_owned();
@@ -355,7 +362,7 @@ async fn job_kill_reaches_a_child_that_left_the_process_group() {
     let tools = transparent_tools(&root);
     let session = tools.open_session().await.expect("session");
 
-    let (id, leader, child, _guard) = start_background(&session, &root, None).await;
+    let (id, leader, child, _guard) = start_background(&session, &root).await;
     assert!(
         alive(child),
         "the child (pid {child}) must be running before the kill"
@@ -382,18 +389,35 @@ async fn job_kill_reaches_a_child_that_left_the_process_group() {
     );
 }
 
-// ---------- 2. a background timeout ----------
+// ---------- 2. a job's own timeout (the adopted foreground deadline) ----------
 
-/// The job's own `timeout_secs` must kill the whole session the same way.
+/// The job's own deadline must kill the whole session the same way. ADR 0037 removed
+/// the explicit-background `timeout_secs`, so the only deadline left is the one an adopted
+/// foreground call carries (revision 1 decision 3); this drives that path and pins that it
+/// reaches the escaped child.
 #[tokio::test]
-async fn a_background_timeout_reaches_a_child_that_left_the_process_group() {
+async fn an_adopted_timeout_reaches_a_child_that_left_the_process_group() {
     let dir = TempDir::new("session-kill-timeout");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
-    let tools = transparent_tools(&root);
+    // Adopt at 500 ms, deadline at 3 s: the call returns as a job, and the job is killed at the
+    // original deadline.
+    let tools = adopting_tools(&root, Duration::from_millis(500));
     let session = tools.open_session().await.expect("session");
 
-    let (id, leader, child, _guard) = start_background(&session, &root, Some(3)).await;
+    let call = exec(
+        &session,
+        "shell",
+        json!({"command": child_leaves_the_group(), "timeout_secs": 3}),
+        CancellationToken::new(),
+    );
+    let pids = escaping_pids(&root);
+    let (result, (leader, child)) = tokio::join!(call, pids);
+    let guard = Leftovers(vec![leader, child]);
+    let output = result.expect("the call returns");
+    let value = structured(&output);
+    assert_eq!(value["adopted"], json!(true), "{value}");
+    let id = value["job_id"].as_str().expect("a job id").to_owned();
 
     let text = settle(&session, &id).await;
     assert!(text.contains("[status: timed out]"), "{text}");
@@ -405,6 +429,7 @@ async fn a_background_timeout_reaches_a_child_that_left_the_process_group() {
         session_empties(leader, Duration::from_secs(10)).await,
         "session {leader} still has members after the timeout"
     );
+    drop(guard);
 }
 
 // ---------- 3. session end ----------
@@ -418,7 +443,7 @@ async fn a_session_end_cleanup_reaches_a_child_that_left_the_process_group() {
     let tools = transparent_tools(&root);
     let session = tools.open_session().await.expect("session");
 
-    let (_id, leader, child, _guard) = start_background(&session, &root, None).await;
+    let (_id, leader, child, _guard) = start_background(&session, &root).await;
 
     session.shutdown_jobs();
     assert!(

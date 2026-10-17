@@ -78,12 +78,13 @@ pub fn hostname() -> Option<String> {
 }
 
 pub use catalog::{
-    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, ModelPrice,
-    OUTPUT_RESERVATION_CAP, PriceRates, PriceTier, ProviderInfo, ProviderModels, Window,
-    WindowCheck, WindowQuery, WindowSource, cache_path, check_context_window_flag,
-    fetch_provider_models, host_of, input_budget, output_ceiling_warning, output_reservation,
-    provider_for_host, provider_models_cache, provider_models_stale, read_provider_models, resolve,
-    resolve_offline, write_provider_models,
+    CACHE_TTL, CATALOG_SNAPSHOT, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit,
+    ModelPrice, OUTPUT_RESERVATION_CAP, PriceRates, PriceTier, ProviderInfo, ProviderModels,
+    SNAPSHOT_DATE, Window, WindowCheck, WindowQuery, WindowSource, bundled_catalog, cache_path,
+    check_context_window_flag, fetch_provider_models, host_of, input_budget,
+    output_ceiling_warning, output_reservation, protocol_catalog, provider_for_host,
+    provider_models_cache, provider_models_stale, read_provider_models, resolve, resolve_offline,
+    write_provider_models,
 };
 pub use chatgpt_usage::{
     ChatGptUsage, USAGE_BASE as CHATGPT_USAGE_BASE, USAGE_URL as CHATGPT_USAGE_URL,
@@ -161,12 +162,13 @@ pub use provider::{
     CHATGPT_DEVICE_LOGIN, CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel,
     EndpointUsage, GENERIC_ID, LoginMethod, NamedProvider, NamedSource, Protocol, ProviderDecl,
     ProviderDescriptor, ProviderRef, RADIAN_KIND, ReasoningReplayOverride, Route, THINKING_LEVELS,
-    ThinkingMap, UsageSource, clamp_thinking, clamp_thinking_with, descriptor, descriptors,
-    has_usage_source, level_fits, login_choices, name_error, parse_thinking_level,
+    ThinkingMap, UsageSource, clamp_thinking, clamp_thinking_with, descriptor, descriptor_base_url,
+    descriptors, has_usage_source, level_fits, login_choices, name_error, parse_thinking_level,
     resolve_provider, resolve_route, resolve_route_for, supported_thinking_levels,
     supported_thinking_levels_ref, supported_thinking_levels_ref_with,
     supported_thinking_levels_with, supported_wire, thinking_map_for, thinking_map_for_ref,
-    thinking_rank, usage_endpoint, usage_item_alias, valid_name, wire_budget,
+    thinking_rank, unsupported_api_message, usage_endpoint, usage_item_alias, valid_name,
+    wire_budget,
 };
 pub use radian_runtime::ModelRoute;
 pub use secrets::{register as register_secret, registered as registered_secrets};
@@ -187,8 +189,8 @@ pub use skills::{
     prompt_section,
 };
 pub use startup::{
-    LeadSetup, ListError, SessionSettings, is_local_base_url, list_sessions, session_dir,
-    session_workspace,
+    LeadSetup, ListError, SessionSettings, is_local_base_url, list_sessions,
+    provider_in_model_hint, session_dir, session_workspace,
 };
 pub use subagent::{MAX_CONCLUSION_CHARS, SubagentParts, SubagentSession, SubagentTools};
 pub use tools::{HostSession, HostTools, merge_tool_specs};

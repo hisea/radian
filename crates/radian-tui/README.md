@@ -488,7 +488,9 @@ with `[tui.colors]`.
 - `keybindings` maps an **action** to one or more key strings; a listed action's keys
   **replace** its defaults. Key strings are `[ctrl-][alt-][shift-]key` (`enter`, `ctrl-j`,
   `alt-enter`, `shift-up`, `pageup`, `space`, a single character, …). An unknown action or key
-  is ignored with a warning; **one key bound to two actions of the same context refuses
+  is ignored with a warning; a **printable single character** bound in the main context (no
+  Ctrl/Alt) is kept but warned about, because it cannot then be typed in the input box;
+  **one key bound to two actions of the same context refuses
   startup** (the message names the key and both actions).
 - Actions: `send`, `newline`, `cursor_left`, `cursor_right`, `word_left`, `word_right`,
   `line_start`, `line_end`, `history_prev`, `history_next`, `delete_before`, `delete_under`,
@@ -1449,16 +1451,27 @@ only; the decorations are drawn but never copied.
 
 The window comes from `--context-window TOKENS` (explicit; it never fetches — an existing
 cache is read only for the `input`/`output` numbers), or from the **models.dev catalog**
-matched by `(provider, model)` (ADR 0018), or — when the catalog has no entry for the route —
-from the route's own **descriptor table** (`chatgpt`: `provider.rs`'s `CODEX_MODELS` cites its
-`contextWindow`/`maxTokens` from `@oh-my-pi/pi-catalog`; a model the table does not list stays
-unknown). The provider is `--catalog-provider`, or the resolved provider's own id, or derived
-from the `--base-url` hostname (`opencode.ai` → `opencode`, `api.anthropic.com` → `anthropic`,
-`api.openai.com` → `openai`, `api.deepseek.com` → `deepseek`, ...). The catalog is a
-read-only GET with no key, header or user data, cached under the user cache directory and
-refreshed at most once every 24 h (3 s timeout; a failure falls back to the cache);
-`--offline-catalog` never goes out. With none of them, `C` is **unknown**, there is no budget,
-and the startup notice says so.
+matched by `(provider, model)` (ADR 0018), or — with no cache and a failed fetch — from the
+**bundled snapshot** compiled into the binary (`radian_host::CATALOG_SNAPSHOT`, the
+models.dev data of `SNAPSHOT_DATE`; the startup notice says `from bundled snapshot (2026-10-17)`),
+or — when neither carries the route — from the route's own **descriptor table** (`chatgpt`:
+`provider.rs`'s `CODEX_MODELS` cites its `contextWindow`/`maxTokens` from `@oh-my-pi/pi-catalog`;
+a model the table does not list stays unknown). The provider is `--catalog-provider`, or the
+resolved provider's own id, or derived from the `--base-url` hostname (`opencode.ai` →
+`opencode`, `api.anthropic.com` → `anthropic`, `api.openai.com` → `openai`, `api.deepseek.com` →
+`deepseek`, ...). The catalog is a read-only GET with no key, header or user data, cached under
+the user cache directory and refreshed at most once every 24 h (3 s timeout; a failure falls
+back to the cache, then to the snapshot); `--offline-catalog` never goes out, and uses the cache
+or the snapshot. With none of them, `C` is **unknown**, there is no budget, and the startup
+notice says so.
+
+The same catalog entry's `provider.npm` decides a built-in descriptor's **wire protocol** (ADR
+0026 revision 2): `@ai-sdk/openai-compatible` → Chat Completions, `@ai-sdk/anthropic` →
+Messages, `@ai-sdk/openai` → Responses; an `npm` radian has no adapter for is refused
+(`radian does not support this model's API (<npm>)`), never sent as chat. The **endpoint** is not
+from the catalog — it is hard-coded per (descriptor, protocol), so a catalog data change cannot
+redirect a key. When the catalog overrules the built-in table, the startup line says `protocol
+from models.dev` once.
 
 The effective input budget is **`B = min(I, C − R)`**, with **`R = max(min(16384, ⌊C/4⌋), the
 request's max output)`** (ADR 0018: a quarter of the window, capped at 16384, raised

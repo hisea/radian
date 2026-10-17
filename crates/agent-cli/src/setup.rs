@@ -113,6 +113,16 @@ pub(crate) async fn setup(
                 SetupError("no model: pass --model, or set model.model in the config file".into())
             })?,
     };
+    // `--model` takes a bare model name; the form is `--provider <p> --model
+    // <m>`. A value that looks like a known provider's `<provider>/<model>` with no `--provider`
+    // gets one hint on stderr (never a refusal, never a change in meaning).
+    if let Some(hint) = radian_host::provider_in_model_hint(
+        cli.model.as_deref(),
+        cli.provider.as_deref(),
+        &config.providers,
+    ) {
+        eprintln!("{hint}");
+    }
     // ADR 0026 D9: `--approval`/`--yes` are the command line's choice; the config and the
     // journal's last in-session switch fill in when it is silent. `full` ignores a config
     // `auto` (with a warning) and never restores one. The TUI runs the same resolution in
@@ -161,7 +171,15 @@ pub(crate) async fn setup(
         eprintln!("[provider] {warning}");
     }
     let key_id = provider_ref.key_id().to_owned();
-    let provider = provider_ref.protocol_for(&model_name).adapter();
+    // ADR 0026: a built-in descriptor's model takes its wire protocol
+    // from the catalog (the local cache, else the bundled snapshot); a model the catalog does
+    // not carry uses the descriptor table. An unsupported `npm` is a startup refusal.
+    let catalog = radian_host::protocol_catalog();
+    let protocol = provider_ref
+        .resolve_protocol(Some(&catalog), &model_name)
+        .map_err(SetupError)?;
+    let provider = protocol.adapter();
+    let chatgpt_oauth = provider_name == radian_host::CHATGPT_PROVIDER_ID;
     let base_url_override = cli
         .base_url
         .clone()
@@ -193,12 +211,12 @@ pub(crate) async fn setup(
     // `None`), so the two readings cannot be confused.
     radian_host::check_context_window_flag(cli.context_window).map_err(SetupError)?;
     // The endpoint this run would talk to, before the session id (for the local-endpoint check).
-    let probe_base_url = if provider_ref.takes_base_url_override() {
-        base_url_override.clone()
-    } else {
-        None
-    }
-    .unwrap_or_else(|| provider_ref.base_url_for(&model_name, None));
+    let probe_base_url = match base_url_override.clone() {
+        Some(url) if provider_ref.takes_base_url_override() => url,
+        _ => provider_ref
+            .endpoint_for(protocol, None)
+            .map_err(SetupError)?,
+    };
     // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a refusal unless the
     // endpoint is local (a local server needs no key).
     let credential = radian_host::resolve_key(&key_id).map_err(|e| SetupError(e.to_string()))?;
@@ -341,8 +359,13 @@ pub(crate) async fn setup(
             .map(String::as_str),
         &headers,
         &session_id,
+        Some(&catalog),
     )
     .map_err(SetupError)?;
+    // ADR 0026: the catalog overruled the built-in table's protocol.
+    if let Some(notice) = &route.protocol_notice {
+        eprintln!("[provider] {notice}");
+    }
     // The catalog matches on the hostname of the endpoint the model actually talks to (ADR 0018).
     let catalog_base_url = route.base_url.clone();
     let (thinking_of, reasoning_effort) = radian_host::resolve_thinking_ref(
@@ -382,6 +405,7 @@ pub(crate) async fn setup(
         thinking: thinking_of,
         reasoning_effort: reasoning_effort.clone(),
         reasoning_replay: reasoning_replay.clone(),
+        chatgpt_oauth,
     })
     .map_err(SetupError)?;
     // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can

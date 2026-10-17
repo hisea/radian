@@ -7,6 +7,7 @@
 //! host-specific input arrives as a plain value (a path, a string), never as a host's struct, and
 //! every failure comes back as a plain message the host maps into its own error.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,12 +24,44 @@ use crate::describe::Wording;
 use crate::memory::InjectionConfig;
 use crate::model::SwitchableModel;
 use crate::output::{StdoutError, write_line};
-use crate::provider::ProviderRef;
+use crate::provider::{ProviderDecl, ProviderRef};
 use crate::session::{AccessBuilder, SessionCapability, SessionId, SessionSetup};
 use crate::sessions;
 use crate::subagent::SubagentParts;
 use crate::trust;
 use crate::workspace::resolve_workspace;
+
+/// A startup hint for a `-m/--model` value that looks like `<provider>/<model>` while no
+/// `--provider` was given.
+///
+/// The form is `--provider <p> --model <m>`: a model is a bare name, and its own id may contain
+/// a slash (OpenRouter's `anthropic/claude-x`). When the part before the first `/` is a **known
+/// provider** — a built-in descriptor (`opencode-go`, `chatgpt`, `anthropic`, …) or a configured
+/// `[providers.<name>]` — and no `--provider` was given, this is one line suggesting the two-flag
+/// form. It is a hint only: nothing is refused and nothing changes meaning. `None` when there is
+/// no slash, the prefix is not a known provider, or `--provider` was given.
+///
+/// An explicit `--provider` suppresses the hint even for a known prefix, because that is the
+/// supported spelling of a real `provider/model` id.
+pub fn provider_in_model_hint(
+    model: Option<&str>,
+    provider_flag: Option<&str>,
+    providers: &BTreeMap<String, ProviderDecl>,
+) -> Option<String> {
+    if provider_flag.is_some() {
+        return None;
+    }
+    let (prefix, rest) = model?.split_once('/')?;
+    if prefix.is_empty() || rest.is_empty() {
+        return None;
+    }
+    if crate::provider::descriptor(prefix).is_none() && !providers.contains_key(prefix) {
+        return None;
+    }
+    Some(format!(
+        "-m takes a bare model name; did you mean --provider {prefix} --model {rest}?"
+    ))
+}
 
 /// Where session files live: an explicit `--session-dir` wins, then `RADIAN_SESSION_DIR`, then
 /// the user's data directory (ADR 0020: `~/.radian/sessions`, or `$RADIAN_HOME/sessions`).
@@ -500,5 +533,56 @@ mod tests {
         // host matches.
         assert!(!is_local_base_url("http://localhost:/x"));
         assert!(!is_local_base_url("http://127.0.0.1:notaport"));
+    }
+
+    /// The `-m provider/model` hint: a **known** provider prefix with no
+    /// `--provider` gets one line; a bare name, an unknown prefix and an explicit `--provider`
+    /// get none.
+    #[test]
+    fn the_model_hint_fires_only_for_a_known_provider_with_no_provider_flag() {
+        let configured: BTreeMap<String, ProviderDecl> = [(
+            "corp".to_owned(),
+            ProviderDecl {
+                kind: "openai-compatible".to_owned(),
+                base_url: "https://corp.example/v1".to_owned(),
+                reasoning_replay: None,
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        // A built-in descriptor prefix naming the other flags' form: one hint.
+        assert_eq!(
+            provider_in_model_hint(Some("opencode-go/x"), None, &configured).as_deref(),
+            Some("-m takes a bare model name; did you mean --provider opencode-go --model x?")
+        );
+        // A configured named provider counts as known too.
+        assert_eq!(
+            provider_in_model_hint(Some("corp/gpt"), None, &configured).as_deref(),
+            Some("-m takes a bare model name; did you mean --provider corp --model gpt?")
+        );
+        // A real `provider/model` id with an explicit `--provider` is the supported form: none.
+        assert_eq!(
+            provider_in_model_hint(Some("anthropic/claude-x"), Some("openrouter"), &configured),
+            None
+        );
+        // A bare model name: no slash, no hint.
+        assert_eq!(
+            provider_in_model_hint(Some("gpt-5"), None, &configured),
+            None
+        );
+        // A slash whose prefix is neither a descriptor nor configured is a model id, not a
+        // provider: none.
+        assert_eq!(
+            provider_in_model_hint(Some("some-org/foo"), None, &configured),
+            None
+        );
+        // Degenerate values never fire.
+        assert_eq!(provider_in_model_hint(Some("/x"), None, &configured), None);
+        assert_eq!(
+            provider_in_model_hint(Some("opencode-go/"), None, &configured),
+            None
+        );
+        assert_eq!(provider_in_model_hint(None, None, &configured), None);
     }
 }
