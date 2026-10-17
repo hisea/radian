@@ -1469,3 +1469,36 @@ worktree 只 checkout `radian/integration`，且 `integrate_task` 只在它上�
 | MUT10-11 | `with_lead_name` 忽略名字 | ✅ failed | `a_named_lead_uses_a_per_lead_integration_branch`（分支/目录名不是 `radian/integration-dev`） |
 
 11/11（含上表 9 条）全部抓住。
+
+## ADR 0027 slice ① task 2: the out-of-process footer `command` component (2026-10-16)
+
+Worktree `footer-command-component` (base `radian/integration` `d647750`). In-place mutations
+driven by `.radian/scratch/mut/mutate.py` (not committed): each file was backed up under
+`.radian/scratch/mut/backup/`, the anchor asserted present **exactly once** (a `cargo fmt` shift
+or a no-op patch is a hard `PATCH FAILED`), the named test run with
+`cargo test -p radian-host --locked --no-fail-fast <target> <name>`, then the file restored with
+`shutil.copyfile` + `os.utime` (so cargo rebuilds) and compared byte-for-byte; `git diff` on the
+source files is empty after the run.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| H1 | only the first stdout line is kept | `first_output_line` no longer cuts at `\n` | `command_footer::the_first_line_is_taken_and_truncated_to_256_bytes` FAILED (`first\nsecond` kept whole) |
+| H2 | the value is hard-capped at 256 bytes | the size check in `first_output_line` becomes `line.len()` | same test FAILED (400 bytes kept) |
+| H3 | `period = 0` is once-only and other values clamp to 15–3600 | `period_from_secs` returns `Some(Duration::from_secs(secs))` | lib `command_footer::tests::the_period_is_clamped_and_zero_means_once` FAILED |
+| H4 | the whole run is bounded by a 5 s timeout | the `tokio::time::timeout(COMMAND_TIMEOUT, run)` wrapper is removed | `command_footer::a_timeout_keeps_the_last_value_and_marks_it_stale` FAILED (the 30 s command runs to completion; the elapsed bound fires) |
+| H5 | a non-zero exit is a failure (last value kept, stale) | the `!status.success()` check becomes `if false` | `command_footer::a_nonzero_exit_keeps_the_last_value_and_marks_it_stale` FAILED (the failing output is published as fresh) |
+| H6 | the child's environment is cleared | `.env_clear()` removed | `command_footer::the_environment_is_cleared_to_the_deliberate_allow_list` FAILED (host variables reached the child) |
+| H7 | the deliberate allow-list exports `RADIAN_SESSION_ID` | that `command.env(...)` line removed | same test FAILED |
+| H8 | a JSON `style` selects the text's theme role | `parse_output` ignores the name (`SegmentRole::Normal`) | `command_footer::json_output_sets_the_role_and_symbol` (and the lib unit test) FAILED |
+| H9 | invalid JSON is a failure, not plain text | `if !line.starts_with('{')` becomes `if true` | `command_footer::invalid_json_and_unknown_styles_keep_the_last_value` FAILED (`{not json}` published as text) |
+| H10 | a project-level `command` is refused | `command_specs`'s `origin == Project` check becomes `if false` | `config_fixtures::the_command_fixture_carries_command_and_period` FAILED (the project config yielded specs) |
+| H11 | the stdin JSON carries every documented fact | `context_percent` is written as `null` | `command_footer::the_stdin_is_the_documented_json_context` FAILED |
+| H12 | the output never reaches a journal | a `std::fs::write("/tmp/radian-footer-journal", &buffer)` added in `run` | `command_footer::the_command_runner_has_no_journal_or_herdr_path` FAILED (`command_footer.rs` reached `std::fs`/journal) |
+| H13 | the command line is split with no shell | whitespace no longer separates words (the join branch is a no-op) | lib `command_footer::tests::command_lines_split_without_a_shell` FAILED (`printf hi` became one argv word) |
+
+13/13 caught; every mutated file compared byte-identical after its mutation.
+
+**Old-code check.** The runner module and its tests are new, so on the pre-change tree the
+command tests do not compile (no `command_footer` module). The behaviours they pin are the
+mutants above; H5/H12 are the two the brief names (a failure keeps the last value; the output
+must never reach a journal).

@@ -2035,3 +2035,24 @@ file per registry id, so a new built-in cannot be registered without its file.
 `git_branch`/`worktree`/`status` are ordinary registered components that read the contribution
 store in their `data` — no `CONTRIBUTION_ITEMS` special case — and an id no built-in claims
 resolves to the dynamic `StoreComponent`.
+
+### ADR 0027 slice ① task 2: the `command` component's rendering (2026-10-16)
+
+Same in-place driver as the `radian-host` entry above (`.radian/scratch/mut/mutate.py`, no
+committed script): exact-match anchor, `cargo test -p radian-tui --test footer --locked
+--no-fail-fast <name>`, restore from a byte-for-byte backup. Base `d647750`.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| T1 | a configured `command` id is a **known** item (no "unknown item" warning; hides until its value) | `is_command_item` always returns `false` (the pre-change dispatch, which marks a user-written id unknown and shows it raw) | `a_command_item_appears_where_its_id_is_placed` FAILED (the unknown-id warning appeared and the raw id was drawn) |
+| T2 | a JSON `symbol` is rendered | `symbol_for` drops the `data.symbol` fallback | `a_command_json_style_and_symbol_render_and_the_symbol_style_applies` FAILED (no `!` on the row) |
+| T3 | a configured `symbol` wins over the JSON `symbol` | `symbol_for` tries `data.symbol` before `item.icon` | same test FAILED (the configured `>` was replaced by the JSON `!`) |
+| T4 | a command item's format may use `{value}` without a warning | `validate_format` no longer treats a command id specially | `a_command_item_accepts_the_value_placeholder` FAILED (`unknown placeholder {value}` warning) |
+| T5 | a configured `symbol_style` styles the symbol a JSON `symbol` produced | the symbol's style ignores `symbol_style` | `a_command_json_style_and_symbol_render_and_the_symbol_style_applies` FAILED (the `!` was not red) |
+
+5/5 caught; `crates/radian-tui/src/footer.rs` compared byte-identical after every mutation.
+
+**Old-code check (T1).** The base tree has no `is_command_item`: `resolve_item`'s unknown rule is
+`components::builtin(&id).is_none()`, so a user-written `weather` id is `unknown = true`, its row
+draws the raw id and warns — exactly what T1 reproduces, and why
+`a_command_item_appears_where_its_id_is_placed` is not vacuous.

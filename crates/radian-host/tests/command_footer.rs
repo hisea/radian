@@ -251,7 +251,15 @@ async fn a_timeout_keeps_the_last_value_and_marks_it_stale() {
     assert_eq!(store.get("thing").unwrap().segments[0].text, "hi");
 
     std::fs::remove_file(&marker).unwrap();
+    let started = std::time::Instant::now();
     let tick = runner.tick().await;
+    // The whole run (spawn, stdin, stdout, exit) is bounded by the 5 s timeout: a command that
+    // never finishes is killed well inside this bound.
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the run must be bounded by the 5 s timeout: {:?}",
+        started.elapsed()
+    );
     assert!(tick.changed, "becoming stale is a redraw");
     assert!(tick.notice.is_none(), "one failure only dims the value");
     let held = store.get("thing").unwrap();
@@ -379,6 +387,33 @@ fn the_command_runner_has_no_journal_or_herdr_path() {
         code.contains("Contribution"),
         "the value must travel through a Contribution"
     );
+}
+
+/// A program that cannot even start (a missing executable) keeps the last good value and marks
+/// it stale, through the same generic failure path as a non-zero exit.
+#[tokio::test]
+async fn a_command_that_cannot_start_keeps_the_last_value_and_marks_it_stale() {
+    let dir = scratch("spawn");
+    let script = write_script(&dir, "good.sh", "printf good");
+    let store = ContributionStore::new();
+    let mut good = ContributorRunner::new(
+        contributor("thing", &script, &dir, FooterContext::new()),
+        Arc::clone(&store),
+    );
+    good.tick().await;
+    assert_eq!(store.get("thing").unwrap().segments[0].text, "good");
+
+    let missing = dir.join("does-not-exist");
+    let mut broken = ContributorRunner::new(
+        contributor("thing", &missing, &dir, FooterContext::new()),
+        Arc::clone(&store),
+    );
+    let tick = broken.tick().await;
+    assert!(tick.changed);
+    let held = store.get("thing").unwrap();
+    assert_eq!(held.segments[0].text, "good", "the last value is kept");
+    assert!(held.stale);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A failure notice is generic and never carries the command's output.
