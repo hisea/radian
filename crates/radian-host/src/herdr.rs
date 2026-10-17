@@ -1,12 +1,28 @@
 //! Agent state reporting to herdr (ADR 0034): the environment check, the pure state function,
 //! the report JSON, the monotonic `seq`, the resume-argv rules, and the latest-only sender.
 //!
-//! The socket protocol (herdr 0.9.3, protocol 22; `docs/socket-api.mdx` v0.9.5): newline-
+//! The socket protocol (herdr 0.9.5, protocol 22; `docs/socket-api.mdx` v0.9.5): newline-
 //! delimited JSON over a Unix socket, one request per line, and the response echoes the
-//! request's `id`. We use three methods - `pane.report_agent`, `pane.report_agent_session`
-//! (unused for now: the identity rides on the first state report) and `pane.release_agent` -
-//! and never parse the response beyond "a line arrived".
+//! request's `id`. We use three methods - `pane.report_agent` (lifecycle state),
+//! `pane.report_metadata` (display-only: `display_agent`, `state_labels`, `tokens`) and
+//! `pane.release_agent` - and never parse the response beyond "a line arrived".
+//!
+//! The shape below was captured from the reference client, the `herdr` 0.9.5 CLI, with
+//! `HERDR_SOCKET_PATH` pointed at a test listener (`herdr pane report-metadata ...`, 2026-10-17):
+//!
+//! ```text
+//! {"id":"cli:request","method":"pane.report_metadata","params":{"pane_id":"w1:p1",
+//!  "source":"radian","agent":"radian","applies_to_source":"radian","display_agent":"radian",
+//!  "state_labels":{"blocked":"approval"},"tokens":{"model":"gpt-5","context":"42%"},
+//!  "clear_title":false,"clear_display_agent":false,"clear_state_labels":false,"seq":12}}
+//! ```
+//!
+//! Two details the CLI settled that the help text does not: the CLI always sends `applies_to_source`
+//! and the three `clear_*` booleans (defaults `false`), and clearing one token is a `null` value
+//! under its name (`--clear-token model` -> `"tokens":{"model":null}`) - there is no `clear_token`
+//! field. Radian sends neither the defaults nor the CLI's `session_start_source`.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -197,6 +213,83 @@ pub fn report_line(env: &HerdrEnv, report: &Report, seq: u64, id: &str) -> Strin
     line(&serde_json::json!({ "id": id, "method": "pane.report_agent", "params": params }))
 }
 
+/// The display-only metadata radian reports (ADR 0034 and 2). Every field
+/// is optional: only what changed is queued, so an empty `Metadata` is never sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Metadata {
+    /// `tokens`: the key's new value, or `None` to clear a key radian reported before. Only the
+    /// keys that changed go in here.
+    pub tokens: BTreeMap<String, Option<String>>,
+    /// `state_labels`: the label of a state, e.g. `{"blocked": "approval"}`.
+    pub state_labels: BTreeMap<String, String>,
+    /// `display_agent`: sent once, at startup.
+    pub display_agent: Option<String>,
+}
+
+impl Metadata {
+    /// Whether this carries nothing to report.
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty() && self.state_labels.is_empty() && self.display_agent.is_none()
+    }
+}
+
+/// Which of the current token values differ from what herdr was last told (ADR revision 1
+/// decision 1: "only the keys that changed"). A key that is unknown now but was reported before is
+/// cleared (`Some(None)`); a key that is unknown and was never reported is left out entirely.
+pub fn token_diff(
+    last: &BTreeMap<String, String>,
+    now: &BTreeMap<String, Option<String>>,
+) -> BTreeMap<String, Option<String>> {
+    let mut changed = BTreeMap::new();
+    for (name, value) in now {
+        match value {
+            Some(value) if last.get(name) != Some(value) => {
+                changed.insert(name.clone(), Some(value.clone()));
+            }
+            None if last.contains_key(name) => {
+                changed.insert(name.clone(), None);
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
+/// The `pane.report_metadata` request line (newline-terminated). Only the fields the caller set
+/// are sent; herdr's defaults (`clear_* = false`, no title, no TTL) stay implicit.
+pub fn metadata_line(env: &HerdrEnv, metadata: &Metadata, seq: u64, id: &str) -> String {
+    let mut params = serde_json::json!({
+        "pane_id": env.pane_id,
+        "source": SOURCE,
+        "agent": AGENT,
+        "seq": seq,
+    });
+    let object = params.as_object_mut().expect("an object");
+    if let Some(display_agent) = &metadata.display_agent {
+        object.insert(
+            "display_agent".into(),
+            serde_json::Value::String(display_agent.clone()),
+        );
+    }
+    if !metadata.state_labels.is_empty() {
+        object.insert(
+            "state_labels".into(),
+            serde_json::to_value(&metadata.state_labels).expect("labels serialize"),
+        );
+    }
+    if !metadata.tokens.is_empty() {
+        object.insert(
+            "tokens".into(),
+            serde_json::to_value(&metadata.tokens).expect("tokens serialize"),
+        );
+    }
+    line(&serde_json::json!({
+        "id": id,
+        "method": "pane.report_metadata",
+        "params": params,
+    }))
+}
+
 /// The `pane.release_agent` request line (newline-terminated).
 pub fn release_line(env: &HerdrEnv, seq: u64, id: &str) -> String {
     line(&serde_json::json!({
@@ -275,15 +368,31 @@ impl Seq {
     }
 }
 
+/// Which request a queued line is, so a newer request of the same kind replaces the older one
+/// while a different kind is not dropped by it (ADR H4's "keep only the latest").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    State,
+    Metadata,
+}
+
 /// One queued request.
 struct Request {
+    kind: Kind,
     line: String,
     /// A release is sent once with the short timeout; a report retries once.
     retry: bool,
 }
 
 struct Shared {
-    slot: Mutex<Option<Request>>,
+    /// At most one pending request per [`Kind`], in the order they were queued. The sender takes
+    /// the front, so the sequence numbers stay non-decreasing on the wire.
+    ///
+    /// It is a list and not a single slot because of the startup order: herdr refuses a
+    /// `resume_argv` until the reporter holds the pane ("report its state with pane.report_agent
+    /// first", `resume_not_accepted`), so the first state report must not be replaced by the
+    /// session report or by the metadata that are queued in the same turn.
+    slot: Mutex<Vec<Request>>,
     wake: Condvar,
     stop: AtomicBool,
     counter: AtomicU64,
@@ -311,7 +420,7 @@ impl Reporter {
     /// uses [`TIMEOUT`]/[`RETRY`].
     pub(crate) fn with_timeouts(env: HerdrEnv, timeout: Duration, retry: Duration) -> Self {
         let shared = Arc::new(Shared {
-            slot: Mutex::new(None),
+            slot: Mutex::new(Vec::new()),
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
             counter: AtomicU64::new(0),
@@ -338,20 +447,41 @@ impl Reporter {
         )
     }
 
-    /// Queues a report, overwriting any report not yet sent (ADR H4). Never blocks on I/O.
+    /// Queues the pending request, replacing one of the same kind and keeping the others (ADR
+    /// H4). Never blocks on I/O.
+    fn queue(&self, request: Request) {
+        let mut slot = self.shared.slot.lock().unwrap_or_else(|e| e.into_inner());
+        slot.retain(|pending| pending.kind != request.kind);
+        slot.push(request);
+        self.shared.wake.notify_one();
+    }
+
+    /// Queues a state report, replacing any state report not yet sent (ADR H4).
     pub fn report(&self, report: &Report, seq: u64) {
-        let request = Request {
+        self.queue(Request {
+            kind: Kind::State,
             line: report_line(&self.env, report, seq, &self.id()),
             retry: true,
-        };
-        let mut slot = self.shared.slot.lock().unwrap_or_else(|e| e.into_inner());
-        *slot = Some(request);
-        self.shared.wake.notify_one();
+        });
+    }
+
+    /// Queues a display-metadata change (ADR 0034). An empty `Metadata` is
+    /// a no-op.
+    pub fn metadata(&self, metadata: &Metadata, seq: u64) {
+        if metadata.is_empty() {
+            return;
+        }
+        self.queue(Request {
+            kind: Kind::Metadata,
+            line: metadata_line(&self.env, metadata, seq, &self.id()),
+            retry: true,
+        });
     }
 
     /// Sends a release synchronously with the short timeout (ADR H5). Failures are ignored.
     pub fn release(&self, seq: u64) {
         let request = Request {
+            kind: Kind::State,
             line: release_line(&self.env, seq, &self.id()),
             retry: false,
         };
@@ -394,10 +524,14 @@ fn sender_loop(env: HerdrEnv, shared: Arc<Shared>) {
     loop {
         let request = {
             let mut slot = shared.slot.lock().unwrap_or_else(|e| e.into_inner());
-            while slot.is_none() && !shared.stop.load(Ordering::SeqCst) {
+            while slot.is_empty() && !shared.stop.load(Ordering::SeqCst) {
                 slot = shared.wake.wait(slot).unwrap_or_else(|e| e.into_inner());
             }
-            slot.take()
+            if slot.is_empty() {
+                None
+            } else {
+                Some(slot.remove(0))
+            }
         };
         match request {
             Some(request) => send(&env, &request, shared.timeout, shared.retry),
@@ -694,5 +828,166 @@ mod tests {
             assert!(next > last, "{next} <= {last}");
             last = next;
         }
+    }
+
+    #[test]
+    fn the_metadata_line_carries_only_what_changed() {
+        let mut tokens = BTreeMap::new();
+        tokens.insert("model".to_owned(), Some("gpt-5".to_owned()));
+        tokens.insert("pending".to_owned(), Some("1".to_owned()));
+        tokens.insert("context".to_owned(), None);
+        let mut labels = BTreeMap::new();
+        labels.insert("blocked".to_owned(), "approval".to_owned());
+        let metadata = Metadata {
+            tokens,
+            state_labels: labels,
+            display_agent: Some("radian".to_owned()),
+        };
+        let text = metadata_line(&env(), &metadata, 12, "r");
+        assert!(text.ends_with('\n'));
+        let value: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(value["method"], "pane.report_metadata");
+        assert_eq!(value["params"]["pane_id"], "w1:p1");
+        assert_eq!(value["params"]["source"], "radian");
+        assert_eq!(value["params"]["agent"], "radian");
+        assert_eq!(value["params"]["display_agent"], "radian");
+        assert_eq!(value["params"]["seq"], 12);
+        assert_eq!(value["params"]["tokens"]["model"], "gpt-5");
+        assert_eq!(value["params"]["tokens"]["pending"], "1");
+        // Clearing a token is a null under its name (the CLI's `--clear-token`).
+        assert_eq!(
+            value["params"]["tokens"]["context"],
+            serde_json::Value::Null
+        );
+        assert_eq!(value["params"]["state_labels"]["blocked"], "approval");
+        // The loop's own bookkeeping never leaks: no usage, cost, path or command text.
+        let all = text.to_ascii_lowercase();
+        for forbidden in [
+            "usage",
+            "cost",
+            "tokens_input",
+            "path",
+            "command",
+            "resume_argv",
+        ] {
+            assert!(!all.contains(forbidden), "{forbidden} in {text}");
+        }
+        assert!(!metadata.is_empty());
+        assert!(Metadata::default().is_empty(), "nothing to report");
+    }
+
+    #[test]
+    fn only_the_changed_token_keys_are_sent() {
+        let mut last = BTreeMap::new();
+        last.insert("model".to_owned(), "gpt-5".to_owned());
+        last.insert("tier".to_owned(), "safe".to_owned());
+        let mut now: BTreeMap<String, Option<String>> = BTreeMap::new();
+        now.insert("model".to_owned(), Some("gpt-5".to_owned()));
+        now.insert("tier".to_owned(), Some("workspace".to_owned()));
+        now.insert("pending".to_owned(), Some("0".to_owned()));
+        now.insert("context".to_owned(), None);
+        let diff = token_diff(&last, &now);
+        assert_eq!(diff.len(), 2, "model did not change: {diff:?}");
+        assert_eq!(diff["tier"], Some("workspace".to_owned()));
+        assert_eq!(diff["pending"], Some("0".to_owned()));
+        assert!(!diff.contains_key("model"));
+        assert!(
+            !diff.contains_key("context"),
+            "never reported, nothing to clear"
+        );
+        // A key that goes unknown after being reported is cleared.
+        let mut now: BTreeMap<String, Option<String>> = BTreeMap::new();
+        now.insert("tier".to_owned(), None);
+        let diff = token_diff(&last, &now);
+        assert_eq!(diff.len(), 1);
+        assert_eq!(diff["tier"], None);
+        // Nothing changed: nothing is queued.
+        let diff = token_diff(&last, &BTreeMap::new());
+        assert!(diff.is_empty());
+    }
+
+    /// The two kinds share the sender, and a later request of one kind does not drop a pending
+    /// request of another.
+    #[test]
+    fn the_slots_keep_the_latest_per_kind_and_the_queue_order() {
+        let (socket, listener) = listener("kinds");
+        let env = HerdrEnv {
+            pane_id: "w1:p1".into(),
+            socket: socket.clone(),
+        };
+        let reporter = Reporter::with_timeouts(env, TEST_TIMEOUT, TEST_TIMEOUT);
+        reporter.report(&Report::new(State::Idle), 1);
+        let mut tokens = BTreeMap::new();
+        tokens.insert("model".to_owned(), Some("a".to_owned()));
+        reporter.metadata(
+            &Metadata {
+                tokens,
+                ..Metadata::default()
+            },
+            2,
+        );
+        reporter.metadata(&Metadata::default(), 3); // empty: nothing queued
+        let mut conn = accept(&listener);
+        let first = read_line(&mut conn);
+        reply(&mut conn);
+        let mut second = accept(&listener);
+        let second_line = read_line(&mut second);
+        reply(&mut second);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(first.trim()).unwrap()["method"],
+            "pane.report_agent",
+            "the state report must go first"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(second_line.trim()).unwrap()["method"],
+            "pane.report_metadata"
+        );
+        reporter.shutdown();
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// A newer metadata report replaces a pending metadata report but not a pending state report.
+    #[test]
+    fn a_metadata_report_replaces_only_the_pending_metadata() {
+        let (socket, listener) = listener("meta-latest");
+        let env = HerdrEnv {
+            pane_id: "w1:p1".into(),
+            socket: socket.clone(),
+        };
+        let reporter = Reporter::with_timeouts(env, TEST_TIMEOUT, TEST_TIMEOUT);
+        reporter.report(&Report::new(State::Idle), 1);
+        let mut first = accept(&listener);
+        let first_line = read_line(&mut first);
+        let mut older = BTreeMap::new();
+        older.insert("model".to_owned(), Some("a".to_owned()));
+        reporter.metadata(
+            &Metadata {
+                tokens: older,
+                ..Metadata::default()
+            },
+            2,
+        );
+        let mut newer = BTreeMap::new();
+        newer.insert("model".to_owned(), Some("b".to_owned()));
+        reporter.metadata(
+            &Metadata {
+                tokens: newer,
+                ..Metadata::default()
+            },
+            3,
+        );
+        reply(&mut first);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(first_line.trim()).unwrap()["params"]["state"],
+            "idle"
+        );
+        let mut second = accept(&listener);
+        let line = read_line(&mut second);
+        reply(&mut second);
+        let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(value["method"], "pane.report_metadata");
+        assert_eq!(value["params"]["tokens"]["model"], "b");
+        reporter.shutdown();
+        let _ = std::fs::remove_file(&socket);
     }
 }

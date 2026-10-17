@@ -10192,6 +10192,32 @@ impl HerdrSocket {
         }
     }
 
+    /// Waits for any request of `method`.
+    fn wait_for_method(&self, method: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self
+                .snapshot()
+                .iter()
+                .any(|value| value["method"] == method)
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Every request of `method`, in arrival order.
+    fn of_method(&self, method: &str) -> Vec<serde_json::Value> {
+        self.snapshot()
+            .into_iter()
+            .filter(|value| value["method"] == method)
+            .collect()
+    }
+
     fn wait_for_release(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -10295,6 +10321,106 @@ async fn pty_herdr_reports_the_turn_states_and_releases() {
     assert_eq!(first["params"]["resume_argv"][0], "radian");
     assert_eq!(first["params"]["resume_argv"][1], "--resume");
     assert_eq!(first["params"]["resume_argv"][2], "herdr-turn");
+}
+
+/// ADR 0034: the display metadata goes as `pane.report_metadata` - every key
+/// once, then only the key that changed, with no cost, token totals, paths or command text
+/// anywhere in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_metadata_changes() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("herdr-meta");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = dir.path().join("sessions");
+    let secret = "echo HERDR-METADATA-SECRET";
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "shell", &json!({"command": secret}).to_string()),
+        text_reply("HERDR-META-DONE"),
+    ])
+    .await;
+    let sock = HerdrSocket::start("meta");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "herdr-meta",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &env_refs,
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_method("pane.report_metadata", wait_positive()),
+        "the metadata report: {:?}",
+        sock.snapshot()
+    );
+    let first = sock.of_method("pane.report_metadata").remove(0);
+    assert_eq!(first["params"]["source"], "radian");
+    assert_eq!(first["params"]["agent"], "radian");
+    assert_eq!(first["params"]["display_agent"], "radian");
+    assert_eq!(first["params"]["tokens"]["model"], "mock");
+    assert_eq!(first["params"]["tokens"]["pending"], "0");
+    assert!(
+        first["params"]["tokens"]["tier"].is_string(),
+        "the tier token: {first}"
+    );
+    // No `tasks` token (ADR 0043 removed in-process tasks), and no cost or token totals.
+    let text = serde_json::to_string(&first).unwrap();
+    for forbidden in [
+        "tasks",
+        "cost",
+        "usage",
+        "tokens_input",
+        "command",
+        ".jsonl",
+    ] {
+        assert!(!text.contains(forbidden), "{forbidden} in {text}");
+    }
+
+    // A tool call waits for an approval: the pending count changes, and the next metadata report
+    // carries that key only.
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", wait_positive()),
+        "the approval box:\n{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("blocked", wait_positive()),
+        "{:?}",
+        sock.snapshot()
+    );
+    let second = sock
+        .of_method("pane.report_metadata")
+        .into_iter()
+        .find(|value| value["params"]["tokens"]["pending"] == "1")
+        .unwrap_or_else(|| panic!("a pending change: {:?}", sock.snapshot()));
+    assert_eq!(
+        second["params"]["tokens"].as_object().unwrap().len(),
+        1,
+        "only the changed key: {second}"
+    );
+    assert!(
+        !serde_json::to_string(&sock.snapshot()).unwrap().contains(secret),
+        "the command text must never be sent"
+    );
+    pty.quit();
 }
 
 /// An approval is `blocked` with the tool name only; the command text is never sent.
