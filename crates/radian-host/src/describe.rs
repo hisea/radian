@@ -226,7 +226,10 @@ mod tests {
             line.contains("an outer sandbox confines this process"),
             "{line}"
         );
-        assert!(line.contains("radian's own rules are not applied"), "{line}");
+        assert!(
+            line.contains("radian's own rules are not applied"),
+            "{line}"
+        );
         assert!(facts.contains("outer sandbox"), "{facts}");
         for forbidden in [
             "not readable",
