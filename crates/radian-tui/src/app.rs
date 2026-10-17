@@ -1925,6 +1925,13 @@ impl App {
         self.session.follow = true;
     }
 
+    /// The transcript's first line (`ctrl-home`), pausing the follow unless the whole
+    /// transcript already fits. The read-only attach view (`crate::attach`) is the other
+    /// caller of this scroll state; it holds an `App` for its entries and scroll only.
+    pub fn scroll_to_top(&mut self) {
+        self.set_scroll(0);
+    }
+
     /// One mouse-wheel notch (ADR 0023 U2, plan B). It acts on the topmost **scrollable**
     /// layer: a modal consumes it (the approval prompt does not scroll), a picker overlay moves
     /// its selection, the `@` completion list consumes it (it has no scroll state of its own,
