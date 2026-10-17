@@ -3877,8 +3877,10 @@ impl App {
             self.session.next_thinking = None;
             // Owner addendum (ADR 0027 slice ①): an applied model switch must follow
             // through to the footer's `model` item, or it keeps showing the startup model. The
-            // session's model facts are updated exactly as startup sets them (`cli.rs`): the
-            // model id and provider from the applied route, with no separate display name.
+            // session's model facts follow the applied route the way startup leaves them: the
+            // model id, the provider from the route, and `model_display = None` so
+            // `{display_name}` falls back to the id. Startup passes `None` for the display name
+            // too (`cli.rs`'s `set_footer_facts`); no catalog name is resolved today.
             if let Some(route) = radian_host::ModelRoute::from_value(change) {
                 self.session.model_name = route.model;
                 self.session.provider = Some(route.provider);

@@ -1540,9 +1540,11 @@ fn the_context_fill_without_a_budget_is_spaces() {
 
 /// Owner addendum (ADR 0027 slice ①): after a `/model` switch the driver emits a
 /// model `ConfigChanged`. The footer's `model` item must then show the new model, so the
-/// session's model facts follow the applied route exactly as startup sets them (`cli.rs`'s
-/// `set_footer_facts`): the model id, the provider, no separate display name. Before this fix
-/// the item kept reading the startup model (`old-model`).
+/// session's model facts follow the applied route the way startup leaves them: the model id
+/// (`cli.rs` sets `app.session.model_name`), the provider from the applied route, and
+/// `model_display = None` so `{display_name}` falls back to the id — startup passes `None` to
+/// `set_footer_facts` too, so no catalog name is resolved anywhere today. Before this fix the
+/// item kept reading the startup model (`old-model`).
 #[test]
 fn the_footer_model_follows_an_applied_switch() {
     let mut app = App::new("old-model", "s");
@@ -1570,6 +1572,13 @@ fn the_footer_model_follows_an_applied_switch() {
         Some("anthropic"),
         "the provider follows"
     );
+    // The switch resolves no catalog display name, exactly like startup: `model_display` stays
+    // `None`, so `{display_name}` is the id.
+    assert!(
+        app.session.model_display.is_none(),
+        "no catalog display name is resolved: {:?}",
+        app.session.model_display
+    );
     let after = render(&mut app, 80, 12);
     let text = screen(&after);
     assert!(
@@ -1579,9 +1588,13 @@ fn the_footer_model_follows_an_applied_switch() {
     assert!(!text.contains("old-model"), "the old model is gone: {text}");
 }
 
-/// ADR 0027: an arbitrary id a contributor publishes renders through the
-/// registry's dynamic fallback, not an id list. Before the refactor a store id outside
-/// `CONTRIBUTION_ITEMS` was drawn raw; now the store value is an ordinary component.
+/// ADR 0027: a contributor's value renders through the registry's dynamic
+/// fallback even when the id is one the **user wrote** in a row. The old code was not uniformly
+/// raw here: `item.known` was true for a preset id (or any id `item_is_known` accepted), and such
+/// an item *did* reach the old `contribution_item`'s general store fallback. What is new is the
+/// user-written id: the old `resolve_item` marked it `known = false`, so `render_item` returned
+/// the raw id **before** consulting the store — publishing a value never changed the row. This
+/// test fails on the old code at the second render: `left: "custom.thing", right: "hello"`.
 #[test]
 fn an_arbitrary_store_id_renders_through_the_dynamic_component() {
     let mut app = App::new("mock", "s");
@@ -1596,4 +1609,24 @@ fn an_arbitrary_store_id_renders_through_the_dynamic_component() {
     publish(&app, "custom.thing", "hello");
     let after = render(&mut app, 60, 12);
     assert_eq!(row(&after, 11).trim_end(), "hello");
+}
+
+/// ADR 0027: a compiled-in component claims its id first, so a store value
+/// published under a built-in's name cannot hijack it — the dynamic fallback is only for ids no
+/// built-in claims (`components::lookup`). This is a behaviour the old dispatch got wrong: the old
+/// `contribution_item` checked only `CONTRIBUTION_ITEMS` before falling back to the store, so a
+/// `model` value in the store was drawn instead of the model. On the old code the second render
+/// reads `HIJACK`; here it must read the model.
+#[test]
+fn a_builtin_id_wins_over_the_store_fallback() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, Some("Mock 5".to_string()), None, None);
+    app.apply_footer(&rows(vec![item("model")]));
+    publish(&app, "model", "HIJACK");
+    let terminal = render(&mut app, 60, 12);
+    assert_eq!(
+        row(&terminal, 11).trim_end(),
+        "Mock 5",
+        "the built-in component wins over a store value under its id"
+    );
 }

@@ -1382,6 +1382,25 @@ mod tests {
         }
     }
 
+    /// ADR 0027: one component per file. Every registered id has its own
+    /// `src/footer/components/<id>.rs`, so a new built-in cannot be registered without its file
+    /// (a file with no registry entry is the registry test above's job); the C2 item list and
+    /// the old id tables were all one-for-one with these files, and a `git_branch`/`worktree`/
+    /// `status` file is a component like any other (no contributor special case).
+    #[test]
+    fn every_registry_id_has_a_component_file() {
+        for id in components::ids() {
+            let path = format!(
+                "{}/src/footer/components/{id}.rs",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            assert!(
+                std::path::Path::new(&path).is_file(),
+                "{id} is registered but has no component file at {path}"
+            );
+        }
+    }
+
     /// ADR 0027: the draw path has no item-id tables. The pre-refactor
     /// dispatch (`item_placeholders`, `item_priority`, `default_thresholds`, the
     /// `CONTRIBUTION_ITEMS` list, …) is gone; the renderer reaches every item through

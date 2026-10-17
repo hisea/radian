@@ -1992,3 +1992,46 @@ Base: 本 worktree（`oc/esc-noquit`，分支自 `e2a4436`）。变异在 worktr
 
 1/1 caught。EN-M1 只动空闲分支：运行中的 turn 取消（`update::esc_with_an_empty_input_and_a_running_turn_cancels`）与非空输入清空都不受影响，两个键都仍然绿；`--pick` 选择器的 `Esc` = 退出走的是
 `Input::PickerKey` 另一条路径（`pty::pty_pick_starts_new_and_escape_leaves_no_session`），本改动不碰它，变异也不影响它。
+
+## ADR 0027 slice ①: the footer component registry and the model switch (2026-10-16)
+
+Worktree `footer-components-review-fix` (base `4a9c492`, the failed first task's head). In-place
+binary-only mutations, driven by `.radian/scratch/mut/mutations.py` (not committed): each file
+backed up under `.radian/scratch/mut/`, the anchor asserted present **exactly once** (a `cargo fmt`
+shift or a no-op patch is a hard `PATCH FAILED` — the U3/U4 trap), the named test run with
+`cargo test -p radian-tui --locked --no-fail-fast <target> <name>`, then the file restored with
+`shutil.copyfile` + `os.utime` (so cargo rebuilds, the thin-① cache trap) and `cmp`ed
+byte-for-byte; `git status --short` shows only the intended edits after the run.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| REG-M1 | decision 1: every built-in resolves through the registry | `components::lookup` drops its built-in branch (only the store fallback is left) | `footer::the_default_footer_is_two_rows` FAILED (the identity row loses the model, the branch and the reasoning glyph) |
+| REG-M2 | decision 1: a compiled-in component claims its id first | `lookup` consults the store **before** the registry | `footer::a_builtin_id_wins_over_the_store_fallback` FAILED (`left: "HIJACK"`, right `"Mock 5"`) |
+| REG-M3 | decision 1: the dynamic fallback serves contributor ids | `lookup` drops the store branch | `footer::an_arbitrary_store_id_renders_through_the_dynamic_component` FAILED (after the publish the row is still `custom.thing`) |
+| REG-M4 | decision 1: one registry entry per built-in | `&tokens::Tokens` removed from `COMPONENTS` | `footer::tests::the_registry_lists_every_builtin_once` FAILED ("the registry is missing tokens") |
+| SW-M1 | the applied `/model` switch follows through to the footer's `model` | the `ConfigChanged` handler no longer writes `model_name`/`provider`/`model_display` | `footer::the_footer_model_follows_an_applied_switch` FAILED ("the model id follows": `old-model` ≠ `claude-new`) |
+| SW-M2 | a switch resolves no catalog display name (startup passes `None`) | the handler sets `model_display = Some("Claude New")` instead of `None` | `footer::the_footer_model_follows_an_applied_switch` FAILED ("no catalog display name is resolved: Some(\"Claude New\")") |
+
+6/6 caught, no equivalent mutants; every mutated file `cmp`ed byte-identical after its mutation.
+
+**Old-code check.** The first task's test
+`an_arbitrary_store_id_renders_through_the_dynamic_component` was re-run against the pre-refactor
+`footer.rs` (`631c8dd`, keeping the new test file): it fails at the second render
+(`left: "custom.thing", right: "hello"`), so it is not vacuous. Its **comment** was wrong in a
+different way, and the comment now says this: the old `contribution_item` *did* have a general
+store fallback for any id `item_is_known` accepted — a preset id such as `opencode-go.usage` went
+through it and drew the store text — while a **user-written** id was marked `known = false` by the
+old `resolve_item`, so the old `render_item` returned the raw id *before* consulting the store and
+a published value never appeared. The new `a_builtin_id_wins_over_the_store_fallback` adds the
+behaviour the old dispatch got wrong (a store value under a built-in id was drawn instead of the
+built-in); it fails the same `631c8dd` footer the same way.
+
+**Coverage (decision 1).** The old `item_placeholders` table listed 20 built-in ids — `brand`,
+`host`, `model`, `reasoning`, `tier`, `cwd`, `git_branch`, `worktree`, `status`, `session`,
+`context`, `context_bar`, `tokens`, `speed`, `elapsed`, `cost`, `pending`, `tasks`, `mcp`,
+`scroll` — and the registry has exactly those 20, one file each (`tasks` is the ADR 0030 addition;
+the ADR C2 list omits it). `every_registry_id_has_a_component_file` pins the `components/<id>.rs`
+file per registry id, so a new built-in cannot be registered without its file.
+`git_branch`/`worktree`/`status` are ordinary registered components that read the contribution
+store in their `data` — no `CONTRIBUTION_ITEMS` special case — and an id no built-in claims
+resolves to the dynamic `StoreComponent`.
