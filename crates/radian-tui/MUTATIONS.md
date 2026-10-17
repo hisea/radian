@@ -1992,3 +1992,90 @@ Base: 本 worktree（`oc/esc-noquit`，分支自 `e2a4436`）。变异在 worktr
 
 1/1 caught。EN-M1 只动空闲分支：运行中的 turn 取消（`update::esc_with_an_empty_input_and_a_running_turn_cancels`）与非空输入清空都不受影响，两个键都仍然绿；`--pick` 选择器的 `Esc` = 退出走的是
 `Input::PickerKey` 另一条路径（`pty::pty_pick_starts_new_and_escape_leaves_no_session`），本改动不碰它，变异也不影响它。
+
+## ADR 0027 slice ①: the footer component registry and the model switch (2026-10-16)
+
+Worktree `footer-components-review-fix` (base `4a9c492`, the failed first task's head). In-place
+binary-only mutations, driven by `.radian/scratch/mut/mutations.py` (not committed): each file
+backed up under `.radian/scratch/mut/`, the anchor asserted present **exactly once** (a `cargo fmt`
+shift or a no-op patch is a hard `PATCH FAILED` — the U3/U4 trap), the named test run with
+`cargo test -p radian-tui --locked --no-fail-fast <target> <name>`, then the file restored with
+`shutil.copyfile` + `os.utime` (so cargo rebuilds, the thin-① cache trap) and `cmp`ed
+byte-for-byte; `git status --short` shows only the intended edits after the run.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| REG-M1 | decision 1: every built-in resolves through the registry | `components::lookup` drops its built-in branch (only the store fallback is left) | `footer::the_default_footer_is_two_rows` FAILED (the identity row loses the model, the branch and the reasoning glyph) |
+| REG-M2 | decision 1: a compiled-in component claims its id first | `lookup` consults the store **before** the registry | `footer::a_builtin_id_wins_over_the_store_fallback` FAILED (`left: "HIJACK"`, right `"Mock 5"`) |
+| REG-M3 | decision 1: the dynamic fallback serves contributor ids | `lookup` drops the store branch | `footer::an_arbitrary_store_id_renders_through_the_dynamic_component` FAILED (after the publish the row is still `custom.thing`) |
+| REG-M4 | decision 1: one registry entry per built-in | `&tokens::Tokens` removed from `COMPONENTS` | `footer::tests::the_registry_lists_every_builtin_once` FAILED ("the registry is missing tokens") |
+| SW-M1 | the applied `/model` switch follows through to the footer's `model` | the `ConfigChanged` handler no longer writes `model_name`/`provider`/`model_display` | `footer::the_footer_model_follows_an_applied_switch` FAILED ("the model id follows": `old-model` ≠ `claude-new`) |
+| SW-M2 | a switch resolves no catalog display name (startup passes `None`) | the handler sets `model_display = Some("Claude New")` instead of `None` | `footer::the_footer_model_follows_an_applied_switch` FAILED ("no catalog display name is resolved: Some(\"Claude New\")") |
+
+6/6 caught, no equivalent mutants; every mutated file `cmp`ed byte-identical after its mutation.
+
+**Old-code check.** The first task's test
+`an_arbitrary_store_id_renders_through_the_dynamic_component` was re-run against the pre-refactor
+`footer.rs` (`631c8dd`, keeping the new test file): it fails at the second render
+(`left: "custom.thing", right: "hello"`), so it is not vacuous. Its **comment** was wrong in a
+different way, and the comment now says this: the old `contribution_item` *did* have a general
+store fallback for any id `item_is_known` accepted — a preset id such as `opencode-go.usage` went
+through it and drew the store text — while a **user-written** id was marked `known = false` by the
+old `resolve_item`, so the old `render_item` returned the raw id *before* consulting the store and
+a published value never appeared. The new `a_builtin_id_wins_over_the_store_fallback` adds the
+behaviour the old dispatch got wrong (a store value under a built-in id was drawn instead of the
+built-in); it fails the same `631c8dd` footer the same way.
+
+**Coverage (decision 1).** The old `item_placeholders` table listed 20 built-in ids — `brand`,
+`host`, `model`, `reasoning`, `tier`, `cwd`, `git_branch`, `worktree`, `status`, `session`,
+`context`, `context_bar`, `tokens`, `speed`, `elapsed`, `cost`, `pending`, `tasks`, `mcp`,
+`scroll` — and the registry has exactly those 20, one file each (`tasks` is the ADR 0030 addition;
+the ADR C2 list omits it). `every_registry_id_has_a_component_file` pins the `components/<id>.rs`
+file per registry id, so a new built-in cannot be registered without its file.
+`git_branch`/`worktree`/`status` are ordinary registered components that read the contribution
+store in their `data` — no `CONTRIBUTION_ITEMS` special case — and an id no built-in claims
+resolves to the dynamic `StoreComponent`.
+
+### ADR 0027 slice ① task 2: the `command` component's rendering (2026-10-16)
+
+Same in-place driver as the `radian-host` entry above (`.radian/scratch/mut/mutate.py`, no
+committed script): exact-match anchor, `cargo test -p radian-tui --test footer --locked
+--no-fail-fast <name>`, restore from a byte-for-byte backup. Base `d647750`.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| T1 | a configured `command` id is a **known** item (no "unknown item" warning; hides until its value) | `is_command_item` always returns `false` (the pre-change dispatch, which marks a user-written id unknown and shows it raw) | `a_command_item_appears_where_its_id_is_placed` FAILED (the unknown-id warning appeared and the raw id was drawn) |
+| T2 | a JSON `symbol` is rendered | `symbol_for` drops the `data.symbol` fallback | `a_command_json_style_and_symbol_render_and_the_symbol_style_applies` FAILED (no `!` on the row) |
+| T3 | a configured `symbol` wins over the JSON `symbol` | `symbol_for` tries `data.symbol` before `item.icon` | same test FAILED (the configured `>` was replaced by the JSON `!`) |
+| T4 | a command item's format may use `{value}` without a warning | `validate_format` no longer treats a command id specially | `a_command_item_accepts_the_value_placeholder` FAILED (`unknown placeholder {value}` warning) |
+| T5 | a configured `symbol_style` styles the symbol a JSON `symbol` produced | the symbol's style ignores `symbol_style` | `a_command_json_style_and_symbol_render_and_the_symbol_style_applies` FAILED (the `!` was not red) |
+
+5/5 caught; `crates/radian-tui/src/footer.rs` compared byte-identical after every mutation.
+
+**Old-code check (T1).** The base tree has no `is_command_item`: `resolve_item`'s unknown rule is
+`components::builtin(&id).is_none()`, so a user-written `weather` id is `unknown = true`, its row
+draws the raw id and warns — exactly what T1 reproduces, and why
+`a_command_item_appears_where_its_id_is_placed` is not vacuous. The end-to-end
+`a_printf_fixture_appears_in_the_configured_footer_location` (a real `printf hi` fixture through
+the runner and into the footer) is caught by T1 on the render side and by the `radian-host`
+mutants H1/H5 on the run side.
+
+### ADR 0027 slice ① fix round `footer-s1-fix1`: the registry tables vs `631c8dd` (2026-10-16)
+
+Same in-place driver as above: exact-match anchor, `cargo test -p radian-tui --lib --locked
+--no-fail-fast <name>`, restore from a byte-for-byte backup (`.radian/progress/*.bak`).
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| P1 | every built-in's default priority matches the `631c8dd` `item_priority` table | `Model`'s `priority` override is dropped (back to the refactor's 50 fallback) | `footer::tests::the_registry_matches_the_pre_refactor_priority_table` FAILED (`priority for model`: left 50, right 90) |
+| P2 | `context_bar`'s default glyph is empty in every set (the old `glyph` table had no `context_bar` row) | `ContextBar::glyphs` is given `context`'s `["", "\u{f035b} ", "[", ""]` | `footer::tests::the_registry_matches_the_pre_refactor_glyph_table` FAILED (`default glyphs for context_bar`: left `["", "\u{f035b} ", "["]`, right `["", "", ""]`) |
+
+2/2 caught; `crates/radian-tui/src/footer/components/model.rs` and `.../context_bar.rs` compared
+byte-identical (same sha) after each mutation.
+
+The five pin tests this fix round adds — `the_registry_matches_the_pre_refactor_priority_table`,
+`..._placeholder_table`, `..._role_table`, `..._threshold_table`, `..._glyph_table` — compare every
+built-in id against the `631c8dd` tables. Priority is the **required** fix: `brand` (92), `model`
+(90) and `host` (78) had lost their overrides and fell back to 50. The glyph comparison found a
+second regression (`context_bar`), restored here. The placeholder, role and threshold tables
+already matched the old values.

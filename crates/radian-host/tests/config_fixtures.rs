@@ -32,6 +32,7 @@ fn the_reader_matches_the_reference_checker() {
     let cases = [
         ("minimal.toml", "accept"),
         ("tui-theme-colors.toml", "accept"),
+        ("tui-footer-command.toml", "accept"),
         ("providers.toml", "accept"),
         ("model-retries.toml", "accept"),
         ("skills-extra-paths.toml", "accept"),
@@ -288,4 +289,33 @@ fn the_refusal_messages_never_echo_a_value() {
             assert!(!error.contains(needle), "{name}: {error}");
         }
     }
+}
+
+/// ADR 0027: the `command`/`period` item parameters are carried by the
+/// reader, and `command_specs` turns them into specs. v1 has no project-level config layer
+/// (ADR 0031), so every configuration source is the user's own and is accepted.
+#[test]
+fn the_command_fixture_carries_command_and_period() {
+    let (path, text) = fixture("tui-footer-command.toml");
+    let config = config::parse(&path, &text).unwrap();
+    let weather = &config.tui.footer.items["weather"];
+    let param = |key: &str| {
+        weather
+            .params
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+    };
+    assert_eq!(param("command"), Some("printf 72F"));
+    assert_eq!(param("period"), Some("300"));
+
+    let (specs, warnings) = radian_host::command_specs(&config.tui.footer);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(specs.len(), 2, "{specs:?}");
+    let weather = specs.iter().find(|spec| spec.id == "weather").unwrap();
+    assert_eq!(weather.program, std::ffi::OsString::from("printf"));
+    assert_eq!(weather.args, vec![std::ffi::OsString::from("72F")]);
+    assert_eq!(weather.period, Some(std::time::Duration::from_secs(300)));
+    let host_tag = specs.iter().find(|spec| spec.id == "host_tag").unwrap();
+    assert_eq!(host_tag.period, None, "period = 0 is startup-only");
 }

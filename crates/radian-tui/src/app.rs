@@ -1461,6 +1461,10 @@ pub struct App {
     /// The contributor store (ADR 0027 C3). The background tasks write it; the renderer reads a
     /// snapshot, and the `git_branch`/`worktree`/`status` items come from it.
     pub contributions: std::sync::Arc<radian_host::ContributionStore>,
+    /// The footer facts a background `command` item reads on stdin (ADR 0027
+    /// decision 4). The loop publishes a snapshot as the facts change; the command producers read
+    /// it, so the draw path never runs a command and the command never blocks a frame.
+    pub footer_context: std::sync::Arc<radian_host::FooterContext>,
     /// `[tui.widgets]`: contributor items on a line above/below the input box (ADR 0027 C3).
     pub widgets: radian_host::config::TuiWidgetsConfig,
     /// The input composer: text plus a cursor (ADR 0009 Phase 4).
@@ -1605,6 +1609,7 @@ impl App {
             now: Instant::now(),
             footer: crate::footer::Footer::default(),
             contributions: radian_host::ContributionStore::new(),
+            footer_context: radian_host::FooterContext::new(),
             widgets: radian_host::config::TuiWidgetsConfig::default(),
             input: Composer::new(),
             quit: false,
@@ -3871,10 +3876,21 @@ impl App {
                 return UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork));
             }
         }
-        if matches!(event, RuntimeEvent::ConfigChanged { .. }) {
+        if let RuntimeEvent::ConfigChanged { change, .. } = event {
             // The driver applied the queued change: the status bar's `next:` promise is done.
             self.session.next_model = None;
             self.session.next_thinking = None;
+            // Owner addendum (ADR 0027 slice ①): an applied model switch must follow
+            // through to the footer's `model` item, or it keeps showing the startup model. The
+            // session's model facts follow the applied route the way startup leaves them: the
+            // model id, the provider from the route, and `model_display = None` so
+            // `{display_name}` falls back to the id. Startup passes `None` for the display name
+            // too (`cli.rs`'s `set_footer_facts`); no catalog name is resolved today.
+            if let Some(route) = radian_host::ModelRoute::from_value(change) {
+                self.session.model_name = route.model;
+                self.session.provider = Some(route.provider);
+                self.session.model_display = None;
+            }
         }
         if let RuntimeEvent::TurnFailed { message, .. } = event {
             self.session.entries.push(Entry::new(
@@ -5168,6 +5184,63 @@ impl App {
         contributions: std::sync::Arc<radian_host::ContributionStore>,
     ) {
         self.contributions = contributions;
+    }
+
+    /// Installs the shared footer-facts handoff the loop publishes into and a background
+    /// `command` item reads (ADR 0027).
+    pub fn set_footer_context(&mut self, context: std::sync::Arc<radian_host::FooterContext>) {
+        self.footer_context = context;
+    }
+
+    /// The footer facts a `command` item may read (ADR 0027). Only facts
+    /// the footer already displays: the model, the cwd, the branch, the context proportion, the
+    /// token totals, the fee and the task counts. A missing fact is `None`, never a fabricated
+    /// number (v5 §5). The git branch prefers the background contributor's value and falls back
+    /// to the host's one-shot read.
+    pub fn footer_snapshot(&self) -> radian_host::FooterSnapshot {
+        let session = self.session.projection.read();
+        let branch = self
+            .contributions
+            .get("git_branch")
+            .map(|contribution| {
+                contribution
+                    .segments
+                    .iter()
+                    .map(|segment| segment.text.as_str())
+                    .collect::<String>()
+            })
+            .filter(|branch| !branch.is_empty())
+            .or_else(|| self.session.git_branch.clone());
+        let (tasks_running, tasks_total) = match self.session.task_counts() {
+            Some((running, total)) => (Some(running as u64), Some(total as u64)),
+            None => (None, None),
+        };
+        radian_host::FooterSnapshot {
+            model: Some(self.session.model_name.clone()),
+            cwd: self
+                .session
+                .cwd
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            branch,
+            context_percent: crate::footer::context_fraction(&session)
+                .map(|fraction| fraction * 100.0),
+            tokens_input: session.usage_input(),
+            tokens_output: session.usage_output(),
+            tokens_cache_read: session.usage_cache_read(),
+            cost_usd: session
+                .cost_micros()
+                .map(|micros| micros as f64 / 1_000_000.0),
+            tasks_running,
+            tasks_total,
+        }
+    }
+
+    /// Publishes the current footer facts for the background `command` items (ADR 0027 revision
+    /// 14 decision 4). A pure state read plus one lock write; the command reads the latest
+    /// snapshot when it runs, so the UI never waits for it.
+    pub fn publish_footer_context(&self) {
+        self.footer_context.set(self.footer_snapshot());
     }
 
     /// The applied thinking level, once the driver reports it (ADR 0026 D11).

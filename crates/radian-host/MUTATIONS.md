@@ -1478,3 +1478,55 @@ refused with "no agent definition ``". Run: `cargo test -p radian-host --test le
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | SB-A | `spawn` parses `SpawnArgs` without `.without_blank_fields()` (the old code) | caught (rc=101) | `spawn_task_treats_blank_optional_fields_as_omitted` |
+## ADR 0027 slice ① task 2: the out-of-process footer `command` component (2026-10-16)
+
+Worktree `footer-command-component` (base `radian/integration` `d647750`). In-place mutations
+driven by `.radian/scratch/mut/mutate.py` (not committed): each file was backed up under
+`.radian/scratch/mut/backup/`, the anchor asserted present **exactly once** (a `cargo fmt` shift
+or a no-op patch is a hard `PATCH FAILED`), the named test run with
+`cargo test -p radian-host --locked --no-fail-fast <target> <name>`, then the file restored with
+`shutil.copyfile` + `os.utime` (so cargo rebuilds) and compared byte-for-byte; `git diff` on the
+source files is empty after the run.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| H1 | only the first stdout line is kept | `first_output_line` no longer cuts at `\n` | `command_footer::the_first_line_is_taken_and_truncated_to_256_bytes` FAILED (`first\nsecond` kept whole) |
+| H2 | the value is hard-capped at 256 bytes | the size check in `first_output_line` becomes `line.len()` | same test FAILED (400 bytes kept) |
+| H3 | `period = 0` is once-only and other values clamp to 15–3600 | `period_from_secs` returns `Some(Duration::from_secs(secs))` | lib `command_footer::tests::the_period_is_clamped_and_zero_means_once` FAILED |
+| H4 | the whole run is bounded by a 5 s timeout | the `tokio::time::timeout(COMMAND_TIMEOUT, run)` wrapper is removed | `command_footer::a_timeout_keeps_the_last_value_and_marks_it_stale` FAILED (the 30 s command runs to completion; the elapsed bound fires) |
+| H5 | a non-zero exit is a failure (last value kept, stale) | the `!status.success()` check becomes `if false` | `command_footer::a_nonzero_exit_keeps_the_last_value_and_marks_it_stale` FAILED (the failing output is published as fresh) |
+| H6 | the child's environment is cleared | `.env_clear()` removed | `command_footer::the_environment_is_cleared_to_the_deliberate_allow_list` FAILED (host variables reached the child) |
+| H7 | the deliberate allow-list exports `RADIAN_SESSION_ID` | that `command.env(...)` line removed | same test FAILED |
+| H8 | a JSON `style` selects the text's theme role | `parse_output` ignores the name (`SegmentRole::Normal`) | `command_footer::json_output_sets_the_role_and_symbol` (and the lib unit test) FAILED |
+| H9 | invalid JSON is a failure, not plain text | `if !line.starts_with('{')` becomes `if true` | `command_footer::invalid_json_and_unknown_styles_keep_the_last_value` FAILED (`{not json}` published as text) |
+| H10 | a project-level `command` is refused | `command_specs`'s `origin == Project` check becomes `if false` | `config_fixtures::the_command_fixture_carries_command_and_period` FAILED (the project config yielded specs) |
+| H11 | the stdin JSON carries every documented fact | `context_percent` is written as `null` | `command_footer::the_stdin_is_the_documented_json_context` FAILED |
+| H12 | the output never reaches a journal | a `std::fs::write("/tmp/radian-footer-journal", &buffer)` added in `run` | `command_footer::the_command_runner_has_no_journal_or_herdr_path` FAILED (`command_footer.rs` reached `std::fs`/journal) |
+| H13 | the command line is split with no shell | whitespace no longer separates words (the join branch is a no-op) | lib `command_footer::tests::command_lines_split_without_a_shell` FAILED (`printf hi` became one argv word) |
+| H14 | a `disabled = true` command item is never run | the disabled check in `command_specs` is removed | lib `command_footer::tests::a_disabled_command_is_not_a_spec_and_a_malformed_one_warns` FAILED |
+
+14/14 caught; every mutated file compared byte-identical after its mutation.
+
+**Old-code check.** The runner module and its tests are new, so on the pre-change tree the
+command tests do not compile (no `command_footer` module). The behaviours they pin are the
+mutants above; H5/H12 are the two the brief names (a failure keeps the last value; the output
+must never reach a journal).
+
+## ADR 0027 slice ① fix round `footer-s1-fix1`: H10 removed (2026-10-16)
+
+decision A of the fix round `footer-s1-fix1`: **v1 has no project config layer** (ADR 0031;
+`config::resolve_path` chooses only `--config` > `RADIAN_CONFIG` > `~/.radian/config/config.toml`,
+all user-chosen). The provenance seam (`ConfigOrigin`, `classify_origin`, `Config.origin`,
+`load_in_workspace`) and `command_specs`'s `origin` parameter were removed, so the project-level
+`command` refusal no longer exists. The **H10** row above is therefore **removed**: its requirement
+is gone, not failed. Every `command` from any current source is accepted
+(`config_fixtures::the_command_fixture_carries_command_and_period`, minus its former project half).
+When a project-level config layer is added, a `command` must be refused there, and that slice owns
+the test. No other row in this file is touched.
+
+## Gate review of the footer `command` component (2026-10-17, reviewer)
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| GR-1 | an unknown JSON style's error repeats the style name (`format!("... {name:?} ...")`, the branch's code) | caught (rc=101) | `an_unknown_style_notice_never_carries_the_style_name` |
+| GR-2 | drop `.env_clear()` from the command spawn | caught (rc=101) | `the_environment_is_cleared_to_the_deliberate_allow_list` (`HOME` leaks; the old `set_var` probe was removed because it raced the parallel tests) |

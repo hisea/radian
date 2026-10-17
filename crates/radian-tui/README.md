@@ -282,6 +282,22 @@ find_next = ["ctrl-g", "shift-enter"]
   `host`, the model's price and the auto-compaction switch are read once at startup;
   `git_branch`/`worktree` and the change counts come from the background contributor, so the
   draw path never runs git.
+  An item with `command = "<executable or command line>"` (ADR 0027) is
+  an **out-of-process** component: the command runs as the user, unsandboxed, `period` seconds
+  apart (15–3600; `0` = once at startup; default 60). Its stdout's first line (at most 256
+  bytes) is the value, or a JSON line `{"text","style","symbol"}` (`style` a contribution role:
+  `text`/`dim`/`warn`/`ok`/`error`/`accent`). The command line is split without a shell (quotes
+  group words); an empty or malformed line warns and never runs. Its stdin is one JSON object of
+  the footer's own facts — no transcript, no secrets:
+  `{"model":…, "cwd":…, "branch":…, "context_percent":…, "tokens":{"input":…,"output":…,
+  "cache_read":…}, "cost_usd":…, "tasks":{"running":…,"total":…}}` (a missed fact is `null`).
+  Its environment is cleared to `PATH` plus `RADIAN_SESSION_ID`/`RADIAN_CWD`. A timeout (5 s), a
+  spawn failure, a non-zero exit or an invalid line keeps the last value and draws it stale; the
+  output never enters the journal, the transcript, the model context or a herdr report. v1 has
+  **one** config layer, chosen by the user (`--config` > `RADIAN_CONFIG` >
+  `~/.radian/config/config.toml`); there is no project-level config (ADR 0031), so every
+  `command` is accepted. When a project-level config layer is added, a `command` must be refused
+  there — that slice owns the test.
 
 | item | placeholders | default |
 |---|---|---|
@@ -306,6 +322,7 @@ find_next = ["ctrl-g", "shift-enter"]
 | `worktree` | `{worktree}` | 只在 git worktree 里显示（贡献者） |
 | `status` | `{status}` | `status.*` 贡献文本，`keys = ["…"]` 可过滤 |
 | `opencode-go.usage` | — | opencode-go 用量的**剩余**百分比与重置倒计时（ADR 0027 C4，贡献者；`tui.usage_period_secs` 0 关闭） |
+| `command` item (`[tui.footer.items.<id>] command = "…"`) | `{value}` | the command's first stdout line; JSON `{"text","style","symbol"}` sets the role and symbol (ADR 0027) |
 
 `worktree`/`status` 来自贡献者存储（ADR 0027 C3）：一个 `git` 贡献者每 5 s 在后台刷新
 `git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。`[tui.widgets]`
