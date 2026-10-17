@@ -1023,7 +1023,13 @@ fn run(
         startup_log.line(format!("[provider] {warning}"));
     }
     let key_id = provider_ref.key_id().to_owned();
-    let provider = provider_ref.protocol_for(&model_name).adapter();
+    // ADR 0026: a built-in descriptor's model takes its wire protocol
+    // from the catalog (the local cache, else the bundled snapshot); a model the catalog does
+    // not carry uses the descriptor table. An unsupported `npm` refuses the run.
+    let catalog = radian_host::protocol_catalog();
+    let protocol = provider_ref.resolve_protocol(Some(&catalog), &model_name)?;
+    let provider = protocol.adapter();
+    let chatgpt_oauth = provider_name == radian_host::CHATGPT_PROVIDER_ID;
     // ADR 0026 D11: the unified levels, with the legacy Anthropic spellings accepted for one
     // version (a warning goes to stderr when one is used).
     let (thinking, thinking_budget, legacy_thinking) = match cli.thinking.as_deref() {
@@ -1069,12 +1075,10 @@ fn run(
     // The endpoint this run would talk to, before the session id: used only to allow a local
     // server to run without a key (a loopback mock needs no credential). `--base-url` only
     // pre-fills the probe for the generic provider (a named one has a fixed endpoint).
-    let probe_base_url = if provider_ref.takes_base_url_override() {
-        base_url_override.clone()
-    } else {
-        None
-    }
-    .unwrap_or_else(|| provider_ref.base_url_for(&model_name, None));
+    let probe_base_url = match base_url_override.clone() {
+        Some(url) if provider_ref.takes_base_url_override() => url,
+        _ => provider_ref.endpoint_for(protocol, None)?,
+    };
     // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a clear refusal with
     // the fix (run `/login <provider>` — D3, in this slice), unless the endpoint is local.
     let credential = match radian_host::resolve_key(&key_id).map_err(|e| e.to_string())? {
@@ -1118,7 +1122,7 @@ fn run(
         Provider::OpenAiCompatible | Provider::ChatGpt => None,
     };
     // The window's base URL: the provider's endpoint (for a named provider, its declaration).
-    let catalog_base_url = provider_ref.base_url_for(&model_name, None);
+    let catalog_base_url = provider_ref.endpoint_for(protocol, None)?;
     // The catalog groups by provider id; the generic descriptor is not one, so its provider
     // is derived from the base URL hostname. A named provider is its own group only when its
     // name is a catalog provider; otherwise the hostname rule applies (the fallback below).
@@ -1185,7 +1189,12 @@ fn run(
             .map(String::as_str),
         &user_headers,
         &session_id,
+        Some(&catalog),
     )?;
+    // ADR 0026: the catalog overruled the built-in table's protocol.
+    if let Some(notice) = &route.protocol_notice {
+        startup_log.line(format!("radian: [provider] {notice}"));
+    }
     // D1/D2: every check that can fail runs **before** the session file is created. The
     // workspace is validated first, so a typo is a workspace error and never reaches the
     // sandbox probe (dogfooding D1). `radian-host` owns the rule so both hosts share it.
@@ -1228,6 +1237,7 @@ fn run(
         thinking: thinking_of,
         reasoning_effort: reasoning_effort.clone(),
         reasoning_replay: reasoning_replay.clone(),
+        chatgpt_oauth,
     })?;
     // ADR 0026 D5: the model is switchable. The slot is shared with the driver (open_session
     // wires it), so a `/model` change reaches the next request without touching the key.
