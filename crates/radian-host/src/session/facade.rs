@@ -4,8 +4,6 @@
 //!
 //! Split from `session/mod.rs` by pure move (ADR 0043 decision 5): no behaviour change.
 
-use std::sync::Mutex;
-
 use radian_permissions::{ApprovalPolicy, Preset};
 
 use super::ids::{CommandRefused, SessionCapability, SessionCommand, SessionId, UserBashRecord};
@@ -123,11 +121,6 @@ impl DriverEnd {
 }
 
 /// The driver's task handle: the host asks it to stop or aborts it, and waits once.
-pub(super) struct DriverTask {
-    pub(super) stop: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    pub(super) abort: tokio::task::AbortHandle,
-    pub(super) done: Mutex<Option<tokio::sync::oneshot::Receiver<DriverEnd>>>,
-}
 
 /// Why a session could not be opened.
 #[derive(Debug, thiserror::Error)]
