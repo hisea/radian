@@ -16,8 +16,8 @@
 //! kill the job, so it may be waiting on it.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Weak};
 
 use agent_core::{InputSource, Message};
 use radian_coding::{JobEvent, Jobs};
@@ -36,7 +36,12 @@ pub const MAX_CONSECUTIVE_WAKES: u32 = 3;
 
 /// The per-session job notifier. One per session; the host holds it for `reset_wakes`.
 pub struct JobNotifier {
-    jobs: Arc<Jobs>,
+    /// Weak: the subscriber task holds the notifier and waits for the registry's channel to
+    /// close, and the channel's sender lives in the registry. A strong reference here was a
+    /// cycle - the registry never dropped, `Closed` never came, and every ended session kept
+    /// its task, journal (with its lock) and inbox until the process exited (found 2026-10-17:
+    /// a removed task's id could not be spawned again in the same process).
+    jobs: Weak<Jobs>,
     inbox: Arc<Inbox>,
     journal: Arc<SessionJournal>,
     /// Shared with the driver: `true` while a turn is in flight.
@@ -53,7 +58,7 @@ impl JobNotifier {
         turn_running: Arc<AtomicBool>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            jobs,
+            jobs: Arc::downgrade(&jobs),
             inbox,
             journal,
             turn_running,
@@ -68,7 +73,14 @@ impl JobNotifier {
     /// sent between `spawn` returning and the task first running would otherwise be lost, and
     /// the first job of a session is exactly such an event.
     pub fn spawn(self: &Arc<Self>, runtime: &tokio::runtime::Handle) {
-        let mut rx = self.jobs.subscribe();
+        // The registry is already gone (the session ended before the spawn): nothing to watch.
+        let Some(jobs) = self.jobs.upgrade() else {
+            return;
+        };
+        let mut rx = jobs.subscribe();
+        // Drop the strong reference before the task starts, or the task would keep the
+        // registry (and so its own channel) alive.
+        drop(jobs);
         let notifier = Arc::clone(self);
         runtime.spawn(async move {
             loop {
@@ -159,7 +171,11 @@ impl JobNotifier {
             state.label(),
             human_duration(duration_ms)
         );
-        if let Some((_, output, tail)) = self.jobs.tail(id, NOTIFY_INLINE_BYTES) {
+        if let Some((_, output, tail)) = self
+            .jobs
+            .upgrade()
+            .and_then(|jobs| jobs.tail(id, NOTIFY_INLINE_BYTES))
+        {
             text.push_str(&format!("\noutput: {output}"));
             if !tail.is_empty() {
                 text.push_str("\nthe last part of its output:\n");

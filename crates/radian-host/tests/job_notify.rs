@@ -344,3 +344,35 @@ async fn a_burst_of_instant_jobs_keeps_every_settle_behind_its_start() {
         "the first job's Started must not be lost"
     );
 }
+
+/// An ended session releases its journal: once the session drops its job registry, the
+/// subscriber task sees the channel close and ends, so nothing keeps the journal (and its
+/// lock) alive. Until 2026-10-17 the notifier held the registry strongly, the channel never
+/// closed, and a removed task's id could not be spawned again in the same process.
+#[tokio::test]
+async fn an_ended_session_releases_its_journal() {
+    let dir = scratch("release");
+    let journal = journal(&dir);
+    let jobs = Arc::new(Jobs::new(dir.join("jobs")));
+    let notifier = JobNotifier::new(
+        Arc::clone(&jobs),
+        Inbox::new(8),
+        Arc::clone(&journal),
+        Arc::new(AtomicBool::new(false)),
+    );
+    notifier.spawn(&tokio::runtime::Handle::current());
+    // The session ends: the host drops its notifier and its registry.
+    drop(notifier);
+    drop(jobs);
+    let released = tokio::time::timeout(Duration::from_secs(10), async {
+        while Arc::strong_count(&journal) > 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "the subscriber task still holds the journal: {} references",
+        Arc::strong_count(&journal)
+    );
+}
