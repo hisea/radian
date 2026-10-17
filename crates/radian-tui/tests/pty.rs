@@ -784,27 +784,33 @@ async fn pty_mounts_only_the_builtin_tools() {
             "`{gone}` must not be mounted: {names:?}"
         );
     }
-    // The built-ins a workspace session mounts are exactly these.
-    for core in [
-        "read",
-        "write",
-        "patch",
-        "list",
-        "glob",
-        "grep",
-        "shell",
-        "job_output",
-        "job_list",
-        "job_kill",
-        "git_status",
-        "git_diff",
-        "ask_user",
-    ] {
-        assert!(
-            names.iter().any(|name| name == core),
-            "`{core}` must be mounted: {names:?}"
-        );
-    }
+    // The built-ins a workspace session mounts are exactly these, and nothing else.
+    let mut got = names.clone();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            "ask_user",
+            "git_diff",
+            "git_status",
+            "glob",
+            "grep",
+            "job_kill",
+            "job_list",
+            "job_output",
+            "list",
+            "memory_get",
+            "memory_revise",
+            "memory_save",
+            "memory_search",
+            "patch",
+            "read",
+            "shell",
+            "skill",
+            "write"
+        ],
+        "the exact tool set of a fresh TUI session: {names:?}"
+    );
 }
 
 /// ADR 0026 slice 0b acceptance: with `model.provider` and `model.model` in the config and a
