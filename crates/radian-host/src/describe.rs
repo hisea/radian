@@ -65,14 +65,16 @@ pub fn describe(
         ),
         (SandboxMode::WorkspaceWrite, Some(sandbox)) => (
             format!(
-                "workspace · sandbox {} (probe: {})",
+                "workspace · sandbox on: commands stay in the workspace · {} (probe: {})",
                 sandbox.backend_name(),
                 sandbox.probe().detail
             ),
             workspace_sandbox_facts(wording, sandbox.git_writable_except_exec()),
         ),
         (SandboxMode::FullAccess, _) => (
-            "full (chosen explicitly; never a default)".into(),
+            // ADR 0043 decision 2: `full` is the built-in default now, so the line does not
+            // say "chosen explicitly".
+            "full".into(),
             "no sandbox: commands can read and write anywhere you can, including the network"
                 .into(),
         ),
@@ -159,7 +161,7 @@ mod tests {
     }
 
     /// `safe` is "no exec" (there is no command execution to sandbox), `full` is
-    /// "no sandbox" (chosen explicitly).
+    /// "no sandbox" (the built-in default since ADR 0043).
     #[test]
     fn the_summary_word_names_what_the_tier_means() {
         assert_eq!(sandbox_word(SandboxMode::Safe, None), "no exec");

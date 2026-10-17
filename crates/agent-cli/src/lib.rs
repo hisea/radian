@@ -112,9 +112,10 @@ pub struct Cli {
     #[arg(long)]
     workspace: Option<String>,
 
-    /// Permission profile: `safe` (read-only, no shell, no MCP), `workspace` (the
-    /// default: writes confined to the workspace, `shell` sandboxed, network on), or `full`
-    /// (explicitly unsandboxed; never a default).
+    /// Permission profile: `safe` (read-only, no shell, no MCP), `workspace` (sandboxed:
+    /// writes confined to the workspace, `shell` sandboxed, network on), or `full` (the
+    /// default since ADR 0043: explicitly unsandboxed). A project's `.radian/config.toml`
+    /// can narrow the result but never widen it.
     #[arg(long, value_name = "PROFILE")]
     profile: Option<profile::ProfileArg>,
 
@@ -587,7 +588,12 @@ async fn trust_prompt(
         };
         eprintln!("  [{}] {label}{marker}", index + 1);
     }
-    eprint!("choice [4]: ");
+    let choice_default = Choice::ALL
+        .iter()
+        .position(|choice| *choice == Choice::UntrustHere)
+        .map(|index| index + 1)
+        .unwrap_or(1);
+    eprint!("choice [{choice_default}]: ");
     let _ = std::io::Write::flush(&mut std::io::stderr());
     // The same line hub the approval prompt uses: one reader owns stdin.
     let answer = lines.next().await.unwrap_or_default();
@@ -595,14 +601,15 @@ async fn trust_prompt(
 }
 
 /// The answer to the trust question, as a choice. Anything unrecognized (including an empty
-/// line) is the fail-safe default, never a trust.
+/// line) is the fail-safe default, never a trust. The numbers follow [`Choice::ALL`].
 fn trust_choice_from_answer(answer: &str) -> radian_host::trust::Choice {
     use radian_host::trust::Choice;
     match answer.trim() {
         "1" => Choice::TrustHere,
-        "2" => Choice::TrustParent,
-        "3" => Choice::TrustSession,
-        "5" => Choice::UntrustSession,
+        "2" => Choice::TrustHereSandbox,
+        "3" => Choice::TrustParent,
+        "4" => Choice::TrustSession,
+        "6" => Choice::UntrustSession,
         _ => Choice::UntrustHere,
     }
 }
@@ -789,6 +796,9 @@ struct Setup {
     config_skipped: Vec<String>,
     /// `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized (ADR 0016).
     allow_unix_sockets: Vec<PathBuf>,
+    /// `[sandbox] allow_env` (ADR 0034): environment variable names
+    /// added to the sandbox whitelist. Names only.
+    allow_env: Vec<String>,
     /// `[control] enabled` (ADR 0030 O6, slice 8): whether this process binds its control
     /// socket at `$RADIAN_HOME/run/<pid>.sock`.
     control_enabled: bool,
@@ -949,9 +959,12 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // message) and leaves nothing behind (D2). `radian-host` owns the rule for both hosts.
     let workspace = resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
         .map_err(SetupError)?;
-    // ADR 0038 decision 3: the tier and where it came from. The command line wins, then the
-    // resumed session's journal, then the remembered per-project record, then the config
-    // default. The CLI has no `/access`, but it honors what the TUI remembered and recorded.
+    // ADR 0038 decision 3 and ADR 0043 decision 2: the tier and where it came from. The
+    // command line wins, then the resumed session's journal, then the remembered per-project
+    // record, then the config default, then the built-in `full`. The CLI has no `/access`,
+    // but it honors what the TUI remembered and recorded. The project's own declaration can
+    // only narrow the result; an explicit `--profile` wins outright and the line names the
+    // project's ask beside it.
     let resumed_access = cli.resume.as_ref().and_then(|id| {
         session_dir(cli)
             .ok()
@@ -964,7 +977,11 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             None
         }
     };
-    let (profile, access_source) = if let Some(explicit) = cli.profile {
+    let project = radian_host::project::read(&workspace);
+    for warning in &project.warnings {
+        eprintln!("[project] {warning}");
+    }
+    let (mut profile, mut access_source) = if let Some(explicit) = cli.profile {
         (explicit, "flag")
     } else if let Some(preset) = resumed_access {
         (profile::from_preset(preset), "session")
@@ -976,8 +993,25 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             None => (profile::default_profile(), "default"),
         }
     };
+    if let Some(declared) = project.tier {
+        if cli.profile.is_some() {
+            if radian_host::narrow_tier(profile.preset(), declared) != profile.preset() {
+                eprintln!(
+                    "[access] {} (from flag); the project asks for {}",
+                    profile.as_str(),
+                    declared.as_str()
+                );
+            }
+        } else {
+            let narrowed = radian_host::narrow_tier(profile.preset(), declared);
+            if narrowed != profile.preset() {
+                profile = profile::from_preset(narrowed);
+                access_source = "project config";
+            }
+        }
+    }
     // ADR 0038 decision 3: name where the tier came from when it was not the built-in default,
-    // so a remembered or resumed tier is visible at startup.
+    // so a remembered, resumed or project-narrowed tier is visible at startup.
     if access_source != "default" {
         eprintln!("[access] {} (from {access_source})", profile.as_str());
     }
@@ -1220,6 +1254,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             }
             paths
         },
+        allow_env: config.sandbox.allow_env.clone(),
     })
 }
 
@@ -1493,6 +1528,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         &workspace_path,
         &sandbox_deny_read,
         &setup.allow_unix_sockets,
+        &setup.allow_env,
     )?;
 
     // The approver and the audit sink. An `auto` policy (ADR 0026 D9, from `--yes`/`--approval
@@ -2379,16 +2415,17 @@ impl EventSink for Ui {
 mod tests {
     use super::*;
 
-    /// ADR 0031 T3: only the five numbered answers are choices; anything else (an empty line,
-    /// `4`, a stray `y`) is the fail-safe default.
+    /// ADR 0031 T3 / ADR 0043 decision 2: only the six numbered answers are choices; anything
+    /// else (an empty line, `5`, a stray `y`) is the fail-safe default.
     #[test]
     fn the_trust_answer_defaults_to_untrust() {
         use radian_host::trust::Choice;
         assert_eq!(trust_choice_from_answer("1"), Choice::TrustHere);
-        assert_eq!(trust_choice_from_answer(" 2 "), Choice::TrustParent);
-        assert_eq!(trust_choice_from_answer("3"), Choice::TrustSession);
-        assert_eq!(trust_choice_from_answer("5"), Choice::UntrustSession);
-        for other in ["", "4", "y", "yes", "99", "trust"] {
+        assert_eq!(trust_choice_from_answer(" 2 "), Choice::TrustHereSandbox);
+        assert_eq!(trust_choice_from_answer("3"), Choice::TrustParent);
+        assert_eq!(trust_choice_from_answer("4"), Choice::TrustSession);
+        assert_eq!(trust_choice_from_answer("6"), Choice::UntrustSession);
+        for other in ["", "5", "y", "yes", "99", "trust"] {
             assert_eq!(
                 trust_choice_from_answer(other),
                 Choice::UntrustHere,

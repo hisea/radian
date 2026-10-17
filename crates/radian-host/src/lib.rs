@@ -36,6 +36,7 @@ pub mod observer;
 pub mod opencode_go;
 mod output;
 pub mod pending;
+pub mod project;
 pub mod projection;
 pub mod prompt;
 pub mod provider;
@@ -137,6 +138,7 @@ pub use oauth_chatgpt::{
     poll_device_until_done as oauth_poll_device_until_done, store_token as oauth_store_token,
 };
 pub use observer::{JournalObserver, SessionObserver};
+pub use project::{ProjectConfig, effective as project_effective_tier, narrow as narrow_tier};
 pub use opencode_go::{
     DEFAULT_PERIOD as OPENCODE_GO_DEFAULT_PERIOD, MAX_PERIOD as OPENCODE_GO_MAX_PERIOD,
     MIN_PERIOD as OPENCODE_GO_MIN_PERIOD, OpencodeGoUsage, USAGE_URL as OPENCODE_GO_USAGE_URL,

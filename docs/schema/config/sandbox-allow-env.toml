@@ -1,0 +1,5 @@
+schema_version = 1
+
+# ADR 0034: names only, and only in the user-level configuration.
+[sandbox]
+allow_env = ["FOO", "HERDR_PANE_ID"]

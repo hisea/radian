@@ -5,8 +5,10 @@
 //! `radian_permissions::Profile` and a `radian_sandbox::Sandbox`. The two invariants it
 //! exists to keep:
 //!
-//! - **`full-access` is never a default.** [`default_profile`] returns `workspace-write`;
-//!   `full-access` is only reachable by naming it on the command line.
+//! - **`full-access` is the default** (ADR 0043 decision 2): [`default_profile`] returns it,
+//!   because the neighbouring harnesses run unsandboxed by default and every real dogfood did.
+//!   `--profile workspace`/`safe` and a project's own `.radian/config.toml` turn the sandbox
+//!   on; a project can only narrow, never widen.
 //! - **A failed probe never degrades.** For an enforced mode, [`build_sandbox`] returns an
 //!   error when the backend is missing or its probe fails; it never returns `None` so the
 //!   caller could run unsandboxed.
@@ -66,15 +68,16 @@ pub(crate) fn from_preset(preset: Preset) -> ProfileArg {
     }
 }
 
-/// The default profile: **`workspace-write`**, never `full-access`.
+/// The default profile: **`full-access`** (ADR 0043 decision 2).
 ///
-/// Rationale: it is the least surprising useful mode. The built-in file tools are confined by
-/// their own workspace boundary, `shell` exists only when a workspace is given (and then runs
-/// under the sandbox), and MCP tools keep working the way this CLI has always run them.
-/// `safe` would silently turn every MCP tool into a denial, and `full-access` must never be
-/// something a user gets by forgetting a flag.
+/// Rationale: the neighbour harnesses (Claude Code, opencode, Gemini CLI) do not turn the OS
+/// sandbox on by default, every dogfood run here used `--profile full`, and the built-in file
+/// tools keep their own workspace boundary either way. The sandbox stays available and is the
+/// recommended choice for an unfamiliar repository or an unattended run; `--profile workspace`
+/// or `safe`, a remembered per-project choice, or the project's own `.radian/config.toml` all
+/// turn it on (a project can only narrow).
 pub(crate) fn default_profile() -> ProfileArg {
-    ProfileArg::WorkspaceWrite
+    ProfileArg::FullAccess
 }
 
 /// Builds the permission profile: the preset's rules, plus any host allow rules for shell
@@ -144,6 +147,7 @@ pub(crate) fn build_sandbox(
     workspace: &Path,
     deny_read: &[std::path::PathBuf],
     allow_unix_sockets: &[std::path::PathBuf],
+    allow_env: &[String],
 ) -> Result<Option<Sandbox>, SetupError> {
     if profile == ProfileArg::Safe {
         return Ok(None);
@@ -185,6 +189,11 @@ pub(crate) fn build_sandbox(
     for path in allow_unix_sockets {
         policy = policy.allow_unix_socket(path);
     }
+    // ADR 0034: the user-level `[sandbox] allow_env` names, on top of
+    // the built-in whitelist (which already carries the six `HERDR_*` names).
+    for name in allow_env {
+        policy = policy.allow_env(name.clone());
+    }
     match Sandbox::from_policy(policy) {
         Ok(sandbox) => Ok(Some(sandbox)),
         // The workspace being inside a denied directory is not a backend problem: say what it
@@ -201,7 +210,7 @@ fn unavailable(profile: ProfileArg, mode: SandboxMode) -> String {
     format!(
         "the `{}` sandbox backend is unavailable or failed its probe, so `{}` cannot be \
          enforced; refusing to run. Install/fix the backend, or pass `--profile full` \
-         if you really mean to run without a sandbox (that is never the default)",
+         if you really mean to run without a sandbox (the built-in default)",
         mode.as_str(),
         profile.as_str()
     )
@@ -229,7 +238,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("radian-cli-profile-git-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let result = build_sandbox(ProfileArg::WorkspaceWrite, &dir, &[], &[]);
+        let result = build_sandbox(ProfileArg::WorkspaceWrite, &dir, &[], &[], &[]);
         let _ = std::fs::remove_dir_all(&dir);
         match result {
             Ok(Some(sandbox)) => assert_eq!(

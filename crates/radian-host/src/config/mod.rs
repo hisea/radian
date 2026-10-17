@@ -495,15 +495,19 @@ pub struct TuiFooterItemConfig {
     pub params: Vec<(String, String)>,
 }
 
-/// `[sandbox]` (ADR 0016). Only the user-level configuration may set it: a
-/// cloned repository must not be able to open a socket for itself. There is no project-level
-/// configuration layer today, so that is documented rather than enforced here.
+/// `[sandbox]` (ADR 0016, ADR 0034). Only the user-level
+/// configuration may set it: a cloned repository must not be able to open a socket for itself
+/// or pass an environment variable to a model-run command. The project-level
+/// `<workspace>/.radian/config.toml` refuses both keys by name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SandboxConfig {
     /// Unix sockets the sandbox may connect to, as written (`~` is expanded when the policy
     /// is built; the path is canonicalized then). A path that does not resolve is skipped and
     /// named on the startup line.
     pub allow_unix_sockets: Vec<String>,
+    /// Environment variable **names** passed through to a sandboxed command (ADR 0034
+    /// revision 1 decision 7). Names only: a value cannot be set here.
+    pub allow_env: Vec<String>,
 }
 
 /// `[integrations]` (ADR 0034 H6): which local integrations are on. `herdr` defaults to
@@ -962,10 +966,36 @@ fn parse_sandbox(value: &Value, path: &Path, config: &mut Config) -> Result<(), 
                     "an array of strings",
                 ));
             }
+            // ADR 0034: names only, so a value can never be smuggled in
+            // through `NAME=value`. A bad entry is a structural error, like a bad socket path.
+            ("allow_env", Value::Array(items)) => {
+                for (index, item) in items.iter().enumerate() {
+                    match item {
+                        Value::String(name) if valid_env_name(name) => {
+                            config.sandbox.allow_env.push(name.clone())
+                        }
+                        _ => {
+                            return Err(wrong_type(
+                                path,
+                                &format!("sandbox.allow_env[{index}]"),
+                                "an environment variable name (no `=`)",
+                            ));
+                        }
+                    }
+                }
+            }
+            ("allow_env", _) => {
+                return Err(wrong_type(path, "sandbox.allow_env", "an array of strings"));
+            }
             (other, _) => config.skipped.push(format!("sandbox.{other}")),
         }
     }
     Ok(())
+}
+
+/// An environment variable **name**: non-empty, no `=` (it sets no value) and no whitespace.
+fn valid_env_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('=') && !name.chars().any(char::is_whitespace)
 }
 
 fn parse_compaction(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
@@ -1703,6 +1733,27 @@ mod tests {
         let config = parse_str("schema_version = 1\n[sandbox]\nfuture = true\n").unwrap();
         assert!(config.sandbox.allow_unix_sockets.is_empty());
         assert!(config.skipped.contains(&"sandbox.future".to_owned()));
+    }
+
+    /// ADR 0034: `[sandbox] allow_env` is a list of names, not
+    /// `NAME=value` pairs. A value smuggled in as `NAME=value` or a non-string is refused.
+    #[test]
+    fn sandbox_allow_env_is_names_only() {
+        let config = parse_str("schema_version = 1\n[sandbox]\nallow_env = [\"FOO\", \"BAR\"]\n")
+            .unwrap();
+        assert_eq!(config.sandbox.allow_env, vec!["FOO", "BAR"]);
+        assert!(
+            parse_str("schema_version = 1\n[sandbox]\nallow_env = [\"FOO=bar\"]\n").is_err(),
+            "a value must not be smuggled in"
+        );
+        assert!(
+            parse_str("schema_version = 1\n[sandbox]\nallow_env = [3]\n").is_err(),
+            "a non-string is refused"
+        );
+        assert!(
+            parse_str("schema_version = 1\n[sandbox]\nallow_env = \"FOO\"\n").is_err(),
+            "a non-array is refused"
+        );
     }
 
     /// The host expands `~`, canonicalizes, and skips (with a warning) a relative or missing

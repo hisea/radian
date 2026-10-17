@@ -13,7 +13,8 @@
 //!   included) with a saved decision, then "no decision" (untrusted). Paths are canonicalized
 //!   before both storing and looking up, so a symlink and its target share one decision (T5).
 //! - **Trigger**: a workspace needs a decision only when it holds a resource from T1's list;
-//!   today that list is `<workspace>/.radian/skills/<x>/SKILL.md`. A bare `.radian/` does not
+//!   today that list is `<workspace>/.radian/skills/<x>/SKILL.md` and the project declaration
+//!   `<workspace>/.radian/config.toml` (ADR 0043 decision 1). A bare `.radian/` does not
 //!   trigger (T1).
 
 use std::collections::BTreeMap;
@@ -95,11 +96,14 @@ impl Setup {
     }
 }
 
-/// The five choices the startup prompt offers (ADR 0031 T3, owner ruling 6). The order is the
-/// display order; `UntrustHere` is the default highlight.
+/// The six choices the startup prompt offers (ADR 0031 T3 revision by ADR 0043 decision 2;
+/// owner ruling 6). The order is the display order; `UntrustHere` is the default highlight.
+/// `TrustHereSandbox` trusts this directory **and** remembers `workspace` for it in
+/// `~/.radian/access/access.json`, the same record `/access` writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
     TrustHere,
+    TrustHereSandbox,
     TrustParent,
     TrustSession,
     UntrustHere,
@@ -107,8 +111,9 @@ pub enum Choice {
 }
 
 impl Choice {
-    pub const ALL: [Choice; 5] = [
+    pub const ALL: [Choice; 6] = [
         Choice::TrustHere,
+        Choice::TrustHereSandbox,
         Choice::TrustParent,
         Choice::TrustSession,
         Choice::UntrustHere,
@@ -122,7 +127,8 @@ impl Choice {
 
     pub fn decision(self) -> Decision {
         match self {
-            Choice::TrustHere | Choice::TrustParent | Choice::TrustSession => Decision::Trust,
+            Choice::TrustHere | Choice::TrustHereSandbox | Choice::TrustParent
+            | Choice::TrustSession => Decision::Trust,
             Choice::UntrustHere | Choice::UntrustSession => Decision::Untrust,
         }
     }
@@ -132,6 +138,9 @@ impl Choice {
     pub fn label(self, workspace: &Path) -> Option<String> {
         Some(match self {
             Choice::TrustHere => format!("Trust this directory ({})", workspace.display()),
+            Choice::TrustHereSandbox => {
+                "Trust this directory, and use the sandbox for this project".to_owned()
+            }
             Choice::TrustParent => format!(
                 "Trust the parent directory ({})",
                 workspace.parent()?.display()
@@ -154,6 +163,14 @@ pub fn apply(choice: Choice, workspace: &Path, audit: Audit<'_>) -> Result<Resol
     match choice {
         Choice::TrustHere | Choice::UntrustHere => {
             set_at(&path, workspace, resolved.decision, audit)?;
+        }
+        // ADR 0043 decision 2: this choice also remembers the sandbox for the project, in the
+        // same per-project record `/access` writes. The trust decision is what makes the
+        // project's own resources load; the access record is what keeps the sandbox on next
+        // time.
+        Choice::TrustHereSandbox => {
+            set_at(&path, workspace, resolved.decision, audit)?;
+            crate::access::remember_for(workspace, radian_permissions::Preset::WorkspaceWrite)?;
         }
         Choice::TrustParent => {
             let parent = workspace
@@ -178,7 +195,7 @@ pub fn resolved_for(choice: Choice, workspace: &Path) -> Result<Resolved, String
             decision,
             source: Source::Session,
         },
-        Choice::TrustHere | Choice::UntrustHere => Resolved {
+        Choice::TrustHere | Choice::TrustHereSandbox | Choice::UntrustHere => Resolved {
             decision,
             source: Source::Saved(canonical(workspace)),
         },
@@ -400,10 +417,10 @@ pub fn untrusted_notice(workspace: &Path) -> String {
 }
 
 /// Whether `workspace` holds a resource from T1's list. The list (ADR 0031 T1, shrunk by ADR
-/// 0043 decision 1 to the project's own skills; the project-config row returns with the
-/// profile slice):
+/// 0043 decision 1 to the project's own skills and its project-level configuration):
 ///
-/// - a project-level skill: `<workspace>/.radian/skills/<x>/SKILL.md` (or directly under `skills/`).
+/// - a project-level skill: `<workspace>/.radian/skills/<x>/SKILL.md` (or directly under `skills/`);
+/// - the project declaration: `<workspace>/.radian/config.toml`.
 ///
 /// A bare `.radian/` does not trigger, and `.radian-sandbox/` is ignored. The check is a **file**
 /// question: a malformed file is still something the loader would read, so it still triggers.
@@ -411,6 +428,7 @@ pub fn untrusted_notice(workspace: &Path) -> String {
 pub fn has_project_resources(workspace: &Path) -> bool {
     let dot_radian = workspace.join(".radian");
     crate::skills::has_skill_file(&dot_radian.join("skills"))
+        || crate::project::path(workspace).is_file()
 }
 
 /// The canonical form of `path`: symlinks resolved, `.`/`..` removed. Falls back to the path
@@ -640,5 +658,12 @@ mod tests {
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "---\nname: greet\n---\n").unwrap();
         assert!(has_project_resources(&ws));
+
+        // ADR 0043 decision 2: the project declaration itself is a project resource.
+        let other = root.root.join("ws-config");
+        std::fs::create_dir_all(other.join(".radian")).unwrap();
+        assert!(!has_project_resources(&other));
+        std::fs::write(other.join(".radian/config.toml"), "[permissions]\n").unwrap();
+        assert!(has_project_resources(&other));
     }
 }
