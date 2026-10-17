@@ -36,7 +36,8 @@ fn scratch() -> PathBuf {
 fn isolated_home() -> PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("radian-subagent-route-home-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("radian-subagent-route-home-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
@@ -53,7 +54,10 @@ fn stub(dir: &Path, argv_path: &Path) -> PathBuf {
     let path = dir.join("child.sh");
     std::fs::write(
         &path,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", argv_path.display()),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            argv_path.display()
+        ),
     )
     .unwrap();
     let mut permissions = std::fs::metadata(&path).unwrap().permissions();
@@ -227,7 +231,9 @@ async fn the_child_runs_the_parents_live_model_route() {
             approvals: ApprovalRouting::Direct(Arc::new(DenyApprover)),
             shared_queue: None,
             ask_user: false,
-            audit: Arc::new(|_journal| Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>),
+            audit: Arc::new(|_journal| {
+                Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
+            }),
             events: Arc::new(NoopSink),
             projection: Arc::new(SessionProjection::new()),
             runtime_events: Arc::new(|_event: &radian_session::RuntimeEvent| {}),

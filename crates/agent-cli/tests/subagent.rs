@@ -595,4 +595,3 @@ async fn the_parents_header_reaches_the_child_and_nothing_else_writes_it() {
         "the secret must never be printed: {stdout}{stderr}"
     );
 }
-
