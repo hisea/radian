@@ -551,17 +551,28 @@ impl Jobs {
         let mut waited_out = false;
         let mut wait_cancelled = false;
         if wait {
-            let mut rx = {
+            // A settled job never waits: the state under the cell lock is the authority, and
+            // `settle` writes it under the same lock as the watched value, so the two can never
+            // disagree. The watched value alone would do now that a settle stores it
+            // unconditionally, but this keeps the waiter count (and so the settle's `notify`)
+            // off a job that has already finished.
+            let rx = {
                 let mut cell = lock(&cell);
-                cell.waiters += 1;
-                cell.settled.subscribe()
+                if cell.state.is_running() {
+                    cell.waiters += 1;
+                    Some(cell.settled.subscribe())
+                } else {
+                    None
+                }
             };
-            let _waiter = WaiterGuard(Arc::clone(&cell));
-            if !*rx.borrow_and_update() {
-                tokio::select! {
-                    _ = rx.changed() => {}
-                    _ = tokio::time::sleep(timeout) => waited_out = true,
-                    _ = cancel.cancelled() => wait_cancelled = true,
+            if let Some(mut rx) = rx {
+                let _waiter = WaiterGuard(Arc::clone(&cell));
+                if !*rx.borrow_and_update() {
+                    tokio::select! {
+                        _ = rx.changed() => {}
+                        _ = tokio::time::sleep(timeout) => waited_out = true,
+                        _ = cancel.cancelled() => wait_cancelled = true,
+                    }
                 }
             }
         }
@@ -734,7 +745,8 @@ pub(crate) struct OutputResult {
     /// Bytes the ring had to drop before the caller's cursor.
     pub dropped: u64,
     pub increment: Vec<u8>,
-    /// The wait hit its timeout: the job is still running.
+    /// The wait hit its timeout (it may have lost the race with a settle in that instant; the
+    /// renderer prints "still running" only when [`OutputResult::state`] is running).
     pub waited_out: bool,
     /// The turn was cancelled while waiting: the job is untouched.
     pub wait_cancelled: bool,
@@ -927,7 +939,11 @@ fn settle(
         // notified: the model set the timeout but did not ask to kill the job, so it may be
         // waiting on it.
         let notify = !matches!(cell.termination, Some(Termination::Killed)) && cell.waiters == 0;
-        let _ = cell.settled.send(true);
+        // `send_replace`, not `send`: tokio's `send` returns `Err` **without storing** the value
+        // when the channel has no receiver, and the receiver from `watch::channel(false)` is
+        // dropped at once, so a job that settles while nobody waits would leave the watched
+        // value `false` and a later `job_output wait=true` would sleep to its timeout.
+        cell.settled.send_replace(true);
         (state, duration_ms, notify)
     };
     let _ = events.send(JobEvent::Settled {
@@ -1341,7 +1357,9 @@ pub(crate) async fn run_output(
             result.dropped
         ));
     }
-    if result.waited_out {
+    // A wait that timed out in the instant the job settled must not claim it is still running:
+    // the state is the authority, the timeout is only why the wait ended.
+    if result.waited_out && result.state.is_running() {
         text.push_str(&format!(
             "[still running after {} ms; the job was not killed]\n",
             timeout.as_millis()
@@ -1753,5 +1771,41 @@ mod tests {
         assert_eq!(first_line("make test\necho done"), "make test");
         assert_eq!(first_line("  spaced  "), "spaced");
         assert_eq!(first_line(&"x".repeat(200)).chars().count(), 120);
+    }
+
+    /// A job cell as `start`/`adopt` build it, for the settle test below.
+    fn test_cell() -> Arc<Mutex<JobCell>> {
+        let (settled, _) = tokio::sync::watch::channel(false);
+        Arc::new(Mutex::new(JobCell {
+            command: "test".into(),
+            started: Instant::now(),
+            state: JobState::Running,
+            termination: None,
+            ring: Ring::default(),
+            read_offset: 0,
+            output: PathBuf::from("test.out"),
+            sid: 0,
+            waiters: 0,
+            reaped: Arc::new(Mutex::new(false)),
+            settled,
+        }))
+    }
+
+    /// The root cause of a wait on a settled job sleeping to its timeout: tokio's `send` returns
+    /// `Err` **without storing** the value when the channel has no receiver, and `start`/`adopt`
+    /// drop the receiver from `watch::channel(false)` at once. A settle with no waiter must store
+    /// `true` anyway (`send_replace`), so a reader that subscribes afterwards sees it.
+    #[test]
+    fn a_settle_with_no_waiter_still_stores_the_watched_value() {
+        let cell = test_cell();
+        let (events, _) = tokio::sync::broadcast::channel(4);
+        settle(&cell, &events, "job-0-0".into(), None);
+
+        assert!(!lock(&cell).state.is_running());
+        let mut rx = lock(&cell).settled.subscribe();
+        assert!(
+            *rx.borrow_and_update(),
+            "a reader that subscribes after the settle must see it"
+        );
     }
 }

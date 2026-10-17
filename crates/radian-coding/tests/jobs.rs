@@ -284,6 +284,120 @@ async fn a_waited_settle_is_not_notified() {
     );
 }
 
+// ---------- 2d. a job that settled while nobody waited ----------
+
+/// The state of the next settle on `events` (skipping the start), bounded. Waiting on the
+/// registry's **own** notice, not on a sleep, is what makes the check below deterministic: when
+/// it returns, the job has settled with no waiter.
+async fn next_settle_state(events: &mut tokio::sync::broadcast::Receiver<JobEvent>) -> JobState {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(15), events.recv()).await {
+            Ok(Ok(JobEvent::Settled { state, .. })) => return state,
+            Ok(Ok(JobEvent::Started { .. })) => continue,
+            Ok(Err(error)) => panic!("no settle event: {error}"),
+            Err(_) => panic!("timed out waiting for a settle event"),
+        }
+    }
+}
+
+/// A job that settles with **no** waiter leaves the watched value `true` as well
+/// (`send_replace`; `send` would return `Err` without storing it), so a later
+/// `job_output wait=true` returns at once with the exited state, and never the contradictory
+/// "[still running …]" line. On the old code it slept the whole 30 s and printed both lines.
+#[tokio::test]
+async fn a_wait_on_a_settled_job_returns_at_once() {
+    let dir = TempDir::new("jobs-settled-wait");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+    let mut events = session.jobs().subscribe();
+
+    let (id, _) = start(&session, "echo done", None).await;
+
+    // Nobody waits while it settles; the registry's own settle notice is the barrier.
+    assert_eq!(
+        next_settle_state(&mut events).await.label(),
+        "exited 0",
+        "the job must settle on its own before the wait below"
+    );
+
+    let started = Instant::now();
+    let text = output_text(
+        &exec(
+            &session,
+            "job_output",
+            json!({"job_id": id, "wait": true, "timeout_ms": 30_000}),
+        )
+        .await
+        .unwrap(),
+    );
+    let waited = started.elapsed();
+    assert!(text.contains("[status: exited 0]"), "{text}");
+    assert!(
+        !text.contains("still running"),
+        "a settled job must never be reported as still running: {text}"
+    );
+    assert!(
+        waited < Duration::from_secs(2),
+        "a wait on a settled job must return at once, not after its timeout: {waited:?}"
+    );
+}
+
+/// The same for an adopted job: a foreground command moved to the background that finishes with
+/// nobody waiting is settled at once on the next `job_output wait=true` (the adopt path shares
+/// `settle`).
+#[tokio::test]
+async fn a_wait_on_a_settled_adopted_job_returns_at_once() {
+    let dir = TempDir::new("auto-settled-wait");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = adopting_tools(&root, Duration::from_millis(300));
+    let session = tools.open_session().await.expect("session");
+    let mut events = session.jobs().subscribe();
+
+    mkfifo(&root.join("gate"));
+    let (id, _) = adopted(
+        &exec(
+            &session,
+            "shell",
+            json!({"command": "cat gate > /dev/null; echo after"}),
+        )
+        .await
+        .unwrap(),
+    );
+
+    // Nobody waits: release it, and wait on the registry's settle notice.
+    release_fifo(&root.join("gate"));
+    assert_eq!(
+        next_settle_state(&mut events).await.label(),
+        "exited 0",
+        "the adopted job must settle on its own before the wait below"
+    );
+
+    let started = Instant::now();
+    let text = output_text(
+        &exec(
+            &session,
+            "job_output",
+            json!({"job_id": id, "wait": true, "timeout_ms": 30_000}),
+        )
+        .await
+        .unwrap(),
+    );
+    let waited = started.elapsed();
+    assert!(text.contains("after"), "{text}");
+    assert!(text.contains("[status: exited 0]"), "{text}");
+    assert!(
+        !text.contains("still running"),
+        "a settled job must never be reported as still running: {text}"
+    );
+    assert!(
+        waited < Duration::from_secs(2),
+        "a wait on a settled adopted job must return at once: {waited:?}"
+    );
+}
+
 // ---------- 2c. the notify flag per settle kind ----------
 
 /// The `notify` flag of the next settle on `events` (skipping the start), bounded.
