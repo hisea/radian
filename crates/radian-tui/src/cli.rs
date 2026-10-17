@@ -881,133 +881,58 @@ fn run(
         &mut startup_log,
     )?;
 
-    // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
-    // with its own bindings. Every startup check that can fail has already run, so this is the
-    // first thing that creates durable state. ADR 0032 slice 5: `LeadSetup::setup` fills what
-    // every host-opened session shares; what the TUI decides itself is written here.
-    let mut session = runtime
-        .block_on(radian_host::open_session(
-            radian_host::LeadSetup {
-                settings,
-                session_id: radian_host::SessionId::new(session_id.clone()),
-                session_dir: dir.clone(),
-                workspace: workspace_path.clone(),
-                // The tools are mounted by default now: the workspace is the current directory
-                // (or `$HOME/tmp`), not only an explicit `--workspace`.
-                coding_root: Some(workspace_path.clone()),
-                model,
-                config_slot: std::sync::Arc::clone(&config_slot),
-                budget_for: Some(budget_for),
-                price_for: Some(Arc::clone(&route_price)),
-                servers,
-                system_prompt: cli.system.clone(),
-                context_budget: window
-                    .budget
-                    // ADR 0015: a zero budget is unset, never a real zero-token budget.
-                    .filter(|tokens| *tokens > 0)
-                    .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
-                sandbox,
-                tier: tier.preset(),
-                profile,
-                access_builder: Some(access_builder),
-                parent: None,
-                subagent: Some(radian_host::SubagentParts {
-                    executable: std::env::current_exe().ok(),
-                    provider: provider_name.clone(),
-                    model: model_name.clone(),
-                    base_url: provider_ref
-                        .takes_base_url_override()
-                        .then(|| route.base_url.clone()),
-                    config: cli.config.clone(),
-                    max_tokens: cli.max_tokens,
-                    thinking: cli.thinking.clone(),
-                    mcp_config: cli.mcp_config.clone(),
-                    trust: trust_setup.resolved.decision.as_bool(),
-                }),
-                tools_allow: None,
-                memory_root,
-                trust: trust_setup,
-                resume: resume.is_some(),
-                config_snapshot: serde_json::json!({
-                    "provider": provider.as_str(),
-                    "model": cli.model,
-                }),
-                turn_options: TurnOptions {
-                    max_model_calls: Some(cli.max_model_calls),
-                    ..TurnOptions::default()
-                },
-                turn_timeout: None,
-                wording: radian_host::TUI_WORDING,
-                capabilities: radian_host::SessionCapability::ALL.to_vec(),
-            }
-            .setup(),
-            radian_host::HostBindings {
-                approvals,
-                shared_queue: None,
-                ask_user: true,
-                audit,
-                events: live,
-                projection: Arc::clone(&projection),
-                runtime_events,
-                driver_stopped,
-                before_driver,
-                memory_warning,
-                memory_notice_line,
-            },
-        ))
-        .map_err(|error| error.to_string())?;
-    mark("open-session-done");
-    // ADR 0030 O6: start accepting control requests for this session.
-    if let Some(server) = &control {
-        server.serve(runtime.handle(), radian_host::ControlTarget::of(&session));
-    }
-    // The providers worth refreshing now: the one this run started with. `/model`'s other
-    // targets refresh on their next use (the fetch itself is on the loop's runtime).
-    let refresh_targets = vec![key_id.clone()];
-    // ADR 0026 D0: refresh the switched-to providers' `/v1/models` in the background. It never
-    // blocks startup and its failures are silent (the next `/model` just sees the old cache).
-    runtime.spawn(async move {
-        for provider_id in refresh_targets {
-            let Some(key) = radian_host::auth::resolve_key(&provider_id)
-                .ok()
-                .flatten()
-                .map(|resolved| resolved.key)
-            else {
-                continue;
-            };
-            // The retry rule (D0): skip when the cache is fresh, or when a fetch failed less
-            // than the retry delay ago (the failure marker is an empty `models` write).
-            let age = radian_host::provider_models_cache(&provider_id).and_then(|path| {
-                std::fs::metadata(path).ok().and_then(|meta| {
-                    meta.modified()
-                        .ok()
-                        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
-                })
-            });
-            let cached = radian_host::auth::resolve_key(&provider_id)
-                .ok()
-                .flatten()
-                .and_then(|resolved| {
-                    radian_host::read_provider_models(&provider_id, &resolved.key)
-                });
-            let cached_models = cached.as_ref().map_or(0, |cache| cache.models.len());
-            if !radian_host::provider_models_stale(age, cached_models) {
-                continue;
-            }
-            let base_url = radian_host::descriptor(&provider_id)
-                .map(|descriptor| descriptor.default_base_url.to_owned())
-                .unwrap_or_default();
-            match radian_host::fetch_provider_models(&base_url, &key).await {
-                Some(models) => {
-                    let _ = radian_host::write_provider_models(&provider_id, &key, models);
-                }
-                None => {
-                    // The failure marker: an empty list, so the retry delay applies (D0).
-                    let _ = radian_host::write_provider_models(&provider_id, &key, Vec::new());
-                }
-            }
-        }
-    });
+    // The session-opening phase takes the input and route structs and returns the open
+    // session. Later phases keep their own names: the values this consumes but later
+    // phases still borrow (`window`, `route_price`) are cloned into the call, and the
+    // inputs this never touches (`startup_approval`, `inherited_sandbox`, `bash_sandbox`)
+    // stay out of it.
+    let mut session = run_open::open_session_and_refresh(
+        runtime,
+        &cli,
+        run_open::SessionInputs {
+            sandbox,
+            servers,
+            profile,
+            projection,
+            control,
+            live,
+            approvals,
+            audit,
+            runtime_events,
+            driver_stopped,
+            before_driver,
+            memory_warning,
+            memory_notice_line,
+            trust_setup,
+            memory_root,
+            access_builder,
+            startup_approval: startup_approval.clone(),
+            inherited_sandbox,
+            bash_sandbox: bash_sandbox.clone(),
+        },
+        run_resolve::ResolvedRoute {
+            window: window.clone(),
+            session_id: session_id.clone(),
+            secrets: secrets.clone(),
+            route,
+            replays_reasoning,
+            settings,
+            config_slot,
+            model,
+            budget_for,
+            route_price: route_price.clone(),
+        },
+        &dir,
+        &workspace_path,
+        &session_id,
+        &resume,
+        tier,
+        &provider_name,
+        &model_name,
+        &provider_ref,
+        provider,
+        &key_id,
+    )?;
     // ADR 0026 D8: an explicit `--model`/`--provider` wins over the resumed change, and the
     // override is recorded so the journal stays the authority for the next resume.
     if cli.resume.is_some()

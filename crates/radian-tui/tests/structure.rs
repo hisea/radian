@@ -21,10 +21,6 @@ fn app_rs() -> String {
     code(concat!(env!("CARGO_MANIFEST_DIR"), "/src/app.rs"))
 }
 
-fn main_rs() -> String {
-    code(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli.rs"))
-}
-
 /// The file that now holds the sandbox/access/open_session half of `run()` (ADR 0043
 /// slice 2c extractions): the startup greps that moved out of `src/cli.rs` read it.
 fn run_open_rs() -> String {
@@ -61,7 +57,7 @@ fn app_holds_no_session_facts() {
 /// session itself: `radian_host::open_session` does, so both binaries share one path.
 #[test]
 fn main_does_not_establish_a_session() {
-    let code = main_rs();
+    let code = run_open_rs();
     for forbidden in [
         "SessionJournal::create",
         "SessionJournal::resume",
@@ -80,7 +76,7 @@ fn main_does_not_establish_a_session() {
     }
     assert!(
         code.contains("radian_host::open_session("),
-        "cli.rs must call the shared open_session"
+        "run_open.rs must call the shared open_session"
     );
 }
 
