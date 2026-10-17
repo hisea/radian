@@ -111,9 +111,9 @@ pub use config::{
 };
 pub use context::{ContextFiles, LoadedFile, load as load_context_files};
 pub use contrib::{
-    Contribution, ContributionStore, ContributorRunner, GitContributor, Segment, SegmentRole,
-    StatusContributor, Tick, spawn as spawn_contributor, spawn_gated as spawn_contributor_gated,
-    spawn_once as spawn_contributor_once,
+    Contribution, ContributionStore, ContributorRunner, GitContributor, NOTICE_AFTER, Segment,
+    SegmentRole, StatusContributor, Tick, spawn as spawn_contributor,
+    spawn_gated as spawn_contributor_gated, spawn_once as spawn_contributor_once,
 };
 pub use control::{ControlServer, ControlTarget, SUBSCRIBER_BUFFER, SocketGuard};
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};

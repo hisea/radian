@@ -100,20 +100,32 @@ impl ContributionStore {
     /// Replaces one item's contribution, clearing `stale`. Returns whether the **value**
     /// changed: an identical value writes nothing and does not wake the UI.
     pub fn write(&self, item: &str, segments: Vec<Segment>) -> bool {
+        self.write_contribution(Contribution {
+            item: item.to_owned(),
+            segments,
+            stale: false,
+            symbol: None,
+        })
+    }
+
+    /// Replaces one item's whole contribution, including an optional `symbol` (ADR 0027 revision
+    /// 14 decision 4: a footer `command`'s JSON symbol). Clears `stale`. Returns whether the
+    /// **value** changed.
+    pub fn write_contribution(&self, contribution: Contribution) -> bool {
+        let item = contribution.item.clone();
         let mut items = self.items.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(current) = items.get(item)
+        if let Some(current) = items.get(&item)
             && !current.stale
-            && current.segments == segments
+            && current.segments == contribution.segments
+            && current.symbol == contribution.symbol
         {
             return false;
         }
         items.insert(
-            item.to_owned(),
+            item,
             Contribution {
-                item: item.to_owned(),
-                segments,
                 stale: false,
-                symbol: None,
+                ..contribution
             },
         );
         drop(items);
@@ -245,7 +257,7 @@ impl ContributorRunner {
                 self.failures = 0;
                 let mut changed = false;
                 for contribution in contributions {
-                    changed |= self.store.write(&contribution.item, contribution.segments);
+                    changed |= self.store.write_contribution(contribution);
                 }
                 Tick {
                     changed,

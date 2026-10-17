@@ -579,24 +579,27 @@ pub enum ConfigOrigin {
     /// outside the workspace, or no file at all. Fully trusted.
     #[default]
     User,
-    /// A file inside the project workspace (and not under `$RADIAN_HOME`). ADR 0031's gate
-    /// applies: a project-provided resource is not trusted by default.
+    /// A file inside the project workspace (and outside the user config directory). ADR 0031's
+    /// gate applies: a project-provided resource is not trusted by default.
     Project,
 }
 
 /// Classifies a resolved configuration path (ADR 0027). Pure: the caller
-/// passes the workspace and the Radian home, so the rule is testable without the environment.
+/// passes the workspace and the **user config directory** (`$RADIAN_HOME/config`), so the rule is
+/// testable without the environment.
 ///
 /// * no source, or a source not inside `workspace` -> [`ConfigOrigin::User`];
-/// * a source inside `workspace` -> [`ConfigOrigin::Project`], **unless** it is also inside
-///   `radian_home` (the user's own `~/.radian/config/config.toml` must stay trusted even when
-///   Radian is run from the home directory).
+/// * a source inside the user config directory -> [`ConfigOrigin::User`] (the user's own
+///   `~/.radian/config/config.toml` must stay trusted even when Radian is run from the home
+///   directory, and this is a narrower rule than "under `$RADIAN_HOME`", which would also swallow
+///   a workspace under `$RADIAN_HOME/worktrees/`);
+/// * any other source inside `workspace` -> [`ConfigOrigin::Project`].
 ///
 /// A path that cannot be canonicalized is compared lexically, so this never fails.
 pub fn classify_origin(
     source: Option<&Path>,
     workspace: Option<&Path>,
-    radian_home: Option<&Path>,
+    user_config_dir: Option<&Path>,
 ) -> ConfigOrigin {
     let Some(source) = source else {
         return ConfigOrigin::User;
@@ -612,9 +615,9 @@ pub fn classify_origin(
     if !source.starts_with(&workspace) {
         return ConfigOrigin::User;
     }
-    if let Some(home) = radian_home {
-        let home = canon(home);
-        if source.starts_with(&home) {
+    if let Some(config_dir) = user_config_dir {
+        let config_dir = canon(config_dir);
+        if source.starts_with(&config_dir) {
             return ConfigOrigin::User;
         }
     }
@@ -686,8 +689,8 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
 }
 
 /// Like [`load`], but classifies the file's [`ConfigOrigin`] against `workspace`: a config file
-/// inside the workspace (and not under `$RADIAN_HOME`) is **project-level** (ADR 0027 revision
-/// 14 decision 4, ADR 0031). The reading behaviour is identical to [`load`].
+/// inside the workspace (and outside `$RADIAN_HOME/config`) is **project-level** (ADR 0027
+/// revision 14 decision 4, ADR 0031). The reading behaviour is identical to [`load`].
 pub fn load_in_workspace(
     explicit: Option<&Path>,
     workspace: Option<&Path>,
@@ -700,8 +703,12 @@ pub fn load_in_workspace(
         Some(path) => match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let mut config = parse(&path, &text)?;
-                config.origin =
-                    classify_origin(config.source.as_deref(), workspace, home.as_deref());
+                let user_config_dir = home.as_deref().map(crate::home::config_dir_for);
+                config.origin = classify_origin(
+                    config.source.as_deref(),
+                    workspace,
+                    user_config_dir.as_deref(),
+                );
                 Ok(config)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),

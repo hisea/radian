@@ -11,6 +11,10 @@
 //! transcript, the model context or a herdr report, and a failure notice is generic, never the
 //! command's output.
 //!
+//! A JSON `symbol` is drawn **verbatim** before the text (like a built-in glyph), so include your
+//! own trailing space; a configured `symbol` on the item wins over it, and a configured
+//! `symbol_style` styles whichever symbol is drawn.
+//!
 //! Only user-level configuration may enable a command: a project-level file is refused with a
 //! warning (ADR 0031's gate; a cloned repository must not be able to run code as the user).
 //!
