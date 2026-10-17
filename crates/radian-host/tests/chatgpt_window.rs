@@ -132,16 +132,24 @@ async fn an_offline_switch_to_a_chatgpt_model_resolves_the_table() {
     let _ = std::fs::remove_dir_all(&cache);
 }
 
-/// The table answers only for a provider that carries numbers: a descriptor whose window comes
-/// from models.dev (`anthropic`, `openai`, …) is untouched by it — no cache, no window.
+/// The table answers only for the provider it has numbers for (`chatgpt`): a descriptor whose
+/// window comes from models.dev (`anthropic`) is answered by the catalog — with no cache and no
+/// network, the bundled snapshot (ADR 0026) — never by the table.
 #[tokio::test]
-async fn a_descriptor_without_numbers_gets_no_window_from_the_table() {
+async fn a_descriptor_without_numbers_is_answered_by_the_catalog_not_the_table() {
     let cache = scratch("no-numbers");
     let mut query = query(&cache, "claude-opus-5-5");
     query.catalog_provider = Some("anthropic".into());
     query.base_url = "https://api.anthropic.com".into();
     let window = resolve(&query).await;
-    assert_eq!(window.source, WindowSource::Unknown);
-    assert_eq!(window.budget, None);
+    assert!(
+        matches!(window.source, WindowSource::Bundled { .. }),
+        "{:?}",
+        window.source
+    );
+    assert!(
+        window.budget.is_some(),
+        "the bundled snapshot carries the anthropic window"
+    );
     let _ = std::fs::remove_dir_all(&cache);
 }

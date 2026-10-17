@@ -150,20 +150,44 @@ async fn a_hanging_fetch_times_out_and_the_stale_cache_is_used() {
     let _ = std::fs::remove_dir_all(&cache);
 }
 
-/// Acceptance 2: no cache and a failed fetch is "unknown", not an error.
+/// Acceptance 2 (ADR 0026): no cache and a failed fetch falls back to the
+/// **bundled snapshot**, not to "unknown". The request was still attempted (and failed).
 #[tokio::test]
-async fn no_cache_and_a_failed_fetch_is_unknown() {
+async fn no_cache_and_a_failed_fetch_uses_the_bundled_snapshot() {
     let cache = scratch("no-cache");
     let server = MockServer::start(vec![Reply::status(500, "boom")]).await;
     let window = resolve(&query(&cache, &server, "deepseek-v4.1-flash")).await;
-    assert_eq!(window.budget, None);
-    assert_eq!(window.source, WindowSource::Unknown);
-    assert!(window.error.is_none(), "unknown is not an error");
+    assert_eq!(
+        window.source,
+        WindowSource::Bundled {
+            provider: "opencode".into(),
+            model: "deepseek-v4.1-flash".into(),
+            date: radian_host::SNAPSHOT_DATE,
+        }
+    );
+    // The snapshot's `opencode/deepseek-v4.1-flash`: C = 1000000, no input ceiling, R = 16384.
+    assert_eq!(window.context, Some(1_000_000));
+    assert_eq!(window.budget, Some(983_616));
+    assert_eq!(server.requests().len(), 1, "it did try to fetch");
     assert!(
-        window.describe().contains("no budget"),
+        window.describe().contains("from bundled snapshot (2026-10-17)"),
         "{}",
         window.describe()
     );
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+/// A provider or model the bundled snapshot does not carry is still unknown: nothing is guessed.
+#[tokio::test]
+async fn a_model_the_snapshot_does_not_carry_is_still_unknown() {
+    let cache = scratch("absent");
+    let server = MockServer::start(vec![Reply::status(500, "boom")]).await;
+    let mut q = query(&cache, &server, "no-such-model");
+    q.catalog_provider = Some("no-such-provider".into());
+    let window = resolve(&q).await;
+    assert_eq!(window.source, WindowSource::Unknown);
+    assert_eq!(window.budget, None);
+    assert!(window.error.is_none(), "unknown is not an error");
     let _ = std::fs::remove_dir_all(&cache);
 }
 
@@ -182,12 +206,18 @@ async fn offline_never_fetches() {
     assert_eq!(window.budget, Some(922_000));
     assert_eq!(server.requests().len(), 0, "offline must not go out");
 
-    // Offline with no cache is unknown, still without a request.
+    // Offline with no cache uses the bundled snapshot, still without a request (ADR 0026
+    // revision 2 decision 3).
     let empty = scratch("offline-nocache");
     let mut q = query(&empty, &server, "deepseek-v4.1-flash");
     q.offline = true;
     let window = resolve(&q).await;
-    assert_eq!(window.source, WindowSource::Unknown);
+    assert!(
+        matches!(window.source, WindowSource::Bundled { .. }),
+        "{:?}",
+        window.source
+    );
+    assert_eq!(window.budget, Some(983_616));
     assert_eq!(server.requests().len(), 0);
     let _ = std::fs::remove_dir_all(&cache);
     let _ = std::fs::remove_dir_all(&empty);

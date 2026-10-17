@@ -2,12 +2,16 @@
 
 A model adapter for the OpenAI **Responses** API, implementing `agent_core::Model` with
 streaming. This is the protocol ChatGPT-subscription (Codex) turns use
-(`chatgpt.com/backend-api/codex/responses`), not Chat Completions.
+(`chatgpt.com/backend-api/codex/responses`), not Chat Completions. Since ADR 0026 it
+is also the protocol of a built-in descriptor's `@ai-sdk/openai` model (e.g. `opencode-go`'s
+`muse-spark-1.3-contributor`) with a plain API key.
 
 - **No auth logic.** The caller supplies every header — `Authorization`,
   `chatgpt-account-id`, `OpenAI-Beta`, `originator` — via
   [`OpenAiResponsesConfig::headers`]. The login/refresh machinery stays in the host
-  (ADR 0026).
+  (ADR 0026). On the API-key route the caller passes
+  `Authorization: Bearer <key>` and none of the three Codex-only headers (ADR 0026
+  decision 4; `docs/providers/openai-responses-wire-notes.md` §8).
 - **Stateless.** Every request sends the full `input` with `store: false`
   (ADR 0026).
 - **Honest mapping.** Text and tool calls round-trip exactly; a completed `reasoning` item

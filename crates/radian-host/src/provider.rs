@@ -1461,6 +1461,51 @@ mod tests {
         assert_eq!(Protocol::Anthropic.adapter(), Provider::Anthropic);
     }
 
+    /// ADR 0026: with no cache, the bundled snapshot alone decides the
+    /// protocol — chat, Anthropic and Responses — and refuses the one it has no adapter for.
+    #[test]
+    fn the_bundled_snapshot_decides_the_protocol_with_no_cache() {
+        let snapshot = crate::bundled_catalog();
+        let builtin = ProviderRef::BuiltIn(descriptor("opencode-go").unwrap());
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(snapshot), "deepseek-v4.1-flash")
+                .unwrap(),
+            Protocol::OpenAiCompatible
+        );
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(snapshot), "claude-haiku-5-5")
+                .unwrap(),
+            Protocol::Anthropic
+        );
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(snapshot), "muse-spark-1.3-contributor")
+                .unwrap(),
+            Protocol::Responses
+        );
+        assert_eq!(
+            builtin
+                .resolve_protocol(Some(snapshot), "gemini-4-argon-contributor")
+                .unwrap_err(),
+            "radian does not support this model's API (@ai-sdk/google)"
+        );
+        // The snapshot's endpoint is hard-coded per protocol, not read from it.
+        let route = resolve_route(
+            "opencode-go",
+            "muse-spark-1.3-contributor",
+            None,
+            None,
+            &[],
+            "s",
+            Some(snapshot),
+        )
+        .unwrap();
+        assert_eq!(route.protocol, Protocol::Responses);
+        assert_eq!(route.base_url, "https://opencode.ai/inference/go/openai/v1");
+    }
+
     /// A catalog with only the `opencode-go` facts the protocol tests need.
     fn catalog(text: &str) -> crate::Catalog {
         crate::Catalog::parse(text).expect("the test catalog parses")
