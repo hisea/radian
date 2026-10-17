@@ -178,7 +178,8 @@ pub struct TuiFooterConfig {
     /// `separator_style`: the separator's style — a theme role or a color (ADR 0027 revision
     /// 3). The TUI parses it; the default is the `footer_separator` role.
     pub separator_style: Option<String>,
-    /// `glyphs`: `"unicode"` (the default), `"nerd"` or `"ascii"`. The TUI validates it.
+    /// `glyphs`: `"unicode"` (the default), `"nerd"`, `"ascii"` or `"emoji"` (ADR 0027
+    /// revision 14 decision 7). The TUI validates it.
     pub glyphs: Option<String>,
     /// `context_line`: `"off"` (the default) or `"percentage"`. ADR 0027 item 4:
     /// `percentage` fills the gap between a row's left and right groups with the context
@@ -201,6 +202,9 @@ pub struct TuiFooterRowConfig {
     pub right: Vec<TuiFooterItemConfig>,
     /// The row's own `separator`, overriding the footer's.
     pub separator: Option<String>,
+    /// Where the row draws (ADR 0027): `"footer"` (the default),
+    /// `"above_input"` or `"below_input"`. Carried raw; the TUI validates it.
+    pub position: Option<String>,
 }
 
 /// One footer item: either a bare id or a table with `item` plus options. Options the reader
@@ -433,6 +437,8 @@ fn parse_footer_row(table: &toml::map::Map<String, Value>) -> Result<TuiFooterRo
                 }
             }
             ("separator", Value::String(separator)) => row.separator = Some(separator.clone()),
+            // ADR 0027: the row's position (footer/above/below_input).
+            ("position", Value::String(position)) => row.position = Some(position.clone()),
             (other, _) => return Err(format!("tui.footer.rows.{other}")),
         }
     }
@@ -637,6 +643,24 @@ mod footer_tests {
         assert_eq!(
             footer.rows[2].left[0].thresholds,
             vec![(70, "warn".into()), (90, "error".into())]
+        );
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+    }
+
+    /// ADR 0027: a row carries its `position`; an unknown position
+    /// value is carried raw (the TUI warns and falls back to the footer).
+    #[test]
+    fn a_row_carries_its_position() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[[tui.footer.rows]]\n",
+            "left = [\"status\"]\n",
+            "position = \"above_input\"\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            config.tui.footer.rows[0].position.as_deref(),
+            Some("above_input")
         );
         assert!(config.skipped.is_empty(), "{:?}", config.skipped);
     }

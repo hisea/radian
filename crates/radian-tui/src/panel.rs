@@ -216,7 +216,7 @@ impl BoxChars {
                 tee_left: '+',
                 tee_right: '+',
             },
-            Glyphs::Unicode | Glyphs::Nerd => Self {
+            Glyphs::Unicode | Glyphs::Nerd | Glyphs::Emoji => Self {
                 top_left: '╭',
                 top_right: '╮',
                 bottom_left: '╰',

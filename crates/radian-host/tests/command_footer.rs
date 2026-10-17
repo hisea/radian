@@ -99,8 +99,6 @@ async fn the_stdin_is_the_documented_json_context() {
         tokens_output: Some(2_600_000),
         tokens_cache_read: Some(1_962_000_000),
         cost_usd: Some(14.51),
-        tasks_running: Some(1),
-        tasks_total: Some(3),
     });
     let store = ContributionStore::new();
     let mut runner = ContributorRunner::new(
@@ -120,8 +118,7 @@ async fn the_stdin_is_the_documented_json_context() {
     assert_eq!(doc["tokens"]["output"], 2_600_000u64);
     assert_eq!(doc["tokens"]["cache_read"], 1_962_000_000u64);
     assert_eq!(doc["cost_usd"], 14.51);
-    assert_eq!(doc["tasks"]["running"], 1);
-    assert_eq!(doc["tasks"]["total"], 3);
+    assert!(doc.get("tasks").is_none(), "ADR 0043 removed tasks: {doc}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

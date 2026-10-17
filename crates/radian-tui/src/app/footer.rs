@@ -143,7 +143,7 @@ impl App {
 
     /// The footer facts a `command` item may read (ADR 0027). Only facts
     /// the footer already displays: the model, the cwd, the branch, the context proportion, the
-    /// token totals, the fee and the task counts. A missing fact is `None`, never a fabricated
+    /// token totals and the fee. A missing fact is `None`, never a fabricated
     /// number (v5 §5). The git branch prefers the background contributor's value and falls back
     /// to the host's one-shot read.
     pub fn footer_snapshot(&self) -> radian_host::FooterSnapshot {
@@ -176,10 +176,6 @@ impl App {
             cost_usd: session
                 .cost_micros()
                 .map(|micros| micros as f64 / 1_000_000.0),
-            // ADR 0043 decision 1 deleted the task registry, so nothing produces a task count;
-            // the fields stay (ADR 0027's document shape) and are null.
-            tasks_running: None,
-            tasks_total: None,
         }
     }
 

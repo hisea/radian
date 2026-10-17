@@ -31,13 +31,13 @@
 //!   "branch": "main",
 //!   "context_percent": 41.3,
 //!   "tokens": { "input": 15000000, "output": 2600000, "cache_read": 1962000000 },
-//!   "cost_usd": 14.51,
-//!   "tasks": { "running": 1, "total": 3 }
+//!   "cost_usd": 14.51
 //! }
 //! ```
 //!
 //! Every field is `null` when the fact is unknown (never a fabricated number). Only facts the
 //! footer already displays are sent: no transcript, no tool arguments, no secrets, no headers.
+//! (ADR 0043 removed the task registry, so the earlier `tasks` key is gone.)
 
 use std::ffi::OsString;
 use std::sync::{Arc, RwLock};
@@ -86,8 +86,6 @@ pub struct FooterSnapshot {
     pub tokens_cache_read: Option<u64>,
     /// The accumulated fee in US dollars, or `None` when no priced call has arrived.
     pub cost_usd: Option<f64>,
-    pub tasks_running: Option<u64>,
-    pub tasks_total: Option<u64>,
 }
 
 impl FooterSnapshot {
@@ -105,10 +103,6 @@ impl FooterSnapshot {
                 "cache_read": self.tokens_cache_read,
             },
             "cost_usd": self.cost_usd,
-            "tasks": {
-                "running": self.tasks_running,
-                "total": self.tasks_total,
-            },
         });
         value.to_string()
     }

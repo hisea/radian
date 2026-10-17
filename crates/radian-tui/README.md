@@ -255,11 +255,15 @@ find_next = ["ctrl-g", "shift-enter"]
   default to on; `false` hides them.
 - `footer` (ADR 0027 C2, revision 3): the status area's rows. `preset` is `deck` (the default,
   three rows: the current provider's `usage` line — dropped when it has no snapshot — then
-  `model`/`cwd`/`git_branch`/`worktree` with `context_bar`/`reasoning` on the right, then
+  `model`/`cwd`/`git_branch`/`worktree` with `context` (`{bar} {percent}%`)/
+  `reasoning` on the right, then
   `tokens`/`cost`/`context` on the right), `full` (revision 1's two rows), `pi` (the earlier two
   rows) or `classic` (today's one line, byte-for-byte). `separator` joins items (default
-  `" │ "`, any string), each row may override it, and `separator_style` styles it (default the
-  `footer_separator` role, dim). `glyphs` is `unicode` (default), `nerd` or `ascii`.
+  `" · "`, any string), each row may override it, and `separator_style` styles it (default the
+  `footer_separator` role, dim). `glyphs` is `unicode` (default), `nerd`, `ascii` or
+  `emoji` (ADR 0027: unicode icons where they exist, emoji where they
+  read better — `💻` host, `🧠` reasoning, `#` session, `🚀` speed, `⏱` elapsed, `⚡` brand —
+  drawn by the system emoji font, so the six-font coverage table does not apply to this tier).
   `context_line` is `off` (default; the gap between a row's left and right groups is spaces) or
   `percentage` (ADR 0027 item 4, following omp's `statusLine.contextLine`: the gap
   becomes a `─` rule, the used fraction of the context window in the `budget` role and the rest
@@ -269,7 +273,9 @@ find_next = ["ctrl-g", "shift-enter"]
   included - so the footer inherits the terminal's own background.
   `[tui.footer.items.<id>]` gives one item its `symbol`/`style`/`symbol_style`/`format`/
   `disabled`; a bare id in a row takes it, an inline table wins. Each `[[tui.footer.rows]]` has
-  a `left` and a `right` group; an item is a bare id or a table with `item`, `icon`/`symbol`,
+  a `left` and a `right` group and a `position` (`footer` the default, `above_input` or
+  `below_input` to draw the row around the input box instead of in the status area); an item is
+  a bare id or a table with `item`, `icon`/`symbol`,
   `format`, `style`, `symbol_style`, `priority`, `thresholds = [{ at = 70, style = "warn" }, …]`
   and the item's own parameters. A `style` (or `[text](style)` inline) is a theme role
   (`accent`, `muted`, `footer_separator`, pi's `dim`/`warn`/`error`/`ok`/`text`) or a
@@ -290,7 +296,8 @@ find_next = ["ctrl-g", "shift-enter"]
   group words); an empty or malformed line warns and never runs. Its stdin is one JSON object of
   the footer's own facts — no transcript, no secrets:
   `{"model":…, "cwd":…, "branch":…, "context_percent":…, "tokens":{"input":…,"output":…,
-  "cache_read":…}, "cost_usd":…, "tasks":{"running":…,"total":…}}` (a missed fact is `null`).
+  "cache_read":…}, "cost_usd":…}` (a missed fact is `null`; ADR 0043 removed the earlier
+  `tasks` key).
   Its environment is cleared to `PATH` plus `RADIAN_SESSION_ID`/`RADIAN_CWD`. A timeout (5 s), a
   spawn failure, a non-zero exit or an invalid line keeps the last value and draws it stale; the
   output never enters the journal, the transcript, the model context or a herdr report. v1 has
@@ -301,7 +308,7 @@ find_next = ["ctrl-g", "shift-enter"]
 
 | item | placeholders | default |
 |---|---|---|
-| `brand` | `{brand}` | `R` (bold accent, unicode) / `󰰠` (nerd) / `rad` (ascii); ADR 0027 |
+| `brand` | `{brand}` | `R` (bold accent, unicode) / `󰰠` (nerd) / `rad` (ascii) / `⚡` (emoji); ADR 0027 |
 | `host` | `{host}` | the machine's hostname, read once at startup |
 | `model` | `{display_name}`, `{id}`, `{provider}` | the model's display name (or id) |
 | `reasoning` | `{level}` | the thinking level, one theme role per level |
@@ -309,8 +316,7 @@ find_next = ["ctrl-g", "shift-enter"]
 | `cwd` | `{path}`, `{path_home}`, `{basename}`, `{repo}`, `{worktree}` | `{path_home}` (`$HOME` → `~`); `{repo}` falls back to the directory name, `{worktree}` is the contributor's current worktree |
 | `git_branch` | `{branch}`, `{dirty}`, `{modified}`, `{untracked}` | `{branch}`; `{dirty}` is ` ?<total>` while the tree has changes (contributor) |
 | `session` | `{id}` | the session id |
-| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{auto}` is `~` (`auto` under ascii) while auto-compaction is on |
-| `context_bar` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{bar} {percent}%`, `width` 10, `fill` `━`, `empty` `─` |
+| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{bar}` is the `width` 10 (`fill` `━`, `empty` `─`) bar, all three overridable per item; `{auto}` is `~` (`auto` under ascii) while auto-compaction is on. The old `context_bar` id is an alias of `context` for one version (one warning) |
 | `tokens` | `{in}`, `{out}`, `{cache}`, `{cache_write}` | `^{in} v{out} R{cache}`; compact K/M, `-` when a provider never reported one. `{cache_write}` (ADR 0027) is a cache **write**, billed at its own rate but deliberately **not** in the default format, so the row does not grow |
 | `cost` | `{usd}` | the session's accumulated fee: each call priced at the route's price **when it arrived** (`radian_host::cost`), so a `/model` switch does not re-price history. The cached tokens are billed once at the cache rate (`uncached_input()`). Hidden until some call had something to bill and when the catalog has no price — never a fabricated number, never `$0.00` |
 | `speed` | `{speed}` | `42.1 tok/s`, the last finished generation's reported output over its measured time |
@@ -323,10 +329,12 @@ find_next = ["ctrl-g", "shift-enter"]
 | `status` | `{status}` | `status.*` 贡献文本，`keys = ["…"]` 可过滤 |
 | `usage` | `{value}` | **当前 provider** 的用量快照：各窗口的剩余百分比与重置倒计时（ADR 0027）。数据来源在 provider 描述符的 `usage`（`Endpoint`：轮询一个 URL 并解析），组件本身不认识任何 provider；没有来源的 provider 这一行不出现。`tui.usage_period_secs` 0 关闭；旧 id `opencode-go.usage`/`chatgpt.usage` 作为别名保留一个版本，启动时各警告一次。`/usage` 打印同一份快照的**全部**窗口 |
 | `command` item (`[tui.footer.items.<id>] command = "…"`) | `{value}` | the command's first stdout line; JSON `{"text","style","symbol"}` sets the role and symbol (ADR 0027) |
+| `jobs` | `{count}`, `{age}` | 本会话正在跑的后台任务数与最老一个的已运行时长（例 `2 jobs · 18m`；ADR 0027 的 2026-10-17 补记）。数据来自任务的开始/结束事件（`BackgroundJobStarted`/`BackgroundJobSettled`，`JobNotifier` 写 journal 的同时转发到 live runtime-event sink），不轮询 journal 文件；没有运行中的任务时组件为空、不占位。年龄随既有的 footer 刷新（贡献者 tick 重画）更新，不另起计时器。不在任何预设的缺省行里 |
 
 `worktree`/`status` 来自贡献者存储（ADR 0027 C3）：一个 `git` 贡献者每 5 s 在后台刷新
-`git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。`[tui.widgets]`
-的 `above_input`/`below_input` 把同样的条目 id 放到输入框上/下一行。
+`git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。每行有一个
+`position`（`footer` 默认、或 `above_input`/`below_input` 把它放到输入框上/下一行）。
+旧的 `[tui.widgets]` 块按原语义折成带 `position` 的行，警告一次，保留一个版本。
 
 #### Glyph coverage (ADR 0027 and 6)
 
@@ -348,7 +356,8 @@ Check a glyph with `crates/radian-tui/scripts/check-glyph-coverage.py` (needs `f
 throwaway venv; it is not a repository dependency and not part of `cargo test`). A font that is
 not installed is printed as `未查`, never guessed. The unit test
 `footer::tests::unicode_tier_glyphs_are_all_verified_covered` keeps a new unicode-tier glyph
-from slipping in unchecked.
+from slipping in unchecked. The `emoji` tier (ADR 0027) is outside this
+check: its glyphs come from the system emoji font, not the six reference fonts.
 
 | glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Source Code Pro |
 |---|---|---|---|---|---|---|---|---|
@@ -365,7 +374,7 @@ from slipping in unchecked.
 | `│` | U+2502 | tool block body rail / open frames | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `╭` `╰` | U+256D/70 | open frame corners (ADR 0035/7) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `…` | U+2026 | truncation | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `·` | U+00B7 | footer separator (ADR 0027) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |

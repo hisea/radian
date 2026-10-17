@@ -10,7 +10,9 @@
 use std::borrow::Cow;
 
 use radian_host::SegmentRole;
-use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig};
+use radian_host::config::{
+    TuiFooterConfig, TuiFooterItemConfig, TuiFooterRowConfig, TuiWidgetsConfig,
+};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -30,6 +32,9 @@ pub fn brand_mark(glyphs: Glyphs) -> &'static str {
         Glyphs::Nerd => "\u{f0c20}",
         Glyphs::Unicode => "R",
         Glyphs::Ascii => "rad",
+        // The emoji set's mark (ADR 0027): a high-voltage bolt, one
+        // cell, drawn by the system emoji font like every other emoji-tier glyph.
+        Glyphs::Emoji => "⚡",
     }
 }
 
@@ -43,6 +48,9 @@ pub enum Glyphs {
     Nerd,
     /// Pure ASCII.
     Ascii,
+    /// Emoji (ADR 0027): drawn by the system emoji font, so the
+    /// six-font coverage rule does not apply to this tier.
+    Emoji,
 }
 
 impl Glyphs {
@@ -51,15 +59,16 @@ impl Glyphs {
             "unicode" => Some(Self::Unicode),
             "nerd" => Some(Self::Nerd),
             "ascii" => Some(Self::Ascii),
+            "emoji" => Some(Self::Emoji),
             _ => None,
         }
     }
 
     /// The card frame's characters (ADR 0028 rule 2): unicode box drawing for the
-    /// unicode and nerd sets, `+ - |` for ascii.
+    /// unicode, nerd and emoji sets, `+ - |` for ascii.
     pub fn frame(self) -> FrameGlyphs {
         match self {
-            Self::Unicode | Self::Nerd => FrameGlyphs {
+            Self::Unicode | Self::Nerd | Self::Emoji => FrameGlyphs {
                 top_left: "┌",
                 top_right: "┐",
                 bottom_left: "└",
@@ -89,42 +98,44 @@ impl Glyphs {
     /// The tool-call status glyphs (ADR 0028 rule 4): running, success, failure.
     /// The unicode set is covered by all six checked fonts (ADR 0027 and 6): omp's
     /// `⟳`/`✔`/`✘` are not, so `~`/`✓`/`×` stand in. The Nerd set uses the Font Awesome
-    /// codepoints; the ASCII set is plain.
+    /// codepoints; the ASCII set is plain. The emoji set draws the hourglass and the ballot
+    /// boxes from the system emoji font (ADR 0027).
     pub fn tool_status(self) -> [&'static str; 3] {
         match self {
             Self::Unicode => ["~", "✓", "×"],
             Self::Nerd => ["\u{f110}", "\u{f00c}", "\u{f00d}"],
             Self::Ascii => ["*", "+", "x"],
+            Self::Emoji => ["⏳", "✅", "❌"],
         }
     }
 
-    /// The token arrows: the unicode tier uses `↑`/`↓` (revision 6 item 2; both are in all six
-    /// checked fonts), the other tiers keep `^`/`v`.
+    /// The token arrows: the unicode and emoji tiers use `↑`/`↓` (revision 6 item 2; both are
+    /// in all six checked fonts), the other tiers keep `^`/`v`.
     pub fn token_arrows(self) -> (&'static str, &'static str) {
         match self {
-            Self::Unicode => ("↑", "↓"),
+            Self::Unicode | Self::Emoji => ("↑", "↓"),
             Self::Nerd | Self::Ascii => ("^", "v"),
         }
     }
 
     /// The marker column's **folded** spelling (ADR 0035's 2026-10-16 "折叠标记统一" note): the
     /// thinking channel's folded one-liner and an expandable tool head that shows only its head
-    /// both take it. `◼ ` on the unicode and nerd tiers, `+ ` under `ascii`. `◼`/`◻` miss four
-    /// of the six reference fonts: the owner chose the pair anyway, a documented exception like
-    /// the ask record's `◉`/`○`.
+    /// both take it. `◼ ` on the unicode, nerd and emoji tiers, `+ ` under `ascii`. `◼`/`◻`
+    /// miss four of the six reference fonts: the owner chose the pair anyway, a documented
+    /// exception like the ask record's `◉`/`○`.
     pub fn fold_marker(self) -> &'static str {
         match self {
-            Self::Unicode | Self::Nerd => "◼ ",
+            Self::Unicode | Self::Nerd | Self::Emoji => "◼ ",
             Self::Ascii => "+ ",
         }
     }
 
     /// The marker column's **expanded** spelling (same note): a body drawn under the head (the
     /// `errors` preview, an error body, `Ctrl-O`/search expansion, the expanded thinking
-    /// channel). `◻ ` on the unicode and nerd tiers, `- ` under `ascii`.
+    /// channel). `◻ ` on the unicode, nerd and emoji tiers, `- ` under `ascii`.
     pub fn open_marker(self) -> &'static str {
         match self {
-            Self::Unicode | Self::Nerd => "◻ ",
+            Self::Unicode | Self::Nerd | Self::Emoji => "◻ ",
             Self::Ascii => "- ",
         }
     }
@@ -234,7 +245,7 @@ pub(crate) struct Item {
     pub(crate) style: Option<ItemStyle>,
     pub(crate) priority: i64,
     pub(crate) thresholds: Vec<(i64, ItemStyle)>,
-    /// The component's own parameters (`context_bar`'s `width`/`fill`/`empty`, `status`'s
+    /// The component's own parameters (`context`'s `width`/`fill`/`empty`, `status`'s
     /// `keys`), read by its `data`.
     pub(crate) params: Vec<(String, String)>,
     /// `disabled = true` in `[tui.footer.items.<id>]` hides the item everywhere.
@@ -323,6 +334,70 @@ struct Row {
     /// The separator's style (ADR 0027): the `footer_separator` role by default,
     /// `[tui.footer] separator_style` can make it a color.
     separator_style: ItemStyle,
+    /// Where the row draws (ADR 0027).
+    position: RowPosition,
+}
+
+/// Where one footer row draws (ADR 0027): the status area, or a line
+/// above/below the input box. The default is the footer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowPosition {
+    /// The status area (the default).
+    #[default]
+    Footer,
+    /// One line above the input box.
+    AboveInput,
+    /// One line below the input box.
+    BelowInput,
+}
+
+impl RowPosition {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "footer" => Some(Self::Footer),
+            "above_input" => Some(Self::AboveInput),
+            "below_input" => Some(Self::BelowInput),
+            _ => None,
+        }
+    }
+}
+
+/// Folds the legacy `[tui.widgets]` block into footer rows (ADR 0027):
+/// one row per non-empty slot, bare ids (a bare id takes `[tui.footer.items.<id>]` exactly like
+/// a row id, so a colour configured there applies here too), positioned above/below the input
+/// with the footer's separator. Returns the one deprecation warning, or `None` when the block
+/// is empty. The block is removed after one version.
+pub fn fold_legacy_widgets(
+    config: &mut TuiFooterConfig,
+    widgets: &TuiWidgetsConfig,
+) -> Option<String> {
+    if widgets.above_input.is_empty() && widgets.below_input.is_empty() {
+        return None;
+    }
+    for (ids, position) in [
+        (&widgets.above_input, "above_input"),
+        (&widgets.below_input, "below_input"),
+    ] {
+        if ids.is_empty() {
+            continue;
+        }
+        config.rows.push(TuiFooterRowConfig {
+            left: ids
+                .iter()
+                .map(|id| TuiFooterItemConfig {
+                    id: id.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            position: Some(position.to_string()),
+            ..Default::default()
+        });
+    }
+    Some(
+        "tui.widgets is deprecated; move its ids into [[tui.footer.rows]] with position = \
+         \"above_input\"|\"below_input\""
+            .to_string(),
+    )
 }
 
 impl Default for Row {
@@ -332,6 +407,7 @@ impl Default for Row {
             right: Vec::new(),
             separator: String::new(),
             separator_style: ItemStyle::Role(Role::FooterSeparator),
+            position: RowPosition::Footer,
         }
     }
 }
@@ -371,7 +447,7 @@ impl Footer {
             None => Glyphs::Unicode,
             Some(name) => Glyphs::parse(name).unwrap_or_else(|| {
                 warnings.push(format!(
-                    "tui.footer.glyphs = {name:?} is not one of unicode|nerd|ascii; using unicode"
+                    "tui.footer.glyphs = {name:?} is not one of unicode|nerd|ascii|emoji; using unicode"
                 ));
                 Glyphs::Unicode
             }),
@@ -379,7 +455,7 @@ impl Footer {
         let separator = config
             .separator
             .clone()
-            .unwrap_or_else(|| " │ ".to_string());
+            .unwrap_or_else(|| " · ".to_string());
         let separator_style = match config.separator_style.as_deref() {
             None => ItemStyle::Role(Role::FooterSeparator),
             Some(name) => parse_item_style(name).unwrap_or_else(|error| {
@@ -442,23 +518,48 @@ impl Footer {
             config
                 .rows
                 .iter()
-                .map(|row| Row {
-                    left: row
-                        .left
-                        .iter()
-                        .filter_map(|item| {
-                            resolve_item(item, &items, &command_ids, &mut aliased, &mut warnings)
-                        })
-                        .collect(),
-                    right: row
-                        .right
-                        .iter()
-                        .filter_map(|item| {
-                            resolve_item(item, &items, &command_ids, &mut aliased, &mut warnings)
-                        })
-                        .collect(),
-                    separator: row.separator.clone().unwrap_or_else(|| separator.clone()),
-                    separator_style: separator_style.clone(),
+                .map(|row| {
+                    let position = match row.position.as_deref() {
+                        None => RowPosition::Footer,
+                        Some(name) => RowPosition::parse(name).unwrap_or_else(|| {
+                            warnings.push(format!(
+                                "tui.footer.rows: position {name:?} is not one of \
+                                 footer|above_input|below_input; using footer"
+                            ));
+                            RowPosition::Footer
+                        }),
+                    };
+                    Row {
+                        left: row
+                            .left
+                            .iter()
+                            .filter_map(|item| {
+                                resolve_item(
+                                    item,
+                                    &items,
+                                    &command_ids,
+                                    &mut aliased,
+                                    &mut warnings,
+                                )
+                            })
+                            .collect(),
+                        right: row
+                            .right
+                            .iter()
+                            .filter_map(|item| {
+                                resolve_item(
+                                    item,
+                                    &items,
+                                    &command_ids,
+                                    &mut aliased,
+                                    &mut warnings,
+                                )
+                            })
+                            .collect(),
+                        separator: row.separator.clone().unwrap_or_else(|| separator.clone()),
+                        separator_style: separator_style.clone(),
+                        position,
+                    }
                 })
                 .collect()
         };
@@ -484,7 +585,9 @@ impl Footer {
     }
 
     /// The footer's lines at `width`. The `classic` preset is the renderer's (it draws the
-    /// pre-ADR one-line status bar); `pi` builds its rows here.
+    /// pre-ADR one-line status bar); `pi` builds its rows here. Only rows positioned at the
+    /// footer (ADR 0027); the input-adjacent rows draw through
+    /// [`Footer::above_input_lines`] and [`Footer::below_input_lines`].
     pub fn lines(&self, app: &App, width: usize) -> Vec<Line<'static>> {
         let rows: Cow<'_, [Row]> = if self.rows.is_empty() {
             Cow::Owned(preset_rows(self.preset, self.glyphs))
@@ -494,6 +597,7 @@ impl Footer {
         // A row with no data renders empty (the deck's usage row, revision 3): drop it so it
         // never leaves a blank line.
         rows.iter()
+            .filter(|row| row.position == RowPosition::Footer)
             .map(|row| render_row(app, row, width, self.context_line))
             .filter(|line| !line.spans.is_empty())
             .map(|mut line| {
@@ -506,6 +610,26 @@ impl Footer {
                 }
                 line
             })
+            .collect()
+    }
+
+    /// The rows positioned above the input box (ADR 0027), at `width`.
+    /// Empty rows are dropped, so a row with no data takes no space.
+    pub fn above_input_lines(&self, app: &App, width: usize) -> Vec<Line<'static>> {
+        self.position_lines(app, width, RowPosition::AboveInput)
+    }
+
+    /// The rows positioned below the input box (ADR 0027), at `width`.
+    pub fn below_input_lines(&self, app: &App, width: usize) -> Vec<Line<'static>> {
+        self.position_lines(app, width, RowPosition::BelowInput)
+    }
+
+    fn position_lines(&self, app: &App, width: usize, position: RowPosition) -> Vec<Line<'static>> {
+        self.rows
+            .iter()
+            .filter(|row| row.position == position)
+            .map(|row| render_row(app, row, width, self.context_line))
+            .filter(|line| !line.spans.is_empty())
             .collect()
     }
 }
@@ -539,8 +663,9 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
     let row = |left: Vec<Item>, right: Vec<Item>| Row {
         left,
         right,
-        separator: " │ ".to_string(),
+        separator: " · ".to_string(),
         separator_style: ItemStyle::Role(Role::FooterSeparator),
+        position: RowPosition::Footer,
     };
     match preset {
         Preset::Deck => vec![
@@ -548,7 +673,10 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
             // snapshot the item is empty and `lines` drops the whole row, so it never leaves a
             // blank line.
             row(vec![item("usage")], Vec::new()),
-            // Row 2: identity, with the context bar and reasoning on the right.
+            // Row 2: identity, with the context bar and reasoning on the right. The bar is
+            // the `context` component's `{bar}` (ADR 0027 merged
+            // `context_bar` into it); the empty icon keeps the nerd/ascii sets symbol-free,
+            // exactly as the old id drew.
             row(
                 vec![
                     item("model"),
@@ -556,7 +684,7 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     with_format("git_branch", "{branch}{dirty}"),
                     item("worktree"),
                 ],
-                vec![item("context_bar"), item("reasoning")],
+                vec![no_symbol("context", "{bar} {percent}%"), item("reasoning")],
             ),
             // Row 3: the numbers, right-aligned, single spaces (revision 3's sample
             // `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M`).
@@ -588,8 +716,9 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     item("session"),
                 ],
                 right: Vec::new(),
-                separator: " │ ".to_string(),
+                separator: " · ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
+                position: RowPosition::Footer,
             },
             Row {
                 // The numbers row: tokens (in/out/cache), speed, cost, context (share/window
@@ -605,8 +734,9 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     item("elapsed"),
                 ],
                 right: Vec::new(),
-                separator: " │ ".to_string(),
+                separator: " · ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
+                position: RowPosition::Footer,
             },
         ],
         Preset::Pi => vec![
@@ -615,31 +745,47 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     item("model"),
                     item("cwd"),
                     item("git_branch"),
-                    item("context_bar"),
+                    no_symbol("context", "{bar} {percent}%"),
                 ],
                 right: vec![item("reasoning")],
-                separator: " │ ".to_string(),
+                separator: " · ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
+                position: RowPosition::Footer,
             },
             Row {
                 left: vec![item("tokens"), item("cost")],
                 right: Vec::new(),
-                separator: " │ ".to_string(),
+                separator: " · ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
+                position: RowPosition::Footer,
             },
         ],
         Preset::Classic => Vec::new(),
     }
 }
 
-/// The current id a configured item id means (ADR 0027): `radian_host`
-/// knows which ids an earlier version used for a provider's usage row, and such an id stays an
-/// alias of `usage` for one version. The warning names the new id, once per old id.
+/// The current id a configured item id means. Two earlier-version ids keep working for one
+/// version, each with one warning naming the new id:
+/// - ADR 0027: `radian_host` knows which ids an earlier version used
+///   for a provider's usage row; such an id stays an alias of `usage`.
+/// - ADR 0027: `context_bar` merged into `context`, `{bar}` its
+///   placeholder.
 fn canonical_id(
     id: &str,
     warned: &mut std::collections::BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) -> String {
+    // ADR 0027: the old `context_bar` id is the `context` component.
+    if id == "context_bar" {
+        if warned.insert(id.to_owned()) {
+            warnings.push(
+                "tui.footer: item \"context_bar\" is the old id for \"context\"; the old id \
+                 works for one version"
+                    .to_string(),
+            );
+        }
+        return "context".to_owned();
+    }
     let Some(current) = radian_host::usage_item_alias(id) else {
         return id.to_owned();
     };
@@ -1221,52 +1367,6 @@ fn inline_styles(format: &str) -> Vec<String> {
     out
 }
 
-/// One `[tui.widgets]` slot as a line (ADR 0027 C3): the configured item ids in order, joined
-/// by the footer's separator. `None` when none of them has data, so the row takes no space.
-pub fn widget_line(app: &App, ids: &[String]) -> Option<Line<'static>> {
-    let separator = " │ ";
-    let separator_style = ItemStyle::Role(Role::FooterSeparator).resolve(app);
-    let mut pieces: Vec<Piece> = Vec::new();
-    for id in ids {
-        // An id an earlier version used for a provider's usage row works here too: a widget
-        // carries the same item ids a row does (ADR 0027). The
-        // `[tui.widgets]` block's own deprecation warning belongs to slice ③, which folds
-        // widgets into rows; drawing must not regress in the meantime.
-        let id: &str = match radian_host::usage_item_alias(id) {
-            Some(current) => current,
-            None => id,
-        };
-        let item = Item {
-            id: id.to_owned(),
-            icon: None,
-            symbol_style: None,
-            format: None,
-            style: None,
-            priority: components::priority(id),
-            thresholds: components::thresholds(id),
-            params: Vec::new(),
-            disabled: false,
-            unknown: components::builtin(id).is_none(),
-        };
-        if let Some(piece) = render_item(app, &item) {
-            pieces.push(piece);
-        }
-    }
-    if pieces.is_empty() {
-        return None;
-    }
-    let mut spans: Vec<Span> = Vec::new();
-    for (index, piece) in pieces.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(separator.to_string(), separator_style));
-        }
-        for (text, style) in &piece.spans {
-            spans.push(Span::styled(text.clone(), *style));
-        }
-    }
-    Some(Line::from(spans))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1276,7 +1376,7 @@ mod tests {
     /// failed tool head, `•` for a one-line tool head). Each one is checked against the six
     /// fonts by `scripts/check-glyph-coverage.py` and listed in the README's coverage table. A
     /// new glyph makes this test fail until it is re-checked and added here.
-    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓•╭╰…▄▀";
+    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓•╭╰…▄▀·";
 
     /// The documented exceptions to the coverage rule (ADR 0027/10 and ADR 0035's
     /// 2026-10-16 notes): the owner picked the arc and the pulse after seeing them, braille is
@@ -1310,11 +1410,17 @@ mod tests {
         }
     }
 
-    /// The brand mark is per glyph set (ADR 0027): Nerd Font, unicode `R`, ascii
-    /// `rad`; `㎭` is gone.
+    /// The brand mark is per glyph set (ADR 0027, plus the emoji set from
+    /// revision 14 decision 7): Nerd Font, unicode `R`, ascii `rad`, emoji bolt; `㎭`
+    /// is gone.
     #[test]
     fn the_brand_mark_is_per_glyph_set() {
-        for (name, expected) in [("unicode", "R"), ("nerd", "\u{f0c20}"), ("ascii", "rad")] {
+        for (name, expected) in [
+            ("unicode", "R"),
+            ("nerd", "\u{f0c20}"),
+            ("ascii", "rad"),
+            ("emoji", "⚡"),
+        ] {
             let app = app_with_glyphs(name);
             let item = bare_item("brand");
             let component = components::builtin("brand").expect("the brand component");
@@ -1449,13 +1555,13 @@ mod tests {
             "status",
             "session",
             "context",
-            "context_bar",
             "usage",
             "tokens",
             "speed",
             "elapsed",
             "cost",
             "pending",
+            "jobs",
             "mcp",
             "scroll",
         ] {
@@ -1489,12 +1595,15 @@ mod tests {
     /// from `631c8dd` exactly. The refactor dropped the `item_priority` overrides of `brand`,
     /// `model` and `host`, so they silently fell back to the generic 50; this pins **every**
     /// built-in id's default priority, so a missing override fails here instead of only changing a
-    /// narrow-terminal truncation order.
+    /// narrow-terminal truncation order. Slice ③ merged `context_bar` into `context` (decision 6),
+    /// so the table has one row fewer than `631c8dd`'s.
     #[test]
     fn the_registry_matches_the_pre_refactor_priority_table() {
         // The `631c8dd` `item_priority` table, plus `usage` (ADR 0027):
         // it replaces the usage contribution id, which the table never named and which
-        // therefore kept the generic 50.
+        // therefore kept the generic 50. Minus `context_bar` (decision 6 merged it into
+        // `context`, keeping its 85), plus `jobs` (the 2026-10-17 note's component: a running
+        // job is as worth keeping as a pending request, so 70 like `pending`).
         let expected: [(&str, i64); 20] = [
             ("brand", 92),
             ("host", 78),
@@ -1507,13 +1616,13 @@ mod tests {
             ("status", 45),
             ("session", 65),
             ("context", 85),
-            ("context_bar", 85),
             ("usage", 50),
             ("tokens", 50),
             ("speed", 55),
             ("elapsed", 35),
             ("cost", 40),
             ("pending", 70),
+            ("jobs", 70),
             ("mcp", 55),
             ("scroll", 20),
         ];
@@ -1530,7 +1639,8 @@ mod tests {
     }
 
     /// ADR 0027: the registry's `placeholders` must match the `631c8dd`
-    /// `item_placeholders` table, id for id.
+    /// `item_placeholders` table, id for id. Slice ③ merged `context_bar` into `context`
+    /// (decision 6): `context` keeps the shared five placeholders, the old row is gone.
     #[test]
     fn the_registry_matches_the_pre_refactor_placeholder_table() {
         // Plus `usage` (ADR 0027), whose one placeholder is the whole
@@ -1550,13 +1660,13 @@ mod tests {
             ("status", &["status"]),
             ("session", &["id"]),
             ("context", &["bar", "percent", "used", "budget", "auto"]),
-            ("context_bar", &["bar", "percent", "used", "budget", "auto"]),
             ("usage", &["value"]),
             ("tokens", &["in", "out", "cache", "cache_write"]),
             ("speed", &["speed"]),
             ("elapsed", &["elapsed"]),
             ("cost", &["usd"]),
             ("pending", &["count"]),
+            ("jobs", &["count", "age"]),
             ("mcp", &["mcp"]),
             ("scroll", &["position", "mode"]),
         ];
@@ -1593,7 +1703,6 @@ mod tests {
             ("status", None),
             ("session", None),
             ("context", Some(Role::Budget)),
-            ("context_bar", Some(Role::Budget)),
             // The snapshot's style is the data's own (fresh `text`, stale `dim`), like a
             // contribution's role before the refactor.
             ("usage", None),
@@ -1602,6 +1711,7 @@ mod tests {
             ("elapsed", Some(Role::Truncation)),
             ("cost", None),
             ("pending", Some(Role::TurnRunning)),
+            ("jobs", None),
             ("mcp", Some(Role::Mcp)),
             ("scroll", None),
         ];
@@ -1612,7 +1722,9 @@ mod tests {
     }
 
     /// ADR 0027: the registry's default thresholds must match the `631c8dd`
-    /// `default_thresholds` table (`context`/`context_bar`/`cost` at 70/90; every other id empty).
+    /// `default_thresholds` table (`context`/`cost` at 70/90; every other id empty). Slice ③
+    /// merged `context_bar` into `context`, so its row is gone; the pair it shared survives on
+    /// `context`.
     #[test]
     fn the_registry_matches_the_pre_refactor_threshold_table() {
         let numeric = vec![
@@ -1620,7 +1732,7 @@ mod tests {
             (90, ItemStyle::Role(Role::ToolResultError)),
         ];
         for id in components::ids() {
-            let expected = if matches!(id, "context" | "context_bar" | "cost") {
+            let expected = if matches!(id, "context" | "cost") {
                 numeric.clone()
             } else {
                 Vec::new()
@@ -1630,32 +1742,33 @@ mod tests {
     }
 
     /// ADR 0027: the registry's default glyph in the three selectable sets
-    /// must match the `631c8dd` `glyph` table (`emoji`, index 3, is not selectable until slice ③
-    /// and stays empty). The refactor gave `context_bar` the `context` icons; the old table had no
-    /// `context_bar` row, so its default icon was empty in every set.
+    /// must match the `631c8dd` `glyph` table; decision 7 adds the fourth, emoji column, drawn
+    /// by the system emoji font (the six-font coverage rule does not apply to it). Slice ③
+    /// item 2 only removes `context_bar`, merged into `context` by decision 6, whose row had
+    /// an empty icon in every set.
     #[test]
     fn the_registry_matches_the_pre_refactor_glyph_table() {
-        let expected: [(&str, [&str; 3]); 20] = [
-            ("brand", ["", "", ""]),
-            ("host", ["@ ", "\u{f109} ", "host "]),
-            ("model", ["", "", ""]),
-            ("reasoning", ["* ", "\u{f0eb} ", "* "]),
-            ("tier", ["", "", ""]),
-            ("cwd", ["", "", ""]),
-            ("git_branch", ["", "\u{e0a0} ", ""]),
-            ("worktree", ["", "", ""]),
-            ("status", ["", "", ""]),
-            ("session", ["# ", "", "# "]),
-            ("context", ["", "\u{f035b} ", "["]),
-            ("context_bar", ["", "", ""]),
-            ("usage", ["", "", ""]),
-            ("tokens", ["", "", ""]),
-            ("speed", ["\u{bb} ", "\u{f0e7} ", "spd "]),
-            ("elapsed", ["", "\u{f017} ", "t "]),
-            ("cost", ["", "", ""]),
-            ("pending", ["", "", ""]),
-            ("mcp", ["", "", ""]),
-            ("scroll", ["", "", ""]),
+        let expected: [(&str, [&str; 4]); 20] = [
+            ("brand", ["", "", "", ""]),
+            ("host", ["@ ", "\u{f109} ", "host ", "💻 "]),
+            ("model", ["", "", "", ""]),
+            ("reasoning", ["* ", "\u{f0eb} ", "* ", "🧠 "]),
+            ("tier", ["", "", "", ""]),
+            ("cwd", ["", "", "", ""]),
+            ("git_branch", ["", "\u{e0a0} ", "", ""]),
+            ("worktree", ["", "", "", ""]),
+            ("status", ["", "", "", ""]),
+            ("session", ["# ", "", "# ", "# "]),
+            ("context", ["", "\u{f035b} ", "[", ""]),
+            ("usage", ["", "", "", ""]),
+            ("tokens", ["", "", "", ""]),
+            ("speed", ["\u{bb} ", "\u{f0e7} ", "spd ", "🚀 "]),
+            ("elapsed", ["", "\u{f017} ", "t ", "⏱ "]),
+            ("cost", ["", "", "", ""]),
+            ("pending", ["", "", "", ""]),
+            ("jobs", ["", "", "", ""]),
+            ("mcp", ["", "", "", ""]),
+            ("scroll", ["", "", "", ""]),
         ];
         assert_eq!(
             components::ids().len(),
@@ -1664,13 +1777,11 @@ mod tests {
         );
         for (id, glyphs) in expected {
             let component = components::builtin(id).expect("registered");
-            let [unicode, nerd, ascii, emoji] = component.glyphs();
             assert_eq!(
-                [unicode, nerd, ascii],
+                component.glyphs(),
                 glyphs,
-                "default glyphs for {id} (unicode/nerd/ascii)"
+                "default glyphs for {id} (unicode/nerd/ascii/emoji)"
             );
-            assert_eq!(emoji, "", "{id}'s emoji glyph is not selectable yet");
         }
     }
 

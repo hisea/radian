@@ -108,6 +108,21 @@ impl App {
                 self.session.model_display = None;
             }
         }
+        if let RuntimeEvent::BackgroundJobStarted { job_id, .. } = event {
+            // ADR 0027 slice ③ item 5: the footer's `jobs` item reads this
+            // session's running jobs. Stamp the loop's clock; the age ticks with the existing
+            // footer refresh, so no new timer exists for it.
+            self.session.running_jobs.retain(|job| job.id != *job_id);
+            self.session.running_jobs.push(crate::app::RunningJob {
+                id: job_id.clone(),
+                started: self.now,
+            });
+            return UpdateResult::dirty();
+        }
+        if let RuntimeEvent::BackgroundJobSettled { job_id, .. } = event {
+            self.session.running_jobs.retain(|job| job.id != *job_id);
+            return UpdateResult::dirty();
+        }
         if let RuntimeEvent::TurnFailed { message, .. } = event {
             self.session.entries.push(Entry::new(
                 EntryKind::Notice,

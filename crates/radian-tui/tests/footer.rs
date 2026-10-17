@@ -4,7 +4,9 @@
 
 use agent_core::{BudgetReport, EventSink, UsageSource};
 use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig, TuiFooterRowConfig};
+use radian_session::RuntimeEvent;
 use radian_tui::App;
+use radian_tui::app::Input;
 use radian_tui::footer::{Footer, Preset};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -178,8 +180,13 @@ fn the_context_thresholds_change_the_style() {
     for (tokens, expected_role) in [(750u64, "warn"), (950, "error")] {
         let mut app = App::new("mock", "s");
         // The default `full` preset uses the text `context`; this test is about the bar, so
-        // it asks for `context_bar` explicitly.
-        app.apply_footer(&rows(vec![item("context_bar")]));
+        // it asks for `{bar}` explicitly.
+        let warnings = app.apply_footer(&rows(vec![TuiFooterItemConfig {
+            id: "context".to_string(),
+            format: Some("{bar}".to_string()),
+            ..Default::default()
+        }]));
+        assert!(warnings.is_empty(), "{warnings:?}");
         app.session.projection.set_context_window(Some(1000));
         app.session
             .projection
@@ -202,8 +209,9 @@ fn the_context_thresholds_change_the_style() {
     }
 }
 
-/// `context_bar`'s own parameters: `width` cells, `fill` for the used part, `empty` for the
-/// rest.
+/// `context`'s `{bar}` placeholder (ADR 0027 merged `context_bar`
+/// into it): `width` cells, `fill` for the used part, `empty` for the rest. The old
+/// `context_bar` id keeps working with exactly one warning.
 #[test]
 fn the_context_bar_takes_width_fill_and_empty() {
     let config = TuiFooterConfig {
@@ -223,7 +231,15 @@ fn the_context_bar_takes_width_fill_and_empty() {
         ..Default::default()
     };
     let mut app = App::new("mock", "s");
-    app.apply_footer(&config);
+    let warnings = app.apply_footer(&config);
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|w| w.contains("context_bar"))
+            .count(),
+        1,
+        "the old id warns exactly once: {warnings:?}"
+    );
     app.session.projection.set_context_window(Some(1000));
     app.session
         .projection
@@ -448,6 +464,76 @@ fn the_status_item_lists_status_contributions_and_filters_by_keys() {
     assert!(!text.contains("beta-text"), "{text:?}");
 }
 
+/// The `jobs` component (ADR 0027's 2026-10-17 note, slice ③ item 5): the
+/// running background jobs and the oldest one's age, fed by the start/settle events — never
+/// by polling the journal file. Empty while none runs, so its row takes no space.
+#[test]
+fn jobs_shows_the_running_count_and_the_oldest_age() {
+    fn started(id: &str) -> Input {
+        Input::Runtime(RuntimeEvent::BackgroundJobStarted {
+            job_id: id.to_string(),
+            command: "make test".to_string(),
+            output: "available through job_output".to_string(),
+        })
+    }
+    fn settled(id: &str) -> Input {
+        Input::Runtime(RuntimeEvent::BackgroundJobSettled {
+            job_id: id.to_string(),
+            state: "exited 0".to_string(),
+            duration_ms: 1_000,
+        })
+    }
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&rows(vec![item("jobs")]));
+    let start = std::time::Instant::now();
+    app.set_now(start);
+    assert!(
+        app.footer.lines(&app, 100).is_empty(),
+        "no running job, no row"
+    );
+
+    // One running job: the count and its age.
+    app.update(started("job-1"));
+    app.set_now(start + std::time::Duration::from_secs(18 * 60));
+    let one = render(&mut app, 80, 12);
+    assert!(
+        row(&one, 11).contains("1 job") && row(&one, 11).contains("18m"),
+        "one job with its age: {}",
+        row(&one, 11)
+    );
+
+    // A second job: the count grows, the age stays the oldest one's.
+    app.update(started("job-2"));
+    let two = render(&mut app, 80, 12);
+    assert!(
+        row(&two, 11).contains("2 jobs") && row(&two, 11).contains("18m"),
+        "two jobs, oldest age: {}",
+        row(&two, 11)
+    );
+
+    // Settling the oldest leaves the younger one's count and age.
+    app.update(settled("job-1"));
+    let younger = render(&mut app, 80, 12);
+    assert!(
+        row(&younger, 11).contains("1 job") && row(&younger, 11).contains("0s"),
+        "the younger job remains: {}",
+        row(&younger, 11)
+    );
+
+    // Settling the last one empties the component: no text, no row, no gap.
+    app.update(settled("job-2"));
+    assert!(
+        app.footer.lines(&app, 100).is_empty(),
+        "no running job, no row"
+    );
+    let empty = render(&mut app, 80, 12);
+    assert!(
+        !screen(&empty).contains("job"),
+        "nothing left behind:\n{}",
+        screen(&empty)
+    );
+}
+
 /// A failed refresh keeps the value and draws it dim (the stale marker).
 #[test]
 fn a_stale_contribution_draws_with_the_dim_role() {
@@ -469,35 +555,119 @@ fn a_stale_contribution_draws_with_the_dim_role() {
     );
 }
 
-/// `[tui.widgets]` puts a contributor line above and/or below the input box (ADR 0027 C3).
+/// Rows positioned above/below the input draw around it (ADR 0027),
+/// and an input-adjacent row reads `[tui.footer.items.<id>]` like a footer row does. (`status`
+/// fixes its own text style from the contribution role, so the items-table colour shows on its
+/// symbol; the old `widget_line` path read none of the items table.)
 #[test]
-fn widgets_render_above_and_below_the_input() {
+fn rows_draw_above_and_below_the_input_with_items_config() {
+    use radian_host::config::TuiFooterRowConfig;
+    let mut config = items(&[(
+        "status",
+        TuiFooterItemConfig {
+            id: "status".to_string(),
+            icon: Some("● ".to_string()),
+            symbol_style: Some("red".to_string()),
+            ..Default::default()
+        },
+    )]);
+    config.rows = vec![
+        TuiFooterRowConfig {
+            left: vec![item("status")],
+            position: Some("above_input".to_string()),
+            ..Default::default()
+        },
+        TuiFooterRowConfig {
+            left: vec![item("status")],
+            position: Some("below_input".to_string()),
+            ..Default::default()
+        },
+    ];
     let mut app = App::new("mock", "s");
-    app.widgets = radian_host::config::TuiWidgetsConfig {
-        above_input: vec!["status".to_string()],
-        below_input: Vec::new(),
-    };
-    publish(&app, "status.thing", "ABOVE-WIDGET");
+    let warnings = app.apply_footer(&config);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    publish(&app, "status.thing", "EDGE-WIDGET");
     let terminal = render(&mut app, 80, 14);
     let text = screen(&terminal);
-    let above = text.find("ABOVE-WIDGET").expect("the above widget");
+    let above = text.find("EDGE-WIDGET").expect("the above row");
+    let input = text.find("(type a message").expect("the input hint");
+    assert!(above < input, "the above row precedes the input:\n{text}");
+    let below = text.rfind("EDGE-WIDGET").expect("the below row");
+    assert!(below > input, "the below row follows the input:\n{text}");
+    // The above row takes the items-table symbol colour (rev14 slice ③ acceptance).
+    let height = 14;
+    let mut coloured = false;
+    for y in 0..height {
+        if row(&terminal, y).contains("EDGE-WIDGET") && fg_at(&terminal, y, "●") == Some(Color::Red)
+        {
+            coloured = true;
+        }
+    }
+    assert!(
+        coloured,
+        "the above/below row uses items.status red:\n{text}"
+    );
+}
+
+/// The old `[tui.widgets]` block still works for one version: one warning, and its ids draw
+/// above/below the input as rows (ADR 0027).
+#[test]
+fn legacy_widgets_convert_to_positioned_rows_with_one_warning() {
+    let parsed = radian_host::config::parse(
+        std::path::Path::new("/tmp/config.toml"),
+        "schema_version = 1\n[tui.widgets]\nabove_input = [\"status\"]\nbelow_input = [\"status\"]\n",
+    )
+    .unwrap();
+    let mut app = App::new("mock", "s");
+    let warnings = app.apply_config(&parsed, false).unwrap();
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|w| w.contains("tui.widgets"))
+            .count(),
+        1,
+        "exactly one widgets warning: {warnings:?}"
+    );
+    publish(&app, "status.thing", "LEGACY-WIDGET");
+    let terminal = render(&mut app, 80, 14);
+    let text = screen(&terminal);
+    let above = text.find("LEGACY-WIDGET").expect("the converted above row");
     let input = text.find("(type a message").expect("the input hint");
     assert!(
         above < input,
-        "the above widget precedes the input:\n{text}"
+        "the converted row precedes the input:\n{text}"
     );
+    let below = text
+        .rfind("LEGACY-WIDGET")
+        .expect("the converted below row");
+    assert!(
+        below > input,
+        "the converted row follows the input:\n{text}"
+    );
+}
 
-    let mut app = App::new("mock", "s");
-    app.widgets = radian_host::config::TuiWidgetsConfig {
-        above_input: Vec::new(),
-        below_input: vec!["status".to_string()],
+/// A bad row position warns and falls back to the footer (never a refusal).
+#[test]
+fn a_bad_row_position_warns_and_falls_back_to_the_footer() {
+    use radian_host::config::TuiFooterRowConfig;
+    let config = TuiFooterConfig {
+        rows: vec![TuiFooterRowConfig {
+            left: vec![item("session")],
+            position: Some("sideways".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
     };
-    publish(&app, "status.thing", "BELOW-WIDGET");
-    let terminal = render(&mut app, 80, 14);
-    let text = screen(&terminal);
-    let input = text.find("(type a message").expect("the input hint");
-    let below = text.find("BELOW-WIDGET").expect("the below widget");
-    assert!(input < below, "the below widget follows the input:\n{text}");
+    let mut app = App::new("mock", "s");
+    let warnings = app.apply_footer(&config);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("position"), "{warnings:?}");
+    let terminal = render(&mut app, 80, 12);
+    assert!(
+        row(&terminal, 11).contains('s'),
+        "the row draws in the footer:\n{}",
+        screen(&terminal)
+    );
 }
 
 /// The `brand` and `host` items (ADR 0027): the `㎭` wordmark (or `rad` under the
@@ -979,12 +1149,14 @@ fn the_context_auto_marker_follows_the_switch() {
 
 /// Every new item carries a glyph in all three sets (ADR 0027), and the sets differ.
 #[test]
-fn the_new_items_have_glyphs_in_all_three_sets() {
-    // The unicode `elapsed` icon was dropped (ADR 0027: no covered glyph).
+fn the_new_items_have_glyphs_in_every_set() {
+    // The unicode `elapsed` icon was dropped (ADR 0027: no covered glyph); the
+    // emoji set (ADR 0027) draws from the system emoji font.
     for (set, host, speed, elapsed) in [
         ("unicode", '@', '»', None),
         ("nerd", '\u{f109}', '\u{f0e7}', Some('\u{f017}')),
         ("ascii", 'h', 's', Some('t')),
+        ("emoji", '💻', '🚀', Some('⏱')),
     ] {
         let mut app = App::new("mock", "s");
         app.set_hostname(Some("box".to_string()));

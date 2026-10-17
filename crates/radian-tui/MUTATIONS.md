@@ -2280,3 +2280,26 @@ a_printable_key_in_the_main_view_is_warned_about`.
 |---|---|---|---|
 | KB-1 | the printable check is gone (`if action.context() == Context::Main`, so every main binding warns) | ✅ 1 failed (the Ctrl/Alt/Shift loop's `warnings.is_empty()`): `a_bare_printable_character_in_the_main_view_warns` | the same unit test |
 | KB-2 | the warning block is removed entirely | ✅ 1 failed (the `'p'` warning is missing) | the same unit test |
+
+## ADR 0027 slice ③ (footer rows, separator, emoji, jobs) + `tasks` key drop (2026-10-17)
+
+Base `c09b614` · branch `dogfood/footer-s3`. Mutations in source in place, each restored
+from a `cp` in `/tmp/` and confirmed byte-identical with `cmp`. Every run with
+`--no-fail-fast`; each mutation run only its catching binary.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| S3-1 | legacy `[tui.widgets]` folds into positioned rows | `fold_legacy_widgets` returns `None` always (no rows converted) | `--test footer -- legacy_widgets_convert_to_positioned_rows_with_one_warning` ✅ 1 failed (the converted rows never draw) |
+| S3-2 | the old `context_bar` id is the `context` component | `canonical_id` never matches `"context_bar"` (unknown id, shown raw) | `--test footer -- the_context_bar_takes_width_fill_and_empty` ✅ 1 failed (the bar never renders) |
+| S3-3 | `glyphs = "emoji"` selects the fourth set | the `"emoji"` arm parses to `None` (falls back to `unicode` with a warning) | `--test footer -- the_new_items_have_glyphs_in_every_set` ✅ 1 failed (no 💻/🚀/⏱) |
+| S3-4 | a settle removes the job (settled jobs are not counted) | the settle arm keeps the job in `running_jobs` | `--test footer -- jobs_shows_the_running_count_and_the_oldest_age` ✅ 1 failed (the last case still shows `2 jobs`) |
+| S3-5 | the command stdin has no `tasks` key (ADR 0043) | `to_json` gains `"tasks": {"running": 0, "total": 0}` | `-p radian-host --test command_footer -- the_stdin_is_the_documented_json_context` ✅ 1 failed (`doc.get("tasks").is_none()`) |
+
+5/5 caught; no misses. The separator swap (decision 8) is proved mechanically, not by
+mutation: the four preset screens (fixed `App`, 100x12) taken before the slice, re-taken
+after, with ` · ` swapped back to ` │ `, are byte-identical (`cmp`) for deck, full, pi and
+classic; the post-change screens each contain several ` · ` and no ` │ `, so the proof is not
+vacuous. The `·` (U+00B7) coverage check could not run the repo's fontTools script (no
+network for the venv), so a stdlib-only cmap reader (TTC + format 4/12, deleted after use)
+verified all six reference fonts map U+00B7 and none maps the emoji codepoints; the script
+itself was validated both ways.

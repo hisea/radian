@@ -21,7 +21,7 @@ use std::sync::{Arc, Weak};
 
 use agent_core::{InputSource, Message};
 use radian_coding::{JobEvent, Jobs};
-use radian_runtime::Inbox;
+use radian_runtime::{Inbox, RuntimeEvents};
 use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};
 
 /// The most output bytes a completion message inlines (ADR 0037 decision 5; omp's
@@ -46,6 +46,10 @@ pub struct JobNotifier {
     journal: Arc<SessionJournal>,
     /// Shared with the driver: `true` while a turn is in flight.
     turn_running: Arc<AtomicBool>,
+    /// The live runtime-event sink (ADR 0027 slice ③ item 5): the TUI's footer
+    /// `jobs` item reads the start/settle pair from here, not by polling the journal file.
+    /// The record is journaled first, then forwarded, like the driver's own boundaries.
+    events: Arc<dyn RuntimeEvents>,
     /// Consecutive wake-started turns with no user input in between.
     wakes: AtomicU32,
 }
@@ -56,12 +60,14 @@ impl JobNotifier {
         inbox: Arc<Inbox>,
         journal: Arc<SessionJournal>,
         turn_running: Arc<AtomicBool>,
+        events: Arc<dyn RuntimeEvents>,
     ) -> Arc<Self> {
         Arc::new(Self {
             jobs: Arc::downgrade(&jobs),
             inbox,
             journal,
             turn_running,
+            events,
             wakes: AtomicU32::new(0),
         })
     }
@@ -105,7 +111,8 @@ impl JobNotifier {
         self.wakes.load(Ordering::SeqCst)
     }
 
-    /// Handles one lifecycle event: write the durable record, then (for a notifiable settle)
+    /// Handles one lifecycle event: write the durable record, forward it on the live
+    /// runtime-event sink (the TUI's footer `jobs` item), then (for a notifiable settle)
     /// deliver the System message on the busy/idle lane.
     pub async fn deliver(&self, event: JobEvent) {
         match event {
@@ -114,14 +121,13 @@ impl JobNotifier {
                 command,
                 output,
             } => {
-                let _ = self
-                    .journal
-                    .append_runtime_event(RuntimeEvent::BackgroundJobStarted {
-                        job_id: id,
-                        command,
-                        output,
-                    })
-                    .await;
+                let record = RuntimeEvent::BackgroundJobStarted {
+                    job_id: id,
+                    command,
+                    output,
+                };
+                let _ = self.journal.append_runtime_event(record.clone()).await;
+                self.events.on_runtime_event(&record);
             }
             JobEvent::Settled {
                 id,
@@ -129,14 +135,13 @@ impl JobNotifier {
                 duration_ms,
                 notify,
             } => {
-                let _ = self
-                    .journal
-                    .append_runtime_event(RuntimeEvent::BackgroundJobSettled {
-                        job_id: id.clone(),
-                        state: state.label(),
-                        duration_ms,
-                    })
-                    .await;
+                let record = RuntimeEvent::BackgroundJobSettled {
+                    job_id: id.clone(),
+                    state: state.label(),
+                    duration_ms,
+                };
+                let _ = self.journal.append_runtime_event(record.clone()).await;
+                self.events.on_runtime_event(&record);
                 if !notify {
                     return;
                 }

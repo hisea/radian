@@ -17,12 +17,12 @@ use super::{Glyphs, Item, ItemStyle};
 
 mod brand;
 mod context;
-mod context_bar;
 mod cost;
 mod cwd;
 mod elapsed;
 mod git_branch;
 mod host;
+mod jobs;
 mod mcp;
 mod model;
 mod pending;
@@ -89,9 +89,8 @@ pub(crate) trait Component: Sync {
     fn id(&self) -> &str;
     /// The `{placeholder}`s its `data` fills, for parse-time validation and its README row.
     fn placeholders(&self) -> &'static [&'static str];
-    /// The default icon in each glyph set, `[unicode, nerd, ascii, emoji]`. `emoji` (index 3) is
-    /// declared by every component, but `tui.footer.glyphs` does not accept `emoji` until slice
-    /// ③, so only the first three are ever selected today. An empty string is "no icon".
+    /// The default icon in each glyph set, `[unicode, nerd, ascii, emoji]` (ADR 0027 revision
+    /// 14 decision 7 added the fourth). An empty string is "no icon".
     fn glyphs(&self) -> [&'static str; 4];
     /// The default theme role, after a threshold and a configured `style` (ADR 0027 C2).
     fn role(&self, _app: &App) -> Option<Role> {
@@ -106,7 +105,7 @@ pub(crate) trait Component: Sync {
         Vec::new()
     }
     /// The item's data at draw time, or `None` when it has nothing (the item hides; v5 §5: never
-    /// a fabricated number). `item` carries the configured per-item parameters (`context_bar`'s
+    /// a fabricated number). `item` carries the configured per-item parameters (`context`'s
     /// `width`/`fill`/`empty`, `status`'s `keys`).
     fn data(&self, app: &App, item: &Item) -> Option<ItemData>;
 }
@@ -124,13 +123,13 @@ static COMPONENTS: &[&'static dyn Component] = &[
     &status::Status,
     &session::Session,
     &context::Context,
-    &context_bar::ContextBar,
     &usage::Usage,
     &tokens::Tokens,
     &speed::Speed,
     &elapsed::Elapsed,
     &cost::Cost,
     &pending::Pending,
+    &jobs::Jobs,
     &mcp::Mcp,
     &scroll::Scroll,
 ];
@@ -164,12 +163,13 @@ pub(crate) fn thresholds(id: &str) -> Vec<(i64, ItemStyle)> {
     builtin(id).map_or_else(Vec::new, Component::thresholds)
 }
 
-/// A component's default glyph in the configured set (`emoji` is never selected today).
+/// A component's default glyph in the configured set.
 pub(crate) fn glyph_of(component: &dyn Component, glyphs: Glyphs) -> &'static str {
     component.glyphs()[match glyphs {
         Glyphs::Unicode => 0,
         Glyphs::Nerd => 1,
         Glyphs::Ascii => 2,
+        Glyphs::Emoji => 3,
     }]
 }
 
