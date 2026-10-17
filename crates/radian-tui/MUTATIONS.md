@@ -2222,3 +2222,27 @@ never drawn) and 20 of 20 after.
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | D43-T1 | 缺省档位回到 `workspace` | `pty_the_default_tier_is_full_with_no_sandbox`（摘要行没有 `full` / `no sandbox`） | ✅ 1 failed |
+
+## dogfood/tui-lost-input：resize 吃掉按键 + 驱动结束后吞掉提交（2026-10-17）
+
+Base `61c4afb` · branch `dogfood/tui-lost-input` · worktree `.radian-worktrees/tui-lost-input`。
+
+两个缺陷：(1) `cli/tty.rs` 的 resize 合并器要读一个非 resize 事件才停下，并且把它丢掉——
+`read_input(ZERO)` 已经把它从 crossterm 缓冲里取走了，所以窗口 resize 和第一个按键同时到达
+时，那个键不是文本（旧代码下 pty 里 `❯ acdef`）。(2) 驱动停止后 App 不看 `session_ended`，提交
+照旧走 `ExpandMentions` → `Inbox::followup`，而 inbox 仍然开着、没有 driver 读它，消息被静默吞
+掉，footer 还说 `idle`。
+
+变异在源码原地改，每次从 `.radian/scratch/mut-lost-input/` 的 `cp` 副本还原并 `cmp` 一致
+（不用 `git checkout --`/`restore`/`stash`）；所有运行都带 `--no-fail-fast`。命令：
+`timeout 300 cargo test -p radian-tui --locked --no-fail-fast --test pty -- pty_a_resize_does_not_eat_a_typed_key pty_a_submit_after_the_driver_ended` 与
+`... --test update -- a_submit_after_the_session_ended`。
+
+| # | 需求变异 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| LI-1 | resize 合并器绝不丢掉非 resize 事件 | `Input::Event(other) => { let _ = other; break; }`（旧行为） | `pty_a_resize_does_not_eat_a_typed_key` | ✅ 1 failed |
+| LI-2 | 会话结束后提交被拒绝并说明原因 | `refuse_if_session_ended` 直接 `None` | `update::a_submit_after_the_session_ended_says_so_and_sends_nothing`；`pty_a_submit_after_the_driver_ended_says_the_session_is_dead` | ✅ 1 + 1 failed |
+| LI-3 | footer 在会话结束后不说 `idle` | `if false && app.session.session_ended.is_some()`（回到 `turn.label()`） | `pty_a_submit_after_the_driver_ended_says_the_session_is_dead`（footer 显示 `idle`） | ✅ 1 failed |
+
+3/3 抓住；恢复后 `git status --short` 只有测试与三处源码改动。`pty_a_resize_does_not_eat_a_typed_key`
+在修复后单独重跑 3 次全过（旧代码/变异下每次失败）。

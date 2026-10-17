@@ -426,42 +426,57 @@ pub(super) fn spawn_input_thread(tx: Sender<UiEvent>) {
             let packed = (u32::from(rows) << 16) | u32::from(cols);
             LAST_SIZE.store(packed, std::sync::atomic::Ordering::SeqCst);
         }
+        // An event read while a resize burst coalesces: it is handled on the next turn. It
+        // cannot stay in crossterm's buffer — `read_input` already consumed it.
+        let mut stashed: Option<Event> = None;
         loop {
-            match read_input(INPUT_POLL) {
-                Input::Gone => {
-                    exit_trace("pollhup");
-                    let _ = tx.send(UiEvent::TerminalGone);
-                    return;
-                }
-                Input::Event(event) => {
-                    // A resize burst coalesces to the last one; everything else goes through
-                    // the one pure event map (which drops clicks, drags and moves).
-                    let event = match event {
-                        // crossterm's order is `(cols, rows)`; `coalesce_resize` takes rows first.
-                        Event::Resize(cols, rows) => coalesce_resize(rows, cols),
-                        other => match radian_tui::events::input_event(other) {
-                            Some(event) => event,
-                            None => continue,
-                        },
-                    };
-                    if tx.send(UiEvent::Input(event)).is_err() {
+            let event = match stashed.take() {
+                Some(event) => event,
+                None => match read_input(INPUT_POLL) {
+                    Input::Gone => {
+                        exit_trace("pollhup");
+                        let _ = tx.send(UiEvent::TerminalGone);
                         return;
                     }
-                }
-                Input::Idle => {}
+                    Input::Event(event) => event,
+                    Input::Idle => continue,
+                },
+            };
+            // A resize burst coalesces to the last one; everything else goes through the one
+            // pure event map (which drops clicks, drags and moves).
+            let event = match event {
+                // crossterm's order is `(cols, rows)`; `coalesce_resize` takes rows first.
+                Event::Resize(cols, rows) => coalesce_resize(rows, cols, &mut stashed),
+                other => match radian_tui::events::input_event(other) {
+                    Some(event) => event,
+                    None => continue,
+                },
+            };
+            if tx.send(UiEvent::Input(event)).is_err() {
+                return;
             }
         }
     });
 }
 
 /// A burst of resizes (a window drag) collapses to the last one: every size in between would
-/// cost a full re-wrap for a frame nobody sees. A non-resize event stops the collapse and is
-/// handled on the next turn (it stays in crossterm's buffer).
-fn coalesce_resize(rows: u16, cols: u16) -> InputEvent {
+/// cost a full re-wrap for a frame nobody sees. A non-resize event ends the collapse; it was
+/// already read, so it is stashed for the next turn rather than dropped (the coalescer used to
+/// consume one typed key whenever a resize and a keystroke arrived together).
+fn coalesce_resize(rows: u16, cols: u16, stashed: &mut Option<Event>) -> InputEvent {
     let (mut rows, mut cols) = (rows, cols);
-    while let Input::Event(Event::Resize(next_cols, next_rows)) = read_input(Duration::ZERO) {
-        rows = next_rows;
-        cols = next_cols;
+    loop {
+        match read_input(Duration::ZERO) {
+            Input::Event(Event::Resize(next_cols, next_rows)) => {
+                rows = next_rows;
+                cols = next_cols;
+            }
+            Input::Event(other) => {
+                *stashed = Some(other);
+                break;
+            }
+            Input::Idle | Input::Gone => break,
+        }
     }
     // A drag may have moved the window again since; the last size is the one that matters, so
     // report it rather than an intermediate one.

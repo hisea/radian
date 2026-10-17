@@ -550,3 +550,50 @@ fn esc_with_an_empty_input_and_a_running_turn_cancels() {
         result.effects
     );
 }
+
+/// The driver stopped: the session is over, so a submit cannot start a turn. Every submit
+/// says so once (with the way back in) and sends nothing — the input is kept, never accepted
+/// into an inbox no driver will read.
+#[test]
+fn a_submit_after_the_session_ended_says_so_and_sends_nothing() {
+    let mut app = App::new("m", "sess-7");
+    app.session.session_ended = Some("driver failed: ENOSPC".to_owned());
+
+    let first = submit(&mut app, "hello there");
+    assert!(
+        first.is_empty(),
+        "nothing is sent after the session ended: {first:?}"
+    );
+    assert_eq!(app.input, "hello there", "the message is kept, not lost");
+    let first_notices = notices(&app);
+    assert_eq!(first_notices.len(), 1, "{first_notices:?}");
+    assert!(
+        first_notices[0].contains("the session has ended")
+            && first_notices[0].contains("driver failed: ENOSPC")
+            && first_notices[0].contains("the message was not sent")
+            && first_notices[0].contains("radian --resume sess-7"),
+        "{}",
+        first_notices[0]
+    );
+
+    // A second submit says why again: the refusal is never silent.
+    let second = submit(&mut app, "another one");
+    assert!(second.is_empty(), "{second:?}");
+    assert_eq!(notices(&app).len(), 2, "one notice per submit");
+    assert_eq!(app.input, "another one");
+}
+
+/// The gate is on messages, not on the app-only commands: `/help` still answers after the
+/// driver stopped (it never needed the session).
+#[test]
+fn an_app_only_command_still_runs_after_the_session_ended() {
+    let mut app = App::new("m", "sess-8");
+    app.session.session_ended = Some("driver failed: ENOSPC".to_owned());
+    let effects = submit(&mut app, "/help");
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(
+        notices(&app).iter().any(|note| note.contains("/compact")),
+        "{:?}",
+        notices(&app)
+    );
+}

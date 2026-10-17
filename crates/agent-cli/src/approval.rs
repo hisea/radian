@@ -14,7 +14,7 @@ use radian_permissions::{
 };
 use tokio::sync::mpsc;
 
-use crate::LineHub;
+use crate::ui::LineHub;
 
 /// Asks the user on stderr and reads the answer from the shared line hub.
 ///

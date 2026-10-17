@@ -11976,3 +11976,113 @@ async fn pty_attach_swallows_every_other_key() {
         "q must quit the view"
     );
 }
+
+// ---------- lost input: a resize must not eat a typed key ----------
+
+/// A printable key typed into an empty composer is text — including while a resize is being
+/// coalesced. The coalescer used to read one non-resize event to find the end of a resize
+/// burst and throw it away, so the first key after a resize was silently dropped.
+#[test]
+fn pty_a_resize_does_not_eat_a_typed_key() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("resize-keeps-keys");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "resize-keys",
+            "--offline-catalog",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The resize lands while the input thread is idle and the text follows in one write, so
+    // crossterm's read buffers the tail of it: that buffered key was the one the coalescer ate.
+    pty.resize(31, 110);
+    pty.send(b"abcdef");
+    assert!(
+        pty.wait_for_screen("abcdef", 5),
+        "a key was dropped after the resize:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// Once the driver stopped, a submit cannot start a turn: every submit says the session is
+/// dead and how to resume it, keeps the text, and reaches no model. The footer says `ended`,
+/// never `idle` (nothing can start).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_submit_after_the_driver_ended_says_the_session_is_dead() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ended-submit");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "ended-submit",
+            "--panic-in-driver",
+        ],
+        40,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("the session ended: driver panicked", 15),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"hello there\r");
+    assert!(
+        pty.wait_for_screen("message was not sent", 10),
+        "the submit was silently swallowed:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("radian --resume ended-submit", 10),
+        "the notice does not say how to continue:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("hello there"),
+        "the message must stay in the composer:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("idle"),
+        "the footer must not claim a live turn:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("ended"),
+        "the footer does not say the session ended:\n{}",
+        pty.screen()
+    );
+    // Every submit says so again.
+    pty.send(b"\r");
+    assert!(
+        pty.wait_until(10, |screen| screen.matches("message was not sent").count()
+            >= 2),
+        "the second submit was silent:\n{}",
+        pty.screen()
+    );
+    assert!(
+        server.requests().is_empty(),
+        "no request may reach the model: {:?}",
+        server.requests()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(1));
+}
