@@ -1181,6 +1181,62 @@ Commands: `timeout 300 cargo test -p agent-cli --locked --test cli a_headless_ex
 (GV-1); `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast memory_search_with_ids_returns_the_full_records`
 (GV-2).
 
+## ADR 0043 decision 1a gaps: `--header` forwarding, the live route, the drop guard (2026-10-17)
+
+Worktree `.radian-worktrees/subagent-gaps`, branch `dogfood/subagent-gaps`. Each mutation was
+applied in place in `crates/radian-host/src/subagent.rs`, restored from a `cp` and confirmed
+byte-identical with `cmp`. SG-1 changes the child the tool spawns, so the `agent-cli` run was
+made after `cargo build -p radian-tui --bin radian` (the harness refuses a stale binary).
+
+Commands: `timeout 300 cargo test -p radian-host --locked --no-fail-fast --test subagent_headers`
+(SG-1, radian-host); `timeout 300 cargo test -p agent-cli --locked --no-fail-fast --test subagent
+the_parents_header` (SG-1, end to end).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| SG-1 | the child `env` carrying the parent's `--header` values is never set (`if false`) | ✅ 2 failed | `agent-cli::subagent::the_parents_header_reaches_the_child_and_nothing_else_writes_it` (`the child must send the parent's header`: `left: None`); `radian_host::subagent_headers::the_header_value_reaches_the_child_through_the_environment_not_its_argv` (`EOF while parsing` an empty variable) |
+| SG-2 | `current_route` returns the startup route (the config slot is ignored) | ✅ 1 failed | `radian_host::subagent_route::the_child_runs_the_parents_live_model_route` (the recorded argv names `--model old`; the parent's own request still named `new`, so the switch itself is proven) |
+| SG-3 | `SessionKillGuard::drop` does nothing (plain `kill_on_drop`) | ✅ 1 failed | `radian_host::subagent_drop::dropping_the_call_leaves_no_grandchild_alive` (the logged grandchild pid was still alive after the 10 s bound) |
+
+## Fix round 1 A: the forwarded header must not outlive the child's startup (2026-10-17)
+
+`RADIAN_CHILD_HEADERS` is read and **removed from the child's own environment** at the top of
+`run_blocking`, before the Tokio runtime exists (so the process still has one thread), and the MCP
+spawn in `agent-extensions` removes the name again (belt and braces: that spawn already
+`env_clear`s, so a name in `inherit_env` is the only path left). Mutations were applied in place,
+restored from a `cp` under `/tmp/radian-fix1/mut/` and confirmed byte-identical with `cmp`; every
+run was made after `cargo build -p radian-tui --bin radian` and `cargo build -p agent-extensions
+--bin mcp-fixture` (the harness refuses a stale binary).
+
+Commands: `timeout 300 cargo test -p agent-cli --locked --no-fail-fast --test subagent <name>`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| FH-1 | `take_child_headers_from_env` reads the variable but does not `remove_var` it | ✅ 1 failed (the child's `shell` command wrote `["X-Test=child-env-secret-9"]` into the dump file) | `agent-cli::subagent::the_childs_own_environment_no_longer_carries_the_parents_header` |
+| FH-2 | the MCP spawn's `env_remove("RADIAN_CHILD_HEADERS")` is dropped | ⚠️ not caught alone (with FH-1 fixed the variable is already out of the child's environment, so `inherit_env` copies nothing) | none — the belt and braces is observable only together with FH-1 |
+| FH-1+FH-2 | both removals gone | ✅ 1 failed (the MCP server's env dump held `["X-Test=mcp-env-secret-5"]`) | `agent-cli::subagent::an_mcp_server_the_child_starts_does_not_get_the_parents_header` |
+
+## Fix round 1 B: the two-step stop — SIGTERM, the grace, then the session SIGKILL (2026-10-17)
+
+Both the cancel path (`stop_child`) and the drop guard (`SessionKillGuard::drop`) now send SIGTERM
+to the child first, wait `CHILD_STOP_GRACE` (3 s) for it to exit, and only then `kill_session` — a
+SIGKILL of the child's session cannot reach a `shell` command, because that tool `setsid`s every
+command, and the child's own cleanup (cancel the turn, then close the session, which kills every
+job's session) is what reaches them. `radian-coding` gained `stop_leader` (SIGTERM to one pid) and
+`wait_for_exit` (bounded, `waitid` with `WNOWAIT`, so the leader stays unreaped for the fallback).
+`crates/radian-host/tests/subagent_drop.rs` now pins the **fallback** (its stub ignores SIGTERM),
+and `crates/radian-host/tests/subagent_stop.rs` is new. Mutations were applied in place, restored
+from a `cp` under `/tmp/radian-fix1/mut/` and confirmed byte-identical with `cmp`; every run was
+made after `cargo build -p radian-tui --bin radian` (the harness refuses a stale binary).
+
+Commands: `timeout 400 cargo test -p radian-host --locked --no-fail-fast --test subagent_stop`;
+`timeout 400 cargo test -p agent-cli --locked --no-fail-fast --test subagent a_cancelled`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TS-1 | the cancel path sends SIGKILL straight away (the graceful step is skipped) | ✅ 3 failed | `radian_host::subagent_stop::cancelling_the_call_stops_what_the_child_started` (the escaped grandchild was still alive after 10 s); `agent-cli::subagent::a_cancelled_parent_turn_stops_the_command_the_childs_shell_started` and `..._stops_the_childs_background_job` (both timed out waiting for the pid to go) |
+| TS-2 | the drop guard sends SIGKILL straight away | ✅ 1 failed | `radian_host::subagent_stop::dropping_the_call_stops_what_the_child_started` (the escaped grandchild was still alive). `radian_host::subagent_drop::dropping_the_call_leaves_no_grandchild_alive` still passes: it pins the fallback. |
+| TS-3 | `radian exec` installs no SIGTERM listener (the kernel's default action kills the child at once; this mutation lives in `crates/agent-cli/src/events.rs`, see that crate's MUTATIONS.md) | ✅ 2 failed | both `agent-cli` tests above (the command and the job outlived the cancelled turn). The two `subagent_stop` tests still pass: their stub handles SIGTERM itself. |
 ## ADR 0026: protocol from the models.dev `npm`, hard-coded per-protocol base URLs, the bundled snapshot, Responses with an API key (2026-10-17)
 
 Each mutation was applied in place under `src/`, the catching test binary was run alone with
@@ -1200,6 +1256,23 @@ Each mutation was applied in place under `src/`, the catching test binary was ru
 
 Commands: `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast <name>`;
 `timeout 300 cargo test -p radian-host --locked --test <file>`. 9/9 caught.
+
+## ADR 0034: `pane.report_metadata`, `state_labels`, `pane.report_agent_session` (2026-10-17)
+
+Base `2e513ef` · branch `dogfood/s4-herdr`. Each mutation was applied in place, only the catching
+binary was run (`--no-fail-fast`), and the source was restored from a `cp` in `/tmp/s4/` and
+confirmed with `cmp`.
+
+| # | Mutation | Result | Test(s) that caught it |
+|---|---|---|---|
+| H34-1 | `token_diff` drops the "changed" guard: every known key is sent every time | ✅ 2 + 1 failed | `radian-tui cli::herdr::tests::each_metadata_trigger_reports_only_the_changed_key`, `...::a_key_that_goes_unknown_is_cleared`; pty `pty_herdr_reports_metadata_changes` |
+| H34-2 | a `cost` token is added to `metadata_tokens` | ✅ 1 + 1 failed | `radian-tui cli::herdr::tests::each_metadata_trigger_reports_only_the_changed_key`; pty `pty_herdr_reports_metadata_changes` |
+| H34-3 | `blocked_label` is always `"blocked"` (the H2 category is dropped) | ✅ 1 + 2 failed | `herdr::tests::the_blocked_label_is_the_h2_category`; pty `pty_herdr_labels_a_question_as_question`, `pty_herdr_reports_metadata_changes` |
+| H34-4 | `Reporter::session` is not queued at startup (no `report_agent_session`) | ✅ 1 failed | pty `pty_herdr_reports_the_session_identity` |
+
+Commands: `timeout 900 cargo test -p radian-tui --locked --lib --no-fail-fast cli::herdr`;
+`timeout 900 cargo test -p radian-host --locked --lib --no-fail-fast herdr`;
+`timeout 900 cargo test -p radian-tui --locked --test pty --no-fail-fast herdr`. 4/4 caught.
 ## the `-m provider/model` hint (`startup::provider_in_model_hint`)
 
 The form is `--provider <p> --model <m>`; a `-m`/`--model` value that looks like `<known

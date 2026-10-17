@@ -288,6 +288,7 @@ pub async fn open_session(
             workspace.clone(),
             coding_root.clone(),
             sandbox_slot.clone(),
+            Arc::clone(&config_slot),
             Arc::clone(&hooks),
         ));
     }

@@ -114,7 +114,10 @@ pub use diagnostics::{
     diagnostics_dir, is_diagnostic_file, now_millis, panic_log_name,
 };
 pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_overflow};
-pub use headers::{SESSION_PLACEHOLDER, parse_headers};
+pub use headers::{
+    CHILD_HEADERS_ENV, SESSION_PLACEHOLDER, encode_child_headers, parse_headers,
+    take_child_headers_from_env,
+};
 pub use home::{
     RADIAN_HOME_ENV, access_dir_for, cache_dir_for, catalog_cache, catalog_cache_for, config_dir,
     config_dir_for, credentials_dir, credentials_dir_for, diagnostics_dir_for, ensure_private_dir,

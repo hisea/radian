@@ -325,11 +325,18 @@ where
 /// Runs the parsed CLI to completion and returns the exit code: the runtime is built here and
 /// torn down with a bound, exactly as the headless command always did.
 pub fn run_blocking(cli: Cli) -> i32 {
+    // ADR 0043 decision 1a (fix round 1 A): a subagent child receives its parent's `--header`
+    // values in `RADIAN_CHILD_HEADERS`. They are read — and the variable is removed from this
+    // process's environment — **here**, before the runtime below is built: `remove_var` may only
+    // run while the process has one thread, and the multi-thread runtime is what starts the
+    // others. From here on the headers live only in the `Setup` this run builds, so no process
+    // this child starts can inherit the secret.
+    let child_headers = radian_host::take_child_headers_from_env();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let code = runtime.block_on(run(cli));
+    let code = runtime.block_on(run(cli, child_headers));
     // The session is closed on every path inside `run`. Dropping a runtime waits for its
     // blocking threads, and the stdin reader's blocking read cannot be interrupted: with stdin
     // still open it would hold the process here until the user typed another line.
@@ -337,7 +344,7 @@ pub fn run_blocking(cli: Cli) -> i32 {
     code
 }
 
-pub async fn run(mut cli: Cli) -> i32 {
+pub async fn run(mut cli: Cli, child_headers: Result<Vec<String>, String>) -> i32 {
     // `radian memory` and `radian config` are modes of their own: no model, no key, no session
     // file, no network. They are handled before `setup`, like the session-management commands.
     if cli.command.is_some() {
@@ -380,7 +387,7 @@ pub async fn run(mut cli: Cli) -> i32 {
             }
         };
     }
-    let setup = match setup::setup(&cli).await {
+    let setup = match setup::setup(&cli, child_headers).await {
         Ok(setup) => setup,
         Err(e) => {
             eprintln!("radian: {}", e.0);

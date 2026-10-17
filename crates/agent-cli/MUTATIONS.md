@@ -398,3 +398,16 @@ token（ADR 0026 禁止）。两个读点都改成走 `redaction_secrets()`（�
 | D43-3 | `build_sandbox` 不把 `allow_env` 加进 policy（删掉循环） | `the_shell_environment_carries_herdr_and_allow_env`（`left: "pane-9||"`） | ✅ 1 failed |
 
 3/3 抓住。
+
+## ADR 0043 fix round 1 B：子进程必须处理 SIGTERM（2026-10-17）
+
+`radian exec` 现在为 SIGTERM 装一个长驻监听（与 SIGINT 同一个 channel），收到后取消当前轮、
+立刻关闭 inbox 并 join driver（会话结束会杀掉每个后台 job 的整个 session），退出码 128+15。
+否则 SIGTERM 走内核默认动作，进程当场被杀，`Jobs::kill_all` 与 shell 工具的取消清理都不会跑。
+
+命令：`timeout 400 cargo test -p agent-cli --locked --no-fail-fast --test subagent a_cancelled`；
+变异前 `cp` 备份、`cargo build -p radian-tui --bin radian`，变异后 `cp` 还原并 `cmp` 逐字节一致。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SG-TERM | `spawn_signals` 不再监听 SIGTERM（空任务） | `a_cancelled_parent_turn_stops_the_command_the_childs_shell_started`、`a_cancelled_parent_turn_stops_the_childs_background_job`（两条都等不到 pid 消失） | ✅ 2 failed |
