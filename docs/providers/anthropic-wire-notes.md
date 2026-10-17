@@ -222,9 +222,7 @@ Anthropic 的 `ContentBlockParam` 文档列出的输入块类型里**没有**音
 
 ## 9. 限额响应头（ADR 0027 切片 ④，2026-10-17）
 
-来源：`https://docs.claude.com/en/api/rate-limits`（Anthropic 官方 rate-limits 页：请求数与
-token 数的 limit / remaining / reset 六个头）。本离线 worktree 未重拉该页；头名按切片 ④
-任务单的方向取，adapter 只按前缀 `anthropic-ratelimit-` 原样保留（`model.rs` 的
+来源：`https://platform.claude.com/docs/en/api/rate-limits`（旧址 `docs.claude.com/en/api/rate-limits` 301 到此；Anthropic 官方 rate-limits 页）。**p1 2026-10-17 已对照该页核实**：`anthropic-ratelimit-{requests,tokens}-{limit,remaining,reset}` 六个头名与本表一致，reset 为 RFC 3339；该页另列 `anthropic-ratelimit-{input,output}-tokens-*` 与 `anthropic-priority-*`（Priority Tier），本切片不解析。adapter 只按前缀 `anthropic-ratelimit-` 原样保留（`model.rs` 的
 `RATE_LIMIT_PREFIX`），具体名字只出现在宿主的解析表（`radian-host` 的 `ANTHROPIC_HEADERS`），
 改名不需要动 adapter。
 

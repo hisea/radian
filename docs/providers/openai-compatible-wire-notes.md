@@ -4,7 +4,7 @@
 Chat Completions 形状（SSE chunk、`usage` 三形态、`finish_reason`），那些不在这里记——本文件
 不是该形状的完整 wire notes，只钉住限额头的名字与来源。
 
-来源：`https://platform.openai.com/docs/guides/rate-limits`（OpenAI 官方 rate-limits 指南：
+来源：`https://developers.openai.com/api/docs/guides/rate-limits`（旧址 `platform.openai.com/docs/guides/rate-limits` 301 到此；**p1 2026-10-17 已对照核实**：`x-ratelimit-{limit,remaining,reset}-{requests,tokens}` 与本表一致，reset 为 `1s`、`6m0s` 式时长；该页另列 `x-ratelimit-*-project-tokens`，本切片不解析）。原写（OpenAI 官方 rate-limits 指南：
 `x-ratelimit-limit-*` / `x-ratelimit-remaining-*` / `x-ratelimit-reset-*` 三组，requests 与
 tokens 各一对）。本离线 worktree 未重拉该页；头名按切片 ④ 任务单的方向取（请求数与 token
 数的 limit / remaining / reset），adapter 只按前缀 `x-ratelimit-` 原样保留（`model.rs` 的
