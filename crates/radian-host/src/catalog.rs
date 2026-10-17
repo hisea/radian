@@ -1,10 +1,12 @@
 //! The models.dev catalog: where a model's context window comes from (ADR 0018 §目录).
 //!
 //! The window is **not** guessed from the model name. It is either the host's explicit
-//! `--context-window`, or a lookup in the public models.dev catalog matched by
-//! `(provider, model)`. The catalog is fetched over a read-only GET with no key, no header and
-//! no user data, cached owner-only under the same cache root as the diagnostics (ADR 0013
-//! decision 4), and refreshed at most once every [`CACHE_TTL`].
+//! `--context-window`, a lookup in the public models.dev catalog matched by
+//! `(provider, model)`, or — for a provider models.dev does not carry (`chatgpt`) — the numbers
+//! the route's own descriptor table cites ([`crate::DescriptorModel::limit`], read from
+//! `@oh-my-pi/pi-catalog`'s `openai-codex` block). The catalog is fetched over a read-only GET
+//! with no key, no header and no user data, cached owner-only under the same cache root as the
+//! diagnostics (ADR 0013 decision 4), and refreshed at most once every [`CACHE_TTL`].
 //!
 //! The fetch is deliberately allowed to fail: a missing or stale catalog leaves the window
 //! unknown and the guard off (ADR 0015), never a guessed number.
@@ -58,11 +60,28 @@ pub fn host_of(base_url: &str) -> Option<String> {
 /// (ADR 0018): `context` is the total window `C`, `input` the input ceiling `I`
 /// when the provider publishes one, and `output` the output ceiling. A missing or zero value
 /// means "unknown", never a fabricated number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelLimit {
     pub context: Option<u64>,
     pub output: Option<u64>,
     pub input: Option<u64>,
+}
+
+impl ModelLimit {
+    /// All three numbers unknown — the value a descriptor that draws its numbers from the
+    /// catalog carries, and what `Default` means here. A `const` (rather than only the derived
+    /// `Default`) because the descriptor table's builders are `const fn`.
+    pub const UNKNOWN: Self = Self {
+        context: None,
+        output: None,
+        input: None,
+    };
+}
+
+impl Default for ModelLimit {
+    fn default() -> Self {
+        Self::UNKNOWN
+    }
 }
 
 /// One model's unit prices from the catalog (ADR 0027), in **millionths of a US
@@ -515,6 +534,10 @@ pub enum WindowSource {
         model: String,
         age: Option<Duration>,
     },
+    /// The route's own descriptor table ([`crate::DescriptorModel::limit`]): the numbers the
+    /// `chatgpt` descriptor cites from `@oh-my-pi/pi-catalog`'s `openai-codex` block, for a
+    /// provider models.dev does not carry.
+    Descriptor { provider: String, model: String },
     /// Nothing matched; the budget is off.
     Unknown,
 }
@@ -612,6 +635,9 @@ impl Window {
                     None => "age unknown".to_string(),
                 }
             ),
+            WindowSource::Descriptor { provider, model } => {
+                format!("from the {provider} descriptor ({provider}/{model})")
+            }
             WindowSource::Unknown => "unknown".to_string(),
         };
         match (&self.error, self.budget) {
@@ -705,7 +731,8 @@ pub fn cache_path() -> PathBuf {
     }
 }
 
-/// Resolves the window: `--context-window`, then the catalog, then unknown.
+/// Resolves the window: `--context-window`, then the catalog, then the route's own descriptor
+/// table, then unknown.
 pub async fn resolve(query: &WindowQuery) -> Window {
     if let Some(explicit) = query.explicit {
         // ADR 0018: an explicit window never fetches. If a cache already exists,
@@ -735,55 +762,76 @@ pub async fn resolve(query: &WindowQuery) -> Window {
         return Window::unknown();
     };
     let (catalog, age) = load(&query.cache_path, &query.url, query.offline).await;
-    let Some(catalog) = catalog else {
-        return Window::unknown();
-    };
-    let Some(limit) = catalog.limit(&provider, &query.model) else {
-        return Window::unknown();
-    };
-    let price = catalog.price(&provider, &query.model);
-    build_window(
-        limit.context,
-        limit.input,
-        limit.output,
-        query.request_max_output,
-        WindowSource::Catalog {
-            provider,
-            model: query.model.clone(),
-            age,
-        },
-        Some(limit),
-        price,
-    )
+    if let Some(catalog) = catalog.as_ref()
+        && let Some(limit) = catalog.limit(&provider, &query.model)
+    {
+        let price = catalog.price(&provider, &query.model);
+        return build_window(
+            limit.context,
+            limit.input,
+            limit.output,
+            query.request_max_output,
+            WindowSource::Catalog {
+                provider,
+                model: query.model.clone(),
+                age,
+            },
+            Some(limit),
+            price,
+        );
+    }
+    descriptor_window(query, &provider).unwrap_or_else(Window::unknown)
 }
 
 /// Resolves a window **offline**: the local catalog cache only, never the network. This is
 /// what the driver's budget resolver uses (ADR 0026 D7): a `/model` switch recomputes `B`
-/// from the warm cache, and a cache miss means "unknown", not a fetch.
+/// from the warm cache, and a cache miss means "unknown", not a fetch — unless the route's own
+/// descriptor table carries the numbers (a `chatgpt` switch has no cache entry to miss).
 pub fn resolve_offline(query: &WindowQuery) -> Window {
     let Some(provider) = query.provider() else {
         return Window::unknown();
     };
-    let Some((catalog, age)) = read_cache(&query.cache_path) else {
-        return Window::unknown();
-    };
-    let Some(limit) = catalog.limit(&provider, &query.model) else {
-        return Window::unknown();
-    };
-    let price = catalog.price(&provider, &query.model);
-    build_window(
+    if let Some((catalog, age)) = read_cache(&query.cache_path)
+        && let Some(limit) = catalog.limit(&provider, &query.model)
+    {
+        let price = catalog.price(&provider, &query.model);
+        return build_window(
+            limit.context,
+            limit.input,
+            limit.output,
+            query.request_max_output,
+            WindowSource::Catalog {
+                provider,
+                model: query.model.clone(),
+                age: Some(age),
+            },
+            Some(limit),
+            price,
+        );
+    }
+    descriptor_window(query, &provider).unwrap_or_else(Window::unknown)
+}
+
+/// The window from the route's own descriptor table ([`crate::DescriptorModel::limit`]): the
+/// fallback for a provider models.dev does not carry, such as `chatgpt`. `None` when the
+/// provider is not a built-in descriptor or its table carries no numbers for this model — the
+/// window stays unknown rather than guessed.
+fn descriptor_window(query: &WindowQuery, provider: &str) -> Option<Window> {
+    let limit = crate::descriptor(provider)?.limit_for(&query.model)?;
+    Some(build_window(
         limit.context,
         limit.input,
         limit.output,
         query.request_max_output,
-        WindowSource::Catalog {
-            provider,
+        WindowSource::Descriptor {
+            provider: provider.to_owned(),
             model: query.model.clone(),
-            age: Some(age),
         },
         Some(limit),
-        price,
-    )
+        // No price: models.dev is the price source (ADR 0027), and it has no
+        // `chatgpt` provider either.
+        None,
+    ))
 }
 
 /// Computes `B` and assembles a [`Window`], keeping a `C ≤ R` error instead of failing here

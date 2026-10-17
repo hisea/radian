@@ -1561,3 +1561,16 @@ The notifier held `Arc<Jobs>` while its task waited for the registry's channel t
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | JN-1 | `spawn` keeps a strong registry reference (`std::mem::forget(jobs)` instead of `drop(jobs)`; the old code's strong field has the same effect) | caught (rc=101, "still holds the journal: 2 references") | `an_ended_session_releases_its_journal` |
+
+## chatgpt-limits Part 2: a `chatgpt` route's window comes from its descriptor table (2026-10-17)
+
+models.dev has no `chatgpt` provider, so a `chatgpt` session resolved no window at all. The
+descriptor table (`provider::CODEX_MODELS`, cited from `@oh-my-pi/pi-catalog/src/models.json`'s
+`openai-codex` block) is now the resolver's fallback (`catalog::descriptor_window`). Run:
+`cargo test -p radian-host --locked --no-fail-fast --test chatgpt_window`; the mutation edits
+`src/provider.rs` in place, saving a copy to `/tmp/chatgpt-limits-save/` first and comparing the
+restored file with `diff -q`; afterwards `git diff` shows only the intended files.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| CW-1 | drop the table entry: `gpt-5.6-sol`'s `codex_limit(1_000_000, 128_000)` → `ModelLimit::UNKNOWN` (the model falls through to the catalog, which has no `chatgpt`) | caught (rc=101) | `every_chatgpt_model_resolves_the_window_its_table_cites` (`source` is `Unknown`, not `Descriptor`) |

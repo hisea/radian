@@ -1431,13 +1431,16 @@ only; the decorations are drawn but never copied.
 
 The window comes from `--context-window TOKENS` (explicit; it never fetches — an existing
 cache is read only for the `input`/`output` numbers), or from the **models.dev catalog**
-matched by `(provider, model)` (ADR 0018). The provider is `--catalog-provider`, or derived
+matched by `(provider, model)` (ADR 0018), or — when the catalog has no entry for the route —
+from the route's own **descriptor table** (`chatgpt`: `provider.rs`'s `CODEX_MODELS` cites its
+`contextWindow`/`maxTokens` from `@oh-my-pi/pi-catalog`; a model the table does not list stays
+unknown). The provider is `--catalog-provider`, or the resolved provider's own id, or derived
 from the `--base-url` hostname (`opencode.ai` → `opencode`, `api.anthropic.com` → `anthropic`,
 `api.openai.com` → `openai`, `api.deepseek.com` → `deepseek`, ...). The catalog is a
 read-only GET with no key, header or user data, cached under the user cache directory and
 refreshed at most once every 24 h (3 s timeout; a failure falls back to the cache);
-`--offline-catalog` never goes out. With neither, `C` is **unknown**, there is no budget, and
-the startup notice says so.
+`--offline-catalog` never goes out. With none of them, `C` is **unknown**, there is no budget,
+and the startup notice says so.
 
 The effective input budget is **`B = min(I, C − R)`**, with **`R = max(min(16384, ⌊C/4⌋), the
 request's max output)`** (ADR 0018: a quarter of the window, capped at 16384, raised
