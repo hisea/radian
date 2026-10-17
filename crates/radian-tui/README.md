@@ -296,7 +296,8 @@ find_next = ["ctrl-g", "shift-enter"]
   group words); an empty or malformed line warns and never runs. Its stdin is one JSON object of
   the footer's own facts — no transcript, no secrets:
   `{"model":…, "cwd":…, "branch":…, "context_percent":…, "tokens":{"input":…,"output":…,
-  "cache_read":…}, "cost_usd":…, "tasks":{"running":…,"total":…}}` (a missed fact is `null`).
+  "cache_read":…}, "cost_usd":…}` (a missed fact is `null`; ADR 0043 removed the earlier
+  `tasks` key).
   Its environment is cleared to `PATH` plus `RADIAN_SESSION_ID`/`RADIAN_CWD`. A timeout (5 s), a
   spawn failure, a non-zero exit or an invalid line keeps the last value and draws it stale; the
   output never enters the journal, the transcript, the model context or a herdr report. v1 has
