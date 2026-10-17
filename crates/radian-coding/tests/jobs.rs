@@ -324,10 +324,55 @@ async fn the_notify_flag_follows_the_settle_kind() {
         "job_kill must not notify"
     );
 
-    // A timeout notifies (decision a: the model set it but did not ask to kill the job).
+    // An explicit `background: true` ignores `timeout_secs` (ADR 0037): the
+    // job keeps running past the deadline — no settle, no notify. The bounded `job_output`
+    // wait proves it without sleeping: past the 1 s deadline it still reports running.
+    let (id, _) = start(&session, "echo $$ > t.pid; sleep 600", Some(1)).await;
+    let text = output_text(
+        &exec(
+            &session,
+            "job_output",
+            json!({"job_id": id, "wait": true, "timeout_ms": 5_000}),
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(
+        text.contains("[status: running]"),
+        "a background job ignores timeout_secs: {text}"
+    );
+    exec(&session, "job_kill", json!({"job_id": id}))
+        .await
+        .unwrap();
+}
+
+/// A timeout still notifies when it comes from adoption (ADR 0037):
+/// the explicit `timeout_secs` keeps counting from the command's start, and the model set
+/// it but did not ask to kill the job (decision a). The background-timeout path above is
+/// gone (ADR 0037 ignores it), so this pins the remaining one.
+#[tokio::test]
+async fn an_adopted_timeout_notifies() {
+    let dir = TempDir::new("auto-timeout-notify");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    // Adopt at 1 s, deadline at 3 s: the settle is a timeout.
+    let tools = adopting_tools(&root, Duration::from_secs(1));
+    let session = tools.open_session().await.expect("session");
     let mut events = session.jobs().subscribe();
-    let (_id, _) = start(&session, "echo $$ > t.pid; sleep 600", Some(1)).await;
-    assert!(next_settle_notify(&mut events).await, "a timeout notifies");
+    let (_id, _) = adopted(
+        &exec(
+            &session,
+            "shell",
+            json!({"command": "sleep 30", "timeout_secs": 3}),
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(
+        next_settle_notify(&mut events).await,
+        "an adopted timeout notifies"
+    );
+    session.shutdown_jobs();
 }
 
 /// A session-end cleanup is a kill: the settle reads `killed` and `notify: false`
@@ -451,17 +496,28 @@ async fn job_kill_kills_the_whole_process_group() {
     assert!(again.contains("already finished"), "{again}");
 }
 
-/// `timeout_secs` on a background job kills the whole group and settles as timed out.
+/// A timeout kills the whole group and settles as timed out. An explicit `background: true`
+/// ignores `timeout_secs` (ADR 0037), so this goes through adoption: a foreground
+/// call with an explicit timeout, adopted past the threshold, is killed at its deadline.
 #[tokio::test]
-async fn a_background_timeout_kills_the_whole_process_group() {
+async fn an_adopted_timeout_kills_the_whole_process_group() {
     let dir = TempDir::new("jobs-timeout");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
-    let tools = transparent_tools(&root);
+    let tools = adopting_tools(&root, Duration::from_secs(1));
     let session = tools.open_session().await.expect("session");
 
-    // Two seconds: the script writes both pids before the timeout can fire.
-    let (id, _) = start(&session, TWO_SLEEPS, Some(2)).await;
+    // Adopted at 1 s, deadline at 3 s: the script writes both pids at the start, long
+    // before the timeout can fire.
+    let (id, _) = adopted(
+        &exec(
+            &session,
+            "shell",
+            json!({"command": TWO_SLEEPS, "timeout_secs": 3}),
+        )
+        .await
+        .unwrap(),
+    );
     let leader = wait_for_pid(&root, "leader.pid").await;
     let background = wait_for_pid(&root, "bg.pid").await;
 

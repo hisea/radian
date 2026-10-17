@@ -332,8 +332,8 @@ pub(crate) async fn run(
 }
 
 /// Starts `command` as a background job (ADR 0037) and returns the one-line acknowledgement:
-/// the job id, the `job_output` hint and the three tools. No default timeout; an explicit
-/// `timeout_secs` kills the job like `job_kill` and settles it as timed out.
+/// the job id, the `job_output` hint and the three tools. A background job has **no**
+/// timeout (ADR 0037: an explicit `background: true` ignores `timeout_secs`).
 fn start_background(
     root: &WorkspaceRoot,
     sandbox: &Sandbox,
@@ -341,10 +341,7 @@ fn start_background(
     cwd: &Path,
     args: &ShellArgs,
 ) -> Result<ToolOutput, ToolFailure> {
-    let timeout = args
-        .timeout_secs
-        .map(|secs| Duration::from_secs(secs.max(1)));
-    let info = jobs.start(sandbox, cwd, &args.command, timeout)?;
+    let info = jobs.start(sandbox, cwd, &args.command)?;
     let cwd_relative = cwd
         .strip_prefix(root.root())
         .ok()
@@ -371,7 +368,7 @@ fn start_background(
             "command": args.command,
             "cwd": cwd_relative,
             "sandbox_mode": sandbox.mode().as_str(),
-            "timeout_secs": timeout.map(|t| t.as_secs()),
+            "timeout_secs": args.timeout_secs,
         })),
     })
 }
