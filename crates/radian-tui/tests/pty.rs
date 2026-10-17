@@ -2360,6 +2360,14 @@ async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
 /// (that is the whole point), so it runs the bin directly and checks the one thing still
 /// checkable — that the outer sandbox **this test's own process** is in is inherited and named.
 /// The write checks need a profile whose writable subtree is known, so they run only outside.
+///
+/// macOS-only: it wraps the bin in `sandbox-exec`, the one outer sandbox this repository knows
+/// how to build. Linux has no `sandbox-exec`, and the `inherited` backend is unreachable there —
+/// `confined_by_outer_sandbox()` answers `false` on every non-macOS target (`radian-sandbox/src/
+/// lib.rs`), because bwrap nesting and a kernel "already confined" signal are unverified on Linux
+/// (ADR 0016). A Linux twin would have nothing to inherit, so the test is
+/// compiled out there rather than failing on the missing binary.
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_an_outer_sandbox_is_inherited_instead_of_refused() {
@@ -2479,6 +2487,7 @@ async fn pty_an_outer_sandbox_is_inherited_instead_of_refused() {
 /// session file, `HOME` and `TMPDIR`. `process*` is what lets `sandbox-exec` exec the bin (and
 /// what a nested `sandbox-exec` would need in vain); the Mach/sysctl/IPC/signal allows are what
 /// the Rust runtime and tokio need to come up under `(deny default)`.
+#[cfg(target_os = "macos")]
 fn outer_profile(ws: &Path) -> String {
     let ws = std::fs::canonicalize(ws).unwrap();
     format!(
@@ -2500,6 +2509,7 @@ fn outer_profile(ws: &Path) -> String {
 /// Waits (bounded) for a file the `!` command writes, pumping the screen so the app keeps
 /// draining the pty. The file's existence is the synchronization; the deadline only bounds a
 /// failure.
+#[cfg(target_os = "macos")]
 fn wait_for_bang_file(pty: &mut Pty, path: &Path) -> bool {
     let deadline = Instant::now() + wait_positive();
     while Instant::now() < deadline {
@@ -2514,6 +2524,7 @@ fn wait_for_bang_file(pty: &mut Pty, path: &Path) -> bool {
 
 /// The system launcher: ADR 0016 acceptance 2 wraps the bin in a deny-default
 /// profile.
+#[cfg(target_os = "macos")]
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// The shell approval shows the whole command, and a capped result keeps the truncation
