@@ -1215,3 +1215,25 @@ Commands: `timeout 300 cargo test -p agent-cli --locked --no-fail-fast --test su
 | FH-1 | `take_child_headers_from_env` reads the variable but does not `remove_var` it | ✅ 1 failed (the child's `shell` command wrote `["X-Test=child-env-secret-9"]` into the dump file) | `agent-cli::subagent::the_childs_own_environment_no_longer_carries_the_parents_header` |
 | FH-2 | the MCP spawn's `env_remove("RADIAN_CHILD_HEADERS")` is dropped | ⚠️ not caught alone (with FH-1 fixed the variable is already out of the child's environment, so `inherit_env` copies nothing) | none — the belt and braces is observable only together with FH-1 |
 | FH-1+FH-2 | both removals gone | ✅ 1 failed (the MCP server's env dump held `["X-Test=mcp-env-secret-5"]`) | `agent-cli::subagent::an_mcp_server_the_child_starts_does_not_get_the_parents_header` |
+
+## Fix round 1 B: the two-step stop — SIGTERM, the grace, then the session SIGKILL (2026-10-17)
+
+Both the cancel path (`stop_child`) and the drop guard (`SessionKillGuard::drop`) now send SIGTERM
+to the child first, wait `CHILD_STOP_GRACE` (3 s) for it to exit, and only then `kill_session` — a
+SIGKILL of the child's session cannot reach a `shell` command, because that tool `setsid`s every
+command, and the child's own cleanup (cancel the turn, then close the session, which kills every
+job's session) is what reaches them. `radian-coding` gained `stop_leader` (SIGTERM to one pid) and
+`wait_for_exit` (bounded, `waitid` with `WNOWAIT`, so the leader stays unreaped for the fallback).
+`crates/radian-host/tests/subagent_drop.rs` now pins the **fallback** (its stub ignores SIGTERM),
+and `crates/radian-host/tests/subagent_stop.rs` is new. Mutations were applied in place, restored
+from a `cp` under `/tmp/radian-fix1/mut/` and confirmed byte-identical with `cmp`; every run was
+made after `cargo build -p radian-tui --bin radian` (the harness refuses a stale binary).
+
+Commands: `timeout 400 cargo test -p radian-host --locked --no-fail-fast --test subagent_stop`;
+`timeout 400 cargo test -p agent-cli --locked --no-fail-fast --test subagent a_cancelled`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TS-1 | the cancel path sends SIGKILL straight away (the graceful step is skipped) | ✅ 3 failed | `radian_host::subagent_stop::cancelling_the_call_stops_what_the_child_started` (the escaped grandchild was still alive after 10 s); `agent-cli::subagent::a_cancelled_parent_turn_stops_the_command_the_childs_shell_started` and `..._stops_the_childs_background_job` (both timed out waiting for the pid to go) |
+| TS-2 | the drop guard sends SIGKILL straight away | ✅ 1 failed | `radian_host::subagent_stop::dropping_the_call_stops_what_the_child_started` (the escaped grandchild was still alive). `radian_host::subagent_drop::dropping_the_call_leaves_no_grandchild_alive` still passes: it pins the fallback. |
+| TS-3 | `radian exec` installs no SIGTERM listener (the kernel's default action kills the child at once; this mutation lives in `crates/agent-cli/src/events.rs`, see that crate's MUTATIONS.md) | ✅ 2 failed | both `agent-cli` tests above (the command and the job outlived the cancelled turn). The two `subagent_stop` tests still pass: their stub handles SIGTERM itself. |

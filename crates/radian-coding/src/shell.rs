@@ -1025,6 +1025,81 @@ pub fn kill_session(sid: u32) {
     signal_session(sid, SIGKILL);
 }
 
+#[cfg(unix)]
+const SIGTERM: i32 = libc::SIGTERM;
+#[cfg(not(unix))]
+const SIGTERM: i32 = 15;
+
+/// Asks the **leader** `pid` — a session leader this process spawned — to stop gracefully:
+/// SIGTERM to that pid alone, never to its whole session (ADR 0043 decision 1a, fix round 1 B).
+///
+/// The child handles it: `radian exec` cancels its turn and then shuts its session down, which
+/// kills the whole session of every background job it started and stops its MCP servers
+/// ([`kill_session`] is the fallback for a child that does not react). A session-wide SIGTERM
+/// would instead hit processes the child is about to shut down in order.
+pub fn stop_leader(pid: u32) {
+    #[cfg(unix)]
+    {
+        if let Ok(pid) = libc::pid_t::try_from(pid) {
+            // SAFETY: `kill` takes plain integers and has no memory-safety preconditions.
+            unsafe {
+                libc::kill(pid, SIGTERM);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+/// Blocks up to `grace` waiting for `pid` to exit, leaving it **unreaped** (`waitid` with
+/// `WNOWAIT`), so its pid and session stay reserved for the SIGKILL fallback. `true` when it
+/// exited.
+///
+/// The poll interval is not an ordering device: it only bounds how often the kernel is asked.
+/// A drop path cannot await, so this is the synchronous counterpart of `child.wait()` with a
+/// timeout; a caller that holds a `tokio::process::Child` should use that instead.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn wait_for_exit(pid: u32, grace: std::time::Duration) -> bool {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(20);
+    let id: libc::id_t = pid;
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        // SAFETY: `info` is zeroed plain data that `waitid` fills in; no other preconditions.
+        let (status, exited) = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            let status = libc::waitid(
+                libc::P_PID,
+                id,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            );
+            (status, info.si_pid() == id as libc::pid_t)
+        };
+        if status == 0 && exited {
+            return true;
+        }
+        if status != 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+        {
+            // Not a child of this process any more (`ECHILD`), or `waitid` refused: there is
+            // nothing left to wait for, and `kill_session` on a gone pid would be unsafe.
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// Platforms without `waitid(WNOWAIT)` cannot tell a running child from a zombie one without
+/// reaping it, so the caller goes straight to the SIGKILL fallback.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn wait_for_exit(_pid: u32, _grace: std::time::Duration) -> bool {
+    false
+}
+
 /// Sends `signal` to **every process in session `sid`**: the process group `sid` first (one
 /// syscall, and it also reaches a member that appears after the enumeration), then every process
 /// the enumeration finds in that session.

@@ -1,11 +1,14 @@
 //! ADR 0043 decision 1a (gap 3): dropping the call's future kills the child's **whole
 //! session**, not just its leader.
 //!
-//! The child is a stub shell script that starts a long-lived grandchild into its own session
-//! (the tool `setsid`s the child, so the stub is the session leader) and records the
-//! grandchild's pid. The test drives the tool directly and drops the `execute` future without
-//! ever cancelling the token — the path a driver-task abort takes. Tokio's `kill_on_drop`
-//! signals only the leader's pid, so the mutation (no drop guard) leaves the grandchild alive.
+//! This is the SIGKILL **fallback** half of the two-step stop (fix round 1 B, the graceful half
+//! is `subagent_stop`'s `dropping_the_call_stops_what_the_child_started`): the stub ignores
+//! SIGTERM, so the tool's grace expires and `kill_session` takes the child's whole session. The
+//! stub is a shell script that starts a long-lived grandchild in that session — the tool `setsid`s
+//! the child, so the stub is the session leader — and records the grandchild's pid. The test
+//! drives the tool directly and drops the `execute` future without ever cancelling the token: the
+//! path a driver-task abort takes. Tokio's `kill_on_drop` signals only the leader's pid, so the
+//! mutation (no fallback in the guard) leaves the grandchild alive.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -28,14 +31,16 @@ fn scratch(label: &str) -> PathBuf {
     dir
 }
 
-/// An executable stub child: it starts a long-lived grandchild in its own session, records the
-/// grandchild's pid, and waits.
+/// An executable stub child that **ignores SIGTERM** (the fallback's case): it starts a
+/// long-lived grandchild in its own session — the tool `setsid`s the stub, so the stub is the
+/// session leader and the grandchild stays in that session — records the grandchild's pid, and
+/// waits.
 fn stub(dir: &Path, pid_path: &Path) -> PathBuf {
     let path = dir.join("child.sh");
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\nsleep 300 &\necho $! > '{}'\nwait\n",
+            "#!/bin/sh\ntrap '' TERM\nsleep 300 &\necho $! > '{}'\nwait\n",
             pid_path.display()
         ),
     )
@@ -119,7 +124,8 @@ async fn dropping_the_call_leaves_no_grandchild_alive() {
     };
     drop(call_future);
 
-    // The guard's kill is asynchronous from our side: poll the pid we logged for a bound.
+    // The guard's drop waits the grace for the (SIGTERM-ignoring) stub and then kills its whole
+    // session; the poll is the bound on the grandchild going away.
     let deadline = Instant::now() + Duration::from_secs(10);
     while alive(pid) && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;

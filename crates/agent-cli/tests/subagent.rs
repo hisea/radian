@@ -220,6 +220,28 @@ fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
+fn session_of(pid: u32) -> i32 {
+    // SAFETY: `getsid` takes a pid and has no memory-safety preconditions.
+    unsafe { libc::getsid(pid as libc::pid_t) }
+}
+
+/// The child radian's pid: it binds `<RADIAN_HOME>/run/<pid>.sock` before its first model call,
+/// and the parent's own socket is already there, so the other socket is the child.
+async fn child_pid(env: &Env, parent_pid: u32) -> u32 {
+    let run_dir = env.home.join("run");
+    let others = || -> Vec<u32> {
+        std::fs::read_dir(&run_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.path().file_stem()?.to_str()?.parse::<u32>().ok())
+            .filter(|pid| *pid != parent_pid)
+            .collect()
+    };
+    wait_until("the child's control socket", || !others().is_empty()).await;
+    others().into_iter().next().expect("the child pid")
+}
+
 fn sigint(child: &Child) {
     // SAFETY: signal delivery to our own child process.
     unsafe {
@@ -512,25 +534,7 @@ async fn a_cancelled_parent_turn_kills_the_child() {
         &["--model", "m", "--base-url", &server.base_url, "-p", "go"],
     );
     let parent_pid = parent.id().expect("parent pid");
-    let run_dir = env.home.join("run");
-
-    // The child binds `<RADIAN_HOME>/run/<pid>.sock` before its first model call; the parent's
-    // own socket is already there. A second socket is the child.
-    wait_until("the child's control socket", || {
-        std::fs::read_dir(&run_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| entry.path().file_stem()?.to_str()?.parse::<u32>().ok())
-            .any(|pid| pid != parent_pid)
-    })
-    .await;
-    let child_pid = std::fs::read_dir(&run_dir)
-        .unwrap()
-        .flatten()
-        .filter_map(|entry| entry.path().file_stem()?.to_str()?.parse::<u32>().ok())
-        .find(|pid| *pid != parent_pid)
-        .expect("the child pid");
+    let child_pid = child_pid(&env, parent_pid).await;
 
     sigint(&parent);
     // The deadline is shorter than the core's 5 s `DEFAULT_TOOL_CANCEL_GRACE`: the tool's own
@@ -761,4 +765,129 @@ async fn the_parents_header_reaches_the_child_and_nothing_else_writes_it() {
         !stdout.contains(SECRET) && !stderr.contains(SECRET),
         "the secret must never be printed: {stdout}{stderr}"
     );
+}
+
+/// The two pids the stub command records: its own (the command runs in its own session, so this
+/// is that session's leader) and `$PPID` (the child radian), or `None` until the file is
+/// complete. No control socket is involved: a long temp path makes `run/<pid>.sock` exceed
+/// `SUN_LEN`, and the pid is what this test needs.
+fn recorded_pids(path: &Path) -> Option<(u32, u32)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut parts = text.split_whitespace();
+    let command = parts.next()?.parse().ok()?;
+    let child = parts.next()?.parse().ok()?;
+    Some((command, child))
+}
+
+async fn wait_for_recorded_pids(path: &Path, what: &str) -> (u32, u32) {
+    wait_until(what, || recorded_pids(path).is_some()).await;
+    recorded_pids(path).expect("waited for it")
+}
+
+/// ADR 0043 1a (fix round 1 B): cancelling the parent's turn must stop what the **child's**
+/// `shell` tool started. That command runs in its own session (`setsid`), so the SIGKILL of the
+/// child's session the tool used to send could not reach it: the child has to get SIGTERM first,
+/// cancel its own turn — which is what kills the command's session — and then close its session.
+/// The command records its own pid and its parent's; the assertion is that its pid is gone within
+/// a bound, and the shape (its session is not the child's) is checked first, because a command
+/// that stayed in the child's session would make the test prove nothing.
+#[tokio::test]
+async fn a_cancelled_parent_turn_stops_the_command_the_childs_shell_started() {
+    let env = Env::new("shell-cancel");
+    let pid_path = env.home.join("stub.pid");
+    let command = format!("echo $$ $PPID > '{}'; sleep 300", pid_path.display());
+    let server = MockServer::start(vec![
+        tool_reply("p1", "subagent", r#"{"task":"SHELL-TASK"}"#),
+        tool_reply("c1", "shell", &json!({"command": command}).to_string()),
+        text_reply("CHILD-DONE"),
+        text_reply("PARENT-DONE"),
+    ])
+    .await;
+    let workspace = env.workspace.to_str().unwrap().to_owned();
+    let parent = spawn_parent(
+        &env,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            &workspace,
+            "--yes",
+            "-p",
+            "go",
+        ],
+    );
+
+    let (stub, child) = wait_for_recorded_pids(&pid_path, "the child's shell command").await;
+    assert_ne!(
+        session_of(stub),
+        session_of(child),
+        "the command {stub} must be in its own session (the child {child} is {}), or this test \
+         proves nothing",
+        session_of(child)
+    );
+
+    sigint(&parent);
+    // A bounded poll, not a guess: the parent cancels its turn, SIGTERMs the child, the child
+    // cancels its own turn (killing the command's session) and exits.
+    wait_until("the child's shell command to be gone", || !alive(stub)).await;
+    assert!(
+        !alive(stub),
+        "the command {stub} outlived the cancelled turn"
+    );
+    let (code, _, _) = run(parent).await;
+    assert_ne!(code, 0, "a cancelled turn is not a clean exit");
+}
+
+/// ADR 0043 1a (fix round 1 B): the same two-step stop reaches a **background job** the child
+/// started. The child is parked in a model call that never answers, so its only cleanup path is
+/// the session end: SIGTERM cancels the turn, the driver closes the session, and `kill_all`
+/// SIGKILLs the whole session of every running job (ADR 0037 decision 6) — a job that a SIGKILL
+/// of the child could never reach, because the job registry runs `setsid` too.
+#[tokio::test]
+async fn a_cancelled_parent_turn_stops_the_childs_background_job() {
+    let env = Env::new("job-cancel");
+    let pid_path = env.home.join("job.pid");
+    let command = format!("echo $$ $PPID > '{}'; sleep 300", pid_path.display());
+    let server = MockServer::start(vec![
+        tool_reply("p1", "subagent", r#"{"task":"JOB-TASK"}"#),
+        tool_reply(
+            "c1",
+            "shell",
+            &json!({"command": command, "background": true}).to_string(),
+        ),
+        Reply::SseThenHang { pieces: Vec::new() },
+    ])
+    .await;
+    let workspace = env.workspace.to_str().unwrap().to_owned();
+    let parent = spawn_parent(
+        &env,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            &workspace,
+            "--yes",
+            "-p",
+            "go",
+        ],
+    );
+
+    let (job, child) = wait_for_recorded_pids(&pid_path, "the child's background job").await;
+    assert_ne!(
+        session_of(job),
+        session_of(child),
+        "the job {job} must be in its own session (the child {child} is {}), or this test proves \
+         nothing",
+        session_of(child)
+    );
+
+    sigint(&parent);
+    wait_until("the child's background job to be gone", || !alive(job)).await;
+    assert!(!alive(job), "the job {job} outlived the cancelled turn");
+    let (code, _, _) = run(parent).await;
+    assert_ne!(code, 0, "a cancelled turn is not a clean exit");
 }

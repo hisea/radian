@@ -21,11 +21,15 @@
 //! - **The parent's `--header` values.** They are secrets, so they reach the child through its
 //!   environment ([`crate::headers::CHILD_HEADERS_ENV`]), never its argv; the child's startup
 //!   adds them to its redaction list. Config headers already reach it through the config file.
-//! - **Cancellation.** The parent turn's cancellation token kills the child's whole session
-//!   with [`radian_coding::kill_session`] — the same kill path the job supervisor uses — and
-//!   the call returns a `cancelled` failure. Dropping the call's future (a turn timeout that
-//!   aborts the driver task, say) does the same through a drop guard, because `kill_on_drop`
-//!   alone would signal only the leader.
+//! - **Cancellation stops the child's whole session, in two steps.** SIGTERM first
+//!   ([`radian_coding::stop_leader`]): the child cancels its own turn — which is what kills the
+//!   session of every command its `shell` tool started, and why one signal is not enough, since
+//!   the tool `setsid`s each command — and then closes its session, which kills every background
+//!   job's session (ADR 0037 decision 6). Only a child that has not exited within
+//!   [`CHILD_STOP_GRACE`] gets [`radian_coding::kill_session`], and only while its leader is
+//!   unreaped, so a reused pid is never signalled. Dropping the call's future (a turn timeout
+//!   that aborts the driver task, say) takes the same two steps through a drop guard, whose wait
+//!   is the synchronous one a drop path can make.
 //! - **Not promised: survival rules of the OS.** A parent that exits normally drops the child
 //!   handle, which kills the leader (Tokio's `kill_on_drop`); macOS has no `PDEATHSIG`, so a
 //!   parent killed with `SIGKILL` can leave the child running. Its journal is on disk and stays
@@ -39,6 +43,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_core::{
     Message, ModelUsage, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure,
@@ -53,6 +58,13 @@ use serde_json::json;
 /// The most conclusion characters the model sees. Longer text is cut and marked, so the marker
 /// itself is the model's signal that there is more in the child's journal.
 pub const MAX_CONCLUSION_CHARS: usize = 4000;
+
+/// How long a stopping child gets to run its own cleanup after SIGTERM before its whole session
+/// is SIGKILLed (ADR 0043 decision 1a, fix round 1 B). A few seconds: the child's cancellation
+/// kills its `shell` commands in milliseconds, and the rest is its session close. Shorter than
+/// the core's `DEFAULT_TOOL_CANCEL_GRACE` (5 s), which is the bound on the call's own future —
+/// the tool must reach its SIGKILL before the core drops it.
+pub const CHILD_STOP_GRACE: Duration = Duration::from_secs(3);
 
 /// The values a host resolves for the child `radian exec` (ADR 0043 1a point 6). The tool uses
 /// the session facts `open_session` already holds (workspace, session directory, tier slot,
@@ -298,19 +310,17 @@ impl ToolSession for SubagentSession {
         // Declared **after** `child`, so it drops first: if the call's future is dropped while
         // the child runs (a turn timeout aborts the driver task, say), `kill_on_drop` alone
         // would SIGKILL only the leader's pid and a process the child started into its own
-        // session would survive. The guard sends the session kill while the leader is still
-        // unreaped, and the child's own drop then reaps it.
+        // session would survive. The guard takes the same two steps the cancel branch takes
+        // (SIGTERM, the grace, then the session kill), all of them while the leader is still
+        // unreaped; the child's own drop then reaps it.
         let mut guard = SessionKillGuard { pid };
         let status = tokio::select! {
             biased;
             _ = cx.cancellation.cancelled() => {
-                // The parent turn is over. Kill the child's whole session while its leader is
-                // unreaped, then reap, so no reused pid is ever signalled.
-                if let Some(pid) = pid {
-                    radian_coding::kill_session(pid);
-                }
+                // The parent turn is over. Stop the child the two-step way (ADR 0043 1a fix
+                // round 1 B) while its leader is unreaped, so a reused pid is never signalled.
+                stop_child(&mut child, pid).await;
                 guard.disarm();
-                let _ = child.wait().await;
                 return Err(ToolFailure::new(
                     "cancelled",
                     format!("the turn was cancelled, so the `{}` subagent child was killed", kind.as_str()),
@@ -407,11 +417,36 @@ impl SubagentSession {
     }
 }
 
+/// Stops the child the two-step way (ADR 0043 decision 1a, fix round 1 B), in the cancellation
+/// branch: [`radian_coding::stop_leader`] (SIGTERM to the child alone), then — only if it has not
+/// exited within [`CHILD_STOP_GRACE`] — [`radian_coding::kill_session`] as the SIGKILL fallback.
+///
+/// SIGTERM is the step that matters: `radian exec` handles it by cancelling its turn, which is
+/// what kills the session of every command its `shell` tool started (the tool `setsid`s each
+/// command, so a SIGKILL of the child cannot reach them), and then by closing its session, which
+/// kills every background job's session. `child.wait()` only returns once the leader is reaped,
+/// so the SIGKILL is sent while the session id is still reserved.
+async fn stop_child(child: &mut tokio::process::Child, pid: Option<u32>) {
+    let Some(pid) = pid else {
+        // The leader already exited: nothing to signal and nothing left to wait for.
+        return;
+    };
+    radian_coding::stop_leader(pid);
+    if tokio::time::timeout(CHILD_STOP_GRACE, child.wait())
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    radian_coding::kill_session(pid);
+    let _ = child.wait().await;
+}
+
 /// Kills the child's whole session when the call's future is dropped before the leader was
 /// reaped. `kill_on_drop` alone signals only the leader's pid, so a process the child started
-/// into its own session survives; the cancel branch already proves the kill must name the
-/// session, not the pid. Callers disarm it as soon as the leader is reaped, so a reused pid is
-/// never signalled.
+/// into its own session (the `shell` tool `setsid`s every command) survives; the cancel branch
+/// already proves the kill must name the session, not the pid. Callers disarm it as soon as the
+/// leader is reaped, so a reused pid is never signalled.
 struct SessionKillGuard {
     pid: Option<u32>,
 }
@@ -424,10 +459,20 @@ impl SessionKillGuard {
 }
 
 impl Drop for SessionKillGuard {
+    /// The synchronous half of [`stop_child`]: the same two steps, but a drop cannot `await`
+    /// `child.wait()` — and could not use it here anyway, because the `Child` is dropped right
+    /// after this guard and only that hands it to Tokio's reaper. [`radian_coding::wait_for_exit`]
+    /// asks the kernel instead (`waitid` with `WNOWAIT`) and leaves the leader unreaped, so
+    /// Tokio's own `kill_on_drop` SIGKILL still names a reserved pid.
     fn drop(&mut self) {
-        if let Some(pid) = self.pid {
-            radian_coding::kill_session(pid);
+        let Some(pid) = self.pid else {
+            return;
+        };
+        radian_coding::stop_leader(pid);
+        if radian_coding::wait_for_exit(pid, CHILD_STOP_GRACE) {
+            return;
         }
+        radian_coding::kill_session(pid);
     }
 }
 
