@@ -1234,7 +1234,10 @@ could be built. This is the same wiring `agent-cli` uses:
   `radian_sandbox::Sandbox::new`, and a missing backend or a failed probe is an **error**, never
   a fallback to an unsandboxed run (ADR 0012 decision 2). The app then exits 1 without
   entering the terminal. `RADIAN_SANDBOX_PROBE_FAIL=1` is a test seam that can only cause a
-  refusal.
+  refusal. The one other path is ADR 0016: in the `workspace` tier, when the kernel
+  says this process is already confined by an outer sandbox (`sandbox_check`), the outer sandbox
+  is inherited (`Sandbox::inherited`), nothing is probed, and the startup line and `/access` say
+  so — no flag, config key or environment variable can select it.
 - `shell` exists only when a sandbox does (`radian-coding` does not advertise it otherwise), and
   it never runs without one. `safe` builds no sandbox, so it has no shell; its rules deny
   writes and execution.
