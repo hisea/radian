@@ -139,6 +139,12 @@ impl App {
         self.session.sandbox_note = note;
     }
 
+    /// Whether this session has a shell for `!` (ADR 0033): false on the `safe` tier, which
+    /// has no sandbox at all (ADR 0012).
+    pub fn set_bash_available(&mut self, available: bool) {
+        self.session.bash_available = available;
+    }
+
     /// Applies the wired `tui.*` configuration. A bad keymap (a key bound to two actions) is
     /// an error the host turns into a startup refusal; unknown actions/keys are warnings.
     pub fn apply_config(

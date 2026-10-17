@@ -695,11 +695,3 @@ impl App {
         result
     }
 }
-
-impl App {
-    /// Whether this session has a shell for `!` (ADR 0033): false on the `safe` tier, which
-    /// has no sandbox at all (ADR 0012).
-    pub fn set_bash_available(&mut self, available: bool) {
-        self.session.bash_available = available;
-    }
-}
