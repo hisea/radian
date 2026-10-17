@@ -222,6 +222,7 @@ async fn an_early_eof_after_deltas_is_a_transport_error() {
     let server = MockServer::start(vec![Reply::Sse {
         pieces: pieces(&[message_start(None), text_start(0), text_delta(0, "cut")]),
         pause: Duration::ZERO,
+        headers: Vec::new(),
     }])
     .await;
     let events = Recorder::default();
@@ -293,6 +294,7 @@ async fn a_non_json_data_line_is_a_protocol_error() {
     let server = MockServer::start(vec![Reply::Sse {
         pieces: vec![b"data: this is not json\n\n".to_vec()],
         pause: Duration::ZERO,
+        headers: Vec::new(),
     }])
     .await;
     let error = complete(&model(&server), &NoopSink).await.unwrap_err();

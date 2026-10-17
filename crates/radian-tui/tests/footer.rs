@@ -776,6 +776,7 @@ fn a_compaction_usage_reaches_the_footer_totals() {
             input_includes_cache: Some(false),
             ..Default::default()
         }),
+        limits: None,
     });
     assert_eq!(app.session.projection.read().usage_input(), Some(100_000));
     assert_eq!(
@@ -2152,19 +2153,25 @@ fn the_usage_row_is_the_pre_move_chatgpt_line() {
 
 /// ADR 0027, the ADR's own mutation: a provider whose descriptor
 /// declares no `usage` source draws nothing, even while the store holds a snapshot for it. With
-/// the descriptor check gone, this row would appear.
+/// the descriptor check gone, this row would appear. (Slice ④ gave `anthropic` a `Headers`
+/// source, so the no-source example is the generic provider now.)
 #[test]
 fn a_provider_without_a_usage_source_draws_no_usage_row() {
     let mut app = App::new("mock", "s");
     app.set_footer_facts(
         None,
         Some("Mock 5".to_string()),
-        Some("anthropic".to_string()),
+        Some("openai-compatible".to_string()),
         None,
     );
     publish_snapshot(
         &app,
-        usage_snapshot("anthropic", "Usage", vec![window("5h", 98.0, None)], None),
+        usage_snapshot(
+            "openai-compatible",
+            "Usage",
+            vec![window("5h", 98.0, None)],
+            None,
+        ),
     );
     assert_eq!(app.footer.lines(&app, 100).len(), 2, "no usage row");
     let terminal = render(&mut app, 100, 12);
@@ -2301,15 +2308,26 @@ fn usage_prints_every_window() {
 }
 
 /// `/usage` says so in one line when the routed provider has no usage source, and when there
-/// is no snapshot yet (ADR 0027).
+/// is no snapshot yet (ADR 0027). Slice ④: `anthropic` reads its
+/// rate-limit headers per response, so it has a source — with no response yet it says "no
+/// snapshot yet", like `opencode-go` before its first poll.
 #[test]
 fn usage_says_why_there_is_nothing_to_show() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, None, Some("openai-compatible".to_string()), None);
+    let notices = submit_notices(&mut app, "/usage");
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices[0].contains("openai-compatible") && notices[0].contains("no usage source"),
+        "{notices:?}"
+    );
+
     let mut app = App::new("mock", "s");
     app.set_footer_facts(None, None, Some("anthropic".to_string()), None);
     let notices = submit_notices(&mut app, "/usage");
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert!(
-        notices[0].contains("anthropic") && notices[0].contains("no usage source"),
+        notices[0].contains("anthropic") && notices[0].contains("no snapshot yet"),
         "{notices:?}"
     );
 
@@ -2320,5 +2338,102 @@ fn usage_says_why_there_is_nothing_to_show() {
     assert!(
         notices[0].contains("opencode-go") && notices[0].contains("no snapshot yet"),
         "{notices:?}"
+    );
+}
+
+/// ADR 0027 slice ④: a `Headers` provider's rate-limit snapshot reaches the
+/// `usage` row from the model response event — same rendering rules as the endpoint source —
+/// and `/usage` prints its windows. A response without headers leaves the row absent.
+#[test]
+fn rate_limit_headers_reach_the_usage_row() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, None, Some("anthropic".to_string()), None);
+    app.apply_footer(&rows(vec![item("usage")]));
+
+    // No response yet: no snapshot, no row.
+    let terminal = render(&mut app, 80, 12);
+    assert!(
+        !row(&terminal, 11).contains("remaining"),
+        "no snapshot, no row: {:?}",
+        row(&terminal, 11)
+    );
+
+    // A response carrying the headers publishes the snapshot; the row draws it.
+    app.apply_event(&agent_core::AgentEvent::ModelResponseReceived {
+        stop_reason: agent_core::StopReason::EndTurn,
+        tool_calls: 0,
+        usage: None,
+        limits: Some(agent_core::RateLimits {
+            headers: vec![
+                (
+                    "anthropic-ratelimit-requests-remaining".to_owned(),
+                    "999".to_owned(),
+                ),
+                (
+                    "anthropic-ratelimit-requests-reset".to_owned(),
+                    "2030-01-01T00:00:00Z".to_owned(),
+                ),
+                (
+                    "anthropic-ratelimit-tokens-remaining".to_owned(),
+                    "99900".to_owned(),
+                ),
+            ],
+        }),
+    });
+    let stored = app
+        .contributions
+        .get(radian_host::USAGE_ITEM)
+        .expect("the headers publish a snapshot");
+    let snapshot = stored.usage.as_ref().expect("a usage snapshot");
+    assert_eq!(snapshot.provider, "anthropic");
+    assert_eq!(snapshot.title, "Anthropic usage");
+    assert_eq!(snapshot.windows.len(), 2);
+    let terminal = render(&mut app, 80, 12);
+    let line = row(&terminal, 11);
+    assert!(
+        line.contains("Anthropic usage (remaining):"),
+        "the footer line: {line:?}"
+    );
+    assert!(line.contains("requests: 999"), "the count: {line:?}");
+    assert!(line.contains("tokens: 99900"), "the count: {line:?}");
+    assert!(line.contains("↺"), "the reset: {line:?}");
+
+    // `/usage` prints the same snapshot's windows.
+    let notices = submit_notices(&mut app, "/usage");
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("requests: 999 remaining")),
+        "{notices:?}"
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("tokens: 99900 remaining")),
+        "{notices:?}"
+    );
+}
+
+/// A response without headers changes nothing: with no earlier snapshot the row stays absent.
+#[test]
+fn a_response_without_headers_leaves_the_usage_row_absent() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, None, Some("openai".to_string()), None);
+    app.apply_footer(&rows(vec![item("usage")]));
+    app.apply_event(&agent_core::AgentEvent::ModelResponseReceived {
+        stop_reason: agent_core::StopReason::EndTurn,
+        tool_calls: 0,
+        usage: None,
+        limits: None,
+    });
+    assert!(
+        app.contributions.get(radian_host::USAGE_ITEM).is_none(),
+        "nothing invented without headers"
+    );
+    let terminal = render(&mut app, 80, 12);
+    assert!(
+        !row(&terminal, 11).contains("remaining"),
+        "the row is absent: {:?}",
+        row(&terminal, 11)
     );
 }

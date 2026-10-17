@@ -44,6 +44,9 @@ a host that names the configured endpoint in an error redacts it the same way (A
 - A tool call's `arguments` that were not valid JSON are sent back exactly as received; a
   repeated or missing provider call id is renamed/made up so the history stays unique.
 - `total` is taken from the provider or left `None` — never `input + output` (ADR 0007 J2).
+- **Rate-limit headers are kept raw, never parsed.** Every `x-ratelimit-*` response header
+  rides on `ModelResponse::limits` in arrival order (`None` when the provider sent none); the
+  host's `Headers` usage source parses them (ADR 0027 slice ④).
 
 ## What it guarantees (each with the test that holds it)
 
@@ -89,7 +92,7 @@ caught; the usage slice was driven from this adapter).
 
 `testing` exposes an in-process mock server for this crate's tests and for dependent crates:
 `MockServer::start(Vec<Reply>)`, `Reply` (`Sse`, `SseThenHang`, `SseThenCut`, `Status`), and the
-helpers `Reply::sse`, `Reply::status`, `Reply::sse_split`, `chunk(delta, finish_reason)`,
+helpers `Reply::sse`, `Reply::sse_with_headers`, `Reply::status`, `Reply::sse_split`, `chunk(delta, finish_reason)`,
 `RecordedRequest` (`header`, `json`), `MockServer::requests`. It binds `127.0.0.1:0` and is
 compiled only under the feature (ADR 0013: no test server ships in the product).
 

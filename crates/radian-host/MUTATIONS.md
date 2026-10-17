@@ -1291,3 +1291,19 @@ Commands: `timeout 570 cargo test -p radian-host --lib --locked --no-fail-fast t
 the_model_provider_hint` (MP-2). MP-1 is caught only by the unit test: the CLI test's cases use
 `opencode-go/x` and `anthropic/claude-x`, both real descriptors, so warning on every slash would
 not change its answer.
+
+## ADR 0027 slice ④: `Headers` usage from rate-limit response headers (2026-10-17)
+
+Base `c09b614` · branch `dogfood/footer-s4`. Each mutation was applied in place, only the catching
+binary was run (`--no-fail-fast`), and the source was restored from a `cp` in `/tmp` and confirmed
+with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| UH-1 | misread one header name (`anthropic-ratelimit-requests-remaining` → `...-request-remaining`) | ✅ 1 failed (rc=101) | `headers_usage::tests::the_anthropic_headers_form_two_windows` (the requests window loses its remaining; the exact-name match finds nothing) |
+| UH-2 | the `anthropic` descriptor drops its `Headers` source (`usage: None`) | ✅ 1 failed (rc=101) | `provider::tests::only_the_endpoint_providers_declare_a_usage_source` (the slice's "descriptor declares it" acceptance) |
+
+Commands: `timeout 300 cargo test -p radian-host --locked --no-fail-fast --lib headers_usage`
+(UH-1); `timeout 570 cargo test -p radian-host --locked --no-fail-fast --lib provider::` (UH-2,
+run green on the fixed code: 30 passed). UH-1 is the slice's required "misread one header name"
+mutation.

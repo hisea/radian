@@ -24,6 +24,7 @@ mod diagnostics;
 mod errors;
 mod escape;
 mod headers;
+pub mod headers_usage;
 pub mod herdr;
 mod home;
 pub mod job_notify;
@@ -117,6 +118,9 @@ pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_over
 pub use headers::{
     CHILD_HEADERS_ENV, SESSION_PLACEHOLDER, encode_child_headers, parse_headers,
     take_child_headers_from_env,
+};
+pub use headers_usage::{
+    ANTHROPIC_HEADERS, HeadersUsage, HeadersWindow, OPENAI_HEADERS, headers_snapshot,
 };
 pub use home::{
     RADIAN_HOME_ENV, access_dir_for, cache_dir_for, catalog_cache, catalog_cache_for, config_dir,

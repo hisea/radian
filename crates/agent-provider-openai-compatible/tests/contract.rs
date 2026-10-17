@@ -415,3 +415,78 @@ async fn contract_13_the_request_reasoning_effort_wins_over_the_config() {
         "the request setting must win over the configured `high`"
     );
 }
+
+/// ADR 0027 slice ④: the `x-ratelimit-*` response headers are kept raw on
+/// `ModelResponse::limits`, in arrival order; anything else is not kept.
+#[tokio::test]
+async fn contract_14_rate_limit_headers_are_kept_raw() {
+    let server = MockServer::start(vec![Reply::sse_with_headers(
+        &[
+            chunk(json!({"content": "ok"}), None),
+            chunk(json!({}), Some("stop")),
+        ],
+        vec![
+            ("x-ratelimit-limit-requests".into(), "10000".into()),
+            ("x-ratelimit-remaining-requests".into(), "9999".into()),
+            ("x-ratelimit-reset-requests".into(), "1s".into()),
+            ("x-ratelimit-limit-tokens".into(), "200000".into()),
+            ("x-ratelimit-remaining-tokens".into(), "199900".into()),
+            ("x-ratelimit-reset-tokens".into(), "6m0s".into()),
+            ("x-unrelated".into(), "ignored".into()),
+        ],
+    )])
+    .await;
+    let base = server.base_url.clone();
+    let model = OpenAiCompatible::new(
+        OpenAiCompatibleConfig::new(base, "contract-model").with_api_key(ApiKey::new(SECRET)),
+    )
+    .expect("a local mock config is valid");
+    let response = model
+        .complete(
+            agent_provider_contract::request(),
+            agent_provider_contract::context(&NoopSink),
+        )
+        .await
+        .unwrap();
+    let limits = response.limits.expect("the rate-limit headers are kept");
+    assert_eq!(
+        limits.headers,
+        vec![
+            ("x-ratelimit-limit-requests".to_owned(), "10000".to_owned()),
+            (
+                "x-ratelimit-remaining-requests".to_owned(),
+                "9999".to_owned()
+            ),
+            ("x-ratelimit-reset-requests".to_owned(), "1s".to_owned()),
+            ("x-ratelimit-limit-tokens".to_owned(), "200000".to_owned()),
+            (
+                "x-ratelimit-remaining-tokens".to_owned(),
+                "199900".to_owned()
+            ),
+            ("x-ratelimit-reset-tokens".to_owned(), "6m0s".to_owned()),
+        ]
+    );
+}
+
+/// ADR 0027 slice ④: without the headers `limits` is `None`, never invented.
+#[tokio::test]
+async fn contract_14b_no_rate_limit_headers_is_no_limits() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(json!({"content": "ok"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+    let base = server.base_url.clone();
+    let model = OpenAiCompatible::new(
+        OpenAiCompatibleConfig::new(base, "contract-model").with_api_key(ApiKey::new(SECRET)),
+    )
+    .expect("a local mock config is valid");
+    let response = model
+        .complete(
+            agent_provider_contract::request(),
+            agent_provider_contract::context(&NoopSink),
+        )
+        .await
+        .unwrap();
+    assert!(response.limits.is_none());
+}

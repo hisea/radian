@@ -421,6 +421,7 @@ async fn a_stream_that_ends_before_finishing_is_an_error() {
     let server = MockServer::start(vec![Reply::Sse {
         pieces: vec![format!("data: {}\n\n", chunk(json!({"content": "cut"}), None)).into_bytes()],
         pause: Duration::ZERO,
+        headers: Vec::new(),
     }])
     .await;
     let mut session = chat(model(&server), NoTools).await;

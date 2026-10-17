@@ -70,6 +70,9 @@ in every error it returns, including text a server echoes back. `ConfigError` is
 - **Prompt caching is on by default and changes the body only on the wire.** `CacheMode::Auto`
   adds explicit `cache_control` breakpoints; `CacheMode::None` restores the exact pre-caching
   bytes. The choice is the host's; the adapter never reads the environment.
+- **Rate-limit headers are kept raw, never parsed.** Every `anthropic-ratelimit-*` response
+  header rides on `ModelResponse::limits` in arrival order (`None` when the provider sent
+  none); the host's `Headers` usage source parses them (ADR 0027 slice ④).
 
 ## What it guarantees (each with the test that holds it)
 
@@ -128,7 +131,7 @@ individually mutated.
 
 `testing` exposes an in-process mock server for this crate's tests and for dependent crates:
 `MockServer::start(Vec<Reply>)`, `Reply` (`Sse`, `SseThenHang`, `SseThenCut`, `Status`),
-`Reply::sse`, `Reply::status`, `Reply::sse_split`, the event builders `message_start`,
+`Reply::sse`, `Reply::sse_with_headers`, `Reply::status`, `Reply::sse_split`, the event builders `message_start`,
 `text_start`, `text_delta`, `input_json_delta`, `tool_start`, `block_stop`, `message_delta`,
 `message_stop`, `ping`, `error`, and `RecordedRequest` (`header`, `json`) /
 `MockServer::requests`. It binds `127.0.0.1:0` and is compiled only under the feature (ADR 0013).

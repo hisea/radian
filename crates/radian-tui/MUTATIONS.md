@@ -2303,3 +2303,17 @@ vacuous. The `·` (U+00B7) coverage check could not run the repo's fontTools scr
 network for the venv), so a stdlib-only cmap reader (TTC + format 4/12, deleted after use)
 verified all six reference fonts map U+00B7 and none maps the emoji codepoints; the script
 itself was validated both ways.
+## ADR 0027 slice ④: `usage` from rate-limit response headers (2026-10-17)
+
+Base `c09b614` · branch `dogfood/footer-s4`. Each mutation was applied in place, only the catching
+binary was run (`--no-fail-fast`), and the source was restored from a `cp` in `/tmp` and confirmed
+with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| UH-T1 | the `usage` gate goes back to endpoint-only (`has_usage_source` → `usage_endpoint`) | ✅ 1 failed (rc=101) | `footer::rate_limit_headers_reach_the_usage_row` (the snapshot is published but the row draws nothing) |
+| UH-T2 | the `ModelResponseReceived` arm stops publishing the snapshot (the slice-④ block removed) | ✅ 1 failed (rc=101) | `footer::rate_limit_headers_reach_the_usage_row` (`contributions.get(USAGE_ITEM)` is `None`) |
+
+Commands: `timeout 300 cargo test -p radian-tui --locked --no-fail-fast --test footer
+rate_limit_headers` (UH-T1); the full `--test footer` suite runs green on the fixed code (62
+passed). UH-T1 is the slice's "no特判" acceptance: a `Headers` provider must not need an endpoint.

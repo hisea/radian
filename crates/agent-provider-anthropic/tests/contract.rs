@@ -496,3 +496,110 @@ async fn contract_13_the_request_thinking_wins_over_the_config() {
         "the request setting must win over the configured `adaptive`"
     );
 }
+
+/// ADR 0027 slice ④: the `anthropic-ratelimit-*` response headers are kept raw on
+/// `ModelResponse::limits`, in arrival order; anything else is not kept.
+#[tokio::test]
+async fn contract_14_rate_limit_headers_are_kept_raw() {
+    let server = MockServer::start(vec![Reply::sse_with_headers(
+        &[
+            message_start(None),
+            text_start(0),
+            text_delta(0, "ok"),
+            block_stop(0),
+            message_delta("end_turn", None),
+            message_stop(),
+        ],
+        vec![
+            ("anthropic-ratelimit-requests-limit".into(), "1000".into()),
+            (
+                "anthropic-ratelimit-requests-remaining".into(),
+                "999".into(),
+            ),
+            (
+                "anthropic-ratelimit-requests-reset".into(),
+                "2026-10-17T00:00:00Z".into(),
+            ),
+            ("anthropic-ratelimit-tokens-limit".into(), "100000".into()),
+            (
+                "anthropic-ratelimit-tokens-remaining".into(),
+                "99900".into(),
+            ),
+            (
+                "anthropic-ratelimit-tokens-reset".into(),
+                "2026-10-17T00:00:00Z".into(),
+            ),
+            ("x-unrelated".into(), "ignored".into()),
+        ],
+    )])
+    .await;
+    let base = server.base_url.clone();
+    let model = Anthropic::new(
+        AnthropicConfig::new(base, "contract-model").with_api_key(ApiKey::new(SECRET)),
+    )
+    .expect("a local mock config is valid");
+    let response = model
+        .complete(
+            agent_provider_contract::request(),
+            agent_provider_contract::context(&NoopSink),
+        )
+        .await
+        .unwrap();
+    let limits = response.limits.expect("the rate-limit headers are kept");
+    assert_eq!(
+        limits.headers,
+        vec![
+            (
+                "anthropic-ratelimit-requests-limit".to_owned(),
+                "1000".to_owned()
+            ),
+            (
+                "anthropic-ratelimit-requests-remaining".to_owned(),
+                "999".to_owned()
+            ),
+            (
+                "anthropic-ratelimit-requests-reset".to_owned(),
+                "2026-10-17T00:00:00Z".to_owned()
+            ),
+            (
+                "anthropic-ratelimit-tokens-limit".to_owned(),
+                "100000".to_owned()
+            ),
+            (
+                "anthropic-ratelimit-tokens-remaining".to_owned(),
+                "99900".to_owned()
+            ),
+            (
+                "anthropic-ratelimit-tokens-reset".to_owned(),
+                "2026-10-17T00:00:00Z".to_owned()
+            ),
+        ]
+    );
+}
+
+/// ADR 0027 slice ④: without the headers `limits` is `None`, never invented.
+#[tokio::test]
+async fn contract_14b_no_rate_limit_headers_is_no_limits() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        message_start(None),
+        text_start(0),
+        text_delta(0, "ok"),
+        block_stop(0),
+        message_delta("end_turn", None),
+        message_stop(),
+    ])])
+    .await;
+    let base = server.base_url.clone();
+    let model = Anthropic::new(
+        AnthropicConfig::new(base, "contract-model").with_api_key(ApiKey::new(SECRET)),
+    )
+    .expect("a local mock config is valid");
+    let response = model
+        .complete(
+            agent_provider_contract::request(),
+            agent_provider_contract::context(&NoopSink),
+        )
+        .await
+        .unwrap();
+    assert!(response.limits.is_none());
+}

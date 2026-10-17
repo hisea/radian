@@ -347,6 +347,7 @@ mod tests {
                 output: Some(2),
                 ..agent_core::ModelUsage::default()
             }),
+            limits: None,
         });
         {
             let read = projection.read();
@@ -411,6 +412,7 @@ mod tests {
                 input_includes_cache: Some(false),
                 ..agent_core::ModelUsage::default()
             }),
+            limits: None,
         });
         {
             let read = projection.read();

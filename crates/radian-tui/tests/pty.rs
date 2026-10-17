@@ -5559,6 +5559,7 @@ async fn pty_sessions_opens_and_closes_during_a_running_turn() {
     let slow = Reply::Sse {
         pieces,
         pause: Duration::from_millis(1500),
+        headers: Vec::new(),
     };
     let server = MockServer::start(vec![slow]).await;
     let mut pty = Pty::spawn(

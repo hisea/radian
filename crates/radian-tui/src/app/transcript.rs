@@ -175,10 +175,27 @@ impl App {
                 self.session.forget_running_tools();
                 self.session.timer.request_started(self.now);
             }
-            AgentEvent::ModelResponseReceived { usage, .. } => {
+            AgentEvent::ModelResponseReceived { usage, limits, .. } => {
                 self.session
                     .timer
                     .response_finished(self.now, usage.as_ref().and_then(|usage| usage.output));
+                // ADR 0027 slice ④: a `Headers` provider publishes its rate-limit
+                // snapshot here, into the same store the `usage` component draws. Pure and
+                // in-memory (no I/O, no clock read beyond the snapshot's own); a response
+                // without headers changes nothing, so the row stays absent until one arrives.
+                if let Some(provider) = self.session.provider.clone()
+                    && let Some(snapshot) =
+                        radian_host::headers_snapshot(&provider, limits.as_ref())
+                {
+                    self.contributions
+                        .write_contribution(radian_host::Contribution {
+                            item: radian_host::USAGE_ITEM.to_owned(),
+                            segments: Vec::new(),
+                            stale: false,
+                            symbol: None,
+                            usage: Some(snapshot),
+                        });
+                }
             }
             // ADR 0017: a transient failure is being retried. The failed attempt's
             // streamed text is discarded (it was live-only), and the status line names the retry.

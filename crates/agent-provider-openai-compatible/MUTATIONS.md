@@ -48,3 +48,16 @@ fallback never compacted. Run: `cargo test -p agent-provider-openai-compatible -
 |---|---|---|---|
 | OV-A | the new rule never matches (`if false && ...`; the old code) | caught (rc=101) | `overflow::tests::opencode_gos_input_limit_400_is_an_overflow` |
 | OV-B | drop the `too large` conjunct (any "input limit" counts) | caught (rc=101) | `overflow::tests::the_generic_phrasings_are_not_overflow` |
+
+## Rate-limit headers `x-ratelimit-*` (ADR 0027 slice ④, 2026-10-17)
+
+Base `c09b614` · branch `dogfood/footer-s4`. Each mutation was applied in place, only the catching
+binary was run (`--no-fail-fast`), and the source was restored and confirmed (`patch` back).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RL-A | misread the header prefix (`x-ratelimit-` → `x-ratelimits-`) | ✅ 1 failed (rc=101) | `contract_14_rate_limit_headers_are_kept_raw` (`response.limits.expect` is `None`); `contract_14b` still passes (it asserts absence, not behaviour) |
+
+Command: `timeout 300 cargo test -p agent-provider-openai-compatible --features testing --test
+contract --locked --no-fail-fast contract_14`. `contract_14` fails on the old code too (`limits`
+was always `None`); `contract_14b` passes there by construction (the "never invent" assertion).

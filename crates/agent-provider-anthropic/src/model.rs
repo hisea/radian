@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_core::{
     CANCELLATION_MESSAGE, EventSink, Message, Model, ModelContext, ModelError, ModelRequest,
-    ModelResponse,
+    ModelResponse, RateLimits,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER};
 use reqwest::{Client, Url, redirect};
@@ -16,6 +16,13 @@ use crate::stream::{Assembler, Progress};
 
 /// How much of an error body is quoted in the error message.
 const ERROR_BODY_BYTES: usize = 2048;
+
+/// The response header prefix Anthropic reports its rate-limit windows under
+/// (`anthropic-ratelimit-requests-limit`, `anthropic-ratelimit-tokens-remaining`,
+/// `anthropic-ratelimit-requests-reset`, …). Kept raw on the response for the host's
+/// `Headers` usage source (ADR 0027 slice ④); the exact names the host parses
+/// are recorded in `docs/providers/anthropic-wire-notes.md`.
+const RATE_LIMIT_PREFIX: &str = "anthropic-ratelimit-";
 
 /// A model reached over the Anthropic Messages API, streamed, authenticated with an API key.
 ///
@@ -135,6 +142,8 @@ impl Anthropic {
             .await
             .map_err(|e| transport(&e))?;
 
+        // Read the rate-limit headers before the body: both consume the response.
+        let limits = rate_limits(&response);
         let status = response.status();
         if !status.is_success() {
             // Read `Retry-After` before the body: `read_error_body` consumes the response.
@@ -184,7 +193,9 @@ impl Anthropic {
         if let Some(data) = parser.finish()? {
             assembler.feed(&data)?;
         }
-        assembler.finish(taken)
+        let mut response = assembler.finish(taken)?;
+        response.limits = limits;
+        Ok(response)
     }
 }
 
@@ -283,6 +294,25 @@ async fn read_error_body(response: &mut reqwest::Response, idle: Duration) -> St
         "(empty body)".into()
     } else {
         text.to_owned()
+    }
+}
+
+/// The raw `anthropic-ratelimit-*` headers, in arrival order. `None` when none were sent.
+/// Nothing is parsed: the numbers are kept as text for the host's `Headers` usage source.
+fn rate_limits(response: &reqwest::Response) -> Option<RateLimits> {
+    let mut headers = Vec::new();
+    for (name, value) in response.headers() {
+        let name = name.as_str();
+        if name.starts_with(RATE_LIMIT_PREFIX)
+            && let Ok(value) = value.to_str()
+        {
+            headers.push((name.to_owned(), value.to_owned()));
+        }
+    }
+    if headers.is_empty() {
+        None
+    } else {
+        Some(RateLimits { headers })
     }
 }
 
