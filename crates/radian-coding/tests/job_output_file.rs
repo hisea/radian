@@ -223,3 +223,66 @@ async fn the_file_arguments_are_validated() {
 
     session.shutdown_jobs();
 }
+
+/// GPT fills every optional field (seen 2026-10-17: `pattern: ""`, `tail_lines: 1`,
+/// `from_line: 1`, `max_lines: 300`, refused six times). `mode` names the read and the other
+/// reads' fields are ignored; a blank `pattern` is no pattern.
+#[tokio::test]
+async fn mode_names_the_read_and_ignores_the_other_fields() {
+    let dir = TempDir::new("job-mode");
+    let ws = dir.file("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let tools = transparent_tools(&ws);
+    let session = tools.open_session().await.expect("session");
+    let id = run_to_end(&session, "printf 'one\\ntwo\\nthree\\n'").await;
+    let every = |mode: &str| {
+        json!({"job_id": id, "mode": mode, "wait": true, "timeout_ms": 1000,
+               "pattern": "", "tail_lines": 1, "from_line": 1, "max_lines": 300})
+    };
+
+    // `new`: the incremental read (already drained by run_to_end), not a file read.
+    let new = exec(&session, "job_output", every("new"))
+        .await
+        .expect("mode new");
+    let text = output_text(&new);
+    assert!(text.contains("[no new output]"), "{text}");
+    assert!(text.contains("[status: exited 0]"), "{text}");
+
+    // `tail` uses `tail_lines: 1` and ignores the range and the blank pattern.
+    let tail = exec(&session, "job_output", every("tail"))
+        .await
+        .expect("mode tail");
+    let text = output_text(&tail);
+    assert!(text.contains("three"), "{text}");
+    assert!(!text.contains("one"), "only the last line: {text}");
+
+    // `range` uses `from_line`/`max_lines` and ignores `tail_lines`.
+    let range = exec(&session, "job_output", every("range"))
+        .await
+        .expect("mode range");
+    let text = output_text(&range);
+    assert!(text.contains("one") && text.contains("three"), "{text}");
+
+    // `pattern` needs a real pattern.
+    let failure = exec(&session, "job_output", every("pattern"))
+        .await
+        .expect_err("a blank pattern");
+    assert_eq!(failure.code, "invalid_arguments", "{failure:?}");
+
+    // Without `mode`, a blank pattern does not count as a second read (`args::parse` drops an
+    // optional `""`; pinned here because GPT's calls depend on it).
+    let blank = exec(
+        &session,
+        "job_output",
+        json!({"job_id": id, "pattern": "", "tail_lines": 1}),
+    )
+    .await
+    .expect("a blank pattern is no pattern");
+    assert!(
+        output_text(&blank).contains("three"),
+        "{}",
+        output_text(&blank)
+    );
+
+    session.shutdown_jobs();
+}

@@ -1085,6 +1085,15 @@ pub(crate) fn output_schema() -> serde_json::Value {
                 "type": "string",
                 "description": "Return only full-file lines matching this Rust regex (same \
                                 convention as `grep`), numbered and capped."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["new", "tail", "range", "pattern"],
+                "description": "Which read this is: `new` (the output since your last call; \
+                                `wait`/`timeout_ms` apply), `tail` (`tail_lines`), `range` \
+                                (`from_line`/`max_lines`) or `pattern` (`pattern`). With \
+                                `mode`, the other reads' fields are ignored; without it, give \
+                                at most one of them."
             }
         },
         "required": ["job_id"],
@@ -1176,6 +1185,11 @@ struct OutputArgs {
     tail_lines: Option<u64>,
     /// Only full-file lines matching this Rust regex.
     pattern: Option<String>,
+    /// The read the model names: with it, the other reads' fields
+    /// are ignored. GPT fills every optional field (`pattern: ""`, `tail_lines: 1`,
+    /// `from_line: 1`, ...), which the "at most one" rule below refused six times in one lead
+    /// session; naming the read removes the guess.
+    mode: Option<String>,
 }
 
 /// Which part of the **full** output file a `job_output` call asks for (ADR 0039 decision 1: the
@@ -1199,8 +1213,36 @@ impl FileMode {
     /// The file mode the arguments request, or `None` for the ring behaviour. `wait`/`timeout_ms`
     /// do not apply to a file mode: it reads the file as it stands right now.
     fn from_args(args: &OutputArgs, raw: &serde_json::Value) -> Result<Option<Self>, ToolFailure> {
+        // `args::parse` already dropped an optional `""` (so `pattern: ""` is no pattern).
+        let pattern = args.pattern.as_deref();
+        match args.mode.as_deref() {
+            Some("new") => return Ok(None),
+            Some("tail") => {
+                let Some(lines) = args.tail_lines else {
+                    return Err(args::invalid(
+                        "job_output",
+                        raw,
+                        ["`mode: tail` needs `tail_lines`"],
+                    ));
+                };
+                return Self::tail(lines, raw).map(Some);
+            }
+            Some("range") => return Self::range(args.from_line, args.max_lines, raw).map(Some),
+            Some("pattern") => {
+                let Some(source) = pattern else {
+                    return Err(args::invalid(
+                        "job_output",
+                        raw,
+                        ["`mode: pattern` needs a non-empty `pattern`"],
+                    ));
+                };
+                return Self::pattern(source).map(Some);
+            }
+            // The schema's enum refuses any other value before this point.
+            _ => {}
+        }
         let requested = [
-            args.pattern.is_some(),
+            pattern.is_some(),
             args.tail_lines.is_some(),
             args.from_line.is_some() || args.max_lines.is_some(),
         ]
@@ -1218,24 +1260,40 @@ impl FileMode {
             ));
         }
         if let Some(lines) = args.tail_lines {
-            if lines < 1 {
-                return Err(args::invalid(
-                    "job_output",
-                    raw,
-                    ["`tail_lines` must be at least 1"],
-                ));
-            }
-            return Ok(Some(FileMode::Tail { lines }));
+            return Self::tail(lines, raw).map(Some);
         }
-        if let Some(source) = &args.pattern {
-            let regex = regex::Regex::new(source)
-                .map_err(|error| fail("invalid_regex", format!("`{source}`: {error}")))?;
-            return Ok(Some(FileMode::Pattern {
-                source: source.clone(),
-                regex,
-            }));
+        if let Some(source) = pattern {
+            return Self::pattern(source).map(Some);
         }
-        let from_line = args.from_line.unwrap_or(1);
+        Self::range(args.from_line, args.max_lines, raw).map(Some)
+    }
+
+    fn tail(lines: u64, raw: &serde_json::Value) -> Result<Self, ToolFailure> {
+        if lines < 1 {
+            return Err(args::invalid(
+                "job_output",
+                raw,
+                ["`tail_lines` must be at least 1"],
+            ));
+        }
+        Ok(FileMode::Tail { lines })
+    }
+
+    fn pattern(source: &str) -> Result<Self, ToolFailure> {
+        let regex = regex::Regex::new(source)
+            .map_err(|error| fail("invalid_regex", format!("`{source}`: {error}")))?;
+        Ok(FileMode::Pattern {
+            source: source.to_owned(),
+            regex,
+        })
+    }
+
+    fn range(
+        from_line: Option<u64>,
+        max_lines: Option<u64>,
+        raw: &serde_json::Value,
+    ) -> Result<Self, ToolFailure> {
+        let from_line = from_line.unwrap_or(1);
         if from_line < 1 {
             return Err(args::invalid(
                 "job_output",
@@ -1243,7 +1301,7 @@ impl FileMode {
                 ["`from_line` must be at least 1"],
             ));
         }
-        if let Some(lines) = args.max_lines
+        if let Some(lines) = max_lines
             && lines < 1
         {
             return Err(args::invalid(
@@ -1252,10 +1310,10 @@ impl FileMode {
                 ["`max_lines` must be at least 1"],
             ));
         }
-        Ok(Some(FileMode::Range {
+        Ok(FileMode::Range {
             from_line,
-            max_lines: args.max_lines,
-        }))
+            max_lines,
+        })
     }
 }
 

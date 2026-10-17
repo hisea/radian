@@ -485,3 +485,14 @@ Seven dogfood calls failed schema validation on `context` 12-30 against `maximum
 |---|---|---|---|
 | GC-1 | the schema keeps `"maximum": 10` (the old schema) | caught (rc=101) | `grep_schema_does_not_cap_context_below_the_cut` |
 | GC-2 | the cut is silent (no `[context cut ...]` line) | caught (rc=101) | `grep_caps_the_context_argument` |
+
+## job_output: `mode` names the read
+
+GPT fills every optional field (`tail_lines: 1`, `from_line: 1`, `max_lines: 300`, ...), which the "at most one read" rule refused six times in one lead session. An optional `mode` (`new` / `tail` / `range` / `pattern`) now names the read and the other reads' fields are ignored; without `mode` the old rule holds. Run: `cargo test -p radian-coding --test job_output_file`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| JM-1 | `mode` is ignored (`match None::<&str>`) | caught (rc=101) | `mode_names_the_read_and_ignores_the_other_fields` |
+| JM-2 | `mode: tail` reads the range instead | caught (rc=101) | `mode_names_the_read_and_ignores_the_other_fields` (only the last line) |
+
+A third mutation (count a blank `pattern` as a read) survived: `args::parse` already drops an optional `""` (args.rs:58-69), so the extra filter was redundant and was removed; the test pins the parse rule for GPT's calls.
