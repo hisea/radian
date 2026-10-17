@@ -270,6 +270,57 @@ async fn a_429_is_transient_and_carries_the_retry_after() {
 }
 
 #[tokio::test]
+async fn a_used_up_plan_window_is_not_retried_and_names_the_reset() {
+    // The owner's ChatGPT Plus body (2026-10-17), verbatim: the 5-hour window was spent for
+    // another 58 minutes, so the three retries ADR 0017 would make cannot succeed.
+    let body = json!({"error": {
+        "type": "usage_limit_reached",
+        "message": "The usage limit has been reached",
+        "plan_type": "plus",
+        "resets_at": 1792215076,
+        "eligible_promo": null,
+        "limit_window_minutes": 300,
+        "resets_in_seconds": 3516
+    }})
+    .to_string();
+    let server = MockServer::start(vec![Reply::status(429, &body)]).await;
+    let model = model(server.base_url.clone());
+    let error = complete(&model, request(vec![Message::user("hi")]))
+        .await
+        .unwrap_err();
+
+    // The core retries exactly the transient errors (`is_transient`, turn.rs:288), so a
+    // non-transient error is what makes this one request: the adapter never retries itself.
+    assert!(!error.is_transient(), "{error}");
+    let ModelError::Protocol(message) = &error else {
+        panic!("expected a protocol error: {error}");
+    };
+    assert!(message.contains("plus"), "{message}");
+    assert!(message.contains("300 min usage window"), "{message}");
+    assert!(message.contains("58 min"), "{message}");
+    assert!(message.contains("/model"), "{message}");
+    assert_eq!(server.requests().len(), 1, "the request is sent once");
+}
+
+#[tokio::test]
+async fn a_429_without_the_usage_limit_type_is_still_retried() {
+    // A 429 that is not the plan's window is the provider being busy: it stays `Unavailable`,
+    // which the core retries.
+    let body = json!({"error": {"type": "rate_limit_exceeded", "message": "too many requests"}});
+    let server = MockServer::start(vec![Reply::status(429, &body.to_string())]).await;
+    let model = model(server.base_url.clone());
+    let error = complete(&model, request(vec![Message::user("hi")]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, ModelError::Unavailable { message, .. }
+            if message.contains("too many requests")),
+        "{error}"
+    );
+    assert!(error.is_transient());
+}
+
+#[tokio::test]
 async fn a_500_is_transient_and_a_400_is_not() {
     let server = MockServer::start(vec![
         Reply::status(500, "oops"),

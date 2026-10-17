@@ -1177,9 +1177,15 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         // sends `max_output_tokens` when `extra_body` asks for it, same as openai-compatible).
         Provider::OpenAiCompatible | Provider::ChatGpt => None,
     };
+    // The catalog groups by provider id: the resolved provider's own id when it is not the
+    // generic descriptor (so a `chatgpt` route resolves through the descriptor table, which is
+    // the only window source models.dev cannot answer for), else the hostname rule.
+    let catalog_provider = cli.catalog_provider.clone().or_else(|| {
+        (provider_ref.id() != radian_host::GENERIC_ID).then(|| provider_ref.id().to_owned())
+    });
     let window_query = radian_host::WindowQuery::production(
         cli.context_window.or(config.model.context_window),
-        (provider_name != radian_host::GENERIC_ID).then(|| provider_name.clone()),
+        catalog_provider.clone(),
         catalog_base_url.clone(),
         model_name.clone(),
         request_max_output,
@@ -1238,14 +1244,15 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // mapped to `None` by the reader, so this is a window the user really asked for. The catalog
     // decides when it is `None`.
     let context_window = cli.context_window.or(config.model.context_window);
-    // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
-    // failure is not a startup failure: the window is then unknown and the guard stays off.
-    // This runs before the session file exists.
+    // The window comes from `--context-window`, the models.dev catalog, or the route's own
+    // descriptor table (ADR 0018; a `chatgpt` route has only the last). A fetch failure is not a
+    // startup failure: the window is then unknown and the guard stays off. This runs before the
+    // session file exists.
     // ADR 0018: `R` comes from the request's own output setting; Anthropic sends
     // `max_tokens`, OpenAI-compatible sends none.
     let window = radian_host::resolve(&radian_host::WindowQuery::production(
         context_window,
-        cli.catalog_provider.clone(),
+        catalog_provider,
         &catalog_base_url,
         &model_name,
         request_max_output,

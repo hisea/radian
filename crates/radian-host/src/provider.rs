@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::catalog::ModelLimit;
 use crate::model::Provider;
 use crate::usage::{UsageArgs, UsageFetcher};
 
@@ -64,6 +65,13 @@ pub struct DescriptorModel {
     pub name: &'static str,
     pub protocol: Protocol,
     pub base_url: &'static str,
+    /// The window numbers this descriptor's own upstream table carries, when it carries any:
+    /// the `contextWindow` / `maxTokens` pair of the `openai-codex` entry in
+    /// `@oh-my-pi/pi-catalog/src/models.json` for `chatgpt`. [`ModelLimit::default()`] (all
+    /// three unknown) for every descriptor whose numbers come from models.dev (ADR 0018): the
+    /// resolver uses this only when the catalog has no entry for the route
+    /// ([`crate::catalog::resolve`]), never to override a catalog number.
+    pub limit: ModelLimit,
     /// The model's `thinkingLevelMap` (ADR 0026 D11): level → wire value, a `None` wire value
     /// is pi's `null` (unsupported). Empty = no model-level map; the provider's applies.
     pub thinking: ThinkingMap,
@@ -161,6 +169,16 @@ impl ProviderDescriptor {
     pub fn protocol_for(&self, model: &str) -> Protocol {
         self.model(model)
             .map_or(self.default_protocol, |entry| entry.protocol)
+    }
+
+    /// The window numbers the built-in entry itself carries for `model` (see
+    /// [`DescriptorModel::limit`]), or `None` when it carries none: the model is not in the
+    /// list, or the descriptor's numbers come from models.dev. The resolver's fallback for a
+    /// provider models.dev does not carry (`chatgpt`) is this.
+    pub fn limit_for(&self, model: &str) -> Option<ModelLimit> {
+        let limit = self.model(model)?.limit;
+        (limit.context.is_some() || limit.input.is_some() || limit.output.is_some())
+            .then_some(limit)
     }
 }
 
@@ -765,6 +783,8 @@ const fn model(
         name,
         protocol,
         base_url,
+        // The numbers of every non-`chatgpt` descriptor come from models.dev (ADR 0018).
+        limit: ModelLimit::UNKNOWN,
         thinking: &[],
     }
 }
@@ -813,39 +833,101 @@ const fn chatgpt_model(
     id: &'static str,
     name: &'static str,
     thinking: ThinkingMap,
+    limit: ModelLimit,
 ) -> DescriptorModel {
     DescriptorModel {
         id,
         name,
         protocol: Protocol::Responses,
         base_url: CHATGPT_BASE,
+        limit,
         thinking,
     }
 }
 
+/// One `contextWindow`/`maxTokens` pair of the upstream `openai-codex` entry as the descriptor's
+/// [`ModelLimit`]: the context window `C` and the output ceiling. The catalog's third number,
+/// `limit.input`, has no counterpart there, so it stays unknown (never invented).
+const fn codex_limit(context_window: u64, max_tokens: u64) -> ModelLimit {
+    ModelLimit {
+        context: Some(context_window),
+        output: Some(max_tokens),
+        input: None,
+    }
+}
+
 /// `chatgpt`'s built-in model list, from `@oh-my-pi/pi-catalog/src/models.json`'s
-/// `openai-codex` entry (read-only reference, 2026-10-16: all 8 entries, every one
+/// `openai-codex` block (read-only reference, 2026-10-17: all 8 entries, every one
 /// `"api": "openai-codex-responses"`). Two `thinking.efforts` shapes appear upstream:
 /// `low/medium/high/xhigh` (→ the existing [`THINKING_UP_TO_XHIGH`]) and
 /// `low/medium/high/xhigh/max` (→ the existing [`THINKING_LOW_TO_MAX`]) — no new map constant
 /// is needed. **Unverified**: these are upstream's own names, not confirmed against a live
 /// ChatGPT subscription; the list is a starting point the ADR says to keep easy to edit.
+///
+/// The window numbers are the same block's `contextWindow`/`maxTokens`, at the line the entry
+/// starts on:
+///
+/// | model | entry | `contextWindow` | `maxTokens` |
+/// |---|---|---|---|
+/// | `gpt-5.3-codex-spark` | `:76381-76403` | 128000 | 128000 |
+/// | `gpt-5.4` | `:76418-76441` | 272000 | 128000 |
+/// | `gpt-5.4-mini` | `:76455-76478` | 272000 | 128000 |
+/// | `gpt-5.5` | `:76492-76515` | 272000 | 128000 |
+/// | `gpt-5.6-luna` | `:76530-76553` | 1000000 | 128000 |
+/// | `gpt-5.6-sol` | `:76569-76592` | 1000000 | 128000 |
+/// | `gpt-5.6-terra` | `:76608-76631` | 1000000 | 128000 |
+/// | `gpt-daybreak-blue-latest` | `:76647-76670` | 272000 | 128000 |
+///
+/// models.dev has no `chatgpt` provider, so these numbers are the only window a `chatgpt` route
+/// has: without them the session runs with the budget off (ADR 0015/0018).
 const CODEX_MODELS: &[DescriptorModel] = &[
     chatgpt_model(
         "gpt-5.3-codex-spark",
         "GPT-5.3 Codex Spark",
         THINKING_UP_TO_XHIGH,
+        codex_limit(128_000, 128_000),
     ),
-    chatgpt_model("gpt-5.4", "GPT-5.4", THINKING_UP_TO_XHIGH),
-    chatgpt_model("gpt-5.4-mini", "GPT-5.4 mini", THINKING_UP_TO_XHIGH),
-    chatgpt_model("gpt-5.5", "GPT-5.5", THINKING_UP_TO_XHIGH),
-    chatgpt_model("gpt-5.6-luna", "GPT-5.6 Luna", THINKING_LOW_TO_MAX),
-    chatgpt_model("gpt-5.6-sol", "GPT-5.6 Sol", THINKING_LOW_TO_MAX),
-    chatgpt_model("gpt-5.6-terra", "GPT-5.6 Terra", THINKING_LOW_TO_MAX),
+    chatgpt_model(
+        "gpt-5.4",
+        "GPT-5.4",
+        THINKING_UP_TO_XHIGH,
+        codex_limit(272_000, 128_000),
+    ),
+    chatgpt_model(
+        "gpt-5.4-mini",
+        "GPT-5.4 mini",
+        THINKING_UP_TO_XHIGH,
+        codex_limit(272_000, 128_000),
+    ),
+    chatgpt_model(
+        "gpt-5.5",
+        "GPT-5.5",
+        THINKING_UP_TO_XHIGH,
+        codex_limit(272_000, 128_000),
+    ),
+    chatgpt_model(
+        "gpt-5.6-luna",
+        "GPT-5.6 Luna",
+        THINKING_LOW_TO_MAX,
+        codex_limit(1_000_000, 128_000),
+    ),
+    chatgpt_model(
+        "gpt-5.6-sol",
+        "GPT-5.6 Sol",
+        THINKING_LOW_TO_MAX,
+        codex_limit(1_000_000, 128_000),
+    ),
+    chatgpt_model(
+        "gpt-5.6-terra",
+        "GPT-5.6 Terra",
+        THINKING_LOW_TO_MAX,
+        codex_limit(1_000_000, 128_000),
+    ),
     chatgpt_model(
         "gpt-daybreak-blue-latest",
         "Daybreak Blue",
         THINKING_LOW_TO_MAX,
+        codex_limit(272_000, 128_000),
     ),
 ];
 

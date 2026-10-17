@@ -186,13 +186,14 @@ lines, never mixed with the answer (ADR 0014).
 
 ## Context budget (ADR 0018) and the model catalog
 
-The context window `C` comes from one of three places, in order:
+The context window `C` comes from one of these places, in order:
 
 1. **`--context-window <TOKENS>`** — explicit, and always wins. It never fetches: only an
    already-existing cache is read for the `input`/`output` numbers, and with no cache just the
    explicit number is used.
 2. **The models.dev catalog**, matched by `(provider, model)`. The provider is
-   `--catalog-provider`, or derived from the `--base-url` hostname (`opencode.ai` →
+   `--catalog-provider`, or the resolved provider's own id, or the `--base-url` hostname
+   (`opencode.ai` →
    `opencode`, `api.anthropic.com` → `anthropic`, `api.openai.com` → `openai`,
    `api.deepseek.com` → `deepseek`, ...). The catalog is a read-only GET with **no key, no
    header and no user data**, cached owner-only under `~/.radian/cache/catalog/models.json`
@@ -200,7 +201,12 @@ The context window `C` comes from one of three places, in order:
    and refreshed at most once every 24 h (3 s timeout; a failed fetch falls back to the
    cache). `--offline-catalog` never goes out; `--catalog-provider` overrides the hostname
    mapping.
-3. Neither: `C` is **unknown**, there is no budget, and the startup says so. No number is
+3. **The route's own descriptor table** — only when the catalog has no entry for the route.
+   `chatgpt` is the one such provider (models.dev carries no `chatgpt`): its `C` and output
+   ceiling are the `contextWindow`/`maxTokens` that `crates/radian-host/src/provider.rs`'s
+   `CODEX_MODELS` cites from `@oh-my-pi/pi-catalog`'s `openai-codex` block. A model the table
+   does not list stays unknown, exactly as before.
+4. Neither: `C` is **unknown**, there is no budget, and the startup says so. No number is
    guessed (a model-name-to-window table would age and be mostly remembered numbers —
    ADR 0015 C1).
 
