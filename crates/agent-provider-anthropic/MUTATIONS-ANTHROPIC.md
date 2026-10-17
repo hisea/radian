@@ -111,3 +111,17 @@ schema / 工具调用参数里同名的键是调用方数据，不能被误当�
 它上面的 `cache_control`（wire notes §2.4）；两条新测试要求断点回退到前一个非空块、或在只有空块时
 不放断点（M32–M37 在 1395e3e 的临时 worktree 里跑；M37/M38 就地跑，文件从副本恢复并逐字节比对）。
 
+## 限额头 `anthropic-ratelimit-*`（ADR 0027 切片 ④，2026-10-17）
+
+Base `c09b614` · branch `dogfood/footer-s4`。变异在源码原地改，只跑抓住它的测试二进制
+（`--no-fail-fast`），跑完从 `/tmp` 的 `cp` 副本还原并 `cmp` 一致。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| RL-A | 限额头前缀误读（`anthropic-ratelimit-` → `anthropic-ratelimits-`） | ✅ 1 failed (rc=101) | `contract_14_rate_limit_headers_are_kept_raw`（`response.limits.expect` 为 `None`）；`contract_14b` 仍过（无头不断言有值） |
+
+命令：`timeout 300 cargo test -p agent-provider-anthropic --features testing --test contract
+--locked --no-fail-fast contract_14`。`contract_14` 在旧代码（`limits: None` 恒成立）下同样失败：
+`expect("the rate-limit headers are kept")` 为空；`contract_14b` 在旧代码下通过（它是「不编造」
+的断言，不是行为变异）。
+

@@ -18,10 +18,12 @@ const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 /// What the mock does with one request.
 #[derive(Debug, Clone)]
 pub enum Reply {
-    /// `200` with an event stream, one network chunk per piece, `pause` between pieces.
+    /// `200` with an event stream, one network chunk per piece, `pause` between pieces, and
+    /// these extra response headers.
     Sse {
         pieces: Vec<Vec<u8>>,
         pause: Duration,
+        headers: Vec<(String, String)>,
     },
     /// The pieces, then silence: the connection stays open and nothing more is sent.
     SseThenHang { pieces: Vec<Vec<u8>> },
@@ -41,6 +43,17 @@ impl Reply {
         Reply::Sse {
             pieces: sse_pieces(events),
             pause: Duration::ZERO,
+            headers: Vec::new(),
+        }
+    }
+
+    /// Like [`Reply::sse`], with extra response headers (e.g. the `anthropic-ratelimit-*`
+    /// ones).
+    pub fn sse_with_headers(events: &[Value], headers: Vec<(String, String)>) -> Self {
+        Reply::Sse {
+            pieces: sse_pieces(events),
+            pause: Duration::ZERO,
+            headers,
         }
     }
 
@@ -60,6 +73,7 @@ impl Reply {
         Reply::Sse {
             pieces: bytes.chunks(size).map(<[u8]>::to_vec).collect(),
             pause: Duration::ZERO,
+            headers: Vec::new(),
         }
     }
 }
@@ -216,8 +230,6 @@ async fn handle(
 }
 
 async fn respond(stream: &mut TcpStream, reply: Option<Reply>) -> std::io::Result<()> {
-    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
-                transfer-encoding: chunked\r\nconnection: close\r\n\r\n";
     match reply {
         None => write_plain(stream, 500, &[], "no reply was scripted").await,
         Some(Reply::Status {
@@ -225,7 +237,16 @@ async fn respond(stream: &mut TcpStream, reply: Option<Reply>) -> std::io::Resul
             headers,
             body,
         }) => write_plain(stream, code, &headers, &body).await,
-        Some(Reply::Sse { pieces, pause }) => {
+        Some(Reply::Sse {
+            pieces,
+            pause,
+            headers,
+        }) => {
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n{}\
+                 transfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                response_headers(&headers)
+            );
             stream.write_all(head.as_bytes()).await?;
             for piece in pieces {
                 write_chunk(stream, &piece).await?;
@@ -237,20 +258,35 @@ async fn respond(stream: &mut TcpStream, reply: Option<Reply>) -> std::io::Resul
             stream.shutdown().await
         }
         Some(Reply::SseThenHang { pieces }) => {
-            stream.write_all(head.as_bytes()).await?;
+            stream.write_all(sse_head(&[]).as_bytes()).await?;
             for piece in pieces {
                 write_chunk(stream, &piece).await?;
             }
             std::future::pending().await
         }
         Some(Reply::SseThenCut { pieces }) => {
-            stream.write_all(head.as_bytes()).await?;
+            stream.write_all(sse_head(&[]).as_bytes()).await?;
             for piece in pieces {
                 write_chunk(stream, &piece).await?;
             }
             Ok(()) // dropping the stream cuts it without the closing chunk
         }
     }
+}
+
+fn sse_head(headers: &[(String, String)]) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n{}\
+         transfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+        response_headers(headers)
+    )
+}
+
+fn response_headers(headers: &[(String, String)]) -> String {
+    headers
+        .iter()
+        .map(|(n, v)| format!("{n}: {v}\r\n"))
+        .collect()
 }
 
 async fn write_chunk(stream: &mut TcpStream, piece: &[u8]) -> std::io::Result<()> {
