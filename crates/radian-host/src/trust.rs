@@ -127,7 +127,9 @@ impl Choice {
 
     pub fn decision(self) -> Decision {
         match self {
-            Choice::TrustHere | Choice::TrustHereSandbox | Choice::TrustParent
+            Choice::TrustHere
+            | Choice::TrustHereSandbox
+            | Choice::TrustParent
             | Choice::TrustSession => Decision::Trust,
             Choice::UntrustHere | Choice::UntrustSession => Decision::Untrust,
         }

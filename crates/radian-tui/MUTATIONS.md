@@ -2212,3 +2212,13 @@ evidence is the flake itself: `pty_model_switches_to_chatgpt_with_an_oauth_login
 runs under load before the fix (plus a deterministic single-run repro: type the line *without*
 Enter, wait for the two menu rows, then Enter — the composer keeps the line and `next turn:` is
 never drawn) and 20 of 20 after.
+
+## ADR 0043 slice ①：TUI 缺省 `full`、项目声明收窄（2026-10-17）
+
+变异在 `src/cli.rs` 原地改：Default 分支的 `Tier::FullAccess` 换回 `Tier::WorkspaceWrite`；
+先 `cargo build -p radian-tui --bin radian`，跑完从 `cp` 副本还原并 `cmp` 一致。命令：
+`timeout 300 cargo test -p radian-tui --locked --no-fail-fast --test pty pty_the_default_tier_is_full_with_no_sandbox`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| D43-T1 | 缺省档位回到 `workspace` | `pty_the_default_tier_is_full_with_no_sandbox`（摘要行没有 `full` / `no sandbox`） | ✅ 1 failed |

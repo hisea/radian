@@ -1739,8 +1739,8 @@ mod tests {
     /// `NAME=value` pairs. A value smuggled in as `NAME=value` or a non-string is refused.
     #[test]
     fn sandbox_allow_env_is_names_only() {
-        let config = parse_str("schema_version = 1\n[sandbox]\nallow_env = [\"FOO\", \"BAR\"]\n")
-            .unwrap();
+        let config =
+            parse_str("schema_version = 1\n[sandbox]\nallow_env = [\"FOO\", \"BAR\"]\n").unwrap();
         assert_eq!(config.sandbox.allow_env, vec!["FOO", "BAR"]);
         assert!(
             parse_str("schema_version = 1\n[sandbox]\nallow_env = [\"FOO=bar\"]\n").is_err(),

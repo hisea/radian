@@ -219,7 +219,11 @@ mod tests {
         let read = read(&scratch.root);
         assert_eq!(read.tier, None);
         assert_eq!(read.warnings.len(), 1, "{:?}", read.warnings);
-        assert!(read.warnings[0].contains("cannot widen"), "{:?}", read.warnings);
+        assert!(
+            read.warnings[0].contains("cannot widen"),
+            "{:?}",
+            read.warnings
+        );
     }
 
     /// Other keys are skipped and named, never adopted; `[sandbox]` is refused by name
@@ -242,7 +246,9 @@ mod tests {
             "ignoring model",
         ] {
             assert!(
-                read.warnings.iter().any(|warning| warning.contains(expected)),
+                read.warnings
+                    .iter()
+                    .any(|warning| warning.contains(expected)),
                 "{expected} is not named: {:?}",
                 read.warnings
             );
@@ -257,7 +263,11 @@ mod tests {
         let read = read(&scratch.root);
         assert_eq!(read.tier, None);
         assert_eq!(read.warnings.len(), 1, "{:?}", read.warnings);
-        assert!(read.warnings[0].contains("not valid TOML"), "{:?}", read.warnings);
+        assert!(
+            read.warnings[0].contains("not valid TOML"),
+            "{:?}",
+            read.warnings
+        );
     }
 
     /// The narrowing rule (`safe` < `workspace` < `full`), both directions. Taking the wider of

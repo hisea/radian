@@ -2819,7 +2819,6 @@ async fn the_shell_environment_carries_herdr_and_allow_env() {
     );
 }
 
-
 /// 2: a failed sandbox probe refuses to run; it never falls back to an unsandboxed run.
 ///
 /// `RADIAN_SANDBOX_PROBE_FAIL=1` is a test seam that makes the CLI behave exactly as if the
