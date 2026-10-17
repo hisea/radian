@@ -219,3 +219,24 @@ Anthropic 的 `ContentBlockParam` 文档列出的输入块类型里**没有**音
 
 1. **finish reason**：`check_finish_reasons` 原先要求每个 adapter 对每个 `Reason` 都有线上形式。Anthropic 的官方 `stop_reason` 集合（§4.4）里**没有** `content_filter`（它用 `refusal`，由契约的另一条子检查覆盖），所以 Anthropic harness 用 `unsupported_reasons()` 显式声明 `Reason::ContentFiltered`，该条被**跳过**（它在本 provider 下无意义）。
 2. **usage 字段**：`check_usage_shapes` 原先脚本一个含 `total: Some(15)` 的 `ModelUsage` 并要求逐字段相等。Anthropic 官方 usage **没有** total 字段（§3.1），所以 Anthropic harness 用 `unreported_usage_fields()` 显式声明 `UsageField::Total`；契约据此把 `total` **断言为 `None`**（而不是跳过）：provider 没报的数字，adapter 永不得编（ADR 0007 J2）。这处出口让检查**更严**。
+
+## 9. 限额响应头（ADR 0027 切片 ④，2026-10-17）
+
+来源：`https://docs.claude.com/en/api/rate-limits`（Anthropic 官方 rate-limits 页：请求数与
+token 数的 limit / remaining / reset 六个头）。本离线 worktree 未重拉该页；头名按切片 ④
+任务单的方向取，adapter 只按前缀 `anthropic-ratelimit-` 原样保留（`model.rs` 的
+`RATE_LIMIT_PREFIX`），具体名字只出现在宿主的解析表（`radian-host` 的 `ANTHROPIC_HEADERS`），
+改名不需要动 adapter。
+
+| 头 | 含义 | 宿主怎么用 |
+|---|---|---|
+| `anthropic-ratelimit-requests-limit` | 请求数上限 | 保留在原始头里，不进快照 |
+| `anthropic-ratelimit-requests-remaining` | 请求剩余数 | `requests` 窗口的 `remaining`（计数） |
+| `anthropic-ratelimit-requests-reset` | 请求窗口重置（RFC 3339 UTC 时间戳） | `requests` 窗口的倒计时 |
+| `anthropic-ratelimit-tokens-limit` | token 上限 | 保留在原始头里，不进快照 |
+| `anthropic-ratelimit-tokens-remaining` | token 剩余数 | `tokens` 窗口的 `remaining`（计数） |
+| `anthropic-ratelimit-tokens-reset` | token 窗口重置（RFC 3339 UTC 时间戳） | `tokens` 窗口的倒计时 |
+
+规则：只解析上表六个名字（精确小写匹配；文档未命名的一律忽略）；值保持原文，计数解析不出
+是整数则该窗口只剩倒计时，倒计时解析不出则只剩计数（ADR 0027：一个坏字段只丢自己）。
+429 的 `retry-after` 仍走旧的 `Retry-After` 解析（`Unavailable.retry_after`），与这六个头无关。
