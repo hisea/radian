@@ -2079,6 +2079,25 @@ built-in id against the `631c8dd` tables. Priority is the **required** fix: `bra
 (90) and `host` (78) had lost their overrides and fell back to 50. The glyph comparison found a
 second regression (`context_bar`), restored here. The placeholder, role and threshold tables
 already matched the old values.
+
+## ADR 0016：`workspace` 档位继承外层沙箱（2026-10-16）
+
+worktree `.radian-worktrees/inherited-sandbox`，分支 `dogfood/inherited-sandbox`。每个变异只改一个
+文件（`src/profile.rs` 或 `tests/pty.rs`），跑完把保存的原文写回并 `cmp` 确认逐字节一致（副本在
+`.radian/mut/`）。只跑应当抓住它的测试二进制（`--test pty`；IS-7 在 `sandbox-exec` 下跑）。
+`radian-sandbox` 与 `radian-host` 的同类变异见各自 crate 的 MUTATIONS.md。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| IS-4 | `build_sandbox` 的 `workspace` 档位无条件选 `inherited`（不看内核；即「约束为假时也选用」） | `pty_the_startup_summary_names_the_real_sandbox_backend`（摘要写成 `workspace · inherited`，不是 `macOS sandbox`） | ✅ FAILED |
+| IS-5 | 探测失败（`RADIAN_SANDBOX_PROBE_FAIL=1`）回退到 `inherited` 而不是拒绝 | `pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed`（应用没有退出） | ✅ FAILED |
+| IS-6 | 检测读环境变量（`RADIAN_SANDBOX_INHERIT` 存在即为真） | `pty_the_startup_summary_names_the_real_sandbox_backend`（该测试给子进程设了 `RADIAN_SANDBOXED=1`/`RADIAN_SANDBOX_INHERIT=1`，摘要变成 `inherited`） | ✅ FAILED |
+| IS-7 | 去掉 `pty_the_workspace_write_notice_names_the_mcp_sandbox_gap` 的 `skip_inside_sandbox!`（标记少一个） | 该测试在 `sandbox-exec` 下**不再跳过**，真的启动 TUI：`inherited` 的启动行没有 MCP 那一句，断言失败（同时标记计数变成 4） | ✅ FAILED |
+| IS-8 | `/access` 查询不再追加 `sandbox_note`（`app.rs` 去掉那两行） | `app::tests::access_repeats_an_inherited_sandbox_line`（第二条通知缺失） | ✅ FAILED |
+
+5/5 抓住。IS-4 与 IS-6 由同一个测试抓住：前者让真实后端名从摘要里消失，后者让环境变量能选中
+`inherited`，两者都让摘要行写成 `inherited`。IS-7 是 acceptance 5 的两个方向之一：清单里的测试在沙箱
+内必须打标记后返回，去掉一个既少一行标记、又让测试在它跑不了的环境里真跑（于是失败）。
 ## oauth-redact：会话中刷新出来的 token 也必须脱敏（2026-10-16）
 
 Base `5cfb0b1` · worktree `.radian-worktrees/oauth-redact`。每个脱敏名单只在启动时读一次

@@ -30,6 +30,18 @@ pub const TUI_WORDING: Wording = Wording {
     confined_subject: "shell and the built-in tools",
 };
 
+/// The startup lines for the `inherited` backend (ADR 0016): the process
+/// is already confined, radian adds nothing, and **nothing about the outer sandbox's rules can
+/// be claimed** — radian does not know whether it denies reads, keeps `.git` read-only, has the
+/// network on or off, or restricts Unix sockets. The `workspace` tier's facts sentence would
+/// claim four things radian is not enforcing, so it is not used here.
+const INHERITED_PROFILE_LINE: &str = "workspace · sandbox inherited (an outer sandbox confines this process; radian's own rules \
+     are not applied)";
+const INHERITED_FACTS: &str = "this session runs inside an outer sandbox that radian did not \
+                               create; radian adds no sandbox of its own and does not know what \
+                               the outer one allows, so the guarantees in force are the outer \
+                               sandbox's";
+
 /// The two startup lines: what was chosen, and what it actually means. The wording follows
 /// ADR 0012 decision 4 and must **not** claim credential isolation.
 pub fn describe(
@@ -46,6 +58,10 @@ pub fn describe(
             "writes and command execution are denied; the read/list/git tools are confined to \
              the workspace by the tools themselves"
                 .into(),
+        ),
+        (SandboxMode::WorkspaceWrite, Some(sandbox)) if sandbox.backend_name() == "inherited" => (
+            INHERITED_PROFILE_LINE.to_string(),
+            INHERITED_FACTS.to_string(),
         ),
         (SandboxMode::WorkspaceWrite, Some(sandbox)) => (
             format!(
@@ -188,6 +204,51 @@ mod tests {
             "{read_only}"
         );
         assert!(!read_only.contains("native git can commit"), "{read_only}");
+    }
+
+    /// ADR 0016 / acceptance 6: an `inherited` sandbox says only that an
+    /// outer sandbox confines the process. It must **not** carry the `workspace` tier's facts
+    /// sentence, which would claim a deny-read list, a read-only `.git`, a network state, a
+    /// Unix-socket whitelist and an unsandboxed MCP — none of which radian is enforcing here.
+    #[test]
+    fn the_inherited_sandbox_line_claims_no_local_rules() {
+        let dir =
+            std::env::temp_dir().join(format!("radian-describe-inherited-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sandbox = Sandbox::inherited(&dir);
+        let (line, facts) = describe(SandboxMode::WorkspaceWrite, Some(&sandbox), TUI_WORDING);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(line.contains("sandbox inherited"), "{line}");
+        // The line is the exact one the ADR names, not the `workspace` tier's `(probe: …)`
+        // line with `inherited` as the backend name in it: the wording is the whole point here.
+        assert!(
+            line.contains("an outer sandbox confines this process"),
+            "{line}"
+        );
+        assert!(
+            line.contains("radian's own rules are not applied"),
+            "{line}"
+        );
+        assert!(facts.contains("outer sandbox"), "{facts}");
+        for forbidden in [
+            "not readable",
+            "read-only",
+            "network is on",
+            "network is off",
+            "unix socket",
+            "Unix socket",
+            "MCP",
+        ] {
+            assert!(!line.contains(forbidden), "{forbidden:?} in {line}");
+            assert!(!facts.contains(forbidden), "{forbidden:?} in {facts}");
+        }
+        // The sentence that names the tier's local rules must not appear at all. This is the
+        // mutation: reusing `workspace_sandbox_facts` for `inherited`.
+        assert!(
+            !facts.contains("writes are confined to the workspace"),
+            "{facts}"
+        );
     }
 
     /// A backend whose effective git answer is fixed, so the wiring from `describe` through

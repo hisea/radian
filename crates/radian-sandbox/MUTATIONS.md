@@ -150,3 +150,39 @@ GW-6 证明新测试抓住这个回归。**GW-8 的测试要小心**：若嵌套
 的 gitdir 加进只读清单，`literal .../config` 就替 regex 挡住写——测试会**空过**。所以测试里的两级子模块
 故意**没有工作树**（`nest/.git/modules/a/modules/b` 在，`nest/a`、`nest/a/b` 已删），只有多级 regex
 护得住；否则 GW-8 抓不住（本次第一版测试就是这样空过的）。
+
+## ADR 0016：`confined_by_outer_sandbox` 与 `inherited` 后端（2026-10-16）
+
+worktree `.radian-worktrees/inherited-sandbox`，分支 `dogfood/inherited-sandbox`。每个变异只改一个
+文件，跑完把保存的原文写回并 `cmp` 确认逐字节一致（副本在 `.radian/mut/`）。只跑应当抓住它的测试
+二进制。本 crate 的变异如下；`radian-tui` 的 `build_sandbox`/PTY、`radian-host` 的 `describe`、
+`agent-cli` 的 `build_sandbox` 各有自己的表（同一轮）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| IS-1 | `confined_by_outer_sandbox` 恒返回 `false`（`result > 0` → `false`） | `escape_macos`（acceptance 1：`sandbox-exec -p '(version 1)(allow default)'` 下的 `sandbox-confined` 必须打印 `true`）；另跑 `radian-tui` 的 `pty_an_outer_sandbox_is_inherited_instead_of_refused`（内层探测失败即拒绝，启动不了） | ✅ 两个二进制各 FAILED |
+| IS-2 | 恒返回 `true` | 不是某个测试的断言：沙箱**外**也打出了 `radian-test: skipped inside a sandbox:` 标记（acceptance 5 的第二条「沙箱外一行都没有」）；`grep -c 'radian-test:'` 检查失败 | ✅（见下） |
+| IS-3 | `inherited` 后端的 `command()` 去掉 `apply_env`（子进程继承整个宿主环境） | `backend::the_inherited_backend_keeps_the_environment_whitelist_and_no_local_rules`（`/usr/bin/env` 的输出多出 `CARGO_*`、`RUSTUP_*` 等） | ✅ |
+| IS-4 | `confined_by_outer_sandbox` 的 `result > 0` → `result >= 0`（**0 也算被约束**；评审回合发现的真实漏洞） | `escape_macos::macos_confined_probe_is_false_outside_and_true_under_sandbox_exec`：沙箱外**直接**跑 `sandbox-confined` 助手，断言其 stdout 为 `false`，变异下打印 `true` → FAILED。旧矩阵测试**抓不住**，见下 | ✅ 1 test FAILED |
+
+4/4 抓住（IS-1..IS-3 + 评审回合的 IS-4）。**IS-2 的说明**：函数恒真时，`escape_macos` 与四个清单里的 PTY 测试都会走「跳过」分支而
+**空过**，所以它由 acceptance 5 的标记计数检查抓住——沙箱外运行同一批测试并 `grep -c 'radian-test:'`
+应为 0，变异后清单里的测试在沙箱外也各打一行（本次抽查了其中两个二进制，各一行）。这正是 acceptance 5
+要求「沙箱外一行都没有」的原因。
+
+**IS-4（评审回合 2026-10-17，真实安全边界漏洞，已修）**：把 `sandbox_check_self` 的 `result > 0` 写成
+`result >= 0` 后，`sandbox_check(getpid(), NULL, 0)` 在沙箱外返回的 0 也被判成「已约束」。原来的
+acceptance 1 断言写在 `macos_escape_matrix` 里，而它**先**在测试进程调 `confined_by_outer_sandbox()`，
+读到（变异造成的）`true` 就打印 `radian-test: skipped inside a sandbox: macos_escape_matrix` 后返回——
+cargo 记它通过，于是矩阵里那段 acceptance 1（包括「`sandbox-exec` 下的 `sandbox-confined` 必须打印
+`true`」）在变异下**一次也没执行**。旧测试因此对「0 被当成已约束」完全不敏感：沙箱外误判会选中不设限的
+`inherited` 后端，是一条安全边界漏洞。
+
+修法：新增 `macos_confined_probe_is_false_outside_and_true_under_sandbox_exec`，**不**在父进程调
+`confined_by_outer_sandbox()`，答案只从 `sandbox-confined` 助手自己的 stdout 读：同一助手在
+`/usr/bin/sandbox-exec -p '(version 1)(allow default)'` 下必须打印 `true`，**直接**跑必须打印 `false`。
+「已在沙箱内」改用**结构性**信号判定，不走被测函数：内核拒绝在 `(deny default)` 沙箱里再套一层
+`sandbox-exec`（`sandbox-exec: sandbox_apply: Operation not permitted`，本机实测，退出码 71；与 ADR
+0016 修订 2 背景表一致），命中时打印同样的固定标记后返回。`macos_escape_matrix` 的跳过行为保持不变
+（它另有目的：矩阵本来就要在沙箱外持有资源）。变异与还原：只改 `crates/radian-sandbox/src/lib.rs`，
+跑完把保存的原文（`.radian/mut/`）写回并 `cmp` 逐字节一致（SHA256 恢复前后相同）。

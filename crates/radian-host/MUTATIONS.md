@@ -1531,6 +1531,22 @@ the test. No other row in this file is touched.
 | GR-1 | an unknown JSON style's error repeats the style name (`format!("... {name:?} ...")`, the branch's code) | caught (rc=101) | `an_unknown_style_notice_never_carries_the_style_name` |
 | GR-2 | drop `.env_clear()` from the command spawn | caught (rc=101) | `the_environment_is_cleared_to_the_deliberate_allow_list` (`HOME` leaks; the old `set_var` probe was removed because it raced the parallel tests) |
 
+## ADR 0016: the `inherited` startup lines (2026-10-16)
+
+Worktree `.radian-worktrees/inherited-sandbox`, branch `dogfood/inherited-sandbox`. Each mutation
+changes `src/describe.rs` only, is run with `cargo test -p radian-host --lib --locked
+--no-fail-fast -- describe::tests`, and the file is restored from a saved copy and compared
+byte-identical afterwards.
+
+| # | Mutation | Caught by |
+|---|---|---|
+| IS-9 | the `inherited` facts sentence reuses `workspace_sandbox_facts` (the whole `workspace` tier sentence: deny-read list, read-only `.git`, network state, Unix sockets, unsandboxed MCP) | `the_inherited_sandbox_line_claims_no_local_rules` FAILED (the forbidden strings appeared) |
+| IS-10 | the `inherited` arm is dropped, so the generic `workspace · sandbox {backend} (probe: …)` line is used (the line names the real backend and carries the tier's facts) | `the_inherited_sandbox_line_claims_no_local_rules` FAILED (`an outer sandbox confines this process` missing) |
+
+2/2 caught. IS-9 is acceptance 6's mutation; IS-10 is acceptance 2's "the startup line names the
+real backend" mutation, which the ADR's own `sandbox inherited` substring would not catch on its
+own (the generic line contains it too, as the backend's name) — so the unit test pins the whole
+inherited wording.
 ## oauth-redact: a `chatgpt` token refreshed mid-session must be redactable too (2026-10-16)
 
 Owner report: every redaction list is read from `resolved_keys()` at startup, so about an hour

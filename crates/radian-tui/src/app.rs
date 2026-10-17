@@ -1400,6 +1400,11 @@ pub struct SessionView {
     /// a run-time switch. A UI/startup label, not a session fact (the tier itself is in the
     /// projection).
     pub access_source: crate::profile::AccessSource,
+    /// `/access`'s second line when the sandbox is `inherited` (ADR 0016):
+    /// the startup profile line, so the command says what the startup line says instead of
+    /// leaving the user to guess what `workspace` is enforced by. `None` for every other
+    /// session, where the tier's sandbox is described by the `workspace` facts sentence.
+    pub sandbox_note: Option<String>,
     /// The queued switch, shown as `next: <provider/model>` until the driver applies it.
     pub next_model: Option<String>,
     /// The queued thinking level (D11), cleared when the driver applies it.
@@ -1666,6 +1671,7 @@ impl App {
                 startup_len: 0,
                 auto: false,
                 access_source: crate::profile::AccessSource::Default,
+                sandbox_note: None,
                 next_model: None,
                 next_thinking: None,
                 bash_running: None,
@@ -1752,6 +1758,12 @@ impl App {
     /// run-time switch's own record. `/access` with no argument prints it.
     pub fn set_access_source(&mut self, source: crate::profile::AccessSource) {
         self.session.access_source = source;
+    }
+
+    /// The line `/access` adds when the sandbox is inherited from an outer one (ADR 0016
+    /// revision 2 decision 4). The host passes the startup profile line; nothing else sets it.
+    pub fn set_sandbox_note(&mut self, note: Option<String>) {
+        self.session.sandbox_note = note;
     }
 
     /// Applies the wired `tui.*` configuration. A bad keymap (a key bound to two actions) is
@@ -4443,6 +4455,11 @@ impl App {
                         "access: {current} (from {})",
                         self.session.access_source.label()
                     ));
+                    // ADR 0016: an inherited sandbox says so here too,
+                    // rather than letting `workspace` read as radian's own rules.
+                    if let Some(note) = self.session.sandbox_note.clone() {
+                        self.push_notice(note);
+                    }
                     UpdateResult::dirty()
                 }
                 Some(name) => {
@@ -5566,6 +5583,46 @@ mod tests {
             "{effects:?}"
         );
         assert_eq!(app.session.bash_running.as_deref(), Some("echo hi"));
+    }
+
+    /// ADR 0016: `/access` with no argument says what the startup line
+    /// says when the sandbox is one radian inherited from an outer sandbox, so `workspace` does
+    /// not read as radian's own rules. Mutation: drop the note (this test's second line).
+    #[test]
+    fn access_repeats_an_inherited_sandbox_line() {
+        let mut app = App::new("m", "s");
+        app.set_sandbox_note(Some(
+            "workspace · sandbox inherited (an outer sandbox confines this process; radian's own \
+             rules are not applied)"
+                .to_owned(),
+        ));
+        app.run_slash_command("/access");
+        let lines: Vec<&str> = app
+            .session
+            .entries
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect();
+        assert!(
+            lines.iter().any(|line| line.contains("access: ")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("sandbox inherited")
+                && line.contains("radian's own rules are not applied")),
+            "the inherited sandbox line is missing: {lines:?}"
+        );
+
+        // A session whose sandbox is not inherited adds nothing.
+        let mut app = App::new("m", "s");
+        app.run_slash_command("/access");
+        assert!(
+            !app.session
+                .entries
+                .iter()
+                .any(|entry| entry.text.contains("sandbox inherited")),
+            "only an inherited sandbox gets the note"
+        );
     }
 
     /// `!` shows a block, injects the `Ran \`cmd\`` message and audits; `!!` only shows and
