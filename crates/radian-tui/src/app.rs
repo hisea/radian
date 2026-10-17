@@ -4541,22 +4541,16 @@ impl App {
         if !radian_host::has_usage_source(provider) {
             return vec![format!("usage: {provider} has no usage source")];
         }
-        let Some(snapshot) =
-            self.contributions
-                .get(radian_host::USAGE_ITEM)
-                .and_then(|contribution| {
-                    contribution
-                        .usage
-                        .map(|snapshot| (snapshot, contribution.stale))
-                })
-        else {
+        let Some(contribution) = self.contributions.get(radian_host::USAGE_ITEM) else {
             return vec![format!("usage: no snapshot yet for {provider}")];
         };
-        let (snapshot, stale) = snapshot;
+        let Some(snapshot) = contribution.usage else {
+            return vec![format!("usage: no snapshot yet for {provider}")];
+        };
         if snapshot.provider != provider {
             return vec![format!("usage: no snapshot yet for {provider}")];
         }
-        command::usage_notices(&snapshot, stale)
+        command::usage_notices(&snapshot, contribution.stale)
     }
 
     /// The `/model` decision (ADR 0026 D5/D7). The loop has already refused a provider without
