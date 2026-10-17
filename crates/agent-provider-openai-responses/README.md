@@ -14,7 +14,10 @@ streaming. This is the protocol ChatGPT-subscription (Codex) turns use
   (id, summary, `encrypted_content`) is kept verbatim in `provider_payload` and replayed on the
   next request (ADR 0014 R10/revision 1); a payload from another provider is ignored, not
   misread (ADR 0026 D6); `total` is never computed; a context-overflow error is its own kind
-  (ADR 0018).
+  (ADR 0018); a `429` whose body is the plan's used-up usage window
+  (`error.type == "usage_limit_reached"`) is a `Protocol` error naming the plan, its window and
+  the reset — never retried, and never the raw JSON (`docs/providers/openai-responses-wire-notes.md`
+  §7).
 - **Rate-limit headers** (`x-codex-primary-*`, `x-codex-secondary-*`) are kept raw on
   `ModelResponse.limits` for a later slice (ADR 0027 slice ④).
 

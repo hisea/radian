@@ -130,3 +130,30 @@ Standard Responses events; the decoder branches are in `openai-shared.ts` /
 on `ModelResponse.limits`; nothing is parsed. ADR 0027 slice ④ will parse them.
 **Unverified**: the exact header names beyond the two `x-codex-{primary,secondary}-` prefixes are
 not enumerated in this repo; the adapter matches the prefixes only.
+
+## 7. The plan's used-up usage window (429 `usage_limit_reached`)
+
+A ChatGPT subscription whose plan window is spent answers `429` with an JSON error object
+instead of an event stream. The body the owner's Plus turn received on 2026-10-17 (quoted
+verbatim in the slice's brief):
+
+```json
+{"error": {"type": "usage_limit_reached", "message": "The usage limit has been reached",
+ "plan_type": "plus", "resets_at": 1792215076, "eligible_promo": null,
+ "limit_window_minutes": 300, "resets_in_seconds": 3516}}
+```
+
+| Field | Where read | Used for |
+|---|---|---|
+| `error.type` | recognized as the discriminator (this body; omp reads `error.code ?? error.type` — `pi-ai/src/error/flags.ts:487`, `pi-ai/src/providers/openai-codex/response-handler.ts:72`) | the error is this kind at all |
+| `error.plan_type` | omp's handler formats it as `(plus plan)` for the same body | the plan named in the message |
+| `error.limit_window_minutes` | this body only (omp reads no such field) | the window named in the message |
+| `error.resets_in_seconds` | this body only (omp converts `resets_at` itself) | the countdown in the message |
+
+- The adapter never reads `resets_at` or the local clock: the body's own `resets_in_seconds` is
+  the only countdown it reports, so no number is invented when the body omits it.
+- `error.message` ("The usage limit has been reached") is **not** quoted: it carries nothing the
+  composed message does not, and the raw JSON is exactly what the user should not have to read.
+- The error is returned as `ModelError::Protocol` (never retried); every other `429` stays
+  `ModelError::Unavailable` (ADR 0017).
+

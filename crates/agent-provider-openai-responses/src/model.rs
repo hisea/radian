@@ -13,6 +13,7 @@ use crate::overflow::classify_overflow;
 use crate::request::build_body;
 use crate::sse::SseParser;
 use crate::stream::{Assembler, Progress};
+use crate::usage_limit::usage_limit;
 
 /// How much of an error body is quoted in the error message.
 const ERROR_BODY_BYTES: usize = 2048;
@@ -128,6 +129,12 @@ impl OpenAiResponses {
             // ADR 0018: a recognizable context-overflow error is its own kind.
             if classify_overflow(status.as_u16(), &snippet) {
                 return Err(ModelError::ContextOverflow(message));
+            }
+            // A used-up ChatGPT plan window is not throttling: the same request cannot succeed
+            // until the window resets, so it is **not** retried (ADR 0017 retries
+            // only a transient error, and `Protocol` is not one).
+            if let Some(usage) = usage_limit(status.as_u16(), &snippet) {
+                return Err(ModelError::Protocol(usage));
             }
             // Throttling and server trouble are temporary (ADR 0017).
             return Err(
