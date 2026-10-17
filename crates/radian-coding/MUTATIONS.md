@@ -476,3 +476,12 @@ Base：本片 HEAD · 就地变异（改 `shell.rs` / `jobs.rs`），变异前�
 前台重活命令（`echo heavy adopt; sleep 600`）过 300 ms 阈值转后台后 `gate.available() == 0`，
 `job_kill` 使其 settle 后 `== 1`。
 
+
+## grep: a large `context` is cut, not refused (2026-10-17)
+
+Seven dogfood calls failed schema validation on `context` 12-30 against `maximum: 10`, each a wasted model round trip. Now the limit is 30 and a larger ask is cut with a `[context cut to 30 lines]` line. Run: `cargo test -p radian-coding --test search grep_`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| GC-1 | the schema keeps `"maximum": 10` (the old schema) | caught (rc=101) | `grep_schema_does_not_cap_context_below_the_cut` |
+| GC-2 | the cut is silent (no `[context cut ...]` line) | caught (rc=101) | `grep_caps_the_context_argument` |

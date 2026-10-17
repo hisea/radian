@@ -74,7 +74,7 @@ impl Default for Limits {
             max_grep_matches: 5000,
             default_grep_matches: 200,
             default_grep_matches_per_file: 50,
-            max_grep_context: 10,
+            max_grep_context: 30,
             max_git_output_bytes: 1 << 20, // 1 MiB
             git_timeout: Duration::from_secs(10),
             // Per stream, and aligned with `read`'s default budget: 64 KiB is enough for the

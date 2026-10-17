@@ -143,7 +143,7 @@ developer's real `~/.cargo`/`~/.rustup`; `tests/common`'s `tools()` builds with
 | `max_glob_results` / `default_glob_results` | 5000 / 500 | Bound one `glob` result set. |
 | `max_grep_matches` / `default_grep_matches` | 5000 / 200 | Bound `grep`'s total matches. |
 | `default_grep_matches_per_file` | 50 | One file must not fill the result (not model-settable). |
-| `max_grep_context` | 10 | Bound the context lines a single match can add. |
+| `max_grep_context` | 30 | Bound the context lines a single match can add; a larger request is cut to it (with a `[context cut to N lines]` line), not refused. |
 | `max_git_output_bytes` | 1 MiB | Bound git output, truncated on a character boundary with a marker. |
 | `git_timeout` | 10 s | A hung git must not hang the turn. |
 | `default_shell_output_bytes` / `max_shell_output_bytes` | 64 KiB / 1 MiB, **per stream** | Aligned with `read`'s default and hard cap. Past the budget the first quarter and the last three quarters are kept and the middle is replaced by a marker naming the discarded bytes; the tail is larger because a failing build's error is at the end. `max_output_bytes` lets the model raise it, clamped to the hard cap. Discarded bytes are reported per stream in the text and in `structured.*_truncated_bytes`. |
