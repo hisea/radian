@@ -4,6 +4,7 @@
 //! result back as an event. With `price_for_applied_change`, the pure rule for re-pricing an
 //! applied model switch.
 
+use super::herdr::HerdrReporter;
 use super::models::{memory_record_candidates, model_route_candidates, provider_ref_for};
 use super::session::{SessionHost, handle_session_request, load_picker};
 use super::*;
