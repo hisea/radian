@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use agent_core::ToolProvider;
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use radian_host::{Provider, SpawnRequest, TaskHost, TaskRegistry, build_model, task_builder};
 use radian_permissions::NoopAudit;
@@ -64,6 +65,9 @@ fn text_reply(text: &str) -> Reply {
 /// A recorder for the runtime events one sink sees.
 type Seen = Arc<Mutex<Vec<RuntimeEvent>>>;
 
+/// A recorded hook event: `(name, payload)`.
+type HookLog = Arc<Mutex<Vec<(String, Value)>>>;
+
 fn recorder() -> Seen {
     Arc::new(Mutex::new(Vec::new()))
 }
@@ -71,8 +75,11 @@ fn recorder() -> Seen {
 /// The production builder, wired to a mock provider and the two recording sinks.
 fn host(base_url: &str, workspace: &Path, task_seen: Seen) -> TaskHost {
     let base_url = base_url.to_owned();
-    let model: radian_host::TaskModelFactory =
-        Arc::new(move |session_id: &str, slot: Arc<ConfigSlot>| {
+    let model: radian_host::TaskModelFactory = Arc::new(
+        move |session_id: &str,
+              slot: Arc<ConfigSlot>,
+              _route: Option<radian_host::ModelRoute>,
+              _thinking: Option<String>| {
             let initial = build_model(radian_host::ModelArgs {
                 provider: Provider::OpenAiCompatible,
                 base_url: base_url.clone(),
@@ -100,11 +107,13 @@ fn host(base_url: &str, workspace: &Path, task_seen: Seen) -> TaskHost {
                     thinking_budget: None,
                 },
             ))
-        });
+        },
+    );
     TaskHost {
         session_dir: workspace.join("sessions"),
         model,
         route: ("openai-compatible".into(), "mock".into()),
+        servers: Vec::new(),
         sandbox: None,
         sandbox_deny_read: Vec::new(),
         allow_unix_sockets: Vec::new(),
@@ -162,6 +171,24 @@ impl Fixture {
     }
 
     fn registry(&self, base_url: &str, task_seen: Seen, lead_seen: Seen) -> Arc<TaskRegistry> {
+        self.registry_with_host(host(base_url, &self.scratch, task_seen), lead_seen)
+    }
+
+    /// [`Fixture::registry`] over a caller-supplied [`TaskHost`] (so a test can wrap the model
+    /// factory).
+    fn registry_with_host(&self, host: TaskHost, lead_seen: Seen) -> Arc<TaskRegistry> {
+        self.registry_full(host, None, lead_seen, None)
+    }
+
+    /// The registry over a host, an optional orchestration snapshot (ADR 0030 slice 9) and an
+    /// optional hook recorder (`(name, payload)` pairs).
+    fn registry_full(
+        &self,
+        host: TaskHost,
+        orchestration: Option<radian_host::Orchestration>,
+        lead_seen: Seen,
+        hook_seen: Option<HookLog>,
+    ) -> Arc<TaskRegistry> {
         let session_dir = self.scratch.join("sessions");
         std::fs::create_dir_all(&session_dir).unwrap();
         let journal = Arc::new(
@@ -176,16 +203,27 @@ impl Fixture {
         let notifier: radian_host::TaskNotifier = Arc::new(move |event: &RuntimeEvent| {
             lead_seen.lock().unwrap().push(event.clone());
         });
-        Arc::new(
-            TaskRegistry::new(
-                self.lead.clone(),
-                "lead",
-                journal,
-                queue,
-                task_builder(host(base_url, &self.scratch, task_seen)),
-            )
-            .with_notifier(notifier),
+        let mut registry = TaskRegistry::new(
+            self.lead.clone(),
+            "lead",
+            journal,
+            queue,
+            task_builder(host),
         )
+        .with_notifier(notifier);
+        if let Some(orchestration) = orchestration {
+            registry = registry.with_orchestration(orchestration);
+        }
+        if let Some(hook_seen) = hook_seen {
+            let hook: radian_host::task::HookNotifier = Arc::new(move |name, data| {
+                hook_seen
+                    .lock()
+                    .unwrap()
+                    .push((name.to_owned(), data.clone()));
+            });
+            registry = registry.with_hook_notifier(hook);
+        }
+        Arc::new(registry)
     }
 }
 
@@ -297,7 +335,7 @@ async fn a_shared_task_has_no_worktree_and_no_network() {
     let registry = fixture.registry(&server.base_url, recorder(), recorder());
 
     let mut request = SpawnRequest::new("t1");
-    request.isolation = radian_host::Isolation::Shared;
+    request.isolation = Some(radian_host::Isolation::Shared);
     request.brief = Some("do it".into());
     let record = registry
         .spawn(request)
@@ -350,4 +388,289 @@ async fn kill_closes_the_task_and_keeps_the_worktree() {
         )),
         "the notifier must see the cancelled TaskFinished: {seen:?}"
     );
+}
+
+/// ADR 0030 O11: the production builder hands the resolved agent definition to the model
+/// factory, so a `spawn_task { agent }` runs the definition's route and thinking level (the
+/// factory resolves that route's credential the same way `/model` does).
+#[tokio::test]
+async fn the_builder_hands_the_agent_definition_to_the_model_factory() {
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let fixture = Fixture::new("factory-agent");
+    let home = isolated_home();
+    let agents = home.join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let def_path = agents.join("route-agent.md");
+    std::fs::write(
+        &def_path,
+        "---\nname: route-agent\nmodel: opencode-go/one\nthinking: low\n---\nBODY\n",
+    )
+    .unwrap();
+
+    // A recorder for the `provider / thinking` the factory was handed.
+    type SeenAgent = Arc<Mutex<Option<(String, Option<String>)>>>;
+    let seen: SeenAgent = Arc::new(Mutex::new(None));
+    let mut host = host(&server.base_url, &fixture.scratch, recorder());
+    let inner = Arc::clone(&host.model);
+    let seen_factory = Arc::clone(&seen);
+    host.model = Arc::new(
+        move |session_id: &str,
+              slot: Arc<ConfigSlot>,
+              route: Option<radian_host::ModelRoute>,
+              thinking: Option<String>| {
+            *seen_factory.lock().unwrap() = Some((
+                route
+                    .as_ref()
+                    .map(|route| route.provider.clone())
+                    .unwrap_or_default(),
+                thinking.clone(),
+            ));
+            inner(session_id, slot, route, thinking)
+        },
+    );
+
+    let registry = fixture.registry_with_host(host, recorder());
+    let mut request = SpawnRequest::new("t1");
+    request.agent = Some("route-agent".into());
+    request.brief = Some("do it".into());
+    let _record = registry.spawn(request).await.expect("spawn");
+    wait_outcome(&registry, "t1").await;
+
+    let seen = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the factory saw a definition");
+    assert_eq!(seen.0, "opencode-go");
+    assert_eq!(seen.1.as_deref(), Some("low"));
+
+    registry.remove("t1", true).await.expect("remove");
+    let _ = std::fs::remove_file(def_path);
+}
+
+/// ADR 0030 slice 9 / R2: after the end-of-task commit, each `verify` command runs in the task's
+/// sandbox; `wait_task` reports the runtime's facts (exit codes, bounded tails) in their own
+/// field, separate from the model's summary.
+#[tokio::test]
+async fn verify_runs_in_the_task_sandbox_and_is_reported_in_wait_task() {
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let fixture = Fixture::new("verify-run");
+    let orchestration = radian_host::Orchestration {
+        verify: vec!["echo verified".into(), "exit 4".into()],
+        ..Default::default()
+    };
+    let registry = fixture.registry_full(
+        host(&server.base_url, &fixture.scratch, recorder()),
+        Some(orchestration),
+        recorder(),
+        None,
+    );
+
+    let mut request = SpawnRequest::new("t1");
+    request.brief = Some("do it".into());
+    let record = registry.spawn(request).await.expect("spawn");
+    wait_outcome(&registry, "t1").await;
+    record.await_end_commit().await;
+
+    // The runtime's facts: one entry per command, with exit code and tail.
+    let verify = record.verify_results().expect("verify results");
+    assert_eq!(verify.len(), 2);
+    assert_eq!(verify[0].command, "echo verified");
+    assert_eq!(verify[0].exit_code, Some(0));
+    assert_eq!(verify[1].command, "exit 4");
+    assert_eq!(verify[1].exit_code, Some(4));
+    assert!(verify[0].output_tail.contains("verified"));
+    // A shared task runs no verify, so a worktree task's commands carry the exit codes above.
+
+    // The lead's `wait_task` returns the runtime's facts in `verify`, and the model's report in
+    // `summary` — two separate fields (ADR 0030 R2).
+    let tools = radian_host::LeadTools::new(Arc::clone(&registry));
+    let session = tools.open_session().await.expect("a lead session");
+    let sink = agent_core::NoopSink;
+    let cx = agent_core::ToolContext {
+        cancellation: agent_core::CancellationToken::new(),
+        events: &sink,
+        index: 0,
+    };
+    let call = agent_core::ToolCall {
+        id: "c".into(),
+        name: "wait_task".into(),
+        arguments: json!({ "id": "t1", "timeout_secs": 30 }),
+    };
+    let output = radian_host::run_lead_tool(&session, &call, cx)
+        .await
+        .expect("wait_task");
+    let structured = output.structured.expect("structured");
+    assert_eq!(structured["event"], "finished");
+    assert_eq!(structured["verify"][0]["exit_code"], 0);
+    assert_eq!(structured["verify"][1]["exit_code"], 4);
+    assert!(
+        structured["summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("done"),
+        "{structured}"
+    );
+
+    registry.remove("t1", true).await.expect("remove");
+}
+
+/// ADR 0030 O2 layer 2 / slice 9 / ADR 0031: the edge `policy` command comes only from the user
+/// config or a **trusted** project config, and reaches the task's approver through the snapshot.
+#[tokio::test]
+async fn the_edge_policy_comes_from_a_trusted_project_config_only() {
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    for trusted in [true, false] {
+        let fixture = Fixture::new("policy-trust");
+        std::fs::create_dir_all(fixture.lead.join(".radian")).unwrap();
+        std::fs::write(
+            fixture.lead.join(".radian/orchestration.toml"),
+            "policy = \"/bin/echo allow\"\n",
+        )
+        .unwrap();
+        let (orchestration, warnings) = radian_host::orchestration::resolve(
+            &fixture.lead,
+            trusted,
+            &radian_host::OrchestrationConfig::default(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let registry = fixture.registry_full(
+            host(&server.base_url, &fixture.scratch, recorder()),
+            Some(orchestration),
+            recorder(),
+            None,
+        );
+        let record = registry
+            .spawn(SpawnRequest::new("t1"))
+            .await
+            .expect("spawn");
+        if trusted {
+            assert_eq!(
+                record.policy.as_deref(),
+                Some("echo"),
+                "a trusted project policy reaches the approver"
+            );
+        } else {
+            assert!(
+                record.policy.is_none(),
+                "an untrusted project policy must not be read"
+            );
+        }
+        registry.remove("t1", true).await.expect("remove");
+    }
+}
+
+/// ADR 0030 freeze-list 6 / O7 rev 2 item 4: a task reads none of its own worktree's `.radian/`.
+/// Writing the task's own `orchestration.toml` and agent definitions, and editing the lead's
+/// project file **after the snapshot**, changes neither the running task's verify nor its agent.
+#[tokio::test]
+async fn a_tasks_own_dot_radian_and_a_later_edit_do_not_change_the_running_task() {
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let fixture = Fixture::new("verify-snapshot");
+    let orchestration = radian_host::Orchestration {
+        verify: vec!["echo lead".into()],
+        ..Default::default()
+    };
+    let registry = fixture.registry_full(
+        host(&server.base_url, &fixture.scratch, recorder()),
+        Some(orchestration),
+        recorder(),
+        None,
+    );
+
+    // No brief: the task opens without starting a turn, so the writes below land first.
+    let record = registry
+        .spawn(SpawnRequest::new("t1"))
+        .await
+        .expect("spawn");
+    let worktree = record.worktree.clone().expect("a worktree");
+
+    // The task's own project resources — none of these may affect it.
+    std::fs::create_dir_all(worktree.join(".radian/agents")).unwrap();
+    std::fs::write(
+        worktree.join(".radian/orchestration.toml"),
+        "verify = [\"echo task\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        worktree.join(".radian/agents/task.md"),
+        "---\nname: task\n---\nTASK OVERRIDE\n",
+    )
+    .unwrap();
+    // And the LEAD's project file, edited after the snapshot: the running task keeps its snapshot.
+    std::fs::create_dir_all(fixture.lead.join(".radian")).unwrap();
+    std::fs::write(
+        fixture.lead.join(".radian/orchestration.toml"),
+        "verify = [\"echo changed\"]\n",
+    )
+    .unwrap();
+
+    // Now start the turn.
+    record
+        .session
+        .inbox()
+        .followup(
+            agent_core::Message::user("go"),
+            agent_core::InputSource::Subagent,
+        )
+        .await
+        .expect("the brief");
+    wait_outcome(&registry, "t1").await;
+    record.await_end_commit().await;
+
+    let verify = record.verify_results().expect("verify results");
+    assert_eq!(verify.len(), 1);
+    assert_eq!(verify[0].command, "echo lead", "the snapshot's verify");
+    assert!(verify[0].output_tail.contains("lead"));
+    assert!(!verify[0].output_tail.contains("task"));
+    assert!(!verify[0].output_tail.contains("changed"));
+
+    registry.remove("t1", true).await.expect("remove");
+}
+
+/// ADR 0030 O7 / slice 9: the registry emits the `task_spawned` and `task_finished` hook points
+/// (the control port fans them to subscribers) with the stable names and payloads.
+#[tokio::test]
+async fn the_registry_emits_the_task_hook_points() {
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let fixture = Fixture::new("hooks");
+    let hooks: HookLog = Arc::new(Mutex::new(Vec::new()));
+    let registry = fixture.registry_full(
+        host(&server.base_url, &fixture.scratch, recorder()),
+        None,
+        recorder(),
+        Some(Arc::clone(&hooks)),
+    );
+
+    let mut request = SpawnRequest::new("t1");
+    request.brief = Some("do it".into());
+    let record = registry.spawn(request).await.expect("spawn");
+    wait_outcome(&registry, "t1").await;
+    record.await_end_commit().await;
+    // Give the `task_finished` hook a moment to be pushed (it follows the commit).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let seen = hooks.lock().unwrap().clone();
+        if seen.iter().any(|(name, _)| name == "task_finished") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no task_finished");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let seen = hooks.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|(name, data)| name == "task_spawned"
+            && data["task"] == "t1"
+            && data["label"].is_null()),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|(name, data)| name == "task_finished"
+            && data["task"] == "t1"
+            && data["outcome"] == "completed"),
+        "{seen:?}"
+    );
+
+    registry.remove("t1", true).await.expect("remove");
 }

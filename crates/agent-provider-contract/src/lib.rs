@@ -907,6 +907,7 @@ mod tests {
                 return Err(clone_error(error));
             }
             Ok(ModelResponse {
+                limits: None,
                 reasoning: Vec::new(),
                 content: if self.text.is_empty() {
                     Vec::new()

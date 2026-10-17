@@ -56,14 +56,12 @@ impl SkillSource {
     }
 }
 
-/// The built-in skills, compiled in (ADR 0025). `(name, SKILL.md text)`.
-pub const BUILTIN: &[(&str, &str)] = &[
-    ("diagrams", include_str!("../../skills/diagrams/SKILL.md")),
-    (
-        "theme-import",
-        include_str!("../../skills/theme-import/SKILL.md"),
-    ),
-];
+/// The built-in skills, compiled in (ADR 0025; the `diagrams` skill was deleted by
+/// ADR 0042's supplement, so `theme-import` is the only one). `(name, SKILL.md text)`.
+pub const BUILTIN: &[(&str, &str)] = &[(
+    "theme-import",
+    include_str!("../../skills/theme-import/SKILL.md"),
+)];
 
 /// One discovered skill. `path` is the `SKILL.md` (absolute); `dir` is its directory, the base
 /// for relative paths in the body (ADR 0025 S3). For a built-in skill `body` is the embedded
@@ -132,6 +130,30 @@ pub fn discover_with_extras(
         collect_builtin(&mut discovery, &mut by_name, disabled);
     }
     discovery
+}
+
+/// ADR 0030 O11: keeps only the discovered skills an agent definition's `skills` list names, in
+/// discovery order. This is the **allow-list** the definition gives a task; it is applied after
+/// discovery, not through `[skills] disabled` — that list only filters the compiled-in skills
+/// (`collect_builtin`), so it cannot disable a user-level or `extra_paths` skill by name.
+pub fn restrict_to(skills: Vec<Skill>, allow: &[String]) -> Vec<Skill> {
+    skills
+        .into_iter()
+        .filter(|skill| allow.iter().any(|name| name == &skill.name))
+        .collect()
+}
+
+/// ADR 0030 O11: the allow-listed names that discovery did not find, one warning line each. A
+/// name that does not exist is never a failure: the task loads the rest of its list and the
+/// registry reports these lines in the spawn result.
+pub fn missing(skills: &[Skill], allow: &[String]) -> Vec<String> {
+    allow
+        .iter()
+        .filter(|name| !skills.iter().any(|skill| &skill.name == *name))
+        .map(|name| {
+            format!("skill `{name}` named by the agent definition was not found; it is not loaded")
+        })
+        .collect()
 }
 
 /// Collects the skills of one root into `discovery`, keeping the first name seen in `by_name`.
@@ -907,49 +929,21 @@ mod tests {
         assert_eq!(names, ["solo"], "{:?}", discovery.warnings);
     }
 
-    /// ADR 0025: the compiled-in `diagrams` skill is discovered, marked `builtin`,
-    /// and listed by `/skills`.
-    #[test]
-    fn the_builtin_diagrams_skill_is_discovered_and_listed() {
-        let discovery = discover_with_extras(None, &[], true, &[]);
-        let skill = discovery
-            .skills
-            .iter()
-            .find(|skill| skill.name == "diagrams")
-            .expect("the built-in diagrams skill");
-        assert_eq!(skill.source, SkillSource::Builtin);
-        assert!(skill.body.is_some(), "the body is embedded");
-        assert!(!skill.description.is_empty());
-        let notices = notices(&discovery.skills);
-        assert!(
-            notices
-                .iter()
-                .any(|line| line.contains("diagrams") && line.contains("[builtin]")),
-            "{notices:?}"
-        );
-        // It is a completion candidate too.
-        assert!(
-            completion_candidates(&discovery.skills)
-                .iter()
-                .any(|(name, _)| name == "diagrams")
-        );
-    }
-
     /// A user-level skill of the same name wins; the built-in is shadowed with the usual
     /// warning.
     #[test]
     fn a_user_skill_of_the_same_name_overrides_the_builtin() {
         let scratch = Scratch::new("builtin-override");
-        scratch.skill("diagrams", &frontmatter("diagrams", "My own."));
+        scratch.skill("theme-import", &frontmatter("theme-import", "My own."));
         let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[], true, &[]);
-        let diagrams: Vec<&Skill> = discovery
+        let theme_import: Vec<&Skill> = discovery
             .skills
             .iter()
-            .filter(|skill| skill.name == "diagrams")
+            .filter(|skill| skill.name == "theme-import")
             .collect();
-        assert_eq!(diagrams.len(), 1, "only one wins");
-        assert_eq!(diagrams[0].source, SkillSource::User);
-        assert_eq!(diagrams[0].description, "My own.");
+        assert_eq!(theme_import.len(), 1, "only one wins");
+        assert_eq!(theme_import[0].source, SkillSource::User);
+        assert_eq!(theme_import[0].description, "My own.");
         assert!(
             discovery.warnings.iter().any(|w| w.contains("shadows")),
             "{:?}",
@@ -957,7 +951,7 @@ mod tests {
         );
     }
 
-    /// `[skills] builtin = false` turns every built-in off; `disabled` turns one off by name.
+    /// `[skills] builtin = false` turns the built-in off; `disabled` turns it off by name.
     #[test]
     fn builtin_false_and_disabled_turn_the_builtin_off() {
         assert!(
@@ -966,14 +960,9 @@ mod tests {
                 .is_empty()
         );
         assert!(
-            discover_with_extras(
-                None,
-                &[],
-                true,
-                &["diagrams".to_owned(), "theme-import".to_owned()]
-            )
-            .skills
-            .is_empty()
+            discover_with_extras(None, &[], true, &["theme-import".to_owned()])
+                .skills
+                .is_empty()
         );
     }
 
@@ -1366,5 +1355,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(untouched.system_prompt, None);
+    }
+
+    /// ADR 0030 O11: an agent definition's `skills` list is an allow-list over the discovered
+    /// catalog. `restrict_to` keeps only the named skills, in discovery order; `missing` names
+    /// the entries discovery did not find, one warning line each.
+    #[test]
+    fn restrict_to_keeps_the_named_skills_and_missing_warns_about_the_rest() {
+        let scratch = Scratch::new("allow-list");
+        scratch.skill("one", &frontmatter("one", "One."));
+        scratch.skill("two", &frontmatter("two", "Two."));
+        scratch.skill("three", &frontmatter("three", "Three."));
+        let skills = discover(&scratch.skills_dir()).skills;
+        assert_eq!(skills.len(), 3);
+
+        let allow = ["three".to_owned(), "one".to_owned()];
+        let kept = restrict_to(skills.clone(), &allow);
+        let names: Vec<&str> = kept.iter().map(|s| s.name.as_str()).collect();
+        // Discovery order, not the list's order.
+        assert_eq!(names, ["one", "three"], "keeps only the named skills");
+        assert!(
+            missing(&kept, &allow).is_empty(),
+            "every named skill was found"
+        );
+
+        // A name that is not in the catalog: kept skills are unchanged and the name is reported.
+        let allow = ["one".to_owned(), "nope".to_owned()];
+        let kept = restrict_to(skills, &allow);
+        let names: Vec<&str> = kept.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["one"]);
+        let warnings = missing(&kept, &allow);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("nope"), "{warnings:?}");
     }
 }

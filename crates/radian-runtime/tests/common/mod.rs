@@ -204,6 +204,7 @@ impl Model for ScriptedModel {
 
 pub fn text(s: &str) -> ModelResponse {
     ModelResponse {
+        limits: None,
         content: vec![ContentPart::text(s)],
         tool_calls: vec![],
         provider_payload: None,
@@ -215,6 +216,7 @@ pub fn text(s: &str) -> ModelResponse {
 
 pub fn calls(calls: Vec<ToolCall>) -> ModelResponse {
     ModelResponse {
+        limits: None,
         content: vec![],
         tool_calls: calls,
         provider_payload: None,
@@ -296,6 +298,13 @@ impl ToolProvider for MemTools {
                     input_schema: json!({"type": "object"}),
                     concurrency: ToolConcurrency::Exclusive,
                 },
+                ToolSpec {
+                    name: "write".into(),
+                    description: "writes `text` to the file at `path` (an observable side effect)"
+                        .into(),
+                    input_schema: json!({"type": "object"}),
+                    concurrency: ToolConcurrency::Exclusive,
+                },
             ],
         })
     }
@@ -317,8 +326,26 @@ impl ToolSession for MemSession {
         let id = call.id.clone();
         let name = call.name.clone();
         let args = call.arguments.to_string();
+        let write_path = call
+            .arguments
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        let write_text = call
+            .arguments
+            .get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_owned();
         async move {
             log.lock().unwrap().push(id.clone());
+            if name == "write" {
+                // The observable side effect the crash tests reason about: the file exists iff
+                // this call actually ran.
+                let path = write_path.expect("the write tool needs a `path` argument");
+                std::fs::write(&path, write_text).expect("the write tool writes its file");
+                return Ok(ToolOutput::text(path));
+            }
             let behavior = if name == "gate" {
                 Behavior::Gate
             } else {

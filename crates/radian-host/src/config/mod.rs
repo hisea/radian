@@ -111,6 +111,12 @@ pub enum ConfigError {
         name: String,
         reason: String,
     },
+    /// `[orchestration]` (ADR 0030 slice 9): a wrong-typed key. Refused (the ADR 0008 discipline:
+    /// a bad value is never guessed at); an unknown key is only a warning.
+    Orchestration {
+        path: PathBuf,
+        message: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -179,6 +185,9 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::InvalidProviderName { path, name, reason } => {
                 write!(f, "{}: providers.{name}: {reason}", path.display())
+            }
+            ConfigError::Orchestration { path, message } => {
+                write!(f, "{}: {message}", path.display())
             }
         }
     }
@@ -401,10 +410,10 @@ pub struct TuiConfig {
     /// `None` means the default, **on**; the TUI reads `unwrap_or(true)`. `false` sends no
     /// mouse sequence at all and leaves the terminal's native selection/copy alone.
     pub mouse: Option<bool>,
-    /// `tui.input_style`: `"bar"` (the default: the banded input with a left rail and the status
-    /// row above it), `"lines"` (a rule above and below, `> ` on the first line) or `"box"`
-    /// (the bordered input box). `None` means the default; an unknown value is
-    /// ignored with a warning (the `tui.*` rule), and the TUI falls back to `bar`.
+    /// `tui.input_style`: `"lines"` (the default: a rule above and below with a `❯ ` prompt) or
+    /// `"box"` (the thin half frame, ADR 0035's 2026-10-16 note). Carried raw; the TUI parses it,
+    /// and a value that is not `lines`/`box` — including the removed `"bar"` — warns once and
+    /// falls back to `lines`, never a refusal (the `tui.*` display-field rule, ADR 0008).
     pub input_style: Option<String>,
     /// `tui.clipboard`: how a transcript-selection copy reaches the system clipboard —
     /// `"osc52"` (the default), `"pbcopy"` (macOS only; elsewhere a warning and OSC 52) or
@@ -542,6 +551,21 @@ impl Default for IntegrationsConfig {
     }
 }
 
+/// `[control]` (ADR 0030 O6, slice 8): the process control port. `enabled` defaults to
+/// **true** — every hosting process binds `$RADIAN_HOME/run/<pid>.sock` — and `false` turns
+/// the socket off for this process. The socket carries the same verbs O6 lists; a client can
+/// never declare the `User` source and there is no approval verb.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlConfig {
+    pub enabled: bool,
+}
+
+impl Default for ControlConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// One parsed configuration file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
@@ -556,6 +580,8 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     pub sandbox: SandboxConfig,
     pub integrations: IntegrationsConfig,
+    /// `[control]` (ADR 0030 O6, slice 8): the process control port, on by default.
+    pub control: ControlConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
     /// `[memory]` (ADR 0021): the injection keys this revision adds.
@@ -564,6 +590,10 @@ pub struct Config {
     pub git: GitConfig,
     /// `[shell]` (ADR 0037): the shell tool's limits.
     pub shell: ShellConfig,
+    /// `[orchestration]` (ADR 0030 slice 9): the user-level orchestration config. A project-level
+    /// `<workspace>/.radian/orchestration.toml` overrides it key by key when the workspace is
+    /// trusted (ADR 0031).
+    pub orchestration: crate::orchestration::OrchestrationConfig,
     pub tui: TuiConfig,
     /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
     /// resolve them through `radian_host::provider::resolve_provider`.
@@ -667,11 +697,13 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
             "sandbox" => parse_sandbox(value, path, &mut config)?,
             "integrations" => parse_integrations(value, path, &mut config)?,
+            "control" => parse_control(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
             "memory" => parse_memory(value, path, &mut config)?,
             "git" => parse_git(value, &mut config)?,
             "shell" => parse_shell(value, &mut config)?,
+            "orchestration" => parse_orchestration(value, path, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
             "providers" => parse_providers(value, path, &mut config)?,
             // Known by the ADR, not wired in this slice: the hosts take MCP servers from
@@ -797,14 +829,19 @@ fn parse_model(
                     }
                 }
             }
-            ("context_window", Value::Integer(window)) if *window > 0 => {
-                config.model.context_window = Some(*window as u64);
+            // ADR 0015 (with ADR 0018's "0 or missing is unknown"): a zero window means
+            // **unset**, not a real zero-token window — the guard stays off exactly as if the
+            // key were absent. It is a valid "off" value in the same shape as `retries = 0`
+            // below. A negative or non-integer value is still refused rather than guessed
+            // (fail-closed).
+            ("context_window", Value::Integer(window)) if *window >= 0 => {
+                config.model.context_window = (*window > 0).then_some(*window as u64);
             }
             ("context_window", _) => {
                 return Err(wrong_type(
                     path,
                     "model.context_window",
-                    "a positive integer",
+                    "a non-negative integer",
                 ));
             }
             // ADR 0017: `[model] retries = 3`; `0` disables retrying. A negative or
@@ -912,6 +949,24 @@ fn parse_integrations(value: &Value, path: &Path, config: &mut Config) -> Result
                 return Err(wrong_type(path, "integrations.herdr", "a boolean"));
             }
             (other, _) => config.skipped.push(format!("integrations.{other}")),
+        }
+    }
+    Ok(())
+}
+
+/// Parses `[control]` (ADR 0030 O6, slice 8). Only the `enabled` key exists today; an unknown
+/// key is reported and ignored (the `tui.*` rule, not refuse).
+fn parse_control(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "control", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("enabled", Value::Boolean(on)) => config.control.enabled = *on,
+            ("enabled", _) => {
+                return Err(wrong_type(path, "control.enabled", "a boolean"));
+            }
+            (other, _) => config.skipped.push(format!("control.{other}")),
         }
     }
     Ok(())
@@ -1031,6 +1086,24 @@ fn parse_shell(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
         }
     }
     Ok(())
+}
+
+/// Parses `[orchestration]` (ADR 0030 slice 9, O7/O8). The keys are shared with the project-level
+/// `<workspace>/.radian/orchestration.toml` (see [`crate::orchestration`]). A wrong-typed key is
+/// refused (never guessed at); an unknown key is skipped and named on the startup line (the
+/// preferences rule).
+fn parse_orchestration(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    match crate::orchestration::OrchestrationConfig::from_table(value) {
+        Ok(parsed) => {
+            config.skipped.extend(parsed.skipped.iter().cloned());
+            config.orchestration = parsed;
+            Ok(())
+        }
+        Err(message) => Err(ConfigError::Orchestration {
+            path: path.to_path_buf(),
+            message,
+        }),
+    }
 }
 
 fn parse_memory(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
@@ -1263,13 +1336,10 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             }
             ("keybindings", _) => return Err(wrong_type(path, "tui.keybindings", "a table")),
             ("mouse", Value::Boolean(mouse)) => config.tui.mouse = Some(*mouse),
-            ("input_style", Value::String(style))
-                if matches!(style.as_str(), "bar" | "lines" | "box") =>
-            {
-                config.tui.input_style = Some(style.clone());
-            }
-            // An unknown input style is a display preference: ignore it (and say so), never
-            // refuse the file. The TUI falls back to the default.
+            // The input style is a display preference carried raw (like `tui.spinner`): the TUI
+            // parses it, so an unknown value (the removed `bar` included) warns there, with the
+            // exact spelling, and falls back to `lines` -- never a refusal (ADR 0008).
+            ("input_style", Value::String(style)) => config.tui.input_style = Some(style.clone()),
             ("input_style", _) => config.skipped.push("tui.input_style".into()),
             ("footer", Value::Table(footer)) => {
                 if let Err(key) = parse_footer(footer, config) {
@@ -1884,11 +1954,26 @@ theme = "light"
         assert!(parse_str("schema_version = 1\n[model]\nretries = \"3\"\n").is_err());
     }
 
-    /// `tui.input_style` is carried as a string; the TUI parses it, and an unknown value is a
-    /// skipped key (the `tui.*` rule), not a refusal.
+    /// ADR 0015 (2026-10-16): `[model] context_window` is a non-negative integer, and `0` means
+    /// **unset** — a valid "off" in the same shape as `retries = 0`, never a zero-token window.
+    /// A negative or non-integer value is refused rather than guessed (fail-closed).
     #[test]
-    fn the_tui_input_style_is_carried_and_an_unknown_value_is_skipped() {
-        // ADR 0035 V3: `bar` is the third accepted value (and the default).
+    fn context_window_zero_is_unset_and_a_positive_value_is_carried() {
+        let config = parse_str("schema_version = 1\n[model]\ncontext_window = 200000\n").unwrap();
+        assert_eq!(config.model.context_window, Some(200_000));
+        let config = parse_str("schema_version = 1\n[model]\ncontext_window = 0\n").unwrap();
+        assert_eq!(config.model.context_window, None);
+        assert!(parse_str("schema_version = 1\n[model]\ncontext_window = -1\n").is_err());
+        assert!(parse_str("schema_version = 1\n[model]\ncontext_window = \"200000\"\n").is_err());
+    }
+
+    /// `tui.input_style` is carried as a string; the TUI parses it (the removed `bar` and any
+    /// unknown value warn there), and a non-string is a skipped key (the `tui.*` rule), not a
+    /// refusal.
+    #[test]
+    fn the_tui_input_style_is_carried_and_a_non_string_is_skipped() {
+        // ADR 0035's 2026-10-16 note removed `bar`; the reader still carries the spelling so the
+        // TUI can warn with it. `lines` and `box` are the accepted styles.
         for style in ["bar", "lines", "box"] {
             let config = parse_str(&format!(
                 "schema_version = 1\n[tui]\ninput_style = \"{style}\"\n"
@@ -1898,7 +1983,13 @@ theme = "light"
             assert!(config.skipped.is_empty(), "{style}");
         }
 
+        // Any other string is carried too (the TUI validates it), never a refusal.
         let config = parse_str("schema_version = 1\n[tui]\ninput_style = \"future\"\n").unwrap();
+        assert_eq!(config.tui.input_style.as_deref(), Some("future"));
+        assert!(config.skipped.is_empty());
+
+        // A non-string is skipped.
+        let config = parse_str("schema_version = 1\n[tui]\ninput_style = 3\n").unwrap();
         assert_eq!(config.tui.input_style, None);
         assert!(config.skipped.contains(&"tui.input_style".to_string()));
     }

@@ -26,7 +26,7 @@ fn render(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
 fn the_cursor_cell_counts_display_width_not_chars() {
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
-    // The `lines` style (the `bar` default is exercised below).
+    // The `lines` style (the `box` style is exercised below).
     app.input_style = radian_tui::render::InputStyle::Lines;
     app.input.set_text("你好");
     let terminal = render(&mut app, 20, 8);
@@ -74,26 +74,32 @@ fn a_multiline_input_grows_the_box_and_a_long_one_scrolls_to_the_cursor() {
     assert_eq!(cursor.y, 30 - 1 - 12 + 1 + 9);
 }
 
-/// The `box` style's cursor: one border cell plus the `❯ ` prompt's **two display cells**
-/// (owner hand test 2026-10-14: the prompt's byte length used to shift it two cells right,
-/// because `❯` is three bytes).
+/// The `box` style's cursor: the `│ ` body rail (two cells) plus the `❯ ` prompt's **two
+/// display cells** (owner hand test 2026-10-14: the prompt's byte length used to shift it two
+/// cells right, because `❯` is three bytes).
 #[test]
 fn the_box_cursor_counts_the_prompts_display_width() {
     use radian_tui::render::InputStyle;
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
     app.input_style = InputStyle::Box;
-    // Empty: the border (1) + the prompt (2 cells).
+    // Empty: the body rail (2) + the prompt (2 cells).
     let terminal = render(&mut app, 20, 8);
-    assert_eq!(terminal.backend().cursor_position().x, 3, "empty");
+    assert_eq!(terminal.backend().cursor_position().x, 4, "empty");
     // One ASCII character: right after it.
     app.input.set_text("f");
     let terminal = render(&mut app, 20, 8);
-    assert_eq!(terminal.backend().cursor_position().x, 4, "ASCII");
+    assert_eq!(terminal.backend().cursor_position().x, 5, "ASCII");
     // A CJK character is two cells.
     app.input.set_text("你");
     let terminal = render(&mut app, 20, 8);
-    assert_eq!(terminal.backend().cursor_position().x, 5, "CJK");
+    assert_eq!(terminal.backend().cursor_position().x, 6, "CJK");
+    // The text sits on the row below the frame's top rule (the bottom tail is behind it).
+    assert_eq!(
+        terminal.backend().cursor_position().y,
+        5,
+        "the text row inside the frame"
+    );
 }
 
 /// The `lines` style's cursor for the same cases (its prompt is the same two cells, without a
@@ -112,40 +118,6 @@ fn the_lines_cursor_counts_the_prompts_display_width() {
     app.input.set_text("你");
     let terminal = render(&mut app, 20, 8);
     assert_eq!(terminal.backend().cursor_position().x, 4, "CJK");
-}
-
-/// The `bar` style's cursor: the rail plus its one cell of padding (two display cells), with no
-/// rule or border row above the text — the status row takes that row instead (ADR 0035 V3).
-#[test]
-fn the_bar_cursor_counts_the_rails_display_width() {
-    use radian_tui::render::InputStyle;
-    let mut app = App::new("m", "s");
-    classic_footer(&mut app);
-    app.input_style = InputStyle::Bar;
-    let terminal = render(&mut app, 20, 8);
-    assert_eq!(terminal.backend().cursor_position().x, 2, "empty");
-    app.input.set_text("f");
-    let terminal = render(&mut app, 20, 8);
-    assert_eq!(terminal.backend().cursor_position().x, 3, "ASCII");
-    // A CJK character is two cells, and the cursor respects the rail's display width.
-    app.input.set_text("你");
-    let terminal = render(&mut app, 20, 8);
-    assert_eq!(terminal.backend().cursor_position().x, 4, "CJK");
-    app.input.set_text("你好");
-    let terminal = render(&mut app, 20, 8);
-    assert_eq!(
-        terminal.backend().cursor_position().x,
-        6,
-        "two CJK characters"
-    );
-    // The text sits on the band row, below the status row and the band's top half-cell pad
-    // (ADR 0035: the status row takes the row the `lines` style spends on its top
-    // rule, and the top pad is one more).
-    assert_eq!(
-        terminal.backend().cursor_position().y,
-        5,
-        "on the band, below the status row and the top pad"
-    );
 }
 
 /// A continuation line aligns with the first line's text in **both** styles: the indent is the
@@ -192,23 +164,4 @@ fn a_continuation_line_aligns_with_the_first_line() {
 /// The display column of the first non-space character after the prompt/border.
 fn first_text_column(row: &str) -> usize {
     row.chars().position(|c| c.is_alphanumeric()).unwrap_or(0)
-}
-
-/// ADR 0035: the rail is a half-cell wide (`▌`) and continues into the band's pad
-/// rows as `▖`/`▘`, but the text column does not move — `BAR_LEAD` cells before the text, and
-/// the cursor sits on the character it is on.
-#[test]
-fn the_bar_cursor_stays_at_the_text_column() {
-    let mut app = App::new("m", "s");
-    classic_footer(&mut app);
-    app.input_style = radian_tui::render::InputStyle::Bar;
-    app.input = "ab".into();
-    // The text starts at `BAR_LEAD` (the rail plus its one cell of padding): two cells, then the
-    // two characters, so the cursor is at column 4.
-    let cursor = render(&mut app, 20, 8).backend().cursor_position();
-    assert_eq!(cursor.x, 4, "two lead cells plus the two characters");
-    // Empty input: the cursor is on the text column itself.
-    app.input = "".into();
-    let cursor = render(&mut app, 20, 8).backend().cursor_position();
-    assert_eq!(cursor.x, 2, "the rail plus its one cell of padding");
 }

@@ -253,20 +253,21 @@ impl QuestionForm {
         tabs
     }
 
-    /// The bottom-border key hints, which change with the current tab (R2/R3).
+    /// The bottom-border key hints, which change with the current tab (R2/R3; 
+    /// `space select · ⏎ next`). `Space` is the only select key, so it is advertised on a row it
+    /// actually selects; a free-text field (`text`, a chosen `Other`, a note) takes the space as
+    /// text and only advertises `⏎ next` (the note's `⏎` saves it).
     pub fn hints(&self) -> Vec<Hint> {
         let mut hints = Vec::new();
-        if let Some(question) = self.current_question() {
-            match question.kind {
-                QuestionKind::Single => {
-                    hints.push(Hint::new("⏎", "select"));
-                    hints.push(Hint::new("n", "note"));
-                }
-                QuestionKind::Multi => {
-                    hints.push(Hint::new("space", "toggle"));
-                    hints.push(Hint::new("⏎", "next"));
-                }
-                QuestionKind::Text => {}
+        if self.note_focused() {
+            hints.push(Hint::new("⏎", "save"));
+        } else if self.current_question().is_some() {
+            if self.field_takes_space() {
+                // A `text` question or a chosen `Other` row: the space is text, `⏎` advances.
+                hints.push(Hint::new("⏎", "next"));
+            } else {
+                hints.push(Hint::new("space", "select"));
+                hints.push(Hint::new("⏎", "next"));
             }
         } else {
             hints.push(Hint::new("⏎", "submit"));
@@ -360,7 +361,11 @@ impl QuestionForm {
                     self.select();
                 }
             }
-            // `Enter`: save a note, select-and-advance a `single`, toggle a `multi`, or submit.
+            // `Enter`: save a note, otherwise **only** confirm and advance to the next question
+            // (the last question advances to `Submit`; on `Submit` it submits). It never selects
+            //: a question with nothing chosen still moves on and counts as
+            // unanswered, marked in the overview. Reaching `Submit` still blocks a missing
+            // required answer.
             Action::FormSubmit => {
                 self.confirm_decline = false;
                 if self.editing_note.is_some() {
@@ -368,11 +373,6 @@ impl QuestionForm {
                     return FormOutcome::Stay;
                 }
                 match self.current_question() {
-                    Some(question) if question.kind == QuestionKind::Multi => self.select(),
-                    Some(question) if question.kind == QuestionKind::Single => {
-                        self.select();
-                        self.move_tab(1);
-                    }
                     Some(_) => self.move_tab(1),
                     None => return self.submit(),
                 }
@@ -469,7 +469,9 @@ impl QuestionForm {
         answer.cursor = next;
     }
 
-    /// `Space`/`Enter`: choose the highlighted row (a `multi` toggles, a `single` selects).
+    /// `Space`: choose the highlighted row (a `multi` toggles, a `single` selects). It never
+    /// advances. Choosing `Other` moves the text cursor to the end so the
+    /// next keys type into it at once.
     fn select(&mut self) {
         let Some(index) = self.current else { return };
         let question = &self.questions[index];
@@ -494,13 +496,16 @@ impl QuestionForm {
                     answer.other = false;
                 }
             }
-            // The `Other` row.
+            // The `Other` row: choose it and put the text cursor at the end of its text.
             None => {
                 if question.kind == QuestionKind::Multi {
                     answer.other = !answer.other;
                 } else {
                     answer.other = true;
                     answer.selected.clear();
+                }
+                if answer.other {
+                    answer.text.to_end();
                 }
             }
         }

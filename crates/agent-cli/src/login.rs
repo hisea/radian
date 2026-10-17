@@ -216,6 +216,18 @@ fn aborted(message: String) -> i32 {
 /// `radian login [provider]` (ADR 0026 D3). Without a terminal it refuses and points at
 /// `auth.json`; the key is never echoed.
 pub async fn run_login(provider: Option<String>) -> i32 {
+    // The two ChatGPT OAuth choices (ADR 0026) never ask for a typed secret, so
+    // they skip the "needs a terminal" gate below — that gate exists only because a key
+    // pasted into a pipe would be visible (D3), which does not apply here.
+    match provider.as_deref() {
+        Some(id) if id == radian_host::CHATGPT_PROVIDER_ID => {
+            return run_chatgpt_browser_login().await;
+        }
+        Some(id) if id == radian_host::CHATGPT_DEVICE_LOGIN => {
+            return run_chatgpt_device_login().await;
+        }
+        _ => {}
+    }
     if !is_tty() {
         return aborted(
             "login needs a terminal (a key in a pipe would be visible); edit \
@@ -270,6 +282,12 @@ pub async fn run_login(provider: Option<String>) -> i32 {
                 Ok(index) if (1..=choices.len()).contains(&index) => choices[index - 1].0.clone(),
                 _ => answer.trim().to_owned(),
             };
+            if picked == radian_host::CHATGPT_PROVIDER_ID {
+                return run_chatgpt_browser_login().await;
+            }
+            if picked == radian_host::CHATGPT_DEVICE_LOGIN {
+                return run_chatgpt_device_login().await;
+            }
             if picked == radian_host::CUSTOM_LOGIN {
                 match ask_custom_steps() {
                     Ok(steps) => steps,
@@ -391,6 +409,85 @@ fn ask_custom_steps() -> Result<(String, String, String), i32> {
         ));
     }
     Ok((name, kind, base_url))
+}
+
+/// `radian login chatgpt` (ADR 0026): PKCE + the fixed loopback callback. Printed,
+/// not hidden — there is no key to type, only a URL. A busy port 1455 is reported by
+/// `BrowserLogin::start`'s own error, which already names the device-code login as the
+/// alternative (`oauth_chatgpt::OAuthError::PortBusy`'s `Display`).
+async fn run_chatgpt_browser_login() -> i32 {
+    let endpoints = radian_host::OAuthEndpoints::default();
+    let (login, listener) = match radian_host::BrowserLogin::start(&endpoints).await {
+        Ok(pair) => pair,
+        Err(error) => return aborted(error.to_string()),
+    };
+    println!("opening your browser to sign in with ChatGPT…");
+    println!("if it does not open, visit:\n  {}", login.authorize_url);
+    radian_host::oauth_chatgpt::try_open_browser(&login.authorize_url);
+    println!("waiting for the browser to finish sign-in…");
+    let token = match login
+        .finish(
+            &endpoints,
+            listener,
+            radian_host::oauth_chatgpt::CALLBACK_TIMEOUT,
+        )
+        .await
+    {
+        Ok(token) => token,
+        Err(error) => return aborted(error.to_string()),
+    };
+    finish_chatgpt_login(&token)
+}
+
+/// `radian login chatgpt-device`: no loopback listener, no browser required on this machine.
+async fn run_chatgpt_device_login() -> i32 {
+    let endpoints = radian_host::OAuthEndpoints::default();
+    let start = match radian_host::oauth_device_start(&endpoints).await {
+        Ok(start) => start,
+        Err(error) => return aborted(error.to_string()),
+    };
+    println!(
+        "go to {} and enter this code:\n  {}",
+        radian_host::oauth_chatgpt::DEVICE_VERIFICATION_URL,
+        start.user_code
+    );
+    println!("waiting for you to finish sign-in…");
+    // The same overall budget as the browser flow's callback wait, at the server's own poll
+    // interval (floored at `DEVICE_POLL_MIN_INTERVAL`).
+    let max_polls = (radian_host::oauth_chatgpt::CALLBACK_TIMEOUT.as_secs()
+        / start.interval.as_secs().max(1))
+    .max(1) as u32;
+    let token = match radian_host::oauth_poll_device_until_done(
+        &endpoints,
+        &start,
+        start.interval,
+        max_polls,
+    )
+    .await
+    {
+        Ok(token) => token,
+        Err(error) => return aborted(error.to_string()),
+    };
+    finish_chatgpt_login(&token)
+}
+
+/// Saves the credential and prints the honest "what next" line: the Responses adapter and
+/// the `chatgpt` provider descriptor are later slices (ADR 0026), so there is
+/// nothing to switch to yet — only `radian login`'s own job (storing the credential) is done.
+fn finish_chatgpt_login(token: &radian_host::OAuthTokenResponse) -> i32 {
+    let result = radian_host::AuthStore::open()
+        .and_then(|mut store| radian_host::oauth_store_token(&mut store, token))
+        .map_err(|error| error.to_string());
+    match result {
+        Ok(()) => {
+            println!(
+                "signed in to ChatGPT; saved in credentials/auth.json. Nothing uses it yet — \
+                 the ChatGPT provider and its request adapter ship in a later change."
+            );
+            0
+        }
+        Err(error) => aborted(format!("could not save the sign-in: {error}")),
+    }
 }
 
 /// `radian logout <provider>`: confirm, then remove **only** that entry (D3).

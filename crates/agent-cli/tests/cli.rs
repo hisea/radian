@@ -233,6 +233,58 @@ async fn feed_and_wait(mut child: Child, input: &str) -> (i32, String, String) {
     )
 }
 
+/// Feeds one message per turn: writes a line, then waits for that turn's `TurnFinished` in the
+/// session journal before writing the next. The wait matters when the CLI reads stdin while a
+/// turn is in flight — `--yes`, or nobody to ask — because a line written early is taken as a
+/// **steer** and joins the running turn (ADR 0011) instead of opening the next one, so a
+/// two-line feed becomes one turn (three model calls, not four) under load. `sessions` is the
+/// session directory to watch. Every line must be a message that opens its own turn.
+async fn feed_turns_and_wait(
+    mut child: Child,
+    sessions: &Path,
+    lines: &[&str],
+) -> (i32, String, String) {
+    let mut stdin = child.stdin.take().unwrap();
+    for (index, line) in lines.iter().enumerate() {
+        stdin.write_all(line.as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
+        stdin.flush().await.unwrap();
+        let turns = index + 1;
+        wait_until(
+            &format!("{turns} TurnFinished under {}", sessions.display()),
+            || journal_turns(sessions) >= turns,
+        )
+        .await;
+    }
+    drop(stdin);
+    let output = tokio::time::timeout(EXIT_WATCHDOG, child.wait_with_output())
+        .await
+        .expect("the CLI did not exit within the watchdog")
+        .expect("wait");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// The number of `TurnFinished` events across the session files in `sessions`.
+fn journal_turns(sessions: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(sessions) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .map(|entry| {
+            std::fs::read_to_string(entry.path())
+                .unwrap_or_default()
+                .matches("\"event\":\"TurnFinished\"")
+                .count()
+        })
+        .sum()
+}
+
 fn sigint(child: &Child) {
     // SAFETY: signal delivery to our own child process.
     unsafe {
@@ -486,8 +538,8 @@ async fn one_shot_streams_text_to_stdout_only() {
     assert_eq!(code, 0);
     assert_eq!(stdout, "Hello there\n");
     assert!(!stderr.contains("Hello there"), "{stderr}");
-    // The first message is the system prompt (the built-in `diagrams` skill is in it); the
-    // user's words are the user message.
+    // The first message is the system prompt (the skill list is in it); the user's words are
+    // the user message.
     assert_eq!(last_user_text(&messages_of(&server, 0)), "hi");
 }
 
@@ -2014,6 +2066,179 @@ async fn without_workspace_the_built_in_tools_do_not_exist() {
     );
 }
 
+// ---------- the `[git]` section (ADR 0030 R10 and revision 4, ADR 0032) ----------
+
+/// Writes `body` to `path` and makes it executable.
+fn write_script(path: &Path, body: &str) {
+    std::fs::write(path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// A fresh repository with one commit on `branch`.
+fn repo_on_branch(dir: &Path, branch: &str) {
+    git(dir, &["init", "-q", "-b", branch]);
+    git(dir, &["config", "user.email", "t@example.invalid"]);
+    git(dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("seed.txt"), "seed\n").unwrap();
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-qm", "seed"]);
+}
+
+/// How many commits `HEAD` reaches.
+fn commits_at_head(dir: &Path) -> usize {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["rev-list", "--count", "HEAD"])
+        .output()
+        .expect("run git rev-list");
+    assert!(out.status.success(), "git rev-list --count HEAD");
+    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+}
+
+/// ADR 0030 R10 and ADR 0032: `radian exec` resolves `[git] protected_branches` from its own
+/// config exactly like the TUI, so `git_commit` refuses a commit on a configured protected
+/// branch. The session here is a general one (`refuse_main = false`, ADR 0038 decision 4), so
+/// `main` is refused **only** because the config names it: on the pre-fix CLI, which passed
+/// `Vec::new()`, the commit goes through.
+#[tokio::test]
+async fn exec_refuses_a_commit_on_a_configured_protected_branch() {
+    if !git_available() {
+        eprintln!("skipping: git is not on PATH");
+        return;
+    }
+    let dir = scratch("git-protected-branch");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    repo_on_branch(&ws, "main");
+    let config = write_file(
+        &dir,
+        "config.toml",
+        "schema_version = 1\n[git]\nprotected_branches = [\"main\"]\n",
+    );
+    std::fs::write(ws.join("new.txt"), "hello\n").unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "git_commit", r#"{"message":"add new.txt"}"#),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--config",
+                config.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "commit the change",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        result.contains("configured protected branches are refused"),
+        "the configured protected branch must be refused: {result}"
+    );
+    assert_eq!(
+        commits_at_head(&ws),
+        1,
+        "the refusal must not have created a commit"
+    );
+}
+
+/// ADR 0030, ADR 0039 decision 3, ADR 0032: the `[git] allowed_filters` list the CLI
+/// resolves governs which drivers `git_commit` may run. An empty list allows none, so the `lfs`
+/// driver the `.gitattributes` names is refused and Radian's own `git-lfs clean` (the
+/// `RADIAN_GIT_LFS` seam) never runs. A CLI that passes `None` silently falls back to the
+/// default `["lfs"]`, runs the driver and commits.
+#[tokio::test]
+async fn exec_honours_the_configured_git_allowed_filters() {
+    if !git_available() {
+        eprintln!("skipping: git is not on PATH");
+        return;
+    }
+    let dir = scratch("git-allowed-filters");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    repo_on_branch(&ws, "main");
+    let config = write_file(
+        &dir,
+        "config.toml",
+        "schema_version = 1\n[git]\nallowed_filters = []\n",
+    );
+    std::fs::write(ws.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+    std::fs::write(ws.join("data.bin"), "payload\n").unwrap();
+    // Radian's own fixed `git-lfs clean`, faked: it leaves a marker behind, so a run that
+    // reached it is visible even though the commit itself would succeed.
+    let marker = dir.join("GIT-LFS-RAN");
+    let fake = dir.join("fake-git-lfs");
+    write_script(
+        &fake,
+        &format!(
+            "#!/bin/sh\necho ran >> {}\nprintf 'version https://git-lfs.github.com/spec/v1\\noid sha256:0\\nsize 8\\n'\n",
+            marker.display()
+        ),
+    );
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "git_commit", r#"{"message":"add data"}"#),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--config",
+                config.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "commit the change",
+            ],
+            &[("RADIAN_GIT_LFS", fake.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        result.contains("data.bin") && result.contains("allowed_filters"),
+        "an empty `[git] allowed_filters` must refuse the `lfs` driver: {result}"
+    );
+    assert!(
+        !marker.exists(),
+        "the configured allow-list must keep the `lfs` driver from running"
+    );
+    assert_eq!(
+        commits_at_head(&ws),
+        1,
+        "the refusal must not have created a commit"
+    );
+}
+
 // ---------- sessions on disk (Phase 2 / B) ----------
 
 /// 1: a new session writes a valid, contiguous JSONL with the runtime's events.
@@ -3158,6 +3383,109 @@ async fn without_a_window_the_budget_is_off_and_says_so() {
     assert!(stderr.contains("no budget"), "{stderr}");
     // The turn ran to completion: both requests were sent.
     assert_eq!(server.requests().len(), 2, "{stderr}");
+}
+
+/// ADR 0015 (a zero window is unset, never a real zero): `[model] context_window = 0` leaves
+/// the window unknown in `radian exec`, exactly like the key being absent, and the turn runs
+/// with the guard off. A reader that refuses `0` fails startup here; a host that read `0` as a
+/// real window would carry a zero budget instead of no budget.
+#[tokio::test]
+async fn a_zero_context_window_in_the_config_is_unset_and_the_guard_is_off() {
+    let (dir, ws) = budget_workspace("budget-zero-config");
+    let config = write_file(
+        &dir,
+        "config.toml",
+        "schema_version = 1\n[model]\ncontext_window = 0\n",
+    );
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--config",
+                config.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert!(stderr.contains("[budget] window unknown"), "{stderr}");
+    assert!(stderr.contains("no budget"), "{stderr}");
+    assert!(
+        !stderr.contains("positive integer"),
+        "a zero window is unset, not a config error: {stderr}"
+    );
+    assert_eq!(server.requests().len(), 1, "{stderr}");
+}
+
+/// ADR 0015: the flag's zero is a **usage error**, not the config's spelling of "unset". This
+/// run gives the catalog a cached window (`C 20000, I 18000`, i.e. `B 15000`), so a host that
+/// read `--context-window 0` as "not given" would start the turn with the catalog's window:
+/// the test fails on the exit code, on the missing refusal and on the request the mock never
+/// should have seen.
+#[tokio::test]
+async fn a_zero_context_window_flag_is_a_usage_error() {
+    let (dir, ws) = budget_workspace("budget-zero-flag");
+    // The cache the run would read (`--offline-catalog`), in the shape models.dev serves.
+    let home = dir.join("radian");
+    let cache = home.join("cache/catalog/models.json");
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cache,
+        r#"{"acme": {"id": "acme", "models": {"m": {"id": "m",
+            "limit": {"context": 20000, "input": 18000, "output": 4096}}}}}"#,
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--catalog-provider",
+                "acme",
+                "--offline-catalog",
+                "--context-window",
+                "0",
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "go",
+            ],
+            &[("RADIAN_HOME", home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("--context-window must be at least 1 token"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("done"), "{stdout}");
+    assert_eq!(
+        server.requests().len(),
+        0,
+        "the turn must not run: {stderr}"
+    );
 }
 
 /// 2: over the input budget `B` the request is **still sent** and the turn completes
@@ -6027,7 +6355,7 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
         text_reply("done"),
     ])
     .await;
-    let (code, _, stderr) = feed_and_wait(
+    let (code, _, stderr) = feed_turns_and_wait(
         spawn_radian(
             &[
                 "--model",
@@ -6045,8 +6373,9 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
                 ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
             ],
         ),
+        &env.sessions,
         // Turn 1 writes and saves the record; turn 2's text hits it.
-        "first\nsecond\n",
+        &["first", "second"],
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
@@ -6415,7 +6744,7 @@ async fn memory_additions_can_be_turned_off_in_the_config() {
         text_reply("done"),
     ])
     .await;
-    let (code, _, stderr) = feed_and_wait(
+    let (code, _, stderr) = feed_turns_and_wait(
         spawn_radian(
             &[
                 "--model",
@@ -6435,7 +6764,8 @@ async fn memory_additions_can_be_turned_off_in_the_config() {
                 ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
             ],
         ),
-        "first\nsecond\n",
+        &env.sessions,
+        &["first", "second"],
     )
     .await;
     assert_eq!(code, 0, "{stderr}");

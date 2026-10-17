@@ -21,6 +21,9 @@ clap = { version = "4", features = ["derive"] }
 agent-extensions = { path = "../agent-extensions" }
 agent-provider-anthropic = { path = "../agent-provider-anthropic" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
+# The `chatgpt` descriptor's wire protocol (ADR 0026 slice 3); already in the
+# workspace since slice 2.
+agent-provider-openai-responses = { path = "../agent-provider-openai-responses" }
 radian-coding = { path = "../radian-coding" }
 # `QueuedApprover` implements `radian_permissions::Approver` (ADR 0023 U7); the trait lives
 # with the approval layer.
@@ -30,10 +33,8 @@ radian-runtime = { path = "../radian-runtime" }
 # The memory service (ADR 0021 D2/D8) sits on the storage layer.
 radian-memory = { path = "../radian-memory" }
 radian-sandbox = { path = "../radian-sandbox" }
-# The bounded Mermaid renderer (ADR 0028 R8): `mermaid_check` renders with the same crate the
-# TUI draws with, so the check and the transcript cannot disagree.
-codex-mermaid = { path = "../../third_party/codex-mermaid" }
-# `mermaid_check` reports the diagram's real display width (CJK and box characters are 2 cells).
+# Real display width for short model-brand labels (CJK and fullwidth characters are 2 cells);
+# `config` measures a brand before padding it.
 unicode-width = "0.2.2"
 # Reused for the owner-only file/directory creation (ADR 0013) in `diagnostics`.
 radian-session = { path = "../radian-session" }
@@ -41,8 +42,9 @@ radian-session = { path = "../radian-session" }
 # same `chrono` the session writer already uses to format them, so no new crate enters the tree.
 chrono = "0.4"
 # The model catalog fetches over HTTP (ADR 0018); the same client the adapters use, so no new
-# dependency is introduced.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy"] }
+# dependency is introduced. `json`/`form`: the ChatGPT OAuth token and device-code endpoints
+# (ADR 0026 slice ①) are JSON and form-encoded respectively.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy", "json", "form"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -53,11 +55,22 @@ libc = "0.2"
 # The pending-request queue (ADR 0023 U7) needs `oneshot`/`watch`, and `Approver::decide`
 # returns a `BoxFuture`.
 futures-util.workspace = true
-tokio = { workspace = true }
+# `net`/`io-util`: the ChatGPT OAuth login's one-shot loopback callback listener (ADR 0026
+# revision 1 slice ①) is production code, not a test fixture, so these two features are on
+# unconditionally (the mock-server crates only need them under `testing`).
+tokio = { workspace = true, features = ["net", "io-util"] }
 # The configuration file (ADR 0008) is TOML. `toml` reads it; `toml_edit` is the one place
 # that writes it back, format-preserving (`/theme`, ADR 0008 revision).
 toml = "0.8"
 toml_edit = "0.22"
+# SHA-256 for the OAuth PKCE challenge (ADR 0026 slice ①); the same crate and
+# version `agent-extensions` already depends on, so no new major version enters the tree.
+sha2 = "0.10"
+# A cryptographically secure RNG for the PKCE verifier and the CSRF `state` (hand-rolling a
+# random source for these is exactly the kind of "inventing crypto" AGENTS.md warns against);
+# already resolved transitively (rustls' `ring`), this makes it a direct, auditable dependency
+# at the version already in the lockfile.
+getrandom = "0.3"
 
 [dev-dependencies]
 # The crate's own tests always build with the worktree-root test seam, so a plain `cargo test`
@@ -67,4 +80,7 @@ radian-host = { path = ".", features = ["testing"] }
 radian-session = { path = "../radian-session", features = ["testing"] }
 # The catalog tests use the adapter's local mock HTTP server, never the real network.
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
+# The chatgpt provider tests use this adapter's own local mock HTTP server (never the real
+# network).
+agent-provider-openai-responses = { path = "../agent-provider-openai-responses", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

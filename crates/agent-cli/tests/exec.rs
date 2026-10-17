@@ -181,3 +181,46 @@ async fn a_missing_workspace_is_refused_with_the_radian_prefix() {
     );
     assert!(!err.contains("agent: "), "{err}");
 }
+
+/// ADR 0030 O6 (slice 8): a hosting process binds `$RADIAN_HOME/run/<pid>.sock`, names it on
+/// the startup line, and removes it when the process exits.
+#[tokio::test]
+async fn the_control_socket_is_named_and_removed_when_the_process_exits() {
+    use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
+
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(
+            serde_json::json!({"role": "assistant", "content": "ok"}),
+            None,
+        ),
+        chunk(serde_json::json!({}), Some("stop")),
+    ])])
+    .await;
+    let env = Env::fresh("control-socket");
+    let child = spawn_in(
+        &[
+            "exec",
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "-p",
+            "hi",
+        ],
+        &env,
+    );
+    let pid = child.id().expect("the child pid");
+    let socket = env.home.join("run").join(format!("{pid}.sock"));
+
+    let (code, stdout, stderr) = run(child).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("ok"), "{stdout}");
+    assert!(
+        stderr.contains(&socket.display().to_string()),
+        "the startup line names the socket at {socket:?}: {stderr}"
+    );
+    assert!(
+        !socket.exists(),
+        "the control socket is removed when the process exits: {socket:?}"
+    );
+}

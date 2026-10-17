@@ -225,6 +225,27 @@ impl Profile {
         self
     }
 
+    /// Denies every tool in `names` (ADR 0030 problem 7 = A). An agent definition's `tools`
+    /// allow-list is enforced with this: the host passes the built-ins the list does **not**
+    /// name, and `deny` outranks `allow`/`ask`, so a listed tool the tier would not mount stays
+    /// unmounted and an unlisted tool cannot run. It only ever adds `deny` rules, so it can
+    /// narrow a tier but never widen one (ADR 0030 O2).
+    pub fn with_denied_tools<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.rules.extend(names.into_iter().map(|name| {
+            Rule::new(
+                ToolMatcher::Name(name.into()),
+                ResourceMatcher::Any,
+                Action::Deny,
+            )
+            .with_reason("not in this agent's tool allow-list (ADR 0030 O11)")
+        }));
+        self
+    }
+
     fn build(
         preset: Preset,
         workspace: impl AsRef<Path>,
@@ -289,9 +310,7 @@ fn read_only() -> Vec<Rule> {
 /// **is not a permission**, so reading one never prompts and grants nothing. Both still go
 /// through the ordinary hook path.
 fn always_allowed() -> Vec<Rule> {
-    // `mermaid_check` (ADR 0028 R8 / ADR 0025) joins them: it renders text and reads no
-    // file, so it is `allow` in every tier too.
-    ["ask_user", "skill", "mermaid_check"]
+    ["ask_user", "skill"]
         .into_iter()
         .map(|name| {
             Rule::new(
@@ -423,20 +442,6 @@ mod tests {
             let tier = profile.preset.as_str();
             assert_eq!(action(&profile, "glob"), Action::Allow, "{tier}");
             assert_eq!(action(&profile, "grep"), Action::Allow, "{tier}");
-        }
-    }
-
-    /// ADR 0028 R8: `mermaid_check` is read-only, so every tier allows it.
-    #[test]
-    fn mermaid_check_is_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
-        for profile in [
-            Profile::safe(&ws).unwrap(),
-            Profile::workspace_write(&ws).unwrap(),
-            Profile::full_access(&ws).unwrap(),
-        ] {
-            let tier = profile.preset.as_str();
-            assert_eq!(action(&profile, "mermaid_check"), Action::Allow, "{tier}");
         }
     }
 

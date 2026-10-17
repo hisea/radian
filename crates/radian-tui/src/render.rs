@@ -206,16 +206,17 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         // folded one-liner overrides this with the fold marker in `render_row`. Two cells under
         // every tier, so the body column never moves.
         EntryKind::Reasoning => REASONING_MARKER,
-        // ADR 0028: a tool block's marker column carries `• ` on its
-        // head row and `│ ` on its body rows (drawn by [`render_row`], not by the generic
-        // lead — both are two cells, like every other marker).
+        // ADR 0035's 2026-10-16 "折叠标记统一" note: a tool block's marker column carries the
+        // head's fold marker (`• `/`◼ `/`◻ `, ascii `* + -`) on its head row and `│ ` on its
+        // body rows (drawn by [`render_row`], not by the generic lead — both are two cells,
+        // like every other marker). This is only the width's default spelling.
         EntryKind::ToolCall => "• ",
         EntryKind::ToolResult => "│ ",
         EntryKind::Notice => "* ",
         // The compaction line has no marker of its own: it is a rule-like `── … ──` line.
         EntryKind::Compaction => "",
-        // The startup block has no marker of its own: its lines carry `▶`/`▼` (or none for
-        // the wordmark). The warning marker is its own; `Tip:` is styled separately.
+        // The startup block has no marker of its own (the `Tip:` label is content). The warning
+        // marker is its own.
         EntryKind::Banner => "  ",
         EntryKind::Startup => "  ",
         EntryKind::Warning => "! ",
@@ -230,18 +231,16 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
 /// The default (unicode) spelling, also what [`marker_prefix`] returns for the width.
 const USER_MARKER: &str = "❯ ";
 
-/// The expanded thinking channel's header marker (ADR 0035, with the
-/// owner's 2026-10-16 glyph note: `▼`/`▶` replace the design's `▾`/`▸`, which miss Fira Code
-/// and Source Code Pro). `ascii` maps to `v` (ADR 0035). Two cells
-/// under every tier.
-const REASONING_MARKER: &str = "▼ ";
+/// The expanded thinking channel's header marker (ADR 0035, superseded by
+/// the 2026-10-16 "折叠标记统一" note: the thinking header and an expandable tool head share the
+/// pair `◼` folded / `◻` expanded, ascii `+`/`-`). This is the **expanded** spelling, `◻ `
+/// (ascii `- `); two cells under every tier, so the body column never moves.
+const REASONING_MARKER: &str = "◻ ";
 
-/// The thinking channel's header marker in the terminal's glyph set.
+/// The thinking channel's header marker in the terminal's glyph set: `◻ ` normally, `- ` under
+/// `ascii` ([`crate::footer::Glyphs::open_marker`]).
 fn reasoning_marker(glyphs: crate::footer::Glyphs) -> &'static str {
-    match glyphs {
-        crate::footer::Glyphs::Ascii => "v ",
-        _ => REASONING_MARKER,
-    }
+    glyphs.open_marker()
 }
 
 /// The user row's marker in the terminal's glyph set (ADR 0035): `❯ `
@@ -258,7 +257,8 @@ fn marker(kind: EntryKind, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'s
         EntryKind::User => theme.user,
         EntryKind::Assistant => Style::default(),
         EntryKind::Reasoning => theme.reasoning,
-        // The tool block's own markers (`• `/`│ `) are `frame` (ADR 0035).
+        // The tool block's own markers (`│ ` and the head's fold marker) are `frame` (ADR 0035
+        // revision 6 decision 2).
         EntryKind::ToolCall | EntryKind::ToolResult => theme.frame,
         EntryKind::Notice => theme.notice,
         EntryKind::Banner => theme.hint,
@@ -322,38 +322,6 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
     }
 }
 
-/// The style a band's half-cell pad cell takes (ADR 0035): the band's own color as
-/// the foreground and no background of its own — the band's background is painted on the block's
-/// text rows, which this row sits half a cell against. Under `mono` both are absent, so the half
-/// cell is the terminal default — still a visible block, just uncolored.
-fn band_pad_style(band: Style) -> Style {
-    let mut style = Style::default().add_modifier(band.add_modifier);
-    if let Some(color) = band.bg.or(band.fg) {
-        style = style.fg(color);
-    }
-    style
-}
-
-/// The `bar` input's half-cell padding row (ADR 0035): the rail's own cell first —
-/// `rail` is `▖` (quadrant lower left) on the row above the band, `▘` (quadrant upper left) on
-/// the row below it, both in the accent — then the band's half cell (`glyph`) across the rest.
-/// The quadrant is what lets the rail stop at the half cell: the cell keeps the terminal's own
-/// background (its right half carries no band on a pad row, which is the cost of the shape), so
-/// the rail reads as two cells tall with a straight right edge next to the `▌` text rows.
-fn bar_pad_line(
-    rail: &str,
-    rail_style: Style,
-    glyph: &str,
-    width: usize,
-    band: Style,
-) -> Line<'static> {
-    let mut spans = vec![Span::styled(rail.to_string(), rail_style)];
-    if width > 1 {
-        spans.push(Span::styled(glyph.repeat(width - 1), band_pad_style(band)));
-    }
-    Line::from(spans)
-}
-
 /// The text a frame shows for `entry`. A user message's `@` attachments are folded to one
 /// `[file: P, N lines]` line each; every other entry shows its text unchanged. Display only:
 /// the message (and the journal) keep the full text. Also what a selection maps offsets into
@@ -383,8 +351,10 @@ fn entry_lines(
     width: usize,
     theme: &Theme,
     spinner: crate::spinner::Frame,
+    body_follows: bool,
 ) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
+    let head_marker = blocks::head_marker(entry, modes, body_follows);
     let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
     let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
     let style = body_style(entry, theme);
@@ -405,6 +375,7 @@ fn entry_lines(
             Some(i) == first_text,
             modes.glyphs,
             spinner,
+            head_marker,
         );
         if Some(i) == last && entry.interrupted {
             line.spans
@@ -453,10 +424,14 @@ fn render_row(
     first_text: bool,
     glyphs: crate::footer::Glyphs,
     spinner: crate::spinner::Frame,
+    head_marker: blocks::HeadMarker,
 ) -> Line<'static> {
     match row.frame {
-        // The tool block's head (ADR 0028): `• ` and the head's pieces.
-        blocks::Frame::Head => return render_head_row(row, style, theme, glyphs, spinner),
+        // The tool block's head (ADR 0028): the fold marker and the
+        // head's pieces.
+        blocks::Frame::Head => {
+            return render_head_row(row, style, theme, glyphs, spinner, head_marker);
+        }
         // A `│ `-prefixed body row.
         blocks::Frame::Body => {
             return render_body_row(entry, row, style, theme, first_text, glyphs);
@@ -465,8 +440,8 @@ fn render_row(
     }
     // The collapsed reasoning placeholder is one synthetic line: its marker is the marker
     // column's own glyph (ADR 0028 rule 5), so the body column does not move
-    // between folded and expanded. The marker is the tier's fold glyph (ADR 0035
-    // decision 2 with the owner's glyph note: `▶` for unicode/nerd, `>` under ascii).
+    // between folded and expanded. The marker is the tier's folded glyph (ADR 0035's 2026-10-16
+    // "折叠标记统一" note: `◼ ` for unicode/nerd, `+ ` under ascii).
     let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
     // An expanded thinking row (ADR 0028): the header carries the expand
     // marker, every other **prose** row the `│ ` rail in the marker column, so the body stays at
@@ -483,7 +458,7 @@ fn render_row(
     } else if row.code {
         String::new()
     } else if placeholder {
-        format!("{} ", glyphs.fold_marker())
+        glyphs.fold_marker().to_string()
     } else if first_text {
         prefix.to_string()
     } else {
@@ -536,9 +511,10 @@ fn role_style(role: crate::tools::LineRole, style: Style, theme: &Theme) -> Styl
     }
 }
 
-/// A tool block's head row (ADR 0028): the `• ` marker (the `frame`
-/// role, in the marker column, never copied) and the row's pieces — the tool name
-/// (`tool_name`), the title (the entry's own text), the meta (weak) and the status glyph.
+/// A tool block's head row (ADR 0028): the fold marker (the `frame` role,
+/// in the marker column, never copied) and the row's pieces — the tool name (`tool_name`), the
+/// title (the entry's own text), the meta (weak) and the status glyph. The marker itself is the
+/// head's [`blocks::HeadMarker`] (ADR 0035's 2026-10-16 "折叠标记统一" note, option A).
 ///
 /// A **running** call's status is the live spinner frame in place of the placeholder the
 /// layout carries (ADR 0027/13), drawn with the pulse's own colour.
@@ -549,8 +525,9 @@ fn render_head_row(
     theme: &Theme,
     glyphs: crate::footer::Glyphs,
     spinner: crate::spinner::Frame,
+    marker: blocks::HeadMarker,
 ) -> Line<'static> {
-    let mut spans = vec![Span::styled(tool_marker(glyphs).to_string(), theme.frame)];
+    let mut spans = vec![Span::styled(marker.glyph(glyphs).to_string(), theme.frame)];
     match &row.md {
         Some(pieces) => {
             for piece in pieces {
@@ -585,15 +562,6 @@ fn render_body_row(
     let body = role_style(row.role, style, theme);
     spans.extend(body_spans(entry, row, body, theme, first_text));
     Line::from(spans)
-}
-
-/// The tool block's head marker (ADR 0035): `• `, `- ` under `ascii`.
-/// Two cells, like every marker.
-pub(crate) fn tool_marker(glyphs: crate::footer::Glyphs) -> &'static str {
-    match glyphs {
-        crate::footer::Glyphs::Ascii => "- ",
-        _ => "• ",
-    }
 }
 
 /// The tool block's body marker (ADR 0028): `│ `, `| ` under `ascii`.
@@ -656,9 +624,36 @@ pub fn transcript_lines_with(
             Line::from(""),
             blocks::gap_at(entries, index),
         ));
-        out.extend(entry_lines(entry, modes, width, theme, spinner));
+        // Whether a body is drawn under this tool head (the head's fold marker, ADR 0035's
+        // 2026-10-16 note): the reference path measures the paired result without its cache.
+        let result_lines = entries
+            .get(index + 1)
+            .filter(|next| next.kind == EntryKind::ToolResult)
+            .map_or(0, |next| blocks::line_count(next, modes, width));
+        let body_follows = tool_body_follows(entries, index, result_lines);
+        out.extend(entry_lines(
+            entry,
+            modes,
+            width,
+            theme,
+            spinner,
+            body_follows,
+        ));
     }
     out
+}
+
+/// Whether the tool call at `index` has a body drawn under its head (ADR 0035's 2026-10-16
+/// "折叠标记统一" note, option A): the call is a merged block's head, its paired result is the
+/// next entry, and that result lays out at least `result_lines` > 0. The head lives on the call
+/// entry and the body on the result's, so only the pair can decide the head's fold marker.
+fn tool_body_follows(entries: &[Entry], index: usize, result_lines: usize) -> bool {
+    entries[index].kind == EntryKind::ToolCall
+        && entries[index].card == blocks::Card::Head
+        && entries
+            .get(index + 1)
+            .is_some_and(|next| next.kind == EntryKind::ToolResult)
+        && result_lines > 0
 }
 
 /// The transcript's total line count and the `height` lines starting at line `start`, laying
@@ -723,6 +718,10 @@ pub fn visible_lines_with(
         }
         let gap = blocks::gap_at(entries, index);
         let count = counts[index];
+        // Whether the paired result draws a body (the head's fold marker, ADR 0035's 2026-10-16
+        // note): the result's cached count is already in `counts`.
+        let body_follows =
+            tool_body_follows(entries, index, counts.get(index + 1).copied().unwrap_or(0));
         let entry = &mut entries[index];
         let next = line + gap + count;
         if next > start {
@@ -743,6 +742,7 @@ pub fn visible_lines_with(
             let blocks = blocks::blocks_for(entry, modes.reasoning);
             let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
             let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
+            let head_marker = blocks::head_marker(entry, modes, body_follows);
             let style = body_style(entry, theme);
             let first_text = (!body.is_empty()).then_some(0);
             let last = body.len().checked_sub(1);
@@ -762,6 +762,7 @@ pub fn visible_lines_with(
                             Some(i) == first_text,
                             modes.glyphs,
                             spinner,
+                            head_marker,
                         );
                         if Some(i) == last && entry.interrupted {
                             line.spans
@@ -785,25 +786,23 @@ const FIND_BOX_HEIGHT: u16 = 3;
 /// How the input area is drawn (config `tui.input_style`, owner UI review 2026-10-13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputStyle {
-    /// The banded input (ADR 0035 V3, omp's `rail`): one background band per row with a left
-    /// accent rail, no border and no rules, and a fixed status row above the band. Still
-    /// selectable (`tui.input_style = "bar"`, ADR 0035).
-    Bar,
     /// A rule above and below, `❯ ` on the first line, continuation lines indented two cells
     /// (ADR 0035: the default).
     #[default]
     Lines,
-    /// The bordered box with a ` message ` title (the pre-review shape).
+    /// The thin half frame (ADR 0035, the 2026-10-16 note): an **open**
+    /// frame shaped like a code block's — a full-width top rule (idle) or a status label
+    /// (running), each input row `│ ❯ text` (`│   text` for a continuation), and a `╰──` tail.
     Box,
 }
 
 impl InputStyle {
     /// The config spelling. `None` for anything else, so the caller falls back to the default.
+    /// `bar` was removed (ADR 0035's 2026-10-16 note); the caller warns once and uses `lines`.
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "lines" => Some(Self::Lines),
             "box" => Some(Self::Box),
-            "bar" => Some(Self::Bar),
             _ => None,
         }
     }
@@ -815,8 +814,8 @@ impl InputStyle {
 /// reserves — never its byte length (`❯` is three bytes, which used to shift the box cursor).
 const INPUT_PROMPT: &str = "❯ ";
 
-/// The bordered style's prompt: the owner's `❯`, colored with the theme's
-/// accent role (`theme.model`, pi's `accent`). Two cells, like `> `.
+/// The `box` style's prompt: the owner's `❯`, colored with the theme's
+/// accent role (`theme.notice_label`). Two cells, like `> `.
 const BOX_PROMPT: &str = "❯ ";
 
 /// The placeholder shown while the input is empty.
@@ -901,6 +900,32 @@ pub fn login_panel(
                 )))
                 .row(label("save anyway?"));
             panel = panel.hint("y", "save").hint("n/esc", "cancel");
+        }
+        LoginStep::OAuthBrowserWaiting { url } => {
+            panel = panel.row(label("signing in with ChatGPT…"));
+            match url {
+                Some(url) => {
+                    panel = panel
+                        .row(label("opening your browser; if it did not open, visit:"))
+                        .row(value(url.clone()));
+                }
+                None => panel = panel.row(label("starting the local sign-in listener…")),
+            }
+            panel = panel.hint("esc", "cancel");
+        }
+        LoginStep::OAuthDeviceWaiting {
+            user_code,
+            verification_url,
+        } => {
+            panel = panel.row(label("signing in with ChatGPT (device code)…"));
+            if user_code.is_empty() {
+                panel = panel.row(label("requesting a code…"));
+            } else {
+                panel = panel
+                    .row(label(&format!("go to {verification_url} and enter:")))
+                    .row(Line::from(Span::styled(user_code.clone(), theme.text)));
+            }
+            panel = panel.hint("esc", "cancel");
         }
     }
     if let Some(error) = &wizard.error {
@@ -1024,51 +1049,52 @@ pub fn logout_panel(
         .lines(width, theme, glyphs)
 }
 
-/// The `bar` style's left rail (ADR 0035 V3, revision 4): the accent vertical bar on every input
-/// row (omp's `ACCENT_RAIL`). Revision 4 made it `▌` (the left **half** block): the rail is half
-/// a cell wide, so it can be continued into the band's half-cell pad rows as half-cell-wide
-/// quadrants ([`bar_pad_line`]) and read as two cells tall. The `ascii` glyph set uses `|`
-/// (ADR 0027's rule: the unicode glyphs are only used when the font set has them).
-const BAR_RAIL: &str = "▌";
-/// The `bar` rail in the `ascii` glyph set.
-const BAR_RAIL_ASCII: &str = "|";
-/// The cells before the `bar` style's text: the rail plus one cell of padding (omp's rail
-/// `defaultPaddingX = 1`), which is also where the status row's spinner starts (ADR 0035
-/// revision 4: the dot sits in the rail's column, the state text at this text column).
-const BAR_LEAD: usize = 2;
+/// The `box` style's thin half frame (ADR 0035, the 2026-10-16 note): the
+/// same open frame a code block draws — a top rule, a `│ ` rail on every row and a `╰──` tail —
+/// chosen from the terminal's glyph set (`ascii` uses `+`, `-`, `| `, `+--`).
+struct BoxGlyphs {
+    /// The top-left corner.
+    open: &'static str,
+    /// The rule fill.
+    rule: char,
+    /// The body rail (two cells: the bar and its space).
+    rail: &'static str,
+    /// The bottom tail (three cells).
+    bottom: &'static str,
+}
 
-/// The input area's height: the text rows plus the style's chrome — two rule/border rows for
-/// `lines`/`box`, the one fixed status row for `bar` (ADR 0035 V3: `bar` has no rules).
+impl BoxGlyphs {
+    fn for_glyphs(glyphs: crate::footer::Glyphs) -> Self {
+        match glyphs {
+            crate::footer::Glyphs::Ascii => Self {
+                open: "+",
+                rule: '-',
+                rail: "| ",
+                bottom: "+--",
+            },
+            _ => Self {
+                open: "╭",
+                rule: '─',
+                rail: "│ ",
+                bottom: "╰──",
+            },
+        }
+    }
+}
+
+/// The input area's height: the text rows plus the style's chrome — the top rule and the bottom
+/// tail (ADR 0035 / the 2026-10-16 note).
 fn input_height(app: &App, width: usize) -> u16 {
     let inner = input_inner_width(app, width);
     let rows = crate::composer::rows(&app.input.text(), inner)
         .len()
         .clamp(1, MAX_INPUT_ROWS);
-    match app.input_style {
-        InputStyle::Lines | InputStyle::Box => rows as u16 + 2,
-        InputStyle::Bar => rows as u16 + 1 + bar_pad_rows(app) as u16,
-    }
+    rows as u16 + 2
 }
 
-/// The `bar` input's half-cell padding rows (ADR 0035): two (`▄` above the band,
-/// `▀` below it) under the `unicode`/`nerd` glyph tiers, none under `ascii` (decision 4). The
-/// two rows are always both present or both absent, so the band never changes height mid-frame.
-fn bar_pad_rows(app: &App) -> usize {
-    if crate::blocks::banded_pad(app.footer_glyphs()) {
-        2
-    } else {
-        0
-    }
-}
-
-/// The input's visible text rows (`input_area.height` minus the same chrome `input_height`
-/// reserves for the style), at least one.
-fn input_visible_rows(app: &App, height: u16) -> usize {
-    let chrome: u16 = match app.input_style {
-        InputStyle::Lines | InputStyle::Box => 2,
-        InputStyle::Bar => 1 + bar_pad_rows(app) as u16,
-    };
-    height.saturating_sub(chrome).max(1) as usize
+/// The input's visible text rows (`input_area.height` minus the two chrome rows), at least one.
+fn input_visible_rows(height: u16) -> usize {
+    height.saturating_sub(2).max(1) as usize
 }
 
 /// The display width of a prompt constant: the columns it occupies, **not** its byte length
@@ -1077,48 +1103,33 @@ fn prompt_width(prompt: &str) -> usize {
     UnicodeWidthStr::width(prompt)
 }
 
-/// The text width inside the input area: `❯ ` on the first line for `lines`, a border plus the
-/// `❯ ` prompt for `box`, the rail plus its one cell of padding for `bar`.
+/// The text width inside the input area: `❯ ` on the first line for `lines`; the `│ ` body rail
+/// plus the `❯ ` prompt for `box`.
 fn input_inner_width(app: &App, width: usize) -> usize {
     let reserved = match app.input_style {
         InputStyle::Lines => prompt_width(INPUT_PROMPT),
-        // Two border cells plus the prompt.
+        // The body rail (`│ `) plus the `❯ ` prompt.
         InputStyle::Box => 2 + prompt_width(BOX_PROMPT),
-        InputStyle::Bar => BAR_LEAD,
     };
     width.saturating_sub(reserved).max(1)
 }
 
-/// The `bar` style's rail glyph for the terminal's glyph set.
-fn bar_rail(app: &App) -> &'static str {
-    match app.footer_glyphs() {
-        crate::footer::Glyphs::Ascii => BAR_RAIL_ASCII,
-        _ => BAR_RAIL,
-    }
-}
-
-/// The status row a `bar` input carries **above** its band (ADR 0035 V3 / decision 1):
-/// `<spinner> Working · 12s · esc to interrupt` while a turn runs, and a blank row — which
-/// still occupies its line — when idle, so the band and the transcript never move when a turn
-/// starts or ends.
-///
-/// The spinner and the state word are the ones the `lines`/`box` rule line shows (ADR 0027
-/// revision 2, `App::spinner_status`). Since ADR 0035 the dot sits in the **rail's**
-/// column (0) rather than at the text column, so it is on the same vertical line as the rail;
-/// the state text starts at the text column (`BAR_LEAD`) with one cell between the two.
-/// The spinner takes the accent and the rest is one level weaker. The clock is the footer's
-/// `elapsed` (`TurnTimer`: the running generation, else the last one), written in whole seconds
-/// as the ADR's `12s`; `esc to interrupt` is shown exactly while a turn runs, because that is
-/// when Esc cancels it.
-pub fn bar_status_line(app: &App) -> Line<'static> {
-    let Some(status) = app.spinner_status() else {
-        return Line::from("");
-    };
+/// The running input's status content: `<spinner> Working · 12s · esc to interrupt`, or `None`
+/// while idle (ADR 0027, `App::spinner_status`). The spinner takes the pulse style;
+/// the word, clock and hint take the dim/hint level. The `box` top border draws it where a code
+/// block's language label sits (ADR 0035's 2026-10-16 note). The clock is the footer's `elapsed`
+/// (`TurnTimer`: the running generation, else the last one), written in whole seconds as the
+/// ADR's `12s`; `esc to interrupt` is shown exactly while a turn runs, because that is when Esc
+/// cancels it.
+fn input_status_spans(app: &App) -> Option<Vec<Span<'static>>> {
+    let status = app.spinner_status()?;
     let spin = app.spinner_frame();
+    // The frame is never bold (ADR 0035's 2026-10-16 note): the pulse keeps the spinner role's
+    // colour but drops the accent's BOLD weight.
+    let spinner = app.spinner_style(spin).remove_modifier(Modifier::BOLD);
     let mut spans = vec![
-        Span::styled(spin.glyph, app.spinner_style(spin)),
-        Span::styled(" ".repeat(BAR_LEAD - 1), app.theme.hint),
-        Span::styled(status.to_string(), app.theme.hint),
+        Span::styled(spin.glyph, spinner),
+        Span::styled(format!(" {status}"), app.theme.hint),
     ];
     if let Some(elapsed) = app.session.timer.elapsed(app.now) {
         spans.push(Span::styled(
@@ -1129,7 +1140,7 @@ pub fn bar_status_line(app: &App) -> Line<'static> {
     if app.turn_running() {
         spans.push(Span::styled(" · esc to interrupt", app.theme.hint));
     }
-    Line::from(spans)
+    Some(spans)
 }
 
 /// The approval prompt's key line. It is drawn on its **own** row under the body, never part
@@ -1785,11 +1796,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         // before (a confirmation only makes it non-editable).
         _ => {
             // pi-style: a rule above and below instead of a box, and
-            // `> ` on the first line. `input_height` already reserves the style's chrome (the
-            // two rules, the box border or `bar`'s status row), so the layout of everything
-            // else is unchanged.
+            // `> ` on the first line. `input_height` already reserves the style's two chrome
+            // rows (the two rules, or the box's top rule and bottom tail), so the layout of
+            // everything else is unchanged.
             let inner_width = input_inner_width(app, input_area.width as usize);
-            let visible = input_visible_rows(app, input_area.height);
+            let visible = input_visible_rows(input_area.height);
             let text = app.input.text();
             let rows = crate::composer::rows(&text, inner_width);
             let (cursor_row, cursor_col) = app.input.cursor_cell(inner_width);
@@ -1845,130 +1856,86 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     frame.render_widget(Paragraph::new(body).block(block), input_area);
                 }
                 InputStyle::Box => {
-                    // judged against ADR 0029: the accent level is
-                    // for labels and attention surfaces. `notice_label` is the theme's general
-                    // accent role (pi's `accent`), so the rounded border and the `❯` prompt use
-                    // it; the body stays on the ordinary text level. (`model` is the model's
-                    // own display color, not chrome.)
-                    let accent = app.theme.notice_label;
-                    let mut body: Vec<Line> = Vec::new();
-                    if empty {
-                        body.push(Line::from(vec![
-                            Span::styled(BOX_PROMPT, accent),
-                            Span::styled(INPUT_HINT, style),
-                        ]));
-                    } else {
-                        for (index, row) in rows[offset..].iter().enumerate() {
-                            let lead = if index == 0 {
-                                BOX_PROMPT.to_string()
-                            } else {
-                                " ".repeat(prompt_width(BOX_PROMPT))
-                            };
-                            body.push(Line::from(vec![
-                                Span::styled(lead, accent),
-                                Span::styled(row.clone(), style),
-                            ]));
-                        }
-                    }
-                    let title: Line = match status {
-                        // The status replaces the box's ` message ` title while running
-                        // (ADR 0027: the same content on the border's top edge).
-                        Some(status) => Line::from(vec![
-                            Span::styled(" ", accent),
-                            Span::styled(spin.glyph, app.spinner_style(spin)),
-                            Span::styled(format!("  {status} "), app.theme.turn_running),
-                        ]),
-                        None => Line::from(" message "),
-                    };
-                    let block = Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(ratatui::widgets::BorderType::Rounded)
-                        .border_style(accent)
-                        .title(title);
-                    frame.render_widget(Paragraph::new(body).block(block), input_area);
-                }
-                InputStyle::Bar => {
-                    // ADR 0035 V3 (omp's `rail`): one background band per row with the accent
-                    // rail on the left, no border and no rules. The status row is the area's
-                    // first row **always**, so the band's own rows start one below it and a
-                    // turn starting or ending never moves anything.
-                    let band = app.theme.input_bar;
-                    // The rail takes the accent (pi's `accent`, the role the `box` border uses)
-                    // over the band; the text keeps its own level — main, or the weak
-                    // placeholder — and the band only supplies the background behind it
-                    // (`band.patch(style)` lets the text's own color win).
-                    let rail_style = band.patch(app.theme.notice_label);
-                    let text_style = band.patch(style);
+                    // ADR 0035 / the 2026-10-16 note: the thin half frame
+                    // is the same shape as a code block's open frame. `notice_label` is the
+                    // accent role the box already used (judged against ADR
+                    // 0029 revision 1: the accent level is for labels and attention surfaces),
+                    // so the frame and the `❯` prompt keep it; the body stays on the ordinary
+                    // text level. (`model` is the model's own display color, not chrome.)
+                    let frame_style = app.theme.notice_label;
+                    let glyphs = BoxGlyphs::for_glyphs(app.footer_glyphs());
                     let area_width = input_area.width as usize;
-                    let mut body: Vec<Line> = vec![bar_status_line(app)];
-                    // The band's half-cell pads (ADR 0035/4): half a row of the band
-                    // above and below the text rows, so the band reads as extending half a cell
-                    // beyond its text, with the rail continued into them as `▖`/`▘` so it is as
-                    // tall as the band. The `ascii` tier has none.
-                    if bar_pad_rows(app) == 2 {
-                        body.push(bar_pad_line(
-                            "▖",
-                            app.theme.notice_label,
-                            "▄",
-                            area_width,
-                            band,
-                        ));
-                    }
+                    // The top border: a full-width rule when idle, the running status where a
+                    // code block's language label sits (`╭─ <status> ───…`, one space either
+                    // side, dashes filling to the last column) while a turn runs.
+                    let top: Line = match input_status_spans(app) {
+                        None => Line::from(Span::styled(
+                            format!(
+                                "{}{}",
+                                glyphs.open,
+                                glyphs.rule.to_string().repeat(area_width.saturating_sub(1))
+                            ),
+                            frame_style,
+                        )),
+                        Some(status) => {
+                            let used = 3
+                                + status
+                                    .iter()
+                                    .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                                    .sum::<usize>()
+                                + 1;
+                            let mut spans = vec![
+                                Span::styled(glyphs.open, frame_style),
+                                Span::styled(format!("{} ", glyphs.rule), frame_style),
+                            ];
+                            spans.extend(status);
+                            spans.push(Span::styled(" ", frame_style));
+                            spans.push(Span::styled(
+                                glyphs
+                                    .rule
+                                    .to_string()
+                                    .repeat(area_width.saturating_sub(used)),
+                                frame_style,
+                            ));
+                            Line::from(spans)
+                        }
+                    };
+                    let mut body: Vec<Line> = vec![top];
                     let text_rows: Vec<String> = if empty {
                         vec![INPUT_HINT.to_string()]
                     } else {
                         rows[offset..].to_vec()
                     };
-                    for row in &text_rows {
-                        let mut spans = vec![
-                            Span::styled(bar_rail(app).to_string(), rail_style),
-                            // The one cell of padding after the rail carries the band, never
-                            // the text's own style.
-                            Span::styled(" ".to_string(), band),
-                            Span::styled(row.clone(), text_style),
-                        ];
-                        // Fill the rest of the row with the band, so it covers the whole width
-                        // (a band that stops at the text reads as a highlight, not a surface).
-                        let used = BAR_LEAD + UnicodeWidthStr::width(row.as_str());
-                        if used < area_width {
-                            spans.push(Span::styled(" ".repeat(area_width - used), band));
-                        }
-                        body.push(Line::from(spans));
+                    for (index, row) in text_rows.iter().enumerate() {
+                        let lead = if index == 0 {
+                            BOX_PROMPT.to_string()
+                        } else {
+                            " ".repeat(prompt_width(BOX_PROMPT))
+                        };
+                        body.push(Line::from(vec![
+                            Span::styled(glyphs.rail, frame_style),
+                            Span::styled(lead, frame_style),
+                            Span::styled(row.clone(), style),
+                        ]));
                     }
-                    if bar_pad_rows(app) == 2 {
-                        body.push(bar_pad_line(
-                            "▘",
-                            app.theme.notice_label,
-                            "▀",
-                            area_width,
-                            band,
-                        ));
-                    }
+                    body.push(Line::from(Span::styled(glyphs.bottom, frame_style)));
                     frame.render_widget(Paragraph::new(body), input_area);
                 }
             }
             if app.input_editable() {
-                // The text starts after the prompt (`> `, two cells), after the box border plus
-                // the `❯ ` prompt, or after `bar`'s rail plus its one cell of padding; a full
-                // row clamps the cursor to its last cell rather than onto the rule or border.
+                // The text starts after the `❯ ` prompt (`lines`), or after the `│ ` body rail
+                // plus the `❯ ` prompt (`box`); a full row clamps the cursor to its last cell
+                // rather than onto the rule or rail.
                 let lead = match app.input_style {
                     InputStyle::Lines => prompt_width(INPUT_PROMPT) as u16,
-                    // Border (1) + the `❯ ` prompt (2 cells).
-                    InputStyle::Box => 1 + prompt_width(BOX_PROMPT) as u16,
-                    InputStyle::Bar => BAR_LEAD as u16,
+                    // The body rail (`│ `, two cells) + the `❯ ` prompt (two cells).
+                    InputStyle::Box => 2 + prompt_width(BOX_PROMPT) as u16,
                 };
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
                 let row = (cursor_row - offset).min(visible.saturating_sub(1)) as u16;
-                // The text rows start below the style's top chrome: the rule (or box border),
-                // or `bar`'s status row **and** its top half-cell padding row (ADR 0035
-                // revision 3).
-                let top_chrome = match app.input_style {
-                    InputStyle::Lines | InputStyle::Box => 1,
-                    // The status row, plus the band's top half-cell pad when the tier has one.
-                    InputStyle::Bar => {
-                        1 + u16::from(crate::blocks::banded_pad(app.footer_glyphs()))
-                    }
-                };
+                // Both styles draw one chrome row above the text (the top rule, or the box's
+                // top rule with the running status in it).
+                let top_chrome: u16 = 1;
                 let x = input_area.x + lead + col;
                 let y = input_area.y + top_chrome + row;
                 frame.set_cursor_position((x, y));
@@ -2304,18 +2271,17 @@ fn option_line(
     ])
 }
 
-/// The `Other` row: `Other (type your own)`, with the typed text when chosen.
+/// The `Other` row: `Other (type your own)` before it is chosen, `Other: <text>` once it is. A
+/// focused, chosen row draws a visible inline cursor (`Space` on `Other`
+/// starts typing at once), at the composer's cursor so `←`/`→` move it.
 fn other_line(
     question: &radian_coding::Question,
     answer: &crate::question::FormAnswer,
     theme: &Theme,
     glyphs: crate::footer::Glyphs,
 ) -> Line<'static> {
-    let cursor = if answer.cursor == question.options.len() {
-        "❯ "
-    } else {
-        "  "
-    };
+    let focused = answer.cursor == question.options.len();
+    let cursor = if focused { "❯ " } else { "  " };
     // ADR 0024 implementation note: `Other` uses the **same** checkbox pair as the
     // options (it used to always draw a circle, even in a multi question), from `AskGlyphs`.
     let g = blocks::AskGlyphs::for_glyphs(glyphs);
@@ -2324,17 +2290,29 @@ fn other_line(
     } else {
         g.single_off
     };
-    let text = if answer.other && !answer.text.is_empty() {
-        format!("Other: {}", answer.text.text())
-    } else {
-        "Other (type your own)".to_string()
-    };
     // The marker and the cursor are never bold, like `option_line`.
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(cursor, theme.notice_label.remove_modifier(Modifier::BOLD)),
         Span::styled(mark, theme.notice_body),
-        Span::styled(format!(" {text}"), theme.notice_body),
-    ])
+    ];
+    if answer.other && focused {
+        let text = answer.text.text();
+        let at = answer.text.cursor();
+        let before: String = text.chars().take(at).collect();
+        let after: String = text.chars().skip(at).collect();
+        spans.push(Span::styled(" Other: ".to_string(), theme.notice_body));
+        spans.push(Span::styled(before, theme.notice_body));
+        spans.push(Span::styled("▏", theme.hint));
+        spans.push(Span::styled(after, theme.notice_body));
+    } else {
+        let text = if answer.other && !answer.text.is_empty() {
+            format!("Other: {}", answer.text.text())
+        } else {
+            "Other (type your own)".to_string()
+        };
+        spans.push(Span::styled(format!(" {text}"), theme.notice_body));
+    }
+    Line::from(spans)
 }
 
 /// A free-text field (`text`, `Other`, a note): `> ` and the text.

@@ -77,12 +77,12 @@ GLYPHS = [
     ("~", "tool status: running"),
     ("✓", "tool status: success"),
     ("×", "tool status: failure"),
-    ("•", "tool block head marker (ADR 0028)"),
+    ("•", "tool block head marker, one-liner (ADR 0035's 2026-10-16 note)"),
     ("│", "tool block body rail / open frames (ADR 0028/2)"),
     ("╭", "open frame top-left (ADR 0035/7)"),
     ("╰", "open frame bottom-left (ADR 0035/7)"),
-    ("▼", "thinking header, expanded (ADR 0028)"),
-    ("▶", "thinking header, folded (ADR 0028)"),
+    ("◼", "thinking/tool head folded marker (ADR 0035's 2026-10-16 note; documented exception)"),
+    ("◻", "thinking/tool head expanded marker (ADR 0035's 2026-10-16 note; documented exception)"),
     ("…", "truncation"),
 ]
 

@@ -1871,3 +1871,167 @@ file backed up under `.radian/scratch/`, the mutated source restored with a plai
 3/3 caught. CMK-1 also fails `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level`;
 CMK-2 and CMK-3 fail only their `select_list` test. The mark is new behaviour, so these are its
 first mutations.
+
+## fold-mark: one fold marker for thinking and tool heads (ADR 0035's 2026-10-16 note)
+
+Base `2646c17` (the code and its tests; this record follows). In-place mutations: each touched
+source backed up under `.radian/scratch/backup/`, the mutated file restored with a plain `cp` and
+`cmp`ed byte-for-byte (`git status --short` empty after each one). Each mutation ran
+`cargo test -p radian-tui --test <file> --no-fail-fast`.
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| FM-1 | a one-line small tool keeps `•`, never folds | `blocks.rs::head_marker`: `hidden > 1` -> `hidden > 0`, so a `read` whose hidden body is a single line folds | `card::the_tool_head_fold_marker_follows_the_drawn_body`, `card::a_small_tool_is_one_line_until_it_is_expanded`, `card::a_cancelled_call_says_cancelled_in_its_meta_and_draws_no_status_glyph` | ✅ (3 FAILED) |
+| FM-2 | a drawn body makes the head `◻`, never `◼` | `blocks.rs::head_marker`: the `body_follows` branch returns `Folded` | `card::the_head_line_is_the_name_the_title_the_meta_and_the_status`, `card::a_failed_call_ends_the_head_with_a_cross_and_shows_the_error_body`, `card::a_cjk_command_and_output_keep_the_marker_column`, `card::the_ascii_glyph_set_draws_ascii_markers_and_status`, `card::a_small_tool_is_one_line_until_it_is_expanded`, `card::the_tool_head_fold_marker_follows_the_drawn_body`, `card::the_fold_modes_decide_the_body_and_the_collapsed_meta`, `card::a_patch_block_shows_its_diff_body`, `card::an_overwrite_write_head_shows_the_removed_count`, `card::a_new_file_write_numbers_each_content_line` | ✅ (10 FAILED) |
+| FM-3 | the ascii one-liner is `* `, not the expanded `- ` | `blocks.rs::HeadMarker::glyph`: `Ascii => "* "` -> `"- "` | `card::the_tool_head_fold_marker_follows_the_drawn_body` | ✅ (1 FAILED) |
+| FM-4 | the expanded thinking header is `◻` (the shared pair), not `▼` | `render.rs`: `REASONING_MARKER` back to `"▼ "` and `reasoning_marker` back to `v`/`▼ ` | `thinking::the_thinking_fold_marker_is_the_shared_pair`, `thinking::the_expanded_thinking_has_a_header_and_a_rail`, `thinking::the_duration_is_shown_for_a_live_entry_and_absent_for_a_resumed_one`, `thinking::streaming_shows_the_spinner_not_the_duration`, `thinking::the_thinking_markers_follow_the_ascii_glyph_tier` | ✅ (5 FAILED) |
+| FM-5 | a compact tool's head is a `•` whatever its result hides (reviewer fix 1) | `blocks.rs::head_marker`: the compact early-return removed and the old `hidden > 1` fold restored, so a `read` hiding 100 lines folds to `◼` | `card::the_tool_head_fold_marker_follows_the_drawn_body` (the 100-line read row: `◼ read a.rs ✓`), `render::the_block_layout_snapshot` (the `list` head) | ✅ (2 FAILED) |
+
+5/5 caught, no misses and no equivalent mutants. FM-3 is pinned by exactly one test (the ascii row
+of the table); FM-1's one-line-fold mutant also trips the cancelled-call head, which shares the
+`hidden > 0` branch. FM-5 (reviewer fix 1, base `c2b4abd`) is the one mutation that the original
+suite missed: `a_small_tool_is_one_line_until_it_is_expanded` uses a **one-line** `read`, so the
+old `hidden > 1` clause was never exercised — the new test uses a 100-line result to pin it.
+Files restored with `cp` + `cmp` after the run.
+
+## ask-keys: `Space` selects, `Enter` only advances (ADR 0024 note)
+
+Base `1442672` (the implementation commit; the run also carries the new
+`the_other_cursor_follows_the_text_cursor` test). In-place mutations: each touched source backed
+up under `.radian/scratch/mut/`, the mutated file restored with a plain `cp` and `cmp`ed
+byte-for-byte (`git status --short` clean apart from the new test). Each mutation ran
+`cargo test -p radian-tui --test <file> --no-fail-fast` (or `--lib` for the composer).
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| AK-1 | `Enter` never selects | `question.rs::FormSubmit` selects-and-advances a `single` again | `question::enter_advances_without_selecting_and_space_selects_without_advancing` | ✅ (1 FAILED) |
+| AK-2 | `Space` on `Other` shows the text cursor | `render.rs::other_line`: `answer.other && focused` -> `false` (no inline `▏`) | `question::space_on_other_starts_typing_and_the_cursor_is_visible` | ✅ (1 FAILED) |
+| AK-3 | a chosen `Other` field takes the space as text | `question.rs::field_takes_space`: the `Other` clause -> `false` | `question::space_on_other_starts_typing_and_the_cursor_is_visible` | ✅ (1 FAILED) |
+| AK-4 | `Enter` on the last question goes to `Submit`, it does not submit directly | `question.rs::FormSubmit`: the last question returns `self.submit()` | `question::{enter_walks_to_the_overview_and_submits, an_unanswered_question_is_marked_in_the_overview, a_required_question_blocks_the_submit, drafts_are_kept_between_questions, other_keeps_its_text_while_moving_with_arrows}` | ✅ (5 FAILED) |
+| AK-5 | `Enter` never toggles a `multi` | `question.rs::FormSubmit`: a `multi` toggles again | `question::a_multi_question_toggles_with_space_and_enter_only_advances` | ✅ (1 FAILED) |
+| AK-6 | the overview marks an unanswered question | `render.rs::question_panel` Submit tab: `mark` always `"✓"` | `question::an_unanswered_question_is_marked_in_the_overview` | ✅ (1 FAILED) |
+| AK-7 | choosing `Other` puts the composer cursor at the end | `composer.rs::to_end` body -> a no-op | `composer::tests::to_end_moves_the_cursor_to_the_buffer_end_from_the_middle` | ✅ (1 FAILED) |
+| AK-8 | the inline `Other` cursor follows the composer cursor | `render.rs::other_line`: `answer.text.cursor()` -> `text.chars().count()` (always the end) | `question::the_other_cursor_follows_the_text_cursor` | ✅ (1 FAILED) |
+
+8/8 caught, no misses and no equivalent mutants. AK-2/AK-3 cover the two halves of "`Space` on
+`Other` focuses it"; AK-7/AK-8 cover the new `Composer::to_end` and the inline cursor it drives.
+**Process note (AK-7):** the first run used `--lib to_end_moves_... -- --exact`, which matched 0
+tests and looked like a pass (the U3/U4 trap); the full path
+`composer::tests::to_end_moves_...` catches it.
+## multiline-cmd: a multi-line command folds with its block (ADR 0035's 2026-10-16 note, option A)
+
+Base `d151bd7` (the code and its tests; this record follows). In-place mutations: the source
+backed up under `.radian/scratch/mut/`, the patched file restored with a plain `cp` and `cmp`ed
+byte-for-byte (`git status --short` empty after each one). Each mutation ran
+`timeout 600 cargo test -p radian-tui --locked --test card --no-fail-fast <test>`.
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| ML-1 | the fold marker is on the first head row only | `blocks.rs::styled_head_rows` / `styled_body_rows`: the command's continuation rows become `Frame::Head`, so `render_head_row` draws the marker on each | `card::a_multiline_command_folds_with_its_block` (the expanded rows read `◻ print(1)`, not `│ print(1)`) | ✅ (1 FAILED) |
+| ML-2 | a folded block hides the command's other lines | `blocks.rs::call_body_expanded` returns `true` unconditionally, so `collapsed` draws the 39 lines too | `card::a_multiline_command_folds_with_its_block` (the folded head gains 39 `│ ` rows) | ✅ (1 FAILED) |
+| ML-3 | the meta stays on the first row | `head_rows` passes no tail to `styled_head_rows` and appends it to the last row instead | `card::a_multiline_command_folds_with_its_block` (the meta lands on `│ PY · exit 0 ✓`, the head row loses it) | ✅ (1 FAILED) |
+| ML-4 | N counts the command's remaining lines, never the output's | `head_rows` passes `card.result_lines` to `head_tail` instead of `last` | `card::a_multiline_command_folds_with_its_block` (the note reads `… (+2 lines)` for a 40-line command) | ✅ (1 FAILED) |
+| ML-5 | a result row's selection offsets are the entry's own | `blocks.rs::body_plan_lines`: the lift by `source.start` removed (the pre-existing relative-offset bug) | `card::a_copy_of_a_multiline_command_has_no_marker_rail_or_note` (the copy loses the output's second line) | ✅ (1 FAILED) |
+
+5/5 caught, no misses and no equivalent mutants. ML-1..ML-4 are the four behaviours the task
+names, each pinned by the one three-state test; ML-5 is the pre-existing offset bug the copy
+requirement depends on, pinned by the copy test (the same mutation leaves
+`a_copy_of_a_block_has_no_marker_meta_or_status` green, because its single-line result starts at
+offset 0).
+
+## input-box: drop the `bar` input, `box` becomes the thin half frame (ADR 0035's 2026-10-16 note)
+
+Base: the `oc/input-box` worktree; the source backed up under `.radian/scratch/mut/`
+(`render.rs.orig`, `app.rs.orig`), each mutation patched in place with a Python `assert`-guarded
+text replace (a stale anchor is a hard PATCH FAILED), restored with a plain `cp` and `cmp`ed
+byte-for-byte (`git status --short` back to the same set after each). The one test named per row
+ran with `timeout 300 cargo test -p radian-tui --no-fail-fast`.
+
+| # | Requirement | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| IB-M1 | the running status is **not bold** | `render.rs::input_status_spans`: the pulse keeps `spinner_style`'s BOLD (drop the `remove_modifier(Modifier::BOLD)`) | `render::the_box_frame_puts_the_status_in_the_label_position_and_never_bold` (the spinner cell is `.bold()`) | ✅ (1 FAILED) |
+| IB-M2 | the idle top border carries **no label** | `render.rs` idle top rule draws `╭─ message ─…` again | `render::the_box_input_style_draws_the_thin_half_frame` (`!text.contains("message")` and the exact full-width rule) | ✅ (1 FAILED) |
+| IB-M3 | the removed `bar` warns and falls back to `lines` | `app.rs::apply_config`: `Some("bar") => InputStyle::default()` (no warning pushed) | `config::the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines` (warnings empty) | ✅ (1 FAILED) |
+
+3/3 caught. IB-M2's test also pins the full shape (the `│ ❯ `/`│   ` rows and the `╰──` tail),
+so a mutation of the marker column or the tail fails it too; the CJK wrap and the cursor column
+are pinned by `render::the_box_frame_wraps_a_cjk_line` and `cursor::the_box_cursor_counts_the_prompts_display_width`.
+The `input_style = "bar"` reader test (`config::the_tui_input_style_is_carried_and_a_non_string_is_skipped`)
+covers the host side (the spelling is carried, not skipped).
+
+**Piece 2 dropped.** The task's fourth mutation ("the configured separator ignored with a preset")
+belonged to the `[tui.footer]` separator bug, which the owner dropped ("the owner is redesigning the
+footer") before any code was written; no commit or mutation for it exists.
+
+## ADR 0042: 渲染器换成 grok-build 的 `mermaid.rs`（2026-10-16）
+
+Base `aedc23f`。变异在 worktree 内直接改，改前把每个文件复制到 `.radian/scratch/mut/`，改后
+`cp` 还原并 `cmp` 一致（`git status --short` 变异后只剩被测文件，跑完为空）。命令：
+`timeout 600 cargo test -p radian-tui --test mermaid --no-fail-fast`（M4 换成
+`cargo test -p grok-mermaid --test pristine`）。
+
+| # | Requirement mutated | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| M1 | 决定 4：边映射到 `mermaid_edge` | `blocks/markdown.rs`: `Some(grok_mermaid::Role::Edge) => DiagramRole::Edge` → `DiagramRole::Text` | `the_diagram_roles_come_from_the_theme` | ✅ 1 failed |
+| M2 | 决定 3：太宽返回 `TooWide`，**不**走上游 `fallback()`（不出现「open the image」） | `third_party/grok-mermaid/src/lib.rs`: `Oversize::Width` 分支换成 `mermaid::render(...)` 的 fallback 框并 `Ok` | `the_two_wide_samples_report_the_columns_they_need`、`a_too_wide_sample_names_the_columns_in_the_transcript`、`a_diagram_that_does_not_fit_keeps_the_source_and_names_the_reason`、`a_width_change_recounts_and_redraws` | ✅ 4 failed |
+| M3 | 决定 3：`needed` = `max_width = None` 再渲一次的最宽 plain 行 | `lib.rs`: `needed: Art::from_mermaid(art).width` → `needed: 0` | `the_two_wide_samples_report_the_columns_they_need`、`a_too_wide_sample_names_the_columns_in_the_transcript` | ✅ 2 failed |
+| M4 | 决定 2：`src/mermaid.rs` 只有 `use` 行与可见性两类有记录的改动 | `src/mermaid.rs`: 上游一行 `const MAX_LABEL: usize = 28;` → `27` | `third_party/grok-mermaid` `tests/pristine.rs::the_two_edits_are_the_only_difference_from_upstream` | ✅ 1 failed |
+
+4 条变异，4 条抓住。M4 在 vendored crate 里跑（本 crate 的 `mermaid.rs` 快照测试看不见上游 diff）。
+
+## esc-noquit: `Esc` 不再退出空闲会话＼�
+
+Base: 本 worktree（`oc/esc-noquit`，分支自 `e2a4436`）。变异在 worktree 内直接改 `src/app.rs`，
+改前 `cp src/app.rs .radian/scratch/esc-noquit/app.rs.orig`，改后 `cp` 还原并 `cmp` 一致
+（`git status --short` 变异后只剩被测文件，还原后为那三个改动文件）。命令：
+`timeout 600 cargo test -p radian-tui --locked --no-fail-fast --test quit <test>`。
+
+| # | Requirement mutated | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| EN-M1 | 空闲且输入为空时 `Esc` **什么都不做**（绝不退出） | `app.rs` `Action::Escape` 的空闲分支 `UpdateResult::none()` → `self.quit = true; UpdateResult::quiet(Effect::Quit)` | `quit::esc_never_quits_when_idle_and_empty`（`assert!(!app.quit, …)`：`Esc must not quit an idle session`） | ✅ 1 failed |
+
+1/1 caught。EN-M1 只动空闲分支：运行中的 turn 取消（`update::esc_with_an_empty_input_and_a_running_turn_cancels`）与非空输入清空都不受影响，两个键都仍然绿；`--pick` 选择器的 `Esc` = 退出走的是
+`Input::PickerKey` 另一条路径（`pty::pty_pick_starts_new_and_escape_leaves_no_session`），本改动不碰它，变异也不影响它。
+
+## ADR 0027 slice ①: the footer component registry and the model switch (2026-10-16)
+
+Worktree `footer-components-review-fix` (base `4a9c492`, the failed first task's head). In-place
+binary-only mutations, driven by `.radian/scratch/mut/mutations.py` (not committed): each file
+backed up under `.radian/scratch/mut/`, the anchor asserted present **exactly once** (a `cargo fmt`
+shift or a no-op patch is a hard `PATCH FAILED` — the U3/U4 trap), the named test run with
+`cargo test -p radian-tui --locked --no-fail-fast <target> <name>`, then the file restored with
+`shutil.copyfile` + `os.utime` (so cargo rebuilds, the thin-① cache trap) and `cmp`ed
+byte-for-byte; `git status --short` shows only the intended edits after the run.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| REG-M1 | decision 1: every built-in resolves through the registry | `components::lookup` drops its built-in branch (only the store fallback is left) | `footer::the_default_footer_is_two_rows` FAILED (the identity row loses the model, the branch and the reasoning glyph) |
+| REG-M2 | decision 1: a compiled-in component claims its id first | `lookup` consults the store **before** the registry | `footer::a_builtin_id_wins_over_the_store_fallback` FAILED (`left: "HIJACK"`, right `"Mock 5"`) |
+| REG-M3 | decision 1: the dynamic fallback serves contributor ids | `lookup` drops the store branch | `footer::an_arbitrary_store_id_renders_through_the_dynamic_component` FAILED (after the publish the row is still `custom.thing`) |
+| REG-M4 | decision 1: one registry entry per built-in | `&tokens::Tokens` removed from `COMPONENTS` | `footer::tests::the_registry_lists_every_builtin_once` FAILED ("the registry is missing tokens") |
+| SW-M1 | the applied `/model` switch follows through to the footer's `model` | the `ConfigChanged` handler no longer writes `model_name`/`provider`/`model_display` | `footer::the_footer_model_follows_an_applied_switch` FAILED ("the model id follows": `old-model` ≠ `claude-new`) |
+| SW-M2 | a switch resolves no catalog display name (startup passes `None`) | the handler sets `model_display = Some("Claude New")` instead of `None` | `footer::the_footer_model_follows_an_applied_switch` FAILED ("no catalog display name is resolved: Some(\"Claude New\")") |
+
+6/6 caught, no equivalent mutants; every mutated file `cmp`ed byte-identical after its mutation.
+
+**Old-code check.** The first task's test
+`an_arbitrary_store_id_renders_through_the_dynamic_component` was re-run against the pre-refactor
+`footer.rs` (`631c8dd`, keeping the new test file): it fails at the second render
+(`left: "custom.thing", right: "hello"`), so it is not vacuous. Its **comment** was wrong in a
+different way, and the comment now says this: the old `contribution_item` *did* have a general
+store fallback for any id `item_is_known` accepted — a preset id such as `opencode-go.usage` went
+through it and drew the store text — while a **user-written** id was marked `known = false` by the
+old `resolve_item`, so the old `render_item` returned the raw id *before* consulting the store and
+a published value never appeared. The new `a_builtin_id_wins_over_the_store_fallback` adds the
+behaviour the old dispatch got wrong (a store value under a built-in id was drawn instead of the
+built-in); it fails the same `631c8dd` footer the same way.
+
+**Coverage (decision 1).** The old `item_placeholders` table listed 20 built-in ids — `brand`,
+`host`, `model`, `reasoning`, `tier`, `cwd`, `git_branch`, `worktree`, `status`, `session`,
+`context`, `context_bar`, `tokens`, `speed`, `elapsed`, `cost`, `pending`, `tasks`, `mcp`,
+`scroll` — and the registry has exactly those 20, one file each (`tasks` is the ADR 0030 addition;
+the ADR C2 list omits it). `every_registry_id_has_a_component_file` pins the `components/<id>.rs`
+file per registry id, so a new built-in cannot be registered without its file.
+`git_branch`/`worktree`/`status` are ordinary registered components that read the contribution
+store in their `data` — no `CONTRIBUTION_ITEMS` special case — and an id no built-in claims
+resolves to the dynamic `StoreComponent`.

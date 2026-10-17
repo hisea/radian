@@ -169,6 +169,35 @@ const EVT_TOOL_SETTLED: (&str, bool) = ("ToolExecutionSettled", true);
 const EVT_USAGE: (&str, bool) = ("ModelUsageRecorded", false);
 const EVT_COMPACTION_USAGE: (&str, bool) = ("CompactionUsageRecorded", false);
 const EVT_CONTEXT_COMPACTED: (&str, bool) = ("ContextCompacted", false);
+/// The runtime-event names that are also sync points (ADR 0040 decision 2): the writer must
+/// not depend on `radian-session`'s event type here, only on the name, so they are named
+/// beside the core's own event constants.
+const EVT_TURN_FINISHED: &str = "TurnFinished";
+const EVT_TURN_FAILED: &str = "TurnFailed";
+const EVT_TASK_SPAWNED: &str = "TaskSpawned";
+
+/// Whether an append of `event` is a durability boundary (ADR 0040 decision 2): every record
+/// written before it in this writer is on disk when its append returns. Everything else is
+/// `write`+`flush`ed and rides the next sync point. The names are exactly the v1 disk event
+/// names; a record whose name is not here is not synced.
+fn must_sync(event: &str) -> bool {
+    [
+        // The first line.
+        EVT_SESSION_CREATED.0,
+        // Before a tool runs (and before the `git_commit` tool or a background `shell` start,
+        // which are tool calls). It also flushes the assistant message that declared the calls.
+        EVT_TOOL_STARTED.0,
+        // Turn boundaries.
+        EVT_TURN_FINISHED,
+        EVT_TURN_FAILED,
+        // The replacement commit (ADR 0019) and the abort its `resume` writes.
+        EVT_TRANSCRIPT_REPLACEMENT_COMMITTED.0,
+        EVT_TRANSCRIPT_REPLACEMENT_ABORTED.0,
+        // Written before the task's worktree/session exist (ADR 0030).
+        EVT_TASK_SPAWNED,
+    ]
+    .contains(&event)
+}
 
 /// Computes the fee for one usage record (ADR 0027). The host installs it on the
 /// journal; the writer resolves the route in force and prices the call, or returns `None` when
@@ -183,9 +212,10 @@ pub struct SessionJournal {
     session_id: String,
     /// The open file (holding the `flock` for the journal's lifetime) **and** the next
     /// envelope `seq`, behind one mutex. The counter lives inside the lock on purpose: a
-    /// line's `seq` is chosen, rendered, written and fsynced while the lock is held, and the
-    /// counter only advances once the write succeeded. So `seq` order is file order even when
-    /// the runtime's events and the core's journal records are appended concurrently.
+    /// line's `seq` is chosen, rendered and written while the lock is held (fsynced here too
+    /// when it is a sync point, ADR 0040), and the counter only advances once the write
+    /// succeeded. So `seq` order is file order even when the runtime's events and the core's
+    /// journal records are appended concurrently.
     inner: Arc<Mutex<Writer>>,
     /// Holds host appends back while a core replacement segment is open (ADR 0018 §A).
     gate: Arc<SegmentGate>,
@@ -204,6 +234,49 @@ pub struct SessionJournal {
 struct Writer {
     file: File,
     next_seq: u64,
+    /// Bytes written through this writer; it equals the file length while this writer is the
+    /// only one holding the lock.
+    written_len: u64,
+    /// The file length at the last successful fsync — the durable prefix. Every record written
+    /// after it is only `write`+`flush`ed and is carried by the next sync point (ADR 0040).
+    synced_len: u64,
+    /// Test-only: how many fsyncs this writer has performed (the per-step count assertion).
+    #[cfg(feature = "testing")]
+    syncs: u64,
+    /// Test-only: how many writes (attempted appends) this writer has seen.
+    #[cfg(feature = "testing")]
+    writes: u64,
+    /// Test-only: the crash seam. The write whose index reaches this behaves as if the system
+    /// crashed: the unsynced bytes are dropped and the write fails (ADR 0040). It fires at a
+    /// chosen **record** boundary, not only at a sync point, so a crash can be injected
+    /// between any two consecutive sync points.
+    #[cfg(feature = "testing")]
+    crash_at: Option<u64>,
+    /// Test-only: whether the crash seam has fired at least once.
+    #[cfg(feature = "testing")]
+    crash_fired: bool,
+}
+
+impl Writer {
+    /// A writer over `file` whose durable prefix is `written_len` bytes (0 for a fresh file,
+    /// the committed length for a resume). Counting starts at 1 because `create` has already
+    /// written `SessionCreated` at seq 0.
+    fn new(file: File, next_seq: u64, written_len: u64) -> Self {
+        Self {
+            file,
+            next_seq,
+            written_len,
+            synced_len: written_len,
+            #[cfg(feature = "testing")]
+            syncs: 0,
+            #[cfg(feature = "testing")]
+            writes: 0,
+            #[cfg(feature = "testing")]
+            crash_at: None,
+            #[cfg(feature = "testing")]
+            crash_fired: false,
+        }
+    }
 }
 
 impl SessionJournal {
@@ -228,7 +301,7 @@ impl SessionJournal {
         let journal = SessionJournal {
             path: path.clone(),
             session_id: session_id.to_owned(),
-            inner: Arc::new(Mutex::new(Writer { file, next_seq: 0 })),
+            inner: Arc::new(Mutex::new(Writer::new(file, 0, 0))),
             gate: Arc::new(SegmentGate::new()),
             usage_fee: std::sync::OnceLock::new(),
             #[cfg(feature = "testing")]
@@ -283,6 +356,17 @@ impl SessionJournal {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .next_seq
+    }
+
+    /// Marks the session closed (ADR 0040 decision 2: close is a sync point): every record
+    /// written so far is made durable, and the fsync error, if any, is returned. Unlike
+    /// [`Drop`], which runs the same sync best-effort, this surfaces the failure. It does not
+    /// refuse later appends; a later append re-establishes its own sync points.
+    pub fn close(&self) -> Result<(), WriteError> {
+        let mut writer = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        writer.file.sync_all().map_err(|e| io_err(&self.path, e))?;
+        writer.synced_len = writer.written_len;
+        Ok(())
     }
 
     /// Appends a runtime event (ADR 0006 §5.5–§5.7) through the same lock, `seq` counter and
@@ -439,6 +523,71 @@ impl SessionJournal {
     }
 }
 
+impl Drop for SessionJournal {
+    /// ADR 0040 decision 2: a session close is a sync point, but `Drop` cannot await or report
+    /// a failure, and every record written since the last sync point might not be durable yet.
+    /// So the last handle makes the file durable best-effort; a host that wants the error uses
+    /// [`SessionJournal::close`]. Runs once, when the last `Arc<SessionJournal>` goes away
+    /// (after any in-flight append has released the lock).
+    fn drop(&mut self) {
+        let mut writer = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if writer.file.sync_all().is_ok() {
+            writer.synced_len = writer.written_len;
+        }
+    }
+}
+
+/// Test-only observability and fault injection for the group-commit timing (ADR 0040).
+#[cfg(feature = "testing")]
+impl SessionJournal {
+    /// How many fsyncs this journal has performed. A test counts the delta across a turn to
+    /// assert the group-commit timing (a step should fsync 2–3 times, not once per record).
+    pub fn sync_count(&self) -> u64 {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).syncs
+    }
+
+    /// The durable prefix length: the file length at the last successful fsync. Everything
+    /// past it has been `write`+`flush`ed but is not yet durable. Equals the file length after
+    /// a sync point, `close`, or `Drop`.
+    pub fn durable_len(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .synced_len
+    }
+
+    /// How many writes (attempted appends) this journal has seen. A test measures the delta
+    /// across a turn to enumerate a crash at every record boundary.
+    pub fn write_count(&self) -> u64 {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).writes
+    }
+
+    /// Simulates a system crash: truncates the file to [`SessionJournal::durable_len`], dropping
+    /// every byte written after the last fsync, and makes the truncation durable. The caller
+    /// then drops the journal and reopens with `resume`.
+    pub fn simulate_system_crash(&self) -> std::io::Result<()> {
+        let mut writer = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        truncate_to_synced(&mut writer)
+    }
+
+    /// Arms the mid-turn crash seam: the `n`-th write after arming (1-based) acts as if the
+    /// system crashed — it drops the unsynced bytes and fails, and every later write fails the
+    /// same way. `n` is a record index, so a crash can be injected between any two consecutive
+    /// sync points. The turn then ends like a crashed session.
+    pub fn crash_at_write(&self, n: u64) {
+        let mut writer = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        writer.crash_at = Some(writer.writes + n.max(1));
+    }
+
+    /// Whether the crash seam has fired at least once since the journal opened.
+    pub fn crash_fired(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .crash_fired
+    }
+}
+
 /// A held single-writer lock on a session file being resumed, from
 /// [`SessionJournal::lock_for_resume`]. The lock is held from before the parse until
 /// [`ResumeLock::into_journal`] builds the appending journal, so nothing can append between
@@ -516,10 +665,11 @@ impl ResumeLock {
         let journal = SessionJournal {
             path,
             session_id: session_id.to_owned(),
-            inner: Arc::new(Mutex::new(Writer {
+            inner: Arc::new(Mutex::new(Writer::new(
                 file,
-                next_seq: last_seq + 1,
-            })),
+                last_seq + 1,
+                parsed.committed_bytes(),
+            ))),
             gate: Arc::new(SegmentGate::new()),
             usage_fee: std::sync::OnceLock::new(),
             #[cfg(feature = "testing")]
@@ -544,15 +694,33 @@ fn raw_data<D: Serialize>(data: &D) -> serde_json::Result<Box<RawValue>> {
     RawValue::from_string(serde_json::to_string(data)?)
 }
 
-/// Picks the next `seq`, renders the envelope, writes it, flushes and fsyncs — all while the
-/// caller holds the writer lock — and advances the counter only after the line is durable.
-/// A failed write therefore never burns a `seq` number.
+/// Picks the next `seq`, renders the envelope and writes it — all while the caller holds the
+/// writer lock (ADR 0006 §15.3). Every line is `write`+`flush`ed; only a sync point
+/// (`must_sync`, ADR 0040 decision 2) is `fsync`ed, and only then does the group of records
+/// written since the last fsync become durable. The counter advances after a successful write:
+/// `write`+`flush` for a non-sync record, `write`+`flush`+`fsync` for a sync record. A failed
+/// write — or a failed fsync at a sync point — never burns a `seq` number.
 fn write_locked(
     writer: &mut Writer,
     session_id: &str,
     (event, critical): (&str, bool),
     data: &RawValue,
 ) -> std::io::Result<()> {
+    // A test-only crash seam (ADR 0040): on the armed write index the process is treated as
+    // dead here — the unsynced bytes are dropped and the write fails, so the caller's turn
+    // ends exactly as a system crash would leave it. It is sticky: every later write fails the
+    // same way, so the file stays at the truncated prefix.
+    #[cfg(feature = "testing")]
+    {
+        writer.writes += 1;
+        if let Some(at) = writer.crash_at
+            && writer.writes >= at
+        {
+            writer.crash_fired = true;
+            truncate_to_synced(writer)?;
+            return Err(std::io::Error::other("injected: system crash"));
+        }
+    }
     // A test-only seam: fail before any byte is written, so the file stays untouched.
     #[cfg(feature = "testing")]
     if take_write_failure(session_id, event) {
@@ -573,8 +741,27 @@ fn write_locked(
     bytes.push(b'\n');
     writer.file.write_all(&bytes)?;
     writer.file.flush()?;
-    writer.file.sync_all()?;
+    writer.written_len += bytes.len() as u64;
+    if must_sync(event) {
+        writer.file.sync_all()?;
+        writer.synced_len = writer.written_len;
+        #[cfg(feature = "testing")]
+        {
+            writer.syncs += 1;
+        }
+    }
     writer.next_seq = seq + 1;
+    Ok(())
+}
+
+/// Drops every byte written past the last successful fsync, as a system crash would (power
+/// loss / kernel panic). The truncation itself is made durable so a later reopen in the same
+/// process sees the same file. Test-only.
+#[cfg(feature = "testing")]
+fn truncate_to_synced(writer: &mut Writer) -> std::io::Result<()> {
+    writer.file.set_len(writer.synced_len)?;
+    writer.file.sync_all()?;
+    writer.written_len = writer.synced_len;
     Ok(())
 }
 
@@ -1072,4 +1259,55 @@ fn scan_lines(file: &mut File, path: &Path) -> Result<Option<u64>, WriteError> {
         }
     }
     Ok(last_seq)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::must_sync;
+
+    /// ADR 0040 decision 2's sync set is exactly these names; a name added to or removed from
+    /// the set is a decision change, so it is pinned here as well as behaviorally.
+    #[test]
+    fn the_sync_set_is_exactly_the_boundaries() {
+        let sync = [
+            "SessionCreated",
+            "ToolExecutionStarted",
+            "TurnFinished",
+            "TurnFailed",
+            "TranscriptReplacementCommitted",
+            "TranscriptReplacementAborted",
+            "TaskSpawned",
+        ];
+        let non_sync = [
+            "InboxEnqueued",
+            "InputClaimed",
+            "InputAdmitted",
+            "TurnStarted",
+            "MessageAppended",
+            "ToolExecutionSettled",
+            "TranscriptReplaced",
+            "ConfigChanged",
+            "ContextCompacted",
+            "CompactionUsageRecorded",
+            "Rewound",
+            "ContextBudgetReached",
+            "PermissionResolved",
+            "ApprovalPolicyChanged",
+            "MemoryInjected",
+            "ModelUsageRecorded",
+            "SessionForked",
+            "ProjectTrustChanged",
+            "UserBash",
+            "GitCommitted",
+            "BackgroundJobStarted",
+            "BackgroundJobSettled",
+            "TaskFinished",
+        ];
+        for name in sync {
+            assert!(must_sync(name), "{name} must be a sync point");
+        }
+        for name in non_sync {
+            assert!(!must_sync(name), "{name} must not be a sync point");
+        }
+    }
 }

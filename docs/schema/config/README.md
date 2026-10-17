@@ -15,7 +15,7 @@
 | `tui-tips-banner.toml` | ADR 0008：`tui.tips`/`tui.banner`（布尔，默认都开）关闭启动画面的 Tip 行与字标。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 |
 | `tui-brand.toml` | ADR 0027：`tui.brand` 是品牌文字（≤ 4 显示宽度），footer 的 `brand` 条目与启动画面一行回退共用；不写时用 glyphs 档默认；超出是配置错误。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0027 |
 | `tui-spinner.toml` | ADR 0027：`tui.spinner = "pulse" | "arc" | "quadrant" | "braille"`（默认 pulse；未知值警告回退）。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0027 |
-| `tui-input-style.toml` | ADR 0035 V3：`tui.input_style = "bar" | "lines" | "box"`（默认 `bar`；未知值警告回退）。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0035 V3 |
+| `tui-input-style.toml` | ADR 0035 与 2026-10-16 补充：`tui.input_style = "lines" | "box"`（默认 `lines`；`box` 是半包框）。`bar` 已移除：写下它与其他未知值一样警告回退 `lines`。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0035 |
 | `tui-footer.toml` | ADR 0027 C2：`[tui.footer]` 的 preset/separator/glyphs/context_line/transparent 与 `[[tui.footer.rows]]` 的 left/right（字符串或表两种条目写法、icon/format/style/priority/thresholds 与条目专属参数）。 | **接受**，0 拒绝；未知条目 id 由 TUI 原样显示并警告，不拒绝文件。 | §2 / ADR 0027 |
 | `tui-footer-items.toml` | ADR 0027：`[tui.footer.items.<id>]` 的 symbol/style/symbol_style/format/disabled，`separator_style`（角色或 starship 颜色），`tui.usage_period_secs`。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
 | `tui-widgets.toml` | ADR 0027 C3：`[tui.widgets]` 的 `above_input`/`below_input` 在输入框上/下放一行贡献者条目（条目 id）。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
@@ -28,6 +28,8 @@
 | `skills-builtin.toml` | ADR 0025:`[skills] builtin = false` 关掉全部内建 skill,`disabled = ["<name>"]` 关掉单个(用户级/extra_paths 不受影响)。 | **接受**,0 拒绝;未知值/未知键是警告。 | §2 / ADR 0025 |
 | `memory-injection.toml` | ADR 0021:`[memory.injection] additions`(后续轮次的新命中是否作为一条 System 消息追加,默认 true)与 `addition_budget`(一次追加的 token 上限,默认 500,整条选取不截断)由读取器读出;同表下 D6 的其余已知键(`enabled`/`max_tokens`/`global_budget`/`project_budget`/`overflow`)本期按文档默认解释,读取器记进 skipped 并点名,不拒绝。 | **接受**,0 拒绝。 | §2 / ADR 0021 |
 | `integrations-herdr.toml` | ADR 0034 H6:`[integrations] herdr = true|false`,缺省 `true`。只在 herdr pane 里生效(`HERDR_ENV=1` 且 pane id、socket path 非空);`RADIAN_HERDR=0` 一次性关闭。上报只有状态、会话 id、journal 路径与恢复命令,不含 transcript/usage/model/费用/命令正文。 | **接受**,0 拒绝。 | §2 / ADR 0034 |
+| `control.toml` | ADR 0030 O6(切片 8):`[control] enabled = true|false`,缺省 `true`。为 `true` 时每个托管会话的进程绑定 `$RADIAN_HOME/run/<pid>.sock`(目录 0700、文件 0600,退出时删除);`false` 关掉本进程的控制口。动词、来源规则(缺省 `Scheduler`,不得自称 `User`,无审批动词)与协议见 `crates/radian-host/CONTROL.md`。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0030 O6 |
+| `orchestration.toml` | ADR 0030 切片 9(O7/O8):`[orchestration]` 是 lead 编排快照的用户级来源(`max_tasks`/`isolation`/`model`/`profile`/`worktree_root`/`verify`/`policy`/`heavy`/`heavy_slots`/`stall_after_secs`/`merge_needs_human`)。项目级同名文件在工作区受信任时读并逐键覆盖;`verify` 与 `policy` 命令在 task 自己的沙箱里跑,启动行列出。错误类型拒绝,未知键警告。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0030 O7/O8 |
 | `sandbox-unix-sockets.toml` | ADR 0016:`[sandbox] allow_unix_sockets` 列出沙箱开网时允许连接的 Unix socket(其余出站 Unix socket 全拒;mDNSResponder 固定放行做 DNS)。只认绝对路径(宿主展开 `~`),canonicalize 失败只警告一次并跳过。**只能写在用户级配置**;今天没有项目级配置层。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0016 |
 | `skills-extra-paths.toml` | ADR 0025 片4:`[skills] extra_paths` 列出额外的 skill 根(裁决 2:`~/.claude/skills` 只有列出时才读)。读取器原样保留字符串(不碰文件系统);宿主展开 `~`、相对路径相对**配置文件所在目录**。不存在的目录只警告一次,不报错。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0025 片4 |
 | `api-key-removed.toml` | `model.api_key` 是**合法**的 `SecretRef`（`{ from = "env", name = "EXAMPLE_TOKEN" }`）。 | **拒绝**（ADR 0026 D2）；提示改用 `~/.radian/credentials/auth.json`，不静默忽略。 | §4.2 / ADR 0026 D2 |

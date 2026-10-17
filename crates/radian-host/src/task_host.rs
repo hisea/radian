@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_core::{ContextBudget, NoopSink, TurnOptions};
+use agent_extensions::McpServerConfig;
 use radian_permissions::{ApprovalPolicy, AuditSink, Preset, Profile};
 use radian_runtime::{CompactionSettingsFor, ConfigQueue, ConfigSlot, RuntimeEvents};
 use radian_sandbox::{Sandbox, SandboxPolicy};
@@ -39,17 +40,30 @@ use crate::projection::SessionProjection;
 use crate::session::{
     ApprovalRouting, HostBindings, SessionCapability, SessionError, SessionId, SessionSetup,
 };
+use crate::startup::{LeadSetup, SessionSettings};
 use crate::task::{TaskBuilder, TaskContext, TaskSession, task_sandbox};
 use crate::trust;
 
 /// Builds a task's model from the task's session id and a **fresh** config slot. The host
 /// implements this with its own `build_model` closure, so a task's model is the lead's route
-/// built again — never the lead's model object and never a copied credential.
-pub type TaskModelFactory =
-    Arc<dyn Fn(&str, Arc<ConfigSlot>) -> Result<SwitchableModel, String> + Send + Sync>;
+/// built again — never the lead's model object and never a copied credential. The last two
+/// arguments are the resolved agent definition's `model` route and `thinking` level (ADR 0030
+/// O11), when present: the host resolves the route's credential the same way `/model` does.
+/// `None` means the host's own default route and level.
+pub type TaskModelFactory = Arc<
+    dyn Fn(
+            &str,
+            Arc<ConfigSlot>,
+            Option<radian_runtime::ModelRoute>,
+            Option<String>,
+        ) -> Result<SwitchableModel, String>
+        + Send
+        + Sync,
+>;
 
 /// Everything the builder needs that the hosts resolve anyway for the lead. One value per host
 /// process (the two hosts construct it once), cloned per task.
+#[derive(Clone)]
 pub struct TaskHost {
     /// Where the task's session file goes: the lead's own session directory (tasks are ordinary
     /// sessions in the same directory, ADR 0030 O2).
@@ -58,6 +72,10 @@ pub struct TaskHost {
     pub model: TaskModelFactory,
     /// The provider name and model name, for the task's `SessionCreated` snapshot.
     pub route: (String, String),
+    /// The lead's configured MCP servers. A task mounts **none** by default (ADR 0030 O8); the
+    /// registry keeps only the servers an agent definition's `mcp` list names, so the builder
+    /// hands the configured set and the definition opts in by name.
+    pub servers: Vec<McpServerConfig>,
     /// The lead's sandbox, when it has one: the task's deny-read list, Unix-socket whitelist and
     /// environment whitelist are inherited from it (the registry installs a `workspace` policy
     /// with the network off on top).
@@ -114,23 +132,71 @@ pub fn task_builder(host: TaskHost) -> TaskBuilder {
     Arc::new(move |ctx: &TaskContext<'_>| build_task(&host, ctx))
 }
 
-/// One task's [`TaskSession`]. The registry enforces the task invariants on it; everything here
-/// is what the host knows and the registry does not.
-fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, SessionError> {
+/// Builds the production [`NamedBuilder`] from the host's resolved values (ADR 0030 O12).
+pub fn named_builder(host: TaskHost) -> crate::named::NamedBuilder {
+    Arc::new(move |ctx: &crate::named::NamedContext<'_>| build_named(&host, ctx))
+}
+
+/// One named session's [`TaskSession`] (ADR 0030 O12). The registry enforces the named
+/// invariants (workspace, no memory, the role, the queue, `allowed_branch`); this supplies the
+/// host-specific parts: the model from the definition's route, the tier, no MCP by default, the
+/// lead's wording/skills/limits.
+fn build_named(
+    host: &TaskHost,
+    ctx: &crate::named::NamedContext<'_>,
+) -> Result<TaskSession, SessionError> {
     let workspace = ctx.workspace.to_path_buf();
     let fail = |error: String| SessionError::Message(error);
     let slot = ConfigSlot::new(serde_json::Value::Null);
-    let model = (host.model)(ctx.session_id, Arc::clone(&slot)).map_err(fail)?;
-    let sandbox = task_sandbox_for(host, &workspace).map_err(fail)?;
-    let profile = Profile::workspace_write(&workspace)
-        .map_err(|error| fail(error.to_string()))?
-        // The registry replaces this with the spawn's approval policy and adds the task
-        // hard-deny list; `auto` here is only the pre-enforcement default.
-        .with_approval(ApprovalPolicy::Auto);
-    // A task's turn must not inherit the lead's absolute deadline; its other options carry over.
+    let model = (host.model)(
+        ctx.session_id,
+        Arc::clone(&slot),
+        ctx.agent.model.clone(),
+        ctx.agent.thinking.clone(),
+    )
+    .map_err(fail)?;
+    // The definition's `profile` is the tier (ADR 0030 O11); `None` is the host's `workspace`
+    // default. A named agent may name any tier — it is the human's own session, not a task.
+    let (tier, sandbox, profile) = match ctx.agent.profile {
+        Some(Preset::Safe) => (
+            Preset::Safe,
+            None,
+            Profile::safe(&workspace).map_err(|error| fail(error.to_string()))?,
+        ),
+        Some(Preset::FullAccess) => (
+            Preset::FullAccess,
+            None,
+            Profile::full_access(&workspace).map_err(|error| fail(error.to_string()))?,
+        ),
+        _ => {
+            let sandbox = named_sandbox(host, &workspace).map_err(fail)?;
+            (
+                Preset::WorkspaceWrite,
+                sandbox,
+                Profile::workspace_write(&workspace)
+                    .map_err(|error| fail(error.to_string()))?
+                    .with_approval(ApprovalPolicy::Auto),
+            )
+        }
+    };
     let mut turn_options = host.turn_options.clone();
     turn_options.deadline = None;
-    let (provider, model_name) = host.route.clone();
+    let (provider, model_name) = ctx
+        .agent
+        .model
+        .clone()
+        .map(|route| (route.provider, route.model))
+        .unwrap_or_else(|| host.route.clone());
+    // The `spawn: true` capability (ADR 0030 O13): a named lead mounts the lead tools. The child
+    // builders are built from a clone of this host, so the nested registries work the same way.
+    let (task_builder, named_builder) = if ctx.agent.spawn {
+        (
+            Some(task_builder(host.clone())),
+            Some(named_builder(host.clone())),
+        )
+    } else {
+        (None, None)
+    };
     Ok(TaskSession {
         setup: SessionSetup {
             session_id: SessionId::new(ctx.session_id),
@@ -140,15 +206,12 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
             model,
             config_slot: slot,
             config_queue: ConfigQueue::new(),
-            // A task does not switch models, and it never resumes, so no budget/price resolver.
             budget_for: None,
             price_for: None,
             protected_branches: host.protected_branches.clone(),
             allowed_filters: host.allowed_filters.clone(),
             shell_auto_background: host.shell_auto_background,
-            // ADR 0030 O8: a task mounts no MCP server by default. The builder passes none.
-            servers: Vec::new(),
-            // The registry sets the `task` role; `--system` (a fixed layer 1) does not apply.
+            servers: host.servers.clone(),
             role: None,
             system_prompt: None,
             context_budget: host.context_budget,
@@ -157,20 +220,23 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
             compaction_settings_for: host.compaction_settings_for.clone(),
             retries: host.retries,
             sandbox,
-            tier: Preset::WorkspaceWrite,
+            tier,
             profile,
-            // A task has no `/access`; the registry pins the tier.
+            // A named agent has no `/access` in v0.
             access_builder: None,
-            // The registry sets these to the task values.
+            // The registry sets these to the named values.
             task_agent: false,
             parent: None,
             allowed_branch: None,
+            git_commit_requires_branch: false,
             memory_root: None,
             skills_extra_paths: host.skills_extra_paths.clone(),
             skills_builtin: host.skills_builtin,
             skills_disabled: host.skills_disabled.clone(),
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: host.memory_injection,
-            // A task's worktree is a fresh, untrusted directory (ADR 0031).
+            // A named agent's worktree is a fresh, untrusted directory (ADR 0031).
             trust: trust::Setup::untrusted(&workspace, false),
             resume: false,
             config_snapshot: serde_json::json!({"provider": provider, "model": model_name}),
@@ -179,6 +245,124 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
             wording: host.wording,
             capabilities: host.capabilities.clone(),
         },
+        bindings: HostBindings {
+            approvals: ApprovalRouting::Queued,
+            shared_queue: None,
+            ask_user: true,
+            audit: Arc::clone(&host.audit),
+            events: Arc::new(NoopSink),
+            projection: Arc::new(SessionProjection::new()),
+            runtime_events: Arc::clone(&host.task_events),
+            driver_stopped: Arc::new(|_| {}),
+            before_driver: None,
+            memory_warning: Arc::new(|_| {}),
+            memory_notice_line: Arc::new(|_| {}),
+            task_builder,
+            named_builder,
+        },
+    })
+}
+
+/// The sandbox a named session runs under: the lead's own tier (network on for `workspace`),
+/// rebuilt with `workspace` as its root and the lead's deny-read / socket / environment lists.
+/// Unlike a task (ADR 0030 O3), the network is not switched off: a named agent is the human's
+/// own session. `None` when the definition asks for `safe`/`full` (handled by the caller).
+fn named_sandbox(host: &TaskHost, workspace: &std::path::Path) -> Result<Option<Sandbox>, String> {
+    let mut policy =
+        SandboxPolicy::workspace_write(workspace).map_err(|error| error.to_string())?;
+    if let Some(lead) = &host.sandbox {
+        let lead = lead.policy();
+        policy.deny_read = lead.deny_read.clone();
+        policy.allow_unix_sockets = lead.allow_unix_sockets.clone();
+        policy.allow_env = lead.allow_env.clone();
+    } else {
+        policy.deny_read = host.sandbox_deny_read.clone();
+        policy.allow_unix_sockets = host.allow_unix_sockets.clone();
+    }
+    Sandbox::from_policy(policy)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+/// One task's [`TaskSession`]. The registry enforces the task invariants on it; everything here
+/// is what the host knows and the registry does not.
+fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, SessionError> {
+    let workspace = ctx.workspace.to_path_buf();
+    let fail = |error: String| SessionError::Message(error);
+    let slot = ConfigSlot::new(serde_json::Value::Null);
+    let model = (host.model)(
+        ctx.session_id,
+        Arc::clone(&slot),
+        ctx.agent.and_then(|agent| agent.model.clone()),
+        ctx.agent.and_then(|agent| agent.thinking.clone()),
+    )
+    .map_err(fail)?;
+    let sandbox = task_sandbox_for(host, &workspace).map_err(fail)?;
+    let profile = Profile::workspace_write(&workspace)
+        .map_err(|error| fail(error.to_string()))?
+        // The registry replaces this with the spawn's approval policy and adds the task
+        // hard-deny list; `auto` here is only the pre-enforcement default.
+        .with_approval(ApprovalPolicy::Auto);
+    // A task's turn must not inherit the lead's absolute deadline; its other options carry over.
+    let mut turn_options = host.turn_options.clone();
+    turn_options.deadline = None;
+    // The snapshot names the route the task actually runs: the definition's (or an override),
+    // else the lead's.
+    let (provider, model_name) = ctx
+        .agent
+        .and_then(|agent| agent.model.clone())
+        .map(|route| (route.provider, route.model))
+        .unwrap_or_else(|| host.route.clone());
+    Ok(TaskSession {
+        // ADR 0032 slice 5: a task's setup is a lead setup with the task's own values; the
+        // registry overwrites the rest (the workspace, the `task` role, the allow-lists, the
+        // sandbox it rebuilds and the approval routing).
+        setup: LeadSetup {
+            settings: SessionSettings {
+                retries: host.retries,
+                auto_compact: host.auto_compact,
+                compaction_settings: host.compaction_settings.clone(),
+                compaction_settings_for: host.compaction_settings_for.clone(),
+                shell_auto_background: host.shell_auto_background,
+                skills_extra_paths: host.skills_extra_paths.clone(),
+                skills_builtin: host.skills_builtin,
+                skills_disabled: host.skills_disabled.clone(),
+                memory_injection: host.memory_injection,
+            },
+            session_id: SessionId::new(ctx.session_id),
+            session_dir: host.session_dir.clone(),
+            workspace: workspace.clone(),
+            coding_root: Some(workspace.clone()),
+            model,
+            config_slot: slot,
+            // A task does not switch models, and it never resumes, so no budget/price resolver.
+            budget_for: None,
+            price_for: None,
+            protected_branches: host.protected_branches.clone(),
+            allowed_filters: host.allowed_filters.clone(),
+            // ADR 0030 O8: a task mounts no MCP server by default. The builder hands the lead's
+            // configured set; the registry keeps only the ones the definition names, so the
+            // default stays none and an explicit `mcp` list opts in by name.
+            servers: host.servers.clone(),
+            // The registry sets the `task` role; `--system` (a fixed layer 1) does not apply.
+            system_prompt: None,
+            context_budget: host.context_budget,
+            sandbox,
+            tier: Preset::WorkspaceWrite,
+            profile,
+            // A task has no `/access`; the registry pins the tier.
+            access_builder: None,
+            memory_root: None,
+            // A task's worktree is a fresh, untrusted directory (ADR 0031).
+            trust: trust::Setup::untrusted(&workspace, false),
+            resume: false,
+            config_snapshot: serde_json::json!({"provider": provider, "model": model_name}),
+            turn_options,
+            turn_timeout: host.turn_timeout,
+            wording: host.wording,
+            capabilities: host.capabilities.clone(),
+        }
+        .setup(),
         bindings: HostBindings {
             // The registry replaces this with the task-side routing; `Queued` is the harmless
             // placeholder it overwrites.
@@ -197,6 +381,7 @@ fn build_task(host: &TaskHost, ctx: &TaskContext<'_>) -> Result<TaskSession, Ses
             memory_notice_line: Arc::new(|_| {}),
             // Depth limit 2 (ADR 0030 O13): a task never mounts the lead tools.
             task_builder: None,
+            named_builder: None,
         },
     })
 }

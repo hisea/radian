@@ -16,6 +16,7 @@ use common::{Recorder, Reply, ScriptedModel, text};
 
 fn summary_reply(summary: &str, input: u64) -> Reply {
     Reply::Respond(ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![ContentPart::text(summary)],
         tool_calls: vec![],
@@ -32,6 +33,7 @@ fn summary_reply(summary: &str, input: u64) -> Reply {
 /// `CompactionUsage` record (ADR 0018, decision 3's acceptance).
 fn empty_reply() -> Reply {
     Reply::Respond(ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![ContentPart::text("   ")],
         tool_calls: vec![],
@@ -694,6 +696,7 @@ async fn each_summarization_attempt_reports_its_usage_once() {
 #[tokio::test]
 async fn a_summarization_call_without_usage_reports_nothing() {
     let no_usage = Reply::Respond(ModelResponse {
+        limits: None,
         reasoning: Vec::new(),
         content: vec![ContentPart::text("a real summary")],
         tool_calls: vec![],

@@ -22,13 +22,17 @@ fn models_path(protocol: Protocol) -> &'static str {
         // base URL never carries it (the adapter appends `/v1/messages`).
         Protocol::OpenAiCompatible => "models",
         Protocol::Anthropic => "v1/models",
+        // Unreachable in practice: `chatgpt` is the only `Responses` descriptor and its login
+        // is OAuth (ADR 0026), never routed through this API-key
+        // verification. Kept total (no panic) rather than relying on that staying true.
+        Protocol::Responses => "models",
     }
 }
 
 /// The auth header the wire protocol expects, as `(name, value)` pairs.
 fn auth_headers(protocol: Protocol, key: &str) -> Vec<(String, String)> {
     match protocol {
-        Protocol::OpenAiCompatible => {
+        Protocol::OpenAiCompatible | Protocol::Responses => {
             vec![("authorization".to_owned(), format!("Bearer {key}"))]
         }
         Protocol::Anthropic => vec![

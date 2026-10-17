@@ -8,13 +8,16 @@
 //! two binaries still decide their own flags, startup text and error wording.
 
 pub mod access;
+pub mod agents;
 pub mod approval;
 pub mod atomic_write;
 pub mod auth;
 mod catalog;
+pub mod chatgpt_usage;
 pub mod config;
 pub mod context;
 pub mod contrib;
+pub mod control;
 pub mod cost;
 mod describe;
 mod diagnostics;
@@ -24,15 +27,18 @@ pub mod git_commit;
 mod headers;
 pub mod herdr;
 mod home;
+pub mod integration;
 pub mod job_notify;
 pub mod lead_tools;
 pub mod login;
 mod mcp;
 pub mod memory;
-pub mod mermaid;
 mod model;
+pub mod named;
+pub mod oauth_chatgpt;
 pub mod observer;
 pub mod opencode_go;
+pub mod orchestration;
 mod output;
 pub mod pending;
 pub mod projection;
@@ -42,6 +48,7 @@ pub mod session;
 mod session_id;
 pub mod sessions;
 pub mod skills;
+pub mod startup;
 pub mod task;
 pub mod task_host;
 pub mod task_pending;
@@ -49,11 +56,16 @@ mod tools;
 pub mod trust;
 mod workspace;
 
+pub use agents::{
+    AgentDef, AgentError, AgentSource, NamedAgent, SpawnAgent, SpawnDefaults, SpawnOverrides,
+    builtin_def, load as load_agent, parse_file as parse_agent_file, parse_model_route, parse_tier,
+    resolve as resolve_agent, resolve_named as resolve_named_agent,
+};
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
-    AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, RADIAN_BASE_URL, ResolvedKey, auth_path,
-    list as list_auth, remove as remove_auth, resolve_key, resolve_note, resolved_keys,
-    upsert_api_key as upsert_auth_api_key,
+    AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, OAuthEntry, RADIAN_BASE_URL, ResolvedKey,
+    auth_path, has_login, list as list_auth, remove as remove_auth, resolve_key, resolve_note,
+    resolved_keys, upsert_api_key as upsert_auth_api_key,
 };
 /// The machine's hostname (ADR 0027 `host`), read once at startup. `HOSTNAME` is
 /// set by most shells (and by BSD's `login`); the `hostname` command is the portable fallback.
@@ -77,16 +89,17 @@ pub fn hostname() -> Option<String> {
 pub use catalog::{
     CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, ModelPrice,
     OUTPUT_RESERVATION_CAP, PriceRates, PriceTier, ProviderInfo, ProviderModels, Window,
-    WindowCheck, WindowQuery, WindowSource, cache_path, fetch_provider_models, host_of,
-    input_budget, output_ceiling_warning, output_reservation, provider_for_host,
-    provider_models_cache, provider_models_stale, read_provider_models, resolve, resolve_offline,
-    write_provider_models,
+    WindowCheck, WindowQuery, WindowSource, cache_path, check_context_window_flag,
+    fetch_provider_models, host_of, input_budget, output_ceiling_warning, output_reservation,
+    provider_for_host, provider_models_cache, provider_models_stale, read_provider_models, resolve,
+    resolve_offline, write_provider_models,
 };
+pub use chatgpt_usage::{ChatGptUsage, USAGE_BASE as CHATGPT_USAGE_BASE};
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{
-    CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ModelConfig, PermissionsConfig,
-    RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
+    CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ControlConfig, ModelConfig,
+    PermissionsConfig, RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
     parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path,
 };
@@ -95,6 +108,7 @@ pub use contrib::{
     Contribution, ContributionStore, ContributorRunner, GitContributor, Segment, SegmentRole,
     StatusContributor, Tick, spawn as spawn_contributor, spawn_gated as spawn_contributor_gated,
 };
+pub use control::{ControlServer, ControlTarget, SUBSCRIBER_BUFFER, SocketGuard};
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use diagnostics::{
     CleanReport, MAX_TOTAL_BYTES, RETENTION, append, cache_dir, clean, clean_startup, clean_with,
@@ -103,33 +117,51 @@ pub use diagnostics::{
 pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_overflow};
 pub use headers::{SESSION_PLACEHOLDER, parse_headers};
 pub use home::{
-    RADIAN_HOME_ENV, access_dir_for, cache_dir_for, catalog_cache, catalog_cache_for, config_dir,
-    config_dir_for, credentials_dir, credentials_dir_for, diagnostics_dir_for, ensure_private_dir,
-    legacy_sessions_dirs_for, legacy_sessions_hint, legacy_sessions_hint_for, memory_dir,
-    memory_dir_for, radian_home, radian_home_for, sessions_dir, sessions_dir_for, skills_dir,
-    skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
-    worktrees_dir_for,
+    RADIAN_HOME_ENV, access_dir_for, agents_dir, agents_dir_for, cache_dir_for, catalog_cache,
+    catalog_cache_for, config_dir, config_dir_for, credentials_dir, credentials_dir_for,
+    diagnostics_dir_for, ensure_private_dir, legacy_sessions_dirs_for, legacy_sessions_hint,
+    legacy_sessions_hint_for, memory_dir, memory_dir_for, radian_home, radian_home_for,
+    run_dir_for, sessions_dir, sessions_dir_for, skills_dir, skills_dir_for, themes_dir,
+    themes_dir_for, trust_dir, trust_dir_for, user_home, worktrees_dir_for,
+};
+pub use integration::{
+    Integration, MergeOutcome, branch_for as integration_branch_for,
+    dir_name_for as integration_dir_name_for, worktree_path as integration_worktree_path,
 };
 pub use job_notify::{
     JobNotifier, MAX_CONSECUTIVE_WAKES, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message,
 };
 pub use lead_tools::{
     DEFAULT_WAIT_TIMEOUT_SECS, LEAD_TOOL_NAMES, LeadSession, LeadTools, TASK_DETAIL_LIMIT_CHARS,
-    TASK_SUMMARY_LIMIT_CHARS, run as run_lead_tool,
+    TASK_SUMMARY_LIMIT_CHARS, human_merge_command, lead_allowed_tools, run as run_lead_tool,
 };
 pub use mcp::load_mcp_config;
-pub use mermaid::{MermaidCheckSession, MermaidCheckTools, check};
 pub use model::{
-    COMPACTION_THINKING_CURRENT, DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs,
-    Provider, RouteContext, SwitchableModel, Thinking, build_model, check_provider_flags,
-    compaction_settings_for, compaction_settings_for_route, redact_base_url,
+    COMPACTION_THINKING_CURRENT, ChatGptModel, DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET,
+    ModelArgs, Provider, RouteContext, SwitchableModel, Thinking, build_model,
+    check_provider_flags, compaction_settings_for, compaction_settings_for_route, redact_base_url,
     resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref, route_replays_reasoning,
+};
+pub use named::{
+    NamedBuilder, NamedContext, NamedError, NamedRecord, NamedRegistry, NamedSeams, SendOutcome,
+    known_definitions as known_agent_definitions,
+};
+pub use oauth_chatgpt::{
+    BrowserLogin, CallbackListener, DevicePoll, DeviceStart, Endpoints as OAuthEndpoints,
+    OAuthError, PROVIDER_ID as CHATGPT_PROVIDER_ID, RefreshError as OAuthRefreshError,
+    TokenResponse as OAuthTokenResponse, device_start as oauth_device_start,
+    ensure_fresh as oauth_ensure_fresh, ensure_fresh_in as oauth_ensure_fresh_in,
+    poll_device_until_done as oauth_poll_device_until_done, store_token as oauth_store_token,
 };
 pub use observer::{JournalObserver, SessionObserver};
 pub use opencode_go::{
     DEFAULT_PERIOD as OPENCODE_GO_DEFAULT_PERIOD, MAX_PERIOD as OPENCODE_GO_MAX_PERIOD,
     MIN_PERIOD as OPENCODE_GO_MIN_PERIOD, OpencodeGoUsage, USAGE_URL as OPENCODE_GO_USAGE_URL,
     clamp_period as clamp_opencode_go_period,
+};
+pub use orchestration::{
+    Orchestration, OrchestrationConfig, VERIFY_TAIL_CHARS, VERIFY_TIMEOUT, VerifyResult, hook,
+    run_verify,
 };
 pub use output::{StdoutError, write_line, write_stdout};
 pub use pending::{
@@ -141,14 +173,14 @@ pub use projection::{
 };
 pub use prompt::{Mode, RoleHooks};
 pub use provider::{
-    CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod,
-    NamedProvider, NamedSource, Protocol, ProviderDecl, ProviderDescriptor, ProviderRef,
-    RADIAN_KIND, ReasoningReplayOverride, Route, THINKING_LEVELS, ThinkingMap, clamp_thinking,
-    clamp_thinking_with, descriptor, descriptors, level_fits, login_choices, name_error,
-    parse_thinking_level, resolve_provider, resolve_route, resolve_route_for,
-    supported_thinking_levels, supported_thinking_levels_ref, supported_thinking_levels_ref_with,
-    supported_thinking_levels_with, supported_wire, thinking_map_for, thinking_map_for_ref,
-    thinking_rank, valid_name, wire_budget,
+    CHATGPT_DEVICE_LOGIN, CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel,
+    GENERIC_ID, LoginMethod, NamedProvider, NamedSource, Protocol, ProviderDecl,
+    ProviderDescriptor, ProviderRef, RADIAN_KIND, ReasoningReplayOverride, Route, THINKING_LEVELS,
+    ThinkingMap, clamp_thinking, clamp_thinking_with, descriptor, descriptors, level_fits,
+    login_choices, name_error, parse_thinking_level, resolve_provider, resolve_route,
+    resolve_route_for, supported_thinking_levels, supported_thinking_levels_ref,
+    supported_thinking_levels_ref_with, supported_thinking_levels_with, supported_wire,
+    thinking_map_for, thinking_map_for_ref, thinking_rank, valid_name, wire_budget,
 };
 pub use radian_runtime::ModelRoute;
 pub use session::session_hooks;
@@ -167,13 +199,17 @@ pub use skills::{
     completion_candidates, discover, discover_with_extras, expand, has_skill_file, notices,
     prompt_section,
 };
+pub use startup::{
+    LeadSetup, ListError, SessionSettings, is_local_base_url, list_sessions, session_dir,
+    session_workspace,
+};
 pub use task::{
-    CommitGate, EndCommit, Isolation, OrchestrationLimits, QueuedTask, SpawnHook, SpawnRequest,
-    SpawnStage, Spawned, StallNotice, TaskBuilder, TaskContext, TaskError, TaskHandle,
-    TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
+    CommitGate, EndCommit, Integrated, Isolation, OrchestrationLimits, QueuedTask, SpawnHook,
+    SpawnRequest, SpawnStage, Spawned, StallNotice, TaskBuilder, TaskContext, TaskError,
+    TaskHandle, TaskNotifier, TaskRecord, TaskRegistry, TaskSeams, TaskSession, end_of_task_commit,
     task_sandbox,
 };
-pub use task_host::{TaskHost, TaskModelFactory, task_builder, task_lines};
+pub use task_host::{TaskHost, TaskModelFactory, named_builder, task_builder, task_lines};
 pub use task_pending::{
     DEFAULT_PENDING_TIMEOUT, DEFAULT_POLICY_TIMEOUT, PolicyCommand, TaskApprover,
     TaskPendingContent, TaskPendingError, TaskPendingKind, TaskPendingQueue, TaskPendingView,

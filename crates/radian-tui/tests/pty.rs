@@ -3922,6 +3922,94 @@ async fn pty_the_startup_notice_names_the_window_source() {
     pty.quit();
 }
 
+/// ADR 0015 (a zero window is unset): `[model] context_window = 0` leaves the window unknown in
+/// the TUI too, exactly like the key being absent — the startup notice says there is no budget,
+/// and no number is invented. The reader maps the key's zero to `None` before either host sees
+/// it, so only a reader that refused `0` would fail here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_zero_context_window_in_the_config_leaves_the_budget_off() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("zero-window");
+    let home = TempDir::new("zero-window-home");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "zero-window",
+            "--profile",
+            "full",
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        "schema_version = 1\n[model]\ncontext_window = 0\n",
+        24,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.expand_startup();
+    assert!(
+        pty.wait_until(10, |screen| {
+            let notice = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+            notice.contains("context window: window unknown") && notice.contains("no budget")
+        }),
+        "a zero `[model] context_window` must be unset: the startup notice must say the window \
+         is unknown:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0015: the flag's zero is a **usage error** in the TUI too, exactly as under `radian exec`
+/// — the user typed a window, so "not given" is not what they meant. The refusal happens before
+/// the terminal is entered and before a session file exists; a host that read the flag's zero as
+/// "unset" would start the app instead (the openai-compatible default provider needs no key for
+/// a loopback endpoint, so nothing else can refuse this run).
+#[test]
+fn pty_a_zero_context_window_flag_is_a_usage_error() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("zero-window-flag");
+    let session_dir = dir.path().join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            session_dir.to_str().unwrap(),
+            "--session-id",
+            "zero-window-flag",
+            "--context-window",
+            "0",
+        ],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_exit(15).is_some(),
+        "the app did not refuse `--context-window 0`"
+    );
+    assert_eq!(pty.app_exit_code(), Some(2));
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        raw.contains("--context-window must be at least 1 token"),
+        "{raw}"
+    );
+    assert!(
+        !raw.contains("\u{1b}[?1049h"),
+        "the refusal must come before the terminal: {raw}"
+    );
+    assert_session_dir_empty(&session_dir);
+}
+
 /// ADR 0021 D2/D6: the TUI shows the memory project state and the injection budget at
 /// startup. The `HOME` is private to the pty, so this never reads the real `~/.radian`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -6684,7 +6772,7 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
     );
     // Wait for the **panel** (its hint), not the transcript block (`[loader]` appears there too).
     assert!(
-        pty.wait_for_screen("⏎ select", 40),
+        pty.wait_for_screen("space select", 40),
         "the panel must be up: {}",
         pty.screen()
     );
@@ -6756,10 +6844,10 @@ async fn pty_ask_user_alt_h_hides_and_shows() {
     assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.send(b"go\r");
     // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
-    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
     // Answer the first question, then collapse.
     pty.send(b" ");
-    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
     pty.send(b"\x1bh"); // alt-h
     assert!(
         pty.wait_for_screen("alt-h to show", 40),
@@ -6805,7 +6893,7 @@ async fn pty_ask_user_esc_declines() {
     assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.send(b"go\r");
     // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
-    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
     pty.send(&[0x1b]); // the first Esc asks again
     assert!(
         pty.wait_for_screen("press Esc again", 40),
@@ -6861,7 +6949,7 @@ async fn pty_ask_user_other_keeps_its_text() {
     assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.send(b"go\r");
     // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
-    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
+    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
     // Move to `Other` (A, B, Other) and type.
     pty.send(b"\x1b[B"); // Down
     pty.send(b"\x1b[B"); // Down
@@ -6948,7 +7036,7 @@ async fn pty_ctrl_c_during_a_question_cancels_without_an_answer() {
     // The form's own title, not the prompt: the transcript shows the tool call's arguments,
     // which contain the prompt text.
     assert!(
-        pty.wait_until_gone("⏎ select", 20),
+        pty.wait_until_gone("space select", 20),
         "the panel must go with the cancelled wait: {}",
         pty.screen()
     );
@@ -7193,6 +7281,142 @@ async fn pty_a_model_switch_sends_the_next_turn_to_the_new_provider() {
     assert!(
         journal.contains("\"model{\"provider\":\"anthropic\"") || journal.contains("anthropic"),
         "the switch is journaled"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+fn pty_base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(n & 0x3f) as usize] as char);
+        }
+    }
+    out
+}
+
+/// Writes a `chatgpt` `oauth` entry (ADR 0026) directly — `write_auth_json` only
+/// knows the `api_key` shape, so a test that wants a `chatgpt` login writes it itself, at the
+/// same `RADIAN_HOME` it passes through `envs`.
+fn write_chatgpt_oauth_entry(radian_home: &Path) {
+    let header = pty_base64url(br#"{"alg":"none"}"#);
+    let payload =
+        pty_base64url(br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-pty-test"}}"#);
+    let access = format!("{header}.{payload}.sig");
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 3_600_000;
+    let dir = radian_home.join("credentials");
+    std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = dir.join("auth.json");
+    let body = serde_json::json!({
+        "chatgpt": {"type": "oauth", "access": access, "refresh": "refresh-unused", "expires": expires}
+    });
+    std::fs::write(&path, serde_json::to_string(&body).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// ADR 0026 slice 3: once there is a `chatgpt` login, `/model` lists its built-in
+/// models alongside every other descriptor's (the flat list is unconditional for a built-in -
+/// the same as `anthropic`/`openai`/`opencode-go` already are - so this also pins that the
+/// new descriptor did not accidentally gain a login gate the others do not have).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_model_lists_chatgpt_once_it_is_logged_in() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("model-chatgpt");
+    let sessions = dir.path().join("sessions");
+    let radian_home = dir.path().join("radian-home");
+    write_chatgpt_oauth_entry(&radian_home);
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "model-chatgpt",
+        ],
+        &[("RADIAN_HOME", radian_home.to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/model chatgpt/");
+    assert!(
+        pty.wait_for_screen("chatgpt/gpt-5.4", 10),
+        "the chatgpt models did not appear in the flat list:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\x1b");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// ADR 0026: switching to a `chatgpt` model with `/model` is accepted once there is
+/// a `chatgpt` login. The login is an `oauth` entry, which `resolve_key` (api keys only) does
+/// not see; the switch's credential check must also accept `has_login` (owner report
+/// 2026-10-16: "no credential for `chatgpt`: run /login chatgpt" right after logging in).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_model_switches_to_chatgpt_with_an_oauth_login() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("model-chatgpt-switch");
+    let sessions = dir.path().join("sessions");
+    let radian_home = dir.path().join("radian-home");
+    write_chatgpt_oauth_entry(&radian_home);
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "model-chatgpt-switch",
+        ],
+        &[("RADIAN_HOME", radian_home.to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/model chatgpt/gpt-5.4\r");
+    assert!(
+        pty.wait_for_screen("next turn: chatgpt/gpt-5.4", 10),
+        "the switch to chatgpt was refused or never confirmed:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("no credential"),
+        "an oauth login must count as a credential:\n{}",
+        pty.screen()
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());

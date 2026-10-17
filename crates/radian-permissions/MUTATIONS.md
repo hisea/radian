@@ -85,3 +85,9 @@ Base `63fafba` · 工作树 `.radian-worktrees/orch-s5`。改前把 `src/profile
 1/1 抓住。硬禁止是 `deny` 规则（优先级最高，`ApprovalPolicy` 不会降级），所以清单移除后
 `git push` 落到 `ask`，approver 一允许就通过；这条变异同时也说明清单不能被 edge policy 放宽
 （清单在时 approver 根本收不到该调用）。
+
+## ADR 0042：`mermaid_check` 的 `allow` 名单删除（2026-10-16）
+
+上面「ADR 0028 R8：`mermaid_check` 三档 allow」的 DG-M3 已随 ADR 0042 的补充失效：工具删除后
+`always_allowed()` 只剩 `ask_user` 与 `skill`，被它测的 `mermaid_check_is_allowed_in_every_tier`
+也一并删除，没有新的变异可跑。

@@ -10,11 +10,14 @@ use std::collections::BTreeMap;
 
 use crate::model::Provider;
 
-/// Which wire protocol a model talks, mapped to one of the two existing adapters.
+/// Which wire protocol a model talks, mapped to one of the three existing adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     OpenAiCompatible,
     Anthropic,
+    /// OpenAI's Responses API (`agent-provider-openai-responses`, ADR 0026 slice
+    /// 2): today only the `chatgpt` descriptor uses it.
+    Responses,
 }
 
 impl Protocol {
@@ -23,6 +26,7 @@ impl Protocol {
         match self {
             Self::OpenAiCompatible => "openai-compatible",
             Self::Anthropic => "anthropic",
+            Self::Responses => "openai-responses",
         }
     }
 
@@ -30,6 +34,7 @@ impl Protocol {
         match self {
             Self::OpenAiCompatible => Provider::OpenAiCompatible,
             Self::Anthropic => Provider::Anthropic,
+            Self::Responses => Provider::ChatGpt,
         }
     }
 }
@@ -110,7 +115,10 @@ impl ProviderDescriptor {
 pub const RADIAN_KIND: &str = "RADIAN_KIND";
 
 impl Protocol {
-    /// The wire protocol a `kind` names (D10: only the two adapters exist in this build).
+    /// The wire protocol a `kind` names (D10: a named/custom provider may only declare one of
+    /// these two; `Responses` is deliberately absent — it is the `chatgpt` descriptor's fixed
+    /// protocol, not a dial a custom endpoint can choose, since its base URL shape and its
+    /// headers come from the OAuth login, not from a user-typed endpoint).
     pub fn from_kind(kind: &str) -> Option<Self> {
         match kind {
             "openai-compatible" => Some(Self::OpenAiCompatible),
@@ -129,12 +137,32 @@ impl Protocol {
 /// (ADR 0026 D10). The TUI wizard and `radian login` share it so they cannot drift.
 pub const CUSTOM_LOGIN: &str = "custom";
 
-/// The `/login` provider-choice candidates: the built-in descriptors, then [`CUSTOM_LOGIN`].
+/// The `/login` choice for the ChatGPT-subscription device-code flow (ADR 0026
+/// decision 3). The browser flow's id is [`crate::oauth_chatgpt::PROVIDER_ID`] (`"chatgpt"`)
+/// — both store into the same `auth.json` entry, so there is no separate constant for it.
+pub const CHATGPT_DEVICE_LOGIN: &str = "chatgpt-device";
+
+/// The `/login` provider-choice candidates: the built-in descriptors, the two ChatGPT OAuth
+/// choices (ADR 0026), then [`CUSTOM_LOGIN`]. The TUI wizard's own `choices()`
+/// mirrors this list (same ids, same order) so the picker and `radian login`'s numbered list
+/// never drift.
 pub fn login_choices() -> Vec<(String, String)> {
+    // `chatgpt` is excluded here: it is a real descriptor (so `/model` lists its models), but
+    // its *login* is the two OAuth entries pushed below, not the generic "ask for an API key"
+    // flow every other descriptor gets from this loop — including it too would list it twice.
     let mut choices: Vec<(String, String)> = descriptors()
         .iter()
+        .filter(|d| d.id != crate::oauth_chatgpt::PROVIDER_ID)
         .map(|d| (d.id.to_owned(), d.display_name.to_owned()))
         .collect();
+    choices.push((
+        crate::oauth_chatgpt::PROVIDER_ID.to_owned(),
+        "Sign in with ChatGPT (opens your browser)".to_owned(),
+    ));
+    choices.push((
+        CHATGPT_DEVICE_LOGIN.to_owned(),
+        "ChatGPT (device code; no browser needed on this machine)".to_owned(),
+    ));
     choices.push((
         CUSTOM_LOGIN.to_owned(),
         "a custom endpoint: name, protocol, base URL and key (ADR 0026 D10)".to_owned(),
@@ -393,6 +421,28 @@ fn opencode_go_headers(session_id: &str) -> Vec<(String, String)> {
 
 fn no_headers(_session_id: &str) -> Vec<(String, String)> {
     Vec::new()
+}
+
+/// `chatgpt`'s **static** headers only (ADR 0026): `OpenAI-Beta` and
+/// `originator` are fixed, and `session_id` is this request's session id (names verified
+/// against `@oh-my-pi/pi-catalog/src/wire/codex.ts`'s `OPENAI_HEADERS`, 2026-10-16, read-only
+/// reference — `session_id` is that literal lowercase-with-underscore spelling, not a
+/// `x-`-prefixed header). `Authorization` and `chatgpt-account-id` are **not** here: they need
+/// a possibly-refreshed access token, which this function (a plain fn pointer, called
+/// synchronously from route resolution) cannot fetch. [`crate::model::ChatGptModel::complete`]
+/// adds them per call.
+fn chatgpt_headers(session_id: &str) -> Vec<(String, String)> {
+    vec![
+        (
+            "OpenAI-Beta".to_owned(),
+            "responses=experimental".to_owned(),
+        ),
+        (
+            "originator".to_owned(),
+            crate::oauth_chatgpt::ORIGINATOR.to_owned(),
+        ),
+        ("session_id".to_owned(), session_id.to_owned()),
+    ]
 }
 
 /// The OpenAI-compatible base URL `opencode-go` serves, from the dogfood command and the
@@ -699,7 +749,52 @@ const fn openai_model(id: &'static str, name: &'static str) -> DescriptorModel {
     model(id, name, Protocol::OpenAiCompatible, OPENAI_BASE)
 }
 
-/// The four built-in descriptors (ADR 0026 D0), in a stable order.
+/// Everything before `/responses` (the adapter's own convention, `OpenAiResponsesConfig::base_url`'s
+/// doc comment gives this exact example): the real request goes to
+/// `{CHATGPT_BASE}/responses` = `https://chatgpt.com/backend-api/codex/responses`.
+const CHATGPT_BASE: &str = "https://chatgpt.com/backend-api/codex";
+
+const fn chatgpt_model(
+    id: &'static str,
+    name: &'static str,
+    thinking: ThinkingMap,
+) -> DescriptorModel {
+    DescriptorModel {
+        id,
+        name,
+        protocol: Protocol::Responses,
+        base_url: CHATGPT_BASE,
+        thinking,
+    }
+}
+
+/// `chatgpt`'s built-in model list, from `@oh-my-pi/pi-catalog/src/models.json`'s
+/// `openai-codex` entry (read-only reference, 2026-10-16: all 8 entries, every one
+/// `"api": "openai-codex-responses"`). Two `thinking.efforts` shapes appear upstream:
+/// `low/medium/high/xhigh` (→ the existing [`THINKING_UP_TO_XHIGH`]) and
+/// `low/medium/high/xhigh/max` (→ the existing [`THINKING_LOW_TO_MAX`]) — no new map constant
+/// is needed. **Unverified**: these are upstream's own names, not confirmed against a live
+/// ChatGPT subscription; the list is a starting point the ADR says to keep easy to edit.
+const CODEX_MODELS: &[DescriptorModel] = &[
+    chatgpt_model(
+        "gpt-5.3-codex-spark",
+        "GPT-5.3 Codex Spark",
+        THINKING_UP_TO_XHIGH,
+    ),
+    chatgpt_model("gpt-5.4", "GPT-5.4", THINKING_UP_TO_XHIGH),
+    chatgpt_model("gpt-5.4-mini", "GPT-5.4 mini", THINKING_UP_TO_XHIGH),
+    chatgpt_model("gpt-5.5", "GPT-5.5", THINKING_UP_TO_XHIGH),
+    chatgpt_model("gpt-5.6-luna", "GPT-5.6 Luna", THINKING_LOW_TO_MAX),
+    chatgpt_model("gpt-5.6-sol", "GPT-5.6 Sol", THINKING_LOW_TO_MAX),
+    chatgpt_model("gpt-5.6-terra", "GPT-5.6 Terra", THINKING_LOW_TO_MAX),
+    chatgpt_model(
+        "gpt-daybreak-blue-latest",
+        "Daybreak Blue",
+        THINKING_LOW_TO_MAX,
+    ),
+];
+
+/// The built-in descriptors (ADR 0026 D0), in a stable order.
 pub const DESCRIPTORS: &[ProviderDescriptor] = &[
     ProviderDescriptor {
         id: "opencode-go",
@@ -710,6 +805,20 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         default_protocol: Protocol::OpenAiCompatible,
         models: OPENCODE_GO_MODELS,
         headers: opencode_go_headers,
+    },
+    ProviderDescriptor {
+        id: "chatgpt",
+        display_name: "ChatGPT (subscription)",
+        default_base_url: CHATGPT_BASE,
+        // Browser OAuth is the primary flow; the device-code flow is a second `/login` entry
+        // (ADR 0026). Neither is dispatched through this field today —
+        // both are special-cased by id in the TUI wizard and `radian login` (slice ①) — but it
+        // documents which login this descriptor actually uses.
+        login: LoginMethod::OAuthBrowser,
+        thinking: &[],
+        default_protocol: Protocol::Responses,
+        models: CODEX_MODELS,
+        headers: chatgpt_headers,
     },
     ProviderDescriptor {
         id: "anthropic",
@@ -872,16 +981,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_four_built_ins_are_registered() {
+    fn the_built_ins_are_registered() {
         let ids: Vec<&str> = descriptors().iter().map(|d| d.id).collect();
         assert_eq!(
             ids,
-            ["opencode-go", "anthropic", "openai", "openai-compatible"]
+            [
+                "opencode-go",
+                "chatgpt",
+                "anthropic",
+                "openai",
+                "openai-compatible"
+            ]
         );
         assert!(descriptor("nope").is_none());
         assert_eq!(
             descriptor("anthropic").unwrap().default_base_url,
             "https://api.anthropic.com"
+        );
+    }
+
+    /// ADR 0026 slice 3: the descriptor exists, uses the Responses protocol, every
+    /// model resolves to the codex base URL, and its static headers carry `originator: radian`
+    /// and the session id but **not** `Authorization`/`chatgpt-account-id` (those are per-call,
+    /// `ChatGptModel`'s job).
+    #[test]
+    fn the_chatgpt_descriptor_is_registered_with_responses_models_and_static_headers_only() {
+        let chatgpt = descriptor("chatgpt").expect("the chatgpt descriptor");
+        assert_eq!(chatgpt.default_protocol, Protocol::Responses);
+        assert_eq!(chatgpt.default_base_url, CHATGPT_BASE);
+        assert!(!chatgpt.models.is_empty(), "the built-in model list");
+        for model in chatgpt.models {
+            assert_eq!(model.protocol, Protocol::Responses, "{}", model.id);
+            assert_eq!(model.base_url, CHATGPT_BASE, "{}", model.id);
+        }
+        assert_eq!(chatgpt.protocol_for("gpt-5.4"), Protocol::Responses);
+        assert_eq!(Protocol::Responses.adapter(), Provider::ChatGpt);
+        assert_eq!(Protocol::Responses.adapter_name(), "openai-responses");
+
+        let headers = chatgpt.request_headers("sess-1");
+        assert_eq!(
+            headers,
+            vec![
+                (
+                    "OpenAI-Beta".to_owned(),
+                    "responses=experimental".to_owned()
+                ),
+                ("originator".to_owned(), "radian".to_owned()),
+                ("session_id".to_owned(), "sess-1".to_owned()),
+            ]
+        );
+        assert!(
+            !headers.iter().any(|(name, _)| name == "Authorization"
+                || name.eq_ignore_ascii_case("chatgpt-account-id")),
+            "the dynamic headers must not be here: {headers:?}"
+        );
+    }
+
+    /// `chatgpt` is not doubly listed: `login_choices()` excludes it from the generic
+    /// descriptor loop because it already has its own two entries (ADR 0026
+    /// decision 3, slice ① `oauth_chatgpt::PROVIDER_ID` + `CHATGPT_DEVICE_LOGIN`).
+    #[test]
+    fn login_choices_lists_chatgpt_exactly_once_each_for_browser_and_device() {
+        let choices = login_choices();
+        let chatgpt_entries: Vec<&str> = choices
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .filter(|id| id.starts_with("chatgpt"))
+            .collect();
+        assert_eq!(
+            chatgpt_entries,
+            [crate::oauth_chatgpt::PROVIDER_ID, CHATGPT_DEVICE_LOGIN]
         );
     }
 
@@ -1284,6 +1453,9 @@ pub fn protocol_descriptor_id(protocol: Protocol) -> &'static str {
     match protocol {
         Protocol::OpenAiCompatible => GENERIC_ID,
         Protocol::Anthropic => "anthropic",
+        // Unreachable: `Protocol::from_kind` never yields `Responses` (D10's named/custom
+        // providers cannot declare it), so no `NamedProvider` ever carries this variant.
+        Protocol::Responses => crate::oauth_chatgpt::PROVIDER_ID,
     }
 }
 

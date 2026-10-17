@@ -19,10 +19,11 @@ use clap::Parser;
 use radian_host::memory::MemoryService;
 use radian_host::{
     DEFAULT_MAX_TOKENS, ModelArgs, Provider, SessionFacade, Thinking, build_model,
-    check_provider_flags, load_mcp_config, parse_headers, validate_session_id,
+    check_context_window_flag, check_provider_flags, is_local_base_url, load_mcp_config,
+    parse_headers, validate_session_id,
 };
 use radian_permissions::{AuditSink, PermissionResolved, runtime_event};
-use radian_session::{Index, SessionJournal};
+use radian_session::SessionJournal;
 use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input as AppInput, MemoryResult, PickerData};
 use radian_tui::clip::{ClipboardMode, osc52};
 use radian_tui::events::{InputEvent, ProjectionSink, UiEvent};
@@ -639,10 +640,13 @@ fn run(
     mark("run-start");
     if cli.list {
         return match list_sessions(&cli) {
-            Ok(()) | Err(ListError::BrokenPipe) => Ok(None),
+            Ok(()) | Err(radian_host::ListError::BrokenPipe) => Ok(None),
             // `--list` failing is a real error of this run, not a startup refusal (ADR 0032
             // A3's table: print-and-exit modes return 1 for a real error).
-            Err(ListError::Failed(message)) => Err(RunError::Failed(message)),
+            Err(radian_host::ListError::Failed(message)) => Err(RunError::Failed(message)),
+            Err(radian_host::ListError::Write(error)) => {
+                Err(RunError::Failed(format!("cannot write to stdout: {error}")))
+            }
         };
     }
     // ADR 0013 decision 4: diagnostics live in the user cache directory, and cleanup runs at
@@ -779,6 +783,7 @@ fn run(
             config.tui.theme.clone(),
             cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             // The picker phase has no session and no sandbox yet.
+            None,
             None,
             None,
             // The picker phase has no session to report (ADR 0034 H1).
@@ -929,6 +934,10 @@ fn run(
     // an error before the session file exists (dogfooding D15). `--thinking` left this check in
     // D11: the unified levels ride both wire protocols.
     check_provider_flags(provider, Thinking::Off, cli.max_tokens)?;
+    // ADR 0015: the same usage error `radian exec` gives, so the two hosts read `--context-window
+    // 0` alike; the config's `[model] context_window = 0` is "unset" in both (the reader already
+    // mapped it to `None`).
+    check_context_window_flag(cli.context_window)?;
     // The generic descriptor's endpoint; a non-generic descriptor refuses it (`resolve_route`).
     // The generic provider's endpoint override (D0): refused for any other provider, so it is
     // dropped here rather than passed to `resolve_route_for`, which would error.
@@ -951,6 +960,10 @@ fn run(
     let credential = match radian_host::resolve_key(&key_id).map_err(|e| e.to_string())? {
         Some(credential) => Some(credential),
         None if is_local_base_url(&probe_base_url) => None,
+        // `resolve_key` only ever resolves an `api_key` entry; `chatgpt`'s login is the oauth
+        // entry slice ① wrote (ADR 0026) — `credential` stays `None` for it either
+        // way (`ChatGptModel` reads `auth.json` itself, per call).
+        None if radian_host::has_login(&key_id) => None,
         None => {
             return Err(RunError::Startup(
                 match radian_host::resolve_note(&key_id).map_err(|e| e.to_string())? {
@@ -980,7 +993,9 @@ fn run(
     app.session.model_name = model_name.clone();
     let request_max_output = match provider {
         Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
-        Provider::OpenAiCompatible => None,
+        // Neither sends an explicit max-output field by default (the Responses adapter only
+        // sends `max_output_tokens` when `extra_body` asks for it, same as openai-compatible).
+        Provider::OpenAiCompatible | Provider::ChatGpt => None,
     };
     // The window's base URL: the provider's endpoint (for a named provider, its declaration).
     let catalog_base_url = provider_ref.base_url_for(&model_name, None);
@@ -1062,38 +1077,21 @@ fn run(
         route.adapter(),
         Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
-    // ADR 0018, decision 1: the summary call's reasoning level, converted to this
-    // route's wire value with the same map `/thinking` uses. `low` by default; `"current"`
-    // keeps the conversation's level (carries no setting). A clamped level is said once.
-    let compaction_settings = {
-        let level = config.compaction.thinking.as_deref().unwrap_or("low");
-        let (settings, notice) = radian_host::compaction_settings_for(
-            &provider_ref,
-            &model_name,
-            level,
-            cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        );
-        if let Some(notice) = notice {
-            eprintln!("radian: [compaction] {notice}");
-        }
-        settings
-    };
-    // ADR 0018: the same level, converted per route, so a `/model` switch never
-    // leaves the summary carrying the previous route's wire form.
-    let compaction_settings_for = {
-        let providers = config.providers.clone();
-        let level = config
-            .compaction
-            .thinking
-            .clone()
-            .unwrap_or_else(|| "low".to_owned());
-        let max_tokens = cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-        std::sync::Arc::new(move |provider: &str, model: &str| {
-            radian_host::compaction_settings_for_route(
-                &providers, provider, model, &level, max_tokens,
-            )
-        }) as radian_runtime::CompactionSettingsFor
-    };
+    // ADR 0032 slice 5: the settings the TUI and `radian exec` read from the config the same way
+    // — the retries, the compaction settings (ADR 0018: `[compaction]
+    // thinking` converted to this route's wire value, `low` by default; a clamped level is said
+    // once), the skills, the memory injection and the shell auto-background. The same value
+    // builds the task builder below.
+    let (settings, compaction_notice) = radian_host::SessionSettings::from_config(
+        &config,
+        &provider_ref,
+        &model_name,
+        cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        cli.no_auto_compact,
+    );
+    if let Some(notice) = compaction_notice {
+        eprintln!("radian: [compaction] {notice}");
+    }
     // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
@@ -1284,8 +1282,35 @@ fn run(
     // The renderer reads the session facts from the host's projection, not a private copy
     // (ADR 0023 U5). Set here because the app is created before the session exists (`--pick`).
     app.set_projection(Arc::clone(&projection));
-    let live: Arc<dyn EventSink> =
+    // ADR 0030 slice 8: the process control port. Bound before the session so its fan-out can
+    // wrap the host's own sinks; the startup line names the path. A bind failure is a warning,
+    // never a startup refusal. The bind creates a tokio listener, and this setup runs outside
+    // the async `run` (sessions are opened with `runtime.block_on`), so enter the runtime first.
+    let control = {
+        let _guard = runtime.enter();
+        match radian_host::ControlServer::bind_if(
+            config.control.enabled,
+            radian_host::radian_home().as_deref(),
+        ) {
+            Ok(server) => server,
+            Err(error) => {
+                eprintln!("[control] disabled: {error}");
+                None
+            }
+        }
+    };
+    if let Some(server) = &control {
+        eprintln!("[control] {}", server.path().display());
+    }
+    // Held for the whole session: the socket is removed on the normal return and on the panic
+    // unwind, even while the driver task still holds a reference to the server (ADR 0030 O6).
+    let _control_guard = control.as_ref().map(|server| server.guard());
+    let live_inner: Arc<dyn EventSink> =
         Arc::new(ProjectionSink::new(tx.clone(), Arc::clone(&projection)));
+    let live: Arc<dyn EventSink> = match &control {
+        Some(server) => server.events(live_inner),
+        None => live_inner,
+    };
     // ADR 0023 U7: approvals go through the session's pending queue, so the UI shows one
     // arrival order and never supersedes a request. An `auto` policy (ADR 0026 D9) answers
     // an `ask` before any approver is consulted, so nothing reaches the queue under it.
@@ -1301,7 +1326,7 @@ fn run(
             })
         })
     };
-    let runtime_events = {
+    let runtime_events_inner = {
         let tx = tx.clone();
         let secrets = Arc::clone(&secrets);
         Arc::new(move |event: &radian_session::RuntimeEvent| {
@@ -1317,6 +1342,10 @@ fn run(
             };
             let _ = tx.send(UiEvent::Runtime(redacted));
         })
+    };
+    let runtime_events: Arc<dyn radian_runtime::RuntimeEvents> = match &control {
+        Some(server) => server.runtime_events(runtime_events_inner),
+        None => runtime_events_inner,
     };
     let driver_stopped = {
         let tx = tx.clone();
@@ -1358,11 +1387,27 @@ fn run(
     }
     eprintln!("{}", radian_host::trust::status_line(&trust_setup));
 
+    // ADR 0030 slice 9: the orchestration snapshot (user config + a trusted project file) is
+    // installed process-wide before any session opens; the startup lines list the verify/policy
+    // commands that will run. The project file is read only when the workspace is trusted.
+    let (orchestration, orchestration_warnings) = radian_host::orchestration::resolve(
+        &workspace_path,
+        trust_setup.resolved.decision.as_bool(),
+        &config.orchestration,
+    );
+    for warning in &orchestration_warnings {
+        eprintln!("[orchestration] {warning}");
+    }
+    for line in orchestration.startup_lines() {
+        eprintln!("{line}");
+    }
+    radian_host::orchestration::set_process(orchestration);
+
     // ADR 0030 slice 6b2: the production task builder. Both hosts hand `radian-host` the same
     // builder, so a `spawn_task` opens a real task session (a fresh model on the lead's route,
     // a workspace-write tier, MCP off, the lead's retries/compaction/budget/skills). The
     // registry still owns the worktree, the network-off sandbox, no memory and the `task` role.
-    let task_builder = {
+    let task_host = {
         let provider = route.adapter();
         let base_url = route.base_url.clone();
         let model_id = model_name.clone();
@@ -1375,7 +1420,29 @@ fn run(
         let route_user_headers = user_headers.clone();
         let route_thinking = thinking.clone();
         let task_model: radian_host::TaskModelFactory = std::sync::Arc::new(
-            move |session_id: &str, slot: std::sync::Arc<radian_runtime::ConfigSlot>| {
+            move |session_id: &str,
+                  slot: std::sync::Arc<radian_runtime::ConfigSlot>,
+                  agent_model: Option<radian_host::ModelRoute>,
+                  agent_thinking: Option<String>| {
+                // ADR 0030 O11: an agent definition's `model` and `thinking` are the task's
+                // route and level. The route's credential is resolved here the same way a
+                // `/model` switch resolves it — never copied into the snapshot.
+                if let Some(route) = agent_model {
+                    let ctx = radian_host::RouteContext {
+                        providers: providers.clone(),
+                        session_id: session_id.to_owned(),
+                        user_headers: route_user_headers.clone(),
+                        include_usage: None,
+                        max_tokens,
+                        thinking: agent_thinking
+                            .clone()
+                            .unwrap_or_else(|| route_thinking.clone()),
+                        thinking_budget,
+                    };
+                    let args = ctx.args_for(&route.provider, &route.model)?;
+                    let initial = build_model(args).map_err(|error| error.to_string())?;
+                    return Ok(radian_host::SwitchableModel::new(initial, route, slot, ctx));
+                }
                 let initial = build_model(ModelArgs {
                     provider,
                     base_url: base_url.clone(),
@@ -1405,28 +1472,24 @@ fn run(
                 ))
             },
         );
-        let task_skills = radian_host::config::resolve_extra_paths(
-            &config.skills.extra_paths,
-            config.source.as_deref().and_then(std::path::Path::parent),
-            radian_host::user_home().as_deref(),
-        );
-        radian_host::task_builder(radian_host::TaskHost {
+        radian_host::TaskHost {
             session_dir: dir.clone(),
             model: task_model,
             route: (provider_name.clone(), model_name.clone()),
+            servers: servers.clone(),
             sandbox: sandbox.clone(),
             sandbox_deny_read: sandbox_deny_read.clone(),
             allow_unix_sockets: allow_unix_sockets.clone(),
-            retries: config
-                .model
-                .retries
-                .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
+            retries: settings.retries,
             context_budget: window
                 .budget
+                // ADR 0015: a zero budget is unset, never a real zero-token budget (the CLI
+                // builds its session budget the same way).
+                .filter(|tokens| *tokens > 0)
                 .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
-            auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
-            compaction_settings: compaction_settings.clone(),
-            compaction_settings_for: Some(compaction_settings_for.clone()),
+            auto_compact: settings.auto_compact,
+            compaction_settings: settings.compaction_settings.clone(),
+            compaction_settings_for: settings.compaction_settings_for.clone(),
             turn_options: TurnOptions {
                 max_model_calls: Some(cli.max_model_calls),
                 ..TurnOptions::default()
@@ -1435,32 +1498,31 @@ fn run(
             wording: radian_host::TUI_WORDING,
             protected_branches: config.git.protected_branches.clone(),
             allowed_filters: Some(config.git.allowed_filters()),
-            shell_auto_background: config.shell.auto_background_after(),
-            skills_extra_paths: task_skills,
-            skills_builtin: config.skills.builtin.unwrap_or(true),
-            skills_disabled: config.skills.disabled.clone(),
-            memory_injection: config.memory.injection(),
+            shell_auto_background: settings.shell_auto_background,
+            skills_extra_paths: settings.skills_extra_paths.clone(),
+            skills_builtin: settings.skills_builtin,
+            skills_disabled: settings.skills_disabled.clone(),
+            memory_injection: settings.memory_injection,
             capabilities: radian_host::SessionCapability::ALL.to_vec(),
             audit: Arc::clone(&audit),
             // A task's own stream must not reach the lead's live view (ADR 0030 O10); the
             // status-bar count and the notice lines come from the registry and the projection.
             task_events: Arc::new(|_: &radian_session::RuntimeEvent| {}),
-        })
+        }
     };
+    // ADR 0030 O12: the named-agent builder shares the same host. A `/send` or `send_agent`
+    // creates one long session per name from its definition.
+    let task_builder = radian_host::task_builder(task_host.clone());
+    let named_builder = radian_host::named_builder(task_host);
 
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
-    // first thing that creates durable state.
+    // first thing that creates durable state. ADR 0032 slice 5: `LeadSetup::setup` fills what
+    // every host-opened session shares; what the TUI decides itself is written here.
     let mut session = runtime
         .block_on(radian_host::open_session(
-            radian_host::SessionSetup {
-                config_slot: std::sync::Arc::clone(&config_slot),
-                config_queue: radian_runtime::ConfigQueue::new(),
-                budget_for: Some(budget_for),
-                price_for: Some(Arc::clone(&route_price)),
-                protected_branches: config.git.protected_branches.clone(),
-                allowed_filters: Some(config.git.allowed_filters()),
-                shell_auto_background: config.shell.auto_background_after(),
+            radian_host::LeadSetup {
+                settings,
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),
@@ -1468,38 +1530,23 @@ fn run(
                 // (or `$HOME/tmp`), not only an explicit `--workspace`.
                 coding_root: Some(workspace_path.clone()),
                 model,
+                config_slot: std::sync::Arc::clone(&config_slot),
+                budget_for: Some(budget_for),
+                price_for: Some(Arc::clone(&route_price)),
+                protected_branches: config.git.protected_branches.clone(),
+                allowed_filters: Some(config.git.allowed_filters()),
                 servers,
-                // ADR 0036: an interactive session uses the `default` role.
-                role: None,
                 system_prompt: cli.system.clone(),
                 context_budget: window
                     .budget
+                    // ADR 0015: a zero budget is unset, never a real zero-token budget.
+                    .filter(|tokens| *tokens > 0)
                     .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
-                auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
-                compaction_settings,
-                compaction_settings_for: Some(compaction_settings_for),
-                retries: config
-                    .model
-                    .retries
-                    .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
                 sandbox,
                 tier: tier.preset(),
                 profile,
                 access_builder: Some(access_builder),
-                // The interactive session is the human's named `main` agent, not a task agent
-                // (ADR 0030 O13), so `/mode` is allowed.
-                task_agent: false,
-                parent: None,
-                allowed_branch: None,
                 memory_root,
-                skills_extra_paths: radian_host::config::resolve_extra_paths(
-                    &config.skills.extra_paths,
-                    config.source.as_deref().and_then(std::path::Path::parent),
-                    radian_host::user_home().as_deref(),
-                ),
-                skills_builtin: config.skills.builtin.unwrap_or(true),
-                skills_disabled: config.skills.disabled.clone(),
-                memory_injection: config.memory.injection(),
                 trust: trust_setup,
                 resume: resume.is_some(),
                 config_snapshot: serde_json::json!({
@@ -1513,7 +1560,8 @@ fn run(
                 turn_timeout: None,
                 wording: radian_host::TUI_WORDING,
                 capabilities: radian_host::SessionCapability::ALL.to_vec(),
-            },
+            }
+            .setup(),
             radian_host::HostBindings {
                 approvals,
                 shared_queue: None,
@@ -1529,10 +1577,16 @@ fn run(
                 // ADR 0030 slice 6b2: the lead's task tools are mounted and can open real task
                 // sessions; the mode gate still refuses them outside `/mode lead`.
                 task_builder: Some(task_builder),
+                // ADR 0030 O12: named agents are available to `/send` and `send_agent`.
+                named_builder: Some(named_builder),
             },
         ))
         .map_err(|error| error.to_string())?;
     mark("open-session-done");
+    // ADR 0030 O6: start accepting control requests for this session.
+    if let Some(server) = &control {
+        server.serve(runtime.handle(), radian_host::ControlTarget::of(&session));
+    }
     // The providers worth refreshing now: the one this run started with. `/model`'s other
     // targets refresh on their next use (the fetch itself is on the loop's runtime).
     let refresh_targets = vec![key_id.clone()];
@@ -1693,6 +1747,29 @@ fn run(
         radian_host::spawn_contributor_gated(
             runtime.handle(),
             Arc::new(radian_host::OpencodeGoUsage::new(key.key.clone(), period)),
+            Arc::clone(&contributions),
+            Arc::clone(&on_tick),
+            gate_rx,
+        );
+        Some(gate_tx)
+    } else {
+        None
+    };
+    // The same C4 mechanism for `chatgpt` (ADR 0026): gated on
+    // `has_login("chatgpt")` rather than a resolved api_key (there is none — the contributor
+    // refreshes the oauth entry itself, per call, exactly like `ChatGptModel`).
+    let chatgpt_usage_gate = if let Some(period) = usage_period(config.tui.usage_period_secs)
+        && radian_host::has_login("chatgpt")
+    {
+        let startup_provider = session
+            .model_route()
+            .map(|(provider, _)| provider)
+            .unwrap_or_else(|| provider_name.clone());
+        let (gate_tx, gate_rx) =
+            tokio::sync::watch::channel(chatgpt_usage_active(&startup_provider));
+        radian_host::spawn_contributor_gated(
+            runtime.handle(),
+            Arc::new(radian_host::ChatGptUsage::new(session_id.clone(), period)),
             Arc::clone(&contributions),
             Arc::clone(&on_tick),
             gate_rx,
@@ -1999,6 +2076,7 @@ fn run(
     };
     mark("startup-set");
     let lead_tasks = session.lead_tasks().cloned();
+    let lead_named = session.named_agents().cloned();
     let session = Arc::new(session);
     let facade: Arc<dyn radian_host::SessionFacade> =
         Arc::clone(&session) as Arc<dyn radian_host::SessionFacade>;
@@ -2015,6 +2093,7 @@ fn run(
             host: &session_host,
             memory: &memory_service,
             lead_tasks,
+            lead_named,
         },
         (provider_name.clone(), model_name.clone()),
         Arc::clone(&route_price),
@@ -2023,6 +2102,7 @@ fn run(
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         bash_sandbox,
         usage_gate,
+        chatgpt_usage_gate,
         herdr.map(|(reporter, _)| reporter),
     );
     exit_trace("loop-done");
@@ -2071,24 +2151,7 @@ fn run(
     }))
 }
 
-/// Whether `base_url` points at this machine (loopback), where a server needs no credential.
-fn is_local_base_url(base_url: &str) -> bool {
-    let Some((_, rest)) = base_url.split_once("://") else {
-        return false;
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority.strip_prefix('[').map_or_else(
-        || {
-            authority
-                .rsplit_once(':')
-                .filter(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
-                .map_or(authority, |(host, _)| host)
-        },
-        |bracketed| bracketed.split(']').next().unwrap_or_default(),
-    );
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
-}
-
+/// Writes every decision to the session journal as a `PermissionResolved` (ADR 0006 §5.9).
 /// The program name for the resume command: `argv[0]`'s file name, so the line is copyable
 /// whatever the binary is called (a `cargo run`, an absolute path, a symlink).
 fn program_name() -> String {
@@ -2117,6 +2180,23 @@ fn refresh_secrets(secrets: &radian_tui::terminal::SharedSecrets) {
             list.push(key);
         }
     }
+}
+
+/// A finished ChatGPT OAuth flow (browser or device): write the entry, refresh the
+/// redaction list on success (the same rule `refresh_secrets` documents for an API key), and
+/// turn the error into the one-line `AppInput::LoginSaved` already expects.
+fn store_oauth_outcome(
+    outcome: Result<radian_host::OAuthTokenResponse, radian_host::OAuthError>,
+    secrets: &radian_tui::terminal::SharedSecrets,
+) -> Result<(), String> {
+    let token = outcome.map_err(|error| error.to_string())?;
+    let result = radian_host::AuthStore::open()
+        .and_then(|mut store| radian_host::oauth_store_token(&mut store, &token))
+        .map_err(|error| error.to_string());
+    if result.is_ok() {
+        refresh_secrets(secrets);
+    }
+    result
 }
 
 /// One argument of the resume command, quoted when it would not survive a shell.
@@ -2768,6 +2848,9 @@ struct LoopContext<'a> {
     host: &'a SessionHost,
     /// The lead's task registry (ADR 0030 slice 6b2), when this session mounted the lead tools.
     lead_tasks: Option<Arc<radian_host::TaskRegistry>>,
+    /// The lead's named-agent registry (ADR 0030 O12), when this session has one; `/send` reads
+    /// it.
+    lead_named: Option<Arc<radian_host::NamedRegistry>>,
     tx: &'a Sender<UiEvent>,
     /// The pending queue (ADR 0023 U7): the loop reads the head and the count when it is told
     /// something changed, and the facade answers it.
@@ -2788,6 +2871,9 @@ struct LoopContext<'a> {
     /// The opencode-go usage gate (ADR 0027): the UI flips it when `/model`
     /// switches the current provider. `None` when there is no key or the period is off.
     usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    /// The chatgpt usage gate (ADR 0026), same mechanism, flipped to
+    /// `route.provider == "chatgpt"` instead.
+    chatgpt_usage_gate: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl LoopContext<'_> {
@@ -2802,9 +2888,13 @@ impl LoopContext<'_> {
         // refreshing (no network) and its row hides; back to it, one immediate refresh.
         if let UiEvent::Runtime(radian_session::RuntimeEvent::ConfigChanged { change, .. }) = &event
             && let Some(route) = radian_host::ModelRoute::from_value(change)
-            && let Some(gate) = &self.usage_gate
         {
-            let _ = gate.send(route.provider == "opencode-go");
+            if let Some(gate) = &self.usage_gate {
+                let _ = gate.send(route.provider == "opencode-go");
+            }
+            if let Some(gate) = &self.chatgpt_usage_gate {
+                let _ = gate.send(chatgpt_usage_active(&route.provider));
+            }
         }
         let result = match event {
             UiEvent::Agent(event) => app.update(AppInput::Event(event)),
@@ -3308,6 +3398,64 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
+            // ADR 0030 O12: `/send` lists the known definitions, or sends to a named agent
+            // (source `User`). The reply arrives later as `AgentReplied`, when the turn ends.
+            Effect::Send(request) => {
+                let Some(named) = self.lead_named.clone() else {
+                    self.send(AppInput::SessionDone(vec![
+                        "this session has no named agents".to_owned(),
+                    ]));
+                    return Ok(());
+                };
+                match request {
+                    radian_tui::command::SendRequest::List => {
+                        let names = radian_host::known_agent_definitions();
+                        self.send(AppInput::SessionDone(vec![format!(
+                            "known definitions: {}",
+                            names.join(", ")
+                        )]));
+                    }
+                    radian_tui::command::SendRequest::Send { name, text } => {
+                        match self.runtime.block_on(named.send(
+                            &name,
+                            text,
+                            radian_tui::command::send_source(),
+                        )) {
+                            Ok(outcome) => {
+                                self.send(AppInput::AgentSent {
+                                    name: name.clone(),
+                                    created: outcome.created,
+                                });
+                                // Wait for this send's turn to end, then show the first lines of
+                                // the reply. The task is dropped when the loop exits.
+                                let record = named.get(&name);
+                                let tx = self.tx.clone();
+                                let turn = outcome.turn;
+                                self.runtime.spawn(async move {
+                                    let summary = match record {
+                                        Some(record) => record
+                                            .await_turn_end(turn)
+                                            .await
+                                            .map(|reply| bound_reply(&reply))
+                                            .unwrap_or_default(),
+                                        None => String::new(),
+                                    };
+                                    let _ = tx.send(UiEvent::Command(AppInput::AgentReplied {
+                                        name,
+                                        summary,
+                                    }));
+                                });
+                            }
+                            Err(error) => {
+                                self.send(AppInput::SessionDone(vec![format!(
+                                    "cannot send to `{name}`: {error}"
+                                )]));
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
             // ADR 0031 T3: apply the startup trust choice through the facade (it writes
             // `trust.json` and journals `ProjectTrustChanged`), then show the new state.
             Effect::SetTrust { choice } => {
@@ -3338,8 +3486,11 @@ impl LoopContext<'_> {
             Effect::ModelSwitch { provider, model } => {
                 // D6: the target needs a credential. `resolve_key` reads `auth.json` (file I/O,
                 // fine in the loop): without one the switch dies here with the `/login` hint.
+                // `resolve_key` only resolves an `api_key` entry; `chatgpt`'s login is an `oauth`
+                // entry (ADR 0026), so `has_login` - the presence check both shapes
+                // share, as at startup and in `RouteContext::args_for` - also counts here.
                 let checked = match radian_host::auth::resolve_key(&provider) {
-                    Ok(Some(_)) => {
+                    Ok(found) if found.is_some() || radian_host::has_login(&provider) => {
                         // D7: `B'` from the warm catalog, `T` from the projection's last report.
                         let budget = self.session.budget_for_route(&provider, &model);
                         let tokens = self
@@ -3354,7 +3505,7 @@ impl LoopContext<'_> {
                             budget,
                         }
                     }
-                    Ok(None) => {
+                    Ok(_) => {
                         self.send(AppInput::CommandRefused(radian_host::CommandRefused {
                             command: format!("/model {provider}/{model}"),
                             reason: format!(
@@ -3477,6 +3628,89 @@ impl LoopContext<'_> {
                 self.send(AppInput::LoginSaved { name, result });
                 Ok(())
             }
+            // Sign in with ChatGPT, browser flow (ADR 0026): bind the listener,
+            // report the URL right away (`LoginOAuthUrlReady`) so a remote/headless session —
+            // or a browser the `open`/`xdg-open` guess failed to launch — has something to
+            // copy, then wait for the redirect and exchange. The whole thing is one spawned
+            // task so a slow or abandoned browser step cannot block the UI loop; it ends on
+            // the same `LoginSaved` event the API-key path does.
+            Effect::LoginOAuthBrowser => {
+                let tx = self.tx.clone();
+                let secrets = Arc::clone(&self.host.secrets);
+                self.runtime.spawn(async move {
+                    let endpoints = radian_host::OAuthEndpoints::default();
+                    let (login, listener) = match radian_host::BrowserLogin::start(&endpoints).await
+                    {
+                        Ok(pair) => pair,
+                        Err(error) => {
+                            let _ = tx.send(UiEvent::Command(AppInput::LoginSaved {
+                                name: radian_host::CHATGPT_PROVIDER_ID.to_owned(),
+                                result: Err(error.to_string()),
+                            }));
+                            return;
+                        }
+                    };
+                    let _ = tx.send(UiEvent::Command(AppInput::LoginOAuthUrlReady {
+                        url: login.authorize_url.clone(),
+                    }));
+                    radian_host::oauth_chatgpt::try_open_browser(&login.authorize_url);
+                    let outcome = login
+                        .finish(
+                            &endpoints,
+                            listener,
+                            radian_host::oauth_chatgpt::CALLBACK_TIMEOUT,
+                        )
+                        .await;
+                    let result = store_oauth_outcome(outcome, &secrets);
+                    let _ = tx.send(UiEvent::Command(AppInput::LoginSaved {
+                        name: radian_host::CHATGPT_PROVIDER_ID.to_owned(),
+                        result,
+                    }));
+                });
+                Ok(())
+            }
+            // Sign in with ChatGPT, device-code flow: ask for a code, report it
+            // (`LoginOAuthDeviceReady`), then poll in the same spawned task.
+            Effect::LoginOAuthDevice => {
+                let tx = self.tx.clone();
+                let secrets = Arc::clone(&self.host.secrets);
+                self.runtime.spawn(async move {
+                    let endpoints = radian_host::OAuthEndpoints::default();
+                    let start = match radian_host::oauth_device_start(&endpoints).await {
+                        Ok(start) => start,
+                        Err(error) => {
+                            let _ = tx.send(UiEvent::Command(AppInput::LoginSaved {
+                                name: radian_host::CHATGPT_PROVIDER_ID.to_owned(),
+                                result: Err(error.to_string()),
+                            }));
+                            return;
+                        }
+                    };
+                    let _ = tx.send(UiEvent::Command(AppInput::LoginOAuthDeviceReady {
+                        user_code: start.user_code.clone(),
+                        verification_url: radian_host::oauth_chatgpt::DEVICE_VERIFICATION_URL
+                            .to_owned(),
+                    }));
+                    // 5 minutes at the server's own interval (floored at
+                    // `DEVICE_POLL_MIN_INTERVAL`), matching the browser flow's timeout.
+                    let max_polls = (radian_host::oauth_chatgpt::CALLBACK_TIMEOUT.as_secs()
+                        / start.interval.as_secs().max(1))
+                    .max(1) as u32;
+                    let outcome = radian_host::oauth_poll_device_until_done(
+                        &endpoints,
+                        &start,
+                        start.interval,
+                        max_polls,
+                    )
+                    .await;
+                    let result = store_oauth_outcome(outcome, &secrets);
+                    let _ = tx.send(UiEvent::Command(AppInput::LoginSaved {
+                        name: radian_host::CHATGPT_PROVIDER_ID.to_owned(),
+                        result,
+                    }));
+                });
+                Ok(())
+            }
             // `/logout` after the `y`: remove the entry, everything else byte-for-byte (D3).
             Effect::Logout { provider } => {
                 let result = radian_host::AuthStore::open()
@@ -3562,7 +3796,27 @@ enum Phase<'a> {
         /// The lead's task registry (ADR 0030 slice 6b2), when this session mounted the lead
         /// tools; `/tasks` and the status-bar count read it.
         lead_tasks: Option<Arc<radian_host::TaskRegistry>>,
+        /// The lead's named-agent registry (ADR 0030 O12), when this session has one; `/send`
+        /// reads it.
+        lead_named: Option<Arc<radian_host::NamedRegistry>>,
     },
+}
+
+/// Bounds a named agent's reply for the `/send` notice (ADR 0030 O12): the first 5 lines and at
+/// most 500 characters, with a marker when cut. The full observation view is a later slice.
+fn bound_reply(text: &str) -> String {
+    let mut out = text.lines().take(5).collect::<Vec<_>>().join("\n");
+    let more_lines = text.lines().count() > 5;
+    let truncated = out.chars().count() > 500;
+    if truncated {
+        out = out.chars().take(500).collect();
+    }
+    if more_lines {
+        out.push_str("\n… [more lines]");
+    } else if truncated {
+        out.push_str("\n… [truncated]");
+    }
+    out
 }
 
 /// Handles one event in the pre-session `--pick` phase. Returns whether the frame is dirty.
@@ -3609,6 +3863,28 @@ fn usage_period(configured: Option<u64>) -> Option<std::time::Duration> {
         Some(0) => None,
         Some(seconds) => Some(radian_host::clamp_opencode_go_period(seconds)),
         None => Some(radian_host::OPENCODE_GO_DEFAULT_PERIOD),
+    }
+}
+
+/// Whether the `chatgpt` usage gate (ADR 0026) should be active for
+/// `provider`: only while the current route's provider is exactly `chatgpt`, mirroring
+/// opencode-go's own (inline) `provider == "opencode-go"` gate. Pulled into its own function
+/// — unlike opencode-go's — so a mutation to it (polling while routed elsewhere) has a direct
+/// unit test rather than needing a full TUI run to catch.
+fn chatgpt_usage_active(provider: &str) -> bool {
+    provider == radian_host::CHATGPT_PROVIDER_ID
+}
+
+#[cfg(test)]
+mod chatgpt_usage_gate_tests {
+    use super::chatgpt_usage_active;
+
+    #[test]
+    fn the_gate_is_active_only_for_chatgpt() {
+        assert!(chatgpt_usage_active("chatgpt"));
+        assert!(!chatgpt_usage_active("opencode-go"));
+        assert!(!chatgpt_usage_active("anthropic"));
+        assert!(!chatgpt_usage_active("openai"));
     }
 }
 
@@ -3659,6 +3935,8 @@ fn ui_loop(
     bash_sandbox: Option<radian_sandbox::Sandbox>,
     // The opencode-go usage gate (ADR 0027), flipped on a `/model` switch.
     usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    // The chatgpt usage gate (ADR 0026), same mechanism.
+    chatgpt_usage_gate: Option<tokio::sync::watch::Sender<bool>>,
     // The herdr reporter (ADR 0034), when running inside a herdr pane.
     mut herdr: Option<HerdrReporter>,
 ) -> Result<Option<i32>, String> {
@@ -3672,6 +3950,7 @@ fn ui_loop(
             host,
             memory,
             lead_tasks,
+            lead_named,
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
             route_price: Arc::clone(&route_price),
@@ -3685,6 +3964,7 @@ fn ui_loop(
             memory,
             host,
             lead_tasks,
+            lead_named,
             tx,
             queue: session.pending(),
             signal: None,
@@ -3692,6 +3972,7 @@ fn ui_loop(
             bash_sandbox: bash_sandbox.clone(),
             bash_cancel: None,
             usage_gate,
+            chatgpt_usage_gate,
             herdr: herdr.take(),
         }),
     };
@@ -4232,36 +4513,26 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Where session files live: `--session-dir`, then `RADIAN_SESSION_DIR`, then the platform's
-/// *data* directory (never a cache or temp path; ADR 0013 decision 4). This is the same
-/// convention `agent-cli` uses, so a session written by one is resumable by the other.
+/// Where session files live: `--session-dir`, then `RADIAN_SESSION_DIR`, then the user's data
+/// directory (ADR 0020: `~/.radian/sessions`). The rule lives in `radian-host` so a session
+/// written by one host is resumable by the other (ADR 0032 slice 5).
 fn session_dir(cli: &Cli) -> Result<PathBuf, String> {
-    if let Some(dir) = &cli.session_dir {
-        return Ok(dir.clone());
-    }
-    if let Ok(dir) = std::env::var("RADIAN_SESSION_DIR")
-        && !dir.is_empty()
-    {
-        return Ok(PathBuf::from(dir));
-    }
-    // ADR 0020: the default is `~/.radian/sessions` (or `$RADIAN_HOME/sessions`).
-    radian_host::sessions_dir().ok_or_else(|| {
-        "no RADIAN_HOME or HOME to place sessions under; pass --session-dir".to_string()
-    })
+    radian_host::session_dir(cli.session_dir.as_deref())
 }
 
 /// The workspace a session belongs to: `--workspace` when given, else the current directory,
-/// canonicalized and validated by the shared `radian-host` rule. `--list` filters by the same
-/// value, so a session is only listed in the workspace it was created in, and a bad
-/// `--workspace` fails as a workspace error (dogfooding D1).
+/// through the TUI's coding root (`$HOME` becomes `$HOME/tmp`, the filesystem root is refused)
+/// and then the shared `radian-host` rule. `--list` filters by the same value, so a session is
+/// only listed in the workspace it was created in, and a bad `--workspace` fails as a workspace
+/// error (dogfooding D1).
 fn session_workspace(cli: &Cli) -> Result<String, String> {
-    Ok(resolve_workspace(cli)?.to_string_lossy().into_owned())
+    radian_host::session_workspace(Some(&coding_root(cli)?.path))
 }
 
 /// The coding root: `--workspace` as given, else the current directory, with the TUI's two
 /// exceptions — `$HOME` becomes `$HOME/tmp` and the filesystem root
-/// is refused. The CLI (`agent`) does **not** do this: it is the unattended entry point and gets
-/// no write access by default.
+/// is refused. The CLI (`radian exec`) does **not** do this: it is the unattended entry point and
+/// gets no write access by default.
 fn coding_root(cli: &Cli) -> Result<radian_tui::workspace::CodingRoot, String> {
     let cwd = std::env::current_dir()
         .map_err(|error| format!("cannot read the current directory: {error}"))?;
@@ -4271,13 +4542,14 @@ fn coding_root(cli: &Cli) -> Result<radian_tui::workspace::CodingRoot, String> {
     radian_tui::workspace::resolve_coding_root(cli.workspace.as_deref(), &cwd, home.as_deref())
 }
 
-/// The canonical, validated workspace path (the shared `radian-host` rule).
-fn resolve_workspace(cli: &Cli) -> Result<PathBuf, String> {
-    let root = coding_root(cli)?;
-    radian_host::resolve_workspace(Some(&root.path))
+/// `--list`: this workspace's sessions, newest activity first (the shared table, ADR 0032
+/// slice 5).
+fn list_sessions(cli: &Cli) -> Result<(), radian_host::ListError> {
+    let dir = session_dir(cli)?;
+    let workspace = session_workspace(cli)?;
+    radian_host::list_sessions(&dir, &workspace)
 }
 
-/// `--list`: this workspace's sessions, newest activity first. Same columns as `agent-cli`.
 /// The Phase 4 startup picker: opens the workspace index, lists the sessions, and (when there
 /// are any) runs the full-screen picker. `Ok(None)` means there are no sessions yet, so the
 /// caller starts a new one with a notice instead of flashing an empty list.
@@ -4296,68 +4568,6 @@ fn prepare_picker(
     Ok(Some(radian_tui::picker::Picker::new(
         rows, index, workspace,
     )))
-}
-
-/// Why the TUI's `--list` stopped. A closed stdout (`radian --list | head`) is a normal
-/// stop, not a failure (dogfooding D21), so it is kept apart from a real error.
-enum ListError {
-    /// A real failure: exit 1 with this message.
-    Failed(String),
-    /// stdout's reader went away: exit 0, no message.
-    BrokenPipe,
-}
-
-impl From<String> for ListError {
-    fn from(message: String) -> Self {
-        Self::Failed(message)
-    }
-}
-
-impl From<radian_host::StdoutError> for ListError {
-    fn from(error: radian_host::StdoutError) -> Self {
-        match error {
-            radian_host::StdoutError::BrokenPipe => Self::BrokenPipe,
-            radian_host::StdoutError::Failed(error) => {
-                Self::Failed(format!("cannot write to stdout: {error}"))
-            }
-        }
-    }
-}
-
-fn list_sessions(cli: &Cli) -> Result<(), ListError> {
-    let dir = session_dir(cli)?;
-    let workspace = session_workspace(cli)?;
-    if !dir.exists() {
-        return Ok(()); // no sessions yet
-    }
-    radian_session::warn_if_wide(&dir);
-    let mut index = Index::open(dir.join("index.db"))
-        .map_err(|e| format!("cannot open the session index in {}: {e}", dir.display()))?;
-    index
-        .rebuild_dir(&dir)
-        .map_err(|e| format!("cannot rebuild the session index: {e}"))?;
-    let sessions = index
-        .list(Some(&workspace))
-        .map_err(|e| format!("cannot list sessions: {e}"))?;
-    for session in sessions {
-        let messages = index
-            .indexed_events(&session.session_id)
-            .map(|events| {
-                events
-                    .iter()
-                    .filter(|event| event.event == "MessageAppended")
-                    .count()
-            })
-            .unwrap_or(0);
-        radian_host::write_line(&format!(
-            "{}\t{}\t{}\t{}",
-            session.session_id,
-            session.created_ts.as_deref().unwrap_or("-"),
-            session.last_ts.as_deref().unwrap_or("-"),
-            messages
-        ))?;
-    }
-    Ok(())
 }
 
 /// Writes every decision to the session journal as a `PermissionResolved` (ADR 0006 §5.9).

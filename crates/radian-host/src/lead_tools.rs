@@ -20,8 +20,11 @@
 //!   is deliberately no `approve` (ADR 0030 R9).
 //! - `task_status`, `list_tasks` — the read-only observer (ADR 0023 U6).
 //! - `cancel_task`, `remove_task`.
+//! - `integrate_task { id }` — the host-side merge of one task branch into the lead's integration
+//!   branch (ADR 0030); it is not a control-port verb (decision 10).
 //!
-//! `spawn_task` and `remove_task` are `Exclusive`; the rest are `Shared` (ADR 0030 O4).
+//! `spawn_task`, `remove_task` and `integrate_task` are `Exclusive`; the rest are `Shared`
+//! (ADR 0030 O4).
 //!
 //! **Part b1 (this slice):** `spawn_task` past `max_tasks` (default 4) queues the task FIFO with
 //! a queue position (ADR 0030 O4/O8); a queued task waits through the queue in `wait_task`/
@@ -29,15 +32,16 @@
 //! position. The registry also owns the process heavy gate and the `stalled` watch; those are the
 //! registry's, not a tool.
 //!
-//! **What is not here (part b2):** `send_agent`, `steer_task` and the verify runner.
+//! **What is not here (later slices):** `steer_task`; the verify runner is the registry's
+//! (slice 9) and reaches the model through `wait_task`/`task_status`.
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use agent_core::{
-    Message, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure, ToolOutput,
-    ToolProvider, ToolSession, ToolSpec,
+    InputSource, Message, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure,
+    ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
 use radian_permissions::ApprovalPolicy;
 use radian_session::TurnOutcome;
@@ -89,10 +93,13 @@ fn wait_timeout(secs: Option<f64>) -> Result<(Duration, f64), ToolFailure> {
 
 /// The lead tool names, in the order the provider advertises them. The host adds these to the
 /// session profile as `allow` rules (ADR 0030 slice 6); the mode gate decides whether they run.
-pub const LEAD_TOOL_NAMES: [&str; 10] = [
+/// `send_agent`/`wait_agent` are the named-agent pair of slice 7 part b (ADR 0030 O4/O12).
+pub const LEAD_TOOL_NAMES: [&str; 13] = [
     "spawn_task",
+    "send_agent",
     "wait_task",
     "wait_any",
+    "wait_agent",
     "answer_task",
     "deny_task_approval",
     "escalate_approval",
@@ -100,7 +107,43 @@ pub const LEAD_TOOL_NAMES: [&str; 10] = [
     "list_tasks",
     "cancel_task",
     "remove_task",
+    "integrate_task",
 ];
+
+/// The command the lead reports to the human for moving the user's branch onto the integration
+/// branch (ADR 0030; ADR 0030 O7). The lead never runs it.
+pub fn human_merge_command(integration_branch: &str) -> String {
+    format!("git merge --ff-only {integration_branch}")
+}
+
+/// The lead profile's allowed tool names (ADR 0030): every lead tool
+/// **except** `integrate_task` while `merge_needs_human` is `true`. The rules then leave
+/// `integrate_task` unmatched, so it resolves to `ask` — a human approval with this session as the
+/// origin, and a refusal for a non-`User` turn (ADR 0012). With `merge_needs_human = false` it is
+/// added to the allow list and does not ask.
+pub fn lead_allowed_tools(merge_needs_human: bool) -> Vec<&'static str> {
+    LEAD_TOOL_NAMES
+        .iter()
+        .copied()
+        .filter(|name| !(*name == "integrate_task" && merge_needs_human))
+        .collect()
+}
+
+/// A short note about the integration verify results for the tool text (ADR 0030
+/// decision 9). Empty when no verify ran.
+fn verify_note(results: &[crate::orchestration::VerifyResult]) -> String {
+    if results.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = results
+        .iter()
+        .map(|result| match result.exit_code {
+            Some(code) => format!("`{}` {} (exit {code})", result.command, result.status),
+            None => format!("`{}` {}", result.command, result.status),
+        })
+        .collect();
+    format!(" Integration verify: {}.", parts.join("; "))
+}
 
 fn fail(code: &str, message: impl Into<String>) -> ToolFailure {
     ToolFailure::new(code, message)
@@ -175,12 +218,49 @@ pub fn specs() -> Vec<ToolSpec> {
                         "type": "string",
                         "enum": ["auto", "on-ask"],
                         "description": "The task's approval default after the hard-deny list: `auto` (default) or `on-ask`."
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description": "The agent definition to run (`~/.radian/agents/<name>.md`); its fields are the task's, overridden by `model`/`profile`/`isolation` here. Omit for the default `task` role."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "A `provider/model` route that overrides the definition's `model`."
+                    },
+                    "profile": {
+                        "type": "string",
+                        "enum": ["safe", "workspace"],
+                        "description": "A tier that overrides the definition's `profile`; a task may only narrow (`safe` or `workspace`)."
+                    },
+                    "base": {
+                        "type": "string",
+                        "description": "The commit-ish the task branch is created from. Omit for the default: `radian/integration` once it exists, so the task sees earlier merged tasks, else your current HEAD."
                     }
                 },
                 "required": ["brief"],
                 "additionalProperties": false
             }),
             concurrency: ToolConcurrency::Exclusive,
+        },
+        ToolSpec {
+            name: "send_agent".into(),
+            description: "Send a task to a named agent (a long session the human commands), \
+                          creating it from its definition on first use and reusing it after. \
+                          Returns at once with the name, whether it was created or reused, and a \
+                          `since` token; read the reply with `wait_agent` and pass that token as \
+                          `since` so a turn that already ended is not missed. The input is \
+                          `Subagent`, so it cannot borrow your permissions."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The agent definition name (`~/.radian/agents/<name>.md`)." },
+                    "brief": { "type": "string", "description": "The task to send; appended to the named agent's queue." }
+                },
+                "required": ["name", "brief"],
+                "additionalProperties": false
+            }),
+            concurrency: ToolConcurrency::Shared,
         },
         ToolSpec {
             name: "wait_task".into(),
@@ -200,6 +280,19 @@ pub fn specs() -> Vec<ToolSpec> {
                           `still_running`. A timeout never cancels a task."
                     .into(),
             input_schema: wait_any_schema(),
+            concurrency: ToolConcurrency::Shared,
+        },
+        ToolSpec {
+            name: "wait_agent".into(),
+            description: "Block until named agent `name` finishes a turn, then return the \
+                          last committed assistant text (bounded). Pass the `since` token a \
+                          `send_agent` returned: the wait then returns as soon as the turn \
+                          that send started has ended — immediately if it already has, so a \
+                          fast turn is never missed. Without `since`, it waits for the next \
+                          turn to end from the moment it is called. A timeout returns \
+                          `still_running` and never cancels the agent."
+                .into(),
+            input_schema: wait_agent_schema(),
             concurrency: ToolConcurrency::Shared,
         },
         ToolSpec {
@@ -322,6 +415,22 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
             concurrency: ToolConcurrency::Exclusive,
         },
+        ToolSpec {
+            name: "integrate_task".into(),
+            description: "Merge a task's branch into your integration branch and rerun the \
+                          project's verify there. Only that task's `radian/<id>` branch is \
+                          merged; the user's branch is never touched. A conflict aborts the \
+                          merge and returns the conflicted paths. Your delivery ends at the \
+                          integration branch."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "The task to merge." } },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            concurrency: ToolConcurrency::Exclusive,
+        },
     ]
 }
 
@@ -366,14 +475,50 @@ fn wait_any_schema() -> Value {
     })
 }
 
+/// The `wait_agent` schema.
+fn wait_agent_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string", "description": "The named agent to wait for." },
+            "since": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "The token a `send_agent` returned. The wait returns as soon as \
+                                the turn that send started has ended; with no `since` it waits \
+                                for the next turn to end from now."
+            },
+            "timeout_secs": {
+                "type": "number",
+                "minimum": 0,
+                "description": "How long to wait, in seconds (fractions allowed). Defaults to \
+                                600 (10 minutes); clamped to 24 hours."
+            }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    })
+}
+
 /// The lead's tool provider: one per lead session, sharing the session's [`TaskRegistry`].
 pub struct LeadTools {
     registry: Arc<TaskRegistry>,
+    /// The named-agent registry (ADR 0030 O12), or `None` for a lead with no named agents.
+    named: Option<Arc<crate::named::NamedRegistry>>,
 }
 
 impl LeadTools {
     pub fn new(registry: Arc<TaskRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            named: None,
+        }
+    }
+
+    /// Adds the named-agent registry (ADR 0030 O12), enabling `send_agent`/`wait_agent`.
+    pub fn with_named(mut self, named: Option<Arc<crate::named::NamedRegistry>>) -> Self {
+        self.named = named;
+        self
     }
 }
 
@@ -383,6 +528,7 @@ impl ToolProvider for LeadTools {
     async fn open_session(&self) -> Result<Self::Session, ToolError> {
         Ok(LeadSession {
             registry: Arc::clone(&self.registry),
+            named: self.named.clone(),
             specs: specs(),
         })
     }
@@ -392,7 +538,25 @@ impl ToolProvider for LeadTools {
 /// registry owns the tasks, their worktrees and the pending queue.
 pub struct LeadSession {
     registry: Arc<TaskRegistry>,
+    /// The named-agent registry (ADR 0030 O12), or `None` for a lead with no named agents.
+    named: Option<Arc<crate::named::NamedRegistry>>,
     specs: Vec<ToolSpec>,
+}
+
+impl LeadSession {
+    /// A lead tool session over an existing registry, **without** opening the session's driver
+    /// (ADR 0030 slice 8): the control port runs the same `spawn_task`/`wait_task`/
+    /// `task_status` handlers the model's lead tools use. The host's [`LeadTools`] provider
+    /// builds the same thing in its `open_session`.
+    pub fn new(registry: Arc<TaskRegistry>) -> Self {
+        Self {
+            specs: specs(),
+            registry,
+            // The control port has no named-agent verbs (ADR 0030 O6 lists none), so its lead
+            // session carries no named-agent registry.
+            named: None,
+        }
+    }
 }
 
 impl ToolSession for LeadSession {
@@ -423,8 +587,10 @@ pub async fn run(
 ) -> Result<ToolOutput, ToolFailure> {
     match call.name.as_str() {
         "spawn_task" => lead.spawn(call).await,
+        "send_agent" => lead.send_agent(call).await,
         "wait_task" => lead.wait_task(call, &cx).await,
         "wait_any" => lead.wait_any(call, &cx).await,
+        "wait_agent" => lead.wait_agent(call, &cx).await,
         "answer_task" => lead.answer_task(call),
         "deny_task_approval" => lead.deny_task_approval(call),
         "escalate_approval" => lead.escalate_approval(call),
@@ -432,6 +598,7 @@ pub async fn run(
         "list_tasks" => lead.list_tasks(call),
         "cancel_task" => lead.cancel_task(call),
         "remove_task" => lead.remove_task(call).await,
+        "integrate_task" => lead.integrate_task(call).await,
         other => Err(fail(
             "unknown_tool",
             format!("`{other}` is not one of the lead tools"),
@@ -447,6 +614,16 @@ struct SpawnArgs {
     isolation: Option<String>,
     label: Option<String>,
     approval: Option<String>,
+    /// The ADR 0030 O11 agent definition name; `None` means the task default.
+    agent: Option<String>,
+    /// A `provider/model` route (ADR 0026) that overrides the definition's `model`.
+    model: Option<String>,
+    /// A tier name that overrides the definition's `profile`. A task may only narrow.
+    profile: Option<String>,
+    /// The commit-ish the task branch is created from (ADR 0030). Omit for
+    /// the default: `radian/integration` once the lead's integration worktree exists, else the
+    /// lead's current HEAD.
+    base: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -460,6 +637,23 @@ struct WaitArgs {
 #[serde(deny_unknown_fields)]
 struct WaitAnyArgs {
     ids: Vec<String>,
+    timeout_secs: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendAgentArgs {
+    name: String,
+    brief: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaitAgentArgs {
+    name: String,
+    /// The token a `send_agent` returned; the wait returns as soon as that send's turn has
+    /// ended (`None` waits for the next turn end from the call).
+    since: Option<u64>,
     timeout_secs: Option<f64>,
 }
 
@@ -511,6 +705,12 @@ struct RemoveArgs {
     force: Option<bool>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntegrateArgs {
+    id: String,
+}
+
 impl LeadSession {
     async fn spawn(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
         let args: SpawnArgs = parse(call)?;
@@ -519,8 +719,9 @@ impl LeadSession {
         }
         let id = args.id.unwrap_or_else(crate::generate_session_id);
         let isolation = match args.isolation.as_deref() {
-            None | Some("worktree") => Isolation::Worktree,
-            Some("shared") => Isolation::Shared,
+            None => None,
+            Some("worktree") => Some(Isolation::Worktree),
+            Some("shared") => Some(Isolation::Shared),
             Some(other) => {
                 return Err(invalid(format!(
                     "`isolation` is `worktree` or `shared`, not {other:?}"
@@ -537,11 +738,24 @@ impl LeadSession {
                 )));
             }
         };
+        // ADR 0030 O11/O4: the definition name is resolved by the registry; `model`/`profile`
+        // override it. Both are validated here so a bad argument is an `invalid_arguments`
+        // failure, not a spawn failure.
+        if let Some(model) = args.model.as_deref() {
+            crate::agents::parse_model_route(model).map_err(|error| invalid(error.message))?;
+        }
+        if let Some(profile) = args.profile.as_deref() {
+            crate::agents::parse_tier(profile).map_err(|error| invalid(error.message))?;
+        }
         let mut request = SpawnRequest::new(id.clone());
         request.isolation = isolation;
         request.label = args.label.clone();
         request.brief = Some(args.brief);
         request.approval = approval;
+        request.agent = args.agent;
+        request.model = args.model;
+        request.profile = args.profile;
+        request.base = args.base;
         // ADR 0030 item 3: the edge policy command is never a model argument, so
         // `spawn_task` has no way to set one and refuses the field (deny_unknown_fields).
         request.policy = None;
@@ -557,7 +771,7 @@ impl LeadSession {
                 "task": spawned.id,
                 "state": "queued",
                 "position": spawned.position,
-                "isolation": isolation.as_str(),
+                "isolation": isolation.unwrap_or_default().as_str(),
                 "label": args.label,
             }),
         };
@@ -568,11 +782,17 @@ impl LeadSession {
                     .as_ref()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| "the shared workspace".to_owned());
-                format!(
+                // ADR 0030 O11: a bad skill name is a warning on a successful spawn, never a
+                // failure.
+                let mut text = format!(
                     "spawned task `{}` ({}) at {worktree}",
                     record.id,
                     record.isolation.as_str()
-                )
+                );
+                for warning in &record.warnings {
+                    text.push_str(&format!("\nwarning: {warning}"));
+                }
+                text
             }
             None => format!(
                 "queued task `{}` at queue position {} (max_tasks reached; it starts FIFO)",
@@ -699,6 +919,91 @@ impl LeadSession {
         }
     }
 
+    /// `send_agent { name, brief }` (ADR 0030 O4/O12): append a task to a named agent without a
+    /// new session, creating it from its definition on first use. The input is `Subagent`, so the
+    /// named agent's turn is lowered and it cannot borrow the lead's `User` authority.
+    async fn send_agent(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
+        let args: SendAgentArgs = parse(call)?;
+        if args.brief.trim().is_empty() {
+            return Err(invalid("`brief` must not be empty"));
+        }
+        let named = self
+            .named
+            .as_ref()
+            .ok_or_else(|| fail("no_named_agents", "this lead has no named-agent registry"))?;
+        let outcome = named
+            .send(&args.name, args.brief, InputSource::Subagent)
+            .await
+            .map_err(|error| fail("send_failed", error.to_string()))?;
+        let state = match (outcome.created, outcome.queued) {
+            (true, _) => "created",
+            (false, true) => "reused, queued behind its current turn",
+            (false, false) => "reused",
+        };
+        let mut text = format!(
+            "sent to named agent `{}` ({state}); read the reply with `wait_agent` `since: {}`",
+            outcome.name, outcome.turn
+        );
+        for warning in &outcome.warnings {
+            text.push_str(&format!("\nwarning: {warning}"));
+        }
+        Ok(ToolOutput {
+            content: vec![agent_core::ContentPart::text(text)],
+            structured: Some(json!({
+                "agent": outcome.name,
+                "session_id": outcome.session_id,
+                "created": outcome.created,
+                "queued": outcome.queued,
+                // The token to pass back as `wait_agent`'s `since`, so a turn that ends before
+                // the wait starts is still seen (ADR 0030 O4/O12).
+                "since": outcome.turn,
+                "worktree": outcome.worktree.as_ref().map(|p| p.display().to_string()),
+                "warnings": outcome.warnings,
+            })),
+        })
+    }
+
+    /// `wait_agent { name, timeout_secs? }` (ADR 0030 O4/O12): block until the named agent's turn
+    /// ends, then return its last committed assistant text (bounded). A timeout returns
+    /// `still_running` and never cancels the agent.
+    async fn wait_agent(
+        &self,
+        call: &ToolCall,
+        cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolFailure> {
+        let args: WaitAgentArgs = parse(call)?;
+        let named = self
+            .named
+            .as_ref()
+            .ok_or_else(|| fail("no_named_agents", "this lead has no named-agent registry"))?;
+        let record = named
+            .get(&args.name)
+            .ok_or_else(|| fail("no_such_agent", format!("no named agent `{}`", args.name)))?;
+        let (timeout, timeout_secs) = wait_timeout(args.timeout_secs)?;
+        let deadline = Instant::now() + timeout;
+        // With `since` (the token a `send_agent` returned), wait for the generation to move
+        // **above** it: the send's own turn is the first one whose end does. This returns at
+        // once when that turn already ended, so a fast turn is never missed. Without `since`,
+        // keep today's behaviour: wait for the next turn end from the call.
+        let start = args.since.unwrap_or_else(|| record.turn_generation());
+        let mut turns = record.subscribe_turns();
+        loop {
+            if record.turn_generation() > start && !record.running() {
+                return Ok(agent_finished(&record));
+            }
+            tokio::select! {
+                biased;
+                _ = cx.cancellation.cancelled() => {
+                    return Err(fail("cancelled", "the wait was cancelled"));
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Ok(still_running(&args.name, timeout_secs));
+                }
+                _ = turns.changed() => {}
+            }
+        }
+    }
+
     fn answer_task(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
         let args: AnswerArgs = parse(call)?;
         self.registry
@@ -811,6 +1116,80 @@ impl LeadSession {
         Ok(ToolOutput::text(format!("removed task `{}`", args.id)))
     }
 
+    /// `integrate_task { id }` (ADR 0030): merge the task's branch into the
+    /// lead's integration branch. A `shared` task (no branch) and an existing integration branch
+    /// are refused. The result always names the command the human runs to move the user's branch.
+    async fn integrate_task(&self, call: &ToolCall) -> Result<ToolOutput, ToolFailure> {
+        let args: IntegrateArgs = parse(call)?;
+        let integrated = self
+            .registry
+            .integrate(&args.id)
+            .await
+            .map_err(|error| fail("integrate_failed", error.to_string()))?;
+        let branch = integrated.integration.branch.clone();
+        let command = human_merge_command(&branch);
+        // ADR 0030: the integration verify facts, in their own field.
+        let verify = serde_json::to_value(&integrated.verify).unwrap_or(Value::Null);
+        let verify_note = verify_note(&integrated.verify);
+        let (mut structured, content) = match &integrated.outcome {
+            crate::integration::MergeOutcome::Merged(committed) => (
+                json!({
+                    "task": args.id,
+                    "event": "merged",
+                    "branch": branch,
+                    "commit": committed.commit,
+                    "files": committed.files,
+                    "human_command": command,
+                }),
+                format!(
+                    "merged task `{}` into `{branch}` (commit {}).{verify_note} Your delivery \
+                     ends at `{branch}`; the user's branch moves only when they run `{command}`.",
+                    args.id, committed.commit
+                ),
+            ),
+            crate::integration::MergeOutcome::AlreadyUpToDate => (
+                json!({
+                    "task": args.id,
+                    "event": "already_up_to_date",
+                    "branch": branch,
+                    "human_command": command,
+                }),
+                format!("task `{}` is already merged into `{branch}`.", args.id),
+            ),
+            crate::integration::MergeOutcome::Conflict {
+                paths,
+                status,
+                stderr,
+            } => (
+                json!({
+                    "task": args.id,
+                    "event": "conflict",
+                    "branch": branch,
+                    "paths": paths,
+                    "status": status,
+                    "stderr": stderr,
+                    "human_command": command,
+                }),
+                format!(
+                    "merging task `{}` conflicted and was aborted; the integration worktree is \
+                     left clean. Conflicted paths: {}. Resolve them with a task based on \
+                     `{branch}`, or report to the user.",
+                    args.id,
+                    if paths.is_empty() {
+                        "(none reported)".to_owned()
+                    } else {
+                        paths.join(", ")
+                    }
+                ),
+            ),
+        };
+        structured["verify"] = verify;
+        Ok(ToolOutput {
+            content: vec![agent_core::ContentPart::text(content)],
+            structured: Some(structured),
+        })
+    }
+
     /// Builds the `finished` result: the committed summary (bounded) plus the host-side facts
     /// the runtime fills (ADR 0030 R2): the end-of-task commit, HEAD and cleanliness.
     async fn finish(&self, record: &Arc<TaskRecord>) -> Result<ToolOutput, ToolFailure> {
@@ -838,6 +1217,12 @@ impl LeadSession {
             Some(EndCommit::Failed(message)) => Some(message.clone()),
             _ => None,
         };
+        // ADR 0030 R2 / slice 9: the runtime's verify facts, in their own field, separate from
+        // the model's `summary`.
+        let verify = record
+            .verify_results()
+            .map(|results| serde_json::to_value(results).unwrap_or(Value::Null))
+            .unwrap_or(Value::Null);
         let mut structured = json!({
             "task": record.id,
             "event": "finished",
@@ -852,6 +1237,7 @@ impl LeadSession {
             "summary_truncated": summary_truncated,
             "status": status,
             "status_truncated": status_truncated,
+            "verify": verify,
         });
         if let Some(error) = end_error {
             structured["end_commit_error"] = Value::String(error);
@@ -966,6 +1352,11 @@ fn observed_status(record: &Arc<TaskRecord>) -> Value {
         Some(text) if !text.is_empty() => bounded_field(&text, TASK_DETAIL_LIMIT_CHARS),
         _ => (Value::Null, false),
     };
+    // ADR 0030 R2 / slice 9: the verify facts, in their own field.
+    let verify = record
+        .verify_results()
+        .map(|results| serde_json::to_value(results).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
     json!({
         "task": record.id,
         "state": observed.state,
@@ -982,6 +1373,7 @@ fn observed_status(record: &Arc<TaskRecord>) -> Value {
         "label": record.label,
         "diff_stat": diff_stat,
         "diff_stat_truncated": diff_truncated,
+        "verify": verify,
     })
 }
 
@@ -1020,6 +1412,11 @@ fn record_json(record: &Arc<TaskRecord>) -> Value {
         "worktree": record.worktree.as_ref().map(|p| p.display().to_string()),
         "branch": record.branch,
         "label": record.label,
+        "agent": record.agent,
+        "spawn_ignored": record.spawn_ignored,
+        // ADR 0030 O11: a `skills` name the definition named but discovery did not find. Never a
+        // failure; the definition's other fields still apply.
+        "warnings": record.warnings,
     })
 }
 
@@ -1098,6 +1495,39 @@ fn any_still_running(timeout_secs: f64) -> ToolOutput {
     }
 }
 
+/// A `wait_agent` result: the named agent's turn ended. Carries the last committed assistant
+/// text (bounded) and the outcome. Reads the committed journal, so an uncommitted replacement is
+/// never shown (ADR 0023 U6).
+fn agent_finished(record: &crate::named::NamedRecord) -> ToolOutput {
+    let outcome = record.last_outcome().unwrap_or(TurnOutcome::Unknown);
+    let (summary, summary_truncated) = match record.reply() {
+        Some(text) => {
+            let (mut cut, truncated) = truncate_chars(&text, TASK_SUMMARY_LIMIT_CHARS);
+            if truncated {
+                cut.push_str("\n… [truncated]");
+            }
+            (Some(cut), truncated)
+        }
+        None => (None, false),
+    };
+    ToolOutput {
+        content: vec![agent_core::ContentPart::text(format!(
+            "named agent `{}` finished ({outcome:?})",
+            record.name
+        ))],
+        structured: Some(json!({
+            "agent": record.name,
+            "event": "finished",
+            "outcome": outcome,
+            "isolation": record.isolation.as_str(),
+            "worktree": record.worktree.as_ref().map(|p| p.display().to_string()),
+            "branch": record.branch,
+            "summary": summary,
+            "summary_truncated": summary_truncated,
+        })),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1108,13 +1538,35 @@ mod tests {
         let names: Vec<&str> = specs.iter().map(|spec| spec.name.as_str()).collect();
         assert_eq!(names, LEAD_TOOL_NAMES);
         for spec in &specs {
-            let expected = if matches!(spec.name.as_str(), "spawn_task" | "remove_task") {
+            let expected = if matches!(
+                spec.name.as_str(),
+                "spawn_task" | "remove_task" | "integrate_task"
+            ) {
                 ToolConcurrency::Exclusive
             } else {
                 ToolConcurrency::Shared
             };
             assert_eq!(spec.concurrency, expected, "{}", spec.name);
         }
+    }
+
+    /// ADR 0030: `integrate_task` is left out of the allow list while
+    /// `merge_needs_human` is `true` (so the rules resolve it to `ask`), and included when it is
+    /// `false`.
+    #[test]
+    fn integrate_task_is_left_to_ask_while_merge_needs_human() {
+        let with_human = lead_allowed_tools(true);
+        assert!(!with_human.contains(&"integrate_task"), "{with_human:?}");
+        assert_eq!(with_human.len(), LEAD_TOOL_NAMES.len() - 1);
+        for name in LEAD_TOOL_NAMES
+            .iter()
+            .filter(|name| **name != "integrate_task")
+        {
+            assert!(with_human.contains(name), "missing {name}");
+        }
+        let without_human = lead_allowed_tools(false);
+        assert!(without_human.contains(&"integrate_task"));
+        assert_eq!(without_human.len(), LEAD_TOOL_NAMES.len());
     }
 
     #[test]
@@ -1158,5 +1610,31 @@ mod tests {
         assert_eq!(duration, Duration::from_secs(600));
         let (_, secs) = wait_timeout(Some(0.02)).expect("a fraction");
         assert_eq!(secs, 0.02);
+    }
+
+    /// ADR 0030 O4/O11: `spawn_task` takes `agent`/`model`/`profile`, refuses an unknown field,
+    /// and advertises the three in its schema.
+    #[test]
+    fn spawn_task_takes_agent_model_and_profile() {
+        let ok = ToolCall {
+            id: "c".into(),
+            name: "spawn_task".into(),
+            arguments: json!({"brief": "x", "agent": "writer", "model": "p/m", "profile": "safe"}),
+        };
+        assert!(parse::<SpawnArgs>(&ok).is_ok());
+        let unknown = ToolCall {
+            id: "c".into(),
+            name: "spawn_task".into(),
+            arguments: json!({"brief": "x", "nope": 1}),
+        };
+        assert!(parse::<SpawnArgs>(&unknown).is_err());
+        let spec = specs()
+            .into_iter()
+            .find(|spec| spec.name == "spawn_task")
+            .expect("spawn_task");
+        let properties = &spec.input_schema["properties"];
+        for field in ["agent", "model", "profile"] {
+            assert!(properties.get(field).is_some(), "schema is missing {field}");
+        }
     }
 }

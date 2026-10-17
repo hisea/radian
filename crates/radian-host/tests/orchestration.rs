@@ -181,6 +181,7 @@ fn builder(
                     task_agent: false,
                     parent: None,
                     allowed_branch: None,
+                    git_commit_requires_branch: false,
                     memory_root: None,
                     skills_extra_paths: Vec::new(),
                     skills_builtin: true,
@@ -193,6 +194,8 @@ fn builder(
                     turn_timeout: None,
                     wording: radian_host::CLI_WORDING,
                     capabilities: radian_host::SessionCapability::ALL.to_vec(),
+                    tools_allow: None,
+                    skills_allow: None,
                 },
                 bindings: HostBindings {
                     approvals: radian_host::ApprovalRouting::Queued,
@@ -209,6 +212,7 @@ fn builder(
                     memory_warning: Arc::new(|_message: &str| {}),
                     memory_notice_line: Arc::new(|_line: &str| {}),
                     task_builder: None,
+                    named_builder: None,
                 },
             })
         },
@@ -216,6 +220,9 @@ fn builder(
 }
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+
+/// A recorded hook event: `(name, payload)`.
+type HookLog = Arc<Mutex<Vec<(String, Value)>>>;
 
 struct Fixture {
     scratch: PathBuf,
@@ -225,11 +232,17 @@ struct Fixture {
 
 impl Fixture {
     fn new(label: &str, limits: OrchestrationLimits) -> Self {
-        Self::build(label, limits, "http://127.0.0.1:9/v1".to_owned(), None)
+        Self::build(
+            label,
+            limits,
+            "http://127.0.0.1:9/v1".to_owned(),
+            None,
+            None,
+        )
     }
 
     fn with_server(label: &str, limits: OrchestrationLimits, base_url: String) -> Self {
-        Self::build(label, limits, base_url, None)
+        Self::build(label, limits, base_url, None, None)
     }
 
     fn with_clock(
@@ -238,7 +251,17 @@ impl Fixture {
         base_url: String,
         clock: Clock,
     ) -> Self {
-        Self::build(label, limits, base_url, Some(clock))
+        Self::build(label, limits, base_url, Some(clock), None)
+    }
+
+    fn with_clock_and_hooks(
+        label: &str,
+        limits: OrchestrationLimits,
+        base_url: String,
+        clock: Clock,
+        hooks: HookLog,
+    ) -> Self {
+        Self::build(label, limits, base_url, Some(clock), Some(hooks))
     }
 
     fn build(
@@ -246,6 +269,7 @@ impl Fixture {
         limits: OrchestrationLimits,
         base_url: String,
         clock: Option<Clock>,
+        hooks: Option<HookLog>,
     ) -> Self {
         let _ = isolated_home();
         let scratch = scratch(label);
@@ -289,6 +313,15 @@ impl Fixture {
         .with_limits(limits);
         if let Some(clock) = clock {
             registry = registry.with_clock(move || clock());
+        }
+        if let Some(hooks) = hooks {
+            let hook: radian_host::task::HookNotifier = Arc::new(move |name, data| {
+                hooks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((name.to_owned(), data.clone()));
+            });
+            registry = registry.with_hook_notifier(hook);
         }
         Self {
             scratch,
@@ -578,4 +611,98 @@ async fn the_stall_fires_once_clears_on_activity_and_fires_again() {
     // A second quiet stretch fires again.
     *cell.lock().unwrap() = quiet + chrono::Duration::seconds(31);
     assert_eq!(registry.check_stalls(), 1, "a second episode fires again");
+}
+
+/// ADR 0030 O7/O8 / slice 9: the `stalled` hook point is emitted when a task's two timestamps are
+/// both past the threshold (the same check the `stalled` watch uses), with the stable name and
+/// payload for the control port.
+#[tokio::test]
+async fn the_stalled_hook_point_is_emitted() {
+    let server = MockServer::start(vec![
+        ask_user_reply("call_q1"),
+        Reply::SseThenHang { pieces: Vec::new() },
+    ])
+    .await;
+    let base = Utc::now();
+    let cell = Arc::new(Mutex::new(base));
+    let clock: Clock = {
+        let cell = Arc::clone(&cell);
+        Arc::new(move || *cell.lock().unwrap_or_else(|e| e.into_inner()))
+    };
+    let hooks: HookLog = Arc::new(Mutex::new(Vec::new()));
+    let fixture = Fixture::with_clock_and_hooks(
+        "stall-hook",
+        limits(4, 30.0),
+        server.base_url.clone(),
+        Arc::clone(&clock),
+        Arc::clone(&hooks),
+    );
+    if !fixture.sandbox_available() {
+        return;
+    }
+    let registry = Arc::clone(&fixture.registry);
+    let mut briefed = SpawnRequest::new("t1");
+    briefed.brief = Some("go".into());
+    registry
+        .submit(briefed)
+        .await
+        .expect("spawn")
+        .record
+        .expect("started");
+
+    let pending = Arc::clone(registry.pending());
+    let _view = wait_until(|| pending.next_for("t1")).await;
+    let quiet = Utc::now();
+    *cell.lock().unwrap_or_else(|e| e.into_inner()) = quiet + chrono::Duration::seconds(31);
+    assert_eq!(registry.check_stalls(), 1, "one notice at the threshold");
+
+    let seen = hooks.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert!(
+        seen.iter().any(|(name, data)| name == "stalled"
+            && data["task"] == "t1"
+            && data["idle_secs"].as_u64().unwrap_or(0) >= 30),
+        "the stalled hook point: {seen:?}"
+    );
+}
+
+/// ADR 0030 item 4: the agent definition is snapshotted at the `spawn_task` call, so a
+/// task that waits past `max_tasks` starts from that snapshot even if the file is gone by the
+/// time a slot frees. Without the submit-time snapshot the queued start would re-resolve and fail.
+#[tokio::test]
+async fn a_queued_task_starts_from_its_submit_time_snapshot() {
+    let fixture = Fixture::new("queue-snapshot", limits(1, 0.0));
+    if !fixture.sandbox_available() {
+        return;
+    }
+    let registry = Arc::clone(&fixture.registry);
+    // A definition the queued task names.
+    let home = isolated_home();
+    let dir = home.join("agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    let def = dir.join("qagent.md");
+    std::fs::write(&def, "---\nname: qagent\n---\nQA\n").unwrap();
+
+    // t1 occupies the only slot (no brief, so it runs no turn and stays live).
+    registry
+        .submit(SpawnRequest::new("t1"))
+        .await
+        .expect("t1 starts");
+    let mut request = SpawnRequest::new("t2");
+    request.agent = Some("qagent".into());
+    let queued = registry.submit(request).await.expect("t2 queues");
+    assert_eq!(queued.position, Some(1), "t2 waits");
+    assert!(registry.get("t2").is_none(), "a queued task has no record");
+
+    // The definition file is gone before the queued task starts.
+    std::fs::remove_file(&def).unwrap();
+
+    // Free the slot: the pump starts t2 from the submit-time snapshot.
+    registry.remove("t1", true).await.expect("remove t1");
+    let record = wait_until(|| registry.get("t2")).await;
+    assert_eq!(
+        record.agent, "qagent",
+        "the queued task started from its submit-time definition"
+    );
+    assert!(registry.queued().is_empty(), "the queue drained");
+    registry.remove("t2", true).await.ok();
 }

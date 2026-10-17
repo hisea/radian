@@ -82,6 +82,21 @@ release 与 debug 几乎一样。这不是模型或 HTTP 的开销，而是 **JS
 （`InputClaimed`/`TurnStarted`/`MessageAppended`/`TurnFinished`/…）。~56 ms / ~4 ms ≈ 14 次
 fsync，与 ADR 0006 §15.2 的估算一致。这与机器负载无关（fsync 等磁盘）。
 
+### 组提交之后（2026-10-16，ADR 0040）
+
+同一个 `perf_runtime.rs`，同一台机器，只有同步点 fsync 之后（一轮 2–3 次，见
+`radian-runtime/tests/group_commit.rs`）：
+
+| 场景 | debug 中位 / p95 | release 中位 / p95 | n |
+|---|---|---|---|
+| 单次模型调用的整轮（进程内） | 20.5 / 60.0 ms | 16.7 / 26.3 ms | 100 |
+| 工具往返整轮（进程内） | 44.8 / 92.7 ms | 26.1 / 40.8 ms | 100 |
+
+测量时 `uptime` 的 1 分钟负载：release 55–76，debug 91（debug 的 p95 是负载尖峰）。相对本节
+上半的 56 / 84 ms（release），一轮从约 14 次 fsync 降到 2–3 次；剩下的时间主要是每次 fsync
+本身与进程内回合开销，不再随记录数线性叠加。release 的 16.7 → 26.1 ms 之差就是工具往返多
+出的那一次 `ToolExecutionStarted` fsync（约 9 ms，含负载）。
+
 ## 3. JSONL 与 SQLite
 
 方法：`perf_session.rs`。append 用真实的 `SessionJournal::append`；`Session::open` 读一个
@@ -90,7 +105,7 @@ fsync，与 ADR 0006 §15.2 的估算一致。这与机器负载无关（fsync �
 
 | 操作 | debug 中位 / p95 | release 中位 / p95 |
 |---|---|---|
-| append（write + flush + fsync，n=200） | 4.08 / 7.99 ms | **4.03 / 4.97 ms** |
+| append（`write` + `flush`，非同步点记录，n=50，均值） | 0.211 ms | **0.025 ms** |
 | `Session::open` 1k 事件 | 9.76 / 14.24 ms | 0.81 / 0.85 ms |
 | `Session::open` 10k 事件 | 93.3–173.6 / 280 ms | 8.43 / 8.64 ms |
 | `Session::open` 100k 事件 | 981 / 1115 ms | 119.3 / 159.9 ms |
@@ -100,6 +115,11 @@ fsync，与 ADR 0006 §15.2 的估算一致。这与机器负载无关（fsync �
 读路径 release 约 **1.2 µs/事件**（100k 用 119 ms），线性；索引重建约 **3.5 µs/事件**。
 append 的 fsync 是 latency 的主要来源，**读**不是。debug 的 10k 数字波动大（93–174 ms），
 是负载导致的，故给出区间。
+
+**2026-10-16（ADR 0040 组提交）**：只有同步点（`SessionCreated`、`ToolExecutionStarted`、
+`TurnFinished`/`TurnFailed`、替换提交/中止、`TaskSpawned`）fsync；第一行的非同步点
+`append` 因此从约 4 ms 降到上表的约 0.03 ms。一次同步点的 append 仍付一次 fsync（约
+4 ms，ADR 0006 §15.2 的测量），而一个回合只发生 2–3 次（见 §2 末）。
 
 ## 4. TUI 渲染（下表为虚拟化之前；之后见本节末）
 
@@ -171,6 +191,8 @@ release 构建。
 1. **回合延迟由 fsync 主导**：进程内、模型与工具都立即返回时，一轮仍要 ~56 ms（release），
    工具往返 ~84 ms；`append` 本身 4.0 ms。交互式可用，但成批工具（每批十几条 append）
    会把延迟累加到几百毫秒。这是 ADR 0006 §15.2 已知代价的独立复核，量级一致。
+   **ADR 0040 之后（组提交，2026-10-16）**：同一测量为一轮 **16.7 ms**、工具往返 **26.1 ms**
+   （release），一轮只 fsync 2–3 次；见 §2 末。非同步点 `append` 不再 fsync（§3）。
 2. **TUI 每帧重渲染全部 transcript**：release 下约 11.5k 条目、debug 下约 1.5k 条目即
    超过 16 ms/帧。这就是 README 里"暂无虚拟化"的可量化后果。**已修（2026-10-13，虚拟化，
    见 §4 末）。**
@@ -567,6 +589,11 @@ text_len)` 不重渲）。
 
 **二进制体积**：`cargo build --release -p radian-tui --bin radian`，接入前 23,993,056 字节，
 接入后 **24,169,680 字节**（+176,624，+0.74%）。
+
+**渲染器已换（ADR 0042，2026-10-16）**：上面的数字与体积是 `codex-mermaid` + 修订 6 布局那一版的，
+此后渲染器换成 vendored 的 `third_party/grok-mermaid`（grok-build 的 `mermaid.rs`：Sugiyama 布局，
+多支持 subgraph / 4 参与者时序图）。接入点仍在 `blocks.rs` 的 `(source, width)` 缓存里，失败仍是
+源码 + 一行原因，所以这里的结论（接入不退化每帧路径）不变；**具体数字与体积要按新渲染器另测**。
 
 ## 工具卡片（ADR 0028 第 2 片 a · R4/R7 门槛）
 

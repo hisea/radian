@@ -624,6 +624,8 @@ fn is_user_input(input: &Input) -> bool {
         | Input::ModelChecked { .. }
         | Input::SwitchCompacted { .. }
         | Input::SessionDone(_)
+        | Input::AgentSent { .. }
+        | Input::AgentReplied { .. }
         | Input::TrustResolved(_)
         | Input::AccessApplied { .. }
         | Input::ModeApplied { .. }
@@ -631,6 +633,8 @@ fn is_user_input(input: &Input) -> bool {
         | Input::PickerOpened(_)
         | Input::LoginVerified { .. }
         | Input::LoginSaved { .. }
+        | Input::LoginOAuthUrlReady { .. }
+        | Input::LoginOAuthDeviceReady { .. }
         | Input::LogoutDone { .. }
         | Input::ClipboardDone(_)
         | Input::ThemeReady { .. }
@@ -826,6 +830,12 @@ pub enum Input {
     },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
+    /// A `/send`'s input was accepted by the named agent (ADR 0030 O12): the "sent to `<name>`"
+    /// notice. `created` distinguishes a first use from a reuse.
+    AgentSent { name: String, created: bool },
+    /// A named agent's turn ended (ADR 0030 O12): the bounded first lines of its last assistant
+    /// text, shown as a notice. `summary` is empty when it produced no text.
+    AgentReplied { name: String, summary: String },
     /// A `/skill:<name> [args]` expansion finished (ADR 0025 S3): the message text to send, or
     /// a notice (an unknown skill or a file that can no longer be read). `steer` mirrors the
     /// turn state when the command was submitted.
@@ -852,10 +862,21 @@ pub enum Input {
         result: Result<(), String>,
     },
     /// The `auth.json` write of a `/login` finished: the wizard closes either way. The
-    /// success notice names the provider and the way to switch to it (D3).
+    /// success notice names the provider and the way to switch to it (D3). Shared by the
+    /// API-key `Save` path and both ChatGPT OAuth flows.
     LoginSaved {
         name: String,
         result: Result<(), String>,
+    },
+    /// [`Effect::LoginOAuthBrowser`] bound its listener and has the authorize URL. Applied
+    /// only while the wizard is still in `OAuthBrowserWaiting` (the same "late answer" rule
+    /// as `LoginVerified`).
+    LoginOAuthUrlReady { url: String },
+    /// [`Effect::LoginOAuthDevice`] has the user code to show. Applied only while the wizard
+    /// is still in `OAuthDeviceWaiting`.
+    LoginOAuthDeviceReady {
+        user_code: String,
+        verification_url: String,
     },
     /// The hardcoded answer to a `/logout` confirmation (`true` = remove).
     ConfirmLogout(bool),
@@ -1009,6 +1030,14 @@ pub enum Effect {
     /// Remove one stored credential (`/logout`, after the confirmation). The answer is
     /// [`Input::LogoutDone`].
     Logout { provider: String },
+    /// Sign in with ChatGPT, browser flow (ADR 0026): bind the loopback listener,
+    /// try to open the authorize URL (and report it either way, as
+    /// [`Input::LoginOAuthUrlReady`]), wait for the redirect, exchange, save. The terminal
+    /// outcome is [`Input::LoginSaved`] — the same event the API-key `Save` path ends on.
+    LoginOAuthBrowser,
+    /// Sign in with ChatGPT, device-code flow: ask for a user code, report it
+    /// ([`Input::LoginOAuthDeviceReady`]), poll, exchange, save. Ends on [`Input::LoginSaved`].
+    LoginOAuthDevice,
     /// Switch the session's auto-approval (ADR 0026 D9). The loop applies it through the
     /// facade, which flips the hooks' live policy, audits the switch and queues the durable
     /// `ConfigChanged` record for the next resume.
@@ -1043,6 +1072,10 @@ pub enum Effect {
     /// `/tasks` (ADR 0030 O10/O12): list the live task agents, or cancel/kill one. The loop runs
     /// it (the task registry lives in the host) and answers with [`Input::SessionDone`].
     Tasks(command::TasksRequest),
+    /// `/send` (ADR 0030 O12): list the known definitions, or send to a named agent. The loop
+    /// runs it (the named registry lives in the host) and answers with [`Input::AgentSent`] and
+    /// then [`Input::AgentReplied`].
+    Send(command::SendRequest),
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
@@ -1156,6 +1189,7 @@ impl PartialEq for Effect {
                     env: be,
                 },
             ) => an == bn && ak == bk && ae == be,
+            (LoginOAuthBrowser, LoginOAuthBrowser) | (LoginOAuthDevice, LoginOAuthDevice) => true,
             (Logout { provider: a }, Logout { provider: b }) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
             (SetTrust { choice: a }, SetTrust { choice: b }) => a == b,
@@ -1174,6 +1208,7 @@ impl PartialEq for Effect {
             (ListSkills, ListSkills) => true,
             (Jobs(a), Jobs(b)) => a == b,
             (Tasks(a), Tasks(b)) => a == b,
+            (Send(a), Send(b)) => a == b,
             (Theme { name: a }, Theme { name: b }) => a == b,
             (Inject(a), Inject(b)) => a == b,
             (CancelBash, CancelBash) => true,
@@ -1749,14 +1784,23 @@ impl App {
                 crate::spinner::Kind::default()
             }),
         };
-        // An unknown `tui.input_style` is a skipped key (the reader warns once); the TUI falls
-        // back to the default.
-        self.input_style = config
-            .tui
-            .input_style
-            .as_deref()
-            .and_then(InputStyle::parse)
-            .unwrap_or_default();
+        // `tui.input_style` (ADR 0035; `bar` removed by the 2026-10-16
+        // note): `lines` (the default) or `box`. The removed `bar`, and any other unknown
+        // spelling, warns once and uses `lines` — a display preference, never a refusal
+        // (ADR 0008).
+        self.input_style = match config.tui.input_style.as_deref() {
+            None => InputStyle::default(),
+            Some("bar") => {
+                warnings.push("tui.input_style = \"bar\" was removed; using lines".into());
+                InputStyle::default()
+            }
+            Some(name) => InputStyle::parse(name).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "tui.input_style = {name:?} is not one of lines|box; using lines"
+                ));
+                InputStyle::default()
+            }),
+        };
         // `tui.display.reasoning` (ADR 0028 R3, default collapsed) and
         // `tui.display.tool_output` + `tool_preview_lines` (R4, default errors / 5). An
         // unknown spelling never reaches here (the host reader skips it with a warning).
@@ -2925,6 +2969,22 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            // ADR 0030 O12: `/send`'s two notices. The input was accepted by the named agent.
+            Input::AgentSent { name, created } => {
+                let verb = if created { "created" } else { "sent to" };
+                self.push_notice(format!("{verb} `{name}`"));
+                UpdateResult::dirty()
+            }
+            // The named agent's turn ended: show the first lines of its last assistant text.
+            Input::AgentReplied { name, summary } => {
+                let text = if summary.trim().is_empty() {
+                    format!("`{name}` finished with no text")
+                } else {
+                    format!("`{name}` replied:\n{summary}")
+                };
+                self.push_notice(text);
+                UpdateResult::dirty()
+            }
             Input::TrustMove(delta) => {
                 if let Some(Modal::Trust(wizard)) =
                     self.layers.iter_mut().rev().find_map(|layer| match layer {
@@ -3082,6 +3142,21 @@ impl App {
                         ));
                     }
                     Err(error) => self.push_notice(format!("could not save the key: {error}")),
+                }
+                UpdateResult::dirty()
+            }
+            Input::LoginOAuthUrlReady { url } => {
+                if let Some(wizard) = self.login_modal_mut() {
+                    wizard.oauth_browser_url_ready(&url);
+                }
+                UpdateResult::dirty()
+            }
+            Input::LoginOAuthDeviceReady {
+                user_code,
+                verification_url,
+            } => {
+                if let Some(wizard) = self.login_modal_mut() {
+                    wizard.oauth_device_ready(&user_code, &verification_url);
                 }
                 UpdateResult::dirty()
             }
@@ -3444,18 +3519,6 @@ impl App {
         self.session.projection.read().turn()
     }
 
-    /// `Esc`'s escalation (unchanged, ): cancel a running turn, otherwise
-    /// quit at once. Ctrl-C ([`Input::Cancel`]) is the one that asks twice.
-    fn cancel_or_quit_now(&mut self) -> UpdateResult {
-        if self.turn() == TurnState::Running {
-            self.quit_pending = None;
-            UpdateResult::quiet(Effect::Cancel)
-        } else {
-            self.quit = true;
-            UpdateResult::quiet(Effect::Quit)
-        }
-    }
-
     /// Ctrl-C (the `cancel` action), the one action whose meaning depends on the clock
     ///:
     /// - a turn is running: cancel it (unchanged);
@@ -3670,8 +3733,11 @@ impl App {
                 UpdateResult::dirty()
             }
             Action::Escape => {
-                // A non-empty input is cleared first (kept in the history, so `Up` finds it);
-                // an empty one cancels a running turn or quits.
+                // Esc never quits an idle session. In order: the menu and
+                // the find box are closed in `key_input`/`update` above; a non-empty input is
+                // cleared (kept in the history, so `Up` finds it); an empty one cancels the
+                // running `!` command or turn; otherwise it does nothing at all. Quitting is the
+                // two-press Ctrl-C (`cancel`) or `/quit`.
                 if !self.input.is_empty() {
                     let text = std::mem::take(&mut self.input).text();
                     self.session.history.push(text);
@@ -3683,8 +3749,13 @@ impl App {
                     // as a cancelled `BashDone`.
                     self.push_notice("cancelling the command…");
                     UpdateResult::effect(Effect::CancelBash)
+                } else if self.turn() == TurnState::Running {
+                    // Esc cancels the running turn (unchanged). A pending Ctrl-C quit window
+                    // is disarmed, as the old escalation did.
+                    self.quit_pending = None;
+                    UpdateResult::quiet(Effect::Cancel)
                 } else {
-                    self.cancel_or_quit_now()
+                    UpdateResult::none()
                 }
             }
             // The form actions normally arrive as `Input::Form`; a main-layer binding to one
@@ -3800,10 +3871,21 @@ impl App {
                 return UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork));
             }
         }
-        if matches!(event, RuntimeEvent::ConfigChanged { .. }) {
+        if let RuntimeEvent::ConfigChanged { change, .. } = event {
             // The driver applied the queued change: the status bar's `next:` promise is done.
             self.session.next_model = None;
             self.session.next_thinking = None;
+            // Owner addendum (ADR 0027 slice ①): an applied model switch must follow
+            // through to the footer's `model` item, or it keeps showing the startup model. The
+            // session's model facts follow the applied route the way startup leaves them: the
+            // model id, the provider from the route, and `model_display = None` so
+            // `{display_name}` falls back to the id. Startup passes `None` for the display name
+            // too (`cli.rs`'s `set_footer_facts`); no catalog name is resolved today.
+            if let Some(route) = radian_host::ModelRoute::from_value(change) {
+                self.session.model_name = route.model;
+                self.session.provider = Some(route.provider);
+                self.session.model_display = None;
+            }
         }
         if let RuntimeEvent::TurnFailed { message, .. } = event {
             self.session.entries.push(Entry::new(
@@ -4125,6 +4207,12 @@ impl App {
             LoginOutcome::Save { name, key, env } => {
                 return UpdateResult::effect(Effect::LoginSave { name, key, env });
             }
+            LoginOutcome::BeginOAuthBrowser => {
+                return UpdateResult::effect(Effect::LoginOAuthBrowser);
+            }
+            LoginOutcome::BeginOAuthDevice => {
+                return UpdateResult::effect(Effect::LoginOAuthDevice);
+            }
         }
         UpdateResult::dirty()
     }
@@ -4277,6 +4365,25 @@ impl App {
                         ));
                         return UpdateResult::dirty();
                     }
+                    // The two ChatGPT OAuth choices (ADR 0026) are not descriptors,
+                    // so they do not go through `for_provider`: pushing the modal and kicking
+                    // off the effect happens together, exactly as choosing them from the
+                    // picker does in `LoginWizard::on_key`.
+                    Some(id) if id == radian_host::CHATGPT_PROVIDER_ID => {
+                        self.push_modal(Modal::Login(Box::new(LoginWizard::new(
+                            crate::login::LoginStep::OAuthBrowserWaiting { url: None },
+                        ))));
+                        return UpdateResult::effect(Effect::LoginOAuthBrowser);
+                    }
+                    Some(id) if id == radian_host::CHATGPT_DEVICE_LOGIN => {
+                        self.push_modal(Modal::Login(Box::new(LoginWizard::new(
+                            crate::login::LoginStep::OAuthDeviceWaiting {
+                                user_code: String::new(),
+                                verification_url: String::new(),
+                            },
+                        ))));
+                        return UpdateResult::effect(Effect::LoginOAuthDevice);
+                    }
                     Some(id) => {
                         // for_provider builds the matching first step (D3).
                         self.push_modal(Modal::Login(Box::new(LoginWizard::for_provider(&id))));
@@ -4405,6 +4512,7 @@ impl App {
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
             command::Outcome::Jobs(request) => UpdateResult::effect(Effect::Jobs(request)),
             command::Outcome::Tasks(request) => UpdateResult::effect(Effect::Tasks(request)),
+            command::Outcome::Send(request) => UpdateResult::effect(Effect::Send(request)),
             command::Outcome::Message => UpdateResult::none(),
         }
     }
@@ -4711,7 +4819,7 @@ impl App {
         // live entry is dropped wherever it sits - the stream can leave one behind a
         // compaction notice (they are not always a suffix of `entries`).
         // The live reasoning channel's clock, taken before the drop (ADR 0028
-        // decision 4): the committed entry below carries its duration, so `▼ thinking · 3.2s`
+        // decision 4): the committed entry below carries its duration, so `◻ thinking · 3.2s`
         // survives the live-to-committed handoff. A resume has no live entry: `None`.
         let reasoning_clock = self.take_live_reasoning_clock();
         self.drop_live();

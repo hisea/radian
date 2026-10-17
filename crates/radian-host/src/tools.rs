@@ -16,7 +16,6 @@ use radian_coding::{AskSession, AskTools, CodingSession, CodingTools};
 use crate::git_commit::{GitCommitTools, run as run_git_commit};
 use crate::lead_tools::{LeadSession, LeadTools};
 use crate::memory::{MemorySession, MemoryTools};
-use crate::mermaid::{MermaidCheckSession, MermaidCheckTools};
 use crate::skills::tools::{SkillSession, SkillTools};
 
 pub struct HostTools {
@@ -27,8 +26,6 @@ pub struct HostTools {
     ask: Option<AskTools>,
     /// `skill` (ADR 0025 S3). Read-only, so it is mounted whenever skills were discovered.
     skills: Option<SkillTools>,
-    /// `mermaid_check` (ADR 0028 R8 / ADR 0025). Read-only and always mounted.
-    mermaid: MermaidCheckTools,
     /// `git_commit` (ADR 0030 R10). Runs in the host, outside the sandbox. `None` for a host
     /// with no workspace/journal (the CLI's own tool tests).
     git_commit: Option<GitCommitTools>,
@@ -36,6 +33,12 @@ pub struct HostTools {
     /// a host that supplies no task builder.
     lead: Option<LeadTools>,
     mcp: McpToolProvider,
+    /// ADR 0030 O11: the agent definition's built-in tool allow-list. `None` (the default)
+    /// mounts every built-in the host has; `Some` mounts only these names — the others are not
+    /// in the model's tool list at all and are not in the `<runtime>` layer (the permission
+    /// `deny` the registry still installs is defence in depth beneath that). MCP tools are not
+    /// in this universe; they stay governed by the definition's `mcp` list.
+    tool_allow: Option<Vec<String>>,
 }
 
 impl HostTools {
@@ -50,10 +53,27 @@ impl HostTools {
             memory,
             ask: None,
             skills: None,
-            mermaid: MermaidCheckTools::new(),
             git_commit,
             lead: None,
             mcp,
+            tool_allow: None,
+        }
+    }
+
+    /// ADR 0030 O11: mount only the built-in tools this allow-list names (an agent definition's
+    /// `tools`). `None` mounts every built-in the host has. This is the "not in the list is not
+    /// mounted" rule; the permission layer's `deny` (the registry's `with_denied_tools`) still
+    /// stands beneath it, so a name that somehow reaches the layer is refused too.
+    pub fn with_tool_allow(mut self, allow: Option<Vec<String>>) -> Self {
+        self.tool_allow = allow;
+        self
+    }
+
+    /// Whether a built-in tool name may be mounted under the allow-list.
+    fn allows(&self, name: &str) -> bool {
+        match &self.tool_allow {
+            Some(allow) => allow.iter().any(|allowed| allowed == name),
+            None => true,
         }
     }
 
@@ -127,7 +147,6 @@ impl HostTools {
         if self.skills.is_some() {
             push("skill", "read one of the discovered skills");
         }
-        push("mermaid_check", "validate a Mermaid diagram");
         if self.git_commit.is_some() {
             push(
                 "git_commit",
@@ -142,6 +161,11 @@ impl HostTools {
             {
                 out.push((name, purpose));
             }
+        }
+        // ADR 0030 O11: an allow-list narrows what is even listed in layer 0a; a built-in it
+        // does not name is not mounted and must not appear here.
+        if self.tool_allow.is_some() {
+            out.retain(|(name, _)| self.allows(name));
         }
         out
     }
@@ -162,7 +186,6 @@ pub struct HostSession {
     memory: Option<MemorySession>,
     ask: Option<AskSession>,
     skills: Option<SkillSession>,
-    mermaid: MermaidCheckSession,
     git_commit: Option<GitCommitTools>,
     lead: Option<LeadSession>,
     mcp: McpSession,
@@ -171,7 +194,6 @@ pub struct HostSession {
     memory_names: HashSet<String>,
     ask_names: HashSet<String>,
     skill_names: HashSet<String>,
-    mermaid_names: HashSet<String>,
     git_commit_names: HashSet<String>,
     lead_names: HashSet<String>,
 }
@@ -198,7 +220,6 @@ impl ToolProvider for HostTools {
             Some(skills) => Some(skills.open_session().await?),
             None => None,
         };
-        let mermaid = self.mermaid.open_session().await?;
         let git_commit = self.git_commit.clone();
         let lead = match &self.lead {
             Some(lead) => Some(lead.open_session().await?),
@@ -209,7 +230,6 @@ impl ToolProvider for HostTools {
         let mut memory_names = HashSet::new();
         let mut ask_names = HashSet::new();
         let mut skill_names = HashSet::new();
-        let mut mermaid_names = HashSet::new();
         let mut git_commit_names = HashSet::new();
         let mut lead_names = HashSet::new();
         let mut built_in_specs: Vec<ToolSpec> = Vec::new();
@@ -237,10 +257,6 @@ impl ToolProvider for HostTools {
                 built_in_specs.push(spec.clone());
             }
         }
-        for spec in mermaid.tool_specs() {
-            mermaid_names.insert(spec.name.clone());
-            built_in_specs.push(spec.clone());
-        }
         if git_commit.is_some() {
             let git_commit_spec = crate::git_commit::spec();
             git_commit_names.insert(git_commit_spec.name.clone());
@@ -252,6 +268,19 @@ impl ToolProvider for HostTools {
                 built_in_specs.push(spec.clone());
             }
         }
+        // ADR 0030 O11: an allow-list is a physical unmount. Drop every unlisted built-in spec
+        // **and** its dispatch name, so a call to it is an unknown tool, not merely denied. MCP
+        // specs are dynamic and are never filtered here (the definition's `mcp` list governs
+        // them). The permission-layer `deny` for the same names is kept (defence in depth).
+        if self.tool_allow.is_some() {
+            coding_names.retain(|name| self.allows(name));
+            memory_names.retain(|name| self.allows(name));
+            ask_names.retain(|name| self.allows(name));
+            skill_names.retain(|name| self.allows(name));
+            git_commit_names.retain(|name| self.allows(name));
+            lead_names.retain(|name| self.allows(name));
+            built_in_specs.retain(|spec| self.allows(&spec.name));
+        }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
 
         Ok(HostSession {
@@ -259,7 +288,6 @@ impl ToolProvider for HostTools {
             memory,
             ask,
             skills,
-            mermaid,
             git_commit,
             lead,
             mcp,
@@ -268,7 +296,6 @@ impl ToolProvider for HostTools {
             memory_names,
             ask_names,
             skill_names,
-            mermaid_names,
             git_commit_names,
             lead_names,
         })
@@ -303,8 +330,6 @@ impl ToolSession for HostSession {
                     format!("`{}` has no lead session", call.name),
                 )),
             }
-        } else if self.mermaid_names.contains(&call.name) {
-            self.mermaid.execute(call, cx).await
         } else if self.skill_names.contains(&call.name) {
             match &self.skills {
                 Some(skills) => skills.execute(call, cx).await,

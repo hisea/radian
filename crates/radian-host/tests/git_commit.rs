@@ -113,6 +113,7 @@ fn commit_in_as(
         protected,
         &radian_host::git_commit::default_allowed_filters(),
         refuse_main,
+        false,
     )
 }
 
@@ -124,7 +125,17 @@ fn commit_with_filters(
     allowed_filters: &[String],
 ) -> Result<Committed, agent_core::ToolFailure> {
     let pin = RepoPin::resolve(dir).expect("a git repository");
-    commit(dir, &pin, message, paths, None, &[], allowed_filters, true)
+    commit(
+        dir,
+        &pin,
+        message,
+        paths,
+        None,
+        &[],
+        allowed_filters,
+        true,
+        false,
+    )
 }
 
 fn write_executable(path: &Path, body: &str) {
@@ -231,6 +242,44 @@ fn branch_rules_are_enforced() {
         commit_in(&dir, "m", &[], None, &[]).unwrap_err().code,
         "detached_head"
     );
+}
+
+/// ADR 0030 O3 (review fix 2): an agent that may commit only to its own branch refuses every
+/// commit when it has none (the `shared` case), even if it reached the tool. With its own branch
+/// it commits there.
+#[test]
+fn a_session_with_no_branch_of_its_own_cannot_commit() {
+    let dir = repo("require-branch");
+    change(&dir);
+    let pin = RepoPin::resolve(&dir).expect("a git repository");
+
+    let error = commit(
+        &dir,
+        &pin,
+        "m",
+        &[],
+        None,
+        &[],
+        &radian_host::git_commit::default_allowed_filters(),
+        false,
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "no_branch", "{error:?}");
+
+    let committed = commit(
+        &dir,
+        &pin,
+        "m",
+        &[],
+        Some("feature/x"),
+        &[],
+        &radian_host::git_commit::default_allowed_filters(),
+        false,
+        true,
+    )
+    .expect("its own branch commits");
+    assert_eq!(committed.branch, "feature/x");
 }
 
 /// ADR 0038 decision 4: a `general`/`lead` session may commit on `main`/`master`; a configured
@@ -502,6 +551,7 @@ fn a_git_dir_created_in_a_subdirectory_workspace_is_refused() {
         &[],
         &radian_host::git_commit::default_allowed_filters(),
         true,
+        false,
     )
     .unwrap_err();
     assert_eq!(error.code, "repository_changed", "{error:?}");

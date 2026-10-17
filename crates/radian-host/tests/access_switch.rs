@@ -125,10 +125,13 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             task_agent: false,
             parent: None,
             allowed_branch: None,
+            git_commit_requires_branch: false,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
             skills_disabled: Vec::new(),
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: false,
@@ -153,6 +156,7 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
             task_builder: None,
+            named_builder: None,
         },
     )
     .await
@@ -263,10 +267,13 @@ async fn a_session_without_a_builder_refuses_set_access() {
             task_agent: false,
             parent: None,
             allowed_branch: None,
+            git_commit_requires_branch: false,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
             skills_disabled: Vec::new(),
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: false,
@@ -291,6 +298,7 @@ async fn a_session_without_a_builder_refuses_set_access() {
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
             task_builder: None,
+            named_builder: None,
         },
     )
     .await

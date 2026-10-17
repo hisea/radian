@@ -151,10 +151,13 @@ fn builder(session_dir: PathBuf, base_url: String, mount_lead_in_tasks: bool) ->
                     task_agent: false,
                     parent: None,
                     allowed_branch: None,
+                    git_commit_requires_branch: false,
                     memory_root: None,
                     skills_extra_paths: Vec::new(),
                     skills_builtin: true,
                     skills_disabled: Vec::new(),
+                    tools_allow: None,
+                    skills_allow: None,
                     memory_injection: radian_host::memory::InjectionConfig::default(),
                     trust: radian_host::trust::Setup::untrusted(&workspace, false),
                     resume: false,
@@ -179,6 +182,7 @@ fn builder(session_dir: PathBuf, base_url: String, mount_lead_in_tasks: bool) ->
                     memory_warning: Arc::new(|_message: &str| {}),
                     memory_notice_line: Arc::new(|_line: &str| {}),
                     task_builder,
+                    named_builder: None,
                 },
             })
         },
@@ -1003,8 +1007,370 @@ async fn a_lead_turn_stays_user_and_a_task_turn_is_subagent() {
 }
 
 // ---------------------------------------------------------------------------
+// Group C: integrate_task (ADR 0030)
+// ---------------------------------------------------------------------------
+
+/// ADR 0030: with the default `merge_needs_human`, a lead-mode turn's
+/// `integrate_task` reaches the human queue, with the lead session as the origin.
+#[tokio::test]
+async fn integrate_task_asks_the_human_by_default() {
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "integrate_task", r#"{"id":"nope"}"#),
+        text_reply("done"),
+    ])
+    .await;
+    let scratch = scratch("integrate-ask");
+    let workspace = scratch.join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    assert!(git(&workspace, &["init", "-q", "-b", "main"]));
+    assert!(git(
+        &workspace,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]
+    ));
+    if workspace_sandbox(&workspace).is_none() {
+        let _ = std::fs::remove_dir_all(&scratch);
+        return;
+    }
+    let session = open_lead_workspace(
+        &scratch,
+        "integrate-ask",
+        &server.base_url,
+        workspace.clone(),
+    )
+    .await;
+    send(&session, "integrate").await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let pending = loop {
+        if let Some(head) = session.pending().head() {
+            break head;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the integrate ask never reached the human queue"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(pending.origin, "integrate-ask", "the origin is the lead");
+    match &pending.request {
+        radian_host::PendingRequest::Approval(request) => {
+            assert_eq!(request.tool, "integrate_task");
+        }
+        other => panic!("expected an approval, got {other:?}"),
+    }
+    session
+        .answer(
+            pending.request_id,
+            radian_host::PendingResponse::Approval(radian_permissions::ApprovalOutcome::Deny {
+                reason: None,
+            }),
+        )
+        .expect("answer the approval");
+    wait_turn_end(&session, &server, 2).await;
+    session.stop();
+    let _ = session.join().await;
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// ADR 0030, 7, 9: `integrate_task` merges the task branch, reruns the
+/// orchestration's `verify` in a sandbox rooted at the integration worktree, emits `before_merge`
+/// once with both HEADs, and never moves the user branch.
+#[tokio::test]
+async fn integrate_task_merges_then_verifies_and_emits_before_merge() {
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "shell", r#"{"command":"echo hello > t1.txt"}"#),
+        text_reply("task done"),
+    ])
+    .await;
+    let scratch = scratch("integrate");
+    let lead = scratch.join("lead");
+    std::fs::create_dir_all(&lead).unwrap();
+    assert!(git(&lead, &["init", "-q", "-b", "main"]));
+    assert!(git(
+        &lead,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]
+    ));
+    if workspace_sandbox(&lead).is_none() {
+        let _ = std::fs::remove_dir_all(&scratch);
+        return;
+    }
+    let session_dir = scratch.join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let hooks: HookLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let orchestration = radian_host::Orchestration {
+        verify: vec![
+            // Reads the merged file (proves the worktree is the integration worktree's tree).
+            "test -f t1.txt".to_owned(),
+            // Writes a NEW file into the integration worktree: it must succeed, which proves the
+            // sandbox root is the integration worktree (not the lead workspace, where it would be
+            // outside the root and denied).
+            "echo ok > verified.txt".to_owned(),
+            // Writes outside the root: the sandbox must deny it.
+            "echo x > ../escaped".to_owned(),
+        ],
+        ..Default::default()
+    };
+    let registry = registry_with(
+        &lead,
+        &session_dir,
+        &server.base_url,
+        orchestration,
+        Some(Arc::clone(&hooks)),
+    );
+    let lead_session = LeadTools::new(Arc::clone(&registry))
+        .open_session()
+        .await
+        .expect("a lead tool session");
+
+    run_tool(
+        &lead_session,
+        "spawn_task",
+        json!({"id": "t1", "brief": "do it"}),
+    )
+    .await
+    .expect("spawn");
+    let finished = run_tool(
+        &lead_session,
+        "wait_task",
+        json!({"id": "t1", "timeout_secs": 20}),
+    )
+    .await
+    .expect("wait");
+    assert_eq!(structured(&finished)["event"], "finished", "{finished:?}");
+
+    let output = run_tool(&lead_session, "integrate_task", json!({"id": "t1"}))
+        .await
+        .expect("integrate");
+    let value = structured(&output);
+    assert_eq!(value["event"], "merged", "{value}");
+    assert_eq!(value["branch"], "radian/integration");
+    assert_eq!(
+        value["human_command"], "git merge --ff-only radian/integration",
+        "{value}"
+    );
+    let verify = value["verify"].as_array().expect("verify results");
+    assert_eq!(verify.len(), 3, "{value}");
+    assert_eq!(verify[0]["status"], "ok", "{value}");
+    assert_eq!(verify[1]["status"], "ok", "{value}");
+    assert_eq!(verify[2]["status"], "failed", "{value}");
+
+    let integration = registry.integration().expect("the integration worktree");
+    assert!(
+        !integration
+            .worktree
+            .parent()
+            .unwrap()
+            .join("escaped")
+            .exists(),
+        "verify must not write outside the integration worktree"
+    );
+    // The user branch never moved.
+    assert_eq!(
+        git_text(&lead, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "main"
+    );
+
+    let seen = hooks.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let before: Vec<_> = seen
+        .iter()
+        .filter(|(name, _)| name == "before_merge")
+        .collect();
+    assert_eq!(before.len(), 1, "{seen:?}");
+    let payload = &before[0].1;
+    assert_eq!(payload["task"], "t1");
+    assert_eq!(payload["branch"], "radian/t1");
+    assert!(payload["task_head"].is_string(), "{payload}");
+    assert_eq!(
+        payload["integration_head"].as_str(),
+        integration.base.as_deref(),
+        "{payload}"
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// ADR 0030 and 7: two tasks from the same `base` conflict; the second
+/// integrate aborts cleanly and still emits `before_merge`. The user branch stays put.
+#[tokio::test]
+async fn a_conflicting_integrate_aborts_and_still_emits_before_merge() {
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "shell", r#"{"command":"echo A > shared.txt"}"#),
+        text_reply("t1 done"),
+        tool_reply("call_3", "shell", r#"{"command":"echo B > shared.txt"}"#),
+        text_reply("t2 done"),
+    ])
+    .await;
+    let scratch = scratch("integrate-conflict");
+    let lead = scratch.join("lead");
+    std::fs::create_dir_all(&lead).unwrap();
+    assert!(git(&lead, &["init", "-q", "-b", "main"]));
+    assert!(git(
+        &lead,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]
+    ));
+    if workspace_sandbox(&lead).is_none() {
+        let _ = std::fs::remove_dir_all(&scratch);
+        return;
+    }
+    let base = git_text(&lead, &["rev-parse", "HEAD"]);
+    let session_dir = scratch.join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let hooks: HookLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let registry = registry_with(
+        &lead,
+        &session_dir,
+        &server.base_url,
+        radian_host::Orchestration::default(),
+        Some(Arc::clone(&hooks)),
+    );
+    let lead_session = LeadTools::new(Arc::clone(&registry))
+        .open_session()
+        .await
+        .expect("a lead tool session");
+
+    for id in ["t1", "t2"] {
+        run_tool(
+            &lead_session,
+            "spawn_task",
+            json!({"id": id, "brief": "do it", "base": base}),
+        )
+        .await
+        .expect("spawn");
+        run_tool(
+            &lead_session,
+            "wait_task",
+            json!({"id": id, "timeout_secs": 20}),
+        )
+        .await
+        .expect("wait");
+    }
+
+    let first = run_tool(&lead_session, "integrate_task", json!({"id": "t1"}))
+        .await
+        .expect("integrate t1");
+    assert_eq!(structured(&first)["event"], "merged");
+
+    let second = run_tool(&lead_session, "integrate_task", json!({"id": "t2"}))
+        .await
+        .expect("integrate t2");
+    let value = structured(&second);
+    assert_eq!(value["event"], "conflict", "{value}");
+    let paths = value["paths"].as_array().expect("conflicted paths");
+    assert!(paths.iter().any(|path| path == "shared.txt"), "{value}");
+
+    let integration = registry.integration().expect("the integration worktree");
+    assert!(
+        !git(
+            &integration.worktree,
+            &["rev-parse", "-q", "--verify", "MERGE_HEAD"]
+        ),
+        "MERGE_HEAD must be gone"
+    );
+    assert_eq!(
+        git_text(&integration.worktree, &["status", "--porcelain"]),
+        "",
+        "the integration worktree must be clean"
+    );
+
+    let seen = hooks.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let before = seen
+        .iter()
+        .filter(|(name, _)| name == "before_merge")
+        .count();
+    assert_eq!(before, 2, "before_merge fires per attempt: {seen:?}");
+    // The user branch never moved.
+    assert_eq!(
+        git_text(&lead, &["rev-parse", "HEAD"]),
+        base,
+        "the user branch must not move"
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+// ---------------------------------------------------------------------------
 // Session helpers
 // ---------------------------------------------------------------------------
+
+/// A host `git` call in `dir`, trimmed.
+fn git_text(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("git runs");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// A recorded hook event: `(name, payload)` (ADR 0030 O7, slice 9).
+type HookLog = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+/// A registry over `lead` with the real task `builder`, an injected orchestration snapshot and an
+/// optional hook log (the `Fixture` always uses the process default; these tests need both a
+/// `verify` list and the `before_merge` events).
+fn registry_with(
+    lead: &Path,
+    session_dir: &Path,
+    base_url: &str,
+    orchestration: radian_host::Orchestration,
+    hooks: Option<HookLog>,
+) -> Arc<TaskRegistry> {
+    let journal = Arc::new(
+        SessionJournal::create(
+            session_dir.join("lead.jsonl"),
+            "lead",
+            SessionCreatedData::new(lead.to_string_lossy(), json!({})),
+        )
+        .expect("the lead journal"),
+    );
+    let queue: Arc<SessionQueue> = Arc::new(SessionQueue::new());
+    let mut registry = TaskRegistry::new(
+        lead.to_path_buf(),
+        "lead",
+        journal,
+        queue,
+        builder(session_dir.to_path_buf(), base_url.to_owned(), false),
+    )
+    .with_orchestration(orchestration);
+    if let Some(hooks) = hooks {
+        let hook: radian_host::task::HookNotifier = Arc::new(move |name, data| {
+            hooks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((name.to_owned(), data.clone()));
+        });
+        registry = registry.with_hook_notifier(hook);
+    }
+    Arc::new(registry)
+}
 
 /// A task builder that is never called (the mode test denies `spawn_task` before it runs; the
 /// source test supplies its own).
@@ -1107,10 +1473,13 @@ async fn open_lead_inner(
             task_agent: false,
             parent: None,
             allowed_branch: None,
+            git_commit_requires_branch: false,
             memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
             skills_disabled: Vec::new(),
+            tools_allow: None,
+            skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
             trust: radian_host::trust::Setup::untrusted(workspace, false),
             resume: false,
@@ -1135,6 +1504,7 @@ async fn open_lead_inner(
             memory_warning: Arc::new(|_message: &str| {}),
             memory_notice_line: Arc::new(|_line: &str| {}),
             task_builder,
+            named_builder: None,
         },
     )
     .await
@@ -1209,4 +1579,40 @@ fn tool_result(server: &MockServer, n: usize, call_id: &str) -> String {
                 .join("\n")
         })
         .unwrap_or_default()
+}
+
+/// `spawn_task { agent }` resolves a user-level definition and records it (ADR 0030 O11): the
+/// result names the definition and says a `spawn: true` definition was ignored for the task
+/// (depth limit 2). The definition's effect on model/profile/tools is pinned by
+/// `tests/task.rs` (the registry is where the snapshot is applied).
+#[tokio::test]
+async fn spawn_task_with_an_agent_records_the_definition() {
+    let fixture = Fixture::new("spawn-agent", "http://127.0.0.1:1/v1");
+    if workspace_sandbox(&fixture.lead).is_none() {
+        return;
+    }
+    let home = isolated_home();
+    let dir = home.join("agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("lead-agent.md");
+    std::fs::write(&path, "---\nname: lead-agent\nspawn: true\n---\nBODY\n").unwrap();
+
+    let session = fixture.lead_session().await;
+    let output = run_tool(
+        &session,
+        "spawn_task",
+        json!({"brief": "x", "agent": "lead-agent"}),
+    )
+    .await
+    .expect("spawn");
+    let value = structured(&output);
+    assert_eq!(value["agent"], "lead-agent");
+    assert_eq!(value["spawn_ignored"], true);
+
+    fixture
+        .registry
+        .remove(value["task"].as_str().unwrap(), true)
+        .await
+        .expect("remove");
+    let _ = std::fs::remove_file(path);
 }

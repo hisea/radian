@@ -48,7 +48,7 @@ pub use message::{
 };
 pub use model::{
     CANCELLATION_MESSAGE, CONTEXT_OVERFLOW_PREFIX, Model, ModelContext, ModelError, ModelRequest,
-    ModelResponse, ModelUsage, StopReason,
+    ModelResponse, ModelUsage, RateLimits, StopReason,
 };
 pub use outcome::{
     CancelReason, CompactionError, CompactionFailure, CompactionOutcome, IncompleteReason,
