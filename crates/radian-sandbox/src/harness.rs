@@ -52,6 +52,44 @@ impl Case {
             Expect::MustSucceed => self.sandbox.succeeded && self.control.succeeded,
         }
     }
+
+    /// Whether this case is one of the two Unix-socket denial cases Linux cannot enforce
+    /// (the accepted gap, decision 4): bwrap reaches pathname sockets
+    /// through the shared root in both tiers, so on `linux-bwrap` they are reported as a
+    /// known limitation rather than a regression. Every other case — and these two cases
+    /// on any other backend — stays strict.
+    pub fn is_accepted_linux_limit(&self) -> bool {
+        self.group == "unix_socket"
+            && matches!(self.name.as_str(), "workspace_denied" | "safe_denied")
+    }
+
+    /// The reason reported with a [`Verdict::KnownLimit`].
+    pub fn known_limit_reason(&self) -> &'static str {
+        "bwrap does not restrict Unix sockets (accepted gap, decision 4)"
+    }
+
+    /// The verdict under `backend`: a passing case is [`Verdict::Pass`]; one of the two
+    /// accepted Linux limits is [`Verdict::KnownLimit`] on `linux-bwrap` (and still
+    /// [`Verdict::Fail`] anywhere else, so macOS stays strict); anything else that did
+    /// not pass is [`Verdict::Fail`].
+    pub fn verdict(&self, backend: &str) -> Verdict {
+        if self.passed() {
+            Verdict::Pass
+        } else if backend == "linux-bwrap" && self.is_accepted_linux_limit() {
+            Verdict::KnownLimit
+        } else {
+            Verdict::Fail
+        }
+    }
+}
+
+/// What one matrix case counts as under the backend that ran it: a pass, a failure, or a
+/// documented, accepted limitation (neither a pass nor a failure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Pass,
+    Fail,
+    KnownLimit,
 }
 
 pub struct Matrix {
@@ -63,12 +101,27 @@ pub struct Matrix {
 }
 
 impl Matrix {
+    /// The matrix passes when no case fails: a [`Verdict::KnownLimit`] is an expected,
+    /// documented limitation, not a regression and not a pass.
     pub fn passed(&self) -> bool {
-        self.cases.iter().all(Case::passed)
+        self.cases
+            .iter()
+            .all(|c| c.verdict(&self.backend) != Verdict::Fail)
     }
 
     pub fn failures(&self) -> Vec<&Case> {
-        self.cases.iter().filter(|c| !c.passed()).collect()
+        self.cases
+            .iter()
+            .filter(|c| c.verdict(&self.backend) == Verdict::Fail)
+            .collect()
+    }
+
+    /// Cases reported as a known limitation under the backend that ran the matrix.
+    pub fn known_limits(&self) -> Vec<&Case> {
+        self.cases
+            .iter()
+            .filter(|c| c.verdict(&self.backend) == Verdict::KnownLimit)
+            .collect()
     }
 
     pub fn to_json(&self) -> Value {
@@ -85,6 +138,7 @@ impl Matrix {
                 "control_succeeded": c.control.succeeded,
                 "control_detail": c.control.detail,
                 "passed": c.passed(),
+                "verdict": match c.verdict(&self.backend) { Verdict::Pass => "PASS", Verdict::Fail => "FAIL", Verdict::KnownLimit => "KNOWN-LIMIT" },
                 "note": c.note,
             })).collect::<Vec<_>>(),
             "orphans": self.orphans,
@@ -98,6 +152,11 @@ impl Matrix {
             "group", "case", "expect", "sandbox", "control", "verdict"
         ));
         for c in &self.cases {
+            let verdict = match c.verdict(&self.backend) {
+                Verdict::Pass => "PASS".to_string(),
+                Verdict::Fail => "FAIL".to_string(),
+                Verdict::KnownLimit => format!("KNOWN-LIMIT: {}", c.known_limit_reason()),
+            };
             out.push_str(&format!(
                 "{:<16} {:<26} {:>8} {:>8} {:>8}  {}\n",
                 c.group,
@@ -108,13 +167,14 @@ impl Matrix {
                 },
                 if c.sandbox.succeeded { "ok" } else { "denied" },
                 if c.control.succeeded { "ok" } else { "denied" },
-                if c.passed() { "PASS" } else { "FAIL" },
+                verdict,
             ));
         }
         out.push_str(&format!(
-            "\n{} cases, {} failed\n\norphan check:\n{}\n",
+            "\n{} cases, {} failed, {} known-limit\n\norphan check:\n{}\n",
             self.cases.len(),
             self.failures().len(),
+            self.known_limits().len(),
             self.orphans
         ));
         out
@@ -1396,4 +1456,91 @@ pub fn startup_overhead(n: usize) -> Result<Overhead, SandboxError> {
     }
     let _ = std::fs::remove_dir_all(&root);
     Ok(Overhead { bare, sandboxed })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Unix-socket denial case whose sandbox connected (the Linux shape: the socket is
+    /// reachable, the control confirms the listener is sound).
+    fn connected_unix_case(name: &str) -> Case {
+        Case {
+            group: "unix_socket",
+            name: name.to_string(),
+            expect: Expect::MustFail,
+            sandbox: Outcome {
+                succeeded: true,
+                detail: "connected".into(),
+            },
+            control: Outcome {
+                succeeded: true,
+                detail: "connected".into(),
+            },
+            note: String::new(),
+        }
+    }
+
+    /// The two denial cases are a known limitation on Linux (neither PASS nor FAIL, with
+    /// the reason), and stay strict failures on macOS: a FAIL must still be possible there.
+    /// `workspace_denied` is shown; `safe_denied` takes the same branch by name.
+    #[test]
+    fn the_two_unix_socket_denials_are_a_known_limit_on_linux_and_fail_on_macos() {
+        for name in ["workspace_denied", "safe_denied"] {
+            let case = connected_unix_case(name);
+            assert!(!case.passed(), "{name}");
+            assert_eq!(
+                case.verdict("linux-bwrap"),
+                Verdict::KnownLimit,
+                "{name}"
+            );
+            assert_eq!(case.verdict("macos-seatbelt"), Verdict::Fail, "{name}");
+            assert!(
+                !case.known_limit_reason().is_empty(),
+                "a KNOWN-LIMIT carries its reason: {name}"
+            );
+        }
+    }
+
+    /// Only the two denial cases take the branch: the whitelisted/dns siblings and every
+    /// other group fail on Linux exactly as before.
+    #[test]
+    fn only_the_two_denial_cases_are_a_known_limit() {
+        let mut other = connected_unix_case("whitelisted_allowed");
+        other.expect = Expect::MustSucceed;
+        assert!(other.passed());
+        assert_eq!(other.verdict("linux-bwrap"), Verdict::Pass);
+
+        let denied_write = Case {
+            group: "escape_write",
+            ..connected_unix_case("outside_absolute")
+        };
+        assert!(!denied_write.passed());
+        assert_eq!(denied_write.verdict("linux-bwrap"), Verdict::Fail);
+    }
+
+    /// A matrix whose only non-pass is an accepted Linux limit still passes on Linux and
+    /// fails on macOS; a real failure fails on both.
+    #[test]
+    fn the_matrix_verdict_follows_the_backend() {
+        let matrix = Matrix {
+            backend: "linux-bwrap".to_string(),
+            probe: "test".to_string(),
+            cases: vec![connected_unix_case("workspace_denied")],
+            orphans: String::new(),
+            root: std::env::temp_dir(),
+        };
+        assert!(matrix.passed());
+        assert!(matrix.failures().is_empty());
+        assert_eq!(matrix.known_limits().len(), 1);
+        assert!(matrix.render_text().contains("KNOWN-LIMIT"),);
+
+        let macos = Matrix {
+            backend: "macos-seatbelt".to_string(),
+            ..matrix
+        };
+        assert!(!macos.passed());
+        assert_eq!(macos.failures().len(), 1);
+        assert!(macos.known_limits().is_empty());
+    }
 }
