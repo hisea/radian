@@ -352,6 +352,7 @@ fn a_genuinely_half_written_line_is_treated_as_a_torn_tail() {
                 message_id: agent_core::MessageId("inbox-1".into()),
                 lane: radian_session::InboxLane::NextTurn,
                 source: InputSource::User,
+                wake: true,
             })
             .await
             .unwrap();

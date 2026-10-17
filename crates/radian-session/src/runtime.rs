@@ -120,12 +120,15 @@ pub struct MemoryInjectedRecord {
 #[non_exhaustive]
 pub enum RuntimeEvent {
     /// An input entered a lane (ADR 0006 §5.5). `source` is always explicit at the runtime
-    /// boundary; `message.meta.id` must equal `message_id`.
+    /// boundary; `message.meta.id` must equal `message_id`. `wake` records whether the input
+    /// may open a turn by itself when the driver is idle (ADR 0011): a `followup`
+    /// and a `steer` do, an `inject` does not.
     InboxEnqueued {
         message: Message,
         message_id: MessageId,
         lane: InboxLane,
         source: InputSource,
+        wake: bool,
     },
     /// The driver claimed these inputs for a turn (ADR 0006 §5.5).
     InputClaimed {
@@ -321,6 +324,10 @@ pub(crate) struct InboxEnqueuedData<'a> {
     pub message_id: &'a MessageId,
     pub lane: InboxLane,
     pub source: InputSource,
+    /// Whether the input wakes an idle driver and may open the next turn itself (ADR 0011
+    /// revision 1). Written explicitly; an old file has no such field and the reader derives
+    /// it from the lane (ADR 0006 §5.5).
+    pub wake: bool,
 }
 
 #[derive(Serialize)]
@@ -482,11 +489,13 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             message_id,
             lane,
             source,
+            wake,
         } => RuntimeData::InboxEnqueued(InboxEnqueuedData {
             message,
             message_id,
             lane: *lane,
             source: *source,
+            wake: *wake,
         }),
         RuntimeEvent::InputClaimed {
             message_ids,

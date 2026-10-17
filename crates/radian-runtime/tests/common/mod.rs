@@ -114,6 +114,14 @@ pub struct ScriptedModel {
     hang: Mutex<Vec<usize>>,
     /// Call indexes that delay by N milliseconds (a slow model, so a turn stays in flight).
     slow: Mutex<Vec<(usize, u64)>>,
+    /// Call indexes that park until `release()`: the call signals `parked` and waits. A
+    /// deterministically held model response, no sleep (the same shape as `MemTools::gate`).
+    park: Mutex<Vec<usize>>,
+    /// Notified when a parked call begins. A `Notify` stores one permit, so a test may await
+    /// `wait_parked()` after the call parked and still see it.
+    parked: tokio::sync::Notify,
+    /// Notified by `release()` to let a parked call return.
+    release: tokio::sync::Notify,
 }
 
 impl ScriptedModel {
@@ -125,6 +133,9 @@ impl ScriptedModel {
             seen: Mutex::new(Vec::new()),
             hang: Mutex::new(Vec::new()),
             slow: Mutex::new(Vec::new()),
+            park: Mutex::new(Vec::new()),
+            parked: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
         })
     }
 
@@ -148,6 +159,24 @@ impl ScriptedModel {
     /// while the test does something else; the assertion is never "how long it took".
     pub fn slow_at(self: &Arc<Self>, index: usize, ms: u64) {
         self.slow.lock().unwrap().push((index, ms));
+    }
+
+    /// The `index`-th call parks: it signals [`ScriptedModel::wait_parked`] and waits for
+    /// [`ScriptedModel::release`]. Deterministic, unlike `slow_at`: a test can enqueue input
+    /// while the call is provably in flight, then let the call return.
+    pub fn park_at(self: &Arc<Self>, index: usize) {
+        self.park.lock().unwrap().push(index);
+    }
+
+    /// Waits until a parked call has begun. A stored permit makes this safe to await after
+    /// the call parked.
+    pub async fn wait_parked(&self) {
+        self.parked.notified().await;
+    }
+
+    /// Lets a parked call return.
+    pub fn release(&self) {
+        self.release.notify_one();
     }
 
     pub fn requests(&self) -> Vec<ModelRequest> {
@@ -193,6 +222,12 @@ impl Model for ScriptedModel {
             .map(|(_, ms)| *ms);
         if let Some(ms) = slow_ms {
             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
+        if self.park.lock().unwrap().contains(&index) {
+            // The test can now enqueue input while this call is provably in flight; it
+            // resumes only when the test calls `release()`.
+            self.parked.notify_one();
+            self.release.notified().await;
         }
         self.script
             .lock()
