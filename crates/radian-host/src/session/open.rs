@@ -14,7 +14,7 @@ use radian_sandbox::{Sandbox, SandboxSlot};
 use super::facade::{DriverEnd, SessionError};
 use super::local::{DriverTask, LocalSession};
 use super::setup_types::{ApprovalRouting, HostBindings, SessionFacts, SessionQueue, SessionSetup};
-use super::{build_coding_tools, memory_notice, open_journal, session_hooks};
+use super::support::{build_coding_tools, memory_notice, open_journal, session_hooks};
 use crate::describe::{describe, sandbox_word};
 use crate::home::{radian_home, skills_dir, user_home};
 use crate::memory::{MemoryHooks, MemoryInjection, MemoryService, MemoryTools};

@@ -16,7 +16,7 @@ use radian_session::SessionJournal;
 use super::facade::{DriverEnd, SessionFacade};
 use super::ids::{CommandRefused, SessionCapability, SessionCommand, SessionId, UserBashRecord};
 use super::setup_types::{AccessBuilder, SessionFacts, SessionQueue};
-use super::trust_event;
+use super::support::trust_event;
 use crate::memory::MemoryService;
 use crate::pending::{Answered, PendingResponse};
 use crate::projection::{ProjectionRead, SessionProjection};
