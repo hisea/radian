@@ -1180,3 +1180,18 @@ stale one).
 Commands: `timeout 300 cargo test -p agent-cli --locked --test cli a_headless_exec_mounts_no_orchestration_tools`
 (GV-1); `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast memory_search_with_ids_returns_the_full_records`
 (GV-2).
+
+## ADR 0043 decision 1a gaps: `--header` forwarding, the live route, the drop guard (2026-10-17)
+
+Worktree `.radian-worktrees/subagent-gaps`, branch `dogfood/subagent-gaps`. Each mutation was
+applied in place in `crates/radian-host/src/subagent.rs`, restored from a `cp` and confirmed
+byte-identical with `cmp`. SG-1 changes the child the tool spawns, so the `agent-cli` run was
+made after `cargo build -p radian-tui --bin radian` (the harness refuses a stale binary).
+
+Commands: `timeout 300 cargo test -p radian-host --locked --no-fail-fast --test subagent_headers`
+(SG-1, radian-host); `timeout 300 cargo test -p agent-cli --locked --no-fail-fast --test subagent
+the_parents_header` (SG-1, end to end).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| SG-1 | the child `env` carrying the parent's `--header` values is never set (`if false`) | ✅ 2 failed | `agent-cli::subagent::the_parents_header_reaches_the_child_and_nothing_else_writes_it` (`the child must send the parent's header`: `left: None`); `radian_host::subagent_headers::the_header_value_reaches_the_child_through_the_environment_not_its_argv` (`EOF while parsing` an empty variable) |

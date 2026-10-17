@@ -15,6 +15,9 @@
 //! - **The parent's approval is not inherited into an answer.** `--yes` is passed only while
 //!   the parent's permission hooks are `auto`; otherwise the child is headless with no terminal,
 //!   so its `ask` is denied (fail closed) and the result names what was denied.
+//! - **The parent's `--header` values.** They are secrets, so they reach the child through its
+//!   environment ([`crate::headers::CHILD_HEADERS_ENV`]), never its argv; the child's startup
+//!   adds them to its redaction list. Config headers already reach it through the config file.
 //! - **Cancellation.** The parent turn's cancellation token kills the child's whole session
 //!   with [`radian_coding::kill_session`] — the same kill path the job supervisor uses — and
 //!   the call returns a `cancelled` failure.
@@ -62,6 +65,12 @@ pub struct SubagentParts {
     /// An explicit `--config` the parent read; a default or `RADIAN_CONFIG` config is inherited
     /// through the environment instead.
     pub config: Option<PathBuf>,
+    /// The parent's command-line `--header NAME=VALUE` values, unexpanded. They are **secrets**
+    /// and argv is visible to every user through `ps`, so the child receives them in its
+    /// environment ([`crate::headers::CHILD_HEADERS_ENV`]) and expands `{session_id}` with its
+    /// own id, exactly as the config file's headers do. Config headers are not repeated here:
+    /// they reach the child through the config file it reads for itself.
+    pub headers: Vec<String>,
     /// `--max-tokens` for anthropic.
     pub max_tokens: Option<u32>,
     /// `--thinking` for anthropic.
@@ -245,6 +254,14 @@ impl ToolSession for SubagentSession {
         let mut command = std::process::Command::new(executable);
         command.args(self.child_args(&child_id, kind, &args.task));
         command.current_dir(&self.workspace);
+        // The parent's `--header` values are secrets: argv is world-readable, so they ride the
+        // child's environment and its startup adds them to its redaction list (ADR 0043 1a).
+        if !self.parts.headers.is_empty() {
+            command.env(
+                crate::headers::CHILD_HEADERS_ENV,
+                crate::headers::encode_child_headers(&self.parts.headers),
+            );
+        }
         // A child is a session leader with no controlling terminal and no inherited stdio:
         // the journal is the result channel, so its stdout/stderr are not read.
         radian_coding::own_session(&mut command);
@@ -253,7 +270,7 @@ impl ToolSession for SubagentSession {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        let child = tokio::process::Command::from(command)
+        let mut child = tokio::process::Command::from(command)
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| {
@@ -263,7 +280,6 @@ impl ToolSession for SubagentSession {
                 )
             })?;
         let pid = child.id();
-        let mut child = child;
         let status = tokio::select! {
             biased;
             _ = cx.cancellation.cancelled() => {

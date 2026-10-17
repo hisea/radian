@@ -539,3 +539,60 @@ async fn a_cancelled_parent_turn_kills_the_child() {
     );
     let _ = run(parent).await;
 }
+
+/// ADR 0043 1a (gap 1): a `--header` on the parent's command line reaches the child. The value
+/// is a secret, so it must not be in the child's argv (the tool carries it in the environment)
+/// and must not be written to the child's journal; the child's own request to the mock is where
+/// it is allowed to appear. The mutation (not forwarding it) fails the request assertion.
+#[tokio::test]
+async fn the_parents_header_reaches_the_child_and_nothing_else_writes_it() {
+    const SECRET: &str = "subagent-header-secret-42";
+    let server = MockServer::start(vec![
+        tool_reply("p1", "subagent", r#"{"task":"HEADER-TASK"}"#),
+        text_reply("CHILD-DONE"),
+        text_reply("PARENT-DONE"),
+    ])
+    .await;
+    let env = Env::new("header");
+    let (code, stdout, stderr) = run(spawn_parent(
+        &env,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--header",
+            &format!("X-Test={SECRET}"),
+            "--session-id",
+            "parent",
+            "-p",
+            "go",
+        ],
+    ))
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("PARENT-DONE"), "{stdout}");
+
+    // The child's own request carries the header — the provider that needs it does not fail.
+    let index = child_request(&server, "HEADER-TASK");
+    assert_eq!(
+        server.requests()[index].header("x-test"),
+        Some(SECRET),
+        "the child must send the parent's header"
+    );
+
+    // The child's journal is the only durable thing it writes, and the header must not be in
+    // it — nor in what the parent printed.
+    let journals = child_journals(&env, "parent");
+    assert_eq!(journals.len(), 1, "{journals:?}");
+    let journal = std::fs::read_to_string(&journals[0]).unwrap();
+    assert!(
+        !journal.contains(SECRET),
+        "the child's journal must not carry the header value"
+    );
+    assert!(
+        !stdout.contains(SECRET) && !stderr.contains(SECRET),
+        "the secret must never be printed: {stdout}{stderr}"
+    );
+}
+

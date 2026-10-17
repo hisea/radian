@@ -49,6 +49,10 @@ pub(crate) struct Setup {
     /// The key and every custom header value: redacted from all error output, never printed
     /// and never written to the session file.
     pub(crate) secrets: Vec<String>,
+    /// The command-line `--header NAME=VALUE` arguments, unexpanded, for the `subagent` child
+    /// (ADR 0043 decision 1a): they are secrets, so the tool passes them in the child's
+    /// environment, never its argv.
+    pub(crate) headers: Vec<String>,
     /// The resolved model name (CLI or config), for the session's config snapshot.
     pub(crate) model_name: String,
     /// The resolved permission profile (CLI flag, config, or the default).
@@ -308,6 +312,11 @@ pub(crate) async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
     header_args.extend(cli.header.iter().cloned());
+    // ADR 0043 decision 1a: a subagent child cannot see the parent's `--header` (argv is
+    // world-readable), so the tool passes them through the environment. The values are still
+    // unresolved here, so `{session_id}` expands to **this** process's id, exactly as a config
+    // file's headers do.
+    header_args.extend(radian_host::child_headers_from_env().map_err(SetupError)?);
     let uses_placeholder = header_args
         .iter()
         .any(|item| item.contains(SESSION_PLACEHOLDER));
@@ -507,6 +516,7 @@ pub(crate) async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         session_id,
         workspace,
         secrets,
+        headers: cli.header.clone(),
         model_name,
         profile,
         approval: startup_approval,
