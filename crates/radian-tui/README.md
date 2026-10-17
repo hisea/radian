@@ -1213,7 +1213,7 @@ The common flags have short forms: `-m`/`--model`, `-w`/`--workspace`, `-r`/`--r
 `-m`/`--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
 `--system`, `--session-dir`, `--session-id`, `-r`/`--resume`, `-l`/`--list`, `--pick`,
 `--version`, `-w`/`--workspace DIR`, `--mcp-config FILE`,
-`--profile safe|workspace|full` (default `workspace`; the old `workspace-write`/`full-access`
+`--profile safe|workspace|full` (default `full`, ADR 0043; the old `workspace-write`/`full-access`
 are accepted aliases but not listed),
 `--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
 `--context-window TOKENS`, `--offline-catalog`, `--catalog-provider PROVIDER`. The key is
@@ -1266,9 +1266,10 @@ could be built. This is the same wiring `agent-cli` uses:
 
 Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
 
-- `--profile safe|workspace|full` picks the rule set (default `workspace`:
-  reads allowed, writes allowed only when the resolved path stays inside the workspace, and the
-  network is on).
+- `--profile safe|workspace|full` picks the rule set (default `full`, ADR 0043: no sandbox;
+  `workspace` enforces the sandbox: reads allowed, writes allowed only when the resolved path
+  stays inside the workspace, and the network is on). A project's `.radian/config.toml` can
+  narrow the tier, never widen it.
 - `--approval on-ask|always|never` picks the `ApprovalPolicy` (default `on-ask`). `always`
   asks for every call a rule does not deny, which is how the dialog is exercised with the
   built-in tools; `never` turns `ask` into a denial.

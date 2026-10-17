@@ -3,8 +3,9 @@
 //! This mirrors `agent-cli`'s wiring on purpose — the same presets from `radian-permissions`,
 //! the same sandbox construction from `radian-sandbox`, the same two invariants:
 //!
-//! - **`full-access` is never a default.** [`parse_tier`] and the CLI default pick
-//!   `workspace-write`; `full-access` is only reachable by naming it.
+//! - **`full-access` is the default** (ADR 0043): [`parse_tier`] and the CLI default pick
+//!   `full`; `safe`/`workspace` are only reached by naming them, a remembered project choice,
+//!   or a project's own `.radian/config.toml` (which can only narrow).
 //! - **A failed probe never degrades.** [`build_sandbox`] returns an error for an enforced
 //!   tier when the backend is missing or its probe fails; it never returns `None` so a caller
 //!   could run unsandboxed.
@@ -71,7 +72,9 @@ pub enum AccessSource {
     Project,
     /// The resumed session's last `ConfigChanged` access.
     Session,
-    /// Nothing named a tier: the built-in default (`workspace`).
+    /// The project declaration (`<workspace>/.radian/config.toml`) narrowed the tier.
+    ProjectConfig,
+    /// Nothing named a tier: the built-in default (`full`, ADR 0043).
     Default,
 }
 
@@ -83,6 +86,7 @@ impl AccessSource {
             Self::Config => "config",
             Self::Project => "project",
             Self::Session => "session",
+            Self::ProjectConfig => "project config",
             Self::Default => "default",
         }
     }
@@ -95,6 +99,7 @@ impl AccessSource {
             Self::Config => " (config)",
             Self::Project => " (project)",
             Self::Session => " (session)",
+            Self::ProjectConfig => " (project config)",
             Self::Default => "",
         }
     }
@@ -110,10 +115,11 @@ pub fn build_access(
     allow_shell_commands: &[String],
     deny_read: &[std::path::PathBuf],
     allow_unix_sockets: &[std::path::PathBuf],
+    allow_env: &[String],
 ) -> Result<radian_host::AccessParts, String> {
     let tier = tier_of(preset);
     let profile = build_profile(tier, workspace, allow_shell_commands)?;
-    let sandbox = build_sandbox(tier, workspace, deny_read, allow_unix_sockets)?;
+    let sandbox = build_sandbox(tier, workspace, deny_read, allow_unix_sockets, allow_env)?;
     Ok(radian_host::AccessParts { profile, sandbox })
 }
 
@@ -182,6 +188,7 @@ pub fn build_sandbox(
     workspace: &Path,
     deny_read: &[std::path::PathBuf],
     allow_unix_sockets: &[std::path::PathBuf],
+    allow_env: &[String],
 ) -> Result<Option<Sandbox>, String> {
     if tier == Tier::Safe {
         return Ok(None);
@@ -217,6 +224,11 @@ pub fn build_sandbox(
     for path in allow_unix_sockets {
         policy = policy.allow_unix_socket(path);
     }
+    // ADR 0034: the user-level `[sandbox] allow_env` names, on top of
+    // the built-in whitelist (which already carries the six `HERDR_*` names).
+    for name in allow_env {
+        policy = policy.allow_env(name.clone());
+    }
     match Sandbox::from_policy(policy) {
         Ok(sandbox) => Ok(Some(sandbox)),
         // The workspace being inside a denied directory is not a backend problem: say what it
@@ -229,8 +241,8 @@ pub fn build_sandbox(
 fn unavailable(tier: Tier, mode: SandboxMode) -> String {
     format!(
         "the `{}` sandbox backend is unavailable or failed its probe, so `{}` cannot be \
-         enforced; refusing to run. Install/fix the backend, or pass `--profile full-access` \
-         if you really mean to run without a sandbox (that is never the default)",
+         enforced; refusing to run. Install/fix the backend, or pass `--profile full` \
+         if you really mean to run without a sandbox (the built-in default)",
         mode.as_str(),
         tier.as_str()
     )
@@ -289,7 +301,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("radian-tui-profile-git-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let result = build_sandbox(Tier::WorkspaceWrite, &dir, &[], &[]);
+        let result = build_sandbox(Tier::WorkspaceWrite, &dir, &[], &[], &[]);
         let _ = std::fs::remove_dir_all(&dir);
         match result {
             Ok(Some(sandbox)) => assert_eq!(

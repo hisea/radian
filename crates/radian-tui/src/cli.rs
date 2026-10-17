@@ -124,7 +124,8 @@ struct Cli {
 
     /// The permission tier (ADR 0016): `safe` denies file modification, `workspace`
     /// allows writes that resolve inside the workspace, `full` also allows MCP. Defaults to
-    /// the config file's `permissions.profile`, then `workspace`.
+    /// `full` (ADR 0043); a project's `.radian/config.toml` may narrow it, and the config
+    /// file's `permissions.profile` is tried in between.
     #[arg(help_heading = "Permissions", long, value_name = "TIER")]
     profile: Option<String>,
 
@@ -1005,10 +1006,13 @@ fn run(
         .ok_or_else(|| {
             "no model: pass --model, or set model.model in the config file".to_string()
         })?;
-    // ADR 0038 decision 3: the tier and where it came from. The command line wins, then the
-    // resumed session's journal, then the remembered per-project record, then the config
-    // default, then the built-in `workspace`. The remembered record is a per-project,
-    // explicitly-confirmed user choice, so it outranks the machine-wide config default.
+    // ADR 0038 decision 3 and ADR 0043 decision 2: the tier and where it came from. The
+    // command line wins, then the resumed session's journal, then the remembered per-project
+    // record, then the config default, then the built-in `full`. The remembered record is a
+    // per-project, explicitly-confirmed user choice, so it outranks the machine-wide config
+    // default. The project's own declaration can only **narrow** the result (ADR 0043); an
+    // explicit `--profile` wins outright, and the startup line names the project's ask beside
+    // it.
     let resumed_tier = resume
         .as_deref()
         .and_then(|id| radian_host::resumed_access(&dir, id))
@@ -1020,6 +1024,10 @@ fn run(
             None
         }
     };
+    let project = radian_host::project::read(&workspace_path);
+    for warning in &project.warnings {
+        startup_log.line(format!("[project] {warning}"));
+    }
     let cli_tier = cli
         .profile
         .as_deref()
@@ -1031,7 +1039,7 @@ fn run(
         .as_deref()
         .map(radian_tui::profile::parse_tier)
         .transpose()?;
-    let (tier, access_source) = if let Some(tier) = cli_tier {
+    let (mut tier, mut access_source) = if let Some(tier) = cli_tier {
         (tier, radian_tui::profile::AccessSource::Flag)
     } else if let Some(tier) = resumed_tier {
         (tier, radian_tui::profile::AccessSource::Session)
@@ -1041,10 +1049,27 @@ fn run(
         (tier, radian_tui::profile::AccessSource::Config)
     } else {
         (
-            radian_tui::profile::Tier::WorkspaceWrite,
+            radian_tui::profile::Tier::FullAccess,
             radian_tui::profile::AccessSource::Default,
         )
     };
+    if let Some(declared) = project.tier {
+        if cli_tier.is_some() {
+            if radian_host::narrow_tier(tier.preset(), declared) != tier.preset() {
+                startup_log.line(format!(
+                    "[access] {} (from flag); the project asks for {}",
+                    tier.as_str(),
+                    declared.as_str()
+                ));
+            }
+        } else {
+            let narrowed = radian_host::narrow_tier(tier.preset(), declared);
+            if narrowed != tier.preset() {
+                tier = radian_tui::profile::tier_of(narrowed);
+                access_source = radian_tui::profile::AccessSource::ProjectConfig;
+            }
+        }
+    }
     // ADR 0026 D0/D10: `--provider`/config `model.provider` names a provider — a built-in
     // descriptor or a named one (`[providers.<name>]` in the config, or the auth.json
     // entry's `env`). The generic `openai-compatible` descriptor is the default (the pre-D0
@@ -1375,6 +1400,7 @@ fn run(
         &workspace_path,
         &sandbox_deny_read,
         &allow_unix_sockets,
+        &config.sandbox.allow_env,
     )?;
     // ADR 0016: when the sandbox is one radian inherited from outside,
     // `/access` says so like the startup line does. Read here, while the sandbox is still local
@@ -1390,6 +1416,7 @@ fn run(
         let allow_shell = cli.allow_shell_command.clone();
         let deny_read = sandbox_deny_read.clone();
         let sockets = allow_unix_sockets.clone();
+        let allow_env = config.sandbox.allow_env.clone();
         std::sync::Arc::new(move |preset: radian_permissions::Preset| {
             radian_tui::profile::build_access(
                 preset,
@@ -1397,6 +1424,7 @@ fn run(
                 &allow_shell,
                 &deny_read,
                 &sockets,
+                &allow_env,
             )
         })
     };

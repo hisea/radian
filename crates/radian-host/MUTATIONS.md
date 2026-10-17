@@ -1149,3 +1149,15 @@ restored file with `diff -q`; afterwards `git diff` shows only the intended file
 `kill_on_drop`（5 s grace 之后）不足以让「父取消 → 子进程立刻消失」成立，测试的 3 s
 期限正是照 `DEFAULT_TOOL_CANCEL_GRACE` 定的有界轮询。SA-1 的检查点在
 `open_session`，所以它同时说明「子不能再起子」是建立会话时的物理不挂载，而不是运行时的判断。
+## ADR 0043 slice ①：项目声明只能收窄，信任选项写 access.json（2026-10-17）
+
+每个变异都在 `src/` 原地改，先 `cp` 到 `/tmp/`，跑完 `cp` 还原并 `cmp` 逐字节一致；变异版先
+`cargo build -p radian-tui --bin radian`（测试二进制的 `radian` 会拒绝过期），再跑单个测试。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| PJ-1 | `project::apply_profile` 接受 `full`（`out.tier = Some(Preset::FullAccess)`） | ✅ 1 failed（`cannot widen` 警告缺失） | `agent-cli::cli::a_project_config_cannot_widen_the_tier`；单元 `project::tests::full_in_a_project_config_is_refused_with_a_warning` |
+| PJ-2 | `project::narrow` 取更宽者（`rank(a) >= rank(b)`） | ✅ 1 failed（记住的 `workspace` 没有被项目的 `safe` 收窄） | `agent-cli::cli::a_remembered_tier_is_narrowed_by_the_project`；单元 `project::tests::the_narrower_tier_wins` |
+| TS-1 | `trust::apply` 的 `TrustHereSandbox` 不写 `access::remember_for` | ✅ 1 failed（`access/access.json` 不存在） | `radian-tui::pty::pty_trust_sandbox_choice_writes_the_access_record` |
+
+3/3 抓住。

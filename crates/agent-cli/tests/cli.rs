@@ -1459,6 +1459,9 @@ async fn answering_y_approves_and_the_tool_runs() {
                 &server.base_url,
                 "--mcp-config",
                 config.to_str().unwrap(),
+                // MCP asks under `workspace`; `full` allows it (ADR 0012/0043).
+                "--profile",
+                "workspace",
             ],
             &[],
         ),
@@ -1488,6 +1491,8 @@ async fn answering_n_denies_the_call() {
                 &server.base_url,
                 "--mcp-config",
                 config.to_str().unwrap(),
+                "--profile",
+                "workspace",
             ],
             &[],
         ),
@@ -1550,6 +1555,8 @@ async fn one_shot_without_a_terminal_denies_without_waiting() {
             "go",
             "--mcp-config",
             config.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &[],
     );
@@ -1920,6 +1927,8 @@ async fn cancelling_at_the_approval_prompt_does_not_swallow_the_next_line() {
             &server.base_url,
             "--mcp-config",
             config.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &[],
     );
@@ -2544,10 +2553,11 @@ fn advertised_tools(server: &MockServer, n: usize) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 1: `full-access` is never the default, and without `--workspace` no write/execute tool
-/// exists at all.
+/// 1 (ADR 0043): `full` **is** the default, and without `--workspace` no write/execute tool
+/// exists at all. The startup line says `no sandbox`; putting the default back to `workspace`
+/// is the mutation this catches.
 #[tokio::test]
-async fn full_access_is_not_the_default_and_no_write_tools_without_a_workspace() {
+async fn full_is_the_default_and_no_write_tools_without_a_workspace() {
     let server = MockServer::start(vec![
         tool_reply("c1", "write", r#"{"path":"x.txt","content":"y"}"#),
         tool_reply("c2", "shell", r#"{"command":"echo hi"}"#),
@@ -2574,9 +2584,12 @@ async fn full_access_is_not_the_default_and_no_write_tools_without_a_workspace()
 
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("done"), "{stdout}");
-    // The default is named on startup, and it is not full-access.
-    assert!(stderr.contains("[profile] workspace"), "{stderr}");
-    assert!(!stderr.contains("full (chosen"), "{stderr}");
+    // The default is named on startup, and it is `full` with no sandbox.
+    assert!(stderr.contains("[profile] full"), "{stderr}");
+    assert!(
+        stderr.contains("[sandbox] no sandbox:"),
+        "the default must say there is no sandbox: {stderr}"
+    );
     // Neither tool is advertised, so the model cannot even ask for one.
     let names = advertised_tools(&server, 0);
     for absent in ["write", "patch", "shell"] {
@@ -2587,6 +2600,232 @@ async fn full_access_is_not_the_default_and_no_write_tools_without_a_workspace()
     }
     assert!(tool_result_content(&server, 1).contains("no tool named"));
     assert!(tool_result_content(&server, 2).contains("no tool named"));
+}
+
+/// ADR 0043 decision 2: `--profile workspace` names the enforced tier, and the startup line
+/// says what it means ("sandbox on: commands stay in the workspace").
+#[tokio::test]
+async fn the_workspace_flag_turns_the_sandbox_on() {
+    let dir = scratch("flag-workspace");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("sandbox on: commands stay in the workspace"),
+        "{stderr}"
+    );
+}
+
+/// Writes `<ws>/.radian/config.toml` with `text`.
+fn write_project_config(ws: &Path, text: &str) {
+    let dir = ws.join(".radian");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_file(&dir, "config.toml", text);
+}
+
+/// ADR 0043 decision 2: a project may only narrow, so `full` there is refused with a warning.
+/// The mutation this catches is accepting it: with a config `workspace` and a project `full`,
+/// the wider tier would take effect.
+#[tokio::test]
+async fn a_project_config_cannot_widen_the_tier() {
+    let dir = scratch("project-full");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_project_config(&ws, "[permissions]\nprofile = \"full\"\n");
+    let config = write_file(
+        &dir,
+        "config.toml",
+        "schema_version = 1\n[permissions]\nprofile = \"workspace\"\n",
+    );
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("[project]"), "{stderr}");
+    assert!(stderr.contains("cannot widen"), "{stderr}");
+    // Still the config's `workspace`, not the project's `full`.
+    assert!(
+        stderr.contains("sandbox on: commands stay in the workspace"),
+        "{stderr}"
+    );
+}
+
+/// ADR 0043 decision 2: the remembered user record and the project declaration are resolved to
+/// the **narrower** of the two. Taking the wider one is the mutation this catches.
+#[tokio::test]
+async fn a_remembered_tier_is_narrowed_by_the_project() {
+    let dir = scratch("project-narrows");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_project_config(&ws, "[permissions]\nprofile = \"safe\"\n");
+    let rh = dir.join("rh");
+    let access = rh.join("access");
+    std::fs::create_dir_all(&access).unwrap();
+    let key = std::fs::canonicalize(&ws).unwrap();
+    write_file(
+        &access,
+        "access.json",
+        &format!("{{\"{}\": \"workspace\"}}\n", key.display()),
+    );
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_bare(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[("RADIAN_HOME", rh.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("[access] safe (from project config)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("[profile] safe"), "{stderr}");
+}
+
+/// ADR 0043 decision 2: an explicit `--profile` wins, and the startup line still names what
+/// the project asks for.
+#[tokio::test]
+async fn an_explicit_flag_wins_and_the_line_names_the_project_ask() {
+    let dir = scratch("flag-wins");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_project_config(&ws, "[permissions]\nprofile = \"workspace\"\n");
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "full",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("[profile] full"), "{stderr}");
+    assert!(stderr.contains("[sandbox] no sandbox:"), "{stderr}");
+    assert!(
+        stderr.contains("the project asks for workspace"),
+        "{stderr}"
+    );
+}
+
+/// ADR 0034: under `full` the shell keeps the six `HERDR_*` names and
+/// any `[sandbox] allow_env` name, and still drops everything else. `HERDR_PANE_ID` being set
+/// in the parent is what the shell must see.
+#[tokio::test]
+async fn the_shell_environment_carries_herdr_and_allow_env() {
+    let dir = scratch("shell-env");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let rh = dir.join("rh");
+    let config = write_file(
+        &dir,
+        "config.toml",
+        "schema_version = 1\n[sandbox]\nallow_env = [\"FOO\"]\n",
+    );
+    let command =
+        "printf '%s|%s|%s' \"$HERDR_PANE_ID\" \"$FOO\" \"$SECRET_API_KEY\" > env.txt".to_string();
+    let server = MockServer::start(vec![shell_reply("c1", &command), text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_bare(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "go",
+            ],
+            &[
+                ("RADIAN_HOME", rh.to_str().unwrap()),
+                ("HERDR_PANE_ID", "pane-9"),
+                ("FOO", "foo-value"),
+                ("SECRET_API_KEY", "sk-secret-value"),
+            ],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let seen = std::fs::read_to_string(ws.join("env.txt"))
+        .unwrap_or_else(|e| panic!("the shell did not run: {e}\n{stderr}"));
+    assert_eq!(
+        seen, "pane-9|foo-value|",
+        "the shell must see the HERDR name and the configured name, and nothing else"
+    );
 }
 
 /// 2: a failed sandbox probe refuses to run; it never falls back to an unsandboxed run.
@@ -2611,6 +2850,10 @@ async fn a_failed_sandbox_probe_refuses_instead_of_degrading() {
                 &server.base_url,
                 "--workspace",
                 ws.to_str().unwrap(),
+                // The enforced tier is what an unavailable backend refuses (ADR 0043:
+                // `full` is the default and needs no backend).
+                "--profile",
+                "workspace",
                 "--yes",
                 "-p",
                 "hi",
@@ -2633,7 +2876,8 @@ async fn a_failed_sandbox_probe_refuses_instead_of_degrading() {
 }
 
 /// 10: the startup text states the real limits and never claims credential isolation
-/// (ADR 0012 decision 4).
+/// (ADR 0012 decision 4). `--profile workspace` names the tier whose facts sentence carries
+/// the limits.
 #[tokio::test]
 async fn the_startup_text_does_not_claim_credential_isolation() {
     let dir = scratch("wording");
@@ -2650,6 +2894,8 @@ async fn the_startup_text_does_not_claim_credential_isolation() {
                 &server.base_url,
                 "--workspace",
                 ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
                 "-p",
                 "hi",
             ],
@@ -3109,7 +3355,7 @@ async fn every_decision_is_audited_once_with_the_right_approver() {
     );
 }
 
-/// 9: under `workspace-write`, a shell command cannot write outside the workspace.
+/// 9: under `workspace`, a shell command cannot write outside the workspace.
 #[tokio::test]
 async fn shell_cannot_write_outside_the_workspace() {
     let dir = scratch("shell-escape");
@@ -3130,6 +3376,8 @@ async fn shell_cannot_write_outside_the_workspace() {
                 &server.base_url,
                 "--workspace",
                 ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
                 "--yes",
                 "-p",
                 "go",
@@ -3551,6 +3799,8 @@ async fn a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
                 "http://127.0.0.1:9/v1",
                 "--workspace",
                 ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
                 "--session-dir",
                 session_dir.to_str().unwrap(),
                 "--session-id",
@@ -3606,6 +3856,8 @@ async fn a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
                 &base_url,
                 "--workspace",
                 &ws_str,
+                "--profile",
+                "workspace",
                 "--yes",
                 "-p",
                 "hi",
@@ -5391,6 +5643,8 @@ async fn workspace_shell_cannot_read_the_sessions_directory() {
                 &server.base_url,
                 "--workspace",
                 ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
                 "--yes",
                 "--session-id",
                 "deny",
@@ -5446,6 +5700,8 @@ async fn workspace_shell_cannot_read_a_background_jobs_output_file() {
                 &server.base_url,
                 "--workspace",
                 ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
                 "--yes",
                 "--session-id",
                 session_id,
@@ -5497,6 +5753,8 @@ async fn workspace_shell_cannot_read_a_moved_sessions_directory() {
                 &server.base_url,
                 "--workspace",
                 ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
                 "--yes",
                 "--session-dir",
                 custom.to_str().unwrap(),

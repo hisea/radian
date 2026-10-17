@@ -210,3 +210,13 @@ worktree `<home>/Code/radian/.radian-worktrees/s0b-gitdir`，分支 `dogfood/s0b
 （`hooks/` deny 缺失），但只有当 common dir 在工作区之外时才漏；新测试的 `common_hook` 正是这个
 形态（既有测试的 common dir 在工作区内，抓不住它）。
 
+
+## ADR 0034：`HERDR_*` 在缺省白名单里（2026-10-17，ADR 0043 slice ①）
+
+变异：从 `policy.rs` 的 `DEFAULT_ALLOW_ENV` 删掉六个 `HERDR_*` 名字；先
+`cargo build -p radian-tui --bin radian`，`cp` 备份 / 还原并 `cmp` 一致。命令：
+`timeout 300 cargo test -p agent-cli --locked --no-fail-fast --test cli the_shell_environment_carries_herdr_and_allow_env`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| HE-1 | 白名单不含 `HERDR_ENV/HERDR_PANE_ID/HERDR_TAB_ID/HERDR_WORKSPACE_ID/HERDR_SOCKET_PATH/HERDR_BIN_PATH` | `the_shell_environment_carries_herdr_and_allow_env`（`left: "\|foo-value\|"`，`pane-9` 为空） | ✅ 1 failed |

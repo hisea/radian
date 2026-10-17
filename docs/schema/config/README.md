@@ -2,6 +2,8 @@
 
 每个文件一个场景。**本表是给人读的；脚本的期望写在 `../check-config-fixtures.sh` 的 `EXPECT` 字典里，脚本不读本表**——改动任何一处必须同步改另一处（同 `docs/schema/fixtures/` 的做法）。读取方 = 支持 `schema_version = 1` 的 v1 实现（ADR 0008 §5）。
 
+这里的 fixtures 都是**用户级**配置。项目级 `<workspace>/.radian/config.toml` 是另一个更小的文件（ADR 0043 决定 2）：只读 `[permissions] profile = "workspace" | "safe"`，`full` 是警告并忽略，`[sandbox]` 键按名字拒绝，其余键跳过并点名；它没有 fixture 表。
+
 **评审补充（合并时追加）**：评审者验证过这条漂移风险是真的——只把本表里的「拒绝」改成「接受」，脚本仍然通过（它读自己的 `EXPECT`）。两处必须手工同步。
 
 | 文件 | 场景 | 读取方期望结果 | 对应 ADR 0008 |
@@ -30,6 +32,7 @@
 | `integrations-herdr.toml` | ADR 0034 H6:`[integrations] herdr = true|false`,缺省 `true`。只在 herdr pane 里生效(`HERDR_ENV=1` 且 pane id、socket path 非空);`RADIAN_HERDR=0` 一次性关闭。上报只有状态、会话 id、journal 路径与恢复命令,不含 transcript/usage/model/费用/命令正文。 | **接受**,0 拒绝。 | §2 / ADR 0034 |
 | `control.toml` | ADR 0030 O6(切片 8):`[control] enabled = true|false`,缺省 `true`。为 `true` 时每个托管会话的进程绑定 `$RADIAN_HOME/run/<pid>.sock`(目录 0700、文件 0600,退出时删除);`false` 关掉本进程的控制口。动词、来源规则(缺省 `Scheduler`,不得自称 `User`,无审批动词)与协议见 `crates/radian-host/CONTROL.md`。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0030 O6 |
 | `sandbox-unix-sockets.toml` | ADR 0016:`[sandbox] allow_unix_sockets` 列出沙箱开网时允许连接的 Unix socket(其余出站 Unix socket 全拒;mDNSResponder 固定放行做 DNS)。只认绝对路径(宿主展开 `~`),canonicalize 失败只警告一次并跳过。**只能写在用户级配置**;今天没有项目级配置层。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0016 |
+| `sandbox-allow-env.toml` | ADR 0034:`[sandbox] allow_env` 列出所有档位都放行给沙箱子进程的环境变量**名字**(只能加名字,不能加值;六个 `HERDR_*` 名字已在缺省名单里)。**只能写在用户级配置**;项目级 `<workspace>/.radian/config.toml` 里出现它是配置错误。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0034 |
 | `skills-extra-paths.toml` | ADR 0025 片4:`[skills] extra_paths` 列出额外的 skill 根(裁决 2:`~/.claude/skills` 只有列出时才读)。读取器原样保留字符串(不碰文件系统);宿主展开 `~`、相对路径相对**配置文件所在目录**。不存在的目录只警告一次,不报错。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0025 片4 |
 | `api-key-removed.toml` | `model.api_key` 是**合法**的 `SecretRef`（`{ from = "env", name = "EXAMPLE_TOKEN" }`）。 | **拒绝**（ADR 0026 D2）；提示改用 `~/.radian/credentials/auth.json`，不静默忽略。 | §4.2 / ADR 0026 D2 |
 | `plaintext-secret.toml` | `api_key` 是明文串 `sk-live-…`。 | **拒绝打开**；报错点名键名/路径（敏感键被赋裸字符串，或明显的密钥样字符串出现在配置里）。 | §4.2 |

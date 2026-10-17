@@ -694,10 +694,10 @@ async fn cwd_escapes_are_refused() {
     );
 }
 
-// ---------- 9. full-access is never a default ----------
+// ---------- 9. an unsandboxed shell requires an explicit sandbox ----------
 
 #[tokio::test]
-async fn full_access_is_never_the_default() {
+async fn an_unsandboxed_shell_requires_an_explicit_sandbox() {
     let dir = TempDir::new("shell-default");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -726,8 +726,10 @@ async fn full_access_is_never_the_default() {
         "the description must not hide the lack of confinement: {}",
         spec.description
     );
+    // ADR 0043: no sandbox is the built-in default now, and the description says so instead
+    // of claiming the user chose it.
     assert!(
-        spec.description.contains("never a default"),
+        spec.description.contains("built-in default"),
         "{}",
         spec.description
     );

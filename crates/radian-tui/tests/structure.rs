@@ -95,4 +95,31 @@ fn main_forwards_the_allowed_unix_sockets_to_the_sandbox() {
         call.contains("&allow_unix_sockets"),
         "the sandbox must get the resolved `[sandbox] allow_unix_sockets` (ADR 0016):\n{call}"
     );
+    assert!(
+        call.contains("&config.sandbox.allow_env"),
+        "the sandbox must get the user-level `[sandbox] allow_env` (ADR 0034):\n{call}"
+    );
+}
+
+/// ADR 0034 / ADR 0038 slice 2: a run-time `/access` switch rebuilds the
+/// sandbox through `build_access`; the allow_env names must travel with the same builder, or a
+/// switch would silently drop them.
+#[test]
+fn access_switches_keep_the_configured_allow_env() {
+    let code = main_rs();
+    let builder = code
+        .split_once("let access_builder: radian_host::AccessBuilder = {")
+        .expect("cli.rs builds the access builder")
+        .1
+        .split_once("};")
+        .expect("the access builder block ends with `};`")
+        .0;
+    assert!(
+        builder.contains("let allow_env = config.sandbox.allow_env.clone();"),
+        "the builder must capture `[sandbox] allow_env`:\n{builder}"
+    );
+    assert!(
+        builder.contains("&allow_env"),
+        "the builder must pass the names to `build_access`:\n{builder}"
+    );
 }

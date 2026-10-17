@@ -86,6 +86,10 @@ pub struct SandboxPolicy {
 /// Environment variables passed through by default. Deliberately small; a caller adds what
 /// its tools need. Nothing else (no API keys, no tokens) reaches a sandboxed child unless
 /// the caller named it.
+///
+/// The six `HERDR_*` names are the herdr pane coordinates (ADR 0034):
+/// they are paths and pane ids, not credentials, and passthrough does not widen the sandbox
+/// (under `workspace` the herdr socket is still denied unless the user whitelists it).
 pub const DEFAULT_ALLOW_ENV: &[&str] = &[
     "PATH",
     "HOME",
@@ -96,6 +100,12 @@ pub const DEFAULT_ALLOW_ENV: &[&str] = &[
     "LOGNAME",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
+    "HERDR_ENV",
+    "HERDR_PANE_ID",
+    "HERDR_TAB_ID",
+    "HERDR_WORKSPACE_ID",
+    "HERDR_SOCKET_PATH",
+    "HERDR_BIN_PATH",
 ];
 
 /// Directories that are readable only if the user names them, by default (ADR 0012 owner

@@ -1171,10 +1171,15 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
         "the trust modal is missing:\n{}",
         pty.screen()
     );
-    // All five options, and the default highlight is the fail-safe one.
+    // All six options, and the default highlight is the fail-safe one.
     assert!(
         pty.wait_for_screen("Trust this directory", 10),
         "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("use the sandbox for this project", 10),
+        "the sandbox choice is missing:\n{}",
         pty.screen()
     );
     assert!(
@@ -1220,6 +1225,80 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
     // The write is audited in the session journal (ADR 0031 T2/T6).
     let journal = std::fs::read_to_string(dir.path().join("trust.jsonl")).unwrap();
     assert!(journal.contains("ProjectTrustChanged"), "{journal}");
+}
+
+/// ADR 0043 decision 2: the trust prompt's sandbox choice trusts the directory **and**
+/// remembers `workspace` for it in `access.json`, the same record `/access` writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_trust_sandbox_choice_writes_the_access_record() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("TRUST-SANDBOX-OK")]).await;
+    let dir = TempDir::new("trust-sandbox-session");
+    let home = TempDir::new("trust-sandbox-home");
+    let ws = TempDir::new("trust-sandbox-ws");
+    std::fs::create_dir_all(ws.path().join(".radian/skills/greet")).unwrap();
+    std::fs::write(
+        ws.path().join(".radian/skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: d\n---\nbody\n",
+    )
+    .unwrap();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust-sandbox",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("project trust", 10),
+        "the trust modal is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("use the sandbox for this project", 10),
+        "{}",
+        pty.screen()
+    );
+    // The default highlight is "do not trust this directory" (index 4); the sandbox choice is
+    // index 1, three rows up through the list.
+    for _ in 0..3 {
+        pty.send(b"\x1b[B"); // Down
+    }
+    pty.send(b"\r");
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: loaded", 10),
+        "the trust state was not shown:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    let canonical = std::fs::canonicalize(ws.path()).unwrap();
+    // Trust is recorded…
+    let trust = std::fs::read_to_string(home.path().join("trust/trust.json")).unwrap();
+    assert!(
+        trust.contains(&canonical.to_string_lossy().to_string()) && trust.contains("true"),
+        "{trust}"
+    );
+    // …and the sandbox is remembered for the project, keyed by the project identity.
+    let access = std::fs::read_to_string(home.path().join("access/access.json")).unwrap();
+    assert!(
+        access.contains(&canonical.to_string_lossy().to_string()),
+        "{access}"
+    );
+    assert!(access.contains("workspace"), "{access}");
 }
 
 /// ADR 0031 T3: `--trust` overrides for this process only and never writes `trust.json`; a
@@ -2131,6 +2210,8 @@ async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
             "probe-fail",
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &[("RADIAN_SANDBOX_PROBE_FAIL", "1")],
         24,
@@ -2211,6 +2292,10 @@ async fn pty_an_outer_sandbox_is_inherited_instead_of_refused() {
             "inherited",
             "--workspace",
             ws.to_str().unwrap(),
+            // ADR 0043: the inherited backend belongs to the `workspace` tier, which is no
+            // longer the default.
+            "--profile",
+            "workspace",
         ]
         .into_iter()
         .map(str::to_owned),
@@ -2962,6 +3047,9 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
             "notice",
             "--workspace",
             ws.to_str().unwrap(),
+            // This notice belongs to the `workspace` tier's facts (ADR 0043: not the default).
+            "--profile",
+            "workspace",
         ],
         30,
         110,
@@ -3020,6 +3108,9 @@ async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
             "summary-sandbox",
             "--workspace",
             ws.to_str().unwrap(),
+            // ADR 0043: the enforced tier is named by the flag now.
+            "--profile",
+            "workspace",
         ],
         &[("RADIAN_SANDBOXED", "1"), ("RADIAN_SANDBOX_INHERIT", "1")],
         30,
@@ -3056,6 +3147,105 @@ async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
     assert!(
         expanded.contains(backend),
         "the expanded profile line keeps the real backend name ({backend}): {expanded}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0043 decision 2: with no flags the session starts `full` and the startup summary says
+/// `no sandbox`. Putting the default back to `workspace` is the mutation this catches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_default_tier_is_full_with_no_sandbox() {
+    skip_inside_sandbox!("pty_the_default_tier_is_full_with_no_sandbox");
+    let _serial = pty_guard();
+    let dir = TempDir::new("default-full");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "default-full",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        120,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    let screen = pty.screen();
+    let summary = screen
+        .lines()
+        .find(|line| line.contains("context ") && line.contains("ask_user"))
+        .unwrap_or_else(|| panic!("no summary line:\n{screen}"));
+    assert!(
+        summary.contains("full"),
+        "the default tier is `full`: {summary:?}"
+    );
+    assert!(
+        summary.contains("no sandbox"),
+        "the default must say there is no sandbox: {summary:?}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0043 decision 2: the project declaration `<workspace>/.radian/config.toml` can only
+/// narrow. `--trust` skips the startup modal (a project config is a project resource), and the
+/// summary then shows `safe`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_project_config_narrows_the_tier() {
+    skip_inside_sandbox!("pty_a_project_config_narrows_the_tier");
+    let _serial = pty_guard();
+    let dir = TempDir::new("project-safe");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(ws.join(".radian")).unwrap();
+    std::fs::write(
+        ws.join(".radian/config.toml"),
+        "[permissions]\nprofile = \"safe\"\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "project-safe",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--trust",
+        ],
+        30,
+        120,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    let screen = pty.screen();
+    let summary = screen
+        .lines()
+        .find(|line| line.contains("context ") && line.contains("ask_user"))
+        .unwrap_or_else(|| panic!("no summary line:\n{screen}"));
+    assert!(
+        summary.contains("safe"),
+        "the project must narrow the default to `safe`: {summary:?}"
+    );
+    assert!(
+        summary.contains("no exec"),
+        "`safe` has no command execution: {summary:?}"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -3455,6 +3645,9 @@ fn pty_a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
             "nested-session",
             "--workspace",
             ws.to_str().unwrap(),
+            // The deny-read boundary is the `workspace` tier's (ADR 0020/0043).
+            "--profile",
+            "workspace",
         ],
         20,
         100,
@@ -8974,6 +9167,8 @@ async fn pty_resume_restores_auto_on_workspace() {
             dir.path().to_str().unwrap(),
             "--resume",
             "auto-resume",
+            "--profile",
+            "workspace",
         ],
         30,
         110,
@@ -9123,6 +9318,8 @@ async fn pty_config_auto_enables_auto_on_workspace() {
             dir.path().to_str().unwrap(),
             "--session-id",
             "config-ws",
+            "--profile",
+            "workspace",
         ],
         30,
         110,
@@ -10390,7 +10587,7 @@ async fn pty_bangbang_stays_out_of_the_context() {
 }
 
 /// ADR 0033 + ADR 0012: a `!` command really is confined — a write outside the workspace
-/// fails (the default tier is `workspace-write`).
+/// fails under `--profile workspace`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_bang_is_confined_to_the_workspace() {
@@ -10403,7 +10600,13 @@ async fn pty_bang_is_confined_to_the_workspace() {
          base_url = \"{}\"\n",
         server.base_url
     );
-    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    let mut pty = Pty::spawn_with_config(
+        &["--profile", "workspace"],
+        &[("OPENAI_API_KEY", "sk-test")],
+        &config,
+        24,
+        100,
+    );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     pty.send(format!("!echo x > {escape}\r").as_bytes());
     assert!(
@@ -10686,7 +10889,8 @@ async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
     assert_eq!(pty.app_exit_code(), Some(0));
 
     // A workspace file with the same content, and a fresh HOME with no store, must not set the
-    // tier: a cloned repository cannot ship a line that opens the sandbox.
+    // tier: a cloned repository cannot ship a line that opens (or narrows) the sandbox. The
+    // built-in default is `full` (ADR 0043).
     let home2 = dir.path().join("home2");
     std::fs::create_dir_all(&home2).unwrap();
     std::fs::create_dir_all(ws.join(".radian")).unwrap();
@@ -10714,12 +10918,12 @@ async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
         110,
     );
     assert!(
-        pty.wait_for_screen("workspace", 15),
-        "the workspace file must be ignored:\n{}",
+        pty.wait_for_screen("no sandbox", 15),
+        "the default tier must be `full`: {:?}",
         pty.screen()
     );
     assert!(
-        !pty.screen().contains("full (project)"),
+        !pty.screen().contains("(project)"),
         "a workspace file must not set the tier:\n{}",
         pty.screen()
     );

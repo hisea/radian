@@ -36,6 +36,7 @@ pub mod observer;
 pub mod opencode_go;
 mod output;
 pub mod pending;
+pub mod project;
 pub mod projection;
 pub mod prompt;
 pub mod provider;
@@ -148,6 +149,7 @@ pub use pending::{
     Abandoned, Answered, PendingAnswer, PendingQueue, PendingRequest, PendingResponse, PendingView,
     QueuedApprover, QueuedPrompter,
 };
+pub use project::{ProjectConfig, effective as project_effective_tier, narrow as narrow_tier};
 pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };

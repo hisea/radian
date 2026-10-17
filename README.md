@@ -216,14 +216,17 @@ theme = "dark"               # dark | light | mono; NO_COLOR forces mono
 `--profile` picks all three layers of ADR 0012 at once: the sandbox (the enforcement boundary),
 the rule set (allow / ask / deny) and what the host mounts. The names the binaries accept are
 `safe`, `workspace` and `full` (ADR 0016); the old `workspace-write` and `full-access` remain
-accepted as aliases but are not listed in `--help`. `workspace` is the default and `full` is
-never reached by forgetting a flag.
+accepted as aliases but are not listed in `--help`. **`full` is the default** (ADR 0043): the
+neighbouring harnesses run unsandboxed by default, and a sandbox is one flag away
+(`--profile workspace`). A project can turn it on for itself in
+`<workspace>/.radian/config.toml` (`[permissions] profile = "workspace" | "safe"`); that
+declaration can only **narrow**, never widen.
 
 | Tier | Sandbox | Shell | MCP | Built-in files |
 |---|---|---|---|---|
 | `safe` | none needed — nothing executes | not offered | denied | `read`/`list`/`git_status`/`git_diff` allowed; `write`/`patch` denied |
 | `workspace` | enforced: macOS seatbelt or Linux bubblewrap, probed at startup | offered, **inside** the sandbox | asks | `write`/`patch` allowed only when the resolved path stays under the workspace |
-| `full` | none — chosen explicitly | offered, **not** sandboxed | allowed | `write`/`patch` as `workspace` |
+| `full` | none — the default (ADR 0043) | offered, **not** sandboxed | allowed | `write`/`patch` as `workspace` |
 
 - **A failed probe refuses to run.** If the backend is missing or its probe fails, the host
   exits with an error instead of falling back to an unsandboxed run. There is no degrade path

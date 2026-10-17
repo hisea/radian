@@ -385,3 +385,16 @@ token（ADR 0026 禁止）。两个读点都改成走 `redaction_secrets()`（�
 | OR-C2 | `export_secrets` 末尾返回原 `secrets`（去掉 `redaction_secrets`） | 同上（`the export list must carry the registered token: []`） | ✅ 1 failed |
 
 2/2 抓住。
+
+## ADR 0043 slice ①：缺省 `full`、显式 flag 优先、allow_env（2026-10-17）
+
+命令：`timeout 300 cargo test -p agent-cli --locked --no-fail-fast --test cli <name>`；每个变异
+先 `cargo build -p radian-tui --bin radian`，`cp` 备份 / 还原，`cmp` 逐字节一致。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| D43-1 | `profile::default_profile()` 回到 `WorkspaceWrite` | `full_is_the_default_and_no_write_tools_without_a_workspace`（`[profile] full` 不成立） | ✅ 1 failed |
+| D43-2 | 项目的 `full` 覆盖显式 `--profile`（`if cli.profile.is_some()` 分支失效） | `an_explicit_flag_wins_and_the_line_names_the_project_ask`（`[profile] full` 不成立） | ✅ 1 failed |
+| D43-3 | `build_sandbox` 不把 `allow_env` 加进 policy（删掉循环） | `the_shell_environment_carries_herdr_and_allow_env`（`left: "pane-9||"`） | ✅ 1 failed |
+
+3/3 抓住。
