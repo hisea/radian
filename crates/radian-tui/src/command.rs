@@ -647,7 +647,8 @@ fn free_level(_typed: &[&str], _partial: &str) -> Level {
 
 /// The completion for `line` at `cursor`: the char range a candidate replaces, and what that
 /// level offers. Pure. `None` when the line is not a slash command, the command or the level is
-/// unknown, the level is free text, or the only candidate is already exactly what was typed.
+/// unknown, the level is free text, or the typed word is already exactly a candidate (see
+/// [`is_exact_candidate`]).
 ///
 /// `level` is 0 for the command name itself, 1 for the first argument, and so on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -798,7 +799,7 @@ fn argument_level(
     let level_result = match source(typed, partial) {
         Level::Ready(candidates) => {
             let candidates = rank(candidates, partial);
-            if candidates.len() == 1 && candidates[0].insert == partial {
+            if is_exact_candidate(&candidates, partial) {
                 return None;
             }
             Level::Ready(candidates)
@@ -831,6 +832,18 @@ fn non_empty(completion: SlashCompletion) -> Option<SlashCompletion> {
         Level::Free => None,
         _ => Some(completion),
     }
+}
+
+/// Whether one of `candidates` is **already exactly** the typed `partial`. `rank` puts such a
+/// candidate first, and it is not a completion to accept: arming the menu on it would make Enter
+/// accept the row (inserting the very same word, or — when a longer id shares the prefix, as
+/// `gpt-5.4` does with `gpt-5.4-mini` — a *different* model) instead of submitting the finished
+/// line. Both completion paths ask this one question — the pure `Ready` levels and the app's
+/// answer for a `Needs` level — so the rule cannot drift between them.
+pub fn is_exact_candidate(candidates: &[Candidate], partial: &str) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| candidate.insert == partial)
 }
 
 /// Ranks `candidates` against `partial` with [`fuzzy_score`]: the best score first, then by name,
@@ -944,7 +957,8 @@ pub fn model_switch(args: &[String]) -> Result<ModelSwitch, String> {
 /// (ADR 0035). The candidates need the host's credential store and the model
 /// lists, so the level is `Needs` and the loop resolves it. The direct `/model
 /// <provider>/<model>` form still works: the typed word is passed as the partial, so a full
-/// `provider/model` is the one exact candidate and is not armed.
+/// `provider/model` is an exact candidate and is not armed — never, not even when a longer id
+/// shares its prefix.
 fn model_route_level(_typed: &[&str], partial: &str) -> Level {
     Level::Needs(Fetch::ModelRoute {
         provider: None,

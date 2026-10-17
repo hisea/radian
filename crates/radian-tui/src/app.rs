@@ -4099,10 +4099,11 @@ impl App {
             return UpdateResult::none();
         }
         let candidates = command::rank(candidates, fetch.partial());
-        // The `Ready` levels' rule holds here too: the one candidate that is already exactly
-        // what was typed is not a completion to accept — arming it would make Enter accept
-        // (inserting the same word) instead of submitting the finished line.
-        if candidates.len() == 1 && candidates[0].insert == fetch.partial() {
+        // The `Ready` levels' rule holds here too (one predicate, `command::is_exact_candidate`):
+        // a candidate that is already exactly what was typed is not a completion to accept —
+        // arming it would make Enter accept (inserting the same word, or a *different* model when
+        // a longer id shares the prefix) instead of submitting the finished line.
+        if command::is_exact_candidate(&candidates, fetch.partial()) {
             self.completion_clear();
             return UpdateResult::dirty();
         }

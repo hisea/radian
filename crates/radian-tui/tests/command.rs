@@ -439,3 +439,46 @@ fn thinking_candidates_name_the_wire_value_and_mark_the_current_level() {
     );
     assert!(high.current, "{high:?}");
 }
+
+/// The exact-match rule on a **`Ready`** level, which `is_exact_candidate` (`command.rs`) also
+/// serves: a typed word that is already a candidate is not a completion to accept, even when a
+/// longer candidate shares its prefix. The `Needs` half of the same rule is
+/// `an_exact_model_route_is_not_armed_even_with_a_prefix_sibling` (`tests/update.rs`), where
+/// `chatgpt`'s `gpt-5.4` / `gpt-5.4-mini` pair hit it. `complete_in` takes the tree as a
+/// parameter exactly so a level with such a pair can be exercised here: the built-in tree has
+/// none.
+#[test]
+fn a_ready_level_with_a_prefix_sibling_does_not_arm_on_an_exact_word() {
+    fn pair(_typed: &[&str], _partial: &str) -> radian_tui::command::Level {
+        let candidate = |insert: &str| radian_tui::command::Candidate {
+            insert: insert.into(),
+            description: String::new(),
+            current: false,
+        };
+        radian_tui::command::Level::Ready(vec![candidate("gpt-5.4"), candidate("gpt-5.4-mini")])
+    }
+    static LEVELS: &[radian_tui::command::LevelSource] = &[pair];
+    static TREE: &[radian_tui::command::Command] = &[radian_tui::command::Command {
+        name: "model",
+        description: "switch the model",
+        levels: LEVELS,
+    }];
+
+    // Exactly a candidate: nothing to complete, so Enter submits the line.
+    assert!(
+        radian_tui::command::complete_in(TREE, "/model gpt-5.4", 14).is_none(),
+        "an exact word must not arm the menu"
+    );
+    // A partial word still lists the sibling (only the longer id matches `gpt-5.4-m`).
+    let level = radian_tui::command::complete_in(TREE, "/model gpt-5.4-m", 16).expect("a list");
+    match level.level_result {
+        radian_tui::command::Level::Ready(candidates) => {
+            let inserts: Vec<&str> = candidates
+                .iter()
+                .map(|candidate| candidate.insert.as_str())
+                .collect();
+            assert_eq!(inserts, ["gpt-5.4-mini"], "{candidates:?}");
+        }
+        other => panic!("expected `Ready`: {other:?}"),
+    }
+}

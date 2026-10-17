@@ -2209,3 +2209,33 @@ compared (`cmp`) after every run. Command:
 
 1/1 caught（两个测试分别抓住）。两个测试在**修复前**的代码上同样失败：句柄测试看到的是
 `terminal: …`（已经读到文件），pty 测试看到 decoy 的正文。
+## flaky-chatgpt-switch: an exact slash completion must not swallow Enter (2026-10-17)
+
+Base `b9c03ac` · branch `dogfood/flaky-chatgpt-switch` · worktree
+`.radian-worktrees/flaky-chatgpt-switch`. `/model chatgpt/gpt-5.4` typed whole must submit on the
+first Enter. The route's completion is a `Needs` level, and the host's answer — the descriptor's
+models, and `chatgpt` lists `gpt-5.4` **and** `gpt-5.4-mini` (`radian-host/src/provider.rs`) — is a
+two-row prefix match. The "a candidate already exactly what was typed is not a completion to
+accept" rule was written for the one-candidate shape (`len() == 1 && insert == partial`), so the
+menu armed and Enter accepted the highlighted row (inserting the same word) instead of sending the
+line. Whether that happened depended only on whether the answer landed before the Enter key was
+handled by the loop, so the same input passed or failed by load. The rule is now one predicate,
+`command::is_exact_candidate`, asked by both completion paths (`command::argument_level` for the
+pure `Ready` levels and `App::completions_ready` for a `Needs` level's answer).
+
+Mutations were applied in place in `src/app.rs` / `src/command.rs`, each restored from a `cp` in
+`.radian/scratch/mut/` and confirmed byte-identical with `cmp` before the next one (no
+`git checkout --`/`restore`/`stash`, per this worktree's rules); every run used `--no-fail-fast`.
+Command: `timeout 300 cargo test -p radian-tui --locked --no-fail-fast --test update --test command`.
+
+| # | Requirement mutated | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| EX-1 | the `Needs` path never arms on an exact candidate | `completions_ready`'s check back to `candidates.len() == 1 && candidates[0].insert == fetch.partial()` | `update::an_exact_model_route_is_not_armed_even_with_a_prefix_sibling` | ✅ 1 failed |
+| EX-2 | the `Ready` path never arms on an exact candidate | `argument_level`'s check back to the same one-candidate form | `command::a_ready_level_with_a_prefix_sibling_does_not_arm_on_an_exact_word` | ✅ 1 failed |
+| EX-3 | "exact" means equal, never merely a prefix | `is_exact_candidate` uses `candidate.insert.starts_with(partial)` | `command::a_ready_level_with_a_prefix_sibling_does_not_arm_on_an_exact_word`; `update::a_partial_model_route_still_lists_its_prefix_siblings`, `update::the_slash_menu_moves_its_highlight_and_enter_accepts_it`, `update::the_slash_completion_walks_the_command_tree`, `update::the_id_level_asks_the_host_and_shows_the_answer`, `update::typing_filters_the_slash_menu_and_resets_the_highlight` | ✅ 6 failed |
+
+3/3 caught; after the restores `git status --short` showed only the two test files. The pty-level
+evidence is the flake itself: `pty_model_switches_to_chatgpt_with_an_oauth_login` failed 3 of 20
+runs under load before the fix (plus a deterministic single-run repro: type the line *without*
+Enter, wait for the two menu rows, then Enter — the composer keeps the line and `next turn:` is
+never drawn) and 20 of 20 after.
