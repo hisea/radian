@@ -1489,11 +1489,7 @@ mod tests {
         for name in ["workspace_denied", "safe_denied"] {
             let case = connected_unix_case(name);
             assert!(!case.passed(), "{name}");
-            assert_eq!(
-                case.verdict("linux-bwrap"),
-                Verdict::KnownLimit,
-                "{name}"
-            );
+            assert_eq!(case.verdict("linux-bwrap"), Verdict::KnownLimit, "{name}");
             assert_eq!(case.verdict("macos-seatbelt"), Verdict::Fail, "{name}");
             assert!(
                 !case.known_limit_reason().is_empty(),
