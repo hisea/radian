@@ -134,6 +134,11 @@ pub(crate) fn build_profile(
 /// `safe` mounts no `shell` and its rules deny every execution path, so there is nothing to
 /// sandbox and `None` is returned. `workspace-write` and `full-access` build a sandbox for
 /// the workspace; for the enforced mode a probe failure is an **error**, never a fallback.
+///
+/// The one other path is ADR 0016: in the `workspace` tier, when the kernel says
+/// this process is already confined by an outer sandbox, the outer sandbox is inherited and
+/// nothing is probed ([`Sandbox::inherited`]). That is not a fallback: the process cannot be
+/// less confined than the parent that confined it, and no flag or variable selects it.
 pub(crate) fn build_sandbox(
     profile: ProfileArg,
     workspace: &Path,
@@ -142,6 +147,15 @@ pub(crate) fn build_sandbox(
 ) -> Result<Option<Sandbox>, SetupError> {
     if profile == ProfileArg::Safe {
         return Ok(None);
+    }
+    // ADR 0016: a process the **kernel** says is already confined by an
+    // outer sandbox inherits it instead of stacking a second one. The nested probe cannot run
+    // at all (the kernel refuses `sandbox_apply` under a deny-default profile), so this comes
+    // before it. `confined_by_outer_sandbox` is the only source of that fact — no environment
+    // variable, config key or flag can reach here (decision 1) — and a `false` answer falls
+    // through to the probe and the refusal below, unchanged.
+    if profile == ProfileArg::WorkspaceWrite && radian_sandbox::confined_by_outer_sandbox() {
+        return Ok(Some(Sandbox::inherited(workspace)));
     }
     let mode = profile.preset().sandbox_mode();
     if probe_failure_injected() {

@@ -1213,6 +1213,12 @@ fn run(
         &sandbox_deny_read,
         &allow_unix_sockets,
     )?;
+    // ADR 0016: when the sandbox is one radian inherited from outside,
+    // `/access` says so like the startup line does. Read here, while the sandbox is still local
+    // (it moves into `open_session` below).
+    let inherited_sandbox = sandbox
+        .as_ref()
+        .is_some_and(|sandbox| sandbox.backend_name() == "inherited");
     // ADR 0038 slice 2: `/access` rebuilds the profile and the sandbox for a new tier through
     // this builder. It captures the same inputs the startup build used, so a switch and a
     // startup cannot drift; a failed sandbox probe is the `Err` that refuses the switch.
@@ -1694,6 +1700,11 @@ fn run(
     // opened the session; the marker is added here.
     app.set_access_source(access_source);
     app.set_tier(format!("{}{}", tier.as_str(), access_source.suffix()));
+    // ADR 0016: `/access` repeats the startup line's own words for an
+    // inherited sandbox (and says nothing extra for any other tier).
+    if inherited_sandbox {
+        app.set_sandbox_note(Some(session.facts().profile_line.clone()));
+    }
     // The footer's startup facts (ADR 0027 C2): the working directory, the model's display
     // name (the id until a catalog name is known), the provider and the applied thinking
     // level. The git branch is not read here: the `git` contributor refreshes it in the
