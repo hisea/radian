@@ -9,7 +9,8 @@ use std::sync::Mutex;
 use radian_permissions::{ApprovalPolicy, Preset};
 
 use super::ids::{CommandRefused, SessionCapability, SessionCommand, SessionId, UserBashRecord};
-use super::{PendingResponse, SessionQueue};
+use super::setup_types::SessionQueue;
+use crate::pending::PendingResponse;
 use crate::projection::ProjectionRead;
 use crate::skills::Skill;
 use crate::trust;
