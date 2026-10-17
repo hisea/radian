@@ -1,7 +1,7 @@
-//! ADR 0027: the opencode-go usage row follows the **current** model. The
-//! contributor refreshes and shows only while the provider is opencode-go; switching away
-//! hides the row and stops the network, switching back refreshes once. A local mock server
-//! counts the requests (never the real endpoint or a real key).
+//! ADR 0027: the usage row follows the **current** model. The source refreshes and
+//! shows only while the provider is opencode-go; switching away hides the row and stops the
+//! network, switching back refreshes once. A local mock server counts the requests (never the
+//! real endpoint or a real key).
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use radian_host::{ContributionStore, OpencodeGoUsage, Tick, spawn_contributor_gated};
+use radian_host::{ContributionStore, OpencodeGoUsage, Tick, spawn_usage_gated};
 
 fn wait_for(deadline: Duration, mut check: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + deadline;
@@ -47,13 +47,13 @@ fn the_usage_row_follows_the_current_model() {
     let store = ContributionStore::new();
     let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
-    let _task = spawn_contributor_gated(
+    let _task = spawn_usage_gated(
         runtime.handle(),
-        Arc::new(OpencodeGoUsage::with_url(
+        Box::new(OpencodeGoUsage::with_url(
             "sk-secret",
             format!("http://{addr}/usage"),
-            radian_host::OPENCODE_GO_MIN_PERIOD,
         )),
+        radian_host::OPENCODE_GO_MIN_PERIOD,
         Arc::clone(&store),
         Arc::new(|_: Tick| {}),
         gate_rx,
@@ -67,7 +67,7 @@ fn the_usage_row_follows_the_current_model() {
         "no request while inactive"
     );
     assert!(
-        store.get("opencode-go.usage").is_none(),
+        store.get(radian_host::USAGE_ITEM).is_none(),
         "no row while inactive"
     );
 
@@ -75,10 +75,15 @@ fn the_usage_row_follows_the_current_model() {
     gate_tx.send(true).unwrap();
     assert!(
         wait_for(Duration::from_secs(3), || store
-            .get("opencode-go.usage")
+            .get(radian_host::USAGE_ITEM)
             .is_some()),
         "the row appears on activation"
     );
+    let contribution = store.get(radian_host::USAGE_ITEM).expect("the row");
+    let snapshot = contribution.usage.expect("the snapshot is the value");
+    assert_eq!(snapshot.provider, "opencode-go");
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].label, "5h");
     assert_eq!(
         requests.load(Ordering::SeqCst),
         1,
@@ -89,7 +94,7 @@ fn the_usage_row_follows_the_current_model() {
     gate_tx.send(false).unwrap();
     assert!(
         wait_for(Duration::from_secs(3), || store
-            .get("opencode-go.usage")
+            .get(radian_host::USAGE_ITEM)
             .is_none()),
         "the row hides on deactivation"
     );
@@ -105,7 +110,7 @@ fn the_usage_row_follows_the_current_model() {
     gate_tx.send(true).unwrap();
     assert!(
         wait_for(Duration::from_secs(3), || store
-            .get("opencode-go.usage")
+            .get(radian_host::USAGE_ITEM)
             .is_some()),
         "the row returns on reactivation"
     );

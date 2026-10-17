@@ -1,12 +1,13 @@
-//! The `chatgpt` usage contributor (ADR 0026, ADR 0027 C4).
+//! The `chatgpt` usage source (ADR 0026, ADR 0027 C4; the descriptor's
+//! `usage = Endpoint`).
 //!
 //! `GET {base}/wham/usage` with the same auth headers a model request carries (the access
 //! token, refreshed first if near expiry, and the account id decoded fresh — slice ①'s
-//! `ensure_fresh`/`decode_account_id`), on the same clamp/period/"one failed window doesn't
-//! drop the other" rules [`crate::opencode_go`] already established for C4. It runs only
-//! while the current or a logged-in provider is `chatgpt` (the runner's gate, wired the same
-//! way `OpencodeGoUsage`'s is). The response is never logged; only the display text enters
-//! the contribution store.
+//! `ensure_fresh`/`decode_account_id`), on the same clamp/"one failed window doesn't drop the
+//! other" rules [`crate::opencode_go`] already established for C4. It runs only while the
+//! current or a logged-in provider is `chatgpt` (the spawn gate, wired the same way
+//! `OpencodeGoUsage`'s is). The response is never logged; only the snapshot enters the
+//! contribution store.
 //!
 //! Response shape (`rate_limit.primary_window`/`secondary_window`, each
 //! `used_percent`/`limit_window_seconds`/`reset_after_seconds`, and `plan_type`) verified
@@ -20,11 +21,14 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::contrib::{Contribution, Segment, SegmentRole, StatusContributor};
 use crate::oauth_chatgpt::{self, Endpoints};
+use crate::usage::{Remaining, UsageArgs, UsageFetcher, UsageSnapshot, UsageWindow};
 
 /// Everything before `/wham/usage`.
 pub const USAGE_BASE: &str = "https://chatgpt.com/backend-api";
+
+/// The usage endpoint.
+pub const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 
 #[derive(Debug, Deserialize)]
 struct UsageResponse {
@@ -77,18 +81,18 @@ fn countdown(seconds: u64) -> String {
     }
 }
 
-/// The one-line display: the **remaining** share per window, then each window's reset
-/// countdown, then the plan type. `None` when the response carries no window at all (ADR
-/// 0027 C4: "one failed window dropped alone" — a window missing `used_percent` contributes
-/// no share but the other window, if present, still shows).
-fn display(response: &UsageResponse) -> Option<String> {
+/// The snapshot for a response (ADR 0027): one window per reported
+/// window, each with its **remaining** share and its reset countdown, plus the plan type as the
+/// snapshot's trailing word. `None` when the response carries no window at all (ADR 0027 C4:
+/// "one failed window dropped alone" — a window missing `used_percent` contributes no share but
+/// the other window, if present, still shows).
+fn snapshot(response: &UsageResponse) -> Option<UsageSnapshot> {
     let rate_limit = response.rate_limit.as_ref()?;
     let windows = [
         ("primary", rate_limit.primary_window.as_ref()),
         ("secondary", rate_limit.secondary_window.as_ref()),
     ];
-    let mut shares = Vec::new();
-    let mut resets = Vec::new();
+    let mut out = Vec::new();
     for (_name, window) in windows {
         let Some(window) = window else {
             continue;
@@ -97,61 +101,62 @@ fn display(response: &UsageResponse) -> Option<String> {
             .limit_window_seconds
             .map(window_label)
             .unwrap_or_else(|| "window".to_owned());
-        if let Some(remaining) = remaining(window) {
-            shares.push(format!("{label}: {remaining:.0}%"));
+        let remaining = remaining(window).map(Remaining::Percent);
+        let resets_at = window.reset_after_seconds.map(countdown);
+        if remaining.is_none() && resets_at.is_none() {
+            continue;
         }
-        if let Some(seconds) = window.reset_after_seconds {
-            resets.push(format!("{label} ↺{}", countdown(seconds)));
-        }
+        out.push(UsageWindow {
+            label,
+            remaining,
+            resets_at,
+        });
     }
-    if shares.is_empty() && resets.is_empty() {
+    if out.is_empty() {
         return None;
     }
-    let mut out = String::from("ChatGPT usage (remaining): ");
-    out.push_str(&shares.join(" · "));
-    if !resets.is_empty() {
-        out.push_str(" · ");
-        out.push_str(&resets.join(" · "));
-    }
-    if let Some(plan) = &response.plan_type {
-        out.push_str(&format!(" · {plan}"));
-    }
-    Some(out)
+    Some(UsageSnapshot {
+        provider: PROVIDER.to_owned(),
+        title: "ChatGPT usage".to_owned(),
+        windows: out,
+        plan: response.plan_type.clone(),
+    })
 }
 
 /// One request's limit, well under the refresh period.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The `chatgpt` usage contributor.
+/// The provider id this source fetches for (the snapshot's `provider`).
+const PROVIDER: &str = "chatgpt";
+
+/// The `chatgpt` usage fetch (ADR 0027).
 pub struct ChatGptUsage {
     usage_url: String,
     session_id: String,
-    period: Duration,
     endpoints: Endpoints,
     client: reqwest::Client,
 }
 
-impl ChatGptUsage {
-    pub fn new(session_id: impl Into<String>, period: Duration) -> Self {
-        Self::with_url(
-            format!("{USAGE_BASE}/wham/usage"),
-            session_id,
-            period,
-            Endpoints::default(),
-        )
-    }
+/// The descriptor's `Endpoint` build for `chatgpt`: the session id the headers carry. There is
+/// no stored secret to hand over — the fetch renews the oauth entry itself, per call.
+pub fn endpoint(args: &UsageArgs) -> Box<dyn UsageFetcher> {
+    Box::new(ChatGptUsage::with_url(
+        USAGE_URL,
+        args.session_id.clone(),
+        Endpoints::default(),
+    ))
+}
 
+impl ChatGptUsage {
     /// For tests: point the usage and the OAuth endpoints at local mocks.
     pub fn with_url(
         usage_url: impl Into<String>,
         session_id: impl Into<String>,
-        period: Duration,
         endpoints: Endpoints,
     ) -> Self {
         Self {
             usage_url: usage_url.into(),
             session_id: session_id.into(),
-            period,
             endpoints,
             client: reqwest::Client::builder()
                 .timeout(REQUEST_TIMEOUT)
@@ -160,7 +165,7 @@ impl ChatGptUsage {
         }
     }
 
-    async fn fetch(&self) -> Result<Vec<Contribution>, String> {
+    async fn fetch(&self) -> Result<UsageSnapshot, String> {
         let access = oauth_chatgpt::ensure_fresh(&self.endpoints)
             .await
             .map_err(|error| format!("chatgpt usage: {error}"))?;
@@ -191,32 +196,16 @@ impl ChatGptUsage {
             .map_err(|error| format!("chatgpt usage body failed: {error}"))?;
         let parsed: UsageResponse = serde_json::from_str(&body)
             .map_err(|error| format!("chatgpt usage was not JSON: {error}"))?;
-        let text = display(&parsed).ok_or_else(|| "chatgpt usage had no windows".to_owned())?;
-        Ok(vec![Contribution {
-            item: "chatgpt.usage".to_owned(),
-            segments: vec![Segment::new(text, SegmentRole::Normal)],
-            stale: false,
-            symbol: None,
-        }])
+        snapshot(&parsed).ok_or_else(|| "chatgpt usage had no windows".to_owned())
     }
 }
 
-impl StatusContributor for ChatGptUsage {
+impl UsageFetcher for ChatGptUsage {
     fn id(&self) -> &'static str {
-        "chatgpt"
+        PROVIDER
     }
 
-    fn items(&self) -> Vec<String> {
-        vec!["chatgpt.usage".to_owned()]
-    }
-
-    fn period(&self) -> Duration {
-        self.period
-    }
-
-    fn refresh(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Contribution>, String>> + Send + '_>> {
+    fn fetch(&self) -> Pin<Box<dyn Future<Output = Result<UsageSnapshot, String>> + Send + '_>> {
         Box::pin(self.fetch())
     }
 }
@@ -229,23 +218,35 @@ mod tests {
         serde_json::from_str(body).expect("valid JSON")
     }
 
-    /// `used_percent` is **used**; the display is the remaining `100 − used_percent`, and the
-    /// window label is derived from `limit_window_seconds`, not assumed from the field name.
+    /// `used_percent` is **used**; the snapshot carries the remaining `100 − used_percent`, and
+    /// the window label is derived from `limit_window_seconds`, not assumed from the field name.
     #[test]
-    fn the_display_is_the_remaining_share_with_a_derived_label() {
+    fn the_snapshot_is_the_remaining_share_with_a_derived_label() {
         let response = parse(
             r#"{"plan_type":"pro","rate_limit":{
                 "primary_window":{"used_percent":5,"limit_window_seconds":18000,"reset_after_seconds":3600},
                 "secondary_window":{"used_percent":40,"limit_window_seconds":604800,"reset_after_seconds":90000}
             }}"#,
         );
-        let text = display(&response).expect("a display");
-        assert!(text.contains("ChatGPT usage (remaining):"), "{text}");
-        assert!(text.contains("5h: 95%"), "{text}");
-        assert!(text.contains("7d: 60%"), "{text}");
-        assert!(text.contains("5h ↺1h0m"), "{text}");
-        assert!(text.contains("7d ↺1d1h"), "{text}");
-        assert!(text.contains("· pro"), "{text}");
+        let snapshot = snapshot(&response).expect("a snapshot");
+        assert_eq!(snapshot.provider, "chatgpt");
+        assert_eq!(snapshot.title, "ChatGPT usage");
+        assert_eq!(snapshot.plan.as_deref(), Some("pro"));
+        assert_eq!(
+            snapshot.windows,
+            vec![
+                UsageWindow {
+                    label: "5h".to_owned(),
+                    remaining: Some(Remaining::Percent(95.0)),
+                    resets_at: Some("1h0m".to_owned()),
+                },
+                UsageWindow {
+                    label: "7d".to_owned(),
+                    remaining: Some(Remaining::Percent(60.0)),
+                    resets_at: Some("1d1h".to_owned()),
+                },
+            ]
+        );
     }
 
     /// One window missing entirely does not drop the other (ADR 0027 C4).
@@ -256,16 +257,23 @@ mod tests {
                 "primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":100}
             }}"#,
         );
-        let text = display(&response).expect("a display");
-        assert!(text.contains("5h: 90%"), "{text}");
-        assert!(!text.contains("secondary"), "{text}");
+        let snapshot = snapshot(&response).expect("a snapshot");
+        assert_eq!(
+            snapshot.windows,
+            vec![UsageWindow {
+                label: "5h".to_owned(),
+                remaining: Some(Remaining::Percent(90.0)),
+                resets_at: Some("1m".to_owned()),
+            }]
+        );
+        assert!(snapshot.plan.is_none(), "no plan type, no trailing word");
     }
 
-    /// No windows at all (and no `rate_limit`) is no display.
+    /// No windows at all (and no `rate_limit`) is no snapshot.
     #[test]
-    fn no_windows_is_no_display() {
-        assert!(display(&parse(r#"{"rate_limit":{}}"#)).is_none());
-        assert!(display(&parse(r#"{}"#)).is_none());
+    fn no_windows_is_no_snapshot() {
+        assert!(snapshot(&parse(r#"{"rate_limit":{}}"#)).is_none());
+        assert!(snapshot(&parse(r#"{}"#)).is_none());
     }
 
     #[test]

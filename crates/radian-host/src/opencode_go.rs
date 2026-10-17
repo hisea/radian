@@ -1,13 +1,18 @@
-//! The opencode-go usage contributor (ADR 0027 C4).
+//! The opencode-go usage source (ADR 0027 C4; the descriptor's `usage = Endpoint`).
 //!
 //! `GET https://opencode.ai/zen/go/v1/usage` with the key from `auth.json` (ADR 0026 D2),
 //! every 60 s by default (15 s–10 min, or off). It runs only when the current or a logged-in
-//! provider is opencode-go. The API reports **used** percentages; the display shows the
+//! provider is opencode-go. The API reports **used** percentages; the snapshot carries the
 //! **remaining** `100 − percent`, labeled, so the number cannot be misread (ADR 0027 C4).
 //!
-//! The key never reaches the journal, a log line or a notice: only the display text goes into
-//! the contribution store. A failed refresh keeps the last value and marks it stale (the
-//! runner's job).
+//! The request, the key handling, the period bounds and the two `resetsAt` forms are exactly
+//! the ones the contributor had before the move (ADR 0027): only the
+//! result changed shape — a [`UsageSnapshot`] instead of a finished display line, which the
+//! `usage` footer component now formats.
+//!
+//! The key never reaches the journal, a log line or a notice: it is handed to the fetch and
+//! nothing else. A failed refresh keeps the last snapshot and marks it stale (the runner's
+//! job).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -16,7 +21,7 @@ use std::time::{Duration, SystemTime};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::contrib::{Contribution, Segment, SegmentRole, StatusContributor};
+use crate::usage::{Remaining, UsageArgs, UsageFetcher, UsageSnapshot, UsageWindow};
 
 /// The usage endpoint.
 pub const USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
@@ -69,43 +74,46 @@ fn label(name: &str) -> &'static str {
     }
 }
 
-/// The one-line display: the **remaining** share per window, then each window's reset
-/// countdown. `None` when the response carries no window at all.
-fn display(response: &UsageResponse, now: SystemTime) -> Option<String> {
+/// The snapshot for a response (ADR 0027): one window per window the
+/// API reports, each with its **remaining** share and its reset countdown. `None` when the
+/// response carries no usable window at all — the row then keeps its last snapshot and goes
+/// stale, exactly as the old `display` returning `None` did.
+fn snapshot(response: &UsageResponse, now: SystemTime) -> Option<UsageSnapshot> {
     let usage = response.usage.as_ref()?;
     let windows = [
         ("rolling", usage.rolling.as_ref()),
         ("weekly", usage.weekly.as_ref()),
         ("monthly", usage.monthly.as_ref()),
     ];
-    let mut shares = Vec::new();
-    let mut resets = Vec::new();
+    let mut out = Vec::new();
     for (name, window) in windows {
         let Some(window) = window else {
             continue;
         };
-        if let Some(remaining) = remaining(window) {
-            shares.push(format!("{}: {remaining:.0}%", label(name)));
-        }
-        if let Some(reset) = window
+        let remaining = remaining(window).map(Remaining::Percent);
+        let resets_at = window
             .resets_at
             .as_ref()
-            .and_then(|at| countdown_value(at, now))
-        {
-            resets.push(format!("{} ↺{reset}", label(name)));
+            .and_then(|at| countdown_value(at, now));
+        if remaining.is_none() && resets_at.is_none() {
+            continue;
         }
+        out.push(UsageWindow {
+            label: label(name).to_owned(),
+            remaining,
+            resets_at,
+        });
     }
-    if shares.is_empty() && resets.is_empty() {
+    if out.is_empty() {
         return None;
     }
-    // "remaining" is explicit: the API's `percent` is used, this is `100 − percent`.
-    let mut out = String::from("Usage (remaining): ");
-    out.push_str(&shares.join(" · "));
-    if !resets.is_empty() {
-        out.push_str(" · ");
-        out.push_str(&resets.join(" · "));
-    }
-    Some(out)
+    Some(UsageSnapshot {
+        provider: PROVIDER.to_owned(),
+        // "remaining" is explicit: the API's `percent` is used, this is `100 − percent`.
+        title: "Usage".to_owned(),
+        windows: out,
+        plan: None,
+    })
 }
 
 /// `↺4h19m`-style countdown from a `resetsAt` that is either an RFC 3339 string or an epoch
@@ -193,25 +201,31 @@ fn chain(error: &dyn std::error::Error) -> String {
     text
 }
 
-/// The opencode-go usage contributor.
+/// The provider id this source fetches for (the snapshot's `provider`).
+const PROVIDER: &str = "opencode-go";
+
+/// The opencode-go usage fetch (ADR 0027).
 pub struct OpencodeGoUsage {
     key: String,
     url: String,
-    period: Duration,
     client: reqwest::Client,
 }
 
-impl OpencodeGoUsage {
-    pub fn new(key: impl Into<String>, period: Duration) -> Self {
-        Self::with_url(key, USAGE_URL, period)
-    }
+/// The descriptor's `Endpoint` build for opencode-go: the key the TUI resolved from `auth.json`
+/// and the fixed endpoint. The period is the runner's, not the fetch's.
+pub fn endpoint(args: &UsageArgs) -> Box<dyn UsageFetcher> {
+    Box::new(OpencodeGoUsage::with_url(
+        args.secret.clone().unwrap_or_default(),
+        USAGE_URL,
+    ))
+}
 
+impl OpencodeGoUsage {
     /// For tests: point the endpoint at a local mock.
-    pub fn with_url(key: impl Into<String>, url: impl Into<String>, period: Duration) -> Self {
+    pub fn with_url(key: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
             key: key.into(),
             url: url.into(),
-            period,
             // A refresh that hangs would hold the runner's task; the period is a minute.
             client: reqwest::Client::builder()
                 .timeout(REQUEST_TIMEOUT)
@@ -220,7 +234,7 @@ impl OpencodeGoUsage {
         }
     }
 
-    async fn fetch(&self) -> Result<Vec<Contribution>, String> {
+    async fn fetch(&self) -> Result<UsageSnapshot, String> {
         let response = self
             .client
             .get(&self.url)
@@ -241,33 +255,17 @@ impl OpencodeGoUsage {
             .map_err(|error| format!("opencode-go usage body failed: {error}"))?;
         let parsed: UsageResponse = serde_json::from_str(&body)
             .map_err(|error| format!("opencode-go usage was not JSON: {error}"))?;
-        let text = display(&parsed, SystemTime::now())
-            .ok_or_else(|| "opencode-go usage had no windows".to_owned())?;
-        Ok(vec![Contribution {
-            item: "opencode-go.usage".to_owned(),
-            segments: vec![Segment::new(text, SegmentRole::Normal)],
-            stale: false,
-            symbol: None,
-        }])
+        snapshot(&parsed, SystemTime::now())
+            .ok_or_else(|| "opencode-go usage had no windows".to_owned())
     }
 }
 
-impl StatusContributor for OpencodeGoUsage {
+impl UsageFetcher for OpencodeGoUsage {
     fn id(&self) -> &'static str {
-        "opencode-go"
+        PROVIDER
     }
 
-    fn items(&self) -> Vec<String> {
-        vec!["opencode-go.usage".to_owned()]
-    }
-
-    fn period(&self) -> Duration {
-        self.period
-    }
-
-    fn refresh(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Contribution>, String>> + Send + '_>> {
+    fn fetch(&self) -> Pin<Box<dyn Future<Output = Result<UsageSnapshot, String>> + Send + '_>> {
         Box::pin(self.fetch())
     }
 }
@@ -280,33 +278,60 @@ mod tests {
         serde_json::from_str(body).expect("valid JSON")
     }
 
-    /// The API's `percent` is **used**; the display is the remaining `100 − percent`.
+    /// The API's `percent` is **used**; the snapshot carries the remaining `100 − percent`.
     #[test]
-    fn the_display_is_the_remaining_share() {
+    fn the_snapshot_is_the_remaining_share() {
         let response = parse(
             r#"{"usage":{"rolling":{"status":"ok","percent":2,"resetsAt":"2030-01-01T00:00:00Z"},
                            "weekly":{"percent":19},"monthly":{"percent":9}}}"#,
         );
-        let text = display(&response, SystemTime::UNIX_EPOCH).expect("a display");
-        assert!(text.contains("Usage (remaining):"), "{text}");
-        assert!(text.contains("5h: 98%"), "{text}");
-        assert!(text.contains("7d: 81%"), "{text}");
-        assert!(text.contains("30d: 91%"), "{text}");
-        assert!(text.contains("↺"), "the reset countdown is shown: {text}");
-        // 2030-01-01 is far from the epoch: days remain.
-        assert!(text.contains("5h ↺"), "{text}");
+        let snapshot = snapshot(&response, SystemTime::UNIX_EPOCH).expect("a snapshot");
+        assert_eq!(snapshot.provider, "opencode-go");
+        assert_eq!(snapshot.title, "Usage");
+        assert_eq!(snapshot.plan, None);
+        assert_eq!(
+            snapshot.windows,
+            vec![
+                UsageWindow {
+                    label: "5h".to_owned(),
+                    remaining: Some(Remaining::Percent(98.0)),
+                    // 2030-01-01 is far from the epoch: days remain.
+                    resets_at: Some("21915d0h".to_owned()),
+                },
+                UsageWindow {
+                    label: "7d".to_owned(),
+                    remaining: Some(Remaining::Percent(81.0)),
+                    resets_at: None,
+                },
+                UsageWindow {
+                    label: "30d".to_owned(),
+                    remaining: Some(Remaining::Percent(91.0)),
+                    resets_at: None,
+                },
+            ]
+        );
     }
 
-    /// `resetsAt` accepts epoch seconds and milliseconds (ADR 0027).
+    /// `resetsAt` accepts epoch seconds and milliseconds (ADR 0027), and both give
+    /// the snapshot the pre-move `display` drew as `5h ↺1h0m`.
     #[test]
     fn resets_at_accepts_epoch_numbers() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let expected = vec![UsageWindow {
+            label: "5h".to_owned(),
+            remaining: Some(Remaining::Percent(98.0)),
+            resets_at: Some("1h0m".to_owned()),
+        }];
         let seconds = parse(r#"{"usage":{"rolling":{"percent":2,"resetsAt":1000003600}}}"#);
-        let text = display(&seconds, now).expect("a display");
-        assert!(text.contains("5h ↺1h0m"), "{text}");
+        assert_eq!(
+            snapshot(&seconds, now).expect("a snapshot").windows,
+            expected
+        );
         let millis = parse(r#"{"usage":{"rolling":{"percent":2,"resetsAt":1000003600000}}}"#);
-        let text = display(&millis, now).expect("a display");
-        assert!(text.contains("5h ↺1h0m"), "{text}");
+        assert_eq!(
+            snapshot(&millis, now).expect("a snapshot").windows,
+            expected
+        );
     }
 
     /// One window's bad `resetsAt` drops only that window's countdown; its share and the other
@@ -319,34 +344,44 @@ mod tests {
                          "weekly":{"percent":19,"resetsAt":1000003600},
                          "monthly":{"percent":9}}}"#,
         );
-        let text = display(&response, now).expect("a display");
-        assert!(
-            text.contains("5h: 98%"),
-            "the bad window's share stays: {text}"
-        );
-        assert!(text.contains("7d: 81%"), "{text}");
-        assert!(text.contains("30d: 91%"), "{text}");
-        assert!(text.contains("7d ↺1h0m"), "{text}");
-        assert!(
-            !text.contains("5h ↺"),
-            "the bad countdown is dropped: {text}"
+        let snapshot = snapshot(&response, now).expect("a snapshot");
+        assert_eq!(
+            snapshot.windows,
+            vec![
+                UsageWindow {
+                    label: "5h".to_owned(),
+                    remaining: Some(Remaining::Percent(98.0)),
+                    // The bad countdown is dropped, the share stays.
+                    resets_at: None,
+                },
+                UsageWindow {
+                    label: "7d".to_owned(),
+                    remaining: Some(Remaining::Percent(81.0)),
+                    resets_at: Some("1h0m".to_owned()),
+                },
+                UsageWindow {
+                    label: "30d".to_owned(),
+                    remaining: Some(Remaining::Percent(91.0)),
+                    resets_at: None,
+                },
+            ]
         );
     }
 
-    /// No windows at all is no display (the row disappears), and the period is clamped.
+    /// No windows at all is no snapshot (the row disappears), and the period is clamped.
     #[test]
     fn no_windows_and_the_period_bounds() {
-        assert!(display(&parse(r#"{"usage":{}}"#), SystemTime::UNIX_EPOCH).is_none());
-        assert!(display(&parse(r#"{}"#), SystemTime::UNIX_EPOCH).is_none());
+        assert!(snapshot(&parse(r#"{"usage":{}}"#), SystemTime::UNIX_EPOCH).is_none());
+        assert!(snapshot(&parse(r#"{}"#), SystemTime::UNIX_EPOCH).is_none());
         assert_eq!(clamp_period(1), MIN_PERIOD);
         assert_eq!(clamp_period(60), Duration::from_secs(60));
         assert_eq!(clamp_period(100_000), MAX_PERIOD);
     }
 
-    /// The contributor fetches from a local mock (never the real key or network), publishes the
-    /// remaining share, and never echoes the key.
+    /// The fetch reads a local mock (never the real key or network), returns the remaining share
+    /// as a snapshot, and never echoes the key.
     #[tokio::test]
-    async fn the_contributor_fetches_and_publishes() {
+    async fn the_fetch_reads_the_endpoint_into_a_snapshot() {
         use std::io::{Read as _, Write as _};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -362,17 +397,25 @@ mod tests {
             );
             let _ = stream.write_all(response.as_bytes());
         });
-        let contributor =
-            OpencodeGoUsage::with_url("sk-secret", format!("http://{addr}/usage"), DEFAULT_PERIOD);
-        let contributions = contributor.refresh().await.expect("a refresh");
-        assert_eq!(contributions[0].item, "opencode-go.usage");
-        let text: String = contributions[0]
-            .segments
-            .iter()
-            .map(|segment| segment.text.as_str())
-            .collect();
-        assert!(text.contains("5h: 98%"), "{text}");
-        assert!(text.contains("7d: 81%"), "{text}");
+        let fetcher = OpencodeGoUsage::with_url("sk-secret", format!("http://{addr}/usage"));
+        let snapshot = fetcher.fetch().await.expect("a fetch");
+        assert_eq!(snapshot.provider, "opencode-go");
+        assert_eq!(
+            snapshot.windows,
+            vec![
+                UsageWindow {
+                    label: "5h".to_owned(),
+                    remaining: Some(Remaining::Percent(98.0)),
+                    resets_at: None,
+                },
+                UsageWindow {
+                    label: "7d".to_owned(),
+                    remaining: Some(Remaining::Percent(81.0)),
+                    resets_at: None,
+                },
+            ]
+        );
+        let text = format!("{snapshot:?}");
         assert!(
             !text.contains("sk-secret"),
             "the key must not appear: {text}"
@@ -391,9 +434,8 @@ mod tests {
             let _ = stream.read(&mut buf);
             let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
         });
-        let contributor =
-            OpencodeGoUsage::with_url("sk-secret", format!("http://{addr}/usage"), DEFAULT_PERIOD);
-        let error = contributor.refresh().await.expect_err("an error");
+        let fetcher = OpencodeGoUsage::with_url("sk-secret", format!("http://{addr}/usage"));
+        let error = fetcher.fetch().await.expect_err("an error");
         assert!(!error.contains("sk-secret"), "{error}");
     }
 
@@ -405,9 +447,8 @@ mod tests {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.local_addr().unwrap()
         };
-        let contributor =
-            OpencodeGoUsage::with_url("sk-secret", format!("http://{addr}/usage"), DEFAULT_PERIOD);
-        let error = contributor.refresh().await.expect_err("nothing listens");
+        let fetcher = OpencodeGoUsage::with_url("sk-secret", format!("http://{addr}/usage"));
+        let error = fetcher.fetch().await.expect_err("nothing listens");
         assert!(error.contains("error sending request"), "{error}");
         assert!(error.to_lowercase().contains("refused"), "{error}");
         assert!(!error.contains("sk-secret"), "{error}");
@@ -418,9 +459,22 @@ mod tests {
     fn remaining_clamps() {
         let response =
             parse(r#"{"usage":{"rolling":{"percent":0},"weekly":{"percent":100},"monthly":{}}}"#);
-        let text = display(&response, SystemTime::UNIX_EPOCH).unwrap();
-        assert!(text.contains("5h: 100%"), "{text}");
-        assert!(text.contains("7d: 0%"), "{text}");
-        assert!(!text.contains("30d"), "no percent, no window: {text}");
+        let snapshot = snapshot(&response, SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(
+            snapshot.windows,
+            vec![
+                UsageWindow {
+                    label: "5h".to_owned(),
+                    remaining: Some(Remaining::Percent(100.0)),
+                    resets_at: None,
+                },
+                UsageWindow {
+                    label: "7d".to_owned(),
+                    remaining: Some(Remaining::Percent(0.0)),
+                    resets_at: None,
+                },
+            ],
+            "no percent, no window"
+        );
     }
 }

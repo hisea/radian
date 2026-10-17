@@ -1,15 +1,14 @@
 //! ADR 0026: `ChatGptUsage::fetch` resolves a (fresh) access token and
 //! account id the same way `ChatGptModel` does, then maps a fake `/wham/usage` body into the
-//! footer's display text. One `#[tokio::test]` per file — see `tests/chatgpt_headers.rs`.
+//! footer's usage snapshot (ADR 0027). One `#[tokio::test]` per file —
+//! see `tests/chatgpt_headers.rs`.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::OnceLock;
-use std::time::Duration;
 
-use radian_host::contrib::StatusContributor as _;
 use radian_host::oauth_chatgpt::Endpoints;
-use radian_host::{AuthStore, ChatGptUsage, OAuthEntry};
+use radian_host::{AuthStore, ChatGptUsage, OAuthEntry, Remaining, UsageFetcher as _, UsageWindow};
 
 fn isolated_home() -> std::path::PathBuf {
     static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
@@ -146,22 +145,20 @@ async fn fetch_resolves_the_token_and_maps_the_body() {
     .to_string();
     let mock = UsageMock::start(usage_body);
 
-    let contributor = ChatGptUsage::with_url(
-        mock.url.clone(),
-        "sess-usage-test",
-        Duration::from_secs(60),
-        Endpoints::default(),
+    let fetcher = ChatGptUsage::with_url(mock.url.clone(), "sess-usage-test", Endpoints::default());
+    let snapshot = fetcher.fetch().await.expect("a fetch");
+    assert_eq!(snapshot.provider, "chatgpt");
+    assert_eq!(snapshot.title, "ChatGPT usage");
+    assert_eq!(
+        snapshot.windows,
+        vec![UsageWindow {
+            label: "5h".to_owned(),
+            remaining: Some(Remaining::Percent(95.0)),
+            resets_at: Some("1h0m".to_owned()),
+        }]
     );
-    let contributions = contributor.refresh().await.expect("a refresh");
-    assert_eq!(contributions[0].item, "chatgpt.usage");
-    let text: String = contributions[0]
-        .segments
-        .iter()
-        .map(|segment| segment.text.as_str())
-        .collect();
-    assert!(text.contains("ChatGPT usage (remaining):"), "{text}");
-    assert!(text.contains("5h: 95%"), "{text}");
-    assert!(text.contains("pro"), "{text}");
+    assert_eq!(snapshot.plan.as_deref(), Some("pro"));
+    let text = format!("{snapshot:?}");
     assert!(
         !text.contains(&access),
         "the token must never appear: {text}"

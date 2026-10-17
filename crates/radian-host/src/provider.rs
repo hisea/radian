@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use crate::model::Provider;
+use crate::usage::{UsageArgs, UsageFetcher};
 
 /// Which wire protocol a model talks, mapped to one of the three existing adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +69,57 @@ pub struct DescriptorModel {
     pub thinking: ThinkingMap,
 }
 
+/// How a provider's usage is obtained (ADR 0027). The optional field
+/// `ProviderDescriptor::usage` names it; a provider without one draws no `usage` row and is
+/// never polled.
+#[derive(Clone, Copy)]
+pub enum UsageSource {
+    /// Poll an endpoint: the fetch builds the provider's request from the facts the session
+    /// hands it, sends it, and parses the answer into a `UsageSnapshot`.
+    Endpoint(EndpointUsage),
+}
+
+/// One `Endpoint` usage source (ADR 0027).
+#[derive(Clone, Copy)]
+pub struct EndpointUsage {
+    /// The endpoint's default URL.
+    pub url: &'static str,
+    /// The item ids an earlier version used for this provider's usage row. They stay valid as
+    /// aliases of the `usage` component for one version ([`usage_item_alias`]).
+    pub legacy_item_ids: &'static [&'static str],
+    /// Builds this provider's fetch from the session's own facts. The credential stays in the
+    /// process: it is handed to the fetch and never reaches a journal, a log line or a notice.
+    pub build: fn(&UsageArgs) -> Box<dyn UsageFetcher>,
+}
+
+/// The `Endpoint` usage source a provider's descriptor declares, or `None` (ADR 0027 revision
+/// 14 decision 3). The TUI spawns a refresh only for a provider with one.
+pub fn usage_endpoint(provider: &str) -> Option<&'static EndpointUsage> {
+    match descriptor(provider)?.usage.as_ref()? {
+        UsageSource::Endpoint(endpoint) => Some(endpoint),
+    }
+}
+
+/// Whether a provider's descriptor declares a usage source: the `usage` footer component's and
+/// `/usage`'s gate. A provider without one draws no row, never a fabricated empty one (ADR 0027
+/// revision 14 decision 3).
+pub fn has_usage_source(provider: &str) -> bool {
+    descriptor(provider).is_some_and(|entry| entry.usage.is_some())
+}
+
+/// The current id of an item id an earlier version used, or `None` when `id` is not a legacy
+/// usage id (`opencode-go.usage`, `chatgpt.usage` — ADR 0027). The TUI
+/// accepts such an id for one version and warns once.
+pub fn usage_item_alias(id: &str) -> Option<&'static str> {
+    descriptors()
+        .iter()
+        .any(|entry| {
+            matches!(&entry.usage,
+                Some(UsageSource::Endpoint(endpoint)) if endpoint.legacy_item_ids.contains(&id))
+        })
+        .then_some(crate::usage::USAGE_ITEM)
+}
+
 /// One registered provider.
 pub struct ProviderDescriptor {
     pub id: &'static str,
@@ -86,6 +138,9 @@ pub struct ProviderDescriptor {
     /// Extra request headers, expanded with the process's session id. See
     /// [`ProviderDescriptor::request_headers`].
     pub headers: fn(&str) -> Vec<(String, String)>,
+    /// Where this provider's usage comes from (ADR 0027), or `None`: the
+    /// footer's `usage` row then has nothing to draw for it.
+    pub usage: Option<UsageSource>,
 }
 
 impl ProviderDescriptor {
@@ -805,6 +860,14 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         default_protocol: Protocol::OpenAiCompatible,
         models: OPENCODE_GO_MODELS,
         headers: opencode_go_headers,
+        // ADR 0027: the endpoint source `opencode_go.rs` used to be, now
+        // declared here. The key comes from `auth.json` (ADR 0026 D2) and never leaves the
+        // process.
+        usage: Some(UsageSource::Endpoint(EndpointUsage {
+            url: crate::opencode_go::USAGE_URL,
+            legacy_item_ids: &["opencode-go.usage"],
+            build: crate::opencode_go::endpoint,
+        })),
     },
     ProviderDescriptor {
         id: "chatgpt",
@@ -819,6 +882,13 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         default_protocol: Protocol::Responses,
         models: CODEX_MODELS,
         headers: chatgpt_headers,
+        // ADR 0026 + ADR 0027: `/wham/usage`,
+        // refreshed with the login the fetch renews itself per call.
+        usage: Some(UsageSource::Endpoint(EndpointUsage {
+            url: crate::chatgpt_usage::USAGE_URL,
+            legacy_item_ids: &["chatgpt.usage"],
+            build: crate::chatgpt_usage::endpoint,
+        })),
     },
     ProviderDescriptor {
         id: "anthropic",
@@ -829,6 +899,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         default_protocol: Protocol::Anthropic,
         models: ANTHROPIC_MODELS,
         headers: no_headers,
+        usage: None,
     },
     ProviderDescriptor {
         id: "openai",
@@ -839,6 +910,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         default_protocol: Protocol::OpenAiCompatible,
         models: OPENAI_MODELS,
         headers: no_headers,
+        usage: None,
     },
     ProviderDescriptor {
         id: "openai-compatible",
@@ -854,6 +926,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         // The user supplies the model id; there is no built-in list.
         models: &[],
         headers: no_headers,
+        usage: None,
     },
 ];
 
@@ -979,6 +1052,60 @@ pub fn resolve_route_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0027: only the providers whose usage the footer can fetch
+    /// declare a source; every other descriptor declares none, so its `usage` row can never
+    /// appear.
+    #[test]
+    fn only_the_endpoint_providers_declare_a_usage_source() {
+        let declared: Vec<(&str, &str)> = descriptors()
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .usage
+                    .as_ref()
+                    .map(|UsageSource::Endpoint(endpoint)| (entry.id, endpoint.url))
+            })
+            .collect();
+        assert_eq!(
+            declared,
+            vec![
+                ("opencode-go", "https://opencode.ai/zen/go/v1/usage"),
+                ("chatgpt", "https://chatgpt.com/backend-api/wham/usage"),
+            ]
+        );
+        for id in ["anthropic", "openai", "openai-compatible"] {
+            assert!(!has_usage_source(id), "{id} declares no usage source");
+            assert!(usage_endpoint(id).is_none());
+        }
+        assert!(has_usage_source("opencode-go") && has_usage_source("chatgpt"));
+        assert!(usage_endpoint("no-such-provider").is_none());
+        assert!(!has_usage_source("no-such-provider"));
+    }
+
+    /// ADR 0027: the ids an earlier version used resolve to `usage` for
+    /// one version; every other id is left as written.
+    #[test]
+    fn the_earlier_usage_ids_are_aliases_of_usage() {
+        assert_eq!(usage_item_alias("opencode-go.usage"), Some("usage"));
+        assert_eq!(usage_item_alias("chatgpt.usage"), Some("usage"));
+        assert_eq!(usage_item_alias("usage"), None);
+        assert_eq!(usage_item_alias("model"), None);
+    }
+
+    /// The fetch a descriptor builds names the descriptor's own id: the `usage` component draws
+    /// a snapshot only while it belongs to the current route's provider.
+    #[test]
+    fn a_built_fetch_names_its_own_provider() {
+        for id in ["opencode-go", "chatgpt"] {
+            let endpoint = usage_endpoint(id).expect("a declared source");
+            let fetcher = (endpoint.build)(&UsageArgs {
+                session_id: "sess-1".to_owned(),
+                secret: Some("sk-not-used-by-this-test".to_owned()),
+            });
+            assert_eq!(fetcher.id(), id);
+        }
+    }
 
     #[test]
     fn the_built_ins_are_registered() {

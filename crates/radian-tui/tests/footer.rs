@@ -1665,6 +1665,7 @@ fn publish_contribution(
             segments: vec![radian_host::Segment::new(text, role)],
             stale: false,
             symbol: symbol.map(str::to_string),
+            usage: None,
         });
 }
 

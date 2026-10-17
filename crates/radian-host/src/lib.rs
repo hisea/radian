@@ -55,6 +55,7 @@ pub mod task_host;
 pub mod task_pending;
 mod tools;
 pub mod trust;
+pub mod usage;
 mod workspace;
 
 pub use agents::{
@@ -95,7 +96,9 @@ pub use catalog::{
     provider_for_host, provider_models_cache, provider_models_stale, read_provider_models, resolve,
     resolve_offline, write_provider_models,
 };
-pub use chatgpt_usage::{ChatGptUsage, USAGE_BASE as CHATGPT_USAGE_BASE};
+pub use chatgpt_usage::{
+    ChatGptUsage, USAGE_BASE as CHATGPT_USAGE_BASE, USAGE_URL as CHATGPT_USAGE_URL,
+};
 pub use command_footer::{
     COMMAND_TIMEOUT, CommandContributor, CommandSpec, FooterContext, FooterSnapshot,
     MAX_OUTPUT_BYTES, command_specs, parse_command as parse_footer_command,
@@ -180,13 +183,14 @@ pub use projection::{
 pub use prompt::{Mode, RoleHooks};
 pub use provider::{
     CHATGPT_DEVICE_LOGIN, CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel,
-    GENERIC_ID, LoginMethod, NamedProvider, NamedSource, Protocol, ProviderDecl,
+    EndpointUsage, GENERIC_ID, LoginMethod, NamedProvider, NamedSource, Protocol, ProviderDecl,
     ProviderDescriptor, ProviderRef, RADIAN_KIND, ReasoningReplayOverride, Route, THINKING_LEVELS,
-    ThinkingMap, clamp_thinking, clamp_thinking_with, descriptor, descriptors, level_fits,
-    login_choices, name_error, parse_thinking_level, resolve_provider, resolve_route,
-    resolve_route_for, supported_thinking_levels, supported_thinking_levels_ref,
-    supported_thinking_levels_ref_with, supported_thinking_levels_with, supported_wire,
-    thinking_map_for, thinking_map_for_ref, thinking_rank, valid_name, wire_budget,
+    ThinkingMap, UsageSource, clamp_thinking, clamp_thinking_with, descriptor, descriptors,
+    has_usage_source, level_fits, login_choices, name_error, parse_thinking_level,
+    resolve_provider, resolve_route, resolve_route_for, supported_thinking_levels,
+    supported_thinking_levels_ref, supported_thinking_levels_ref_with,
+    supported_thinking_levels_with, supported_wire, thinking_map_for, thinking_map_for_ref,
+    thinking_rank, usage_endpoint, usage_item_alias, valid_name, wire_budget,
 };
 pub use radian_runtime::ModelRoute;
 pub use session::session_hooks;
@@ -222,4 +226,8 @@ pub use task_pending::{
     TaskPrompter,
 };
 pub use tools::{HostSession, HostTools, merge_tool_specs};
+pub use usage::{
+    Remaining, USAGE_ITEM, UsageArgs, UsageFetcher, UsageSnapshot, UsageWindow,
+    spawn_gated as spawn_usage_gated,
+};
 pub use workspace::resolve_workspace;
