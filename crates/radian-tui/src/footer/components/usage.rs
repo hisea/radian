@@ -34,7 +34,11 @@ impl Component for Usage {
     fn data(&self, app: &App, _item: &Item) -> Option<ItemData> {
         let provider = app.session.provider.as_deref()?;
         // ADR 0027: a descriptor with no `usage` source draws nothing.
-        radian_host::usage_endpoint(provider)?;
+        // Both sources read the same store snapshot: the endpoint fetch wrote it, or the last
+        // model response's headers did (slice ④).
+        if !radian_host::has_usage_source(provider) {
+            return None;
+        }
         let contribution = app.contributions.get(radian_host::USAGE_ITEM)?;
         let snapshot = contribution.usage.as_ref()?;
         if snapshot.provider != provider {

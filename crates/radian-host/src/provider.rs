@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use crate::catalog::ModelLimit;
+use crate::headers_usage::HeadersUsage;
 use crate::model::Provider;
 use crate::usage::{UsageArgs, UsageFetcher};
 
@@ -103,6 +104,9 @@ pub enum UsageSource {
     /// Poll an endpoint: the fetch builds the provider's request from the facts the session
     /// hands it, sends it, and parses the answer into a `UsageSnapshot`.
     Endpoint(EndpointUsage),
+    /// Parse every model response's rate-limit headers into a `UsageSnapshot` (slice ④): no
+    /// polling, no key, nothing stored. The header names live on the [`HeadersUsage`] value.
+    Headers(HeadersUsage),
 }
 
 /// One `Endpoint` usage source (ADR 0027).
@@ -119,10 +123,12 @@ pub struct EndpointUsage {
 }
 
 /// The `Endpoint` usage source a provider's descriptor declares, or `None` (ADR 0027 revision
-/// 14 decision 3). The TUI spawns a refresh only for a provider with one.
+/// 14 decision 3). The TUI spawns a refresh only for a provider with one; a `Headers`
+/// provider has no endpoint to poll.
 pub fn usage_endpoint(provider: &str) -> Option<&'static EndpointUsage> {
     match descriptor(provider)?.usage.as_ref()? {
         UsageSource::Endpoint(endpoint) => Some(endpoint),
+        UsageSource::Headers(_) => None,
     }
 }
 
@@ -1077,7 +1083,9 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         default_protocol: Protocol::Anthropic,
         models: ANTHROPIC_MODELS,
         headers: no_headers,
-        usage: None,
+        // ADR 0027 slice ④: the `anthropic-ratelimit-*` response
+        // headers, parsed per response (no endpoint, no key).
+        usage: Some(UsageSource::Headers(crate::headers_usage::ANTHROPIC_HEADERS)),
     },
     ProviderDescriptor {
         id: "openai",
@@ -1088,7 +1096,9 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         default_protocol: Protocol::OpenAiCompatible,
         models: OPENAI_MODELS,
         headers: no_headers,
-        usage: None,
+        // ADR 0027 slice ④: the `x-ratelimit-*` response headers,
+        // parsed per response (no endpoint, no key).
+        usage: Some(UsageSource::Headers(crate::headers_usage::OPENAI_HEADERS)),
     },
     ProviderDescriptor {
         id: "openai-compatible",
@@ -1254,17 +1264,16 @@ mod tests {
     use super::*;
 
     /// ADR 0027: only the providers whose usage the footer can fetch
-    /// declare a source; every other descriptor declares none, so its `usage` row can never
+    /// declare a source; the endpoint providers poll, the headers providers (slice ④) read
+    /// each response. Every other descriptor declares none, so its `usage` row can never
     /// appear.
     #[test]
     fn only_the_endpoint_providers_declare_a_usage_source() {
         let declared: Vec<(&str, &str)> = descriptors()
             .iter()
-            .filter_map(|entry| {
-                entry
-                    .usage
-                    .as_ref()
-                    .map(|UsageSource::Endpoint(endpoint)| (entry.id, endpoint.url))
+            .filter_map(|entry| match &entry.usage {
+                Some(UsageSource::Endpoint(endpoint)) => Some((entry.id, endpoint.url)),
+                _ => None,
             })
             .collect();
         assert_eq!(
@@ -1274,10 +1283,20 @@ mod tests {
                 ("chatgpt", "https://chatgpt.com/backend-api/wham/usage"),
             ]
         );
-        for id in ["anthropic", "openai", "openai-compatible"] {
-            assert!(!has_usage_source(id), "{id} declares no usage source");
-            assert!(usage_endpoint(id).is_none());
+        // Slice ④: `anthropic` and `openai` read their rate-limit headers per response.
+        for id in ["anthropic", "openai"] {
+            assert!(has_usage_source(id), "{id} declares a usage source");
+            assert!(usage_endpoint(id).is_none(), "{id} has no endpoint to poll");
+            assert!(
+                matches!(
+                    descriptor(id).unwrap().usage,
+                    Some(UsageSource::Headers(_))
+                ),
+                "{id} declares the Headers source"
+            );
         }
+        assert!(usage_endpoint("openai-compatible").is_none());
+        assert!(!has_usage_source("openai-compatible"));
         assert!(has_usage_source("opencode-go") && has_usage_source("chatgpt"));
         assert!(usage_endpoint("no-such-provider").is_none());
         assert!(!has_usage_source("no-such-provider"));
