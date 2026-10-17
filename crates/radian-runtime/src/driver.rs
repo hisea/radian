@@ -488,11 +488,15 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 turn_id: turn_id.clone(),
             })
             .await?;
-        journal
-            .append_runtime_event(RuntimeEvent::TurnStarted {
-                turn_id: turn_id.clone(),
-            })
-            .await?;
+        let started = RuntimeEvent::TurnStarted {
+            turn_id: turn_id.clone(),
+        };
+        journal.append_runtime_event(started.clone()).await?;
+        // The host hears the start once it is durable, like the end (a task's `running` flag
+        // and the control port's event stream key on it).
+        if let Some(sink) = &runtime_events {
+            sink.on_runtime_event(&started);
+        }
 
         let mut claimed: Vec<MessageId> = vec![entry.id.clone()];
         // Every claimed input, so an accepted-but-unapplied steer can go back to the inbox
