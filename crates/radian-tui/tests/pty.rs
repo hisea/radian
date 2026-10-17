@@ -10557,6 +10557,59 @@ async fn pty_herdr_reports_the_session_identity() {
     pty.quit();
 }
 
+/// ADR 0034: the input-to-`working` path must not wait for the model's
+/// first token (`herdr agent prompt --wait` gives it 5 s). The mock never sends one, so a report
+/// that waited for a token would never arrive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_working_within_a_second_of_the_input() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let dir = TempDir::new("herdr-gate");
+    let sock = HerdrSocket::start("gate");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "herdr-gate",
+        ],
+        &env_refs,
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("idle", wait_positive()),
+        "the startup idle report"
+    );
+    let sent = Instant::now();
+    pty.send(b"hello\r");
+    let early = sock.wait_for_state("working", WAIT_LATENCY_BOUND);
+    assert!(
+        early,
+        "working within {:?}, not at the first token: {:?}",
+        WAIT_LATENCY_BOUND,
+        sock.snapshot()
+    );
+    assert!(
+        sent.elapsed() < Duration::from_secs(2),
+        "the working report took {:?}",
+        sent.elapsed()
+    );
+    pty.quit();
+}
+
 /// An approval is `blocked` with the tool name only; the command text is never sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
