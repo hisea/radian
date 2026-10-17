@@ -465,8 +465,9 @@ fn parse_output(line: &str) -> Result<CommandOutput, String> {
         .ok_or_else(|| "the footer command JSON has no string `text`".to_owned())?;
     let role = match object.get("style") {
         None | Some(serde_json::Value::Null) => SegmentRole::Normal,
+        // The style name is the command's output: the error never repeats it.
         Some(serde_json::Value::String(name)) => SegmentRole::parse(name)
-            .ok_or_else(|| format!("the footer command style {name:?} is not a known role"))?,
+            .ok_or_else(|| "the footer command style is not a known role".to_owned())?,
         Some(_) => return Err("the footer command style was not a string".to_owned()),
     };
     let symbol = match object.get("symbol") {

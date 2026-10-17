@@ -132,22 +132,21 @@ async fn the_environment_is_cleared_to_the_deliberate_allow_list() {
     let dir = scratch("env");
     let out = dir.join("env.txt");
     let script = write_script(&dir, "env.sh", &format!("env > \"{}\"", out.display()));
-    // A uniquely named probe in this process must not reach the child.
-    // SAFETY: the name is unique to this test and single-threaded for its duration.
-    unsafe { std::env::set_var("RADIAN_FOOTER_LEAK_PROBE", "leaked") };
+    // No `set_var` probe: the test binary runs tests on parallel threads, so changing the
+    // process environment would race the other tests' child spawns. `HOME` (always set in the
+    // test process) is the host variable that must not leak.
+    assert!(
+        std::env::var_os("HOME").is_some(),
+        "the test process has a HOME"
+    );
     let store = ContributionStore::new();
     let mut runner = ContributorRunner::new(
         contributor("thing", &script, &dir, FooterContext::new()),
         Arc::clone(&store),
     );
     let _ = runner.tick().await;
-    unsafe { std::env::remove_var("RADIAN_FOOTER_LEAK_PROBE") };
 
     let text = std::fs::read_to_string(&out).expect("the env was captured");
-    assert!(
-        !text.contains("RADIAN_FOOTER_LEAK_PROBE"),
-        "a host variable leaked:\n{text}"
-    );
     assert!(!text.contains("HOME="), "HOME must not leak:\n{text}");
     assert!(
         text.lines().any(|line| line.starts_with("PATH=")),
@@ -434,6 +433,33 @@ async fn a_failure_notice_is_generic_and_never_carries_the_output() {
     assert!(notice.contains("footer command"), "{notice}");
     assert!(
         !notice.contains("SECRET-OUTPUT"),
+        "the output leaked: {notice}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An unknown JSON style is the command's output too: its failure notice must not repeat it.
+#[tokio::test]
+async fn an_unknown_style_notice_never_carries_the_style_name() {
+    let dir = scratch("style-notice");
+    let script = write_script(
+        &dir,
+        "style.sh",
+        "printf '%s' '{\"text\":\"x\",\"style\":\"SECRET-STYLE\"}'",
+    );
+    let store = ContributionStore::new();
+    let mut runner = ContributorRunner::new(
+        contributor("thing", &script, &dir, FooterContext::new()),
+        Arc::clone(&store),
+    );
+    let mut notice = None;
+    for _ in 0..radian_host::NOTICE_AFTER {
+        notice = runner.tick().await.notice;
+    }
+    let notice = notice.expect("a run of failures yields one notice");
+    assert!(notice.contains("style"), "{notice}");
+    assert!(
+        !notice.contains("SECRET-STYLE"),
         "the output leaked: {notice}"
     );
     let _ = std::fs::remove_dir_all(&dir);

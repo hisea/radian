@@ -1515,3 +1515,10 @@ is gone, not failed. Every `command` from any current source is accepted
 (`config_fixtures::the_command_fixture_carries_command_and_period`, minus its former project half).
 When a project-level config layer is added, a `command` must be refused there, and that slice owns
 the test. No other row in this file is touched.
+
+## Gate review of the footer `command` component (2026-10-17, reviewer)
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| GR-1 | an unknown JSON style's error repeats the style name (`format!("... {name:?} ...")`, the branch's code) | caught (rc=101) | `an_unknown_style_notice_never_carries_the_style_name` |
+| GR-2 | drop `.env_clear()` from the command spawn | caught (rc=101) | `the_environment_is_cleared_to_the_deliberate_allow_list` (`HOME` leaks; the old `set_var` probe was removed because it raced the parallel tests) |
