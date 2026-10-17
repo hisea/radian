@@ -20,6 +20,7 @@ pub const HELP: &str = "\
 /model <provider>/<model>
                       switch the model at the next turn boundary (ADR 0026 D5)
 /thinking <level>     set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)
+/usage                show the current provider's usage, one line per window (ADR 0027)
 /auto on|off          auto-approve tool asks for this session (ADR 0026 D9)
 /yolo                 alias of /auto
 /access [safe|workspace|full]
@@ -125,6 +126,9 @@ pub enum Outcome {
     Model(ModelSwitch),
     /// `/thinking <level>` (ADR 0026 D11): the loop clamps it against the current route's map.
     Thinking(String),
+    /// `/usage` (ADR 0027): the current provider's usage snapshot, every
+    /// window of it. The app reads the contribution store, so there is no effect.
+    Usage,
     /// `/login [provider]`: open the credential wizard. `Some(id)` skips the provider
     /// choice (a built-in id or `custom`); `None` starts at the choice.
     Login(Option<String>),
@@ -280,6 +284,11 @@ pub fn tree() -> &'static [Command] {
             name: "thinking",
             description: "set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)",
             levels: &[thinking_level_level],
+        },
+        Command {
+            name: "usage",
+            description: "show the current provider's usage, one line per window (ADR 0027)",
+            levels: &[],
         },
         Command {
             name: "auto",
@@ -1008,6 +1017,8 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
             Some(level) => Outcome::Thinking(level.clone()),
             None => Outcome::Notices(vec!["usage: /thinking <level>".to_owned()]),
         },
+        Some("/usage") if tokens.len() == 1 => Outcome::Usage,
+        Some("/usage") => Outcome::Notices(vec!["usage: /usage (no arguments)".to_owned()]),
         Some("/model") => match model_switch(&tokens[1..]) {
             Ok(switch) => Outcome::Model(switch),
             Err(usage) => Outcome::Notices(vec![usage]),
@@ -1107,6 +1118,32 @@ fn logout_provider(args: &[String]) -> String {
         [] => String::new(),
         [_, extra, ..] => format!("__extra__{extra}"),
     }
+}
+
+/// `/usage`'s notice lines (ADR 0027): every window of the current
+/// provider's snapshot, one line each, then the provider's own trailing word. This is the full
+/// form — the footer's single line is the short one, and the two are deliberately different
+/// views of the same snapshot.
+pub fn usage_notices(snapshot: &radian_host::UsageSnapshot, stale: bool) -> Vec<String> {
+    let mut header = format!("{} ({})", snapshot.title, snapshot.provider);
+    if stale {
+        header.push_str(" (stale)");
+    }
+    let mut out = vec![header];
+    for window in &snapshot.windows {
+        let mut parts = Vec::new();
+        if let Some(remaining) = &window.remaining {
+            parts.push(format!("{} remaining", remaining.text()));
+        }
+        if let Some(reset) = &window.resets_at {
+            parts.push(format!("resets in {reset}"));
+        }
+        out.push(format!("{}: {}", window.label, parts.join(", ")));
+    }
+    if let Some(plan) = &snapshot.plan {
+        out.push(format!("plan: {plan}"));
+    }
+    out
 }
 
 /// The optional `/compact` note: the arguments joined with spaces, or `None` when empty.
@@ -1410,6 +1447,57 @@ mod tests {
             }
             other => panic!("expected a usage notice, got {other:?}"),
         }
+    }
+
+    /// ADR 0027: `/usage` takes no argument, is a command, and is in
+    /// `/help`; anything after it is a usage notice.
+    #[test]
+    fn usage_is_a_command_with_no_arguments() {
+        assert!(matches!(parse("/usage", false), Outcome::Usage));
+        match parse("/usage now", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /usage"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/usage"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "usage"));
+    }
+
+    /// `/usage`'s lines list **every** window, one line each, then the provider's trailing word
+    /// (ADR 0027: the footer's one line is the short form).
+    #[test]
+    fn usage_notices_lists_every_window() {
+        let snapshot = radian_host::UsageSnapshot {
+            provider: "chatgpt".to_owned(),
+            title: "ChatGPT usage".to_owned(),
+            windows: vec![
+                radian_host::UsageWindow {
+                    label: "5h".to_owned(),
+                    remaining: Some(radian_host::Remaining::Percent(95.0)),
+                    resets_at: Some("1h0m".to_owned()),
+                },
+                radian_host::UsageWindow {
+                    label: "7d".to_owned(),
+                    remaining: Some(radian_host::Remaining::Percent(60.0)),
+                    resets_at: None,
+                },
+            ],
+            plan: Some("pro".to_owned()),
+        };
+        assert_eq!(
+            usage_notices(&snapshot, false),
+            vec![
+                "ChatGPT usage (chatgpt)".to_owned(),
+                "5h: 95% remaining, resets in 1h0m".to_owned(),
+                "7d: 60% remaining".to_owned(),
+                "plan: pro".to_owned(),
+            ]
+        );
+        assert!(
+            usage_notices(&snapshot, true)[0].contains("(stale)"),
+            "a stale snapshot says so"
+        );
     }
 
     /// ADR 0025 S3 / ruling 7: `/skill:` completes the discovered names, which only the host

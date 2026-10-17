@@ -411,6 +411,7 @@ impl StatusContributor for CommandContributor {
                 segments: vec![Segment::new(output.text, output.role)],
                 stale: false,
                 symbol: output.symbol,
+                usage: None,
             }])
         })
     }

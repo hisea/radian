@@ -2098,6 +2098,38 @@ worktree `.radian-worktrees/inherited-sandbox`，分支 `dogfood/inherited-sandb
 5/5 抓住。IS-4 与 IS-6 由同一个测试抓住：前者让真实后端名从摘要里消失，后者让环境变量能选中
 `inherited`，两者都让摘要行写成 `inherited`。IS-7 是 acceptance 5 的两个方向之一：清单里的测试在沙箱
 内必须打标记后返回，去掉一个既少一行标记、又让测试在它跑不了的环境里真跑（于是失败）。
+## ADR 0027 slice ② (`footer-usage`): the `usage` component (2026-10-16)
+
+Driver: exact-match `patch`, then `timeout 300 cargo test -p radian-tui <binary> --locked
+--no-fail-fast`, one mutation at a time, each running only the binary that should catch it.
+Restore: copy the byte-for-byte backup from `/tmp/footer-mut/` back over the file and compare
+(`shasum` identical and `git diff --quiet`). Nothing was left changed.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| U1 | a provider whose descriptor declares no `usage` source draws no usage row (ADR 0027's own mutation) | `footer/components/usage.rs`'s `data` drops `radian_host::usage_endpoint(provider)?` | `--test footer`: `a_provider_without_a_usage_source_draws_no_usage_row` FAILED (59 passed, 1 failed) |
+| U2 | `/usage` prints **every** window of the snapshot | `command.rs`'s `usage_notices` takes `snapshot.windows.iter().take(1)` | `--test footer`: `usage_prints_every_window` FAILED (59 passed, 1 failed); `--lib`: `command::tests::usage_notices_lists_every_window` FAILED |
+| U3 | an old usage id warns once, naming the new id | `footer.rs`'s `canonical_id` returns the new id without pushing the warning | `--test footer`: `the_old_usage_ids_still_render_and_warn_once` FAILED (59 passed, 1 failed) |
+
+3/3 caught; `crates/radian-tui/src/footer/components/usage.rs`, `src/command.rs` and
+`src/footer.rs` each compared byte-identical (`shasum` unchanged) after their mutation.
+
+**Old-code check.** The pre-change tree (3b13d76, extracted with `git archive` into a scratch
+tree outside the repository) was given three tests that state the old behaviour directly:
+`old_code_draws_the_usage_row_for_any_provider` (the deck row was the `opencode-go.usage`
+contribution and was drawn for a routed `anthropic` — the descriptor gate the ADR's mutation
+targets did not exist), `old_code_has_no_usage_command` (`/usage` parsed as an unknown command)
+and `old_code_does_not_know_the_usage_id` (`usage` was an unknown item, warned about and drawn
+raw). All three pass there, so U1's and U2's requirements are new, not vacuous.
+
+The remaining new tests cannot run on that tree at all: `Contribution::usage`,
+`radian_host::USAGE_ITEM` and the `usage` component do not exist there, so the test file does
+not compile. What they pin instead is verified two ways: the two pre-move-line literals are the
+pre-change `opencode_go::display`/`chatgpt_usage::display` output captured **on** that tree
+(`Usage (remaining): 5h: 98% · 7d: 81% · 5h ↺1h0m` and `ChatGPT usage (remaining): 5h: 95% ·
+7d: 60% · 5h ↺1h0m · 7d ↺1d1h · pro`), and the snapshot those literals are drawn from is pinned
+field by field in `radian-host`'s `opencode_go::tests::the_snapshot_is_the_remaining_share` /
+`chatgpt_usage::tests::the_snapshot_is_the_remaining_share_with_a_derived_label`.
 ## oauth-redact：会话中刷新出来的 token 也必须脱敏（2026-10-16）
 
 Base `5cfb0b1` · worktree `.radian-worktrees/oauth-redact`。每个脱敏名单只在启动时读一次

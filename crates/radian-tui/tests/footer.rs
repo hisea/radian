@@ -1038,11 +1038,19 @@ fn the_deck_usage_row_appears_only_with_data() {
         Some("opencode-go".to_string()),
         Some("high".to_string()),
     );
-    // Without data the row is **dropped**, not left blank: two rows, not three.
+    // Without a snapshot the row is **dropped**, not left blank: two rows, not three.
     assert_eq!(app.footer.lines(&app, 100).len(), 2, "no usage, no row");
     let without = render(&mut app, 100, 12);
     assert!(!screen(&without).contains("5h:"), "{}", screen(&without));
-    publish(&app, "opencode-go.usage", "5h: 98% · 7d: 81%");
+    publish_snapshot(
+        &app,
+        usage_snapshot(
+            "opencode-go",
+            "Usage",
+            vec![window("5h", 98.0, None), window("7d", 81.0, None)],
+            None,
+        ),
+    );
     assert_eq!(app.footer.lines(&app, 100).len(), 3, "usage adds a row");
     let with = render(&mut app, 100, 12);
     assert!(
@@ -1665,6 +1673,7 @@ fn publish_contribution(
             segments: vec![radian_host::Segment::new(text, role)],
             stale: false,
             symbol: symbol.map(str::to_string),
+            usage: None,
         });
 }
 
@@ -1856,4 +1865,288 @@ fn a_printf_fixture_appears_in_the_configured_footer_location() {
         "the fixture's `printf hi` is in the configured location: {line:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- ADR 0027: the provider-related `usage` component ----
+
+/// One usage window: `remaining` percent and an optional reset countdown.
+fn window(label: &str, percent: f64, resets_at: Option<&str>) -> radian_host::UsageWindow {
+    radian_host::UsageWindow {
+        label: label.to_string(),
+        remaining: Some(radian_host::Remaining::Percent(percent)),
+        resets_at: resets_at.map(str::to_string),
+    }
+}
+
+fn usage_snapshot(
+    provider: &str,
+    title: &str,
+    windows: Vec<radian_host::UsageWindow>,
+    plan: Option<&str>,
+) -> radian_host::UsageSnapshot {
+    radian_host::UsageSnapshot {
+        provider: provider.to_string(),
+        title: title.to_string(),
+        windows,
+        plan: plan.map(str::to_string),
+    }
+}
+
+/// Publish the `usage` item's snapshot, the way a descriptor's `Endpoint` fetch writes it.
+fn publish_snapshot(app: &App, snapshot: radian_host::UsageSnapshot) {
+    app.contributions
+        .write_contribution(radian_host::Contribution {
+            item: radian_host::USAGE_ITEM.to_string(),
+            segments: Vec::new(),
+            stale: false,
+            symbol: None,
+            usage: Some(snapshot),
+        });
+}
+
+/// Submit one `/…` line and return the notices the app printed.
+fn submit_notices(app: &mut App, line: &str) -> Vec<String> {
+    app.input = line.into();
+    let enter = ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Enter,
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    );
+    let _ = app.on_key(enter);
+    app.session
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == radian_tui::EntryKind::Notice)
+        .map(|entry| entry.text.clone())
+        .collect()
+}
+
+/// Acceptance ②: the drawn text for opencode-go is byte-for-byte the line the source built
+/// before the move. The literal is `opencode_go::display`'s output for the response whose
+/// snapshot is this one, captured on the pre-change tree.
+#[test]
+fn the_usage_row_is_the_pre_move_opencode_go_line() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(
+        None,
+        Some("Mock 5".to_string()),
+        Some("opencode-go".to_string()),
+        None,
+    );
+    publish_snapshot(
+        &app,
+        usage_snapshot(
+            "opencode-go",
+            "Usage",
+            vec![window("5h", 98.0, Some("1h0m")), window("7d", 81.0, None)],
+            None,
+        ),
+    );
+    let terminal = render(&mut app, 100, 12);
+    assert_eq!(
+        row(&terminal, 9).trim_end(),
+        "Usage (remaining): 5h: 98% · 7d: 81% · 5h ↺1h0m"
+    );
+}
+
+/// The same for chatgpt, whose line carries its plan type (`ChatGPT usage (remaining): 5h: 95%
+/// · 7d: 60% · 5h ↺1h0m · 7d ↺1d1h · pro`, the pre-move `chatgpt_usage::display` output).
+#[test]
+fn the_usage_row_is_the_pre_move_chatgpt_line() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(
+        None,
+        Some("Mock 5".to_string()),
+        Some("chatgpt".to_string()),
+        None,
+    );
+    publish_snapshot(
+        &app,
+        usage_snapshot(
+            "chatgpt",
+            "ChatGPT usage",
+            vec![
+                window("5h", 95.0, Some("1h0m")),
+                window("7d", 60.0, Some("1d1h")),
+            ],
+            Some("pro"),
+        ),
+    );
+    let terminal = render(&mut app, 100, 12);
+    assert_eq!(
+        row(&terminal, 9).trim_end(),
+        "ChatGPT usage (remaining): 5h: 95% · 7d: 60% · 5h ↺1h0m · 7d ↺1d1h · pro"
+    );
+}
+
+/// ADR 0027, the ADR's own mutation: a provider whose descriptor
+/// declares no `usage` source draws nothing, even while the store holds a snapshot for it. With
+/// the descriptor check gone, this row would appear.
+#[test]
+fn a_provider_without_a_usage_source_draws_no_usage_row() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(
+        None,
+        Some("Mock 5".to_string()),
+        Some("anthropic".to_string()),
+        None,
+    );
+    publish_snapshot(
+        &app,
+        usage_snapshot("anthropic", "Usage", vec![window("5h", 98.0, None)], None),
+    );
+    assert_eq!(app.footer.lines(&app, 100).len(), 2, "no usage row");
+    let terminal = render(&mut app, 100, 12);
+    assert!(!screen(&terminal).contains("5h:"), "{}", screen(&terminal));
+}
+
+/// The snapshot must belong to the **current** route's provider: a leftover value for another
+/// provider does not draw (the `/model` switch removes it, this is the belt to that braces).
+#[test]
+fn a_snapshot_for_another_provider_does_not_draw() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(
+        None,
+        Some("Mock 5".to_string()),
+        Some("chatgpt".to_string()),
+        None,
+    );
+    publish_snapshot(
+        &app,
+        usage_snapshot("opencode-go", "Usage", vec![window("5h", 98.0, None)], None),
+    );
+    let terminal = render(&mut app, 100, 12);
+    assert!(!screen(&terminal).contains("5h:"), "{}", screen(&terminal));
+}
+
+/// A stale snapshot is the last good value, drawn dim (ADR 0027 C3), exactly as the store
+/// fallback drew a stale contribution before the move.
+#[test]
+fn a_stale_snapshot_is_drawn_dim() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(
+        None,
+        Some("Mock 5".to_string()),
+        Some("opencode-go".to_string()),
+        None,
+    );
+    publish_snapshot(
+        &app,
+        usage_snapshot("opencode-go", "Usage", vec![window("5h", 98.0, None)], None),
+    );
+    let fresh = render(&mut app, 100, 12);
+    let fresh_fg = fg_at(&fresh, 9, "5h: 98%");
+    app.contributions.mark_stale(radian_host::USAGE_ITEM);
+    let stale = render(&mut app, 100, 12);
+    assert!(row(&stale, 9).contains("5h: 98%"), "the value is kept");
+    assert_ne!(
+        fg_at(&stale, 9, "5h: 98%"),
+        fresh_fg,
+        "a stale snapshot is drawn dim"
+    );
+}
+
+/// ADR 0027 + ADR 0008: an id an earlier version used for a provider's
+/// usage row still renders (as `usage`), with one startup warning naming the new id — once,
+/// however often the id is written.
+#[test]
+fn the_old_usage_ids_still_render_and_warn_once() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(
+        None,
+        Some("Mock 5".to_string()),
+        Some("opencode-go".to_string()),
+        None,
+    );
+    let mut config = items(&[("opencode-go.usage", TuiFooterItemConfig::default())]);
+    config.rows = vec![
+        TuiFooterRowConfig {
+            left: vec![item("opencode-go.usage")],
+            ..Default::default()
+        },
+        TuiFooterRowConfig {
+            left: vec![item("opencode-go.usage")],
+            ..Default::default()
+        },
+    ];
+    let warnings = app.apply_footer(&config);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "one warning for the id, however often it is written: {warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("\"opencode-go.usage\"") && warnings[0].contains("\"usage\""),
+        "the warning names the old and the new id: {warnings:?}"
+    );
+    publish_snapshot(
+        &app,
+        usage_snapshot("opencode-go", "Usage", vec![window("5h", 98.0, None)], None),
+    );
+    let terminal = render(&mut app, 100, 12);
+    assert!(
+        screen(&terminal).contains("5h: 98%"),
+        "the old id renders the usage line:\n{}",
+        screen(&terminal)
+    );
+}
+
+/// `/usage` prints **every** window of the current provider's snapshot, not the footer's
+/// one-line form (ADR 0027).
+#[test]
+fn usage_prints_every_window() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(
+        None,
+        Some("Mock 5".to_string()),
+        Some("opencode-go".to_string()),
+        None,
+    );
+    publish_snapshot(
+        &app,
+        usage_snapshot(
+            "opencode-go",
+            "Usage",
+            vec![
+                window("5h", 98.0, Some("1h0m")),
+                window("7d", 81.0, None),
+                window("30d", 91.0, None),
+            ],
+            None,
+        ),
+    );
+    let notices = submit_notices(&mut app, "/usage");
+    assert!(notices[0].contains("opencode-go"), "{notices:?}");
+    for expected in [
+        "5h: 98% remaining, resets in 1h0m",
+        "7d: 81% remaining",
+        "30d: 91% remaining",
+    ] {
+        assert!(
+            notices.iter().any(|notice| notice == expected),
+            "`{expected}` must be a notice: {notices:?}"
+        );
+    }
+}
+
+/// `/usage` says so in one line when the routed provider has no usage source, and when there
+/// is no snapshot yet (ADR 0027).
+#[test]
+fn usage_says_why_there_is_nothing_to_show() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, None, Some("anthropic".to_string()), None);
+    let notices = submit_notices(&mut app, "/usage");
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices[0].contains("anthropic") && notices[0].contains("no usage source"),
+        "{notices:?}"
+    );
+
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, None, Some("opencode-go".to_string()), None);
+    let notices = submit_notices(&mut app, "/usage");
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices[0].contains("opencode-go") && notices[0].contains("no snapshot yet"),
+        "{notices:?}"
+    );
 }

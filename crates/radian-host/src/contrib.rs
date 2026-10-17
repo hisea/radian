@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use crate::usage::UsageSnapshot;
+
 /// A theme role a contribution asks for. Colors come from the theme (ADR 0029); the host never
 /// names a color, and a segment never carries an escape sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,13 +75,17 @@ impl Segment {
 /// the segments are the last good value. `symbol` is an optional glyph drawn before the text
 /// (ADR 0027: a footer `command` may return `{"text","style","symbol"}`);
 /// it is plain text, never an escape sequence, so the theme and the footer's width measurement
-/// stay the only owners of colour and layout.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// stay the only owners of colour and layout. `usage` is the structured value of a usage item
+/// (ADR 0027): the provider's snapshot, which the `usage` component
+/// formats itself — such a contribution carries no segments. (`PartialEq` only: a snapshot
+/// carries percentages.)
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Contribution {
     pub item: String,
     pub segments: Vec<Segment>,
     pub stale: bool,
     pub symbol: Option<String>,
+    pub usage: Option<UsageSnapshot>,
 }
 
 /// The shared contribution store: producers write, the UI reads a snapshot. The dirty/revision
@@ -105,12 +111,13 @@ impl ContributionStore {
             segments,
             stale: false,
             symbol: None,
+            usage: None,
         })
     }
 
     /// Replaces one item's whole contribution, including an optional `symbol` (ADR 0027 revision
-    /// 14 decision 4: a footer `command`'s JSON symbol). Clears `stale`. Returns whether the
-    /// **value** changed.
+    /// 14 decision 4: a footer `command`'s JSON symbol) and an optional usage snapshot (decision
+    /// 3). Clears `stale`. Returns whether the **value** changed.
     pub fn write_contribution(&self, contribution: Contribution) -> bool {
         let item = contribution.item.clone();
         let mut items = self.items.write().unwrap_or_else(|e| e.into_inner());
@@ -118,6 +125,7 @@ impl ContributionStore {
             && !current.stale
             && current.segments == contribution.segments
             && current.symbol == contribution.symbol
+            && current.usage == contribution.usage
         {
             return false;
         }
@@ -529,6 +537,7 @@ impl StatusContributor for GitContributor {
                     segments: vec![Segment::new(branch, SegmentRole::Normal)],
                     stale: false,
                     symbol: None,
+                    usage: None,
                 });
             }
             if let Some(name) = worktree {
@@ -539,6 +548,7 @@ impl StatusContributor for GitContributor {
                     segments: vec![Segment::new(name, SegmentRole::Normal)],
                     stale: false,
                     symbol: None,
+                    usage: None,
                 });
             }
             if let Some(repo) = repo {
@@ -547,6 +557,7 @@ impl StatusContributor for GitContributor {
                     segments: vec![Segment::new(repo, SegmentRole::Normal)],
                     stale: false,
                     symbol: None,
+                    usage: None,
                 });
             }
             if let Some((modified, untracked)) = changes {
@@ -555,12 +566,14 @@ impl StatusContributor for GitContributor {
                     segments: vec![Segment::new(modified.to_string(), SegmentRole::Normal)],
                     stale: false,
                     symbol: None,
+                    usage: None,
                 });
                 contributions.push(Contribution {
                     item: "git_untracked".to_owned(),
                     segments: vec![Segment::new(untracked.to_string(), SegmentRole::Normal)],
                     stale: false,
                     symbol: None,
+                    usage: None,
                 });
             }
             Ok(contributions)
@@ -642,6 +655,7 @@ mod tests {
             segments: vec![Segment::new(text, SegmentRole::Normal)],
             stale: false,
             symbol: None,
+            usage: None,
         }]
     }
 

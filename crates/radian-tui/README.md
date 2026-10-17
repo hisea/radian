@@ -254,7 +254,7 @@ find_next = ["ctrl-g", "shift-enter"]
 - `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
   default to on; `false` hides them.
 - `footer` (ADR 0027 C2, revision 3): the status area's rows. `preset` is `deck` (the default,
-  three rows: the opencode-go usage line — dropped when it has no data — then
+  three rows: the current provider's `usage` line — dropped when it has no snapshot — then
   `model`/`cwd`/`git_branch`/`worktree` with `context_bar`/`reasoning` on the right, then
   `tokens`/`cost`/`context` on the right), `full` (revision 1's two rows), `pi` (the earlier two
   rows) or `classic` (today's one line, byte-for-byte). `separator` joins items (default
@@ -321,7 +321,7 @@ find_next = ["ctrl-g", "shift-enter"]
 
 | `worktree` | `{worktree}` | 只在 git worktree 里显示（贡献者） |
 | `status` | `{status}` | `status.*` 贡献文本，`keys = ["…"]` 可过滤 |
-| `opencode-go.usage` | — | opencode-go 用量的**剩余**百分比与重置倒计时（ADR 0027 C4，贡献者；`tui.usage_period_secs` 0 关闭） |
+| `usage` | `{value}` | **当前 provider** 的用量快照：各窗口的剩余百分比与重置倒计时（ADR 0027）。数据来源在 provider 描述符的 `usage`（`Endpoint`：轮询一个 URL 并解析），组件本身不认识任何 provider；没有来源的 provider 这一行不出现。`tui.usage_period_secs` 0 关闭；旧 id `opencode-go.usage`/`chatgpt.usage` 作为别名保留一个版本，启动时各警告一次。`/usage` 打印同一份快照的**全部**窗口 |
 | `command` item (`[tui.footer.items.<id>] command = "…"`) | `{value}` | the command's first stdout line; JSON `{"text","style","symbol"}` sets the role and symbol (ADR 0027) |
 
 `worktree`/`status` 来自贡献者存储（ADR 0027 C3）：一个 `git` 贡献者每 5 s 在后台刷新
@@ -561,6 +561,7 @@ the rest is sent as an ordinary message.
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
 | `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
 | `/jobs [kill <id\|all>]` | list this session's background `shell` jobs (id, state, elapsed, command) as notices, or stop one/all (ADR 0037 decision 4). `kill` sends SIGTERM to the process group, then SIGKILL after 2 s; the model gets a completion message on the busy/idle lane |
+| `/usage` | print the current provider's usage snapshot, **every** window, as notices (ADR 0027). The footer's `usage` line is the short form of the same snapshot; no usage source, or no snapshot yet, is one line saying so |
 
 - Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
   Unbalanced quotes are an error notice.
