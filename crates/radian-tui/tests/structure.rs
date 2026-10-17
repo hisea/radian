@@ -25,6 +25,12 @@ fn main_rs() -> String {
     code(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli.rs"))
 }
 
+/// The file that now holds the sandbox/access/open_session half of `run()` (ADR 0043
+/// slice 2c extractions): the startup greps that moved out of `src/cli.rs` read it.
+fn run_open_rs() -> String {
+    code(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/run_open.rs"))
+}
+
 /// `App` holds UI state only: every session fact moved to `SessionProjection`, and the app
 /// keeps a read handle.
 #[test]
@@ -83,16 +89,16 @@ fn main_does_not_establish_a_session() {
 /// list silently ignores the user's config, and the compiler cannot tell the two apart.
 #[test]
 fn main_forwards_the_allowed_unix_sockets_to_the_sandbox() {
-    let code = main_rs();
+    let code = run_open_rs();
     let call = code
         .split_once("radian_tui::profile::build_sandbox(")
-        .expect("cli.rs builds the sandbox")
+        .expect("run_open.rs builds the sandbox")
         .1
         .split_once(")?;")
         .expect("the build_sandbox call ends with `)?;`")
         .0;
     assert!(
-        call.contains("&allow_unix_sockets"),
+        call.contains("allow_unix_sockets"),
         "the sandbox must get the resolved `[sandbox] allow_unix_sockets` (ADR 0016):\n{call}"
     );
     assert!(
@@ -106,10 +112,10 @@ fn main_forwards_the_allowed_unix_sockets_to_the_sandbox() {
 /// switch would silently drop them.
 #[test]
 fn access_switches_keep_the_configured_allow_env() {
-    let code = main_rs();
+    let code = run_open_rs();
     let builder = code
         .split_once("let access_builder: radian_host::AccessBuilder = {")
-        .expect("cli.rs builds the access builder")
+        .expect("run_open.rs builds the access builder")
         .1
         .split_once("};")
         .expect("the access builder block ends with `};`")
