@@ -201,6 +201,38 @@ fn spawn_direct_keeping_slave(
 
 const BIN: &str = env!("CARGO_BIN_EXE_radian");
 
+/// The positive deadline: how long a wait for something to **appear**, to **change**, or for the
+/// app to **exit** may take before the test fails. Every positive wait in this file uses it (via
+/// [`wait_positive`]); a wait that measures a bound on purpose passes its own constant instead
+/// (the retry probes, [`WAIT_LATENCY_BOUND`]).
+///
+/// 60 s: the gate runs this suite at load average 70-200 beside several cargo builds, where the
+/// 10-20 s literals it used to carry flaked (2026-10-16/17; `pty_herdr_reports_the_turn_states_
+/// and_releases` did not see `working` within 10 s). 60 s is three times the largest of them and
+/// six times the flaked one, and a passing run pays nothing for the headroom: every helper polls
+/// every 20 ms and returns as soon as its condition holds, so only a failing wait sits it out.
+const WAIT_POSITIVE: Duration = Duration::from_secs(60);
+
+/// [`WAIT_POSITIVE`], raised for one run with `RADIAN_TEST_WAIT_SECS` (a slower machine, or a
+/// soak run, without an edit; `RADIAN_PTY_PARALLEL` is the sibling knob). An unparsable value is
+/// ignored, so a typo cannot silently shorten a deadline.
+fn wait_positive() -> Duration {
+    std::env::var("RADIAN_TEST_WAIT_SECS")
+        .ok()
+        .and_then(|secs| secs.trim().parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(WAIT_POSITIVE)
+}
+
+/// The window for a **negative** check ("X must not appear"): short on purpose, because here the
+/// wait *is* the assertion, so a longer window only makes every run slower.
+const WAIT_NEGATIVE: Duration = Duration::from_secs(2);
+
+/// A deliberate latency bound: the test asserts that something arrives **fast**, so the wait is
+/// the measurement and stays short. `pty_attach_follow_shows_new_committed_events` pins the
+/// attach follow to "within a second" (the README hand-test note).
+const WAIT_LATENCY_BOUND: Duration = Duration::from_secs(1);
+
 /// ADR 0016: a test that depends on **sandbox behaviour** cannot run
 /// inside another sandbox. The nested `sandbox-exec` a probe starts is refused by the kernel
 /// (`sandbox_apply: Operation not permitted`), and what the outer sandbox allows is unknown, so
@@ -460,8 +492,8 @@ impl Pty {
 
     /// Waits until `needle` shows on the screen. `pump` is a state check, not a sleep used
     /// for synchronization; the deadline only bounds a failure.
-    fn wait_for_screen(&mut self, needle: &str, secs: u64) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(secs);
+    fn wait_for_screen(&mut self, needle: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
         loop {
             self.pump();
             if self.parser.screen().contents().contains(needle) {
@@ -474,10 +506,18 @@ impl Pty {
         }
     }
 
+    /// A **negative** check: `needle` must not show up on the screen. The wait *is* the
+    /// assertion ([`WAIT_NEGATIVE`]), so it stays short; returns true when it stayed absent.
+    fn screen_absent(&mut self, needle: &str) -> bool {
+        !self.wait_for_screen(needle, WAIT_NEGATIVE)
+    }
+
     /// Waits until `predicate` holds for the current screen contents. The predicate is the
-    /// synchronization; the deadline only bounds a failure.
-    fn wait_until(&mut self, secs: u64, predicate: impl Fn(&str) -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(secs);
+    /// synchronization; the deadline only bounds a failure. A predicate that waits for something
+    /// to **leave** the screen (`!screen.contains(..)`) is still a positive wait, not a negative
+    /// check: it returns as soon as the transition happened.
+    fn wait_until(&mut self, timeout: Duration, predicate: impl Fn(&str) -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
         loop {
             if predicate(&self.screen()) {
                 return true;
@@ -490,8 +530,8 @@ impl Pty {
     }
 
     /// Waits without killing: on timeout the caller decides (the `Drop` impl still kills).
-    fn wait_for_exit(&mut self, secs: u64) -> Option<u32> {
-        let deadline = Instant::now() + Duration::from_secs(secs);
+    fn wait_for_exit(&mut self, timeout: Duration) -> Option<u32> {
+        let deadline = Instant::now() + timeout;
         loop {
             self.pump();
             if let Ok(Some(status)) = self.child.try_wait() {
@@ -511,11 +551,11 @@ impl Pty {
     /// Expands the startup information block (Ctrl-P). the block is folded
     /// by default, so a test that asserts one of the full startup lines expands it first. A
     /// lost keypress is retried; the wait after each send means a successful toggle is never
-    /// pressed twice.
+    /// pressed twice. One attempt's 1 s is the loop's rhythm, not a failure bound.
     fn expand_startup(&mut self) {
         for _ in 0..3 {
             self.send(&[0x10]); // ctrl-p
-            if self.wait_until(1, |screen| {
+            if self.wait_until(Duration::from_secs(1), |screen| {
                 // The expanded header and the first info line are at the **top** of the block;
                 // with the trust line the block can be taller than a 24-row pty, so accept a
                 // later info line that stays visible when the view is pinned to the bottom.
@@ -532,11 +572,12 @@ impl Pty {
     fn quit(&mut self) {
         // The first idle Ctrl-C arms the 2 s quit window and the second inside it quits
         //, so a quit is a **pair** of presses; a running turn needs a
-        // cancel first, which the retries cover (the next pair then arms and quits).
+        // cancel first, which the retries cover (the next pair then arms and quits). One pair's
+        // 3 s is the loop's rhythm, not a failure bound.
         for _ in 0..4 {
             self.send(&[0x03]);
             self.send(&[0x03]);
-            if self.wait_for_exit(3).is_some() {
+            if self.wait_for_exit(Duration::from_secs(3)).is_some() {
                 return;
             }
         }
@@ -549,8 +590,8 @@ impl Pty {
 
     /// Waits until `needle` appears in the raw output. Control sequences (mouse reporting)
     /// never reach the `vt100` screen, so some assertions read the bytes directly.
-    fn wait_for_raw(&self, needle: &str, secs: u64) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(secs);
+    fn wait_for_raw(&self, needle: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
         loop {
             if String::from_utf8_lossy(&self.raw()).contains(needle) {
                 return true;
@@ -574,9 +615,10 @@ impl Pty {
             .ok()
     }
 
-    /// Waits until `needle` is **gone** from the screen (a modal that was cleared).
-    fn wait_until_gone(&mut self, needle: &str, secs: u64) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(secs);
+    /// Waits until `needle` is **gone** from the screen (a modal that was cleared). Like a
+    /// `!contains` predicate, this is a positive wait for a transition, not a negative check.
+    fn wait_until_gone(&mut self, needle: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
         loop {
             self.pump();
             if !self.parser.screen().contents().contains(needle) {
@@ -669,13 +711,13 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
     );
 
     assert!(
-        pty.wait_for_screen("message", 10),
+        pty.wait_for_screen("message", wait_positive()),
         "screen:\n{}",
         pty.screen()
     );
     pty.send(b"hello from the test\r");
     assert!(
-        pty.wait_for_screen("ASSISTANT-REPLY-OK", 15),
+        pty.wait_for_screen("ASSISTANT-REPLY-OK", wait_positive()),
         "reply not rendered:\n{}",
         pty.screen()
     );
@@ -737,13 +779,13 @@ async fn pty_mounts_only_the_builtin_tools() {
         100,
     );
     assert!(
-        pty.wait_for_screen("message", 10),
+        pty.wait_for_screen("message", wait_positive()),
         "screen:\n{}",
         pty.screen()
     );
     pty.send(b"hello\r");
     assert!(
-        pty.wait_for_screen("TASKS-REPLY-OK", 20),
+        pty.wait_for_screen("TASKS-REPLY-OK", wait_positive()),
         "reply not rendered:\n{}",
         pty.screen()
     );
@@ -834,10 +876,14 @@ async fn pty_launches_with_no_arguments_from_the_config_and_auth_json() {
     );
     let mut pty =
         Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-no-args")], &config, 24, 100);
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"hello\r");
     assert!(
-        pty.wait_for_screen("NO-ARGS-REPLY-OK", 20),
+        pty.wait_for_screen("NO-ARGS-REPLY-OK", wait_positive()),
         "the reply is not on screen:\n{}",
         pty.screen()
     );
@@ -892,16 +938,24 @@ async fn pty_the_context_file_reaches_the_model_and_the_startup_line() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The information block is folded; expand it to see the context line.
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("context: AGENTS.md", 10),
+        pty.wait_for_screen("context: AGENTS.md", wait_positive()),
         "the startup line must name the context file:\n{}",
         pty.screen()
     );
     pty.send(b"hello\r");
-    assert!(pty.wait_for_screen("OK", 20), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("OK", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     let body = server.requests()[0].json();
     let system = body["messages"]
         .as_array()
@@ -964,12 +1018,16 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
     // wait (`wait_for_screen` blocks until the text is on screen), so there is no race to
     // remove. The notice waits use the same 20 s as the turn waits: a 10 s bound is the one
     // place a heavily loaded machine can still fail the test without a wrong behavior.
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     // `/skill:greet hello 世界`: the body and the args are one user message.
     pty.send("/skill:greet hello 世界\r".as_bytes());
     assert!(
-        pty.wait_for_screen("SKILL-REPLY-OK", 20),
+        pty.wait_for_screen("SKILL-REPLY-OK", wait_positive()),
         "the reply is missing:\n{}",
         pty.screen()
     );
@@ -1009,12 +1067,15 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
     // `/skills` lists both the visible and the model-invocation-disabled skill.
     pty.send("/skills\r".as_bytes());
     assert!(
-        pty.wait_for_screen("greet: Say hello.", 20),
+        pty.wait_for_screen("greet: Say hello.", wait_positive()),
         "the list is missing:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("secret: SECRET-DESCRIPTION (model-invocation off)", 20),
+        pty.wait_for_screen(
+            "secret: SECRET-DESCRIPTION (model-invocation off)",
+            wait_positive()
+        ),
         "the disabled skill is not listed:\n{}",
         pty.screen()
     );
@@ -1022,7 +1083,7 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
     // `/skill:nope` is a notice, not a message: no second request.
     pty.send("/skill:nope\r".as_bytes());
     assert!(
-        pty.wait_for_screen("no skill named `nope`", 20),
+        pty.wait_for_screen("no skill named `nope`", wait_positive()),
         "the notice is missing:\n{}",
         pty.screen()
     );
@@ -1035,7 +1096,7 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
     // `//skill:greet` is the escape: an ordinary message with one slash dropped.
     pty.send("//skill:greet\r".as_bytes());
     assert!(
-        pty.wait_for_screen("ESCAPE-REPLY-OK", 20),
+        pty.wait_for_screen("ESCAPE-REPLY-OK", wait_positive()),
         "the escaped message got no reply:\n{}",
         pty.screen()
     );
@@ -1100,10 +1161,14 @@ async fn pty_skills_extra_paths_are_read_from_the_config() {
         24,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send("hello\r".as_bytes());
     assert!(
-        pty.wait_for_screen("EXTRA-SKILL-REPLY-OK", 20),
+        pty.wait_for_screen("EXTRA-SKILL-REPLY-OK", wait_positive()),
         "the reply is missing:\n{}",
         pty.screen()
     );
@@ -1120,7 +1185,7 @@ async fn pty_skills_extra_paths_are_read_from_the_config() {
     // The extra skill is usable end to end through the command path too.
     pty.send("/skill:team-skill\r".as_bytes());
     assert!(
-        pty.wait_for_screen("EXTRA-COMMAND-REPLY-OK", 20),
+        pty.wait_for_screen("EXTRA-COMMAND-REPLY-OK", wait_positive()),
         "the extra skill got no reply:\n{}",
         pty.screen()
     );
@@ -1173,38 +1238,38 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
         120,
     );
     assert!(
-        pty.wait_for_screen("project trust", 10),
+        pty.wait_for_screen("project trust", wait_positive()),
         "the trust modal is missing:\n{}",
         pty.screen()
     );
     // All six options, and the default highlight is the fail-safe one.
     assert!(
-        pty.wait_for_screen("Trust this directory", 10),
+        pty.wait_for_screen("Trust this directory", wait_positive()),
         "{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("use the sandbox for this project", 10),
+        pty.wait_for_screen("use the sandbox for this project", wait_positive()),
         "the sandbox choice is missing:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("Trust the parent", 10),
+        pty.wait_for_screen("Trust the parent", wait_positive()),
         "{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("Trust this session only", 10),
+        pty.wait_for_screen("Trust this session only", wait_positive()),
         "{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("Do not trust this directory", 10),
+        pty.wait_for_screen("Do not trust this directory", wait_positive()),
         "{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("Do not trust, this session only", 10),
+        pty.wait_for_screen("Do not trust, this session only", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -1213,7 +1278,7 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
     pty.send(b"\r");
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("project resources: not loaded", 10),
+        pty.wait_for_screen("project resources: not loaded", wait_positive()),
         "the trust state was not shown:\n{}",
         pty.screen()
     );
@@ -1267,12 +1332,12 @@ async fn pty_trust_sandbox_choice_writes_the_access_record() {
         120,
     );
     assert!(
-        pty.wait_for_screen("project trust", 10),
+        pty.wait_for_screen("project trust", wait_positive()),
         "the trust modal is missing:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("use the sandbox for this project", 10),
+        pty.wait_for_screen("use the sandbox for this project", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -1284,7 +1349,7 @@ async fn pty_trust_sandbox_choice_writes_the_access_record() {
     pty.send(b"\r");
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("project resources: loaded", 10),
+        pty.wait_for_screen("project resources: loaded", wait_positive()),
         "the trust state was not shown:\n{}",
         pty.screen()
     );
@@ -1350,7 +1415,7 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
     );
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("project resources: loaded", 10),
+        pty.wait_for_screen("project resources: loaded", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -1379,7 +1444,10 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
     );
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("project resources: loaded (trusted: saved for", 10),
+        pty.wait_for_screen(
+            "project resources: loaded (trusted: saved for",
+            wait_positive()
+        ),
         "{}",
         pty.screen()
     );
@@ -1411,7 +1479,10 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
     );
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("project resources: not loaded (untrusted: default)", 10),
+        pty.wait_for_screen(
+            "project resources: not loaded (untrusted: default)",
+            wait_positive()
+        ),
         "{}",
         pty.screen()
     );
@@ -1450,7 +1521,7 @@ fn pty_panic_path_restores_the_terminal() {
         80,
     );
     assert!(
-        pty.wait_for_exit(15).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the app did not exit after panic"
     );
     assert_eq!(pty.app_exit_code(), Some(101), "panic must exit 101");
@@ -1536,7 +1607,10 @@ fn pty_an_unwritable_diagnostics_directory_is_only_a_notice() {
         20,
         100,
     );
-    assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "the app did not exit"
+    );
     assert_eq!(
         pty.app_exit_code(),
         Some(101),
@@ -1595,7 +1669,7 @@ fn pty_panic_path_does_not_orphan_a_child() {
         80,
     );
     assert!(
-        pty.wait_for_exit(15).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the app did not exit after the panic"
     );
     assert_eq!(pty.app_exit_code(), Some(101), "panic must exit 101");
@@ -1609,7 +1683,7 @@ fn pty_panic_path_does_not_orphan_a_child() {
         .parse()
         .expect("a pid");
     assert!(
-        gone_within(pid, Duration::from_secs(10)),
+        gone_within(pid, wait_positive()),
         "the child {pid} outlived the panic"
     );
     assert!(
@@ -1647,7 +1721,7 @@ async fn pty_panic_path_does_not_orphan_a_background_job() {
         80,
     );
     assert!(
-        pty.wait_for_exit(15).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the app did not exit after the panic"
     );
     assert_eq!(
@@ -1663,7 +1737,7 @@ async fn pty_panic_path_does_not_orphan_a_background_job() {
         .parse()
         .expect("a pid");
     assert!(
-        gone_within(pid, Duration::from_secs(10)),
+        gone_within(pid, wait_positive()),
         "the background job (pid {pid}) outlived the panic"
     );
     assert!(
@@ -1720,18 +1794,18 @@ async fn pty_resume_renders_the_stored_history() {
         100,
     );
     assert!(
-        pty.wait_for_screen("OLD-USER-TURN", 10),
+        pty.wait_for_screen("OLD-USER-TURN", wait_positive()),
         "the resumed history is not on screen:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("OLD-ASSISTANT-REPLY", 10),
+        pty.wait_for_screen("OLD-ASSISTANT-REPLY", wait_positive()),
         "the assistant reply is missing:\n{}",
         pty.screen()
     );
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("resumed session resume-me", 10),
+        pty.wait_for_screen("resumed session resume-me", wait_positive()),
         "the resume notice is missing:\n{}",
         pty.screen()
     );
@@ -1739,7 +1813,7 @@ async fn pty_resume_renders_the_stored_history() {
     // The resumed session keeps appending to the same file.
     pty.send(b"continue\r");
     assert!(
-        pty.wait_for_screen("new reply", 15),
+        pty.wait_for_screen("new reply", wait_positive()),
         "the resumed session did not run a turn:\n{}",
         pty.screen()
     );
@@ -1789,11 +1863,15 @@ async fn pty_approval_allow_once_runs_the_tool() {
         // the resolved-path assertion below needs it on one line.
         140,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"please write\r");
 
     assert!(
-        pty.wait_for_screen("approve tool call?", 20),
+        pty.wait_for_screen("approve tool call?", wait_positive()),
         "no approval prompt:\n{}",
         pty.screen()
     );
@@ -1811,7 +1889,7 @@ async fn pty_approval_allow_once_runs_the_tool() {
 
     pty.send(b"y");
     assert!(
-        pty.wait_for_screen("WROTE-IT", 20),
+        pty.wait_for_screen("WROTE-IT", wait_positive()),
         "the approved call did not complete:\n{}",
         pty.screen()
     );
@@ -1862,10 +1940,14 @@ async fn pty_approval_deny_is_fed_back_to_the_model() {
         30,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", 20),
+        pty.wait_for_screen("approve tool call?", wait_positive()),
         "no prompt:\n{}",
         pty.screen()
     );
@@ -1873,7 +1955,7 @@ async fn pty_approval_deny_is_fed_back_to_the_model() {
     // The reply and the denial are two different events: wait for both, so a frame that shows
     // the reply before the tool result's line cannot make this flake.
     assert!(
-        pty.wait_until(20, |screen| {
+        pty.wait_until(wait_positive(), |screen| {
             screen.contains("SAW-THE-DENIAL") && screen.contains("denied")
         }),
         "the turn did not continue after the denial:\n{}",
@@ -1922,17 +2004,21 @@ async fn pty_approval_always_skips_the_next_prompt() {
         30,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", 20),
+        pty.wait_for_screen("approve tool call?", wait_positive()),
         "no first prompt:\n{}",
         pty.screen()
     );
     pty.send(b"a");
     // No further key press: if the second call asked again the turn would stall here.
     assert!(
-        pty.wait_for_screen("DONE-TWICE", 20),
+        pty.wait_for_screen("DONE-TWICE", wait_positive()),
         "the session grant did not cover the second call:\n{}",
         pty.screen()
     );
@@ -1976,16 +2062,20 @@ async fn pty_escape_cancels_a_running_tool_turn() {
         30,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("sleep 120", 20),
+        pty.wait_for_screen("sleep 120", wait_positive()),
         "the tool did not start:\n{}",
         pty.screen()
     );
     pty.send(&[0x1b]);
     assert!(
-        pty.wait_for_screen("cancelled", 20),
+        pty.wait_for_screen("cancelled", wait_positive()),
         "Esc did not cancel the turn:\n{}",
         pty.screen()
     );
@@ -2014,7 +2104,11 @@ async fn pty_escape_cancels_a_running_turn() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"hello\r");
     // Wait until the request reached the mock: the turn is running now.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -2029,7 +2123,7 @@ async fn pty_escape_cancels_a_running_turn() {
     // The input is empty (the message was sent): Esc cancels the running turn.
     pty.send(&[0x1b]);
     assert!(
-        pty.wait_for_screen("cancelled", 20),
+        pty.wait_for_screen("cancelled", wait_positive()),
         "Esc did not cancel the turn:\n{}",
         pty.screen()
     );
@@ -2070,17 +2164,21 @@ async fn pty_ctrl_c_while_waiting_for_approval_cancels_the_turn() {
         30,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", 20),
+        pty.wait_for_screen("approve tool call?", wait_positive()),
         "no prompt:\n{}",
         pty.screen()
     );
 
     pty.send(&[0x03]); // Ctrl-C: cancel the turn, not answer the prompt
     assert!(
-        pty.wait_for_screen("cancelled", 20),
+        pty.wait_for_screen("cancelled", wait_positive()),
         "the turn was not cancelled:\n{}",
         pty.screen()
     );
@@ -2124,11 +2222,15 @@ async fn pty_an_over_budget_request_is_still_sent() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // ~1000 estimated tokens, over B = 750.
     pty.send(format!("\x1b[200~{}\x1b[201~\r", "x".repeat(4_000)).as_bytes());
     assert!(
-        pty.wait_for_screen("OVER-BUDGET-REPLY", 20),
+        pty.wait_for_screen("OVER-BUDGET-REPLY", wait_positive()),
         "the over-budget request must still be sent:\n{}",
         pty.screen()
     );
@@ -2180,7 +2282,7 @@ async fn pty_without_a_window_the_status_bar_says_the_budget_is_off() {
         110,
     );
     assert!(
-        pty.wait_for_screen("context budget off", 10),
+        pty.wait_for_screen("context budget off", wait_positive()),
         "the status bar does not say the budget is off:\n{}",
         pty.screen()
     );
@@ -2224,7 +2326,7 @@ async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
         100,
     );
     assert!(
-        pty.wait_for_exit(15).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the app did not exit after the probe failed"
     );
     assert_eq!(
@@ -2318,7 +2420,7 @@ async fn pty_an_outer_sandbox_is_inherited_instead_of_refused() {
     );
     // No refusal: the composer is up.
     assert!(
-        pty.wait_for_screen("message", 20),
+        pty.wait_for_screen("message", wait_positive()),
         "the app refused to start under the outer sandbox:\n{}",
         pty.screen()
     );
@@ -2399,7 +2501,7 @@ fn outer_profile(ws: &Path) -> String {
 /// draining the pty. The file's existence is the synchronization; the deadline only bounds a
 /// failure.
 fn wait_for_bang_file(pty: &mut Pty, path: &Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + wait_positive();
     while Instant::now() < deadline {
         pty.pump();
         if path.exists() {
@@ -2451,10 +2553,14 @@ async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", 20),
+        pty.wait_for_screen("approve tool call?", wait_positive()),
         "a shell command must ask:\n{}",
         pty.screen()
     );
@@ -2468,7 +2574,7 @@ async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
 
     pty.send(b"y");
     assert!(
-        pty.wait_for_screen("SHELL-DONE", 30),
+        pty.wait_for_screen("SHELL-DONE", wait_positive()),
         "the approved shell command did not finish:\n{}",
         pty.screen()
     );
@@ -2522,17 +2628,21 @@ async fn pty_a_compound_shell_command_always_asks() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The simple command is allowed by the rule: it runs with no key pressed, and its output
     // proves it actually ran.
     pty.send(b"first\r");
     assert!(
-        pty.wait_for_screen("ALLOWED-OUTPUT-42", 20),
+        pty.wait_for_screen("ALLOWED-OUTPUT-42", wait_positive()),
         "the allowed command did not run:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("FIRST-DONE", 20),
+        pty.wait_for_screen("FIRST-DONE", wait_positive()),
         "the allowed command was blocked:\n{}",
         pty.screen()
     );
@@ -2545,7 +2655,7 @@ async fn pty_a_compound_shell_command_always_asks() {
     // The compound one is not a simple command, so the allow rule cannot match it.
     pty.send(b"second\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", 20),
+        pty.wait_for_screen("approve tool call?", wait_positive()),
         "a compound command must ask:\n{}",
         pty.screen()
     );
@@ -2555,7 +2665,11 @@ async fn pty_a_compound_shell_command_always_asks() {
         pty.screen()
     );
     pty.send(b"n");
-    assert!(pty.wait_for_screen("SECOND-DONE", 20), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("SECOND-DONE", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     pty.quit();
 }
@@ -2585,19 +2699,22 @@ fn pty_a_driver_panic_ends_the_session_and_refuses_fork() {
     );
     // The session ends in place: the notice names the reason and the app stays.
     assert!(
-        pty.wait_for_screen("the session ended: driver panicked", 15),
+        pty.wait_for_screen("the session ended: driver panicked", wait_positive()),
         "the session-ended notice is missing:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("driver task panic test", 10),
+        pty.wait_for_screen("driver task panic test", wait_positive()),
         "the reason is the panic message:\n{}",
         pty.screen()
     );
     // `/fork` is refused: the session is over.
     pty.send(b"/fork\r");
     assert!(
-        pty.wait_for_screen("the session has ended; there is nothing to fork", 10),
+        pty.wait_for_screen(
+            "the session has ended; there is nothing to fork",
+            wait_positive()
+        ),
         "`/fork` was not refused:\n{}",
         pty.screen()
     );
@@ -2634,11 +2751,11 @@ async fn pty_multiline_paste_reaches_the_input_box() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10));
+    assert!(pty.wait_for_screen("message", wait_positive()));
 
     pty.send(b"\x1b[200~paste line one\npaste line two\npaste line three\x1b[201~");
     assert!(
-        pty.wait_for_screen("paste line one", 10),
+        pty.wait_for_screen("paste line one", wait_positive()),
         "paste not shown:\n{}",
         pty.screen()
     );
@@ -2677,13 +2794,13 @@ async fn pty_a_committed_ime_string_reaches_the_input_in_one_frame() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10));
+    assert!(pty.wait_for_screen("message", wait_positive()));
     // A mixed CJK/ASCII run written as one burst (what an IME commit produces).
     let text = "你好世界abc测试中文输入法";
     let start = std::time::Instant::now();
     pty.send(text.as_bytes());
     assert!(
-        pty.wait_for_screen(text, 2),
+        pty.wait_for_screen(text, wait_positive()),
         "the whole string must reach the input:\n{}",
         pty.screen()
     );
@@ -2728,12 +2845,20 @@ async fn pty_reasoning_is_not_sent_back_to_the_provider() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10));
+    assert!(pty.wait_for_screen("message", wait_positive()));
 
     pty.send(b"first\r");
-    assert!(pty.wait_for_screen("first answer", 15), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("first answer", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"second\r");
-    assert!(pty.wait_for_screen("second answer", 15), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("second answer", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     let requests = server.requests();
     assert!(requests.len() >= 2, "two requests expected");
@@ -2773,10 +2898,14 @@ async fn pty_a_header_value_expands_the_session_id() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"hi\r");
     assert!(
-        pty.wait_for_screen("HEADER-OK", 15),
+        pty.wait_for_screen("HEADER-OK", wait_positive()),
         "reply not rendered:\n{}",
         pty.screen()
     );
@@ -2812,9 +2941,17 @@ async fn pty_a_resumed_session_header_uses_the_resumed_id() {
         24,
         100,
     );
-    assert!(first.wait_for_screen("message", 10), "{}", first.screen());
+    assert!(
+        first.wait_for_screen("message", wait_positive()),
+        "{}",
+        first.screen()
+    );
     first.send(b"one\r");
-    assert!(first.wait_for_screen("FIRST", 15), "{}", first.screen());
+    assert!(
+        first.wait_for_screen("FIRST", wait_positive()),
+        "{}",
+        first.screen()
+    );
     first.quit();
     assert_eq!(first.app_exit_code(), Some(0));
 
@@ -2834,9 +2971,17 @@ async fn pty_a_resumed_session_header_uses_the_resumed_id() {
         24,
         100,
     );
-    assert!(second.wait_for_screen("message", 10), "{}", second.screen());
+    assert!(
+        second.wait_for_screen("message", wait_positive()),
+        "{}",
+        second.screen()
+    );
     second.send(b"two\r");
-    assert!(second.wait_for_screen("SECOND", 15), "{}", second.screen());
+    assert!(
+        second.wait_for_screen("SECOND", wait_positive()),
+        "{}",
+        second.screen()
+    );
     second.quit();
     assert_eq!(second.app_exit_code(), Some(0));
     assert_eq!(
@@ -2872,7 +3017,7 @@ async fn pty_an_authorization_header_is_refused_without_echoing_its_value() {
         100,
     );
     assert!(
-        pty.wait_for_exit(10).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the app did not refuse:\n{}",
         pty.screen()
     );
@@ -2912,7 +3057,7 @@ async fn pty_a_malformed_header_error_does_not_echo_its_value() {
         100,
     );
     assert!(
-        pty.wait_for_exit(10).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the app did not refuse:\n{}",
         pty.screen()
     );
@@ -2964,18 +3109,22 @@ async fn pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The session is open, so the status bar reports what connected. The fixture exposes 16
     // tools.
     assert!(
-        pty.wait_for_screen("mcp 1/16", 20),
+        pty.wait_for_screen("mcp 1/16", wait_positive()),
         "the status bar does not show the MCP counts:\n{}",
         pty.screen()
     );
 
     pty.send(b"call the echo tool\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", 20),
+        pty.wait_for_screen("approve tool call?", wait_positive()),
         "no approval for the MCP tool:\n{}",
         pty.screen()
     );
@@ -2992,7 +3141,7 @@ async fn pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them() {
 
     pty.send(b"y");
     assert!(
-        pty.wait_for_screen("MCP-DONE", 20),
+        pty.wait_for_screen("MCP-DONE", wait_positive()),
         "the approved MCP call did not complete:\n{}",
         pty.screen()
     );
@@ -3020,7 +3169,7 @@ async fn pty_the_brand_config_is_the_banner_fallback() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 20);
     assert!(
-        pty.wait_for_screen("ʀ radian", 10),
+        pty.wait_for_screen("ʀ radian", wait_positive()),
         "the configured brand is not in the fallback banner:\n{}",
         pty.screen()
     );
@@ -3060,7 +3209,11 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The sandbox facts line is one of the folded startup lines.
     pty.expand_startup();
     // The notice wraps across lines; collapse whitespace before matching the sentence.
@@ -3122,7 +3275,11 @@ async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
         30,
         120,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     let screen = pty.screen();
     // The collapsed summary line carries the tier, the sandbox word and the rest.
     let summary = screen
@@ -3186,7 +3343,11 @@ async fn pty_the_default_tier_is_full_with_no_sandbox() {
         30,
         120,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     let screen = pty.screen();
     let summary = screen
         .lines()
@@ -3239,7 +3400,11 @@ async fn pty_a_project_config_narrows_the_tier() {
         30,
         120,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     let screen = pty.screen();
     let summary = screen
         .lines()
@@ -3296,23 +3461,30 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.expand_startup();
     // Wait for the line itself: expand_startup returns on the first expanded frame it sees,
     // and under load the pty can hold only part of that frame (gate run, load ~300).
     assert!(
-        pty.wait_for_screen("auto: tool calls are approved without asking", 10),
+        pty.wait_for_screen(
+            "auto: tool calls are approved without asking",
+            wait_positive()
+        ),
         "the startup must say approvals are off:\n{}",
         pty.screen()
     );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("sum=42", 30),
+        pty.wait_for_screen("sum=42", wait_positive()),
         "the command output is missing, so the shell did not run:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("YES-DONE", 30),
+        pty.wait_for_screen("YES-DONE", wait_positive()),
         "the command did not run without a prompt:\n{}",
         pty.screen()
     );
@@ -3364,7 +3536,11 @@ async fn pty_max_model_calls_limits_the_turn() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     let path = sessions.join("max-calls.jsonl");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -3414,10 +3590,14 @@ async fn pty_an_at_reference_attaches_the_file_and_folds_it() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send("看看 @notes.txt\r".as_bytes());
     assert!(
-        pty.wait_for_screen("MENTION-OK", 20),
+        pty.wait_for_screen("MENTION-OK", wait_positive()),
         "the reply is missing:\n{}",
         pty.screen()
     );
@@ -3444,7 +3624,7 @@ async fn pty_an_at_reference_attaches_the_file_and_folds_it() {
     assert!(!user.contains("<file path="), "{user}");
     // The transcript shows the folded form, not the file body.
     assert!(
-        pty.wait_for_screen("[file: notes.txt,", 10),
+        pty.wait_for_screen("[file: notes.txt,", wait_positive()),
         "the attachment is not folded:\n{}",
         pty.screen()
     );
@@ -3486,10 +3666,14 @@ async fn pty_a_binary_attachment_is_not_sent_and_the_input_is_kept() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"see @blob.bin\r");
     assert!(
-        pty.wait_for_screen("not sent:", 10),
+        pty.wait_for_screen("not sent:", wait_positive()),
         "no failure notice:\n{}",
         pty.screen()
     );
@@ -3535,17 +3719,21 @@ async fn pty_tab_completes_an_at_reference_and_enter_attaches_it() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send("看 @no".as_bytes());
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("@notes.txt", 10),
+        pty.wait_for_screen("@notes.txt", wait_positive()),
         "Tab did not complete the reference:\n{}",
         pty.screen()
     );
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("TAB-OK", 20),
+        pty.wait_for_screen("TAB-OK", wait_positive()),
         "the turn did not run:\n{}",
         pty.screen()
     );
@@ -3608,7 +3796,7 @@ fn pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
         100,
     );
     assert!(
-        pty.wait_for_exit(15).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the app did not exit on a bad workspace"
     );
     assert_eq!(pty.app_exit_code(), Some(2));
@@ -3659,7 +3847,7 @@ fn pty_a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
         100,
     );
     assert!(
-        pty.wait_for_exit(15).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the app did not exit on a nested workspace"
     );
     assert_eq!(pty.app_exit_code(), Some(2));
@@ -3709,7 +3897,10 @@ fn pty_a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
         20,
         100,
     );
-    assert!(pty.wait_for_exit(15).is_some(), "the refusal did not exit");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "the refusal did not exit"
+    );
     assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(
@@ -3737,7 +3928,10 @@ fn pty_a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
         20,
         100,
     );
-    assert!(retry.wait_for_exit(15).is_some(), "the retry did not exit");
+    assert!(
+        retry.wait_for_exit(wait_positive()).is_some(),
+        "the retry did not exit"
+    );
     assert!(
         session_dir.join("retry.jsonl").exists(),
         "the corrected retry created the session"
@@ -3777,7 +3971,10 @@ fn pty_a_bad_mcp_config_creates_no_session() {
         20,
         100,
     );
-    assert!(pty.wait_for_exit(15).is_some(), "the refusal did not exit");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "the refusal did not exit"
+    );
     assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw.contains(bad.to_str().unwrap()), "{raw}");
@@ -3811,7 +4008,11 @@ async fn pty_clean_exit_prints_one_reason_line() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "clean exit");
 
@@ -3864,7 +4065,10 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
         20,
         100,
     );
-    assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "the app did not exit"
+    );
     assert_eq!(pty.app_exit_code(), Some(101), "a panic exits 101");
 
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
@@ -3965,7 +4169,10 @@ fn pty_the_panic_log_redacts_every_auth_key_not_only_the_startup_one() {
         20,
         100,
     );
-    assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "the app did not exit"
+    );
     assert_eq!(pty.app_exit_code(), Some(101), "a panic exits 101");
 
     let diagnostics = diagnostics_dir(dir.path());
@@ -4030,7 +4237,11 @@ fn pty_sigterm_and_sighup_restore_the_terminal_and_say_why() {
             20,
             100,
         );
-        assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+        assert!(
+            pty.wait_for_screen("message", wait_positive()),
+            "{}",
+            pty.screen()
+        );
         let pid = app_pid(&pty);
         let status = std::process::Command::new("kill")
             .arg(format!("-{signal}"))
@@ -4039,7 +4250,7 @@ fn pty_sigterm_and_sighup_restore_the_terminal_and_say_why() {
             .unwrap();
         assert!(status.success(), "kill -{signal} {pid}");
         assert!(
-            pty.wait_for_exit(15).is_some(),
+            pty.wait_for_exit(wait_positive()).is_some(),
             "{name}: the app did not exit"
         );
         assert_eq!(pty.app_exit_code(), Some(code), "{name}: 128 + signal");
@@ -4099,10 +4310,14 @@ async fn pty_anthropic_provider_sends_a_messages_request_and_renders_the_reply()
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"hello\r");
     assert!(
-        pty.wait_for_screen("ANTHROPIC-TUI-REPLY", 20),
+        pty.wait_for_screen("ANTHROPIC-TUI-REPLY", wait_positive()),
         "the reply is not on screen:\n{}",
         pty.screen()
     );
@@ -4153,7 +4368,7 @@ fn pty_session_id_already_exists_points_at_resume() {
         80,
     );
     assert!(
-        first.wait_for_exit(15).is_some(),
+        first.wait_for_exit(wait_positive()).is_some(),
         "the first run did not exit"
     );
     assert!(dir.path().join("dup.jsonl").exists());
@@ -4174,7 +4389,7 @@ fn pty_session_id_already_exists_points_at_resume() {
         80,
     );
     assert!(
-        second.wait_for_exit(15).is_some(),
+        second.wait_for_exit(wait_positive()).is_some(),
         "the second run did not exit"
     );
     assert_eq!(second.app_exit_code(), Some(2));
@@ -4217,7 +4432,7 @@ fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
         args.extend(extra);
         let mut pty = Pty::spawn(&args, 20, 80);
         assert!(
-            pty.wait_for_exit(15).is_some(),
+            pty.wait_for_exit(wait_positive()).is_some(),
             "{label}: the refusal did not exit"
         );
         assert_eq!(pty.app_exit_code(), Some(2), "{label}");
@@ -4262,22 +4477,26 @@ async fn pty_a_model_error_is_shown_and_the_session_continues() {
         24,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"first\r");
     assert!(
-        pty.wait_for_screen("turn failed", 20),
+        pty.wait_for_screen("turn failed", wait_positive()),
         "the failure is not shown:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("HTTP 400", 20),
+        pty.wait_for_screen("HTTP 400", wait_positive()),
         "the HTTP status is not shown:\n{}",
         pty.screen()
     );
     // Still usable: a second line opens a new turn that succeeds.
     pty.send(b"second\r");
     assert!(
-        pty.wait_for_screen("SECOND-OK", 20),
+        pty.wait_for_screen("SECOND-OK", wait_positive()),
         "the session did not continue:\n{}",
         pty.screen()
     );
@@ -4309,22 +4528,26 @@ async fn pty_a_context_overflow_is_shown_with_a_hint() {
         24,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"first\r");
     assert!(
-        pty.wait_for_screen("model context overflow", 20),
+        pty.wait_for_screen("model context overflow", wait_positive()),
         "the overflow is not shown:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("compaction could not keep the request", 20),
+        pty.wait_for_screen("compaction could not keep the request", wait_positive()),
         "the hint is not shown:\n{}",
         pty.screen()
     );
     // Still usable: a second line opens a new turn that succeeds.
     pty.send(b"second\r");
     assert!(
-        pty.wait_for_screen("SECOND-OK", 20),
+        pty.wait_for_screen("SECOND-OK", wait_positive()),
         "the session did not continue:\n{}",
         pty.screen()
     );
@@ -4361,7 +4584,7 @@ async fn pty_the_startup_notice_names_the_window_source() {
     );
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("B 15000 from --context-window", 10),
+        pty.wait_for_screen("B 15000 from --context-window", wait_positive()),
         "the startup notice does not name the explicit window and its B:\n{}",
         pty.screen()
     );
@@ -4397,10 +4620,14 @@ async fn pty_a_zero_context_window_in_the_config_leaves_the_budget_off() {
         24,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.expand_startup();
     assert!(
-        pty.wait_until(10, |screen| {
+        pty.wait_until(wait_positive(), |screen| {
             let notice = screen.split_whitespace().collect::<Vec<_>>().join(" ");
             notice.contains("context window: window unknown") && notice.contains("no budget")
         }),
@@ -4440,7 +4667,7 @@ fn pty_a_zero_context_window_flag_is_a_usage_error() {
         100,
     );
     assert!(
-        pty.wait_for_exit(15).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the app did not refuse `--context-window 0`"
     );
     assert_eq!(pty.app_exit_code(), Some(2));
@@ -4483,14 +4710,18 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The memory notice is one of the folded startup lines. Wait for the
     // text itself: `expand_startup` returns on the first expanded frame it sees, and under load
     // the pty can hold only part of that frame. The notice wraps across lines, so compare the
     // screen with its whitespace normalized; the bound only fails a missing notice.
     pty.expand_startup();
     assert!(
-        pty.wait_until(10, |screen| {
+        pty.wait_until(wait_positive(), |screen| {
             let notice = screen.split_whitespace().collect::<Vec<_>>().join(" ");
             notice.contains("[memory]")
                 && notice.contains("no project linked")
@@ -4537,22 +4768,26 @@ async fn pty_a_memory_add_shows_the_created_project_notice() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     pty.send(b"/memory add \"hello world\"\r");
     assert!(
-        pty.wait_for_screen("created project", 10),
+        pty.wait_for_screen("created project", wait_positive()),
         "the notice names the new project: {}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("identity key", 10),
+        pty.wait_for_screen("identity key", wait_positive()),
         "the notice names the identity key: {}",
         pty.screen()
     );
     pty.send(b"/memory list\r");
     assert!(
-        pty.wait_for_screen("hello world", 10),
+        pty.wait_for_screen("hello world", wait_positive()),
         "the record is in the new project: {}",
         pty.screen()
     );
@@ -4586,14 +4821,30 @@ async fn pty_memory_commands_run_without_a_model_request() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     pty.send(b"/memory project new\r");
-    assert!(pty.wait_for_screen("now owns", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("now owns", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/memory add \"hello world\"\r");
-    assert!(pty.wait_for_screen("added", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("added", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/memory list\r");
-    assert!(pty.wait_for_screen("hello world", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("hello world", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     assert!(
         server.requests().is_empty(),
         "a /memory command must not reach the model"
@@ -4602,7 +4853,7 @@ async fn pty_memory_commands_run_without_a_model_request() {
     // A normal message still works, and the memory is in its system prompt.
     pty.send(b"what do you remember?\r");
     assert!(
-        pty.wait_for_screen("REPLY-AFTER-MEMORY", 20),
+        pty.wait_for_screen("REPLY-AFTER-MEMORY", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -4639,15 +4890,31 @@ async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/memory project new\r");
-    assert!(pty.wait_for_screen("now owns", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("now owns", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/memory add --global \"remembered\"\r");
-    assert!(pty.wait_for_screen("added", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("added", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     // Start a turn whose reply never completes; the status bar shows `running`.
     pty.send(b"start a long turn\r");
-    assert!(pty.wait_for_screen("running", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("running", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // `running` is shown at `TurnStarted`, before the request reaches the server; wait for
     // the request itself (polling, like `wait_for_screen`) instead of asserting at once.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -4658,7 +4925,11 @@ async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
     assert_eq!(server.requests().len(), 1);
 
     pty.send(b"/memory list --global\r");
-    assert!(pty.wait_for_screen("remembered", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("remembered", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     assert!(
         pty.screen().contains("running"),
         "the turn is still running:\n{}",
@@ -4691,10 +4962,14 @@ async fn pty_compact_shows_its_result_without_a_model_request() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/compact\r");
     assert!(
-        pty.wait_for_screen("nothing to compact", 15),
+        pty.wait_for_screen("nothing to compact", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -4742,13 +5017,21 @@ async fn pty_editing_in_the_middle_sends_the_edited_text() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // "helo", move left twice (past `o` and `l`) and insert an `l`.
     pty.send(b"helo");
     pty.send(b"\x1b[D\x1b[D");
     pty.send(b"l");
     pty.send(b"\r");
-    assert!(pty.wait_for_screen("EDITED-OK", 20), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("EDITED-OK", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     assert_eq!(last_user_text(&server, 0), "hello");
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -4774,7 +5057,11 @@ async fn pty_multiline_history_and_paste_edit_at_the_cursor() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // `one` Ctrl-J `two`, then Up to the end of the first line and append `!`.
     pty.send(b"one");
     pty.send(&[0x0a]); // Ctrl-J
@@ -4782,7 +5069,11 @@ async fn pty_multiline_history_and_paste_edit_at_the_cursor() {
     pty.send(b"\x1b[A"); // Up: the end of `one`, keeping the column
     pty.send(b"!");
     pty.send(b"\r");
-    assert!(pty.wait_for_screen("MULTI-OK", 20), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("MULTI-OK", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     assert_eq!(last_user_text(&server, 0), "one!\ntwo");
 
     // Paste inserts at the cursor, not at the end.
@@ -4790,7 +5081,11 @@ async fn pty_multiline_history_and_paste_edit_at_the_cursor() {
     pty.send(b"\x1b[D"); // Left
     pty.send(b"\x1b[200~b\x1b[201~");
     pty.send(b"\r");
-    assert!(pty.wait_for_screen("PASTE-OK", 20), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("PASTE-OK", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     assert_eq!(last_user_text(&server, 1), "abc");
 
     pty.quit();
@@ -4821,12 +5116,16 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"unsent draft");
     // Wait for the whole line to render before signalling: the input thread delivers bytes
     // and the app redraws them, and a signal must not race the last characters.
     assert!(
-        pty.wait_for_screen("unsent draft", 10),
+        pty.wait_for_screen("unsent draft", wait_positive()),
         "the draft is not in the input box:\n{}",
         pty.screen()
     );
@@ -4840,7 +5139,10 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
         .status()
         .unwrap();
     assert!(status.success(), "kill -TERM {pid}");
-    assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "the app did not exit"
+    );
     assert_eq!(pty.app_exit_code(), Some(143), "128 + SIGTERM");
     assert_eq!(
         std::fs::read_to_string(&draft).unwrap(),
@@ -4864,7 +5166,7 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
         110,
     );
     assert!(
-        pty.wait_for_screen("unsent draft", 10),
+        pty.wait_for_screen("unsent draft", wait_positive()),
         "the draft is not in the input box:\n{}",
         pty.screen()
     );
@@ -4875,8 +5177,8 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
 
 /// Waits until `path`'s contents contain `needle`. The file is the synchronization (the app
 /// writes it from its own task); the deadline only bounds a failure.
-fn wait_for_file(path: &Path, needle: &str, secs: u64) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(secs);
+fn wait_for_file(path: &Path, needle: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
     loop {
         if std::fs::read_to_string(path)
             .map(|text| text.contains(needle))
@@ -4956,12 +5258,12 @@ async fn pty_pick_lists_filters_and_resumes_the_chosen_session() {
         100,
     );
     assert!(
-        pty.wait_for_screen("alpha", 10),
+        pty.wait_for_screen("alpha", wait_positive()),
         "the picker did not list alpha:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("beta", 10),
+        pty.wait_for_screen("beta", wait_positive()),
         "the picker did not list beta:\n{}",
         pty.screen()
     );
@@ -4974,26 +5276,26 @@ async fn pty_pick_lists_filters_and_resumes_the_chosen_session() {
     // beta proves the filter selected it.
     pty.send(b"beta");
     assert!(
-        pty.wait_until(5, |screen| !screen.contains("alpha")),
+        pty.wait_until(wait_positive(), |screen| !screen.contains("alpha")),
         "the filter did not narrow the list:\n{}",
         pty.screen()
     );
     pty.send(b"\r");
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("resumed session beta", 10),
+        pty.wait_for_screen("resumed session beta", wait_positive()),
         "Enter did not resume the filtered row:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("BETA-HISTORY", 5),
+        pty.wait_for_screen("BETA-HISTORY", wait_positive()),
         "the resumed history is not on screen:\n{}",
         pty.screen()
     );
     // The next request carries the resumed history, not the other session's.
     pty.send(b"continue\r");
     assert!(
-        pty.wait_for_screen("PICKED-REPLY", 15),
+        pty.wait_for_screen("PICKED-REPLY", wait_positive()),
         "the resumed session did not run a turn:\n{}",
         pty.screen()
     );
@@ -5058,9 +5360,16 @@ async fn pty_pick_starts_new_and_escape_leaves_no_session() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("alpha", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("alpha", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(&[0x1b]); // Esc
-    assert!(pty.wait_for_exit(10).is_some(), "Esc did not quit");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "Esc did not quit"
+    );
     assert_eq!(pty.app_exit_code(), Some(0));
     assert_eq!(jsonl(&sessions), before, "Esc created a session file");
 
@@ -5081,11 +5390,15 @@ async fn pty_pick_starts_new_and_escape_leaves_no_session() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("alpha", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("alpha", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"n");
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("new session", 10),
+        pty.wait_for_screen("new session", wait_positive()),
         "`n` did not start a new session:\n{}",
         pty.screen()
     );
@@ -5120,12 +5433,12 @@ async fn pty_pick_without_sessions_starts_a_new_one() {
     );
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("no sessions for this workspace yet", 10),
+        pty.wait_for_screen("no sessions for this workspace yet", wait_positive()),
         "the no-session notice is missing:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("new session", 10),
+        pty.wait_for_screen("new session", wait_positive()),
         "the picker did not fall through to a new session:\n{}",
         pty.screen()
     );
@@ -5160,14 +5473,22 @@ async fn pty_sessions_and_export_commands() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"session body text\r");
-    assert!(pty.wait_for_screen("SESSION-REPLY", 15), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("SESSION-REPLY", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     // `/sessions` names the current session and the way to reopen it.
     pty.send(b"/sessions\r");
     assert!(
-        pty.wait_for_screen("--resume cmd", 10),
+        pty.wait_for_screen("--resume cmd", wait_positive()),
         "the session list is missing the resume hint:\n{}",
         pty.screen()
     );
@@ -5175,13 +5496,13 @@ async fn pty_sessions_and_export_commands() {
     // `/export` writes the default `<workspace>/radian-cmd.md`.
     pty.send(b"/export\r");
     assert!(
-        pty.wait_for_screen("exported to", 10),
+        pty.wait_for_screen("exported to", wait_positive()),
         "no export notice:\n{}",
         pty.screen()
     );
     let export = ws.join("radian-cmd.md");
     assert!(
-        wait_for_file(&export, "session body text", 10),
+        wait_for_file(&export, "session body text", wait_positive()),
         "the export file was not written with the session text"
     );
 
@@ -5189,14 +5510,14 @@ async fn pty_sessions_and_export_commands() {
     pty.send(b"/export\r");
     assert!(
         // The notice wraps, so match a fragment that stays on one line.
-        pty.wait_for_screen("ready exists", 10),
+        pty.wait_for_screen("ready exists", wait_positive()),
         "the overwrite refusal is missing:\n{}",
         pty.screen()
     );
     std::fs::write(&export, "OLD").unwrap();
     pty.send(b"/export md radian-cmd.md --force\r");
     assert!(
-        wait_for_file(&export, "session body text", 10),
+        wait_for_file(&export, "session body text", wait_positive()),
         "the forced export did not overwrite the file"
     );
     let text = std::fs::read_to_string(&export).unwrap();
@@ -5245,30 +5566,34 @@ async fn pty_sessions_opens_and_closes_during_a_running_turn() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"start\r");
     // The first paced chunk has arrived, so the turn is running.
     assert!(
-        pty.wait_for_screen("TURN-ONE-", 10),
+        pty.wait_for_screen("TURN-ONE-", wait_positive()),
         "the turn did not start:\n{}",
         pty.screen()
     );
     // Open the picker while the turn runs: it opens unfocused, so the composer keeps the keys.
     pty.send(b"/sessions\r");
     assert!(
-        pty.wait_for_screen("filter:", 10),
+        pty.wait_for_screen("filter:", wait_positive()),
         "the picker did not open during the turn:\n{}",
         pty.screen()
     );
     pty.send(&[0x1b]); // Esc closes the overlay
     assert!(
-        pty.wait_until(5, |screen| !screen.contains("filter:")),
+        pty.wait_until(wait_positive(), |screen| !screen.contains("filter:")),
         "Esc did not close the picker:\n{}",
         pty.screen()
     );
     // The turn was not disturbed: its later chunk commits normally.
     assert!(
-        pty.wait_for_screen("TURN-TWO", 15),
+        pty.wait_for_screen("TURN-TWO", wait_positive()),
         "the turn did not finish after the picker closed:\n{}",
         pty.screen()
     );
@@ -5308,11 +5633,19 @@ async fn pty_a_rebound_send_key_sends_and_enter_does_not() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"hi");
     pty.send(b"\r"); // Enter: a newline, not a send
     pty.send(&[0x13]); // Ctrl-S: the rebound send
-    assert!(pty.wait_for_screen("SENT", 15), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("SENT", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     assert_eq!(server.requests().len(), 1, "only Ctrl-S sent");
     assert_eq!(
         last_user_text(&server, 0),
@@ -5370,7 +5703,7 @@ async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
         110,
     );
     assert!(
-        pty.wait_for_screen("❯ hello parent config", 10),
+        pty.wait_for_screen("❯ hello parent config", wait_positive()),
         "the first transcript row is corrupted:\n{}",
         pty.screen()
     );
@@ -5424,7 +5757,7 @@ async fn pty_a_keymap_conflict_refuses_to_start() {
         110,
     );
     assert!(
-        pty.wait_for_exit(10).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the app must refuse to start"
     );
     assert_ne!(pty.app_exit_code(), Some(0));
@@ -5462,17 +5795,21 @@ async fn pty_fork_creates_a_resumable_child_when_idle() {
         30,
         110,
     );
-    assert!(parent.wait_for_screen("message", 10), "{}", parent.screen());
+    assert!(
+        parent.wait_for_screen("message", wait_positive()),
+        "{}",
+        parent.screen()
+    );
     parent.send(b"hello parent\r");
     assert!(
-        parent.wait_for_screen("PARENT-DONE", 15),
+        parent.wait_for_screen("PARENT-DONE", wait_positive()),
         "{}",
         parent.screen()
     );
 
     parent.send(b"/fork\r");
     assert!(
-        parent.wait_for_screen("forked at seq", 10),
+        parent.wait_for_screen("forked at seq", wait_positive()),
         "the fork notice is missing:\n{}",
         parent.screen()
     );
@@ -5485,7 +5822,7 @@ async fn pty_fork_creates_a_resumable_child_when_idle() {
         .map(|name| name.trim_end_matches(".jsonl").to_owned())
         .expect("a child session file");
     assert!(
-        parent.wait_for_screen(&format!("--resume {child_id}"), 10),
+        parent.wait_for_screen(&format!("--resume {child_id}"), wait_positive()),
         "the notice does not name the child:\n{}",
         parent.screen()
     );
@@ -5509,13 +5846,13 @@ async fn pty_fork_creates_a_resumable_child_when_idle() {
         110,
     );
     assert!(
-        child.wait_for_screen("hello parent", 10),
+        child.wait_for_screen("hello parent", wait_positive()),
         "the child history is not rendered:\n{}",
         child.screen()
     );
     child.send(b"continue\r");
     assert!(
-        child.wait_for_screen("CHILD-DONE", 15),
+        child.wait_for_screen("CHILD-DONE", wait_positive()),
         "{}",
         child.screen()
     );
@@ -5563,15 +5900,27 @@ async fn pty_a_fork_waits_for_the_turn_to_be_committed() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"hello parent\r");
-    assert!(pty.wait_for_screen("PARENT-DONE", 15), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("PARENT-DONE", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The turn is idle (the agent's `RunFinished`), but the journaled `TurnFinished` is still
     // ~1.5 s away.
-    assert!(pty.wait_for_screen("idle", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("idle", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/fork\r");
     assert!(
-        pty.wait_for_screen("forked at seq", 10),
+        pty.wait_for_screen("forked at seq", wait_positive()),
         "the fork never ran after the commit:\n{}",
         pty.screen()
     );
@@ -5625,13 +5974,25 @@ async fn pty_a_fork_gives_up_when_the_turn_is_still_being_written() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"hello parent\r");
-    assert!(pty.wait_for_screen("PARENT-DONE", 15), "{}", pty.screen());
-    assert!(pty.wait_for_screen("idle", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("PARENT-DONE", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("idle", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/fork\r");
     assert!(
-        pty.wait_for_screen("still writing the turn; try again", 10),
+        pty.wait_for_screen("still writing the turn; try again", wait_positive()),
         "the fork did not time out:\n{}",
         pty.screen()
     );
@@ -5691,17 +6052,21 @@ async fn pty_fork_refuses_while_a_turn_runs() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("sleep 5", 15),
+        pty.wait_for_screen("sleep 5", wait_positive()),
         "the sleeping tool call did not start:\n{}",
         pty.screen()
     );
 
     pty.send(b"/fork\r");
     assert!(
-        pty.wait_for_screen("finish the current turn before forking", 10),
+        pty.wait_for_screen("finish the current turn before forking", wait_positive()),
         "a running turn must refuse /fork:\n{}",
         pty.screen()
     );
@@ -5753,13 +6118,21 @@ async fn pty_find_jumps_to_an_earlier_match() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"m1\r");
-    assert!(pty.wait_for_screen("ALPHA-MARKER", 15), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("ALPHA-MARKER", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     for i in 2..=8 {
         pty.send(format!("m{i}\r").as_bytes());
         assert!(
-            pty.wait_for_screen(&format!("filler-{i}-line-11"), 15),
+            pty.wait_for_screen(&format!("filler-{i}-line-11"), wait_positive()),
             "{}",
             pty.screen()
         );
@@ -5774,12 +6147,12 @@ async fn pty_find_jumps_to_an_earlier_match() {
     pty.send(&[0x06]);
     pty.send(b"ALPHA");
     assert!(
-        pty.wait_for_screen("match 1/1", 10),
+        pty.wait_for_screen("match 1/1", wait_positive()),
         "the find status is missing:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("ALPHA-MARKER", 10),
+        pty.wait_for_screen("ALPHA-MARKER", wait_positive()),
         "the match did not scroll into view:\n{}",
         pty.screen()
     );
@@ -6100,7 +6473,10 @@ fn a_panicking_pty_test_leaves_no_app_process() {
             20,
             80,
         );
-        assert!(pty.wait_for_screen("message", 20), "the app did not start");
+        assert!(
+            pty.wait_for_screen("message", wait_positive()),
+            "the app did not start"
+        );
         std::fs::write(
             &group_file_clone,
             pty.process_group().expect("the shell pid").to_string(),
@@ -6187,7 +6563,7 @@ fn pty_an_idle_screen_is_not_redrawn() {
         100,
     );
     assert!(
-        pty.wait_for_screen("type a message", 10),
+        pty.wait_for_screen("type a message", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -6220,7 +6596,7 @@ async fn pty_a_visible_spinner_redraws_on_its_interval() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 20, 100);
     assert!(
-        pty.wait_for_screen("type a message", 10),
+        pty.wait_for_screen("type a message", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -6228,7 +6604,7 @@ async fn pty_a_visible_spinner_redraws_on_its_interval() {
     // A turn that never finishes keeps the spinner visible.
     pty.send(b"hello\r");
     assert!(
-        pty.wait_for_screen("Working", 10),
+        pty.wait_for_screen("Working", wait_positive()),
         "the input rule must show the running state: {}",
         pty.screen()
     );
@@ -6264,7 +6640,7 @@ async fn pty_the_pulse_breathes_through_rgb_colours() {
         100,
     );
     assert!(
-        pty.wait_for_screen("type a message", 10),
+        pty.wait_for_screen("type a message", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -6272,7 +6648,7 @@ async fn pty_the_pulse_breathes_through_rgb_colours() {
     // A turn that never finishes keeps the spinner visible.
     pty.send(b"hello\r");
     assert!(
-        pty.wait_for_screen("Working", 10),
+        pty.wait_for_screen("Working", wait_positive()),
         "the input rule must show the running state: {}",
         pty.screen()
     );
@@ -6395,7 +6771,7 @@ fn pty_a_signal_while_idle_leaves_immediately() {
         100,
     );
     assert!(
-        pty.wait_for_screen("type a message", 10),
+        pty.wait_for_screen("type a message", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -6407,7 +6783,10 @@ fn pty_a_signal_while_idle_leaves_immediately() {
         .status()
         .unwrap();
     assert!(status.success(), "kill -TERM {pid}");
-    assert!(pty.wait_for_exit(5).is_some(), "the app did not exit");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "the app did not exit"
+    );
     let elapsed = sent.elapsed();
     assert_eq!(pty.app_exit_code(), Some(143), "128 + SIGTERM");
     assert!(
@@ -6443,7 +6822,7 @@ fn pty_a_flooding_producer_still_draws_and_answers_keys() {
         100,
     );
     assert!(
-        pty.wait_for_screen("type a message", 10),
+        pty.wait_for_screen("type a message", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -6464,7 +6843,7 @@ fn pty_a_flooding_producer_still_draws_and_answers_keys() {
     // A key is still handled while the queue drains.
     pty.send(b"zzz");
     assert!(
-        pty.wait_for_screen("zzz", 5),
+        pty.wait_for_screen("zzz", wait_positive()),
         "the key was not handled: {}",
         pty.screen()
     );
@@ -6554,13 +6933,21 @@ async fn pty_wheel_scrolls_the_transcript_not_the_input_history() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"m1\r");
-    assert!(pty.wait_for_screen("FIRST-MARKER", 15), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("FIRST-MARKER", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     for i in 2..=8 {
         pty.send(format!("m{i}\r").as_bytes());
         assert!(
-            pty.wait_for_screen(&format!("filler-{i}-line-11"), 15),
+            pty.wait_for_screen(&format!("filler-{i}-line-11"), wait_positive()),
             "{}",
             pty.screen()
         );
@@ -6573,7 +6960,7 @@ async fn pty_wheel_scrolls_the_transcript_not_the_input_history() {
     // A draft in the input box; the last history entry is `m8`.
     pty.send(b"half-written-draft");
     assert!(
-        pty.wait_for_screen("half-written-draft", 5),
+        pty.wait_for_screen("half-written-draft", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -6584,7 +6971,7 @@ async fn pty_wheel_scrolls_the_transcript_not_the_input_history() {
         pty.send(&wheel(true));
     }
     assert!(
-        pty.wait_for_screen("FIRST-MARKER", 5),
+        pty.wait_for_screen("FIRST-MARKER", wait_positive()),
         "the wheel did not scroll the transcript up:\n{}",
         pty.screen()
     );
@@ -6599,7 +6986,7 @@ async fn pty_wheel_scrolls_the_transcript_not_the_input_history() {
         pty.send(&wheel(false));
     }
     assert!(
-        pty.wait_until(5, |screen| !screen.contains("FIRST-MARKER")),
+        pty.wait_until(wait_positive(), |screen| !screen.contains("FIRST-MARKER")),
         "the wheel did not scroll the transcript back down:\n{}",
         pty.screen()
     );
@@ -6632,9 +7019,17 @@ async fn pty_a_mouse_move_is_dropped() {
         20,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"draft");
-    assert!(pty.wait_for_screen("draft", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("draft", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // A motion report (`ESC[<35;x;yM` = Moved) and a click must change nothing: the draft
     // stays, and the app never enabled any-motion reporting.
     pty.send(b"\x1b[<35;10;10M");
@@ -6642,7 +7037,7 @@ async fn pty_a_mouse_move_is_dropped() {
     // The next key proves the app is alive and the draft survived.
     pty.send(b"-ok");
     assert!(
-        pty.wait_for_screen("draft-ok", 5),
+        pty.wait_for_screen("draft-ok", wait_positive()),
         "a mouse move or click consumed input:\n{}",
         pty.screen()
     );
@@ -6682,7 +7077,11 @@ async fn pty_mouse_off_sends_no_reporting_sequence() {
         20,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
@@ -6717,7 +7116,11 @@ fn pty_every_exit_path_releases_the_mouse() {
             20,
             100,
         );
-        assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+        assert!(
+            pty.wait_for_screen("message", wait_positive()),
+            "{}",
+            pty.screen()
+        );
         pty.quit();
         assert_eq!(pty.app_exit_code(), Some(0));
         assert_mouse_released(&pty, "quit");
@@ -6742,7 +7145,7 @@ fn pty_every_exit_path_releases_the_mouse() {
             100,
         );
         assert!(
-            pty.wait_for_exit(10).is_some(),
+            pty.wait_for_exit(wait_positive()).is_some(),
             "the app did not exit on panic"
         );
         assert_mouse_released(&pty, "panic");
@@ -6765,7 +7168,11 @@ fn pty_every_exit_path_releases_the_mouse() {
             20,
             100,
         );
-        assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+        assert!(
+            pty.wait_for_screen("message", wait_positive()),
+            "{}",
+            pty.screen()
+        );
         let pid = app_pid(&pty);
         let status = std::process::Command::new("kill")
             .arg("-TERM")
@@ -6773,7 +7180,10 @@ fn pty_every_exit_path_releases_the_mouse() {
             .status()
             .unwrap();
         assert!(status.success(), "kill -TERM {pid}");
-        assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+        assert!(
+            pty.wait_for_exit(wait_positive()).is_some(),
+            "the app did not exit"
+        );
         assert_eq!(pty.app_exit_code(), Some(143));
         assert_mouse_released(&pty, "signal");
     }
@@ -6813,17 +7223,21 @@ async fn pty_the_wheel_scrolls_an_open_overlay() {
         24,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/sessions\r");
     assert!(
-        pty.wait_for_screen("filter:", 10),
+        pty.wait_for_screen("filter:", wait_positive()),
         "the picker did not open:\n{}",
         pty.screen()
     );
     // The header's `--resume <id>` hint is drawn with the picker's rows; `filter:` alone can
     // be up a frame earlier under load. Wait for both before snapshotting.
     assert!(
-        pty.wait_until(10, |screen| screen.contains("filter:")
+        pty.wait_until(wait_positive(), |screen| screen.contains("filter:")
             && screen.contains("--resume ")),
         "the picker's rows did not appear:\n{}",
         pty.screen()
@@ -6838,7 +7252,7 @@ async fn pty_the_wheel_scrolls_an_open_overlay() {
     // One notch down moves the picker's selection; the hint names a different session.
     pty.send(&wheel(false));
     assert!(
-        pty.wait_until(5, |screen| {
+        pty.wait_until(wait_positive(), |screen| {
             screen
                 .split("--resume ")
                 .nth(1)
@@ -6892,11 +7306,15 @@ async fn pty_pick_resumes_the_selected_id_and_enters_once() {
         100,
     );
     // The picker overlay is up (still in the first, pre-session phase of the one loop).
-    assert!(pty.wait_for_screen("filter:", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("filter:", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // Filter to beta and resume it.
     pty.send(b"beta");
     assert!(
-        pty.wait_until(5, |screen| !screen.contains("alpha")),
+        pty.wait_until(wait_positive(), |screen| !screen.contains("alpha")),
         "the filter did not narrow the list:\n{}",
         pty.screen()
     );
@@ -6904,18 +7322,22 @@ async fn pty_pick_resumes_the_selected_id_and_enters_once() {
     // Wait for the resumed session to open (the picker's phase ends first), then expand the
     // startup block so the resumed-session line is on screen.
     assert!(
-        pty.wait_for_screen("BETA-HISTORY", 10),
+        pty.wait_for_screen("BETA-HISTORY", wait_positive()),
         "the resumed history is not on screen:\n{}",
         pty.screen()
     );
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("resumed session beta", 10),
+        pty.wait_for_screen("resumed session beta", wait_positive()),
         "the picker did not resume the selection:\n{}",
         pty.screen()
     );
     pty.send(b"go\r");
-    assert!(pty.wait_for_screen("PICKED", 15), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("PICKED", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     let requests = server.requests();
     assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(
@@ -6983,7 +7405,11 @@ async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("filter:", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("filter:", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // Enter resumes the only row (alpha): the picker ends and the session starts in the same
     // terminal, so everything printed in between lands on the alternate screen.
     pty.send(b"\r");
@@ -6991,7 +7417,7 @@ async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
     // ("ALPHA-HISTORY"), so waiting for that alone matches the picker and returns too early.
     // The folded startup line exists only once the session phase has drawn.
     assert!(
-        pty.wait_for_screen("(Ctrl-P to expand)", 10),
+        pty.wait_for_screen("(Ctrl-P to expand)", wait_positive()),
         "the session did not start after the pick:\n{}",
         pty.screen()
     );
@@ -7014,12 +7440,12 @@ async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
     // twice; it must appear exactly once.
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("[control] ", 10),
+        pty.wait_for_screen("[control] ", wait_positive()),
         "the control socket line is missing from the startup block:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_until(10, |screen| {
+        pty.wait_until(wait_positive(), |screen| {
             screen.matches("project resources: not loaded").count() == 1
         }),
         "the trust status line must be in the startup block exactly once:\n{}",
@@ -7067,7 +7493,7 @@ async fn pty_a_memory_warning_is_a_transcript_notice_not_stderr() {
     // Before the terminal is entered the old line went to stderr, which the alternate screen
     // then covered: the notice is what makes it visible at all.
     assert!(
-        pty.wait_for_screen("radian: [memory] skill", 10),
+        pty.wait_for_screen("radian: [memory] skill", wait_positive()),
         "the memory warning is not in the transcript:\n{}",
         pty.screen()
     );
@@ -7111,7 +7537,7 @@ async fn pty_the_signal_watchdog_releases_the_mouse() {
     // The app wrote its mouse-on sequences before the (slow) first frame, so the loop is now
     // sleeping in `draw_frame` and cannot reach `confirm_exit`.
     assert!(
-        pty.wait_for_raw(MOUSE_ON, 10),
+        pty.wait_for_raw(MOUSE_ON, wait_positive()),
         "the app never enabled mouse reporting"
     );
     let pid = app_pid(&pty);
@@ -7122,7 +7548,7 @@ async fn pty_the_signal_watchdog_releases_the_mouse() {
         .unwrap();
     assert!(status.success(), "kill -TERM {pid}");
     assert!(
-        pty.wait_for_exit(15).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the watchdog did not force the exit"
     );
     assert_eq!(pty.app_exit_code(), Some(143), "128 + SIGTERM");
@@ -7180,7 +7606,7 @@ async fn pty_a_signal_during_pick_exits_128_plus_signal() {
         100,
     );
     assert!(
-        pty.wait_for_screen("filter:", 10),
+        pty.wait_for_screen("filter:", wait_positive()),
         "the picker did not open:\n{}",
         pty.screen()
     );
@@ -7192,7 +7618,7 @@ async fn pty_a_signal_during_pick_exits_128_plus_signal() {
         .unwrap();
     assert!(status.success(), "kill -TERM {pid}");
     assert!(
-        pty.wait_for_exit(15).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the app did not exit after the signal"
     );
     assert_eq!(pty.app_exit_code(), Some(143), "128 + SIGTERM");
@@ -7342,28 +7768,32 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
         60,
         100,
     );
-    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // ADR 0024 Q5: this host has an interactive user, so the startup line says so.
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("ask_user: on", 40),
+        pty.wait_for_screen("ask_user: on", wait_positive()),
         "the startup line must say ask_user is on: {}",
         pty.screen()
     );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("How should it load?", 40),
+        pty.wait_for_screen("How should it load?", wait_positive()),
         "no question form: {}",
         pty.screen()
     );
     // Wait for the **panel** (its hint), not the transcript block (`[loader]` appears there too).
     assert!(
-        pty.wait_for_screen("space select", 40),
+        pty.wait_for_screen("space select", wait_positive()),
         "the panel must be up: {}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("loader", 40),
+        pty.wait_for_screen("loader", wait_positive()),
         "the tab row must show the question header: {}",
         pty.screen()
     );
@@ -7380,14 +7810,14 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
     pty.send(b"radian");
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("✓ loader", 40),
+        pty.wait_for_screen("✓ loader", wait_positive()),
         "the Submit tab lists the answers: {}",
         pty.screen()
     );
     // Enter -> submit.
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("ASK-DONE", 40),
+        pty.wait_for_screen("ASK-DONE", wait_positive()),
         "the turn must continue after the answers: {}",
         pty.screen()
     );
@@ -7427,22 +7857,34 @@ async fn pty_ask_user_alt_h_hides_and_shows() {
         60,
         100,
     );
-    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
-    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("space select", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // Answer the first question, then collapse.
     pty.send(b" ");
-    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("space select", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"\x1bh"); // alt-h
     assert!(
-        pty.wait_for_screen("alt-h to show", 40),
+        pty.wait_for_screen("alt-h to show", wait_positive()),
         "the panel must collapse: {}",
         pty.screen()
     );
     pty.send(b"\x1bh"); // alt-h again
     assert!(
-        pty.wait_for_screen("How should it load?", 40),
+        pty.wait_for_screen("How should it load?", wait_positive()),
         "the panel must come back with the answers: {}",
         pty.screen()
     );
@@ -7476,19 +7918,27 @@ async fn pty_ask_user_esc_declines() {
         60,
         100,
     );
-    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
-    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("space select", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(&[0x1b]); // the first Esc asks again
     assert!(
-        pty.wait_for_screen("press Esc again", 40),
+        pty.wait_for_screen("press Esc again", wait_positive()),
         "the first Esc must confirm: {}",
         pty.screen()
     );
     pty.send(&[0x1b]); // the second Esc declines
     assert!(
-        pty.wait_for_screen("DECLINE-DONE", 40),
+        pty.wait_for_screen("DECLINE-DONE", wait_positive()),
         "the turn must continue after the decline: {}",
         pty.screen()
     );
@@ -7532,16 +7982,24 @@ async fn pty_ask_user_other_keeps_its_text() {
         60,
         100,
     );
-    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
-    assert!(pty.wait_for_screen("space select", 40), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("space select", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // Move to `Other` (A, B, Other) and type.
     pty.send(b"\x1b[B"); // Down
     pty.send(b"\x1b[B"); // Down
     pty.send(b"custom");
     assert!(
-        pty.wait_for_screen("Other: custom", 40),
+        pty.wait_for_screen("Other: custom", wait_positive()),
         "the typed text must be in the Other row: {}",
         pty.screen()
     );
@@ -7549,7 +8007,7 @@ async fn pty_ask_user_other_keeps_its_text() {
     pty.send(b"\x1b[A"); // Up
     pty.send(b"\x1b[B"); // Down
     assert!(
-        pty.wait_for_screen("Other: custom", 40),
+        pty.wait_for_screen("Other: custom", wait_positive()),
         "the text must survive the arrows: {}",
         pty.screen()
     );
@@ -7557,7 +8015,7 @@ async fn pty_ask_user_other_keeps_its_text() {
     pty.send(b"\r");
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("OTHER-DONE", 40),
+        pty.wait_for_screen("OTHER-DONE", wait_positive()),
         "the turn must continue with the Other answer: {}",
         pty.screen()
     );
@@ -7605,10 +8063,14 @@ async fn pty_ctrl_c_during_a_question_cancels_without_an_answer() {
         40,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("How should it load?", 20),
+        pty.wait_for_screen("How should it load?", wait_positive()),
         "no question form: {}",
         pty.screen()
     );
@@ -7622,7 +8084,7 @@ async fn pty_ctrl_c_during_a_question_cancels_without_an_answer() {
     // The form's own title, not the prompt: the transcript shows the tool call's arguments,
     // which contain the prompt text.
     assert!(
-        pty.wait_until_gone("space select", 20),
+        pty.wait_until_gone("space select", wait_positive()),
         "the panel must go with the cancelled wait: {}",
         pty.screen()
     );
@@ -7670,10 +8132,14 @@ async fn pty_two_approvals_are_shown_in_order() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", 20),
+        pty.wait_for_screen("approve tool call?", wait_positive()),
         "no approval prompt: {}",
         pty.screen()
     );
@@ -7684,7 +8150,7 @@ async fn pty_two_approvals_are_shown_in_order() {
     );
     // ADR 0023 U7: the status bar counts the pending queue.
     assert!(
-        pty.wait_for_screen("1 pending", 10),
+        pty.wait_for_screen("1 pending", wait_positive()),
         "the status bar must count the queue: {}",
         pty.screen()
     );
@@ -7698,7 +8164,8 @@ async fn pty_two_approvals_are_shown_in_order() {
     let second = "\"content\": \"two\"";
     let first = "\"content\": \"one\"";
     assert!(
-        pty.wait_until(20, |screen| screen.contains("approve tool call?")
+        pty.wait_until(wait_positive(), |screen| screen
+            .contains("approve tool call?")
             && screen.contains(second)),
         "the second approval must follow the first: {}",
         pty.screen()
@@ -7710,7 +8177,7 @@ async fn pty_two_approvals_are_shown_in_order() {
     );
     pty.send(b"y");
     assert!(
-        pty.wait_for_screen("BOTH-DONE", 20),
+        pty.wait_for_screen("BOTH-DONE", wait_positive()),
         "the turn must continue after both approvals: {}",
         pty.screen()
     );
@@ -7757,10 +8224,14 @@ async fn pty_a_long_command_keeps_the_approval_keys_visible() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", 20),
+        pty.wait_for_screen("approve tool call?", wait_positive()),
         "no approval prompt: {}",
         pty.screen()
     );
@@ -7768,7 +8239,7 @@ async fn pty_a_long_command_keeps_the_approval_keys_visible() {
     // paint under load (observed: title and first rows drawn, key line not yet). Wait for a
     // frame that has the whole key line and the window indicator, not for one snapshot.
     assert!(
-        pty.wait_until(10, |screen| screen.contains("[y] allow once")
+        pty.wait_until(wait_positive(), |screen| screen.contains("[y] allow once")
             && screen.contains("[n] deny")
             && screen.contains("lines 1–")),
         "the key line is not fully on screen: {}",
@@ -7777,14 +8248,14 @@ async fn pty_a_long_command_keeps_the_approval_keys_visible() {
     // Scrolling the body keeps the keys on screen.
     pty.send(b"\x1b[B"); // Down
     assert!(
-        pty.wait_until(10, |screen| screen.contains("lines 2–")
+        pty.wait_until(wait_positive(), |screen| screen.contains("lines 2–")
             && screen.contains("[y] allow once")),
         "the box must scroll with the keys visible: {}",
         pty.screen()
     );
     pty.send(b"y");
     assert!(
-        pty.wait_for_screen("APPROVAL-FIT-RAN", 20),
+        pty.wait_for_screen("APPROVAL-FIT-RAN", wait_positive()),
         "y must run the command: {}",
         pty.screen()
     );
@@ -7825,10 +8296,14 @@ async fn pty_a_model_switch_sends_the_next_turn_to_the_new_provider() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"one\r");
     assert!(
-        pty.wait_for_screen("FIRST-PROVIDER-OK", 20),
+        pty.wait_for_screen("FIRST-PROVIDER-OK", wait_positive()),
         "the first turn goes to the startup provider: {}",
         pty.screen()
     );
@@ -7837,13 +8312,13 @@ async fn pty_a_model_switch_sends_the_next_turn_to_the_new_provider() {
     // the second submits the line.
     pty.send(b"/model anthropic/claude-x\r\r");
     assert!(
-        pty.wait_for_screen("next turn: anthropic/claude-x", 10),
+        pty.wait_for_screen("next turn: anthropic/claude-x", wait_positive()),
         "the status bar shows the queued switch: {}",
         pty.screen()
     );
     pty.send(b"two\r");
     assert!(
-        pty.wait_for_screen("SWITCHED-PROVIDER-OK", 20),
+        pty.wait_for_screen("SWITCHED-PROVIDER-OK", wait_positive()),
         "the next turn goes to the new provider: {}",
         pty.screen()
     );
@@ -7854,7 +8329,8 @@ async fn pty_a_model_switch_sends_the_next_turn_to_the_new_provider() {
     assert_eq!(requests[0].header("x-api-key"), Some("sk-ant-switch-test"));
     // The status marker is spent (the transcript's notice stays, by design).
     assert!(
-        pty.wait_until(10, |screen| !screen.contains("next: anthropic/claude-x")),
+        pty.wait_until(wait_positive(), |screen| !screen
+            .contains("next: anthropic/claude-x")),
         "the switch applied: {}",
         pty.screen()
     );
@@ -7952,10 +8428,14 @@ async fn pty_model_lists_chatgpt_once_it_is_logged_in() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/model chatgpt/");
     assert!(
-        pty.wait_for_screen("chatgpt/gpt-5.4", 10),
+        pty.wait_for_screen("chatgpt/gpt-5.4", wait_positive()),
         "the chatgpt models did not appear in the flat list:\n{}",
         pty.screen()
     );
@@ -7992,10 +8472,14 @@ async fn pty_model_switches_to_chatgpt_with_an_oauth_login() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/model chatgpt/gpt-5.4\r");
     assert!(
-        pty.wait_for_screen("next turn: chatgpt/gpt-5.4", 10),
+        pty.wait_for_screen("next turn: chatgpt/gpt-5.4", wait_positive()),
         "the switch to chatgpt was refused or never confirmed:\n{}",
         pty.screen()
     );
@@ -8040,18 +8524,26 @@ async fn pty_a_resume_replays_the_switched_model() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
-    assert!(pty.wait_for_screen("OPENAI-RESUME", 20), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("OPENAI-RESUME", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/model anthropic/claude-x\r\r");
     assert!(
-        pty.wait_for_screen("next turn: anthropic/claude-x", 10),
+        pty.wait_for_screen("next turn: anthropic/claude-x", wait_positive()),
         "{}",
         pty.screen()
     );
     pty.send(b"again\r");
     assert!(
-        pty.wait_for_screen("ANTHROPIC-RESUME", 20),
+        pty.wait_for_screen("ANTHROPIC-RESUME", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -8078,10 +8570,14 @@ async fn pty_a_resume_replays_the_switched_model() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"third\r");
     assert!(
-        pty.wait_for_screen("RESUMED-ON-ANTHROPIC", 20),
+        pty.wait_for_screen("RESUMED-ON-ANTHROPIC", wait_positive()),
         "the resumed session stays on the switched model: {}",
         pty.screen()
     );
@@ -8121,20 +8617,28 @@ async fn pty_thinking_clamps_up_and_sends_reasoning_effort() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/thinking medium\r");
     assert!(
-        pty.wait_for_screen("medium → high", 10),
+        pty.wait_for_screen("medium → high", wait_positive()),
         "the clamp is named: {}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("next turn: thinking high", 10),
+        pty.wait_for_screen("next turn: thinking high", wait_positive()),
         "the clamped level is queued: {}",
         pty.screen()
     );
     pty.send(b"go\r");
-    assert!(pty.wait_for_screen("THINKING-OK", 20), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("THINKING-OK", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     let requests = server.requests();
     assert_eq!(requests.len(), 1, "one request");
     assert_eq!(
@@ -8218,25 +8722,25 @@ async fn pty_a_picked_resume_uses_the_journals_model() {
         100,
     );
     assert!(
-        pty.wait_for_screen("switched", 10),
+        pty.wait_for_screen("switched", wait_positive()),
         "the picker did not list the session: {}",
         pty.screen()
     );
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("message", 10),
+        pty.wait_for_screen("message", wait_positive()),
         "the picked session did not open: {}",
         pty.screen()
     );
     // The status bar names the journal's model, not the config's.
     assert!(
-        pty.wait_until(10, |screen| screen.contains("claude-x")),
+        pty.wait_until(wait_positive(), |screen| screen.contains("claude-x")),
         "the status bar must show the journal's model: {}",
         pty.screen()
     );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("JOURNAL-MODEL", 20),
+        pty.wait_for_screen("JOURNAL-MODEL", wait_positive()),
         "the request must go to the journal's provider: {}",
         pty.screen()
     );
@@ -8278,10 +8782,14 @@ async fn pty_approval_never_still_registers_ask_user() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("ask_user: on", 10),
+        pty.wait_for_screen("ask_user: on", wait_positive()),
         "`--approval never` must not turn ask_user off: {}",
         pty.screen()
     );
@@ -8310,16 +8818,20 @@ async fn pty_ask_user_is_registered_without_a_workspace() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("ask_user: on", 40),
+        pty.wait_for_screen("ask_user: on", wait_positive()),
         "the startup line must say ask_user is on: {}",
         pty.screen()
     );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("NO-WS-DONE", 40),
+        pty.wait_for_screen("NO-WS-DONE", wait_positive()),
         "the turn must run: {}",
         pty.screen()
     );
@@ -8361,33 +8873,33 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
         100,
     );
     assert!(
-        pty.wait_for_screen("type a message", 10),
+        pty.wait_for_screen("type a message", wait_positive()),
         "{}",
         pty.screen()
     );
 
     pty.send(b"/mem");
     assert!(
-        pty.wait_for_screen("/memory", 10),
+        pty.wait_for_screen("/memory", wait_positive()),
         "the command list did not appear:\n{}",
         pty.screen()
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("❯ /memory ", 10),
+        pty.wait_for_screen("❯ /memory ", wait_positive()),
         "Tab did not complete the command name:\n{}",
         pty.screen()
     );
     // The next level's list is already up; a partial is fuzzy-matched and completed.
     pty.send(b"fo");
     assert!(
-        pty.wait_for_screen("forget", 10),
+        pty.wait_for_screen("forget", wait_positive()),
         "the subcommand list did not appear:\n{}",
         pty.screen()
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("❯ /memory forget", 10),
+        pty.wait_for_screen("❯ /memory forget", wait_positive()),
         "Tab did not complete the subcommand:\n{}",
         pty.screen()
     );
@@ -8419,9 +8931,17 @@ async fn pty_without_a_workspace_the_current_directory_is_the_coding_root() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"hi\r");
-    assert!(pty.wait_for_screen("OK", 15), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("OK", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     let requests = server.requests();
     let tools: Vec<String> = requests[0].json()["tools"]
         .as_array()
@@ -8582,7 +9102,7 @@ async fn pty_resume_without_a_value_picks_a_session() {
         100,
     );
     assert!(
-        pty.wait_for_screen("alpha", 10),
+        pty.wait_for_screen("alpha", wait_positive()),
         "the picker did not list the sessions:\n{}",
         pty.screen()
     );
@@ -8594,19 +9114,19 @@ async fn pty_resume_without_a_value_picks_a_session() {
     // Filter to beta (without it, Enter would resume the first row) and resume it.
     pty.send(b"beta");
     assert!(
-        pty.wait_until(5, |screen| !screen.contains("alpha")),
+        pty.wait_until(wait_positive(), |screen| !screen.contains("alpha")),
         "the filter did not narrow the list:\n{}",
         pty.screen()
     );
     pty.send(b"\r");
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("resumed session beta", 10),
+        pty.wait_for_screen("resumed session beta", wait_positive()),
         "Enter did not resume the chosen session:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("BETA-HISTORY", 10),
+        pty.wait_for_screen("BETA-HISTORY", wait_positive()),
         "the resumed history is missing:\n{}",
         pty.screen()
     );
@@ -8631,12 +9151,15 @@ async fn pty_resume_without_a_value_picks_a_session() {
         100,
     );
     assert!(
-        pty.wait_for_screen("alpha", 10),
+        pty.wait_for_screen("alpha", wait_positive()),
         "the picker did not open again:\n{}",
         pty.screen()
     );
     pty.send(&[0x1b]);
-    assert!(pty.wait_for_exit(10).is_some(), "Esc did not leave");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "Esc did not leave"
+    );
     assert_eq!(pty.app_exit_code(), Some(0));
     assert_eq!(listing(&sessions), before, "no session file was created");
 }
@@ -8667,7 +9190,11 @@ async fn pty_the_exit_line_is_a_copyable_resume_command() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 
@@ -8735,9 +9262,17 @@ async fn pty_a_theme_file_colors_the_user_line() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"COLOR-PROBE\r");
-    assert!(pty.wait_for_screen("REPLY-DONE", 15), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("REPLY-DONE", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     // The user entry's `❯ ` marker carries the theme's `user` style (the body text is the
     // terminal default by design), so check the marker cell: two columns before the probe.
@@ -8848,16 +9383,36 @@ async fn pty_login_custom_walk_saves_without_showing_the_key() {
     );
     // The app's HOME is the pty's own temp dir; the credentials live there.
     let auth_path = seed_auth_json(pty.home.path());
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     pty.send(b"/login custom\r");
-    assert!(pty.wait_for_screen("provider name", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("provider name", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"corp\r");
-    assert!(pty.wait_for_screen("wire protocol", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("wire protocol", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"\r"); // openai-compatible (the highlighted row)
-    assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("base URL", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(format!("{verify}\r").as_bytes());
-    assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("API key", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // Type the key **without submitting** and look at the screen: the field must be masked
     // mid-typing, not only after the wizard closes (a plaintext echo is exactly what D3
     // forbids — this is where a `key.clone()` render or an echo-on terminal would show).
@@ -8869,7 +9424,7 @@ async fn pty_login_custom_walk_saves_without_showing_the_key() {
     // assertion is for.
     let stars = "*".repeat(KEY.len());
     assert!(
-        pty.wait_until(5, |screen| screen.contains(&stars)),
+        pty.wait_until(wait_positive(), |screen| screen.contains(&stars)),
         "the masked field never filled:\n{}",
         pty.screen()
     );
@@ -8880,7 +9435,7 @@ async fn pty_login_custom_walk_saves_without_showing_the_key() {
     );
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("saved the key for `corp`", 10),
+        pty.wait_for_screen("saved the key for `corp`", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -8954,25 +9509,45 @@ async fn pty_login_failed_verification_can_save_and_logout_removes_only_one() {
         110,
     );
     let auth_path = seed_auth_json(pty.home.path());
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     pty.send(b"/login custom\r");
-    assert!(pty.wait_for_screen("provider name", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("provider name", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"corp\r");
-    assert!(pty.wait_for_screen("wire protocol", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("wire protocol", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"\r");
-    assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("base URL", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(format!("{dead}\r").as_bytes());
-    assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("API key", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(format!("{KEY}\r").as_bytes());
     assert!(
-        pty.wait_for_screen("verification failed", 15),
+        pty.wait_for_screen("verification failed", wait_positive()),
         "{}",
         pty.screen()
     );
     pty.send(b"y"); // save anyway
     assert!(
-        pty.wait_for_screen("saved the key for `corp`", 10),
+        pty.wait_for_screen("saved the key for `corp`", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -8981,13 +9556,13 @@ async fn pty_login_failed_verification_can_save_and_logout_removes_only_one() {
     // the file mode survive.
     pty.send(b"/logout corp\r");
     assert!(
-        pty.wait_for_screen("remove the stored credential for `corp`?", 5),
+        pty.wait_for_screen("remove the stored credential for `corp`?", wait_positive()),
         "{}",
         pty.screen()
     );
     pty.send(b"y");
     assert!(
-        pty.wait_for_screen("removed the stored credential for `corp`", 5),
+        pty.wait_for_screen("removed the stored credential for `corp`", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -9024,16 +9599,23 @@ async fn pty_logout_with_n_keeps_the_entry() {
         110,
     );
     let auth_path = seed_auth_json(pty.home.path());
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/logout existing\r");
     assert!(
-        pty.wait_for_screen("remove the stored credential for `existing`?", 5),
+        pty.wait_for_screen(
+            "remove the stored credential for `existing`?",
+            wait_positive()
+        ),
         "{}",
         pty.screen()
     );
     pty.send(b"n");
     assert!(
-        pty.wait_for_screen("kept `existing`", 5),
+        pty.wait_for_screen("kept `existing`", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -9082,10 +9664,14 @@ async fn pty_auto_key_approves_once_and_enables_auto() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"please write\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", 20),
+        pty.wait_for_screen("approve tool call?", wait_positive()),
         "no approval prompt:\n{}",
         pty.screen()
     );
@@ -9098,7 +9684,7 @@ async fn pty_auto_key_approves_once_and_enables_auto() {
     // One press: approve this request and enable auto for the rest of the session.
     pty.send(b"!");
     assert!(
-        pty.wait_for_screen("SWITCH-DONE", 30),
+        pty.wait_for_screen("SWITCH-DONE", wait_positive()),
         "the turn did not finish after `!`:\n{}",
         pty.screen()
     );
@@ -9180,7 +9766,7 @@ async fn pty_resume_restores_auto_on_workspace() {
         110,
     );
     assert!(
-        pty.wait_for_screen("AUTO", 10),
+        pty.wait_for_screen("AUTO", wait_positive()),
         "the resumed session must show AUTO:\n{}",
         pty.screen()
     );
@@ -9189,7 +9775,10 @@ async fn pty_resume_restores_auto_on_workspace() {
     // Wait for the line itself: expand_startup returns on the first expanded frame it sees,
     // and under load the pty can hold only part of that frame (gate run, load ~300).
     assert!(
-        pty.wait_for_screen("auto: tool calls are approved without asking", 10),
+        pty.wait_for_screen(
+            "auto: tool calls are approved without asking",
+            wait_positive()
+        ),
         "the startup line must name the restored policy:\n{}",
         pty.screen()
     );
@@ -9240,7 +9829,7 @@ async fn pty_resume_does_not_restore_auto_on_full_and_hints() {
     assert!(
         pty.wait_for_screen(
             "auto was on in the previous run; run `/auto on` to re-enable",
-            10
+            wait_positive()
         ),
         "the full-tier hint is missing:\n{}",
         pty.screen()
@@ -9286,7 +9875,7 @@ async fn pty_config_auto_is_ignored_under_full_with_a_warning() {
         110,
     );
     assert!(
-        pty.wait_for_screen("ignored under the full tier", 10),
+        pty.wait_for_screen("ignored under the full tier", wait_positive()),
         "the config warning is missing:\n{}",
         pty.screen()
     );
@@ -9331,7 +9920,7 @@ async fn pty_config_auto_enables_auto_on_workspace() {
         110,
     );
     assert!(
-        pty.wait_for_screen("AUTO", 10),
+        pty.wait_for_screen("AUTO", wait_positive()),
         "the status bar must show AUTO:\n{}",
         pty.screen()
     );
@@ -9412,7 +10001,7 @@ async fn pty_a_mouse_drag_copies_the_selection_via_osc52() {
         100,
     );
     assert!(
-        pty.wait_for_screen("SELECT-ME-PLEASE", 10),
+        pty.wait_for_screen("SELECT-ME-PLEASE", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -9438,12 +10027,12 @@ async fn pty_a_mouse_drag_copies_the_selection_via_osc52() {
     // The copy: OSC 52 with exactly the selected text, and the honest notice.
     let expected = radian_tui::clip::osc52("SELECT-ME-PLEASE");
     assert!(
-        pty.wait_for_raw(&expected, 10),
+        pty.wait_for_raw(&expected, wait_positive()),
         "no OSC 52 with the selection: {}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("copied 16 chars (via OSC 52)", 10),
+        pty.wait_for_screen("copied 16 chars (via OSC 52)", wait_positive()),
         "the status bar must say what happened, not claim the clipboard:\n{}",
         pty.screen()
     );
@@ -9472,7 +10061,7 @@ fn pty_pointer_motion_alone_draws_no_frame() {
         100,
     );
     assert!(
-        pty.wait_for_screen("type a message", 10),
+        pty.wait_for_screen("type a message", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -9515,7 +10104,7 @@ fn pty_quit_closes_button_motion_reporting() {
         100,
     );
     assert!(
-        pty.wait_for_screen("type a message", 10),
+        pty.wait_for_screen("type a message", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -9588,8 +10177,8 @@ impl HerdrSocket {
     }
 
     /// Waits for a `pane.report_agent` with `state`.
-    fn wait_for_state(&self, state: &str, secs: u64) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(secs);
+    fn wait_for_state(&self, state: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
         loop {
             if self.snapshot().iter().any(|value| {
                 value["method"] == "pane.report_agent" && value["params"]["state"] == state
@@ -9603,8 +10192,8 @@ impl HerdrSocket {
         }
     }
 
-    fn wait_for_release(&self, secs: u64) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(secs);
+    fn wait_for_release(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
         loop {
             if self
                 .snapshot()
@@ -9663,30 +10252,33 @@ async fn pty_herdr_reports_the_turn_states_and_releases() {
         100,
     );
     assert!(
-        pty.wait_for_screen("message", 10),
+        pty.wait_for_screen("message", wait_positive()),
         "screen:\n{}",
         pty.screen()
     );
-    assert!(sock.wait_for_state("idle", 5), "the startup idle report");
+    assert!(
+        sock.wait_for_state("idle", wait_positive()),
+        "the startup idle report"
+    );
     pty.send(b"hello\r");
     assert!(
-        sock.wait_for_state("working", 10),
+        sock.wait_for_state("working", wait_positive()),
         "working on TurnStarted: {:?}",
         sock.snapshot()
     );
     assert!(
-        pty.wait_for_screen("HERDR-REPLY-OK", 15),
+        pty.wait_for_screen("HERDR-REPLY-OK", wait_positive()),
         "screen:\n{}",
         pty.screen()
     );
     assert!(
-        sock.wait_for_state("idle", 10),
+        sock.wait_for_state("idle", wait_positive()),
         "idle on RunFinished: {:?}",
         sock.snapshot()
     );
     pty.quit();
     assert!(
-        sock.wait_for_release(5),
+        sock.wait_for_release(wait_positive()),
         "a normal exit releases: {:?}",
         sock.snapshot()
     );
@@ -9740,15 +10332,19 @@ async fn pty_herdr_reports_blocked_without_the_command_text() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", 20),
+        pty.wait_for_screen("approve tool call?", wait_positive()),
         "the approval box:\n{}",
         pty.screen()
     );
     assert!(
-        sock.wait_for_state("blocked", 10),
+        sock.wait_for_state("blocked", wait_positive()),
         "blocked while the approval waits: {:?}",
         sock.snapshot()
     );
@@ -9792,10 +10388,14 @@ async fn pty_herdr_is_silent_without_the_env() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"hello\r");
     assert!(
-        pty.wait_for_screen("HERDR-SILENT-OK", 15),
+        pty.wait_for_screen("HERDR-SILENT-OK", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -9834,10 +10434,14 @@ async fn pty_herdr_is_silent_when_disabled() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"hello\r");
     assert!(
-        pty.wait_for_screen("HERDR-DISABLED-OK", 15),
+        pty.wait_for_screen("HERDR-DISABLED-OK", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -9876,11 +10480,15 @@ async fn pty_ctrl_c_twice_quits_and_one_press_only_hints() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     pty.send(&[0x03]);
     assert!(
-        pty.wait_for_screen("Press Ctrl-C again to quit", 10),
+        pty.wait_for_screen("Press Ctrl-C again to quit", wait_positive()),
         "the first press must show the hint:\n{}",
         pty.screen()
     );
@@ -9892,7 +10500,7 @@ async fn pty_ctrl_c_twice_quits_and_one_press_only_hints() {
 
     pty.send(&[0x03]);
     assert!(
-        pty.wait_for_exit(5).is_some(),
+        pty.wait_for_exit(wait_positive()).is_some(),
         "the second press must quit:\n{}",
         pty.screen()
     );
@@ -9933,9 +10541,17 @@ async fn pty_ctrl_c_clears_a_draft_before_quitting() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"a draft");
-    assert!(pty.wait_for_screen("a draft", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("a draft", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(&[0x03]);
     // The input line is empty again and the app is still running (no quit).
     assert!(
@@ -9944,14 +10560,14 @@ async fn pty_ctrl_c_clears_a_draft_before_quitting() {
         pty.screen()
     );
     assert!(
-        !pty.wait_for_screen("Press Ctrl-C again to quit", 2),
+        pty.screen_absent("Press Ctrl-C again to quit"),
         "clearing must not arm the quit window:\n{}",
         pty.screen()
     );
     // `Up` recalls the cleared line from the history.
     pty.send(&[0x1b, b'[', b'A']);
     assert!(
-        pty.wait_for_screen("a draft", 10),
+        pty.wait_for_screen("a draft", wait_positive()),
         "the cleared line is in the history:\n{}",
         pty.screen()
     );
@@ -9990,10 +10606,14 @@ async fn pty_slash_theme_switches_and_writes_the_config() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"/theme light");
     assert!(
-        pty.wait_for_screen("/theme light", 10),
+        pty.wait_for_screen("/theme light", wait_positive()),
         "the line did not render:\n{}",
         pty.screen()
     );
@@ -10001,7 +10621,7 @@ async fn pty_slash_theme_switches_and_writes_the_config() {
     pty.send(b"\r");
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("theme saved to", 10),
+        pty.wait_for_screen("theme saved to", wait_positive()),
         "the save notice is missing:\n{}",
         pty.screen()
     );
@@ -10015,14 +10635,14 @@ async fn pty_slash_theme_switches_and_writes_the_config() {
     // An unknown name is refused and the file is untouched.
     pty.send(b"/theme nope");
     assert!(
-        pty.wait_for_screen("/theme nope", 10),
+        pty.wait_for_screen("/theme nope", wait_positive()),
         "the line did not render:\n{}",
         pty.screen()
     );
     pty.send(b"\r");
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("no theme \"nope\"", 10),
+        pty.wait_for_screen("no theme \"nope\"", wait_positive()),
         "the refusal notice is missing:\n{}",
         pty.screen()
     );
@@ -10059,31 +10679,55 @@ async fn pty_a_login_key_is_redacted_from_an_export_in_the_same_session() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     pty.send(b"/login custom\r");
-    assert!(pty.wait_for_screen("provider name", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("provider name", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"corp\r");
-    assert!(pty.wait_for_screen("wire protocol", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("wire protocol", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(b"\r"); // openai-compatible
-    assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("base URL", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(format!("{verify}\r").as_bytes());
-    assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("API key", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(format!("{KEY}\r").as_bytes());
     assert!(
-        pty.wait_for_screen("saved the key for `corp`", 10),
+        pty.wait_for_screen("saved the key for `corp`", wait_positive()),
         "{}",
         pty.screen()
     );
 
     // Put the key into the transcript, then export this same session.
     pty.send(format!("the key is {KEY}\r").as_bytes());
-    assert!(pty.wait_for_screen("DONE", 15), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("DONE", wait_positive()),
+        "{}",
+        pty.screen()
+    );
 
     let out = dir.path().join("export.json");
     pty.send(format!("/export json {}\r", out.display()).as_bytes());
     assert!(
-        pty.wait_for_screen("exported to", 10),
+        pty.wait_for_screen("exported to", wait_positive()),
         "the export notice is missing:\n{}",
         pty.screen()
     );
@@ -10126,11 +10770,15 @@ async fn pty_the_pi_footer_is_two_rows() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The model item is on the footer's first row; the tokens item on the second. The screen
     // text is one string, so both must be present, and the tokens glyph marks the second row.
     assert!(
-        pty.wait_for_screen("↑-", 10),
+        pty.wait_for_screen("↑-", wait_positive()),
         "the tokens row is missing:\n{}",
         pty.screen()
     );
@@ -10167,13 +10815,17 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
         30,
         90,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // Wait for the **footer** before reading its last two lines: `message` is the input hint,
     // which is drawn in the same frame as the footer, but the hint can appear before the
     // footer's items have data. `↑- ↓- R-` is the numbers row with no usage yet (the unicode
     // tier's token arrows, ADR 0027 item 2).
     assert!(
-        pty.wait_for_screen("↑- ↓-", 10),
+        pty.wait_for_screen("↑- ↓-", wait_positive()),
         "the numbers row is on screen:\n{}",
         pty.screen()
     );
@@ -10303,12 +10955,16 @@ async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The earlier turn's tokens are there (1M in, 100K out). The default `tokens` format is
     // `↑{in} ↓{out} R{cache}` (ADR 0027 item 2's unicode arrows), and `format_tokens`
     // keeps one decimal under 10 (so 1 000 000 is `1.0M`) and rounds above it (`100K`).
     assert!(
-        pty.wait_for_screen("↑1.0M", 10),
+        pty.wait_for_screen("↑1.0M", wait_positive()),
         "the resumed token total is missing:\n{}",
         pty.screen()
     );
@@ -10316,7 +10972,7 @@ async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
     // ... and its fee: 1M x $0.15 + 100K x $0.60 per Mtok = $0.21, three decimals
     // (ADR 0027).
     assert!(
-        pty.wait_for_screen("$0.210", 10),
+        pty.wait_for_screen("$0.210", wait_positive()),
         "the resumed fee is missing:\n{}",
         pty.screen()
     );
@@ -10352,7 +11008,11 @@ async fn pty_the_default_footer_drops_the_right_group_on_a_narrow_terminal() {
         // Narrow enough that the right group cannot fit, wide enough for the model.
         22,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     let lines: Vec<String> = pty.screen().lines().map(str::to_owned).collect();
     let first = lines.get(lines.len() - 2).cloned().unwrap_or_default();
     let second = lines.last().cloned().unwrap_or_default();
@@ -10415,14 +11075,18 @@ async fn pty_a_bare_resize_re_lays_out() {
         server.base_url
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     let before = longest_run(&pty.screen(), '─');
     assert!(before > 90, "the initial rule spans the terminal: {before}");
 
     // Only the size changes; no key, no wheel.
     pty.resize(24, 60);
     assert!(
-        pty.wait_until(5, |screen| longest_run(screen, '─') < 62),
+        pty.wait_until(wait_positive(), |screen| longest_run(screen, '─') < 62),
         "no re-layout after a bare resize (rule was {before}, now {}):\n{}",
         longest_run(&pty.screen(), '─'),
         pty.screen()
@@ -10433,7 +11097,7 @@ async fn pty_a_bare_resize_re_lays_out() {
     pty.resize(24, 80);
     pty.resize(24, 50);
     assert!(
-        pty.wait_until(5, |screen| longest_run(screen, '─') < 52),
+        pty.wait_until(wait_positive(), |screen| longest_run(screen, '─') < 52),
         "the final size must win (rule is {}):\n{}",
         longest_run(&pty.screen(), '─'),
         pty.screen()
@@ -10471,12 +11135,12 @@ fn pty_keyboard_enhancement_is_pushed_and_popped_on_exit() {
         100,
     );
     assert!(
-        pty.wait_for_screen("type a message", 10),
+        pty.wait_for_screen("type a message", wait_positive()),
         "{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_raw("\u{1b}[>1u", 5),
+        pty.wait_for_raw("\u{1b}[>1u", wait_positive()),
         "the enhancement flags are pushed at startup"
     );
     pty.quit();
@@ -10506,18 +11170,22 @@ async fn pty_bang_runs_and_enters_the_context() {
         server.base_url
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The output must not be a substring of the command text: `wait_for_screen` would
     // otherwise match the echoed input line and race the command (the audit-test flake).
     pty.send(b"!printf 'BANG-%s' OUTPUT\r");
     assert!(
-        pty.wait_for_screen("BANG-OUTPUT", 20),
+        pty.wait_for_screen("BANG-OUTPUT", wait_positive()),
         "the command output is not on screen:\n{}",
         pty.screen()
     );
     // The block's first line is `$ cmd`.
     assert!(
-        pty.wait_for_screen("$ printf 'BANG-%s' OUTPUT", 10),
+        pty.wait_for_screen("$ printf 'BANG-%s' OUTPUT", wait_positive()),
         "the command line is not on screen:\n{}",
         pty.screen()
     );
@@ -10529,7 +11197,7 @@ async fn pty_bang_runs_and_enters_the_context() {
     );
     pty.send(b"next\r");
     assert!(
-        pty.wait_for_screen("AFTER-BANG", 20),
+        pty.wait_for_screen("AFTER-BANG", wait_positive()),
         "the reply is missing:\n{}",
         pty.screen()
     );
@@ -10560,18 +11228,22 @@ async fn pty_bangbang_stays_out_of_the_context() {
         server.base_url
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // Distinct output (the command text has no `BANG-SECRET`), so the wait cannot match the
     // echoed input line.
     pty.send(b"!!printf 'BANG-%s' SECRET\r");
     assert!(
-        pty.wait_for_screen("BANG-SECRET", 20),
+        pty.wait_for_screen("BANG-SECRET", wait_positive()),
         "the command output is not on screen:\n{}",
         pty.screen()
     );
     pty.send(b"next\r");
     assert!(
-        pty.wait_for_screen("AFTER-BANGBANG", 20),
+        pty.wait_for_screen("AFTER-BANGBANG", wait_positive()),
         "the reply is missing:\n{}",
         pty.screen()
     );
@@ -10613,10 +11285,14 @@ async fn pty_bang_is_confined_to_the_workspace() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     pty.send(format!("!echo x > {escape}\r").as_bytes());
     assert!(
-        pty.wait_for_screen("[exit code:", 20),
+        pty.wait_for_screen("[exit code:", wait_positive()),
         "the block never appeared:\n{}",
         pty.screen()
     );
@@ -10648,13 +11324,17 @@ async fn pty_bang_is_audited_in_the_journal() {
         24,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The output must not appear in the command text: `wait_for_screen("AUDITED")` used to
     // match the echoed `!!printf AUDITED` and quit before the command (and its `UserBash`
     // record) ran. `printf 'A%sB' Z` prints `AZB`, which the command text does not contain.
     pty.send(b"!!printf 'A%sB' Z\r");
     assert!(
-        pty.wait_for_screen("AZB", 20),
+        pty.wait_for_screen("AZB", wait_positive()),
         "the command output is not on screen:\n{}",
         pty.screen()
     );
@@ -10690,7 +11370,11 @@ async fn pty_bang_is_single_and_escapable() {
         server.base_url
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // A running `!` has no block yet (the block appears when it finishes), and the composer
     // echo is gone as soon as Enter is handled, so there is nothing to wait for here: the two
     // sends are processed in order, so the second sees the first already running.
@@ -10698,14 +11382,14 @@ async fn pty_bang_is_single_and_escapable() {
     // A second command while the first runs is refused, not queued or run.
     pty.send(b"!echo SECOND\r");
     assert!(
-        pty.wait_for_screen("already running", 10),
+        pty.wait_for_screen("already running", wait_positive()),
         "the second command was not refused:\n{}",
         pty.screen()
     );
     // Esc cancels the running one; its block says so.
     pty.send(&[0x1b]);
     assert!(
-        pty.wait_for_screen("[cancelled]", 20),
+        pty.wait_for_screen("[cancelled]", wait_positive()),
         "the command was not cancelled:\n{}",
         pty.screen()
     );
@@ -10728,7 +11412,11 @@ async fn pty_ctrl_c_stops_a_running_bang() {
         server.base_url
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // No block to wait for (it appears when the command finishes); the sends are ordered, so
     // the `!` is running by the time the turn below starts.
     pty.send(b"!sleep 30\r");
@@ -10748,7 +11436,7 @@ async fn pty_ctrl_c_stops_a_running_bang() {
     // Ctrl-C cancels the turn AND the running `!`.
     pty.send(&[0x03]);
     assert!(
-        pty.wait_for_screen("[cancelled]", 20),
+        pty.wait_for_screen("[cancelled]", wait_positive()),
         "Ctrl-C did not cancel the running !:\n{}",
         pty.screen()
     );
@@ -10809,7 +11497,7 @@ async fn pty_access_full_requires_confirmation_and_esc_cancels() {
         110,
     );
     assert!(
-        pty.wait_for_screen("workspace", 15),
+        pty.wait_for_screen("workspace", wait_positive()),
         "the startup must show the tier:\n{}",
         pty.screen()
     );
@@ -10817,7 +11505,7 @@ async fn pty_access_full_requires_confirmation_and_esc_cancels() {
     // `/access full` opens the confirmation; nothing has switched yet.
     pty.send(b"/access full\r");
     assert!(
-        pty.wait_for_screen("full means no sandbox", 10),
+        pty.wait_for_screen("full means no sandbox", wait_positive()),
         "the confirmation must be up:\n{}",
         pty.screen()
     );
@@ -10830,7 +11518,7 @@ async fn pty_access_full_requires_confirmation_and_esc_cancels() {
     // Esc cancels.
     pty.send(&[0x1b]);
     assert!(
-        pty.wait_for_screen("access unchanged", 10),
+        pty.wait_for_screen("access unchanged", wait_positive()),
         "Esc must cancel:\n{}",
         pty.screen()
     );
@@ -10887,7 +11575,7 @@ async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
         110,
     );
     assert!(
-        pty.wait_for_screen("full (project)", 15),
+        pty.wait_for_screen("full (project)", wait_positive()),
         "the remembered tier must apply and be marked:\n{}",
         pty.screen()
     );
@@ -10924,7 +11612,7 @@ async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
         110,
     );
     assert!(
-        pty.wait_for_screen("no sandbox", 15),
+        pty.wait_for_screen("no sandbox", wait_positive()),
         "the default tier must be `full`: {:?}",
         pty.screen()
     );
@@ -10982,7 +11670,7 @@ async fn pty_resume_restores_the_access_tier() {
         110,
     );
     assert!(
-        pty.wait_for_screen("full (session)", 15),
+        pty.wait_for_screen("full (session)", wait_positive()),
         "the resumed tier must apply and be marked:\n{}",
         pty.screen()
     );
@@ -11077,12 +11765,12 @@ async fn pty_attach_follow_shows_new_committed_events() {
         100,
     );
     assert!(
-        pty.wait_for_screen("ATTACH-OLD-REPLY", 10),
+        pty.wait_for_screen("ATTACH-OLD-REPLY", wait_positive()),
         "the committed history is not on screen:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("attach · attach-me · read-only", 10),
+        pty.wait_for_screen("attach · attach-me · read-only", wait_positive()),
         "the attach footer is not on screen:\n{}",
         pty.screen()
     );
@@ -11102,12 +11790,12 @@ async fn pty_attach_follow_shows_new_committed_events() {
         .await
         .unwrap();
     assert!(
-        pty.wait_for_screen("ATTACH-FOLLOW-NEW", 1),
+        pty.wait_for_screen("ATTACH-FOLLOW-NEW", WAIT_LATENCY_BOUND),
         "the appended message did not arrive within a second:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("working…", 1),
+        pty.wait_for_screen("working…", WAIT_LATENCY_BOUND),
         "the open turn's `working…` line did not arrive within a second:\n{}",
         pty.screen()
     );
@@ -11123,13 +11811,17 @@ async fn pty_attach_follow_shows_new_committed_events() {
         .await
         .unwrap();
     assert!(
-        pty.wait_until_gone("working…", 1),
+        pty.wait_until_gone("working…", WAIT_LATENCY_BOUND),
         "the finished turn still shows `working…`:\n{}",
         pty.screen()
     );
 
     pty.send(b"q");
-    assert_eq!(pty.wait_for_exit(3), Some(0), "q must quit the view");
+    assert_eq!(
+        pty.wait_for_exit(wait_positive()),
+        Some(0),
+        "q must quit the view"
+    );
 }
 
 /// A session id becomes a file name, so a path-like id must be refused before anything is read:
@@ -11160,7 +11852,10 @@ async fn pty_attach_refuses_a_path_like_id_without_reading_it() {
         100,
     );
     assert!(
-        pty.wait_for_raw("must be 1-128 characters of [A-Za-z0-9._-]", 5),
+        pty.wait_for_raw(
+            "must be 1-128 characters of [A-Za-z0-9._-]",
+            wait_positive()
+        ),
         "the one-line id refusal is not on the terminal:\n{}",
         pty.screen()
     );
@@ -11172,7 +11867,7 @@ async fn pty_attach_refuses_a_path_like_id_without_reading_it() {
     assert_eq!(
         {
             assert!(
-                pty.wait_for_exit(3).is_some(),
+                pty.wait_for_exit(wait_positive()).is_some(),
                 "the refusal did not end the process:\n{}",
                 pty.screen()
             );
@@ -11214,7 +11909,7 @@ async fn pty_attach_swallows_every_other_key() {
         100,
     );
     assert!(
-        pty.wait_for_screen("ATTACH-FILLER-39", 10),
+        pty.wait_for_screen("ATTACH-FILLER-39", wait_positive()),
         "the committed history is not on screen:\n{}",
         pty.screen()
     );
@@ -11243,14 +11938,14 @@ async fn pty_attach_swallows_every_other_key() {
     // showing `paused` proves every key sent above it has been processed by now.
     pty.send(b"\x1b[5~");
     assert!(
-        pty.wait_for_screen("paused", 5),
+        pty.wait_for_screen("paused", wait_positive()),
         "page up did not pause the follow:\n{}",
         pty.screen()
     );
 
     // So the assertions below are about keys the app has already handled.
     assert!(
-        pty.wait_for_screen("attach · keys-me · read-only", 2),
+        pty.wait_for_screen("attach · keys-me · read-only", wait_positive()),
         "the view stopped drawing:\n{}",
         pty.screen()
     );
@@ -11275,7 +11970,11 @@ async fn pty_attach_swallows_every_other_key() {
     );
 
     pty.send(b"q");
-    assert_eq!(pty.wait_for_exit(3), Some(0), "q must quit the view");
+    assert_eq!(
+        pty.wait_for_exit(wait_positive()),
+        Some(0),
+        "q must quit the view"
+    );
 }
 
 // ---------- lost input: a resize must not eat a typed key ----------
@@ -11302,13 +12001,17 @@ fn pty_a_resize_does_not_eat_a_typed_key() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
     // The resize lands while the input thread is idle and the text follows in one write, so
     // crossterm's read buffers the tail of it: that buffered key was the one the coalescer ate.
     pty.resize(31, 110);
     pty.send(b"abcdef");
     assert!(
-        pty.wait_for_screen("abcdef", 5),
+        pty.wait_for_screen("abcdef", wait_positive()),
         "a key was dropped after the resize:\n{}",
         pty.screen()
     );
@@ -11341,18 +12044,18 @@ async fn pty_a_submit_after_the_driver_ended_says_the_session_is_dead() {
         110,
     );
     assert!(
-        pty.wait_for_screen("the session ended: driver panicked", 15),
+        pty.wait_for_screen("the session ended: driver panicked", wait_positive()),
         "{}",
         pty.screen()
     );
     pty.send(b"hello there\r");
     assert!(
-        pty.wait_for_screen("message was not sent", 10),
+        pty.wait_for_screen("message was not sent", wait_positive()),
         "the submit was silently swallowed:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("radian --resume ended-submit", 10),
+        pty.wait_for_screen("radian --resume ended-submit", wait_positive()),
         "the notice does not say how to continue:\n{}",
         pty.screen()
     );
@@ -11374,7 +12077,9 @@ async fn pty_a_submit_after_the_driver_ended_says_the_session_is_dead() {
     // Every submit says so again.
     pty.send(b"\r");
     assert!(
-        pty.wait_until(10, |screen| screen.matches("message was not sent").count()
+        pty.wait_until(wait_positive(), |screen| screen
+            .matches("message was not sent")
+            .count()
             >= 2),
         "the second submit was silent:\n{}",
         pty.screen()
