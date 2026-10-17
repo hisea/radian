@@ -45,6 +45,7 @@ pub mod pending;
 pub mod projection;
 pub mod prompt;
 pub mod provider;
+pub mod secrets;
 pub mod session;
 mod session_id;
 pub mod sessions;
@@ -193,6 +194,7 @@ pub use provider::{
     thinking_rank, usage_endpoint, usage_item_alias, valid_name, wire_budget,
 };
 pub use radian_runtime::ModelRoute;
+pub use secrets::{register as register_secret, registered as registered_secrets};
 pub use session::session_hooks;
 pub use session::{
     AccessBuilder, AccessParts, ApprovalRouting, CommandRefused, DriverEnd, HostBindings,

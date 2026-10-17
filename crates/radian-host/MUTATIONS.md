@@ -1530,3 +1530,16 @@ the test. No other row in this file is touched.
 |---|---|---|---|
 | GR-1 | an unknown JSON style's error repeats the style name (`format!("... {name:?} ...")`, the branch's code) | caught (rc=101) | `an_unknown_style_notice_never_carries_the_style_name` |
 | GR-2 | drop `.env_clear()` from the command spawn | caught (rc=101) | `the_environment_is_cleared_to_the_deliberate_allow_list` (`HOME` leaks; the old `set_var` probe was removed because it raced the parallel tests) |
+
+## oauth-redact: a `chatgpt` token refreshed mid-session must be redactable too (2026-10-16)
+
+Owner report: every redaction list is read from `resolved_keys()` at startup, so about an hour
+into a session (the first `ensure_fresh` refresh, `model.rs:204`) the list no longer carries the
+access token the session is using. Run: `cargo test -p radian-host --locked --no-fail-fast
+--test oauth_chatgpt a_refresh_registers`. The mutation edits `src/oauth_chatgpt.rs` in place,
+saving a copy to `.radian/scratch/mut/` first and comparing the restored file with `cmp`; after
+the run `git status --short` shows only the intended files.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| OR-H1 | `oauth_chatgpt::store_token` drops its two `secrets::register(...)` lines (the refresh still writes the pair, nothing registers it) | ✅ 1 failed | `a_refresh_registers_the_new_tokens_for_redaction` (`registered_secrets()` is `[]`, so `contains(&fresh_access)` fails) |
