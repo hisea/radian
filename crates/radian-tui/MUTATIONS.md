@@ -2246,3 +2246,22 @@ Base `61c4afb` · branch `dogfood/tui-lost-input` · worktree `.radian-worktrees
 
 3/3 抓住；恢复后 `git status --short` 只有测试与三处源码改动。`pty_a_resize_does_not_eat_a_typed_key`
 在修复后单独重跑 3 次全过（旧代码/变异下每次失败）。
+
+## ADR 0034 slice ④：元数据、标签、会话身份、5 秒门、插件（2026-10-17）
+
+Base `2e513ef` · branch `dogfood/s4-herdr`。变异在源码原地改，每次只跑抓住它的那个测试二进制
+（`--no-fail-fast`），跑完从 `/tmp/s4/` 的 `cp` 副本还原并 `cmp` 一致。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| H34-T1 | 报告挪到模型首 token 之后（`Working` 且流为空时不报） | pty `pty_herdr_reports_working_within_a_second_of_the_input` | ✅ 1 failed |
+| H34-T2 | manifest 去掉 `min_herdr_version` | `tests/herdr_plugin.rs::the_manifest_has_the_fields_herdr_requires` | ✅ 1 failed |
+| H34-T3 | `sessions` pane 的 `placement` 改成 `overlay` | `tests/herdr_plugin.rs::the_manifest_has_the_fields_herdr_requires` | ✅ 1 failed |
+
+命令：`timeout 900 cargo test -p radian-tui --locked --test pty --no-fail-fast herdr`；
+`timeout 300 cargo test -p radian-tui --locked --test herdr_plugin --no-fail-fast`。3/3 抓住。
+
+同一次手跑（不进套件，因为 `herdr plugin link` 会写用户自己的 herdr 配置）：一次性
+`XDG_CONFIG_HOME` 下 `herdr plugin link integrations/herdr` 成功（返回解析后的 manifest，只有一条
+`manifest does not declare platforms` warning）；把 `min_herdr_version` 去掉后同一命令失败于
+`plugin min_herdr_version is required`。
