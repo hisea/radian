@@ -2066,179 +2066,6 @@ async fn without_workspace_the_built_in_tools_do_not_exist() {
     );
 }
 
-// ---------- the `[git]` section (ADR 0030 R10 and revision 4, ADR 0032) ----------
-
-/// Writes `body` to `path` and makes it executable.
-fn write_script(path: &Path, body: &str) {
-    std::fs::write(path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-}
-
-/// A fresh repository with one commit on `branch`.
-fn repo_on_branch(dir: &Path, branch: &str) {
-    git(dir, &["init", "-q", "-b", branch]);
-    git(dir, &["config", "user.email", "t@example.invalid"]);
-    git(dir, &["config", "user.name", "t"]);
-    std::fs::write(dir.join("seed.txt"), "seed\n").unwrap();
-    git(dir, &["add", "."]);
-    git(dir, &["commit", "-qm", "seed"]);
-}
-
-/// How many commits `HEAD` reaches.
-fn commits_at_head(dir: &Path) -> usize {
-    let out = std::process::Command::new("git")
-        .current_dir(dir)
-        .args(["rev-list", "--count", "HEAD"])
-        .output()
-        .expect("run git rev-list");
-    assert!(out.status.success(), "git rev-list --count HEAD");
-    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
-}
-
-/// ADR 0030 R10 and ADR 0032: `radian exec` resolves `[git] protected_branches` from its own
-/// config exactly like the TUI, so `git_commit` refuses a commit on a configured protected
-/// branch. The session here is a general one (`refuse_main = false`, ADR 0038 decision 4), so
-/// `main` is refused **only** because the config names it: on the pre-fix CLI, which passed
-/// `Vec::new()`, the commit goes through.
-#[tokio::test]
-async fn exec_refuses_a_commit_on_a_configured_protected_branch() {
-    if !git_available() {
-        eprintln!("skipping: git is not on PATH");
-        return;
-    }
-    let dir = scratch("git-protected-branch");
-    let ws = dir.join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    repo_on_branch(&ws, "main");
-    let config = write_file(
-        &dir,
-        "config.toml",
-        "schema_version = 1\n[git]\nprotected_branches = [\"main\"]\n",
-    );
-    std::fs::write(ws.join("new.txt"), "hello\n").unwrap();
-    let server = MockServer::start(vec![
-        tool_reply("call_1", "git_commit", r#"{"message":"add new.txt"}"#),
-        text_reply("done"),
-    ])
-    .await;
-
-    let (code, stdout, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--config",
-                config.to_str().unwrap(),
-                "--workspace",
-                ws.to_str().unwrap(),
-                "--yes",
-                "-p",
-                "commit the change",
-            ],
-            &[],
-        ),
-        "",
-    )
-    .await;
-
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-    let result = tool_result_content(&server, 1);
-    assert!(
-        result.contains("configured protected branches are refused"),
-        "the configured protected branch must be refused: {result}"
-    );
-    assert_eq!(
-        commits_at_head(&ws),
-        1,
-        "the refusal must not have created a commit"
-    );
-}
-
-/// ADR 0030, ADR 0039 decision 3, ADR 0032: the `[git] allowed_filters` list the CLI
-/// resolves governs which drivers `git_commit` may run. An empty list allows none, so the `lfs`
-/// driver the `.gitattributes` names is refused and Radian's own `git-lfs clean` (the
-/// `RADIAN_GIT_LFS` seam) never runs. A CLI that passes `None` silently falls back to the
-/// default `["lfs"]`, runs the driver and commits.
-#[tokio::test]
-async fn exec_honours_the_configured_git_allowed_filters() {
-    if !git_available() {
-        eprintln!("skipping: git is not on PATH");
-        return;
-    }
-    let dir = scratch("git-allowed-filters");
-    let ws = dir.join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    repo_on_branch(&ws, "main");
-    let config = write_file(
-        &dir,
-        "config.toml",
-        "schema_version = 1\n[git]\nallowed_filters = []\n",
-    );
-    std::fs::write(ws.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
-    std::fs::write(ws.join("data.bin"), "payload\n").unwrap();
-    // Radian's own fixed `git-lfs clean`, faked: it leaves a marker behind, so a run that
-    // reached it is visible even though the commit itself would succeed.
-    let marker = dir.join("GIT-LFS-RAN");
-    let fake = dir.join("fake-git-lfs");
-    write_script(
-        &fake,
-        &format!(
-            "#!/bin/sh\necho ran >> {}\nprintf 'version https://git-lfs.github.com/spec/v1\\noid sha256:0\\nsize 8\\n'\n",
-            marker.display()
-        ),
-    );
-    let server = MockServer::start(vec![
-        tool_reply("call_1", "git_commit", r#"{"message":"add data"}"#),
-        text_reply("done"),
-    ])
-    .await;
-
-    let (code, stdout, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--config",
-                config.to_str().unwrap(),
-                "--workspace",
-                ws.to_str().unwrap(),
-                "--yes",
-                "-p",
-                "commit the change",
-            ],
-            &[("RADIAN_GIT_LFS", fake.to_str().unwrap())],
-        ),
-        "",
-    )
-    .await;
-
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-    let result = tool_result_content(&server, 1);
-    assert!(
-        result.contains("data.bin") && result.contains("allowed_filters"),
-        "an empty `[git] allowed_filters` must refuse the `lfs` driver: {result}"
-    );
-    assert!(
-        !marker.exists(),
-        "the configured allow-list must keep the `lfs` driver from running"
-    );
-    assert_eq!(
-        commits_at_head(&ws),
-        1,
-        "the refusal must not have created a commit"
-    );
-}
-
 // ---------- sessions on disk (Phase 2 / B) ----------
 
 /// 1: a new session writes a valid, contiguous JSONL with the runtime's events.
@@ -8097,11 +7924,10 @@ async fn pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo() {
     assert_stty_has_echo(stty);
 }
 
-/// ADR 0030 slice 6b2: a headless lead (`radian exec`) mounts the lead tools from the start, so
-/// every lead tool name is in the model's list. The mode gate still refuses the calls (a
-/// `general` turn), which is pinned in `radian-host`'s `lead_tools` tests.
+/// ADR 0043 slice ⓪A: a headless `radian exec` mounts neither `git_commit` nor any task/lead/
+/// named tool; its list is the built-in tools only.
 #[tokio::test]
-async fn a_headless_lead_mounts_the_task_tools() {
+async fn a_headless_exec_mounts_no_orchestration_tools() {
     let server = MockServer::start(vec![text_reply("hi")]).await;
     let (code, _, stderr) = feed_and_wait(
         spawn_radian(
@@ -8113,10 +7939,43 @@ async fn a_headless_lead_mounts_the_task_tools() {
     .await;
     assert_eq!(code, 0, "{stderr}");
     let names = advertised_tools(&server, 0);
-    for lead in radian_host::LEAD_TOOL_NAMES {
+    assert!(
+        !names.iter().any(|name| name == "git_commit"),
+        "`git_commit` must not be mounted: {names:?}"
+    );
+    for gone in [
+        "spawn_task",
+        "wait_task",
+        "wait_any",
+        "list_tasks",
+        "task_status",
+        "cancel_task",
+        "remove_task",
+        "integrate_task",
+        "answer_task",
+        "deny_task_approval",
+        "escalate_approval",
+        "send_agent",
+        "wait_agent",
+    ] {
         assert!(
-            names.iter().any(|name| name == lead),
-            "`{lead}` is not mounted by a headless lead: {names:?}"
+            !names.iter().any(|name| name == gone),
+            "`{gone}` must not be mounted: {names:?}"
         );
     }
+    // The exact set: a headless session with no `--workspace` mounts the memory tools and the
+    // built-in `skill` (its `theme-import` skill is compiled in), and nothing else.
+    let mut got = names.clone();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            "memory_get",
+            "memory_revise",
+            "memory_save",
+            "memory_search",
+            "skill"
+        ],
+        "the exact tool set of a fresh headless session: {names:?}"
+    );
 }

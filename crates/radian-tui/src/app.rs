@@ -624,11 +624,8 @@ fn is_user_input(input: &Input) -> bool {
         | Input::ModelChecked { .. }
         | Input::SwitchCompacted { .. }
         | Input::SessionDone(_)
-        | Input::AgentSent { .. }
-        | Input::AgentReplied { .. }
         | Input::TrustResolved(_)
         | Input::AccessApplied { .. }
-        | Input::ModeApplied { .. }
         | Input::CommandRefused(_)
         | Input::PickerOpened(_)
         | Input::LoginVerified { .. }
@@ -830,12 +827,6 @@ pub enum Input {
     },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
-    /// A `/send`'s input was accepted by the named agent (ADR 0030 O12): the "sent to `<name>`"
-    /// notice. `created` distinguishes a first use from a reuse.
-    AgentSent { name: String, created: bool },
-    /// A named agent's turn ended (ADR 0030 O12): the bounded first lines of its last assistant
-    /// text, shown as a notice. `summary` is empty when it produced no text.
-    AgentReplied { name: String, summary: String },
     /// A `/skill:<name> [args]` expansion finished (ADR 0025 S3): the message text to send, or
     /// a notice (an unknown skill or a file that can no longer be read). `steer` mirrors the
     /// turn state when the command was submitted.
@@ -901,12 +892,6 @@ pub enum Input {
     AccessApplied {
         tier: crate::profile::Tier,
         remember: bool,
-        result: Result<(), String>,
-    },
-    /// A mode switch finished (the result of [`Effect::SetMode`]): the mode, and the outcome (a
-    /// task agent, or a session whose layer 1 is fixed, is a refusal).
-    ModeApplied {
-        mode: radian_host::Mode,
         result: Result<(), String>,
     },
     /// The left button went down at a screen cell: the press that may start a transcript
@@ -1050,11 +1035,6 @@ pub enum Effect {
         tier: crate::profile::Tier,
         remember: bool,
     },
-    /// Switch the session's working mode (ADR 0038 slice 3). The loop calls the facade
-    /// (`set_mode`), which queues the durable `ConfigChanged` the driver journals at the turn
-    /// boundary, so layer 1 (the role prompt) changes at the next turn. The answer is
-    /// [`Input::ModeApplied`].
-    SetMode { mode: radian_host::Mode },
     /// Expand `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and the loop sends
     /// the folded `<skill …>` text as one user message (`steer` picks steer vs follow-up). The
     /// answer is [`Input::SkillExpanded`].
@@ -1069,13 +1049,6 @@ pub enum Effect {
     /// `/jobs` (ADR 0037 decision 4): list the session's background jobs, or stop one/all. The
     /// loop runs it (the registry lives in the host) and answers with [`Input::SessionDone`].
     Jobs(command::JobsRequest),
-    /// `/tasks` (ADR 0030 O10/O12): list the live task agents, or cancel/kill one. The loop runs
-    /// it (the task registry lives in the host) and answers with [`Input::SessionDone`].
-    Tasks(command::TasksRequest),
-    /// `/send` (ADR 0030 O12): list the known definitions, or send to a named agent. The loop
-    /// runs it (the named registry lives in the host) and answers with [`Input::AgentSent`] and
-    /// then [`Input::AgentReplied`].
-    Send(command::SendRequest),
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
@@ -1127,7 +1100,6 @@ impl PartialEq for Effect {
                     remember: br,
                 },
             ) => at == bt && ar == br,
-            (SetMode { mode: a }, SetMode { mode: b }) => a == b,
             (
                 AnswerRequest {
                     request_id: a,
@@ -1207,8 +1179,6 @@ impl PartialEq for Effect {
             ) => an == bn && aa == ba && as_ == bs,
             (ListSkills, ListSkills) => true,
             (Jobs(a), Jobs(b)) => a == b,
-            (Tasks(a), Tasks(b)) => a == b,
-            (Send(a), Send(b)) => a == b,
             (Theme { name: a }, Theme { name: b }) => a == b,
             (Inject(a), Inject(b)) => a == b,
             (CancelBash, CancelBash) => true,
@@ -1440,11 +1410,6 @@ pub struct SessionView {
     /// The last `CompactionFinished`'s numbers, handed to the summary message that follows it
     /// (ADR 0018). `(revision, tokens_before, tokens_after, deterministic, dropped)`.
     pending_compaction: Option<(u64, u64, u64, bool, u64)>,
-    /// The live task agents the lead has spawned (ADR 0030 O10), keyed by task id; the value is
-    /// whether the task's current turn is running. Updated from the lead's `TaskSpawned`/
-    /// `TaskFinished` runtime events, and refreshed from the registry by the host loop. Empty
-    /// when there are no tasks, so the status-bar count is absent then.
-    pub tasks: std::collections::BTreeMap<String, bool>,
 }
 
 /// The whole TUI's state: the global chrome every session view shares, plus exactly one
@@ -1594,16 +1559,6 @@ impl SessionView {
     fn note_for_running_tools(&mut self) {
         self.note = self.tool_note();
     }
-
-    /// The task-agent count `(running, total)` for the status bar (ADR 0030 O10), or `None` when
-    /// there are no tasks — and then the item is absent.
-    pub fn task_counts(&self) -> Option<(usize, usize)> {
-        if self.tasks.is_empty() {
-            return None;
-        }
-        let running = self.tasks.values().filter(|running| **running).count();
-        Some((running, self.tasks.len()))
-    }
 }
 
 impl App {
@@ -1687,7 +1642,6 @@ impl App {
                 selecting: None,
                 last_click: None,
                 pending_compaction: None,
-                tasks: std::collections::BTreeMap::new(),
             },
         }
     }
@@ -2993,22 +2947,6 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
-            // ADR 0030 O12: `/send`'s two notices. The input was accepted by the named agent.
-            Input::AgentSent { name, created } => {
-                let verb = if created { "created" } else { "sent to" };
-                self.push_notice(format!("{verb} `{name}`"));
-                UpdateResult::dirty()
-            }
-            // The named agent's turn ended: show the first lines of its last assistant text.
-            Input::AgentReplied { name, summary } => {
-                let text = if summary.trim().is_empty() {
-                    format!("`{name}` finished with no text")
-                } else {
-                    format!("`{name}` replied:\n{summary}")
-                };
-                self.push_notice(text);
-                UpdateResult::dirty()
-            }
             Input::TrustMove(delta) => {
                 if let Some(Modal::Trust(wizard)) =
                     self.layers.iter_mut().rev().find_map(|layer| match layer {
@@ -3096,23 +3034,6 @@ impl App {
                         );
                     }
                     Err(reason) => self.push_notice(format!("cannot switch access: {reason}")),
-                }
-                UpdateResult::dirty()
-            }
-            Input::ModeApplied { mode, result } => {
-                match result {
-                    Ok(()) => {
-                        // The layer itself switches at the next turn (the loop's `set_mode`
-                        // queues the change); the projection is the UI's mirror of it.
-                        self.session
-                            .projection
-                            .set_mode(Some(mode.as_str().to_string()));
-                        self.push_notice(format!(
-                            "mode: {} from the next turn (role prompt)",
-                            mode.as_str()
-                        ));
-                    }
-                    Err(reason) => self.push_notice(format!("cannot switch mode: {reason}")),
                 }
                 UpdateResult::dirty()
             }
@@ -3848,46 +3769,6 @@ impl App {
 
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
     fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
-        // ADR 0030 O10: a lead's `TaskSpawned`/`TaskFinished` becomes a notice line, and the
-        // status-bar count follows the first and the last.
-        if let RuntimeEvent::TaskSpawned {
-            agent_session_id,
-            worktree,
-            label,
-        } = event
-        {
-            self.session.tasks.insert(agent_session_id.clone(), true);
-            let where_ = worktree
-                .as_deref()
-                .unwrap_or("the shared workspace")
-                .to_owned();
-            let name = match label {
-                Some(label) => format!("{agent_session_id} ({label})"),
-                None => agent_session_id.clone(),
-            };
-            self.session.entries.push(Entry::new(
-                EntryKind::Notice,
-                format!("task `{name}` spawned at {where_}"),
-            ));
-            return UpdateResult::dirty();
-        }
-        if let RuntimeEvent::TaskFinished {
-            agent_session_id,
-            outcome,
-            error,
-        } = event
-        {
-            self.session.tasks.remove(agent_session_id);
-            let suffix = match error {
-                Some(error) => format!(" ({outcome:?}): {error}"),
-                None => format!(" ({outcome:?})"),
-            };
-            self.session.entries.push(Entry::new(
-                EntryKind::Notice,
-                format!("task `{agent_session_id}` finished{suffix}"),
-            ));
-            return UpdateResult::dirty();
-        }
         if let RuntimeEvent::TurnFinished { .. } = event {
             // The turn boundary is on disk: a `/fork` that was waiting for it can run now.
             self.session.turn_committed = true;
@@ -4513,28 +4394,6 @@ impl App {
                     })
                 }
             },
-            // `/mode` (ADR 0038 slice 3): a query with no argument, otherwise a role switch. The
-            // layer changes at the next turn, so there is nothing to confirm here.
-            command::Outcome::ModeSwitch(name) => match name {
-                None => {
-                    let current = self
-                        .session
-                        .projection
-                        .read()
-                        .mode()
-                        .unwrap_or("general")
-                        .to_owned();
-                    self.push_notice(format!("mode: {current}"));
-                    UpdateResult::dirty()
-                }
-                Some(name) => match radian_host::Mode::parse(&name) {
-                    Ok(mode) => UpdateResult::effect(Effect::SetMode { mode }),
-                    Err(message) => {
-                        self.push_notice(message);
-                        UpdateResult::dirty()
-                    }
-                },
-            },
             // `/skill:` (ADR 0025 S3): the host reads the body and the expanded text becomes a
             // user message. Whether it steers is decided here, like a typed send.
             command::Outcome::Skill { name, args } => {
@@ -4550,8 +4409,6 @@ impl App {
             // `/skills`: the host lists the discovered skills as notices.
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
             command::Outcome::Jobs(request) => UpdateResult::effect(Effect::Jobs(request)),
-            command::Outcome::Tasks(request) => UpdateResult::effect(Effect::Tasks(request)),
-            command::Outcome::Send(request) => UpdateResult::effect(Effect::Send(request)),
             command::Outcome::Message => UpdateResult::none(),
         }
     }
@@ -5267,10 +5124,6 @@ impl App {
             })
             .filter(|branch| !branch.is_empty())
             .or_else(|| self.session.git_branch.clone());
-        let (tasks_running, tasks_total) = match self.session.task_counts() {
-            Some((running, total)) => (Some(running as u64), Some(total as u64)),
-            None => (None, None),
-        };
         radian_host::FooterSnapshot {
             model: Some(self.session.model_name.clone()),
             cwd: self
@@ -5287,8 +5140,10 @@ impl App {
             cost_usd: session
                 .cost_micros()
                 .map(|micros| micros as f64 / 1_000_000.0),
-            tasks_running,
-            tasks_total,
+            // ADR 0043 decision 1 deleted the task registry, so nothing produces a task count;
+            // the fields stay (ADR 0027's document shape) and are null.
+            tasks_running: None,
+            tasks_total: None,
         }
     }
 

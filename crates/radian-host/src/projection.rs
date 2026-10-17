@@ -117,9 +117,6 @@ struct Facts {
     /// The effective input budget `B` (ADR 0018), for the status bar's `T / B`.
     context_window: Option<u64>,
     tier: Option<String>,
-    /// The working mode in force (`general` / `lead`, ADR 0038 decision 1). The footer and
-    /// `/mode` with no argument read it.
-    mode: Option<String>,
     mcp_configured: usize,
     mcp_open: Option<(usize, usize)>,
     last_tool: Option<LastToolCall>,
@@ -302,12 +299,6 @@ impl SessionProjection {
         self.write(|facts| facts.tier = tier)
     }
 
-    /// The working mode's name (ADR 0038 decision 1). The session sets the startup value; a
-    /// `/mode` switch sets the new one as it queues the change.
-    pub fn set_mode(&self, mode: Option<String>) -> bool {
-        self.write(|facts| facts.mode = mode)
-    }
-
     /// How many MCP servers are configured, and the servers/tools the opened session reported.
     pub fn set_mcp(&self, configured: usize, open: Option<(usize, usize)>) -> bool {
         self.write(|facts| {
@@ -421,11 +412,6 @@ impl ProjectionRead<'_> {
 
     pub fn tier(&self) -> Option<&str> {
         self.facts.tier.as_deref()
-    }
-
-    /// The working mode's name (ADR 0038 decision 1): `general` or `lead`.
-    pub fn mode(&self) -> Option<&str> {
-        self.facts.mode.as_deref()
     }
 
     pub fn mcp_configured(&self) -> usize {

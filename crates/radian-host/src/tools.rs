@@ -13,8 +13,6 @@ use agent_core::{
 use agent_extensions::{McpSession, McpToolProvider};
 use radian_coding::{AskSession, AskTools, CodingSession, CodingTools};
 
-use crate::git_commit::{GitCommitTools, run as run_git_commit};
-use crate::lead_tools::{LeadSession, LeadTools};
 use crate::memory::{MemorySession, MemoryTools};
 use crate::skills::tools::{SkillSession, SkillTools};
 
@@ -26,12 +24,6 @@ pub struct HostTools {
     ask: Option<AskTools>,
     /// `skill` (ADR 0025 S3). Read-only, so it is mounted whenever skills were discovered.
     skills: Option<SkillTools>,
-    /// `git_commit` (ADR 0030 R10). Runs in the host, outside the sandbox. `None` for a host
-    /// with no workspace/journal (the CLI's own tool tests).
-    git_commit: Option<GitCommitTools>,
-    /// The lead's task tools (ADR 0030 slice 6). `None` for a task agent (depth limit) and for
-    /// a host that supplies no task builder.
-    lead: Option<LeadTools>,
     mcp: McpToolProvider,
     /// ADR 0030 O11: the agent definition's built-in tool allow-list. `None` (the default)
     /// mounts every built-in the host has; `Some` mounts only these names — the others are not
@@ -46,15 +38,12 @@ impl HostTools {
         coding: Option<CodingTools>,
         memory: Option<MemoryTools>,
         mcp: McpToolProvider,
-        git_commit: Option<GitCommitTools>,
     ) -> Self {
         Self {
             coding,
             memory,
             ask: None,
             skills: None,
-            git_commit,
-            lead: None,
             mcp,
             tool_allow: None,
         }
@@ -75,14 +64,6 @@ impl HostTools {
             Some(allow) => allow.iter().any(|allowed| allowed == name),
             None => true,
         }
-    }
-
-    /// Mounts the lead's task tools from the start (ADR 0030 item 5). The permission
-    /// layer decides whether they run: a mode gate denies them outside `lead` (ADR 0038
-    /// decision 1). Never mounted for a task agent.
-    pub fn with_lead(mut self, lead: LeadTools) -> Self {
-        self.lead = Some(lead);
-        self
     }
 
     /// Mounts `ask_user`. The host calls this only when a human is there to answer; without it
@@ -147,21 +128,6 @@ impl HostTools {
         if self.skills.is_some() {
             push("skill", "read one of the discovered skills");
         }
-        if self.git_commit.is_some() {
-            push(
-                "git_commit",
-                "commit inside the workspace from the host; needed when the sandbox keeps \
-                 `.git` read-only (task agents, Linux)",
-            );
-        }
-        if self.lead.is_some() {
-            for (name, purpose) in crate::lead_tools::specs()
-                .iter()
-                .map(|spec| (spec.name.clone(), first_line(&spec.description)))
-            {
-                out.push((name, purpose));
-            }
-        }
         // ADR 0030 O11: an allow-list narrows what is even listed in layer 0a; a built-in it
         // does not name is not mounted and must not appear here.
         if self.tool_allow.is_some() {
@@ -171,31 +137,17 @@ impl HostTools {
     }
 }
 
-/// The first sentence of a tool description, for the `<runtime>` layer's one-line list.
-fn first_line(description: &str) -> String {
-    description
-        .split(". ")
-        .next()
-        .unwrap_or(description)
-        .trim()
-        .to_owned()
-}
-
 pub struct HostSession {
     coding: Option<CodingSession>,
     memory: Option<MemorySession>,
     ask: Option<AskSession>,
     skills: Option<SkillSession>,
-    git_commit: Option<GitCommitTools>,
-    lead: Option<LeadSession>,
     mcp: McpSession,
     specs: Vec<ToolSpec>,
     coding_names: HashSet<String>,
     memory_names: HashSet<String>,
     ask_names: HashSet<String>,
     skill_names: HashSet<String>,
-    git_commit_names: HashSet<String>,
-    lead_names: HashSet<String>,
 }
 
 impl ToolProvider for HostTools {
@@ -220,18 +172,11 @@ impl ToolProvider for HostTools {
             Some(skills) => Some(skills.open_session().await?),
             None => None,
         };
-        let git_commit = self.git_commit.clone();
-        let lead = match &self.lead {
-            Some(lead) => Some(lead.open_session().await?),
-            None => None,
-        };
 
         let mut coding_names = HashSet::new();
         let mut memory_names = HashSet::new();
         let mut ask_names = HashSet::new();
         let mut skill_names = HashSet::new();
-        let mut git_commit_names = HashSet::new();
-        let mut lead_names = HashSet::new();
         let mut built_in_specs: Vec<ToolSpec> = Vec::new();
         if let Some(coding) = &coding {
             for spec in coding.tool_specs() {
@@ -257,17 +202,6 @@ impl ToolProvider for HostTools {
                 built_in_specs.push(spec.clone());
             }
         }
-        if git_commit.is_some() {
-            let git_commit_spec = crate::git_commit::spec();
-            git_commit_names.insert(git_commit_spec.name.clone());
-            built_in_specs.push(git_commit_spec);
-        }
-        if let Some(lead) = &lead {
-            for spec in lead.tool_specs() {
-                lead_names.insert(spec.name.clone());
-                built_in_specs.push(spec.clone());
-            }
-        }
         // ADR 0030 O11: an allow-list is a physical unmount. Drop every unlisted built-in spec
         // **and** its dispatch name, so a call to it is an unknown tool, not merely denied. MCP
         // specs are dynamic and are never filtered here (the definition's `mcp` list governs
@@ -277,8 +211,6 @@ impl ToolProvider for HostTools {
             memory_names.retain(|name| self.allows(name));
             ask_names.retain(|name| self.allows(name));
             skill_names.retain(|name| self.allows(name));
-            git_commit_names.retain(|name| self.allows(name));
-            lead_names.retain(|name| self.allows(name));
             built_in_specs.retain(|spec| self.allows(&spec.name));
         }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
@@ -288,16 +220,12 @@ impl ToolProvider for HostTools {
             memory,
             ask,
             skills,
-            git_commit,
-            lead,
             mcp,
             specs,
             coding_names,
             memory_names,
             ask_names,
             skill_names,
-            git_commit_names,
-            lead_names,
         })
     }
 }
@@ -312,25 +240,7 @@ impl ToolSession for HostSession {
         call: &ToolCall,
         cx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
-        if self.git_commit_names.contains(&call.name) {
-            // The host tool needs the workspace, the journal and the branch rules, so it runs
-            // through its own entry point rather than the plain `ToolSession` trait.
-            match &self.git_commit {
-                Some(git_commit) => run_git_commit(git_commit, call).await,
-                None => Err(ToolFailure::new(
-                    "unknown_tool",
-                    format!("`{}` has no host session", call.name),
-                )),
-            }
-        } else if self.lead_names.contains(&call.name) {
-            match &self.lead {
-                Some(lead) => crate::lead_tools::run(lead, call, cx).await,
-                None => Err(ToolFailure::new(
-                    "unknown_tool",
-                    format!("`{}` has no lead session", call.name),
-                )),
-            }
-        } else if self.skill_names.contains(&call.name) {
+        if self.skill_names.contains(&call.name) {
             match &self.skills {
                 Some(skills) => skills.execute(call, cx).await,
                 None => Err(ToolFailure::new(

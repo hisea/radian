@@ -31,7 +31,6 @@ async fn a_sync_point_makes_every_earlier_record_durable() {
         TurnFailed,
         ReplacementCommitted,
         ReplacementAborted,
-        TaskSpawned,
     }
 
     for case in [
@@ -41,7 +40,6 @@ async fn a_sync_point_makes_every_earlier_record_durable() {
         Sync::TurnFailed,
         Sync::ReplacementCommitted,
         Sync::ReplacementAborted,
-        Sync::TaskSpawned,
     ] {
         let dir = TempDir::new("sync");
         let path = dir.file("s.jsonl");
@@ -106,14 +104,6 @@ async fn a_sync_point_makes_every_earlier_record_durable() {
                 .append(JournalRecord::TranscriptReplacementAborted { revision: 1 })
                 .await
                 .unwrap(),
-            Sync::TaskSpawned => journal
-                .append_runtime_event(RuntimeEvent::TaskSpawned {
-                    agent_session_id: "task-1".into(),
-                    worktree: None,
-                    label: None,
-                })
-                .await
-                .unwrap(),
         }
 
         assert_eq!(
@@ -156,14 +146,6 @@ async fn non_sync_records_ride_the_next_sync_point() {
             },
         ),
         (
-            "GitCommitted",
-            RuntimeEvent::GitCommitted {
-                commit: "abc".into(),
-                branch: "main".into(),
-                files: 1,
-            },
-        ),
-        (
             "BackgroundJobStarted",
             RuntimeEvent::BackgroundJobStarted {
                 job_id: "j1".into(),
@@ -178,14 +160,6 @@ async fn non_sync_records_ride_the_next_sync_point() {
                 exclude_from_context: false,
                 exit_code: Some(0),
                 cancelled: false,
-            },
-        ),
-        (
-            "TaskFinished",
-            RuntimeEvent::TaskFinished {
-                agent_session_id: "task-1".into(),
-                outcome: TurnOutcome::Completed,
-                error: None,
             },
         ),
     ];

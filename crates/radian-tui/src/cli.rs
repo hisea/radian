@@ -1579,134 +1579,6 @@ fn run(
     // once the session exists): inside the alternate screen the block is where it shows.
     startup_log.print_before_screen(&radian_host::trust::status_line(&trust_setup));
 
-    // ADR 0030 slice 9: the orchestration snapshot (user config + a trusted project file) is
-    // installed process-wide before any session opens; the startup lines list the verify/policy
-    // commands that will run. The project file is read only when the workspace is trusted.
-    let (orchestration, orchestration_warnings) = radian_host::orchestration::resolve(
-        &workspace_path,
-        trust_setup.resolved.decision.as_bool(),
-        &config.orchestration,
-    );
-    for warning in &orchestration_warnings {
-        startup_log.line(format!("[orchestration] {warning}"));
-    }
-    for line in orchestration.startup_lines() {
-        startup_log.line(line);
-    }
-    radian_host::orchestration::set_process(orchestration);
-
-    // ADR 0030 slice 6b2: the production task builder. Both hosts hand `radian-host` the same
-    // builder, so a `spawn_task` opens a real task session (a fresh model on the lead's route,
-    // a workspace-write tier, MCP off, the lead's retries/compaction/budget/skills). The
-    // registry still owns the worktree, the network-off sandbox, no memory and the `task` role.
-    let task_host = {
-        let provider = route.adapter();
-        let base_url = route.base_url.clone();
-        let model_id = model_name.clone();
-        let api_key = credential.as_ref().map(|credential| credential.key.clone());
-        let headers = route.headers.clone();
-        let max_tokens = cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-        let providers = config.providers.clone();
-        let route_provider = provider_name.clone();
-        let route_model = model_name.clone();
-        let route_user_headers = user_headers.clone();
-        let route_thinking = thinking.clone();
-        let task_model: radian_host::TaskModelFactory = std::sync::Arc::new(
-            move |session_id: &str,
-                  slot: std::sync::Arc<radian_runtime::ConfigSlot>,
-                  agent_model: Option<radian_host::ModelRoute>,
-                  agent_thinking: Option<String>| {
-                // ADR 0030 O11: an agent definition's `model` and `thinking` are the task's
-                // route and level. The route's credential is resolved here the same way a
-                // `/model` switch resolves it — never copied into the snapshot.
-                if let Some(route) = agent_model {
-                    let ctx = radian_host::RouteContext {
-                        providers: providers.clone(),
-                        session_id: session_id.to_owned(),
-                        user_headers: route_user_headers.clone(),
-                        include_usage: None,
-                        max_tokens,
-                        thinking: agent_thinking
-                            .clone()
-                            .unwrap_or_else(|| route_thinking.clone()),
-                        thinking_budget,
-                    };
-                    let args = ctx.args_for(&route.provider, &route.model)?;
-                    let initial = build_model(args).map_err(|error| error.to_string())?;
-                    return Ok(radian_host::SwitchableModel::new(initial, route, slot, ctx));
-                }
-                let initial = build_model(ModelArgs {
-                    provider,
-                    base_url: base_url.clone(),
-                    model: model_id.clone(),
-                    api_key: api_key.clone(),
-                    headers: headers.clone(),
-                    include_usage: None,
-                    max_tokens,
-                    thinking: thinking_of,
-                    reasoning_effort: reasoning_effort.clone(),
-                    reasoning_replay: reasoning_replay.clone(),
-                })
-                .map_err(|error| error.to_string())?;
-                Ok(radian_host::SwitchableModel::new(
-                    initial,
-                    radian_host::ModelRoute::new(&route_provider, &route_model),
-                    slot,
-                    radian_host::RouteContext {
-                        providers: providers.clone(),
-                        session_id: session_id.to_owned(),
-                        user_headers: route_user_headers.clone(),
-                        include_usage: None,
-                        max_tokens,
-                        thinking: route_thinking.clone(),
-                        thinking_budget,
-                    },
-                ))
-            },
-        );
-        radian_host::TaskHost {
-            session_dir: dir.clone(),
-            model: task_model,
-            route: (provider_name.clone(), model_name.clone()),
-            servers: servers.clone(),
-            sandbox: sandbox.clone(),
-            sandbox_deny_read: sandbox_deny_read.clone(),
-            allow_unix_sockets: allow_unix_sockets.clone(),
-            retries: settings.retries,
-            context_budget: window
-                .budget
-                // ADR 0015: a zero budget is unset, never a real zero-token budget (the CLI
-                // builds its session budget the same way).
-                .filter(|tokens| *tokens > 0)
-                .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
-            auto_compact: settings.auto_compact,
-            compaction_settings: settings.compaction_settings.clone(),
-            compaction_settings_for: settings.compaction_settings_for.clone(),
-            turn_options: TurnOptions {
-                max_model_calls: Some(cli.max_model_calls),
-                ..TurnOptions::default()
-            },
-            turn_timeout: None,
-            wording: radian_host::TUI_WORDING,
-            protected_branches: config.git.protected_branches.clone(),
-            allowed_filters: Some(config.git.allowed_filters()),
-            shell_auto_background: settings.shell_auto_background,
-            skills_extra_paths: settings.skills_extra_paths.clone(),
-            skills_builtin: settings.skills_builtin,
-            skills_disabled: settings.skills_disabled.clone(),
-            memory_injection: settings.memory_injection,
-            capabilities: radian_host::SessionCapability::ALL.to_vec(),
-            audit: Arc::clone(&audit),
-            // A task's own stream must not reach the lead's live view (ADR 0030 O10); the
-            // status-bar count and the notice lines come from the registry and the projection.
-            task_events: Arc::new(|_: &radian_session::RuntimeEvent| {}),
-        }
-    };
-    // ADR 0030 O12: the named-agent builder shares the same host. A `/send` or `send_agent`
-    // creates one long session per name from its definition.
-    let task_builder = radian_host::task_builder(task_host.clone());
-    let named_builder = radian_host::named_builder(task_host);
-
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
     // first thing that creates durable state. ADR 0032 slice 5: `LeadSetup::setup` fills what
@@ -1725,8 +1597,6 @@ fn run(
                 config_slot: std::sync::Arc::clone(&config_slot),
                 budget_for: Some(budget_for),
                 price_for: Some(Arc::clone(&route_price)),
-                protected_branches: config.git.protected_branches.clone(),
-                allowed_filters: Some(config.git.allowed_filters()),
                 servers,
                 system_prompt: cli.system.clone(),
                 context_budget: window
@@ -1766,11 +1636,6 @@ fn run(
                 before_driver,
                 memory_warning,
                 memory_notice_line,
-                // ADR 0030 slice 6b2: the lead's task tools are mounted and can open real task
-                // sessions; the mode gate still refuses them outside `/mode lead`.
-                task_builder: Some(task_builder),
-                // ADR 0030 O12: named agents are available to `/send` and `send_agent`.
-                named_builder: Some(named_builder),
             },
         ))
         .map_err(|error| error.to_string())?;
@@ -2324,8 +2189,6 @@ fn run(
         config_read_only: config.read_only,
     };
     mark("startup-set");
-    let lead_tasks = session.lead_tasks().cloned();
-    let lead_named = session.named_agents().cloned();
     let session = Arc::new(session);
     let facade: Arc<dyn radian_host::SessionFacade> =
         Arc::clone(&session) as Arc<dyn radian_host::SessionFacade>;
@@ -2341,8 +2204,6 @@ fn run(
             session: &facade,
             host: &session_host,
             memory: &memory_service,
-            lead_tasks,
-            lead_named,
         },
         (provider_name.clone(), model_name.clone()),
         Arc::clone(&route_price),
@@ -3099,11 +2960,6 @@ struct LoopContext<'a> {
     session: &'a Arc<dyn radian_host::SessionFacade>,
     memory: &'a Option<MemoryService>,
     host: &'a SessionHost,
-    /// The lead's task registry (ADR 0030 slice 6b2), when this session mounted the lead tools.
-    lead_tasks: Option<Arc<radian_host::TaskRegistry>>,
-    /// The lead's named-agent registry (ADR 0030 O12), when this session has one; `/send` reads
-    /// it.
-    lead_named: Option<Arc<radian_host::NamedRegistry>>,
     tx: &'a Sender<UiEvent>,
     /// The pending queue (ADR 0023 U7): the loop reads the head and the count when it is told
     /// something changed, and the facade answers it.
@@ -3229,25 +3085,8 @@ impl LoopContext<'_> {
         if let Some(level) = app.session.thinking_level.clone() {
             self.current_thinking = level;
         }
-        // ADR 0030 O10: the registry is the authority for the status-bar task count (a task
-        // removed or killed leaves it at once, and a normal finish stops counting it as
-        // running). The event handlers above already cover the app-level view; this keeps the
-        // live count in step even when the only change is a task's turn boundary.
-        let mut dirty = result.dirty;
-        if let Some(registry) = &self.lead_tasks {
-            let tasks: std::collections::BTreeMap<String, bool> = registry
-                .ids()
-                .iter()
-                .filter_map(|id| registry.get(id))
-                .map(|record| (record.id.clone(), record.running()))
-                .collect();
-            if app.session.tasks != tasks {
-                app.session.tasks = tasks;
-                dirty = true;
-            }
-        }
         effects.extend(result.effects);
-        dirty
+        result.dirty
     }
 
     /// Runs one effect. Its result is an event on the channel (ADR 0023 U2), so the caller
@@ -3387,18 +3226,6 @@ impl LoopContext<'_> {
                         });
                     }
                 }
-                Ok(())
-            }
-            // ADR 0038 slice 3: the mode switch. The facade queues the durable `ConfigChanged`
-            // the driver journals at the next turn boundary, so layer 1 (the role prompt) is the
-            // new one from the next turn's first model request. A task agent, and a session
-            // whose role layer is fixed (`--system`), is a refusal.
-            Effect::SetMode { mode } => {
-                let result = self
-                    .session
-                    .set_mode(mode)
-                    .map_err(|refused| refused.reason);
-                self.send(AppInput::ModeApplied { mode, result });
                 Ok(())
             }
             Effect::AnswerRequest {
@@ -3611,102 +3438,6 @@ impl LoopContext<'_> {
                     }
                 };
                 self.send(AppInput::SessionDone(notices));
-                Ok(())
-            }
-            // ADR 0030 O10/O12: `/tasks` lists the live task agents, or cancels/kills one. The
-            // registry lives in the host, so the loop runs it and shows the result as notices.
-            // A session with no lead tools has no registry.
-            Effect::Tasks(request) => {
-                let notices = match &self.lead_tasks {
-                    None => vec!["this session has no task agents".to_owned()],
-                    Some(registry) => match request {
-                        radian_tui::command::TasksRequest::List => {
-                            let lines = radian_host::task_lines(registry);
-                            if lines.is_empty() {
-                                vec!["no task agents in this session".to_owned()]
-                            } else {
-                                lines
-                            }
-                        }
-                        radian_tui::command::TasksRequest::Cancel(id) => match registry.get(&id) {
-                            Some(record) => match record
-                                .session
-                                .command(radian_host::SessionCommand::Cancel)
-                            {
-                                Ok(()) => vec![format!("cancelled task `{id}`")],
-                                Err(error) => vec![format!("cannot cancel task `{id}`: {error}")],
-                            },
-                            None => vec![format!("no task `{id}`")],
-                        },
-                        radian_tui::command::TasksRequest::Kill(id) => {
-                            match self.runtime.block_on(registry.kill(&id)) {
-                                Ok(()) => {
-                                    vec![format!("killed task `{id}` (its worktree is kept)")]
-                                }
-                                Err(error) => vec![format!("cannot kill task `{id}`: {error}")],
-                            }
-                        }
-                    },
-                };
-                self.send(AppInput::SessionDone(notices));
-                Ok(())
-            }
-            // ADR 0030 O12: `/send` lists the known definitions, or sends to a named agent
-            // (source `User`). The reply arrives later as `AgentReplied`, when the turn ends.
-            Effect::Send(request) => {
-                let Some(named) = self.lead_named.clone() else {
-                    self.send(AppInput::SessionDone(vec![
-                        "this session has no named agents".to_owned(),
-                    ]));
-                    return Ok(());
-                };
-                match request {
-                    radian_tui::command::SendRequest::List => {
-                        let names = radian_host::known_agent_definitions();
-                        self.send(AppInput::SessionDone(vec![format!(
-                            "known definitions: {}",
-                            names.join(", ")
-                        )]));
-                    }
-                    radian_tui::command::SendRequest::Send { name, text } => {
-                        match self.runtime.block_on(named.send(
-                            &name,
-                            text,
-                            radian_tui::command::send_source(),
-                        )) {
-                            Ok(outcome) => {
-                                self.send(AppInput::AgentSent {
-                                    name: name.clone(),
-                                    created: outcome.created,
-                                });
-                                // Wait for this send's turn to end, then show the first lines of
-                                // the reply. The task is dropped when the loop exits.
-                                let record = named.get(&name);
-                                let tx = self.tx.clone();
-                                let turn = outcome.turn;
-                                self.runtime.spawn(async move {
-                                    let summary = match record {
-                                        Some(record) => record
-                                            .await_turn_end(turn)
-                                            .await
-                                            .map(|reply| bound_reply(&reply))
-                                            .unwrap_or_default(),
-                                        None => String::new(),
-                                    };
-                                    let _ = tx.send(UiEvent::Command(AppInput::AgentReplied {
-                                        name,
-                                        summary,
-                                    }));
-                                });
-                            }
-                            Err(error) => {
-                                self.send(AppInput::SessionDone(vec![format!(
-                                    "cannot send to `{name}`: {error}"
-                                )]));
-                            }
-                        }
-                    }
-                }
                 Ok(())
             }
             // ADR 0031 T3: apply the startup trust choice through the facade (it writes
@@ -4046,30 +3777,7 @@ enum Phase<'a> {
         session: &'a Arc<dyn radian_host::SessionFacade>,
         host: &'a SessionHost,
         memory: &'a Option<MemoryService>,
-        /// The lead's task registry (ADR 0030 slice 6b2), when this session mounted the lead
-        /// tools; `/tasks` and the status-bar count read it.
-        lead_tasks: Option<Arc<radian_host::TaskRegistry>>,
-        /// The lead's named-agent registry (ADR 0030 O12), when this session has one; `/send`
-        /// reads it.
-        lead_named: Option<Arc<radian_host::NamedRegistry>>,
     },
-}
-
-/// Bounds a named agent's reply for the `/send` notice (ADR 0030 O12): the first 5 lines and at
-/// most 500 characters, with a marker when cut. The full observation view is a later slice.
-fn bound_reply(text: &str) -> String {
-    let mut out = text.lines().take(5).collect::<Vec<_>>().join("\n");
-    let more_lines = text.lines().count() > 5;
-    let truncated = out.chars().count() > 500;
-    if truncated {
-        out = out.chars().take(500).collect();
-    }
-    if more_lines {
-        out.push_str("\n… [more lines]");
-    } else if truncated {
-        out.push_str("\n… [truncated]");
-    }
-    out
 }
 
 /// Handles one event in the pre-session `--pick` phase. Returns whether the frame is dirty.
@@ -4202,8 +3910,6 @@ fn ui_loop(
             session,
             host,
             memory,
-            lead_tasks,
-            lead_named,
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
             route_price: Arc::clone(&route_price),
@@ -4216,8 +3922,6 @@ fn ui_loop(
             session,
             memory,
             host,
-            lead_tasks,
-            lead_named,
             tx,
             queue: session.pending(),
             signal: None,

@@ -30,7 +30,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 31] = [
+pub(crate) const KNOWN_EVENTS: [&str; 27] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -56,12 +56,8 @@ pub(crate) const KNOWN_EVENTS: [&str; 31] = [
     "SessionForked",
     "ProjectTrustChanged",
     "UserBash",
-    "GitCommitted",
     "BackgroundJobStarted",
     "BackgroundJobSettled",
-    "TaskSpawned",
-    "TaskFinished",
-    "NamedAgentStarted",
 ];
 
 /// The parsed body of one known event. Events this slice does not interpret (for example
@@ -205,34 +201,6 @@ pub enum EventData {
         exclude_from_context: bool,
         exit_code: Option<i32>,
         cancelled: bool,
-    },
-    /// The host-side `git_commit` tool committed (ADR 0030 R10). Typed for an exact round trip;
-    /// audit only, never a transcript record.
-    GitCommitted {
-        commit: String,
-        branch: String,
-        files: usize,
-    },
-    /// A lead spawned a task agent (ADR 0030 O5). Typed for an exact round trip; audit only,
-    /// never a transcript record.
-    TaskSpawned {
-        agent_session_id: String,
-        worktree: Option<String>,
-        label: Option<String>,
-    },
-    /// A task agent finished (ADR 0030 O5). Typed for an exact round trip; audit only, never
-    /// a transcript record. `error` (ADR 0039) is optional: absent on a clean finish.
-    TaskFinished {
-        agent_session_id: String,
-        outcome: TurnOutcome,
-        error: Option<String>,
-    },
-    /// A named agent (ADR 0030 O12) was created from its definition on first use. Typed for an
-    /// exact round trip; audit only, never a transcript record.
-    NamedAgentStarted {
-        name: String,
-        agent_session_id: String,
-        worktree: Option<String>,
     },
     /// A background `shell` job started (ADR 0037 decision 5). Typed for an exact round trip;
     /// audit only, never a transcript record. A start with no settle after a crash is how the
@@ -724,38 +692,6 @@ impl LineScanner {
                     cancelled: d.cancelled,
                 }
             }
-            "GitCommitted" => {
-                let d: GitCommittedData = data_of(raw, self.lineno, path)?;
-                EventData::GitCommitted {
-                    commit: d.commit,
-                    branch: d.branch,
-                    files: d.files,
-                }
-            }
-            "TaskSpawned" => {
-                let d: TaskSpawnedData = data_of(raw, self.lineno, path)?;
-                EventData::TaskSpawned {
-                    agent_session_id: d.agent_session_id,
-                    worktree: d.worktree,
-                    label: d.label,
-                }
-            }
-            "TaskFinished" => {
-                let d: TaskFinishedData = data_of(raw, self.lineno, path)?;
-                EventData::TaskFinished {
-                    agent_session_id: d.agent_session_id,
-                    outcome: d.outcome,
-                    error: d.error,
-                }
-            }
-            "NamedAgentStarted" => {
-                let d: NamedAgentStartedData = data_of(raw, self.lineno, path)?;
-                EventData::NamedAgentStarted {
-                    name: d.name,
-                    agent_session_id: d.agent_session_id,
-                    worktree: d.worktree,
-                }
-            }
             "BackgroundJobStarted" => {
                 let d: BackgroundJobStartedData = data_of(raw, self.lineno, path)?;
                 EventData::BackgroundJobStarted {
@@ -1103,10 +1039,6 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::MemoryInjected { .. }
         | EventData::ProjectTrustChanged { .. }
         | EventData::UserBash { .. }
-        | EventData::GitCommitted { .. }
-        | EventData::TaskSpawned { .. }
-        | EventData::TaskFinished { .. }
-        | EventData::NamedAgentStarted { .. }
         | EventData::BackgroundJobStarted { .. }
         | EventData::BackgroundJobSettled { .. }
         | EventData::Other(_) => None,
@@ -1305,38 +1237,6 @@ struct UserBashData {
     exclude_from_context: bool,
     exit_code: Option<i32>,
     cancelled: bool,
-}
-
-#[derive(Deserialize)]
-struct GitCommittedData {
-    commit: String,
-    branch: String,
-    files: usize,
-}
-
-#[derive(Deserialize)]
-struct TaskSpawnedData {
-    agent_session_id: String,
-    #[serde(default)]
-    worktree: Option<String>,
-    #[serde(default)]
-    label: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TaskFinishedData {
-    agent_session_id: String,
-    outcome: TurnOutcome,
-    #[serde(default)]
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct NamedAgentStartedData {
-    name: String,
-    agent_session_id: String,
-    #[serde(default)]
-    worktree: Option<String>,
 }
 
 #[derive(Deserialize)]

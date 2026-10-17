@@ -399,13 +399,11 @@ pub fn untrusted_notice(workspace: &Path) -> String {
     )
 }
 
-/// Whether `workspace` holds a resource from T1's list. The list (ADR 0031 T1, extended by ADR
-/// 0030 slice 9):
+/// Whether `workspace` holds a resource from T1's list. The list (ADR 0031 T1, shrunk by ADR
+/// 0043 decision 1 to the project's own skills; the project-config row returns with the
+/// profile slice):
 ///
-/// - a project-level skill: `<workspace>/.radian/skills/<x>/SKILL.md` (or directly under `skills/`);
-/// - `<workspace>/.radian/orchestration.toml` (ADR 0030 O7: verify/policy commands);
-/// - `<workspace>/.radian/agents/*.md` (ADR 0030 O11);
-/// - `<workspace>/.radian/prompts/*.md` (ADR 0030 O7).
+/// - a project-level skill: `<workspace>/.radian/skills/<x>/SKILL.md` (or directly under `skills/`).
 ///
 /// A bare `.radian/` does not trigger, and `.radian-sandbox/` is ignored. The check is a **file**
 /// question: a malformed file is still something the loader would read, so it still triggers.
@@ -413,9 +411,6 @@ pub fn untrusted_notice(workspace: &Path) -> String {
 pub fn has_project_resources(workspace: &Path) -> bool {
     let dot_radian = workspace.join(".radian");
     crate::skills::has_skill_file(&dot_radian.join("skills"))
-        || crate::orchestration::project_config_path(workspace).is_file()
-        || crate::orchestration::has_files_with_ext(&dot_radian.join("agents"), "md")
-        || crate::orchestration::has_files_with_ext(&dot_radian.join("prompts"), "md")
 }
 
 /// The canonical form of `path`: symlinks resolved, `.`/`..` removed. Falls back to the path
@@ -645,42 +640,5 @@ mod tests {
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "---\nname: greet\n---\n").unwrap();
         assert!(has_project_resources(&ws));
-    }
-
-    /// ADR 0030 slice 9: `orchestration.toml` and the agents/prompts directories are T1 resources
-    /// too (ADR 0031 T1's last three rows). A bare directory of any of them does not trigger.
-    #[test]
-    fn orchestration_agents_and_prompts_are_project_resources() {
-        for resource in ["orchestration", "agents", "prompts"] {
-            let root = Scratch::new("trigger-orch");
-            let ws = root.root.join("ws");
-            let dir = ws.join(".radian");
-            std::fs::create_dir_all(&dir).unwrap();
-            match resource {
-                "orchestration" => {
-                    // A bare `.radian/` still does not trigger; the file does.
-                    assert!(!has_project_resources(&ws));
-                    std::fs::write(dir.join("orchestration.toml"), "verify = [\"a\"]\n").unwrap();
-                }
-                other => {
-                    std::fs::create_dir_all(dir.join(other)).unwrap();
-                    assert!(
-                        !has_project_resources(&ws),
-                        "a bare `.radian/{other}/` does not trigger"
-                    );
-                    std::fs::write(dir.join(other).join("one.md"), "x\n").unwrap();
-                }
-            }
-            assert!(has_project_resources(&ws), "{resource} must trigger");
-            // A non-markdown file in agents/ or prompts/ does not trigger.
-            if resource != "orchestration" {
-                std::fs::remove_file(dir.join(resource).join("one.md")).unwrap();
-                std::fs::write(dir.join(resource).join("one.txt"), "x\n").unwrap();
-                assert!(
-                    !has_project_resources(&ws),
-                    "`.radian/{resource}/one.txt` must not trigger"
-                );
-            }
-        }
     }
 }

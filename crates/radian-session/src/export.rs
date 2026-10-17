@@ -431,42 +431,6 @@ fn event_data_value(
             "exit_code": exit_code,
             "cancelled": cancelled,
         }),
-        EventData::GitCommitted {
-            commit,
-            branch,
-            files,
-        } => json!({
-            "commit": commit,
-            "branch": branch,
-            "files": files,
-        }),
-        EventData::TaskSpawned {
-            agent_session_id,
-            worktree,
-            label,
-        } => json!({
-            "agent_session_id": agent_session_id,
-            "worktree": worktree,
-            "label": label,
-        }),
-        EventData::TaskFinished {
-            agent_session_id,
-            outcome,
-            error,
-        } => json!({
-            "agent_session_id": agent_session_id,
-            "outcome": outcome,
-            "error": error,
-        }),
-        EventData::NamedAgentStarted {
-            name,
-            agent_session_id,
-            worktree,
-        } => json!({
-            "name": name,
-            "agent_session_id": agent_session_id,
-            "worktree": worktree,
-        }),
         EventData::BackgroundJobStarted {
             job_id,
             command,

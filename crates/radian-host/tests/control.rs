@@ -1,9 +1,8 @@
 //! ADR 0030 slice 8: the process control port (`radian-host`'s `control`).
 //!
 //! Every test drives a real [`ControlServer`] over a real session (a mock model provider), so
-//! the socket, the JSON-lines protocol, the source rules and the task registry are exercised
-//! end to end. The socket is bound under a per-test `RADIAN_HOME`; nothing reads the user's
-//! `~/.radian`.
+//! the socket, the JSON-lines protocol and the source rules are exercised end to end. The
+//! socket is bound under a per-test `RADIAN_HOME`; nothing reads the user's `~/.radian`.
 
 #![cfg(unix)]
 
@@ -14,9 +13,8 @@ use std::time::Duration;
 use agent_core::{NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use radian_host::{
-    ApprovalRouting, ControlServer, HostBindings, LocalSession, SessionError, SessionId,
-    SessionProjection, SessionSetup, TaskBuilder, TaskContext, TaskRegistry, TaskSession,
-    TurnState, build_model, open_session,
+    ApprovalRouting, ControlServer, HostBindings, LocalSession, SessionId, SessionProjection,
+    SessionSetup, TurnState, build_model, open_session,
 };
 use radian_permissions::{ApprovalPolicy, NoopAudit, Preset, Profile};
 use serde_json::{Value, json};
@@ -52,17 +50,6 @@ fn isolated_home() -> PathBuf {
         dir
     })
     .clone()
-}
-
-fn git(dir: &Path, args: &[&str]) -> bool {
-    std::process::Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .expect("git runs")
-        .success()
 }
 
 fn text_reply(text: &str) -> Reply {
@@ -106,90 +93,11 @@ fn model(
     )
 }
 
-/// A task builder with no sandbox: the task's turn only calls the mock and writes nothing, so
-/// the worktree task registry accepts it without a sandbox backend. The registry still
-/// enforces the task invariants (worktree, `Subagent`, no memory, `task` role).
-fn task_builder(session_dir: PathBuf, base_url: String) -> TaskBuilder {
-    Arc::new(
-        move |ctx: &TaskContext<'_>| -> Result<TaskSession, SessionError> {
-            let workspace = ctx.workspace.to_path_buf();
-            let fail = |error: String| SessionError::Message(error);
-            let slot = radian_runtime::ConfigSlot::new(Value::Null);
-            Ok(TaskSession {
-                setup: SessionSetup {
-                    session_id: SessionId::new(ctx.session_id),
-                    session_dir: session_dir.clone(),
-                    workspace: workspace.clone(),
-                    coding_root: Some(workspace.clone()),
-                    model: model(ctx.session_id, &base_url, Arc::clone(&slot)),
-                    config_slot: slot,
-                    config_queue: radian_runtime::ConfigQueue::new(),
-                    budget_for: None,
-                    price_for: None,
-                    protected_branches: Vec::new(),
-                    allowed_filters: None,
-                    shell_auto_background: None,
-                    servers: Vec::new(),
-                    role: None,
-                    system_prompt: None,
-                    context_budget: None,
-                    auto_compact: false,
-                    compaction_settings: Value::Null,
-                    compaction_settings_for: None,
-                    retries: 0,
-                    sandbox: None,
-                    tier: Preset::Safe,
-                    profile: Profile::safe(&workspace)
-                        .map_err(|e| fail(e.to_string()))?
-                        .with_approval(ApprovalPolicy::Auto),
-                    access_builder: None,
-                    task_agent: false,
-                    parent: None,
-                    allowed_branch: None,
-                    memory_root: None,
-                    skills_extra_paths: Vec::new(),
-                    skills_builtin: true,
-                    skills_disabled: Vec::new(),
-                    tools_allow: None,
-                    skills_allow: None,
-                    git_commit_requires_branch: false,
-                    memory_injection: radian_host::memory::InjectionConfig::default(),
-                    trust: radian_host::trust::Setup::untrusted(&workspace, false),
-                    resume: false,
-                    config_snapshot: json!({"provider": "openai-compatible", "model": "mock"}),
-                    turn_options: TurnOptions::default(),
-                    turn_timeout: None,
-                    wording: radian_host::CLI_WORDING,
-                    capabilities: radian_host::SessionCapability::ALL.to_vec(),
-                },
-                bindings: HostBindings {
-                    approvals: ApprovalRouting::Queued,
-                    shared_queue: None,
-                    ask_user: false,
-                    audit: Arc::new(|_journal| {
-                        Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
-                    }),
-                    events: Arc::new(NoopSink),
-                    projection: Arc::new(SessionProjection::new()),
-                    runtime_events: Arc::new(|_event: &radian_session::RuntimeEvent| {}),
-                    driver_stopped: Arc::new(|_| {}),
-                    before_driver: None,
-                    memory_warning: Arc::new(|_message: &str| {}),
-                    memory_notice_line: Arc::new(|_line: &str| {}),
-                    task_builder: None,
-                    named_builder: None,
-                },
-            })
-        },
-    )
-}
-
-/// A lead session with the control server bound, the task registry mounted, and a recording
-/// event sink (so the `subscribe` fan-out has something to carry).
+/// A session with the control server bound and a recording event sink (so the `subscribe`
+/// fan-out has something to carry).
 struct Fixture {
     scratch: PathBuf,
     home: PathBuf,
-    lead: PathBuf,
     session: Arc<LocalSession>,
     server: Arc<ControlServer>,
 }
@@ -202,23 +110,8 @@ impl Fixture {
         // concurrently in one process, so a shared home would collide on the path.
         let home = scratch.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        let lead = scratch.join("lead");
-        std::fs::create_dir_all(&lead).unwrap();
-        assert!(git(&lead, &["init", "-q", "-b", "main"]));
-        assert!(git(
-            &lead,
-            &[
-                "-c",
-                "user.email=t@example.com",
-                "-c",
-                "user.name=t",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "init",
-            ]
-        ));
+        let workspace = scratch.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
         let session_dir = scratch.join("sessions");
         std::fs::create_dir_all(&session_dir).unwrap();
         // The server is bound first so its fan-out sinks can wrap the host's own sinks (ADR
@@ -232,18 +125,15 @@ impl Fixture {
             SessionSetup {
                 session_id: SessionId::new(label),
                 session_dir: session_dir.clone(),
-                workspace: lead.clone(),
-                coding_root: Some(lead.clone()),
+                workspace: workspace.clone(),
+                coding_root: Some(workspace.clone()),
                 model: model(label, base_url, Arc::clone(&slot)),
                 config_slot: slot,
                 config_queue: radian_runtime::ConfigQueue::new(),
                 budget_for: None,
                 price_for: None,
-                protected_branches: Vec::new(),
-                allowed_filters: None,
                 shell_auto_background: None,
                 servers: Vec::new(),
-                role: None,
                 system_prompt: None,
                 context_budget: None,
                 auto_compact: false,
@@ -252,22 +142,19 @@ impl Fixture {
                 retries: 0,
                 sandbox: None,
                 tier: Preset::Safe,
-                profile: Profile::safe(&lead)
+                profile: Profile::safe(&workspace)
                     .unwrap()
                     .with_approval(ApprovalPolicy::Auto),
                 access_builder: None,
-                task_agent: false,
                 parent: None,
-                allowed_branch: None,
                 memory_root: None,
                 skills_extra_paths: Vec::new(),
                 skills_builtin: true,
                 skills_disabled: Vec::new(),
                 tools_allow: None,
                 skills_allow: None,
-                git_commit_requires_branch: false,
                 memory_injection: radian_host::memory::InjectionConfig::default(),
-                trust: radian_host::trust::Setup::untrusted(&lead, false),
+                trust: radian_host::trust::Setup::untrusted(&workspace, false),
                 resume: false,
                 config_snapshot: json!({"provider": "openai-compatible", "model": "mock"}),
                 turn_options: TurnOptions::default(),
@@ -289,12 +176,10 @@ impl Fixture {
                 before_driver: None,
                 memory_warning: Arc::new(|_message: &str| {}),
                 memory_notice_line: Arc::new(|_line: &str| {}),
-                task_builder: Some(task_builder(session_dir.clone(), base_url.to_owned())),
-                named_builder: None,
             },
         )
         .await
-        .expect("open the lead session");
+        .expect("open the session");
         let session = Arc::new(session);
         server.serve(
             &tokio::runtime::Handle::current(),
@@ -303,7 +188,6 @@ impl Fixture {
         Self {
             scratch,
             home,
-            lead,
             session,
             server,
         }
@@ -311,10 +195,6 @@ impl Fixture {
 
     fn socket(&self) -> &Path {
         self.server.path()
-    }
-
-    fn registry(&self) -> Arc<TaskRegistry> {
-        Arc::clone(self.session.lead_tasks().expect("a lead registry"))
     }
 
     /// The journal's lines, as JSON values.
@@ -337,7 +217,6 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.scratch);
         let _ = &self.home;
-        let _ = &self.lead;
     }
 }
 
@@ -555,51 +434,20 @@ async fn a_slow_subscriber_is_disconnected_and_turns_still_finish() {
     fixture.stop().await;
 }
 
-/// `spawn_task` + `wait_task` over the port go through the same registry the lead tools use.
+/// ADR 0043 decision 1: `list_sessions` serves one process, so it lists the one `main` row.
 #[tokio::test]
-async fn spawn_task_and_wait_task_over_the_port() {
-    let server = MockServer::start(vec![text_reply("done")]).await;
-    let fixture = Fixture::new("spawn", &server.base_url).await;
+async fn list_sessions_returns_the_one_main_row() {
+    let server = MockServer::start(vec![text_reply("x")]).await;
+    let fixture = Fixture::new("list", &server.base_url).await;
     let mut client = Client::connect(fixture.socket()).await;
-
-    // `as` accepts only the only lead that exists (`main`).
-    let refused = client
-        .request(json!({
-            "id": 1, "verb": "spawn_task", "brief": "x", "as": "dev"
-        }))
-        .await;
-    assert_eq!(refused["ok"], false, "{refused}");
-
-    let spawned = client
-        .request(json!({
-            "id": 2, "verb": "spawn_task", "brief": "do it", "task": "t1", "as": "main"
-        }))
-        .await;
-    assert_eq!(spawned["ok"], true, "{spawned}");
-    assert_eq!(spawned["task"], "t1", "{spawned}");
-    assert_eq!(spawned["branch"], "radian/t1", "{spawned}");
-
-    let finished = client
-        .request(json!({
-            "id": 3, "verb": "wait_task", "task": "t1", "timeout_secs": 30
-        }))
-        .await;
-    assert_eq!(finished["ok"], true, "{finished}");
-    assert_eq!(finished["event"], "finished", "{finished}");
-
-    // `list_sessions` names the main session and the live task.
     let sessions = client
-        .request(json!({"id": 4, "verb": "list_sessions"}))
+        .request(json!({"id": 1, "verb": "list_sessions"}))
         .await;
+    assert_eq!(sessions["ok"], true, "{sessions}");
     let list = sessions["sessions"].as_array().expect("sessions");
-    assert!(list.iter().any(|row| row["kind"] == "main"), "{sessions}");
-    assert!(
-        list.iter()
-            .any(|row| row["id"] == "t1" && row["kind"] == "task"),
-        "{sessions}"
-    );
-
-    fixture.registry().remove("t1", true).await.expect("remove");
+    assert_eq!(list.len(), 1, "{sessions}");
+    assert_eq!(list[0]["id"], "list", "{sessions}");
+    assert_eq!(list[0]["kind"], "main", "{sessions}");
     fixture.stop().await;
 }
 
@@ -642,157 +490,4 @@ async fn the_socket_is_private_cleans_stale_files_and_is_removed_on_drop() {
         "the socket is removed when the server drops"
     );
     let _ = std::fs::remove_dir_all(&home);
-}
-
-/// The task registry is only reachable when the session has one: a session with no builder
-/// answers `spawn_task` with an error, never a panic.
-#[tokio::test]
-async fn a_session_without_a_registry_refuses_the_task_verbs() {
-    // A session built without a task builder: `lead_tasks()` is `None`.
-    let server = MockServer::start(vec![text_reply("x")]).await;
-    let _ = isolated_home();
-    let scratch = scratch("no-registry");
-    let home = scratch.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let session_dir = scratch.join("sessions");
-    std::fs::create_dir_all(&session_dir).unwrap();
-    let slot = radian_runtime::ConfigSlot::new(Value::Null);
-    let session = Arc::new(
-        open_session(
-            SessionSetup {
-                session_id: SessionId::new("plain"),
-                session_dir: session_dir.clone(),
-                workspace: scratch.clone(),
-                coding_root: Some(scratch.clone()),
-                model: model("plain", &server.base_url, Arc::clone(&slot)),
-                config_slot: slot,
-                config_queue: radian_runtime::ConfigQueue::new(),
-                budget_for: None,
-                price_for: None,
-                protected_branches: Vec::new(),
-                allowed_filters: None,
-                shell_auto_background: None,
-                servers: Vec::new(),
-                role: None,
-                system_prompt: None,
-                context_budget: None,
-                auto_compact: false,
-                compaction_settings: Value::Null,
-                compaction_settings_for: None,
-                retries: 0,
-                sandbox: None,
-                tier: Preset::Safe,
-                profile: Profile::safe(&scratch).unwrap(),
-                access_builder: None,
-                task_agent: false,
-                parent: None,
-                allowed_branch: None,
-                memory_root: None,
-                skills_extra_paths: Vec::new(),
-                skills_builtin: true,
-                skills_disabled: Vec::new(),
-                tools_allow: None,
-                skills_allow: None,
-                git_commit_requires_branch: false,
-                memory_injection: radian_host::memory::InjectionConfig::default(),
-                trust: radian_host::trust::Setup::untrusted(&scratch, false),
-                resume: false,
-                config_snapshot: json!({"provider": "openai-compatible", "model": "mock"}),
-                turn_options: TurnOptions::default(),
-                turn_timeout: None,
-                wording: radian_host::CLI_WORDING,
-                capabilities: radian_host::SessionCapability::ALL.to_vec(),
-            },
-            HostBindings {
-                approvals: ApprovalRouting::Queued,
-                shared_queue: None,
-                ask_user: false,
-                audit: Arc::new(|_journal| {
-                    Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
-                }),
-                events: Arc::new(NoopSink),
-                projection: Arc::new(SessionProjection::new()),
-                runtime_events: Arc::new(|_event: &radian_session::RuntimeEvent| {}),
-                driver_stopped: Arc::new(|_| {}),
-                before_driver: None,
-                memory_warning: Arc::new(|_message: &str| {}),
-                memory_notice_line: Arc::new(|_line: &str| {}),
-                task_builder: None,
-                named_builder: None,
-            },
-        )
-        .await
-        .expect("open"),
-    );
-    let server = ControlServer::bind(&home).expect("bind");
-    server.serve(
-        &tokio::runtime::Handle::current(),
-        radian_host::ControlTarget::of(&session),
-    );
-
-    let mut client = Client::connect(server.path()).await;
-    let refused = client
-        .request(json!({"id": 1, "verb": "spawn_task", "brief": "x"}))
-        .await;
-    assert_eq!(refused["ok"], false, "{refused}");
-    assert!(
-        refused["error"].as_str().unwrap().contains("not a lead"),
-        "{refused}"
-    );
-
-    session.stop();
-    let _ = session.join().await;
-    let _ = std::fs::remove_dir_all(&scratch);
-}
-
-/// ADR 0030 O7 (slices 9 + 10): the orchestration hook points reach a subscriber with
-/// `source: "hook"`, in the hook envelope. `integrate_task` emits `before_merge` through the same
-/// fan-out; this pins the path a subscriber sees.
-#[tokio::test]
-async fn a_subscriber_sees_the_hook_events() {
-    let server = MockServer::start(vec![text_reply("done")]).await;
-    let fixture = Fixture::new("hooks", &server.base_url).await;
-    let mut subscriber = Client::connect(fixture.socket()).await;
-    let subscribed = subscriber
-        .request(json!({"id": 1, "verb": "subscribe"}))
-        .await;
-    assert_eq!(subscribed["ok"], true, "{subscribed}");
-
-    // A shared task with no brief: spawning writes `TaskSpawned`, which the registry also emits
-    // as the `task_spawned` hook point (ADR 0030 O7).
-    let mut request = radian_host::SpawnRequest::new("t1");
-    request.isolation = Some(radian_host::Isolation::Shared);
-    fixture.registry().spawn(request).await.expect("spawn");
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let line = tokio::time::timeout_at(deadline, subscriber.read())
-            .await
-            .expect("a hook line in time");
-        let event = &line["event"];
-        if event["source"] == "hook" {
-            assert_eq!(event["name"], "task_spawned", "{line}");
-            assert_eq!(event["data"]["task"], "t1", "{line}");
-            break;
-        }
-    }
-    fixture.stop().await;
-}
-
-/// ADR 0030: `integrate_task` is **not** a control-port verb (v0), so an
-/// external lead cannot merge over the port.
-#[tokio::test]
-async fn integrate_task_is_not_a_control_port_verb() {
-    let server = MockServer::start(vec![text_reply("done")]).await;
-    let fixture = Fixture::new("no-integrate-verb", &server.base_url).await;
-    let mut client = Client::connect(fixture.socket()).await;
-    let response = client
-        .request(json!({"id": 1, "verb": "integrate_task", "task": "t1"}))
-        .await;
-    assert_eq!(response["ok"], false, "{response}");
-    assert!(
-        response["error"].as_str().unwrap().contains("unknown verb"),
-        "{response}"
-    );
-    fixture.stop().await;
 }

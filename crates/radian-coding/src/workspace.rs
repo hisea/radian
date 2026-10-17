@@ -99,7 +99,7 @@ impl WorkspaceRoot {
     }
 
     /// Checks a workspace-relative path for a host tool that needs the same boundary the file
-    /// tools use (ADR 0030 R10's `git_commit`): no absolute path, no `..`, no symlink in any
+    /// tools use: no absolute path, no `..`, no symlink in any
     /// component (the parents are walked by fd; the leaf is `lstat`ed, never opened). Returns
     /// the path under the canonical root, or the reason as text. The leaf need not exist.
     pub fn resolve_in_workspace(&self, user: &str) -> Result<PathBuf, String> {
@@ -328,7 +328,7 @@ impl WorkspaceRoot {
 
     /// A workspace-relative path whose parents exist and hold no symlink (walked by fd) and
     /// whose leaf, if it exists, is not a symlink (`lstat`, never opened). For `git_diff`'s
-    /// pathspec and `git_commit`: the path is handed to git relative to the root, so the
+    /// pathspec: the path is handed to git relative to the root, so the
     /// check is what keeps a link out of the pathspec.
     pub(crate) fn relative_checked(&self, user: &str) -> Result<PathBuf, ToolFailure> {
         let relative = self.checked_relative(user)?;

@@ -17,10 +17,8 @@ KNOWN_EVENTS = {
     "TurnFinished", "ConfigChanged", "ContextCompacted",
     "Rewound", "ContextBudgetReached", "PermissionResolved", "ApprovalPolicyChanged",
     "MemoryInjected", "ModelUsageRecorded", "CompactionUsageRecorded", "SessionForked",
-    "ProjectTrustChanged", "UserBash", "GitCommitted",
+    "ProjectTrustChanged", "UserBash",
     "BackgroundJobStarted", "BackgroundJobSettled",
-    "TaskSpawned", "TaskFinished",
-    "NamedAgentStarted",
 }
 # ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
@@ -92,19 +90,6 @@ EXPECT = {
         user_bash=[(5, "echo hi", False, 0), (6, "false", True, 1)],
         repair={},
     ),
-    "context-files.jsonl": dict(
-        outcome="accept",
-        events=1,
-        skips=[],
-        repair={},
-    ),
-    "git-committed.jsonl": dict(
-        outcome="accept",
-        events=6,
-        skips=[],
-        git_committed=(5, "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", "feature/x", 3),
-        repair={},
-    ),
     "background-jobs.jsonl": dict(
         outcome="accept",
         events=7,
@@ -164,80 +149,6 @@ EXPECT = {
         replacement=(6, 1, 2),
         uncommitted=[],
         repair={},
-    ),
-    "compaction-candidate-only.jsonl": dict(
-        outcome="accept",
-        events=4,
-        skips=[],
-        uncommitted=[],
-        repair={},
-    ),
-    "compaction-deterministic.jsonl": dict(
-        outcome="accept",
-        events=8,
-        skips=[],
-        replacement=(5, 1, 2),
-        uncommitted=[],
-        deterministic=True,
-        repair={},
-    ),
-    "fork-parent.jsonl": dict(
-        outcome="accept",
-        events=6,
-        skips=[],
-        repair={},
-        forked=("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 4),
-    ),
-    "fork-child.jsonl": dict(
-        outcome="accept",
-        events=3,
-        skips=[],
-        repair={},
-        parent=("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 4),
-    ),
-    "task-parent.jsonl": dict(
-        outcome="accept",
-        events=7,
-        skips=[],
-        repair={},
-        task_spawned=(
-            3,
-            "14222222-2222-4222-8222-222222222222",
-            "/work/radian-home/worktrees/example-0f3a1c9b7d2e/task-1",
-            "slice 1",
-        ),
-        task_finished=(6, "14222222-2222-4222-8222-222222222222", "completed"),
-    ),
-    "task-finished-error.jsonl": dict(
-        outcome="accept",
-        events=5,
-        skips=[],
-        repair={},
-        task_finished_error=(
-            4,
-            "15222222-2222-4222-8222-222222222222",
-            "completed",
-            "the end-of-task commit failed: this session may only commit to `radian/task-1`, not `other`",
-        ),
-    ),
-    "task-child.jsonl": dict(
-        outcome="accept",
-        events=2,
-        skips=[],
-        repair={},
-        parent=("14111111-1111-4111-8111-111111111111", 3, "task"),
-    ),
-    "named-agent.jsonl": dict(
-        outcome="accept",
-        events=3,
-        skips=[],
-        repair={},
-        named_agent_started=(
-            1,
-            "writer",
-            "14333333-3333-4333-8333-333333333333",
-            "/work/radian-home/worktrees/example-0f3a1c9b7d2e/agent/writer",
-        ),
     ),
     "policy-approval.jsonl": dict(
         outcome="accept",
@@ -511,33 +422,6 @@ def check_fixture(name, exp):
                     raise Corruption(
                         f"{name}: line {i}: 只有 approver=policy 的事件才能带 policy"
                     )
-        if ev["event"] in ("TaskSpawned", "TaskFinished"):
-            # ADR 0030 O5：lead journal 的两条审计事件，都是 critical:false。
-            if ev["critical"]:
-                raise Corruption(f"{name}: line {i}: {ev['event']} 必须是 critical:false")
-            data = ev["data"]
-            if not isinstance(data.get("agent_session_id"), str) or not data["agent_session_id"]:
-                raise Corruption(
-                    f"{name}: line {i}: {ev['event']}.agent_session_id 必须是非空字符串"
-                )
-            if ev["event"] == "TaskSpawned":
-                for field in ("worktree", "label"):
-                    if field in data and (
-                        not isinstance(data[field], str) or not data[field]
-                    ):
-                        raise Corruption(
-                            f"{name}: line {i}: TaskSpawned.{field} 必须是非空字符串"
-                        )
-            else:
-                if not isinstance(data.get("outcome"), str) or not data["outcome"]:
-                    raise Corruption(f"{name}: line {i}: TaskFinished.outcome 必须是非空字符串")
-                # ADR 0039 决定 5/7：`error` 是可选的；出现时必须是非空字符串。
-                if "error" in data and (
-                    not isinstance(data["error"], str) or not data["error"]
-                ):
-                    raise Corruption(
-                        f"{name}: line {i}: TaskFinished.error 必须是非空字符串"
-                    )
         if ev["event"] == "MessageAppended":
             msg = ev["data"].get("message")
             if not isinstance(msg, dict) or len(msg) != 1:
@@ -798,85 +682,6 @@ def check_fixture(name, exp):
         for e in events:
             if e["event"] == "UserBash" and e["critical"]:
                 raise Corruption(f"{name}: UserBash 必须是 critical:false")
-    if "git_committed" in exp:
-        runs = [
-            (
-                e["seq"],
-                e["data"].get("commit"),
-                e["data"].get("branch"),
-                e["data"].get("files"),
-            )
-            for e in events
-            if e["event"] == "GitCommitted"
-        ]
-        if runs != [tuple(exp["git_committed"])]:
-            raise Corruption(f"{name}: git_committed {runs} != 期望 {exp['git_committed']}")
-        # ADR 0030 R10：提交审计是非 critical 事件。
-        for e in events:
-            if e["event"] == "GitCommitted" and e["critical"]:
-                raise Corruption(f"{name}: GitCommitted 必须是 critical:false")
-    if "task_spawned" in exp:
-        spawned = [
-            (
-                e["seq"],
-                e["data"].get("agent_session_id"),
-                e["data"].get("worktree"),
-                e["data"].get("label"),
-            )
-            for e in events
-            if e["event"] == "TaskSpawned"
-        ]
-        if spawned != [tuple(exp["task_spawned"])]:
-            raise Corruption(f"{name}: task_spawned {spawned} != 期望 {[tuple(exp['task_spawned'])]}")
-    if "task_finished" in exp:
-        finished = [
-            (
-                e["seq"],
-                e["data"].get("agent_session_id"),
-                e["data"].get("outcome"),
-            )
-            for e in events
-            if e["event"] == "TaskFinished"
-        ]
-        if finished != [tuple(exp["task_finished"])]:
-            raise Corruption(
-                f"{name}: task_finished {finished} != 期望 {[tuple(exp['task_finished'])]}"
-            )
-    if "task_finished_error" in exp:
-        # ADR 0039 决定 7：提交失败写在 TaskFinished 的可选 `error` 里。
-        finished = [
-            (
-                e["seq"],
-                e["data"].get("agent_session_id"),
-                e["data"].get("outcome"),
-                e["data"].get("error"),
-            )
-            for e in events
-            if e["event"] == "TaskFinished"
-        ]
-        if finished != [tuple(exp["task_finished_error"])]:
-            raise Corruption(
-                f"{name}: task_finished_error {finished} != 期望 {[tuple(exp['task_finished_error'])]}"
-            )
-    if "named_agent_started" in exp:
-        started = [
-            (
-                e["seq"],
-                e["data"].get("name"),
-                e["data"].get("agent_session_id"),
-                e["data"].get("worktree"),
-            )
-            for e in events
-            if e["event"] == "NamedAgentStarted"
-        ]
-        if started != [tuple(exp["named_agent_started"])]:
-            raise Corruption(
-                f"{name}: named_agent_started {started} != 期望 {[tuple(exp['named_agent_started'])]}"
-            )
-        # ADR 0030 O12：命名 agent 的创建审计是非 critical 事件。
-        for e in events:
-            if e["event"] == "NamedAgentStarted" and e["critical"]:
-                raise Corruption(f"{name}: NamedAgentStarted 必须是 critical:false")
     if "policy_resolved" in exp:
         resolved = [
             (e["seq"], e["data"].get("approver"), e["data"].get("policy"))

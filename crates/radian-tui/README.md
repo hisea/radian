@@ -57,7 +57,7 @@ switch between them. Today exactly one session view exists: `app.session`.
   `timer`, `spinner_origin`), `session_ended`, `pending_fork`, the session's own model and its
   queued switches (`model_name`, `model_display`, `provider`, `model_price`, `thinking_level`,
   `next_model`, `next_thinking`), its `!`/`!!` shell state, its workspace/cwd/branch and the
-  startup banner, and its mode/tier markers (`auto`, `access_source`).
+  startup banner, and its tier marker (`auto`, `access_source`).
 
 The line: a value the user sets once for the whole terminal (a theme, a footer row, the
 composer) is global; a value a second session would need its own copy of (a transcript, a
@@ -701,10 +701,6 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   default highlight on `cancel`, and do ↑/↓/Enter/Esc feel right? After "remember for this
   project", restart — is the tier applied and is the `(project)` marker readable in the footer
   and the startup summary? pty automation asserts the text, not the feel (ADR 0009).
-- **the `/mode` switch** (ADR 0038 slice 3): type `/mode` — does it name the mode in effect?
-  Type `/mode lead` — does the notice say the role changes from the next turn, and does the next
-  reply read like a project lead (it plans, briefs and reviews) rather than a coding agent?
-  `/mode general` switches back; a resumed session must open in the mode it was left in.
 - **native `git commit` in the sandbox, and its text** (ADR 0038 slice 4): in a **worktree on
   `main`** of a real repo, start a general `workspace` session and run a `git commit` through
   `shell` — the commit must land with native git (`git_commit` is not needed). The `shell` tool

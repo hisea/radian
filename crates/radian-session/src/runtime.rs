@@ -218,46 +218,6 @@ pub enum RuntimeEvent {
         exit_code: Option<i32>,
         cancelled: bool,
     },
-    /// The host-side `git_commit` tool committed (ADR 0030 R10). Audit only: `critical =
-    /// false`. The new commit id, the branch it landed on, and how many files it changed.
-    GitCommitted {
-        commit: String,
-        branch: String,
-        files: usize,
-    },
-    /// A lead spawned a task agent (ADR 0030 O5). Audit only: `critical = false`. Written to
-    /// the **lead's** journal, so the lead's file alone answers "which task agents were
-    /// started, which never finished". `agent_session_id` is the task agent's session; a
-    /// `TaskSpawned` with no matching `TaskFinished` after a crash is `unknown_after_crash`
-    /// and is never restarted (ADR 0002 E7's stance).
-    TaskSpawned {
-        agent_session_id: String,
-        /// The task agent's worktree, when it has one (`isolation = "shared"` has none).
-        worktree: Option<String>,
-        /// The human-facing label, when one was given.
-        label: Option<String>,
-    },
-    /// A task agent finished (ADR 0030 O5). Audit only: `critical = false`. `outcome` is the
-    /// task agent's own final turn outcome. `error` (ADR 0039 decisions 5 and 7) is why the task
-    /// ended abnormally when that is not the turn itself: a spawn that rolled back after this
-    /// `TaskSpawned` was written, or an end-of-task commit that failed. Optional, so an older
-    /// record still reads (ADR 0006 §7a) and a clean finish carries nothing extra.
-    TaskFinished {
-        agent_session_id: String,
-        outcome: TurnOutcome,
-        error: Option<String>,
-    },
-    /// A **named agent** (ADR 0030 O12) was created from its definition on first use. Audit
-    /// only: `critical = false`. Unlike `TaskSpawned`, a `NamedAgentStarted` with no matching
-    /// "finished" after a crash is **not** `unknown_after_crash`: a named agent is a long
-    /// session the human commands, and it is resumable by its session id (O12). `name` is the
-    /// definition name the human and the lead use; `agent_session_id` is the session created.
-    NamedAgentStarted {
-        name: String,
-        agent_session_id: String,
-        /// The named agent's worktree, when it has one (`isolation = "shared"` has none).
-        worktree: Option<String>,
-    },
     /// A background `shell` job started (ADR 0037 decision 5). Audit only: `critical =
     /// false`. The start/settle pair is how a resume learns a job existed; a start with no
     /// settle after a crash is reported once as unknown and never re-run.
@@ -298,10 +258,6 @@ impl RuntimeEvent {
             RuntimeEvent::SessionForked { .. } => "SessionForked",
             RuntimeEvent::ProjectTrustChanged { .. } => "ProjectTrustChanged",
             RuntimeEvent::UserBash { .. } => "UserBash",
-            RuntimeEvent::GitCommitted { .. } => "GitCommitted",
-            RuntimeEvent::TaskSpawned { .. } => "TaskSpawned",
-            RuntimeEvent::TaskFinished { .. } => "TaskFinished",
-            RuntimeEvent::NamedAgentStarted { .. } => "NamedAgentStarted",
             RuntimeEvent::BackgroundJobStarted { .. } => "BackgroundJobStarted",
             RuntimeEvent::BackgroundJobSettled { .. } => "BackgroundJobSettled",
         }
@@ -325,10 +281,6 @@ impl RuntimeEvent {
             | RuntimeEvent::SessionForked { .. }
             | RuntimeEvent::ProjectTrustChanged { .. }
             | RuntimeEvent::UserBash { .. }
-            | RuntimeEvent::GitCommitted { .. }
-            | RuntimeEvent::TaskSpawned { .. }
-            | RuntimeEvent::TaskFinished { .. }
-            | RuntimeEvent::NamedAgentStarted { .. }
             | RuntimeEvent::BackgroundJobStarted { .. }
             | RuntimeEvent::BackgroundJobSettled { .. } => false,
         }
@@ -466,38 +418,6 @@ pub(crate) struct UserBashData<'a> {
 }
 
 #[derive(Serialize)]
-pub(crate) struct GitCommittedData<'a> {
-    pub commit: &'a str,
-    pub branch: &'a str,
-    pub files: usize,
-}
-
-#[derive(Serialize)]
-pub(crate) struct TaskSpawnedData<'a> {
-    pub agent_session_id: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worktree: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-pub(crate) struct TaskFinishedData<'a> {
-    pub agent_session_id: &'a str,
-    pub outcome: TurnOutcome,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-pub(crate) struct NamedAgentStartedData<'a> {
-    pub name: &'a str,
-    pub agent_session_id: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worktree: Option<&'a str>,
-}
-
-#[derive(Serialize)]
 pub(crate) struct BackgroundJobStartedData<'a> {
     pub job_id: &'a str,
     pub command: &'a str,
@@ -528,10 +448,6 @@ pub(crate) enum RuntimeData<'a> {
     SessionForked(SessionForkedData<'a>),
     ProjectTrustChanged(ProjectTrustChangedData),
     UserBash(UserBashData<'a>),
-    GitCommitted(GitCommittedData<'a>),
-    TaskSpawned(TaskSpawnedData<'a>),
-    TaskFinished(TaskFinishedData<'a>),
-    NamedAgentStarted(NamedAgentStartedData<'a>),
     BackgroundJobStarted(BackgroundJobStartedData<'a>),
     BackgroundJobSettled(BackgroundJobSettledData<'a>),
 }
@@ -553,10 +469,6 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::SessionForked(d) => d.serialize(serializer),
             RuntimeData::ProjectTrustChanged(d) => d.serialize(serializer),
             RuntimeData::UserBash(d) => d.serialize(serializer),
-            RuntimeData::GitCommitted(d) => d.serialize(serializer),
-            RuntimeData::TaskSpawned(d) => d.serialize(serializer),
-            RuntimeData::TaskFinished(d) => d.serialize(serializer),
-            RuntimeData::NamedAgentStarted(d) => d.serialize(serializer),
             RuntimeData::BackgroundJobStarted(d) => d.serialize(serializer),
             RuntimeData::BackgroundJobSettled(d) => d.serialize(serializer),
         }
@@ -674,42 +586,6 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             exclude_from_context: *exclude_from_context,
             exit_code: *exit_code,
             cancelled: *cancelled,
-        }),
-        RuntimeEvent::GitCommitted {
-            commit,
-            branch,
-            files,
-        } => RuntimeData::GitCommitted(GitCommittedData {
-            commit,
-            branch,
-            files: *files,
-        }),
-        RuntimeEvent::TaskSpawned {
-            agent_session_id,
-            worktree,
-            label,
-        } => RuntimeData::TaskSpawned(TaskSpawnedData {
-            agent_session_id,
-            worktree: worktree.as_deref(),
-            label: label.as_deref(),
-        }),
-        RuntimeEvent::TaskFinished {
-            agent_session_id,
-            outcome,
-            error,
-        } => RuntimeData::TaskFinished(TaskFinishedData {
-            agent_session_id,
-            outcome: *outcome,
-            error: error.as_deref(),
-        }),
-        RuntimeEvent::NamedAgentStarted {
-            name,
-            agent_session_id,
-            worktree,
-        } => RuntimeData::NamedAgentStarted(NamedAgentStartedData {
-            name,
-            agent_session_id,
-            worktree: worktree.as_deref(),
         }),
         RuntimeEvent::BackgroundJobStarted {
             job_id,

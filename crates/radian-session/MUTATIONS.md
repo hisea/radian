@@ -282,3 +282,14 @@ Base: `d2d0f7f` · worktree `.radian-worktrees/group-commit` · `writer.rs` 先 
 `ToolExecutionStarted` 就必须在盘上。GC4 的变异必须放在失败接缝**之前**才被触发（接缝在
 `write_locked` 顶部返回 `Err`），所以忠实变异是"在写入前就前进计数器"而不是"在 `write_all`
 前一步前进"。
+
+## ADR 0043 slice ⓪A：删掉编排后旧 journal 仍可读（2026-10-17）
+
+`TaskSpawned`/`TaskFinished` 等编排事件从 `KNOWN_EVENTS` 移除后，带这些行的旧 journal 必须
+按 ADR 0006 §7(d) 当作**未知非关键事件跳过**、会话照常打开。变异把 `reader.rs` 的跳过分支护成
+「未知即拒」（`cp` 到 `/tmp/s0a-reader.rs.bak`，改后 `cp` 还原并 `cmp` 一致）。命令：
+`cargo test -p radian-session --locked --test old_orchestration_journal`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| OA-1 | `reader.rs`：未知事件不论 `critical` 一律 `Err(UnknownCritical)`（不再 `skipped.push`） | ✅ 2 failed（`UnknownCritical { line: 4, event: "TaskSpawned" }`） | `an_old_lead_journal_with_task_events_still_opens_and_replays`、`the_resume_path_opens_the_old_journal_and_appends` |

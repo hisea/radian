@@ -265,10 +265,6 @@ pub struct LeadSetup {
     pub budget_for: Option<BudgetFor>,
     /// Resolves a route's catalog prices from the warm local cache (ADR 0027).
     pub price_for: Option<RoutePrice>,
-    /// Branch names `git_commit` refuses besides `main`/`master` (ADR 0030 R10).
-    pub protected_branches: Vec<String>,
-    /// Filter drivers `git add` may run (ADR 0030).
-    pub allowed_filters: Option<Vec<String>>,
     pub servers: Vec<McpServerConfig>,
     /// `--system`/`--system-file`, already read: the fixed layer 1 (ADR 0036).
     pub system_prompt: Option<String>,
@@ -306,15 +302,8 @@ impl LeadSetup {
             config_queue: ConfigQueue::new(),
             budget_for: self.budget_for,
             price_for: self.price_for,
-            protected_branches: self.protected_branches,
-            allowed_filters: self.allowed_filters,
             shell_auto_background: settings.shell_auto_background,
             servers: self.servers,
-            // A host-opened session is neither an agent definition (ADR 0030 O11: no role, no
-            // built-in tool allow-list and no skills allow-list) nor a task agent (O13): `/mode`
-            // is allowed and `git_commit` is not restricted to one branch. The task builder
-            // starts from these defaults as well; the registry overwrites the ones a task owns.
-            role: None,
             system_prompt: self.system_prompt,
             context_budget: self.context_budget,
             auto_compact: settings.auto_compact,
@@ -325,10 +314,7 @@ impl LeadSetup {
             tier: self.tier,
             profile: self.profile,
             access_builder: self.access_builder,
-            task_agent: false,
             parent: None,
-            allowed_branch: None,
-            git_commit_requires_branch: false,
             memory_root: self.memory_root,
             skills_extra_paths: settings.skills_extra_paths,
             skills_builtin: settings.skills_builtin,

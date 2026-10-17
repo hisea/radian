@@ -20,7 +20,7 @@ mod tests {
     async fn built_in_tools_are_exposed_and_dispatched() {
         let ws = scratch("builtin");
         let coding = CodingTools::new(&ws).unwrap();
-        let tools = CliTools::new(Some(coding), None, McpToolProvider::new(Vec::new()), None);
+        let tools = CliTools::new(Some(coding), None, McpToolProvider::new(Vec::new()));
         let session = tools.open_session().await.unwrap();
         let names: Vec<&str> = session
             .tool_specs()
@@ -59,7 +59,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_a_workspace_no_built_in_tools_exist() {
-        let tools = CliTools::new(None, None, McpToolProvider::new(Vec::new()), None);
+        let tools = CliTools::new(None, None, McpToolProvider::new(Vec::new()));
         let session = tools.open_session().await.unwrap();
         // `mermaid_check` was the one always-mounted host tool; ADR 0042's supplement deleted it,
         // so a host with no workspace provides no built-in tool at all.

@@ -31,7 +31,6 @@ mod scroll;
 mod session;
 mod speed;
 mod status;
-mod tasks;
 mod tier;
 mod tokens;
 mod usage;
@@ -132,7 +131,6 @@ static COMPONENTS: &[&'static dyn Component] = &[
     &elapsed::Elapsed,
     &cost::Cost,
     &pending::Pending,
-    &tasks::Tasks,
     &mcp::Mcp,
     &scroll::Scroll,
 ];

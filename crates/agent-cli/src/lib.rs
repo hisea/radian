@@ -779,21 +779,10 @@ struct Setup {
     secrets: Vec<String>,
     /// The resolved model name (CLI or config), for the session's config snapshot.
     model_name: String,
-    /// The resolved provider/model names for the route, used as the task builder's snapshot
-    /// label (ADR 0030 slice 6b2).
-    route: (String, String),
-    /// Builds a fresh model per task off the same resolved route (ADR 0030 slice 6b2).
-    task_model: radian_host::TaskModelFactory,
     /// The resolved permission profile (CLI flag, config, or the default).
     profile: profile::ProfileArg,
     /// The resolved approval policy and its startup record (ADR 0026 D9).
     approval: radian_host::StartupApproval,
-    /// `[git]` (ADR 0030 R10 and revision 4): the branches `git_commit` refuses besides
-    /// `main`/`master`, and the filter drivers it may run. Carried whole so the session setup
-    /// reads exactly what the TUI's session reads (`config.git`), not a weaker default: under
-    /// `radian exec` a dropped section would let `git_commit` commit on a configured protected
-    /// branch and silently apply the default allow-list (ADR 0032).
-    git: radian_host::config::GitConfig,
     /// The config file actually read, for the `[config]` startup line.
     config_path: Option<PathBuf>,
     /// Known-but-unwired and unknown config keys, named (never their values) at startup.
@@ -803,9 +792,6 @@ struct Setup {
     /// `[control] enabled` (ADR 0030 O6, slice 8): whether this process binds its control
     /// socket at `$RADIAN_HOME/run/<pid>.sock`.
     control_enabled: bool,
-    /// `[orchestration]` (ADR 0030 slice 9): the user-level orchestration config, merged with a
-    /// trusted project file before the session opens.
-    orchestration: radian_host::OrchestrationConfig,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -1082,78 +1068,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         reasoning_replay: reasoning_replay.clone(),
     })
     .map_err(SetupError)?;
-    // ADR 0030 slice 6b2: the model factory the task builder uses. It captures the same
-    // resolved route the lead's model used, so a task's model is that route built again
-    // through the same `build_model` path (no credential is copied anywhere new).
-    let task_model: radian_host::TaskModelFactory = {
-        let provider = route.adapter();
-        let base_url = route.base_url.clone();
-        let model_id = model_name.clone();
-        let api_key = credential.as_ref().map(|key| key.key.clone());
-        let model_headers = route.headers.clone();
-        let user_headers = headers.clone();
-        let include_usage = cli.include_usage;
-        let max_tokens = cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-        let providers = config.providers.clone();
-        let route_provider = provider_name.clone();
-        let route_model = model_name.clone();
-        let route_thinking = thinking.clone();
-        let reasoning_effort = reasoning_effort.clone();
-        let reasoning_replay = reasoning_replay.clone();
-        std::sync::Arc::new(
-            move |session_id: &str,
-                  slot: std::sync::Arc<radian_runtime::ConfigSlot>,
-                  agent_model: Option<radian_host::ModelRoute>,
-                  agent_thinking: Option<String>| {
-                // ADR 0030 O11: an agent definition's `model` and `thinking` are the task's
-                // route and level. The route's credential is resolved here the same way a
-                // `/model` switch resolves it — never copied into the snapshot.
-                if let Some(route) = agent_model {
-                    let ctx = radian_host::RouteContext {
-                        providers: providers.clone(),
-                        session_id: session_id.to_owned(),
-                        user_headers: user_headers.clone(),
-                        include_usage,
-                        max_tokens,
-                        thinking: agent_thinking
-                            .clone()
-                            .unwrap_or_else(|| route_thinking.clone()),
-                        thinking_budget,
-                    };
-                    let args = ctx.args_for(&route.provider, &route.model)?;
-                    let initial = build_model(args).map_err(|error| error.to_string())?;
-                    return Ok(radian_host::SwitchableModel::new(initial, route, slot, ctx));
-                }
-                let initial = build_model(ModelArgs {
-                    provider,
-                    base_url: base_url.clone(),
-                    model: model_id.clone(),
-                    api_key: api_key.clone(),
-                    headers: model_headers.clone(),
-                    include_usage,
-                    max_tokens,
-                    thinking: thinking_of,
-                    reasoning_effort: reasoning_effort.clone(),
-                    reasoning_replay: reasoning_replay.clone(),
-                })
-                .map_err(|error| error.to_string())?;
-                Ok(radian_host::SwitchableModel::new(
-                    initial,
-                    radian_host::ModelRoute::new(&route_provider, &route_model),
-                    slot,
-                    radian_host::RouteContext {
-                        providers: providers.clone(),
-                        session_id: session_id.to_owned(),
-                        user_headers: user_headers.clone(),
-                        include_usage,
-                        max_tokens,
-                        thinking: route_thinking.clone(),
-                        thinking_budget,
-                    },
-                ))
-            },
-        )
-    };
     // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can
     // still carry a change the TUI wrote, so resume restores the right model (D8).
     let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
@@ -1276,8 +1190,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     Ok(Setup {
         model,
         provider_id: provider_name.clone(),
-        route: (provider_name.clone(), model_name.clone()),
-        task_model,
         config_slot,
         budget_for,
         price_for,
@@ -1295,11 +1207,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         model_name,
         profile,
         approval: startup_approval,
-        git: config.git.clone(),
         config_path: config.source.clone(),
         config_skipped: config.skipped.clone(),
         control_enabled: config.control.enabled,
-        orchestration: config.orchestration.clone(),
         allow_unix_sockets: {
             let (paths, warnings) = radian_host::resolve_allow_unix_sockets(
                 &config.sandbox.allow_unix_sockets,
@@ -1607,35 +1517,6 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let runtime_events_inner = {
         let secrets = Arc::new(setup.secrets.clone());
         Arc::new(move |event: &radian_session::RuntimeEvent| {
-            // ADR 0030 O10: a task agent's spawn and finish are one stderr line each — a
-            // headless lead has no transcript to put them in.
-            match event {
-                radian_session::RuntimeEvent::TaskSpawned {
-                    agent_session_id,
-                    worktree,
-                    ..
-                } => {
-                    let where_ = worktree.as_deref().unwrap_or("the shared workspace");
-                    eprintln!("radian: task `{agent_session_id}` spawned at {where_}");
-                    return;
-                }
-                radian_session::RuntimeEvent::TaskFinished {
-                    agent_session_id,
-                    outcome,
-                    error,
-                } => {
-                    match error {
-                        Some(error) => eprintln!(
-                            "radian: task `{agent_session_id}` finished ({outcome:?}): {error}"
-                        ),
-                        None => {
-                            eprintln!("radian: task `{agent_session_id}` finished ({outcome:?})")
-                        }
-                    }
-                    return;
-                }
-                _ => {}
-            }
             if let radian_session::RuntimeEvent::TurnFailed { message, .. } = event {
                 let message = redact(message, &secrets);
                 eprintln!("radian: {message}");
@@ -1714,63 +1595,6 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     }
     eprintln!("{}", radian_host::trust::status_line(&trust_setup));
 
-    // ADR 0030 slice 9: resolve the orchestration snapshot from the LEAD's workspace (the user
-    // `[orchestration]` merged with the trusted project `.radian/orchestration.toml`) and install
-    // it process-wide, before any session opens. The startup lines list the commands that will run
-    // (ADR 0030 O7); a project file is read only when the workspace is trusted (ADR 0031).
-    let (orchestration, orchestration_warnings) = radian_host::orchestration::resolve(
-        &workspace_path,
-        trust_setup.resolved.decision.as_bool(),
-        &setup.orchestration,
-    );
-    for warning in &orchestration_warnings {
-        eprintln!("[orchestration] {warning}");
-    }
-    for line in orchestration.startup_lines() {
-        eprintln!("{line}");
-    }
-    radian_host::orchestration::set_process(orchestration);
-
-    // ADR 0030 slice 6b2: the production task builder, so a headless lead (`radian exec`) can
-    // spawn real task sessions. A task mounts no MCP servers (ADR 0030 O8) and inherits the
-    // lead's sandbox deny-read/Unix-socket lists, retries, compaction and budget settings.
-    let task_host = radian_host::TaskHost {
-        session_dir: sessions_for_deny.clone(),
-        model: setup.task_model.clone(),
-        route: setup.route.clone(),
-        servers: setup.servers.clone(),
-        sandbox: sandbox.clone(),
-        sandbox_deny_read: sandbox_deny_read.clone(),
-        allow_unix_sockets: setup.allow_unix_sockets.clone(),
-        retries: setup.settings.retries,
-        context_budget: setup.context_budget,
-        auto_compact: setup.settings.auto_compact,
-        compaction_settings: setup.settings.compaction_settings.clone(),
-        compaction_settings_for: setup.settings.compaction_settings_for.clone(),
-        turn_options: TurnOptions {
-            max_model_calls: setup.max_model_calls,
-            ..TurnOptions::default()
-        },
-        turn_timeout: setup.turn_timeout_secs.map(Duration::from_secs),
-        wording: radian_host::CLI_WORDING,
-        // ADR 0030 R10 / revision 4, ADR 0032: the task builder carries the same `[git]` the
-        // lead's session does, from the config this host read.
-        protected_branches: setup.git.protected_branches.clone(),
-        allowed_filters: Some(setup.git.allowed_filters()),
-        shell_auto_background: setup.settings.shell_auto_background,
-        skills_extra_paths: setup.settings.skills_extra_paths.clone(),
-        skills_builtin: setup.settings.skills_builtin,
-        skills_disabled: setup.settings.skills_disabled.clone(),
-        memory_injection: setup.settings.memory_injection,
-        capabilities: radian_host::SessionCapability::ALL.to_vec(),
-        audit: Arc::clone(&audit),
-        // A task's own stream must not reach the lead's live view (ADR 0030 O10); the CLI prints
-        // its own one-line notices for spawn/finish, not the task's stream.
-        task_events: Arc::new(|_: &radian_session::RuntimeEvent| {}),
-    };
-    let task_builder = radian_host::task_builder(task_host.clone());
-    let named_builder = radian_host::named_builder(task_host);
-
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
     // with its own bindings. ADR 0032 slice 5: `LeadSetup::setup` fills what every host-opened
     // session shares; what this host decides itself is written here.
@@ -1788,10 +1612,6 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             config_slot: setup.config_slot,
             budget_for: Some(setup.budget_for),
             price_for: setup.price_for,
-            // ADR 0030 R10 / revision 4: resolved from the config exactly like the TUI's
-            // session, so `radian exec` is not a weaker path (ADR 0032).
-            protected_branches: setup.git.protected_branches.clone(),
-            allowed_filters: Some(setup.git.allowed_filters()),
             servers: setup.servers,
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
@@ -1831,10 +1651,6 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             before_driver: None,
             memory_warning: Arc::new(|message: &str| eprintln!("[memory] {message}")),
             memory_notice_line: Arc::new(|line: &str| eprintln!("[memory] {line}")),
-            // ADR 0030 slice 6b2: a headless lead mounts the task tools and can spawn tasks.
-            task_builder: Some(task_builder),
-            // ADR 0030 O12: named agents are available to `send_agent` (no `/send` in the CLI).
-            named_builder: Some(named_builder),
         },
     )
     .await

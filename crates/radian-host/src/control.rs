@@ -27,9 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use agent_core::{
-    AgentEvent, CancellationToken, EventSink, InputSource, Message, NoopSink, ToolCall, ToolContext,
-};
+use agent_core::{AgentEvent, EventSink, InputSource, Message};
 use radian_runtime::{CancelCause, RuntimeEvents};
 use radian_session::RuntimeEvent;
 use serde_json::{Map, Value, json};
@@ -38,18 +36,15 @@ use tokio::sync::mpsc;
 
 use crate::session::LocalSession;
 
-/// What the port needs from the hosting session: its id, its inbox, its permission hooks and
-/// its task registry (ADR 0030 O6). Every handle is **weak**, so serving the socket never keeps
-/// a closed session (or its audit sink) alive — a host's teardown still observes the session
-/// dropping. A request upgrades what it needs; if the session has closed it is refused.
+/// What the port needs from the hosting session: its id, its inbox and its permission hooks.
+/// Every handle is **weak**, so serving the socket never keeps a closed session (or its audit
+/// sink) alive — a host's teardown still observes the session dropping. A request upgrades what
+/// it needs; if the session has closed it is refused.
 #[derive(Clone)]
 pub struct ControlTarget {
     pub session_id: String,
     inbox: Weak<radian_runtime::Inbox>,
     hooks: Weak<radian_permissions::PermissionHooks>,
-    /// The lead task registry, when this session is a lead (ADR 0030 O4/O13); `None` refuses
-    /// the `spawn_task`/`wait_task`/`task_status` verbs.
-    registry: Option<Weak<crate::task::TaskRegistry>>,
 }
 
 impl ControlTarget {
@@ -59,7 +54,6 @@ impl ControlTarget {
             session_id: session.id().as_str().to_owned(),
             inbox: Arc::downgrade(session.inbox()),
             hooks: Arc::downgrade(session.hooks()),
-            registry: session.lead_tasks().map(Arc::downgrade),
         }
     }
 
@@ -71,11 +65,6 @@ impl ControlTarget {
     /// The session's permission hooks, or `None` once the session has closed.
     fn hooks(&self) -> Option<Arc<radian_permissions::PermissionHooks>> {
         self.hooks.upgrade()
-    }
-
-    /// The session's task registry, or `None` when it has none or has closed.
-    fn registry(&self) -> Option<Arc<crate::task::TaskRegistry>> {
-        self.registry.as_ref().and_then(Weak::upgrade)
     }
 }
 
@@ -334,9 +323,6 @@ impl ControlServer {
                 success(id, None)
             }
             "list_sessions" => success(id, Some(json!({ "sessions": self.sessions(target) }))),
-            "spawn_task" | "wait_task" | "task_status" => {
-                self.lead_verb(verb, &id, &request, target).await
-            }
             "subscribe" => {
                 *client_id = Some(self.register(tx.clone(), Arc::clone(close)));
                 success(id, None)
@@ -386,103 +372,10 @@ impl ControlServer {
         }
     }
 
-    /// `spawn_task`/`wait_task`/`task_status`: the same handlers the lead's model tools use
-    /// (ADR 0030 O4); the port only translates the wire arguments and enforces `as`.
-    async fn lead_verb(
-        &self,
-        verb: &str,
-        id: &Value,
-        request: &Value,
-        target: &ControlTarget,
-    ) -> Value {
-        let Some(registry) = target.registry() else {
-            return failure(
-                id.clone(),
-                "this session has no task registry (it is not a lead)",
-            );
-        };
-        // O13: `spawn_task` may name a lead; only `main` exists today.
-        if verb == "spawn_task"
-            && let Some(named) = request.get("as")
-        {
-            match named.as_str() {
-                Some("main") => {}
-                _ => {
-                    return failure(
-                        id.clone(),
-                        "`as` must be `main` or absent (only the `main` lead exists today)",
-                    );
-                }
-            }
-        }
-        let arguments = match verb {
-            "spawn_task" => {
-                if request.get("brief").and_then(Value::as_str).is_none() {
-                    return failure(id.clone(), "`brief` is required");
-                }
-                let mut arguments = Map::new();
-                for key in ["brief", "isolation", "label", "approval"] {
-                    if let Some(value) = request.get(key) {
-                        arguments.insert(key.to_owned(), value.clone());
-                    }
-                }
-                if let Some(task) = request.get("task") {
-                    arguments.insert("id".to_owned(), task.clone());
-                }
-                Value::Object(arguments)
-            }
-            // The task id is named `task` on the wire to avoid colliding with the request `id`.
-            "wait_task" => {
-                let Some(task) = request.get("task").cloned() else {
-                    return failure(id.clone(), "`task` is required");
-                };
-                let mut arguments = Map::from_iter([(String::from("id"), task)]);
-                if let Some(timeout) = request.get("timeout_secs") {
-                    arguments.insert("timeout_secs".to_owned(), timeout.clone());
-                }
-                Value::Object(arguments)
-            }
-            _ => {
-                let Some(task) = request.get("task").cloned() else {
-                    return failure(id.clone(), "`task` is required");
-                };
-                json!({ "id": task })
-            }
-        };
-        let lead = crate::lead_tools::LeadSession::new(Arc::clone(&registry));
-        let call = ToolCall {
-            id: format!("control-{verb}"),
-            name: verb.to_owned(),
-            arguments,
-        };
-        let sink = NoopSink;
-        let cx = ToolContext {
-            cancellation: CancellationToken::new(),
-            events: &sink,
-            index: 0,
-        };
-        match crate::lead_tools::run(&lead, &call, cx).await {
-            Ok(output) => success(id.clone(), output.structured),
-            Err(error) => {
-                let mut response = failure(id.clone(), error.message.clone());
-                if let Some(object) = response.as_object_mut() {
-                    object.insert("code".to_owned(), Value::String(error.code));
-                }
-                response
-            }
-        }
-    }
-
-    /// `list_sessions`: the hosting session and its live task agents (ADR 0030 O6). The port
-    /// serves one process, so this is one `main` row plus one row per task agent.
+    /// `list_sessions`: the hosting session (ADR 0030 O6). The port serves one process, so this
+    /// is one `main` row.
     fn sessions(&self, target: &ControlTarget) -> Vec<Value> {
-        let mut sessions = vec![json!({ "id": target.session_id, "kind": "main" })];
-        if let Some(registry) = target.registry() {
-            for task in registry.ids() {
-                sessions.push(json!({ "id": task, "kind": "task" }));
-            }
-        }
-        sessions
+        vec![json!({ "id": target.session_id, "kind": "main" })]
     }
 }
 
@@ -520,13 +413,14 @@ impl RuntimeEvents for RuntimeFanout {
         self.inner.on_runtime_event(event);
     }
 
-    /// ADR 0030 O7 / slice 9: the orchestration hook points (`task_spawned`, `task_finished`,
-    /// `stalled`, `before_merge`) reach subscribers with their stable hook name and payload, in
-    /// the same envelope shape as a runtime event but with `source: "hook"`. Slice 10's
-    /// `integrate_task` is the producer of `before_merge`.
     fn on_hook_event(&self, name: &str, data: &serde_json::Value) {
-        self.server
-            .push(crate::orchestration::hook::envelope(name, data));
+        self.server.push(json!({
+            "event": {
+                "source": "hook",
+                "name": name,
+                "data": data,
+            }
+        }));
         self.inner.on_hook_event(name, data);
     }
 }
@@ -623,29 +517,6 @@ fn runtime_event_json(event: &RuntimeEvent) -> Value {
             "exclude_from_context": exclude_from_context,
             "exit_code": exit_code,
             "cancelled": cancelled,
-        }),
-        RuntimeEvent::GitCommitted {
-            commit,
-            branch,
-            files,
-        } => json!({ "commit": commit, "branch": branch, "files": files }),
-        RuntimeEvent::TaskSpawned {
-            agent_session_id,
-            worktree,
-            label,
-        } => json!({
-            "agent_session_id": agent_session_id,
-            "worktree": worktree,
-            "label": label,
-        }),
-        RuntimeEvent::TaskFinished {
-            agent_session_id,
-            outcome,
-            error,
-        } => json!({
-            "agent_session_id": agent_session_id,
-            "outcome": outcome,
-            "error": error,
         }),
         RuntimeEvent::BackgroundJobStarted {
             job_id,
