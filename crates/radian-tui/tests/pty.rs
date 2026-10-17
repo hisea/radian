@@ -6496,10 +6496,11 @@ async fn pty_pick_resumes_the_selected_id_and_enters_once() {
 /// written: `[control] <sock>` and the trust status line sat drawn over the input box and never
 /// cleared. On this path the startup diagnostics must not reach the terminal at all.
 ///
-/// The check reads the **raw** output, not the `vt100` screen: the stray bytes are in the
-/// stream every time, while whether the diff happens to overwrite a given cell depends on the
-/// layout. The second half of the test pins that nothing is lost: the same lines are in the
-/// transcript's startup block.
+/// The check reads the **raw** output, not the `vt100` screen. The raw stream is the direct
+/// evidence that the bytes reached the terminal at all; which cell each one ends up in depends on
+/// the frame diff and the layout (at 24x100 the dumped screen showed them in the composer row and
+/// the footer row, still there after the session's first frame). The second half of the test pins
+/// that nothing is lost: the same lines are in the transcript's startup block.
 ///
 /// (p1's earlier screen-content attempts at 24x100 passed on the old code because they waited
 /// for the seeded history text — which the picker already shows in the row's summary — so they
