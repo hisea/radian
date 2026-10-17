@@ -664,11 +664,10 @@ fn run(
     }
     // ADR 0008: the config file provides defaults; every CLI flag wins. A refused file fails
     // startup before any session file exists.
-    // The config's provenance (ADR 0027, ADR 0031) is classified against
-    // the workspace: only a **user-level** file may enable a footer `command` item.
+    // v1 has one configuration layer, chosen by the user (`--config` > `RADIAN_CONFIG` >
+    // `~/.radian/config/config.toml`); there is no project-level config (ADR 0031).
     let config =
-        radian_host::load_config_in_workspace(cli.config.as_deref(), Some(&workspace_path))
-            .map_err(|error| error.to_string())?;
+        radian_host::load_config(cli.config.as_deref()).map_err(|error| error.to_string())?;
     if config.read_only {
         eprintln!(
             "[config] schema_version {} is newer than the supported v{}; reading it read-only",
@@ -740,11 +739,12 @@ fn run(
         radian_host::user_home().as_deref(),
     );
     config_warnings.extend(socket_warnings);
-    // ADR 0027: the configured footer `command` items, parsed once. A
-    // project-level command is refused here with a warning; the specs that survive are spawned as
-    // background producers later (their values travel only through the contribution store).
-    let (command_specs, command_warnings) =
-        radian_host::command_specs(&config.tui.footer, config.origin);
+    // ADR 0027: the configured footer `command` items, parsed once and
+    // spawned as background producers later (their values travel only through the contribution
+    // store). v1 has no project-level config layer (ADR 0031), so every current source is the
+    // user's own and every command is accepted; when one is added, a `command` must be refused
+    // there and that slice owns the test.
+    let (command_specs, command_warnings) = radian_host::command_specs(&config.tui.footer);
     config_warnings.extend(command_warnings);
     match &config.source {
         Some(path) => eprintln!("[config] {}", path.display()),

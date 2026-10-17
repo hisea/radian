@@ -7,7 +7,6 @@
 
 use std::path::PathBuf;
 
-use radian_host::ConfigOrigin;
 use radian_host::config;
 
 fn fixture(name: &str) -> (PathBuf, String) {
@@ -293,7 +292,8 @@ fn the_refusal_messages_never_echo_a_value() {
 }
 
 /// ADR 0027: the `command`/`period` item parameters are carried by the
-/// reader, and `command_specs` turns them into specs (or refuses them at project level).
+/// reader, and `command_specs` turns them into specs. v1 has no project-level config layer
+/// (ADR 0031), so every configuration source is the user's own and is accepted.
 #[test]
 fn the_command_fixture_carries_command_and_period() {
     let (path, text) = fixture("tui-footer-command.toml");
@@ -309,7 +309,7 @@ fn the_command_fixture_carries_command_and_period() {
     assert_eq!(param("command"), Some("printf 72F"));
     assert_eq!(param("period"), Some("300"));
 
-    let (specs, warnings) = radian_host::command_specs(&config.tui.footer, ConfigOrigin::User);
+    let (specs, warnings) = radian_host::command_specs(&config.tui.footer);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(specs.len(), 2, "{specs:?}");
     let weather = specs.iter().find(|spec| spec.id == "weather").unwrap();
@@ -318,117 +318,4 @@ fn the_command_fixture_carries_command_and_period() {
     assert_eq!(weather.period, Some(std::time::Duration::from_secs(300)));
     let host_tag = specs.iter().find(|spec| spec.id == "host_tag").unwrap();
     assert_eq!(host_tag.period, None, "period = 0 is startup-only");
-
-    // A project-level config may not enable a command: every entry is refused with a warning.
-    let (specs, warnings) = radian_host::command_specs(&config.tui.footer, ConfigOrigin::Project);
-    assert!(specs.is_empty(), "{specs:?}");
-    assert_eq!(warnings.len(), 2, "{warnings:?}");
-    assert!(
-        warnings.iter().all(|warning| warning.contains("command")),
-        "{warnings:?}"
-    );
-}
-
-/// A scratch directory for the provenance tests (never the real config or home).
-fn scratch(label: &str) -> PathBuf {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-config-origin-{}-{label}-{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-/// ADR 0027, ADR 0031: provenance is decided by **location**, not by
-/// whether the path is the default. A file inside the workspace is project-level; a file outside
-/// it — an explicit `--config` path included — is user-level.
-#[test]
-fn a_config_inside_the_workspace_is_project_level() {
-    let workspace = scratch("ws");
-    let source = workspace.join("config.toml");
-    std::fs::write(&source, "schema_version = 1\n").unwrap();
-    assert_eq!(
-        config::classify_origin(Some(&source), Some(&workspace), None),
-        ConfigOrigin::Project
-    );
-
-    // An explicit path outside the workspace is not project-level merely because it is not the
-    // default.
-    let outside = scratch("outside");
-    let elsewhere = outside.join("config.toml");
-    std::fs::write(&elsewhere, "schema_version = 1\n").unwrap();
-    assert_eq!(
-        config::classify_origin(Some(&elsewhere), Some(&workspace), None),
-        ConfigOrigin::User
-    );
-
-    // No file, and no workspace, are user-level.
-    assert_eq!(
-        config::classify_origin(None, Some(&workspace), None),
-        ConfigOrigin::User
-    );
-    assert_eq!(
-        config::classify_origin(Some(&source), None, None),
-        ConfigOrigin::User
-    );
-
-    // A file under the user config directory stays user-level even when the workspace is the
-    // home: the user's own `~/.radian/config/config.toml` must never be refused.
-    let home = scratch("home");
-    let config_dir = home.join("config");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    let user_config = config_dir.join("config.toml");
-    std::fs::write(&user_config, "schema_version = 1\n").unwrap();
-    assert_eq!(
-        config::classify_origin(Some(&user_config), Some(&home), Some(&config_dir)),
-        ConfigOrigin::User
-    );
-
-    // A workspace that itself lives under `$RADIAN_HOME` (a task worktree under
-    // `$RADIAN_HOME/worktrees/`) is **not** swallowed by the config-dir rule: its own config is
-    // still project-level.
-    let worktrees = config_dir.parent().unwrap().join("worktrees");
-    let task_ws = worktrees.join("t1");
-    std::fs::create_dir_all(&task_ws).unwrap();
-    let task_config = task_ws.join("config.toml");
-    std::fs::write(&task_config, "schema_version = 1\n").unwrap();
-    assert_eq!(
-        config::classify_origin(Some(&task_config), Some(&task_ws), Some(&config_dir)),
-        ConfigOrigin::Project
-    );
-
-    let _ = std::fs::remove_dir_all(&workspace);
-    let _ = std::fs::remove_dir_all(&outside);
-    let _ = std::fs::remove_dir_all(&home);
-}
-
-/// `load_in_workspace` reads exactly like `load` and only adds the origin classification; `load`
-/// itself stays user-level because it has no workspace.
-#[test]
-fn load_in_workspace_classifies_the_origin() {
-    let workspace = scratch("load");
-    let source = workspace.join("config.toml");
-    std::fs::write(&source, "schema_version = 1\n").unwrap();
-    let loaded = radian_host::load_config_in_workspace(Some(&source), Some(&workspace)).unwrap();
-    assert_eq!(loaded.origin, ConfigOrigin::Project);
-    assert_eq!(loaded.source.as_deref(), Some(source.as_path()));
-
-    let outside = scratch("load-out");
-    let elsewhere = outside.join("config.toml");
-    std::fs::write(&elsewhere, "schema_version = 1\n").unwrap();
-    let loaded = radian_host::load_config_in_workspace(Some(&elsewhere), Some(&workspace)).unwrap();
-    assert_eq!(loaded.origin, ConfigOrigin::User);
-
-    let loaded = radian_host::load_config(Some(&source)).unwrap();
-    assert_eq!(
-        loaded.origin,
-        ConfigOrigin::User,
-        "the old entry point never claims a project origin"
-    );
-
-    let _ = std::fs::remove_dir_all(&workspace);
-    let _ = std::fs::remove_dir_all(&outside);
 }

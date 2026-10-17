@@ -293,9 +293,11 @@ find_next = ["ctrl-g", "shift-enter"]
   "cache_read":…}, "cost_usd":…, "tasks":{"running":…,"total":…}}` (a missed fact is `null`).
   Its environment is cleared to `PATH` plus `RADIAN_SESSION_ID`/`RADIAN_CWD`. A timeout (5 s), a
   spawn failure, a non-zero exit or an invalid line keeps the last value and draws it stale; the
-  output never enters the journal, the transcript, the model context or a herdr report. **Only a
-  user-level config may enable a command**: a project-level file (inside the workspace, outside
-  `$RADIAN_HOME/config`) has its `command` items refused with a warning (ADR 0031).
+  output never enters the journal, the transcript, the model context or a herdr report. v1 has
+  **one** config layer, chosen by the user (`--config` > `RADIAN_CONFIG` >
+  `~/.radian/config/config.toml`); there is no project-level config (ADR 0031), so every
+  `command` is accepted. When a project-level config layer is added, a `command` must be refused
+  there — that slice owns the test.
 
 | item | placeholders | default |
 |---|---|---|

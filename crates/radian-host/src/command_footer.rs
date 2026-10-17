@@ -15,8 +15,10 @@
 //! own trailing space; a configured `symbol` on the item wins over it, and a configured
 //! `symbol_style` styles whichever symbol is drawn.
 //!
-//! Only user-level configuration may enable a command: a project-level file is refused with a
-//! warning (ADR 0031's gate; a cloned repository must not be able to run code as the user).
+//! v1 has **one** configuration layer, chosen by the user (`--config` > `RADIAN_CONFIG` >
+//! `~/.radian/config/config.toml`; there is no project-level config, ADR 0031), so every source
+//! this reads is the user's own and every `command` item is accepted. When a project-level
+//! config layer is added, a `command` item must be refused there and that slice owns the test.
 //!
 //! # stdin JSON schema
 //!
@@ -41,7 +43,7 @@ use std::ffi::OsString;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use crate::config::{ConfigOrigin, TuiFooterConfig};
+use crate::config::TuiFooterConfig;
 use crate::contrib::{Contribution, Segment, SegmentRole, StatusContributor};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -158,14 +160,12 @@ struct CommandOutput {
     symbol: Option<String>,
 }
 
-/// The command items a footer config enables, plus a warning per refused or malformed one
-/// (ADR 0027). Only user-level configuration may enable a command:
-/// a project-level entry is refused, never run. The caller spawns one
+/// The command items a footer config enables, plus a warning per malformed one (ADR 0027
+/// revision 14 decision 4). Every `command` item from any current configuration source is
+/// accepted: v1 has no project-level config layer (ADR 0031). When one is added, a `command`
+/// item must be refused there, and that slice owns the test. The caller spawns one
 /// [`CommandContributor`] per spec.
-pub fn command_specs(
-    footer: &TuiFooterConfig,
-    origin: ConfigOrigin,
-) -> (Vec<CommandSpec>, Vec<String>) {
+pub fn command_specs(footer: &TuiFooterConfig) -> (Vec<CommandSpec>, Vec<String>) {
     let mut specs = Vec::new();
     let mut warnings = Vec::new();
     for (id, item) in &footer.items {
@@ -174,13 +174,6 @@ pub fn command_specs(
         };
         // A disabled item is hidden everywhere, so its command is never run.
         if item.disabled {
-            continue;
-        }
-        if origin == ConfigOrigin::Project {
-            warnings.push(format!(
-                "tui.footer.items.{id}.command is ignored: only user-level configuration may \
-                 run a footer command (a project-level file is not trusted, ADR 0031)"
-            ));
             continue;
         }
         let (program, args) = match parse_command(command) {
@@ -578,12 +571,12 @@ mod tests {
     #[test]
     fn a_disabled_command_is_not_a_spec_and_a_malformed_one_warns() {
         let footer = footer_with("x", &[("command", "printf hi")], true);
-        let (specs, warnings) = command_specs(&footer, ConfigOrigin::User);
+        let (specs, warnings) = command_specs(&footer);
         assert!(specs.is_empty(), "a disabled item's command never runs");
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let footer = footer_with("x", &[("command", "printf 'unterminated")], false);
-        let (specs, warnings) = command_specs(&footer, ConfigOrigin::User);
+        let (specs, warnings) = command_specs(&footer);
         assert!(specs.is_empty());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("command"), "{warnings:?}");
