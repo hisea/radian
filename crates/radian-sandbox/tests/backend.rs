@@ -276,6 +276,71 @@ fn a_denied_directory_inside_the_workspace_is_allowed() {
     }
 }
 
+/// ADR 0016: the `inherited` backend adds no local rules — the outer
+/// sandbox owns what is readable, writable and reachable — but the **host-side** rules that are
+/// not sandbox rules still apply: the environment is cleared to the policy's whitelist, and the
+/// child runs in the workspace with `TMPDIR` inside it (the one tree the outer sandbox is known
+/// to allow writing). Mutations: drop `apply_env` (the child inherits the whole host
+/// environment) or drop the `TMPDIR` line.
+#[test]
+fn the_inherited_backend_keeps_the_environment_whitelist_and_no_local_rules() {
+    let dir = TempDir::new("inherited");
+    let sandbox = Sandbox::inherited(dir.path());
+    assert_eq!(sandbox.backend_name(), "inherited");
+    assert_eq!(sandbox.mode(), SandboxMode::WorkspaceWrite);
+    assert_eq!(sandbox.probe().backend, "inherited");
+    assert!(
+        sandbox.probe().detail.contains("no probe"),
+        "{:?}",
+        sandbox.probe()
+    );
+    // Nothing local: no deny-read list, no read-only git metadata, no whitelisted socket.
+    assert!(sandbox.policy().deny_read.is_empty());
+    assert!(sandbox.policy().read_only.is_empty());
+    assert!(sandbox.policy().allow_unix_sockets.is_empty());
+
+    // Run a real child: what it sees is what the shell tool's commands see.
+    let output = sandbox
+        .command("/usr/bin/env", std::iter::empty::<&str>())
+        .unwrap()
+        .output()
+        .expect("the inherited backend runs a plain child");
+    assert!(output.status.success());
+    let env_output = String::from_utf8_lossy(&output.stdout);
+    let child: std::collections::BTreeSet<String> = env_output
+        .lines()
+        .filter_map(|line| line.split_once('=').map(|(name, _)| name.to_owned()))
+        .collect();
+    let mut expected: std::collections::BTreeSet<String> = radian_sandbox::DEFAULT_ALLOW_ENV
+        .iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .map(|name| (*name).to_owned())
+        .collect();
+    // The backend sets `TMPDIR` itself, whether or not the host has one.
+    expected.insert("TMPDIR".to_owned());
+    assert!(expected.len() > 1, "the test host must have PATH-like vars");
+    assert_eq!(
+        child, expected,
+        "the child's environment is not the whitelist"
+    );
+    let tmpdir = env_output
+        .lines()
+        .find_map(|line| line.strip_prefix("TMPDIR="))
+        .expect("the child has a TMPDIR");
+    assert!(
+        tmpdir.ends_with(".radian-sandbox/tmp"),
+        "TMPDIR must stay inside the workspace: {tmpdir}"
+    );
+    let command = sandbox
+        .command("/bin/true", std::iter::empty::<&str>())
+        .unwrap();
+    assert_eq!(
+        command.get_current_dir(),
+        Some(dir.path()),
+        "the workspace is the child's cwd"
+    );
+}
+
 #[test]
 fn a_missing_workspace_is_an_invalid_workspace_error() {
     let dir = TempDir::new("missing");

@@ -145,6 +145,23 @@ impl SandboxPolicy {
         })
     }
 
+    /// The policy for [`crate::Sandbox::inherited`] (ADR 0016). It is
+    /// deliberately **not** [`SandboxPolicy::new`]: there is nothing to discover or deny
+    /// locally. The outer sandbox decides what is readable and writable; radian only needs the
+    /// workspace its backend spawns into and the host-side environment whitelist.
+    pub(crate) fn inherited(workspace: &Path) -> Self {
+        Self {
+            mode: SandboxMode::WorkspaceWrite,
+            workspace: workspace.to_path_buf(),
+            network: true,
+            read_only: Vec::new(),
+            git_access: GitAccess::default(),
+            deny_read: Vec::new(),
+            allow_unix_sockets: Vec::new(),
+            allow_env: DEFAULT_ALLOW_ENV.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
     pub fn network(mut self, on: bool) -> Self {
         self.network = on;
         self

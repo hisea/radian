@@ -20,6 +20,7 @@
 #[cfg(target_os = "linux")]
 mod bwrap;
 mod error;
+mod inherited;
 mod policy;
 #[cfg(target_os = "macos")]
 mod seatbelt;
@@ -111,6 +112,53 @@ pub fn platform_backend() -> Result<&'static dyn SandboxBackend, SandboxError> {
     Err(SandboxError::UnsupportedPlatform(std::env::consts::OS))
 }
 
+/// ADR 0016: whether the **kernel** says this process is already confined
+/// by a sandbox. macOS asks `sandbox_check(getpid(), NULL, 0)`; anything else is `false`.
+///
+/// This is the only source of that fact. No environment variable, config key or flag may stand
+/// in for it: a script outside any sandbox could set a variable, and radian would then run with
+/// no confinement at all. A missing symbol or an error (a negative result) also reads as
+/// `false`, so a future macOS that drops the private API falls back to the ordinary
+/// probe-and-refuse path — fail closed, never fail open.
+///
+/// Linux is deliberately unanswered (revision 2 decision 7): `bwrap` nesting and a kernel
+/// signal for "already confined" are unverified there, so Linux keeps today's behaviour.
+pub fn confined_by_outer_sandbox() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return macos::sandbox_check_self();
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
+/// The private macOS API behind [`confined_by_outer_sandbox`].
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::os::raw::{c_char, c_int};
+
+    // `libsystem_sandbox.dylib` exports `sandbox_check`; libSystem's shared cache resolves it,
+    // and there is no public header for it (`sandbox.h` declares only the deprecated
+    // `sandbox_init`). The signature is the measured one:
+    // `int sandbox_check(pid_t pid, const char *operation, int type, ...)`.
+    unsafe extern "C" {
+        fn sandbox_check(pid: c_int, operation: *const c_char, kind: c_int, ...) -> c_int;
+    }
+
+    /// `sandbox_check(getpid(), NULL, 0)`: 0 outside a sandbox, 1 under `sandbox-exec` with
+    /// either an `(allow default)` or a `(deny default)` profile (measured on macOS 27,
+    /// 2026-10-16). The `type` argument's meaning is undocumented and untested here; 0 is what
+    /// was measured and is what is used.
+    pub(super) fn sandbox_check_self() -> bool {
+        let pid = std::process::id() as c_int;
+        // SAFETY: `sandbox_check` only inspects the named process's sandbox state. With a null
+        // `operation` and `kind = 0` it takes no further arguments (the variadic tail is
+        // unused), and it has no memory-safety preconditions.
+        let result = unsafe { sandbox_check(pid, std::ptr::null(), 0) };
+        result > 0
+    }
+}
+
 /// ADR 0020: the workspace must not be inside a path the sandbox denies reading, or the
 /// sandbox would hide the workspace from the commands it is supposed to let run. Refuse the
 /// enforced modes before any backend probes.
@@ -150,6 +198,24 @@ impl Sandbox {
     ) -> Result<Self, SandboxError> {
         let policy = SandboxPolicy::new(mode, workspace)?;
         Self::from_policy(policy)
+    }
+
+    /// ADR 0016: the sandbox for a process the kernel says is **already
+    /// confined** by an outer sandbox. radian adds no layer of its own — there is no policy
+    /// bookkeeping to do locally (the outer sandbox owns what is readable, writable and
+    /// reachable) and no probe to run (a nested `sandbox-exec` cannot start at all) — so this
+    /// builds the [`inherited`](crate::inherited) backend directly.
+    ///
+    /// Callers reach it only through [`confined_by_outer_sandbox`]: it is never a fallback.
+    pub fn inherited(workspace: impl AsRef<std::path::Path>) -> Self {
+        Self {
+            backend: &inherited::INHERITED,
+            policy: SandboxPolicy::inherited(workspace.as_ref()),
+            probe: ProbeReport {
+                backend: "inherited",
+                detail: inherited::PROBE_DETAIL.into(),
+            },
+        }
     }
 
     pub fn from_policy(policy: SandboxPolicy) -> Result<Self, SandboxError> {

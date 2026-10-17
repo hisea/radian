@@ -29,3 +29,10 @@ testing = []
 name = "sandbox-escape"
 path = "src/bin/sandbox-escape.rs"
 required-features = ["testing"]
+
+# ADR 0016 acceptance 1: prints `confined_by_outer_sandbox()` for its own process, so
+# `tests/escape_macos.rs` can run it under `sandbox-exec` and read the kernel's answer.
+[[bin]]
+name = "sandbox-confined"
+path = "src/bin/sandbox-confined.rs"
+required-features = ["testing"]
