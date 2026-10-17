@@ -259,15 +259,13 @@ impl Jobs {
     }
 
     /// Starts `command` in the background under `sandbox`. One approval covers its whole life
-    /// (the caller has already been approved for this tool call). `timeout` is an optional job
-    /// deadline; the `shell` tool no longer passes one, because an explicit `background: true`
-    /// `timeout_secs` is ignored (ADR 0037), so production always passes `None`.
+    /// (the caller has already been approved for this tool call). A background job has **no**
+    /// timeout (ADR 0037: an explicit `background: true` ignores `timeout_secs`).
     pub fn start(
         &self,
         sandbox: &Sandbox,
         cwd: &Path,
         command: &str,
-        timeout: Option<Duration>,
     ) -> Result<StartInfo, ToolFailure> {
         let mut state = self.lock_state();
         let running = state
@@ -373,13 +371,6 @@ impl Jobs {
             let events = self.inner.events.clone();
             let job_id = id.clone();
             thread::spawn(move || supervise(pid, child, supervisor_cell, done_rx, events, job_id));
-        }
-        if let Some(timeout) = timeout {
-            let timer_cell = Arc::clone(&cell);
-            thread::spawn(move || {
-                thread::sleep(timeout);
-                terminate(&timer_cell, Termination::TimedOut);
-            });
         }
 
         Ok(StartInfo {
