@@ -3394,9 +3394,16 @@ async fn shell_cannot_write_outside_the_workspace() {
 
     assert_eq!(code, 0, "{stderr}");
     let result = tool_result_content(&server, 1);
-    assert!(
-        result.contains("exit code: 1"),
-        "the sandboxed command must fail: {result}"
+    // The sandbox denies the write, but the shell's exit status for a failed redirection is
+    // its own: bash uses 1, dash (Linux's `/bin/sh`) uses 2. Assert what the test means — the
+    // command failed — not one shell's number.
+    let exit = result
+        .lines()
+        .find_map(|line| line.strip_prefix("exit code: "))
+        .expect("the shell result has an `exit code:` line");
+    assert_ne!(
+        exit, "0",
+        "the sandboxed command must fail (a redirection denied): {result}"
     );
     assert!(
         !target.exists(),
