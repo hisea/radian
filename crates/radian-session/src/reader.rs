@@ -128,6 +128,10 @@ pub enum EventData {
         message_id: MessageId,
         lane: InboxLane,
         source: InputSource,
+        /// Whether the input may open a turn by itself when the driver is idle (ADR 0011
+        /// revision 1). Absent in an old file; the reader derives it from the lane
+        /// (`next_turn` true, `next_step` false), which is today's behaviour.
+        wake: bool,
     },
     InputClaimed {
         message_ids: Vec<MessageId>,
@@ -716,6 +720,10 @@ impl LineScanner {
                     message_id: d.message_id,
                     lane: d.lane,
                     source: d.source,
+                    // ADR 0011: an old file has no `wake`; derive it from the lane
+                    // (this is exactly today's behaviour: a `next_turn` opens a turn, a
+                    // `next_step` entry waits).
+                    wake: d.wake.unwrap_or(d.lane == InboxLane::NextTurn),
                 }
             }
             "InputClaimed" => {
@@ -1150,6 +1158,10 @@ struct InboxEnqueuedData {
     message_id: MessageId,
     lane: InboxLane,
     source: InputSource,
+    /// ADR 0011 / ADR 0006 §5.5: optional on disk. Absent in an old journal and
+    /// resolved from the lane, so an old session's semantics do not change.
+    #[serde(default)]
+    wake: Option<bool>,
 }
 
 #[derive(Deserialize)]

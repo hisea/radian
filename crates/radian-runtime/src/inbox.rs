@@ -16,6 +16,14 @@
 //!
 //! There is deliberately no generic splice/insert API (plan §3.3, ADR 0011 L1).
 //!
+//! # The idle rule (ADR 0011)
+//!
+//! When no turn is running, the driver opens the next turn with the oldest `next_turn`
+//! entry; when that lane is empty, it opens one with the **oldest waking** `next_step` entry
+//! (a `steer`). An `inject` never opens a turn by itself: it waits for a natural step
+//! boundary inside a turn someone else started. [`InboxEntry::wake`] carries that difference,
+//! and it is durable, so a resume restores it.
+//!
 //! # Bounded input (ADR 0011 L4, decision 1)
 //!
 //! The queue is bounded. When it is full, `followup`/`steer`/`inject` **refuse** the input
@@ -114,6 +122,10 @@ pub enum CancelCause {
 pub struct InboxEntry {
     pub id: MessageId,
     pub lane: Lane,
+    /// Whether this entry wakes an idle driver and may open the next turn itself (ADR 0011
+    /// revision 1): a `steer` does, an `inject` does not. `followup` entries wake too, but
+    /// they are taken by lane priority before this flag is consulted.
+    pub wake: bool,
     /// The source the caller declared at enqueue time (ADR 0011).
     pub source: InputSource,
     /// The message, with its `meta.id` and `meta.source` set.
@@ -296,6 +308,9 @@ impl Inbox {
                     message_id: id.clone(),
                     lane: lane.wire(),
                     source,
+                    // ADR 0011: the entry's waking flag is durable, so a resume
+                    // knows which `next_step` entries may open a turn themselves.
+                    wake,
                 })
                 .await
                 .map_err(|error| InboxError::Journal {
@@ -307,6 +322,7 @@ impl Inbox {
         state.push(InboxEntry {
             id: id.clone(),
             lane,
+            wake,
             source,
             message,
             seq,
@@ -418,9 +434,19 @@ impl Inbox {
         self.wake.notify_one();
     }
 
-    /// Removes the oldest `next_turn` entry, if any. Used by the driver at a turn boundary.
+    /// Claims the input that opens the next turn (ADR 0011): the
+    /// oldest `next_turn` entry, or, when that lane is empty, the **oldest waking**
+    /// `next_step` entry. A non-waking `next_step` entry (an `inject`) never opens a turn; it
+    /// stays and is absorbed by a turn's first safe point. Every older entry keeps its
+    /// relative order: an `inject` pushed before the chosen steer stays in `next_step` in
+    /// front of the later entries.
     pub async fn claim_next_turn(&self) -> Option<InboxEntry> {
-        self.state.lock().await.next_turn.pop_front()
+        let mut state = self.state.lock().await;
+        if let Some(entry) = state.next_turn.pop_front() {
+            return Some(entry);
+        }
+        let index = state.next_step.iter().position(|entry| entry.wake)?;
+        state.next_step.remove(index)
     }
 
     /// Removes the oldest `next_step` entry, if any. Used by the driver at a safe point.
