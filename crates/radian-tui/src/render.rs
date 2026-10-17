@@ -130,15 +130,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     .split(chunks[2]);
     let input_area = middle_chunks[1];
     if !above_lines.is_empty() {
-        let rows =
-            Layout::vertical(vec![Constraint::Length(1); above_lines.len()]).split(middle_chunks[0]);
+        let rows = Layout::vertical(vec![Constraint::Length(1); above_lines.len()])
+            .split(middle_chunks[0]);
         for (line, area) in above_lines.iter().zip(rows.iter()) {
             frame.render_widget(Paragraph::new(line.clone()), *area);
         }
     }
     if !below_lines.is_empty() {
-        let rows =
-            Layout::vertical(vec![Constraint::Length(1); below_lines.len()]).split(middle_chunks[2]);
+        let rows = Layout::vertical(vec![Constraint::Length(1); below_lines.len()])
+            .split(middle_chunks[2]);
         for (line, area) in below_lines.iter().zip(rows.iter()) {
             frame.render_widget(Paragraph::new(line.clone()), *area);
         }

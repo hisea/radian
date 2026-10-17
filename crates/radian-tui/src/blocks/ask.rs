@@ -45,7 +45,9 @@ impl AskGlyphs {
                 multi_off: "( )",
                 desc: "->",
             },
-            crate::footer::Glyphs::Unicode | crate::footer::Glyphs::Nerd | crate::footer::Glyphs::Emoji => Self {
+            crate::footer::Glyphs::Unicode
+            | crate::footer::Glyphs::Nerd
+            | crate::footer::Glyphs::Emoji => Self {
                 top_left: '╭',
                 bottom_left: '╰',
                 horizontal: '─',

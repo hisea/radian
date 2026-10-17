@@ -10,7 +10,9 @@
 use std::borrow::Cow;
 
 use radian_host::SegmentRole;
-use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig, TuiFooterRowConfig, TuiWidgetsConfig};
+use radian_host::config::{
+    TuiFooterConfig, TuiFooterItemConfig, TuiFooterRowConfig, TuiWidgetsConfig,
+};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -532,14 +534,26 @@ impl Footer {
                             .left
                             .iter()
                             .filter_map(|item| {
-                                resolve_item(item, &items, &command_ids, &mut aliased, &mut warnings)
+                                resolve_item(
+                                    item,
+                                    &items,
+                                    &command_ids,
+                                    &mut aliased,
+                                    &mut warnings,
+                                )
                             })
                             .collect(),
                         right: row
                             .right
                             .iter()
                             .filter_map(|item| {
-                                resolve_item(item, &items, &command_ids, &mut aliased, &mut warnings)
+                                resolve_item(
+                                    item,
+                                    &items,
+                                    &command_ids,
+                                    &mut aliased,
+                                    &mut warnings,
+                                )
                             })
                             .collect(),
                         separator: row.separator.clone().unwrap_or_else(|| separator.clone()),
@@ -610,12 +624,7 @@ impl Footer {
         self.position_lines(app, width, RowPosition::BelowInput)
     }
 
-    fn position_lines(
-        &self,
-        app: &App,
-        width: usize,
-        position: RowPosition,
-    ) -> Vec<Line<'static>> {
+    fn position_lines(&self, app: &App, width: usize, position: RowPosition) -> Vec<Line<'static>> {
         self.rows
             .iter()
             .filter(|row| row.position == position)
@@ -675,10 +684,7 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     with_format("git_branch", "{branch}{dirty}"),
                     item("worktree"),
                 ],
-                vec![
-                    no_symbol("context", "{bar} {percent}%"),
-                    item("reasoning"),
-                ],
+                vec![no_symbol("context", "{bar} {percent}%"), item("reasoning")],
             ),
             // Row 3: the numbers, right-aligned, single spaces (revision 3's sample
             // `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M`).
@@ -1409,7 +1415,12 @@ mod tests {
     /// is gone.
     #[test]
     fn the_brand_mark_is_per_glyph_set() {
-        for (name, expected) in [("unicode", "R"), ("nerd", "\u{f0c20}"), ("ascii", "rad"), ("emoji", "⚡")] {
+        for (name, expected) in [
+            ("unicode", "R"),
+            ("nerd", "\u{f0c20}"),
+            ("ascii", "rad"),
+            ("emoji", "⚡"),
+        ] {
             let app = app_with_glyphs(name);
             let item = bare_item("brand");
             let component = components::builtin("brand").expect("the brand component");

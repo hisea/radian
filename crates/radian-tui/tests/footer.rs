@@ -233,7 +233,10 @@ fn the_context_bar_takes_width_fill_and_empty() {
     let mut app = App::new("mock", "s");
     let warnings = app.apply_footer(&config);
     assert_eq!(
-        warnings.iter().filter(|w| w.contains("context_bar")).count(),
+        warnings
+            .iter()
+            .filter(|w| w.contains("context_bar"))
+            .count(),
         1,
         "the old id warns exactly once: {warnings:?}"
     );
@@ -588,23 +591,22 @@ fn rows_draw_above_and_below_the_input_with_items_config() {
     let text = screen(&terminal);
     let above = text.find("EDGE-WIDGET").expect("the above row");
     let input = text.find("(type a message").expect("the input hint");
-    assert!(
-        above < input,
-        "the above row precedes the input:\n{text}"
-    );
+    assert!(above < input, "the above row precedes the input:\n{text}");
     let below = text.rfind("EDGE-WIDGET").expect("the below row");
     assert!(below > input, "the below row follows the input:\n{text}");
     // The above row takes the items-table symbol colour (rev14 slice ③ acceptance).
     let height = 14;
     let mut coloured = false;
     for y in 0..height {
-        if row(&terminal, y).contains("EDGE-WIDGET")
-            && fg_at(&terminal, y, "●") == Some(Color::Red)
+        if row(&terminal, y).contains("EDGE-WIDGET") && fg_at(&terminal, y, "●") == Some(Color::Red)
         {
             coloured = true;
         }
     }
-    assert!(coloured, "the above/below row uses items.status red:\n{text}");
+    assert!(
+        coloured,
+        "the above/below row uses items.status red:\n{text}"
+    );
 }
 
 /// The old `[tui.widgets]` block still works for one version: one warning, and its ids draw
@@ -619,7 +621,10 @@ fn legacy_widgets_convert_to_positioned_rows_with_one_warning() {
     let mut app = App::new("mock", "s");
     let warnings = app.apply_config(&parsed, false).unwrap();
     assert_eq!(
-        warnings.iter().filter(|w| w.contains("tui.widgets")).count(),
+        warnings
+            .iter()
+            .filter(|w| w.contains("tui.widgets"))
+            .count(),
         1,
         "exactly one widgets warning: {warnings:?}"
     );
@@ -628,9 +633,17 @@ fn legacy_widgets_convert_to_positioned_rows_with_one_warning() {
     let text = screen(&terminal);
     let above = text.find("LEGACY-WIDGET").expect("the converted above row");
     let input = text.find("(type a message").expect("the input hint");
-    assert!(above < input, "the converted row precedes the input:\n{text}");
-    let below = text.rfind("LEGACY-WIDGET").expect("the converted below row");
-    assert!(below > input, "the converted row follows the input:\n{text}");
+    assert!(
+        above < input,
+        "the converted row precedes the input:\n{text}"
+    );
+    let below = text
+        .rfind("LEGACY-WIDGET")
+        .expect("the converted below row");
+    assert!(
+        below > input,
+        "the converted row follows the input:\n{text}"
+    );
 }
 
 /// A bad row position warns and falls back to the footer (never a refusal).
