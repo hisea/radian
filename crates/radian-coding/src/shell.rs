@@ -68,12 +68,13 @@ pub(crate) fn schema() -> serde_json::Value {
             "timeout_secs": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "How long the command may run before its whole session \
-                                (every process it started) is \
+                "description": "How long a **foreground** command may run before its whole \
+                                session (every process it started) is \
                                 killed. Clamped to the configured maximum. Ignored for \
-                                `background: true` unless given, in which case the job is \
-                                killed like `job_kill` and settles as timed out. For a \
-                                foreground command this deadline is kept from the command's \
+                                `background: true` (ADR 0037): a background job \
+                                has no deadline, so bound the command itself (`timeout N …`) \
+                                or stop it with `job_kill`. For a foreground command this \
+                                deadline is kept from the command's \
                                 start even if the command is moved to the background when it \
                                 runs past the auto-background threshold."
             },
@@ -103,7 +104,9 @@ pub(crate) fn schema() -> serde_json::Value {
                                 `job_list`, stop one with `job_kill`. `job_output` returns \
                                 a bounded incremental ring; use `job_output` with \
                                 `tail_lines` / `pattern` / `from_line` to see more than the \
-                                last 64 KiB. No default timeout. Do not sleep or poll."
+                                last 64 KiB. No default timeout, and `timeout_secs` is \
+                                ignored: bound the command itself (`timeout N …`) or stop it \
+                                with `job_kill`. Do not sleep or poll."
             }
         },
         "required": ["command"],
@@ -332,8 +335,10 @@ pub(crate) async fn run(
 }
 
 /// Starts `command` as a background job (ADR 0037) and returns the one-line acknowledgement:
-/// the job id, the `job_output` hint and the three tools. A background job has **no**
-/// timeout (ADR 0037: an explicit `background: true` ignores `timeout_secs`).
+/// the job id, the `job_output` hint and the three tools. No timeout: a background job has no
+/// deadline, and an explicit `timeout_secs` is **ignored** (ADR 0037). The
+/// acknowledgement says so and names the two ways to bound the job — `timeout N …` inside the
+/// command, or `job_kill`.
 fn start_background(
     root: &WorkspaceRoot,
     sandbox: &Sandbox,
@@ -341,6 +346,9 @@ fn start_background(
     cwd: &Path,
     args: &ShellArgs,
 ) -> Result<ToolOutput, ToolFailure> {
+    // ADR 0037: `background: true` ignores `timeout_secs`. The model
+    // fills every optional field, so a small value it did not mean as a deadline must not kill
+    // the job; the registry takes no deadline at all.
     let info = jobs.start(sandbox, cwd, &args.command)?;
     let cwd_relative = cwd
         .strip_prefix(root.root())
@@ -351,6 +359,8 @@ fn start_background(
     let text = format!(
         "started background job {id}\n\
          its output is {output}\n\
+         `timeout_secs` is ignored for background jobs; bound it in the command \
+         (`timeout N …`) or stop it with `job_kill`.\n\
          read it with `job_output` (pass `wait: true` to wait for the end); `job_list` lists \
          this session's jobs; `job_kill` stops one.\n\
          `job_output` is a bounded incremental ring; use `job_output` with `tail_lines`, \
@@ -368,7 +378,10 @@ fn start_background(
             "command": args.command,
             "cwd": cwd_relative,
             "sandbox_mode": sandbox.mode().as_str(),
-            "timeout_secs": args.timeout_secs,
+            // ADR 0037: a background job has no deadline. Whether the model sent
+            // the field is reported so a transcript shows it was dropped, not honoured.
+            "timeout_secs": null,
+            "timeout_secs_ignored": args.timeout_secs.is_some(),
         })),
     })
 }

@@ -286,6 +286,13 @@ impl KeyPress {
         })
     }
 
+    /// Whether this binding is a bare printable character — the case that swallows a character
+    /// the composer would otherwise type. A modifier (Ctrl/Alt/Shift) or a non-character key
+    /// (arrows, tab, enter, …) is not: those are not characters the input box would have typed.
+    fn is_bare_printable_char(&self) -> bool {
+        self.modifiers.is_empty() && matches!(self.code, KeyCode::Char(c) if !c.is_control())
+    }
+
     /// Whether a real key event is this binding. A character compares case-insensitively, and
     /// an uppercase character (which already encodes Shift) does not require the Shift flag.
     pub fn matches(&self, key: &KeyEvent) -> bool {
@@ -477,7 +484,22 @@ impl Keymap {
             let mut parsed = Vec::new();
             for key in keys {
                 match KeyPress::parse(key) {
-                    Ok(press) => parsed.push(press),
+                    Ok(press) => {
+                        // A bare printable character bound in the main view swallows that
+                        // character for the composer, so the user must be told (owner
+                        // 2026-10-17). The binding is kept — README allows it — it is only
+                        // warned about. Never for the find/form layers, whose keys do not
+                        // reach the composer, and never for a Ctrl/Alt/Shift binding, which
+                        // is not a character the input box would have typed.
+                        if action.context() == Context::Main && press.is_bare_printable_char() {
+                            map.warnings.push(format!(
+                                "tui.keybindings: '{press}' is bound to {} in the main view, so \
+                                 it cannot be typed in the input box",
+                                action.name()
+                            ));
+                        }
+                        parsed.push(press);
+                    }
                     Err(error) => map
                         .warnings
                         .push(format!("tui.keybindings.{name}: {error} ignored")),
@@ -699,5 +721,43 @@ mod tests {
         assert!(press.matches(&event(KeyCode::Char('a'), KeyModifiers::NONE)));
         assert!(press.matches(&event(KeyCode::Char('A'), KeyModifiers::SHIFT)));
         assert!(!press.matches(&event(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    }
+
+    /// a printable single character bound in the **main** view swallows that
+    /// character for the composer, so startup warns about it. The binding is kept (README allows
+    /// it); a Ctrl/Alt/Shift binding, a non-character key, and a character in another layer do
+    /// not warn.
+    #[test]
+    fn a_bare_printable_character_in_the_main_view_warns() {
+        let map = Keymap::from_config(&[("toggle_reasoning".into(), vec!["p".into()])]).unwrap();
+        assert_eq!(map.warnings.len(), 1, "{:?}", map.warnings);
+        let warning = &map.warnings[0];
+        assert!(warning.contains("'p'"), "{warning}");
+        assert!(warning.contains("toggle_reasoning"), "{warning}");
+        assert!(
+            warning.contains("cannot be typed in the input box"),
+            "{warning}"
+        );
+        // Kept, not dropped: the warning never changes the binding.
+        assert_eq!(
+            map.action_for(&event(KeyCode::Char('p'), KeyModifiers::NONE)),
+            Some(Action::ToggleReasoning)
+        );
+
+        // A modified binding is not a character the input box would have typed.
+        for key in ["ctrl-y", "alt-y", "shift-p"] {
+            let map =
+                Keymap::from_config(&[("toggle_reasoning".into(), vec![key.into()])]).unwrap();
+            assert!(map.warnings.is_empty(), "{key}: {:?}", map.warnings);
+        }
+        // A non-character key does not swallow text either.
+        let map =
+            Keymap::from_config(&[("toggle_reasoning".into(), vec!["insert".into()])]).unwrap();
+        assert!(map.warnings.is_empty(), "{:?}", map.warnings);
+        // Only the main view feeds the composer: the find and form layers may take characters.
+        for (name, key) in [("find_close", "x"), ("form_select", "x")] {
+            let map = Keymap::from_config(&[(name.into(), vec![key.into()])]).unwrap();
+            assert!(map.warnings.is_empty(), "{name}: {:?}", map.warnings);
+        }
     }
 }

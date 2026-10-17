@@ -106,6 +106,16 @@ pub(crate) async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
                 SetupError("no model: pass --model, or set model.model in the config file".into())
             })?,
     };
+    // `--model` takes a bare model name; the form is `--provider <p> --model
+    // <m>`. A value that looks like a known provider's `<provider>/<model>` with no `--provider`
+    // gets one hint on stderr (never a refusal, never a change in meaning).
+    if let Some(hint) = radian_host::provider_in_model_hint(
+        cli.model.as_deref(),
+        cli.provider.as_deref(),
+        &config.providers,
+    ) {
+        eprintln!("{hint}");
+    }
     // ADR 0026 D9: `--approval`/`--yes` are the command line's choice; the config and the
     // journal's last in-session switch fill in when it is silent. `full` ignores a config
     // `auto` (with a warning) and never restores one. The TUI runs the same resolution in

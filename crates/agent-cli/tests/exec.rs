@@ -118,9 +118,11 @@ async fn radian_serve_and_mcp_are_reserved_and_refuse_with_two() {
         assert_eq!(code, 2, "{name}: a usage-class refusal");
         assert!(out.is_empty(), "{name}: stdout stays clean: {out}");
         assert!(
-            err.contains("reserved for ADR 0030") && err.contains("not implemented"),
+            err.contains("reserved") && err.contains("not implemented"),
             "{name}: {err}"
         );
+        // ADR 0030 is shelved (ADR 0043), so the refusal must not name it.
+        assert!(!err.contains("0030"), "{name}: {err}");
     }
 }
 
@@ -166,6 +168,51 @@ async fn the_missing_credential_hint_names_radian_login() {
         !err.contains("agent login"),
         "no `agent login` hint remains: {err}"
     );
+}
+
+#[tokio::test]
+async fn the_model_provider_hint_fires_once_without_a_provider_flag() {
+    // `-m/--model` takes a bare model name; the form is `--provider <p>
+    // --model <m>`. A known provider prefix with no `--provider` gets one hint — on the TUI's
+    // startup log and on `radian exec`'s stderr — and the run still refuses for the missing
+    // credential, which is where these stop (no network, no session file).
+    let hint = "did you mean --provider opencode-go --model x?";
+    let env = Env::fresh("model-hint");
+
+    // The TUI's `-m`.
+    let (code, out, err) = run(spawn_in(&["-m", "opencode-go/x"], &env)).await;
+    assert_eq!(code, 2, "the credential refusal is a usage error: {err}");
+    assert!(out.is_empty(), "{out}");
+    assert_eq!(
+        err.matches("did you mean").count(),
+        1,
+        "exactly one hint: {err}"
+    );
+    assert!(err.contains(hint), "{err}");
+
+    // `radian exec --model`: the same hint on the same stderr path.
+    let (code, out, err) = run(spawn_in(&["exec", "--model", "opencode-go/x"], &env)).await;
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert_eq!(err.matches("did you mean").count(), 1, "{err}");
+
+    // An explicit `--provider` is the supported spelling of a real `provider/model` id: no hint.
+    let (_, _, err) = run(spawn_in(
+        &[
+            "exec",
+            "--provider",
+            "opencode-go",
+            "--model",
+            "anthropic/claude-x",
+        ],
+        &env,
+    ))
+    .await;
+    assert!(!err.contains("did you mean"), "{err}");
+
+    // A bare model name gets none either.
+    let (_, _, err) = run(spawn_in(&["exec", "--model", "plain-name"], &env)).await;
+    assert!(!err.contains("did you mean"), "{err}");
 }
 
 #[tokio::test]

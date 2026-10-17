@@ -186,8 +186,8 @@ pub use skills::{
     prompt_section,
 };
 pub use startup::{
-    LeadSetup, ListError, SessionSettings, is_local_base_url, list_sessions, session_dir,
-    session_workspace,
+    LeadSetup, ListError, SessionSettings, is_local_base_url, list_sessions,
+    provider_in_model_hint, session_dir, session_workspace,
 };
 pub use subagent::{MAX_CONCLUSION_CHARS, SubagentParts, SubagentSession, SubagentTools};
 pub use tools::{HostSession, HostTools, merge_tool_specs};

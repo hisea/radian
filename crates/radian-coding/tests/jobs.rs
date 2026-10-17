@@ -70,7 +70,10 @@ fn structured(output: &ToolOutput) -> Value {
     output.structured.clone().expect("structured output")
 }
 
-/// Starts a background job and returns `(job_id, the output hint)`.
+/// Starts a background job and returns `(job_id, the output hint)`. `timeout_secs` is written
+/// into the arguments verbatim: the tool still **accepts** the field, but a background job has
+/// no deadline (ADR 0037), so the value is passed through to be ignored. Callers that
+/// want a deadline assert on `job_output`'s state instead.
 async fn start(
     session: &CodingSession,
     command: &str,
@@ -324,55 +327,26 @@ async fn the_notify_flag_follows_the_settle_kind() {
         "job_kill must not notify"
     );
 
-    // An explicit `background: true` ignores `timeout_secs` (ADR 0037): the
-    // job keeps running past the deadline — no settle, no notify. The bounded `job_output`
-    // wait proves it without sleeping: past the 1 s deadline it still reports running.
-    let (id, _) = start(&session, "echo $$ > t.pid; sleep 600", Some(1)).await;
-    let text = output_text(
-        &exec(
-            &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 5_000}),
-        )
-        .await
-        .unwrap(),
-    );
-    assert!(
-        text.contains("[status: running]"),
-        "a background job ignores timeout_secs: {text}"
-    );
-    exec(&session, "job_kill", json!({"job_id": id}))
-        .await
-        .unwrap();
-}
-
-/// A timeout still notifies when it comes from adoption (ADR 0037):
-/// the explicit `timeout_secs` keeps counting from the command's start, and the model set
-/// it but did not ask to kill the job (decision a). The background-timeout path above is
-/// gone (ADR 0037 ignores it), so this pins the remaining one.
-#[tokio::test]
-async fn an_adopted_timeout_notifies() {
-    let dir = TempDir::new("auto-timeout-notify");
-    let root = dir.file("ws");
-    std::fs::create_dir_all(&root).unwrap();
-    // Adopt at 1 s, deadline at 3 s: the settle is a timeout.
-    let tools = adopting_tools(&root, Duration::from_secs(1));
-    let session = tools.open_session().await.expect("session");
-    let mut events = session.jobs().subscribe();
-    let (_id, _) = adopted(
-        &exec(
-            &session,
-            "shell",
-            json!({"command": "sleep 30", "timeout_secs": 3}),
-        )
-        .await
-        .unwrap(),
-    );
+    // A timeout notifies: the model set the deadline itself but did not ask to kill the job, so
+    // it may be waiting on the settle. ADR 0037 removed the explicit-background
+    // timeout, so the only deadline left is the one an adopted foreground call carries
+    // (revision 1 decision 3); this drives that path.
+    let adopting = adopting_tools(&root, Duration::from_millis(300));
+    let adopted_session = adopting.open_session().await.expect("session");
+    let mut events = adopted_session.jobs().subscribe();
+    let output = exec(
+        &adopted_session,
+        "shell",
+        json!({"command": "echo $$ > t.pid; sleep 600", "timeout_secs": 2}),
+    )
+    .await
+    .unwrap();
+    let value = structured(&output);
+    assert_eq!(value["adopted"], json!(true), "{value}");
     assert!(
         next_settle_notify(&mut events).await,
-        "an adopted timeout notifies"
+        "an adopted job's timeout notifies"
     );
-    session.shutdown_jobs();
 }
 
 /// A session-end cleanup is a kill: the settle reads `killed` and `notify: false`
@@ -443,7 +417,117 @@ async fn a_wait_timeout_returns_running_and_leaves_the_job_alive() {
     );
 }
 
-// ---------- 3. kill and timeout kill the whole group ----------
+// ---------- 3. an explicit background `timeout_secs` is ignored (ADR 0037) ----------
+
+/// ADR 0037: `background: true` ignores `timeout_secs`. The job is still
+/// running after the second the field would have killed it at, the whole group is alive, and the
+/// acknowledgement says the field is ignored and names the two ways to bound the job. On the
+/// pre-revision code the deadline fires here and the job settles as timed out.
+#[tokio::test]
+async fn a_background_timeout_secs_is_ignored() {
+    let dir = TempDir::new("jobs-timeout-ignored");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+
+    let output = exec(
+        &session,
+        "shell",
+        json!({"command": TWO_SLEEPS, "background": true, "timeout_secs": 1}),
+    )
+    .await
+    .expect("start the job");
+    let value = structured(&output);
+    let id = value["job_id"].as_str().expect("a job id").to_owned();
+    assert_eq!(value["timeout_secs"], json!(null), "{value}");
+    assert_eq!(value["timeout_secs_ignored"], json!(true), "{value}");
+    let text = output_text(&output);
+    assert!(
+        text.contains("is ignored for background jobs"),
+        "the acknowledgement must say the field is ignored: {text}"
+    );
+    assert!(text.contains("job_kill"), "{text}");
+
+    let leader = wait_for_pid(&root, "leader.pid").await;
+    let background = wait_for_pid(&root, "bg.pid").await;
+
+    // Wait on the job's **own** state, with a bound past the old 1 s deadline: it is still
+    // running (a bounded wait, not a sleep for ordering). On the pre-revision code it would have
+    // settled as timed out at 1 s, so this returns `[status: timed out]` at once instead.
+    let status = output_text(
+        &exec(
+            &session,
+            "job_output",
+            json!({"job_id": id, "wait": true, "timeout_ms": 2000}),
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(status.contains("[status: running]"), "{status}");
+    assert!(status.contains("the job was not killed"), "{status}");
+    // A bounded process-state check: on the pre-revision code both are gone long before now.
+    assert!(
+        !gone_within(leader, Duration::from_secs(1)).await,
+        "the shell (pid {leader}) was killed by an ignored `timeout_secs`"
+    );
+    assert!(
+        !gone_within(background, Duration::from_secs(1)).await,
+        "the child (pid {background}) was killed by an ignored `timeout_secs`"
+    );
+    assert!(group_alive(leader), "group {leader} lost members");
+
+    // `job_kill` is the way to stop it.
+    exec(&session, "job_kill", json!({"job_id": id}))
+        .await
+        .unwrap();
+    let killed = output_text(
+        &exec(
+            &session,
+            "job_output",
+            json!({"job_id": id, "wait": true, "timeout_ms": 10_000}),
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(killed.contains("[status: killed]"), "{killed}");
+}
+
+/// The contrast (ADR 0037): a **foreground** command's `timeout_secs` is
+/// still a deadline, and it still kills the whole session at 1 s.
+#[tokio::test]
+async fn a_foreground_timeout_secs_still_kills_the_command() {
+    let dir = TempDir::new("jobs-foreground-timeout");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    // No adoption: this call must run to its own 1 s deadline.
+    let tools = transparent_tools(&root).with_limits(Limits {
+        auto_background_after: None,
+        ..Limits::default()
+    });
+    let session = tools.open_session().await.expect("session");
+
+    let output = exec(
+        &session,
+        "shell",
+        json!({"command": "echo $$ > fg.pid; sleep 600", "timeout_secs": 1}),
+    )
+    .await
+    .unwrap();
+    let value = structured(&output);
+    assert_eq!(value["timed_out"], json!(true), "{value}");
+    assert_eq!(value["timeout_secs"], json!(1), "{value}");
+    assert_eq!(value["background"], json!(null), "{value}");
+
+    let pid = wait_for_pid(&root, "fg.pid").await;
+    assert!(
+        gone_within(pid, Duration::from_secs(10)).await,
+        "the foreground command (pid {pid}) survived its `timeout_secs`"
+    );
+    assert!(!group_alive(pid), "group {pid} still has members");
+}
+
+// ---------- 3b. kill kills the whole group ----------
 
 /// `job_kill` SIGTERMs the whole group (then SIGKILLs): neither the shell nor its background
 /// child survives, and the group is empty.
@@ -496,53 +580,7 @@ async fn job_kill_kills_the_whole_process_group() {
     assert!(again.contains("already finished"), "{again}");
 }
 
-/// A timeout kills the whole group and settles as timed out. An explicit `background: true`
-/// ignores `timeout_secs` (ADR 0037), so this goes through adoption: a foreground
-/// call with an explicit timeout, adopted past the threshold, is killed at its deadline.
-#[tokio::test]
-async fn an_adopted_timeout_kills_the_whole_process_group() {
-    let dir = TempDir::new("jobs-timeout");
-    let root = dir.file("ws");
-    std::fs::create_dir_all(&root).unwrap();
-    let tools = adopting_tools(&root, Duration::from_secs(1));
-    let session = tools.open_session().await.expect("session");
-
-    // Adopted at 1 s, deadline at 3 s: the script writes both pids at the start, long
-    // before the timeout can fire.
-    let (id, _) = adopted(
-        &exec(
-            &session,
-            "shell",
-            json!({"command": TWO_SLEEPS, "timeout_secs": 3}),
-        )
-        .await
-        .unwrap(),
-    );
-    let leader = wait_for_pid(&root, "leader.pid").await;
-    let background = wait_for_pid(&root, "bg.pid").await;
-
-    let text = output_text(
-        &exec(
-            &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 15_000}),
-        )
-        .await
-        .unwrap(),
-    );
-    assert!(text.contains("[status: timed out]"), "{text}");
-    assert!(
-        gone_within(background, Duration::from_secs(10)).await,
-        "the child (pid {background}) survived the timeout"
-    );
-    assert!(
-        gone_within(leader, Duration::from_secs(10)).await,
-        "the shell (pid {leader}) survived the timeout"
-    );
-    assert!(!group_alive(leader), "group {leader} still has members");
-}
-
-// ---------- 3b. a natural exit kills the group too ----------
+// ---------- 3c. a natural exit kills the group too ----------
 
 /// A command that exits on its own but leaves a background grandchild: the supervisor kills
 /// the whole process group when the leader exits, so the grandchild does not outlive it. This

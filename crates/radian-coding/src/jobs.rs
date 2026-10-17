@@ -104,7 +104,9 @@ pub enum JobState {
     Signaled(i32),
     /// `job_kill` (or a session-end cleanup) stopped it.
     Killed,
-    /// Its `timeout_secs` elapsed.
+    /// Its deadline elapsed (the `job_kill`-style stop). Only an adopted foreground call's
+    /// `timeout_secs` sets one now (ADR 0037; revision 2 for explicit
+    /// background jobs).
     TimedOut,
 }
 
