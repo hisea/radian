@@ -259,10 +259,7 @@ async fn a_resumed_waking_next_step_entry_opens_a_turn_on_open() {
     let steer_id = {
         let journal = Arc::new(SessionJournal::create(&path, "sid", created()).unwrap());
         let inbox = Inbox::durable(16, Arc::clone(&journal));
-        inbox
-            .steer("leftover", InputSource::User)
-            .await
-            .unwrap()
+        inbox.steer("leftover", InputSource::User).await.unwrap()
         // The journal and the inbox drop here, releasing the single-writer lock.
     };
 
