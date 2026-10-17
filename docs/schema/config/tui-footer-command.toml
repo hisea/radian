@@ -4,7 +4,7 @@
 # (15–3600; 0 = run once at startup). The reader keeps both as item parameters; v1 has one config
 # layer, chosen by the user (`--config` > `RADIAN_CONFIG` > `~/.radian/config/config.toml`), so
 # every command is accepted (no project-level config, ADR 0031; when one is added a command must
-# be refused there).
+# be refused there, and that slice owns the test).
 schema_version = 1
 
 [tui.footer]
