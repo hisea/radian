@@ -348,8 +348,8 @@ fn start_background(
 ) -> Result<ToolOutput, ToolFailure> {
     // ADR 0037: `background: true` ignores `timeout_secs`. The model
     // fills every optional field, so a small value it did not mean as a deadline must not kill
-    // the job; the field is dropped here rather than passed to the registry.
-    let info = jobs.start(sandbox, cwd, &args.command, None)?;
+    // the job; the registry takes no deadline at all.
+    let info = jobs.start(sandbox, cwd, &args.command)?;
     let cwd_relative = cwd
         .strip_prefix(root.root())
         .ok()

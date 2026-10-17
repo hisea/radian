@@ -237,7 +237,7 @@ mod tests {
         );
 
         let info = jobs
-            .start(&full_access(&ws), &ws, "echo hi", None)
+            .start(&full_access(&ws), &ws, "echo hi")
             .expect("start the job");
         let output = jobs.output_path(&info.id);
         assert!(output.starts_with(&jobs_dir), "{}", output.display());
