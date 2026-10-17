@@ -178,6 +178,7 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         model: setup.model_name.clone(),
         base_url: setup.base_url.clone(),
         config: cli.config.clone(),
+        headers: setup.headers.clone(),
         max_tokens: cli.max_tokens,
         thinking: cli.thinking.clone(),
         mcp_config: cli.mcp_config.clone(),

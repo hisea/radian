@@ -69,7 +69,13 @@ impl Drop for Env {
 }
 
 fn spawn_parent(env: &Env, args: &[&str]) -> Child {
-    Command::new(common::radian_bin())
+    spawn_parent_env(env, args, &[])
+}
+
+/// [`spawn_parent`] with extra environment (e.g. `RADIAN_CONFIG`, which the child inherits too).
+fn spawn_parent_env(env: &Env, args: &[&str], extra: &[(&str, String)]) -> Child {
+    let mut command = Command::new(common::radian_bin());
+    command
         .arg("exec")
         .args(args)
         .env_remove("OPENAI_API_KEY")
@@ -82,9 +88,11 @@ fn spawn_parent(env: &Env, args: &[&str]) -> Child {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn radian")
+        .kill_on_drop(true);
+    for (key, value) in extra {
+        command.env(key, value);
+    }
+    command.spawn().expect("spawn radian")
 }
 
 /// Writes no input, closes stdin, and waits with a cap so a stuck process fails the test.
@@ -210,6 +218,28 @@ async fn wait_until(what: &str, predicate: impl Fn() -> bool) {
 fn alive(pid: u32) -> bool {
     // SAFETY: signal 0 only checks existence.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+fn session_of(pid: u32) -> i32 {
+    // SAFETY: `getsid` takes a pid and has no memory-safety preconditions.
+    unsafe { libc::getsid(pid as libc::pid_t) }
+}
+
+/// The child radian's pid: it binds `<RADIAN_HOME>/run/<pid>.sock` before its first model call,
+/// and the parent's own socket is already there, so the other socket is the child.
+async fn child_pid(env: &Env, parent_pid: u32) -> u32 {
+    let run_dir = env.home.join("run");
+    let others = || -> Vec<u32> {
+        std::fs::read_dir(&run_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.path().file_stem()?.to_str()?.parse::<u32>().ok())
+            .filter(|pid| *pid != parent_pid)
+            .collect()
+    };
+    wait_until("the child's control socket", || !others().is_empty()).await;
+    others().into_iter().next().expect("the child pid")
 }
 
 fn sigint(child: &Child) {
@@ -504,25 +534,7 @@ async fn a_cancelled_parent_turn_kills_the_child() {
         &["--model", "m", "--base-url", &server.base_url, "-p", "go"],
     );
     let parent_pid = parent.id().expect("parent pid");
-    let run_dir = env.home.join("run");
-
-    // The child binds `<RADIAN_HOME>/run/<pid>.sock` before its first model call; the parent's
-    // own socket is already there. A second socket is the child.
-    wait_until("the child's control socket", || {
-        std::fs::read_dir(&run_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| entry.path().file_stem()?.to_str()?.parse::<u32>().ok())
-            .any(|pid| pid != parent_pid)
-    })
-    .await;
-    let child_pid = std::fs::read_dir(&run_dir)
-        .unwrap()
-        .flatten()
-        .filter_map(|entry| entry.path().file_stem()?.to_str()?.parse::<u32>().ok())
-        .find(|pid| *pid != parent_pid)
-        .expect("the child pid");
+    let child_pid = child_pid(&env, parent_pid).await;
 
     sigint(&parent);
     // The deadline is shorter than the core's 5 s `DEFAULT_TOOL_CANCEL_GRACE`: the tool's own
@@ -538,4 +550,344 @@ async fn a_cancelled_parent_turn_kills_the_child() {
         "the child process {child_pid} must be gone after the parent turn was cancelled"
     );
     let _ = run(parent).await;
+}
+
+/// ADR 0043 1a (gap 1, fix round 1 A): the child reads the parent's header variable at startup
+/// and **removes it from its own environment**, so a `shell` command it starts cannot inherit
+/// the secret. The config names the variable in `[sandbox] allow_env` — that is the only way the
+/// value could reach such a command, and without it this test would pass against the old code
+/// too. The mutation (leaving the variable in the child's environment) writes the secret into
+/// the file this asserts is clean.
+#[tokio::test]
+async fn the_childs_own_environment_no_longer_carries_the_parents_header() {
+    const SECRET: &str = "child-env-secret-9";
+    let env = Env::new("child-env");
+    let dump = env.home.join("dump.txt");
+    let command = format!(
+        "printf '%s' \"$RADIAN_CHILD_HEADERS\" > '{}'",
+        dump.display()
+    );
+    let server = MockServer::start(vec![
+        tool_reply("p1", "subagent", r#"{"task":"LEAK-TASK"}"#),
+        tool_reply("c1", "shell", &json!({"command": command}).to_string()),
+        text_reply("CHILD-DONE"),
+        text_reply("PARENT-DONE"),
+    ])
+    .await;
+    let config = env.home.join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[sandbox]\nallow_env = [\"RADIAN_CHILD_HEADERS\"]\n",
+    )
+    .unwrap();
+    let workspace = env.workspace.to_str().unwrap().to_owned();
+    let (code, stdout, stderr) = run(spawn_parent_env(
+        &env,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            &workspace,
+            "--header",
+            &format!("X-Test={SECRET}"),
+            "--yes",
+            "--session-id",
+            "parent",
+            "-p",
+            "go",
+        ],
+        &[("RADIAN_CONFIG", config.to_string_lossy().into_owned())],
+    ))
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("PARENT-DONE"), "{stdout}");
+
+    // The child did read the header: its own request carries it.
+    let index = child_request(&server, "LEAK-TASK");
+    assert_eq!(
+        server.requests()[index].header("x-test"),
+        Some(SECRET),
+        "the child must send the parent's header"
+    );
+
+    // ... and its environment no longer holds it, so the command that named it did not get it.
+    let dump = std::fs::read_to_string(&dump).unwrap_or_default();
+    assert!(
+        !dump.contains(SECRET),
+        "the child's own environment must not carry the header: {dump}"
+    );
+}
+
+/// ADR 0043 1a (gap 1, fix round 1 A, the belt and braces): an MCP server the child starts must
+/// not inherit the parent's header secret, even when the config names the variable in
+/// `inherit_env` — the spawn clears the environment, so a name in that list is the only path
+/// left. The wrapper around the repo's mcp fixture appends the variable to a file; both the
+/// parent's and the child's server process write there, and neither may see the secret. The
+/// mutation (removing neither the child's startup removal nor the spawn's own removal) writes it.
+#[tokio::test]
+async fn an_mcp_server_the_child_starts_does_not_get_the_parents_header() {
+    const SECRET: &str = "mcp-env-secret-5";
+    let server = MockServer::start(vec![
+        tool_reply("p1", "subagent", r#"{"task":"MCP-TASK"}"#),
+        text_reply("CHILD-DONE"),
+        text_reply("PARENT-DONE"),
+    ])
+    .await;
+    let env = Env::new("mcp-env");
+    let fixture = common::target_dir().join("mcp-fixture");
+    assert!(
+        fixture.exists(),
+        "mcp-fixture is not built; run: cargo build -p agent-extensions --bin mcp-fixture"
+    );
+    let dump = env.home.join("mcp-env.txt");
+    let wrapper = env.home.join("mcp-wrapper.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$RADIAN_CHILD_HEADERS\" >> '{dump}'\nexec '{fixture}'\n",
+            dump = dump.display(),
+            fixture = fixture.display(),
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).unwrap();
+    }
+    let config = env.home.join("mcp.json");
+    std::fs::write(
+        &config,
+        json!({"servers": [{
+            "id": "fx",
+            "command": wrapper,
+            "inherit_env": ["RADIAN_CHILD_HEADERS"],
+            "env": {"FIXTURE_LOG": env.home.join("fixture.log")},
+            "call_timeout_secs": 30
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let workspace = env.workspace.to_str().unwrap().to_owned();
+    let (code, stdout, stderr) = run(spawn_parent(
+        &env,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            &workspace,
+            "--header",
+            &format!("X-Test={SECRET}"),
+            "--mcp-config",
+            config.to_str().unwrap(),
+            "--session-id",
+            "parent",
+            "-p",
+            "go",
+        ],
+    ))
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("PARENT-DONE"), "{stdout}");
+
+    // The child read the header: its own request carries it.
+    let index = child_request(&server, "MCP-TASK");
+    assert_eq!(
+        server.requests()[index].header("x-test"),
+        Some(SECRET),
+        "the child must send the parent's header"
+    );
+
+    // Neither MCP server process (the parent's or the child's) inherited the variable.
+    let dump = std::fs::read_to_string(&dump).unwrap_or_default();
+    assert!(
+        !dump.contains(SECRET),
+        "an MCP server must not inherit the parent's header: {dump}"
+    );
+}
+
+/// ADR 0043 1a (gap 1): a `--header` on the parent's command line reaches the child. The value
+/// is a secret, so it must not be in the child's argv (the tool carries it in the environment)
+/// and must not be written to the child's journal; the child's own request to the mock is where
+/// it is allowed to appear. The mutation (not forwarding it) fails the request assertion.
+#[tokio::test]
+async fn the_parents_header_reaches_the_child_and_nothing_else_writes_it() {
+    const SECRET: &str = "subagent-header-secret-42";
+    let server = MockServer::start(vec![
+        tool_reply("p1", "subagent", r#"{"task":"HEADER-TASK"}"#),
+        text_reply("CHILD-DONE"),
+        text_reply("PARENT-DONE"),
+    ])
+    .await;
+    let env = Env::new("header");
+    let (code, stdout, stderr) = run(spawn_parent(
+        &env,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--header",
+            &format!("X-Test={SECRET}"),
+            "--session-id",
+            "parent",
+            "-p",
+            "go",
+        ],
+    ))
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("PARENT-DONE"), "{stdout}");
+
+    // The child's own request carries the header — the provider that needs it does not fail.
+    let index = child_request(&server, "HEADER-TASK");
+    assert_eq!(
+        server.requests()[index].header("x-test"),
+        Some(SECRET),
+        "the child must send the parent's header"
+    );
+
+    // The child's journal is the only durable thing it writes, and the header must not be in
+    // it — nor in what the parent printed.
+    let journals = child_journals(&env, "parent");
+    assert_eq!(journals.len(), 1, "{journals:?}");
+    let journal = std::fs::read_to_string(&journals[0]).unwrap();
+    assert!(
+        !journal.contains(SECRET),
+        "the child's journal must not carry the header value"
+    );
+    assert!(
+        !stdout.contains(SECRET) && !stderr.contains(SECRET),
+        "the secret must never be printed: {stdout}{stderr}"
+    );
+}
+
+/// The two pids the stub command records: its own (the command runs in its own session, so this
+/// is that session's leader) and `$PPID` (the child radian), or `None` until the file is
+/// complete. No control socket is involved: a long temp path makes `run/<pid>.sock` exceed
+/// `SUN_LEN`, and the pid is what this test needs.
+fn recorded_pids(path: &Path) -> Option<(u32, u32)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut parts = text.split_whitespace();
+    let command = parts.next()?.parse().ok()?;
+    let child = parts.next()?.parse().ok()?;
+    Some((command, child))
+}
+
+async fn wait_for_recorded_pids(path: &Path, what: &str) -> (u32, u32) {
+    wait_until(what, || recorded_pids(path).is_some()).await;
+    recorded_pids(path).expect("waited for it")
+}
+
+/// ADR 0043 1a (fix round 1 B): cancelling the parent's turn must stop what the **child's**
+/// `shell` tool started. That command runs in its own session (`setsid`), so the SIGKILL of the
+/// child's session the tool used to send could not reach it: the child has to get SIGTERM first,
+/// cancel its own turn — which is what kills the command's session — and then close its session.
+/// The command records its own pid and its parent's; the assertion is that its pid is gone within
+/// a bound, and the shape (its session is not the child's) is checked first, because a command
+/// that stayed in the child's session would make the test prove nothing.
+#[tokio::test]
+async fn a_cancelled_parent_turn_stops_the_command_the_childs_shell_started() {
+    let env = Env::new("shell-cancel");
+    let pid_path = env.home.join("stub.pid");
+    let command = format!("echo $$ $PPID > '{}'; sleep 300", pid_path.display());
+    let server = MockServer::start(vec![
+        tool_reply("p1", "subagent", r#"{"task":"SHELL-TASK"}"#),
+        tool_reply("c1", "shell", &json!({"command": command}).to_string()),
+        text_reply("CHILD-DONE"),
+        text_reply("PARENT-DONE"),
+    ])
+    .await;
+    let workspace = env.workspace.to_str().unwrap().to_owned();
+    let parent = spawn_parent(
+        &env,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            &workspace,
+            "--yes",
+            "-p",
+            "go",
+        ],
+    );
+
+    let (stub, child) = wait_for_recorded_pids(&pid_path, "the child's shell command").await;
+    assert_ne!(
+        session_of(stub),
+        session_of(child),
+        "the command {stub} must be in its own session (the child {child} is {}), or this test \
+         proves nothing",
+        session_of(child)
+    );
+
+    sigint(&parent);
+    // A bounded poll, not a guess: the parent cancels its turn, SIGTERMs the child, the child
+    // cancels its own turn (killing the command's session) and exits.
+    wait_until("the child's shell command to be gone", || !alive(stub)).await;
+    assert!(
+        !alive(stub),
+        "the command {stub} outlived the cancelled turn"
+    );
+    let (code, _, _) = run(parent).await;
+    assert_ne!(code, 0, "a cancelled turn is not a clean exit");
+}
+
+/// ADR 0043 1a (fix round 1 B): the same two-step stop reaches a **background job** the child
+/// started. The child is parked in a model call that never answers, so its only cleanup path is
+/// the session end: SIGTERM cancels the turn, the driver closes the session, and `kill_all`
+/// SIGKILLs the whole session of every running job (ADR 0037 decision 6) — a job that a SIGKILL
+/// of the child could never reach, because the job registry runs `setsid` too.
+#[tokio::test]
+async fn a_cancelled_parent_turn_stops_the_childs_background_job() {
+    let env = Env::new("job-cancel");
+    let pid_path = env.home.join("job.pid");
+    let command = format!("echo $$ $PPID > '{}'; sleep 300", pid_path.display());
+    let server = MockServer::start(vec![
+        tool_reply("p1", "subagent", r#"{"task":"JOB-TASK"}"#),
+        tool_reply(
+            "c1",
+            "shell",
+            &json!({"command": command, "background": true}).to_string(),
+        ),
+        Reply::SseThenHang { pieces: Vec::new() },
+    ])
+    .await;
+    let workspace = env.workspace.to_str().unwrap().to_owned();
+    let parent = spawn_parent(
+        &env,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            &workspace,
+            "--yes",
+            "-p",
+            "go",
+        ],
+    );
+
+    let (job, child) = wait_for_recorded_pids(&pid_path, "the child's background job").await;
+    assert_ne!(
+        session_of(job),
+        session_of(child),
+        "the job {job} must be in its own session (the child {child} is {}), or this test proves \
+         nothing",
+        session_of(child)
+    );
+
+    sigint(&parent);
+    wait_until("the child's background job to be gone", || !alive(job)).await;
+    assert!(!alive(job), "the job {job} outlived the cancelled turn");
+    let (code, _, _) = run(parent).await;
+    assert_ne!(code, 0, "a cancelled turn is not a clean exit");
 }

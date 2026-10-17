@@ -1591,6 +1591,7 @@ fn run(
                         .takes_base_url_override()
                         .then(|| route.base_url.clone()),
                     config: cli.config.clone(),
+                    headers: cli.header.clone(),
                     max_tokens: cli.max_tokens,
                     thinking: cli.thinking.clone(),
                     mcp_config: cli.mcp_config.clone(),
