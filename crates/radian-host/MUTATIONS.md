@@ -1256,6 +1256,23 @@ Each mutation was applied in place under `src/`, the catching test binary was ru
 
 Commands: `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast <name>`;
 `timeout 300 cargo test -p radian-host --locked --test <file>`. 9/9 caught.
+
+## ADR 0034: `pane.report_metadata`, `state_labels`, `pane.report_agent_session` (2026-10-17)
+
+Base `2e513ef` · branch `dogfood/s4-herdr`. Each mutation was applied in place, only the catching
+binary was run (`--no-fail-fast`), and the source was restored from a `cp` in `/tmp/s4/` and
+confirmed with `cmp`.
+
+| # | Mutation | Result | Test(s) that caught it |
+|---|---|---|---|
+| H34-1 | `token_diff` drops the "changed" guard: every known key is sent every time | ✅ 2 + 1 failed | `radian-tui cli::herdr::tests::each_metadata_trigger_reports_only_the_changed_key`, `...::a_key_that_goes_unknown_is_cleared`; pty `pty_herdr_reports_metadata_changes` |
+| H34-2 | a `cost` token is added to `metadata_tokens` | ✅ 1 + 1 failed | `radian-tui cli::herdr::tests::each_metadata_trigger_reports_only_the_changed_key`; pty `pty_herdr_reports_metadata_changes` |
+| H34-3 | `blocked_label` is always `"blocked"` (the H2 category is dropped) | ✅ 1 + 2 failed | `herdr::tests::the_blocked_label_is_the_h2_category`; pty `pty_herdr_labels_a_question_as_question`, `pty_herdr_reports_metadata_changes` |
+| H34-4 | `Reporter::session` is not queued at startup (no `report_agent_session`) | ✅ 1 failed | pty `pty_herdr_reports_the_session_identity` |
+
+Commands: `timeout 900 cargo test -p radian-tui --locked --lib --no-fail-fast cli::herdr`;
+`timeout 900 cargo test -p radian-host --locked --lib --no-fail-fast herdr`;
+`timeout 900 cargo test -p radian-tui --locked --test pty --no-fail-fast herdr`. 4/4 caught.
 ## the `-m provider/model` hint (`startup::provider_in_model_hint`)
 
 The form is `--provider <p> --model <m>`; a `-m`/`--model` value that looks like `<known

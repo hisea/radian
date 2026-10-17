@@ -798,6 +798,19 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   scroll the way the main view does, does `q` leave without touching the session, and does the
   footer read `attach · <id> · read-only` with the scroll position? pty automation asserts the
   text and the one-second follow latency, not the feel.
+- **radian as a herdr agent** (ADR 0034, slice ④): the pty tests can only watch a fake
+  socket, so the real herdr is yours. In a herdr pane (its env sets `HERDR_ENV=1`), start `radian`,
+  then from another pane run `herdr agent list` — radian's entry must carry `agent_session` (the
+  `pane.report_agent_session` report; without it `agent prompt` answers "not an active named
+  agent"). Then `herdr agent prompt <pane> "hello" --wait` must return (it needs `working` or
+  `blocked` within 5 s, which decision 5's 1 s gate covers) and radian must run the turn as if you
+  had typed it. `herdr session stop` and start again: the pane must come back on the same session
+  (the `resume_argv`). Look at the sidebar too: does the `model`/`context`/`tier`/`pending` token
+  row read at your width, and does the `blocked` label say `approval`/`question`/`trust` rather
+  than just `blocked`? Link the plugin with `herdr plugin link integrations/herdr`, then
+  `herdr plugin action list` and try "Start radian here"; the `attach` pane needs its id in the
+  environment (`herdr plugin pane open --plugin radian --entrypoint attach --env
+  RADIAN_ATTACH_SESSION=<id>`) because a plugin pane runs a fixed argv.
 
 ### Thin redesign (ADR 0028, slice ⑦): one step per shape
 
