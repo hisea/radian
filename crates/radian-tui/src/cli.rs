@@ -2076,6 +2076,9 @@ fn run(
     let herdr_note = herdr.as_ref().and_then(|(_, note)| note.clone());
     if let Some((reporter, _)) = herdr.as_mut() {
         reporter.maybe_report(&app);
+        // ADR 0034: the session identity is its own method, after the state
+        // report (herdr accepts a `resume_argv` only from a reporter that already holds the pane).
+        reporter.report_session();
     }
     let mut startup_lines = vec![
         format!("profile: {}", session.facts().profile_line),
