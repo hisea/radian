@@ -414,12 +414,17 @@ fn an_unknown_session_id_refuses_and_creates_nothing() {
         .expect("the binary runs");
     assert_eq!(output.status.code(), Some(2), "a setup refusal is exit 2");
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // The whole line, not a substring: the refusal names the id and the directory it looked in,
+    // and it is the refusal **before** opening anything (a later I/O error would word it as a
+    // read failure instead).
     assert_eq!(
-        stderr.lines().count(),
-        1,
-        "exactly one line on stderr, got:\n{stderr}"
+        stderr,
+        format!(
+            "radian: no session \"no-such-session\" in {}\n",
+            sessions.display()
+        ),
+        "exactly one line on stderr, the refusal"
     );
-    assert!(stderr.contains("no-such-session"), "{stderr}");
     assert!(
         output.stdout.is_empty(),
         "nothing on stdout: {:?}",

@@ -2096,3 +2096,25 @@ Base `5cfb0b1` · worktree `.radian-worktrees/oauth-redact`。每个脱敏名单
 `mod tests`：注册表是进程级的，同一个二进制里加值会让 `terminal.rs` 两条对
 `shared_secrets` 做 `==` 全等断言的测试变得不确定。
 
+
+## attach（ADR 0043 切片 ①）：只读视图的跟随、无 live、无输入（2026-10-17）
+
+基线 `ebb9f1a` · worktree `.radian-worktrees/attach`。四条变异分别改 `src/cli.rs`（A1、A3、
+A5）与 `src/attach.rs`（A2），改前 `cp` 到 `.radian/scratch/mut/`，改后 `cp` 还原并 `cmp`
+一致（跑完 `git status --short` 只剩被测的三个文件）。命令：`timeout 300 cargo test -p
+radian-tui --locked --no-fail-fast --test pty pty_attach…` 与 `--test attach <name>`。
+
+| # | Requirement mutated | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| AT-T1 | A1：`--follow` 必须 tail 新追加的字节 | `run_attach` 的 `Input::Idle` 分支改成不调 `view.poll()`（`if false`） | `pty::pty_attach_follow_shows_new_committed_events`（`ATTACH-FOLLOW-NEW` 与 `working…` 都不出现） | ✅ 1 failed |
+| AT-T2 | A2：渲染路径不接受 live 事件（ADR 0010 K2 的 delta 不落盘） | `AttachView::poll` 里加一句 `projection.push_delta(StreamKind::Assistant, "MUTANT")`（即给视图接上 live 管路） | `attach::the_attach_view_has_no_live_event_sink`（源码里出现 `push_delta`/`StreamKind`） | ✅ 1 failed |
+| AT-T3 | A3：除滚动/退出外的按键不产生任何副作用 | `run_attach` 的 `AttachKey::Ignored` 分支改成往 journal 追加一行 `MUTANT` | `pty::pty_attach_swallows_every_other_key`（`a key press changed the journal`） | ✅ 1 failed |
+| AT-T4 | A5：不存在的 id 在打开文件**之前**就拒绝 | 删掉 `run_attach` 的 `if !path.exists()` 检查 | `attach::an_unknown_session_id_refuses_and_creates_nothing`（拒绝行变成读失败的那一行） | ✅ 1 failed |
+
+4/4 caught。AT-T3 的第一版**没有**抓住：当时断言在发键之后立刻跑，而 app 还没处理那些键
+（`wait_for_screen` 对一个已在屏上的 needle 立即返回，不构成同步）。修法是先发被吞的键、再发
+PageUp（footer 从 `follow` 变 `paused`）作为 happens-before，之后的字节断言才真的覆盖已处理的
+按键；AT-T1/A1 与 AT-T3/A3 各跑五次稳定（5/5）。
+
+A4 不设变异：它本身就是「attach 首帧 ≤ 2 × `--resume` 首帧」的同机测量（同一次运行里两者各跑
+三次取中位数）；debug 构建下 10k 条首帧是 attach 1185 ms、resume 1473 ms，比值约 0.8。

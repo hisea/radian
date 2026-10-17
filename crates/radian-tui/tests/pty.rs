@@ -10488,10 +10488,11 @@ async fn pty_mode_lead_switches_the_role_prompt_from_the_next_turn() {
 
 // ---------- ADR 0043 slice ①: `radian attach` ----------
 
-/// The two-message journal the attach tests read, returned with its writer **still open**: the
-/// appender really is a different process from the reader, and the writer's lock is held the
-/// whole time (attach never takes it — a reader that locked would block here).
-async fn attach_session(dir: &Path, id: &str) -> radian_session::SessionJournal {
+/// The journal the attach tests read, returned with its writer **still open**: the appender
+/// really is a different process from the reader, and the writer's lock is held the whole time
+/// (attach never takes it — a reader that locked would block here). The messages are
+/// `ATTACH-OLD-USER`/`ATTACH-OLD-REPLY` followed by `extra` filler replies.
+async fn attach_session(dir: &Path, id: &str, extra: usize) -> radian_session::SessionJournal {
     use agent_core::TranscriptJournal;
     let path = dir.join(format!("{id}.jsonl"));
     let journal = radian_session::SessionJournal::create(
@@ -10514,6 +10515,15 @@ async fn attach_session(dir: &Path, id: &str) -> radian_session::SessionJournal 
         })
         .await
         .unwrap();
+    for index in 0..extra {
+        journal
+            .append(agent_core::JournalRecord::Message {
+                index: index + 2,
+                message: agent_core::Message::assistant(format!("ATTACH-FILLER-{index}")),
+            })
+            .await
+            .unwrap();
+    }
     journal
 }
 
@@ -10549,7 +10559,7 @@ async fn pty_attach_follow_shows_new_committed_events() {
     let _serial = pty_guard();
     use agent_core::TranscriptJournal;
     let dir = TempDir::new("attach-follow");
-    let journal = attach_session(dir.path(), "attach-me").await;
+    let journal = attach_session(dir.path(), "attach-me", 0).await;
 
     let mut pty = Pty::spawn(
         &[
@@ -10633,7 +10643,7 @@ async fn pty_attach_swallows_every_other_key() {
     let home = TempDir::new("attach-keys-home");
     // Held for the whole test: the writer lock stays taken, so a reader that tried to lock
     // would block instead of showing the transcript.
-    let _journal = attach_session(dir.path(), "keys-me").await;
+    let _journal = attach_session(dir.path(), "keys-me", 40).await;
     let path = dir.path().join("keys-me.jsonl");
 
     let mut pty = Pty::spawn_with_env(
@@ -10648,7 +10658,7 @@ async fn pty_attach_swallows_every_other_key() {
         100,
     );
     assert!(
-        pty.wait_for_screen("ATTACH-OLD-USER", 10),
+        pty.wait_for_screen("ATTACH-FILLER-39", 10),
         "the committed history is not on screen:\n{}",
         pty.screen()
     );
@@ -10656,8 +10666,9 @@ async fn pty_attach_swallows_every_other_key() {
     let before_run = run_entries(home.path());
     let before_sessions = dir_entries(dir.path());
 
-    // Letters, punctuation, Enter, Tab, ctrl-f/ctrl-p, an arrow and PageUp (a scroll key: it
-    // moves the view and nothing else). Esc and Ctrl-C are the quit keys and are not sent.
+    // Letters, punctuation, Enter, Tab, ctrl-f/ctrl-p, an arrow sequence and a bare Escape
+    // sequence's prefix are all neither scroll nor quit keys. Esc and Ctrl-C are the quit keys
+    // and are not sent.
     for key in [
         b"x".as_slice(),
         b"/".as_slice(),
@@ -10668,14 +10679,23 @@ async fn pty_attach_swallows_every_other_key() {
         b"\x06".as_slice(),
         b"\x10".as_slice(),
         b"\x1b[A".as_slice(),
-        b"\x1b[5~".as_slice(),
     ] {
         pty.send(key);
     }
-    // Still up, still showing the transcript.
+    // PageUp is a scroll key: it moves the view and nothing else. Its effect on the footer is
+    // also the **synchronization** — keys are handled in the order they arrive, so the footer
+    // showing `paused` proves every key sent above it has been processed by now.
+    pty.send(b"\x1b[5~");
     assert!(
-        pty.wait_for_screen("ATTACH-OLD-REPLY", 2),
-        "the view stopped showing the transcript:\n{}",
+        pty.wait_for_screen("paused", 5),
+        "page up did not pause the follow:\n{}",
+        pty.screen()
+    );
+
+    // So the assertions below are about keys the app has already handled.
+    assert!(
+        pty.wait_for_screen("attach · keys-me · read-only", 2),
+        "the view stopped drawing:\n{}",
         pty.screen()
     );
     assert!(
