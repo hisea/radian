@@ -499,10 +499,8 @@ mod tests {
     /// Setting the flag from the tier again fails the `false` half.
     #[test]
     fn the_runtime_unix_socket_sentence_follows_the_backend() {
-        let dir = std::env::temp_dir().join(format!(
-            "radian-prompt-sockets-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("radian-prompt-sockets-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for (backend, expect_sentence) in [(&SOCKETS_DENIED, true), (&SOCKETS_OPEN, false)] {
             let sandbox = radian_sandbox::Sandbox::from_backend(
