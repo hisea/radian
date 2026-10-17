@@ -475,6 +475,14 @@ const ATTACH_POLL: Duration = Duration::from_millis(50);
 /// clean quit. The refusal is decided **before** the terminal is entered, so stderr keeps its
 /// one line and nothing on disk is touched.
 fn run_attach(dir_flag: Option<&Path>, id: &str, follow: bool) -> ExitCode {
+    // The id becomes a file name, so it goes through the same rule `--resume` uses
+    // (`validate_session_id`): a path-like id must not name a file outside the session
+    // directory. The refusal comes before the directory is even resolved, so nothing is
+    // looked up, created or read.
+    if let Err(error) = radian_host::validate_session_id(id) {
+        eprintln!("radian: {error}");
+        return ExitCode::from(2);
+    }
     // The same resolution as `--resume`: `--session-dir`, then `RADIAN_SESSION_DIR`, then the
     // data directory (ADR 0020).
     let dir = match radian_host::session_dir(dir_flag) {

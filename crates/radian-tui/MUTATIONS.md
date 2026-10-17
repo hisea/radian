@@ -2142,3 +2142,19 @@ compared (`cmp`) after every run. Command:
 
 5/5 caught; `src/cli.rs` compared byte-identical after every restore.
 
+
+## attach 复核修复：id 必须先过 `validate_session_id`（2026-10-17）
+
+复核轮（p1 2026-10-17）：`run_attach` 直接用 `dir.join(format!("{id}.jsonl"))` 拼路径，而
+`--resume` 先过 `radian_host::validate_session_id`（`crates/radian-host/src/session_id.rs:16`）。
+`../decoy` 这类 id 因此能读到 sessions 目录**之外**的文件。修复在 `run_attach` 的入口加上同一个
+校验（在任何目录解析与文件访问之前），`src/cli.rs`；基线是本分支的 `7675130`，变异用
+`cp`/`cmp` 往返（`.radian/scratch/mut/cli.rs.bak2`，比对后删除）。命令：`timeout 300 cargo test
+-p radian-tui --locked --no-fail-fast --test attach a_path_like` 与 `--test pty pty_attach_refuses`。
+
+| # | Requirement mutated | Mutation | Caught by | Result |
+|---|---|---|---|---|
+| AT-T5 | 非法 id 在解析目录/访问文件之前就被拒（非零退出、一行 stderr、不读不写） | 校验调用改成 `if false && let Err(…)`（等于不校验，id 原样进 `join`） | `attach::a_path_like_session_id_is_refused_before_anything_is_read`（stderr 变成 `radian: terminal: Device not configured (os error 6)`，说明它已经打开并读到了 `../decoy`）与 `pty::pty_attach_refuses_a_path_like_id_without_reading_it`（屏上出现 decoy 的 `❯ ATTACH-OLD-USER`/`ATTACH-OLD-REPLY`） | ✅ 2 failed（两个二进制各一） |
+
+1/1 caught（两个测试分别抓住）。两个测试在**修复前**的代码上同样失败：句柄测试看到的是
+`terminal: …`（已经读到文件），pty 测试看到 decoy 的正文。

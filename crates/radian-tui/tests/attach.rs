@@ -402,16 +402,7 @@ fn an_unknown_session_id_refuses_and_creates_nothing() {
     let scratch = Scratch::new("unknown-id");
     let sessions = scratch.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
-    let output = Command::new(BIN)
-        .args(["attach", "no-such-session"])
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", scratch.path())
-        .env("RADIAN_SESSION_DIR", &sessions)
-        .env("TERM", "xterm-256color")
-        .stdin(Stdio::null())
-        .output()
-        .expect("the binary runs");
+    let output = attach_without_a_terminal(&scratch, &sessions, "no-such-session");
     assert_eq!(output.status.code(), Some(2), "a setup refusal is exit 2");
     let stderr = String::from_utf8_lossy(&output.stderr);
     // The whole line, not a substring: the refusal names the id and the directory it looked in,
@@ -430,14 +421,75 @@ fn an_unknown_session_id_refuses_and_creates_nothing() {
         "nothing on stdout: {:?}",
         output.stdout
     );
-    let leftovers: Vec<String> = std::fs::read_dir(&sessions)
-        .unwrap()
+    assert_empty_dir(&sessions, "a refused attach");
+}
+
+/// A session id becomes a file name, so a path-like id is refused by the same rule `--resume`
+/// uses (`validate_session_id`) — before the session directory is even resolved, so nothing is
+/// looked up, created or read. The `../decoy` case is the reason: one level up sits a real,
+/// readable session file, and it must stay unread.
+///
+/// Mutation: drop the validation (build the path from the raw id) → `../decoy` is opened (and
+/// the line stops being the refusal) → FAILED.
+#[test]
+fn a_path_like_session_id_is_refused_before_anything_is_read() {
+    let scratch = Scratch::new("bad-id");
+    let sessions = scratch.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    // The decoy: where `../decoy` resolves to, and a perfectly readable session file.
+    let decoy = scratch.file("decoy.jsonl");
+    std::fs::write(&decoy, format!("{}\n", committed_journal().join("\n"))).unwrap();
+    let decoy_before = std::fs::read(&decoy).unwrap();
+
+    for bad in ["../decoy", "a/b", "..", ".", ""] {
+        let output = attach_without_a_terminal(&scratch, &sessions, bad);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{bad:?} must be refused with a setup exit code"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!("radian: session id {bad:?} must be 1-128 characters of [A-Za-z0-9._-]\n"),
+            "{bad:?}: exactly one line, the id rule"
+        );
+        assert!(output.stdout.is_empty(), "{bad:?}: nothing on stdout");
+    }
+    assert_empty_dir(&sessions, "a refused id");
+    assert_eq!(
+        std::fs::read(&decoy).unwrap(),
+        decoy_before,
+        "the escaped file must not be touched"
+    );
+}
+
+/// Runs `radian attach <id>` with `sessions` as the session directory and **no** terminal
+/// (`stdin` is `/dev/null`): every refusal path is taken before the terminal is entered, so the
+/// process exits on its own without a pty.
+fn attach_without_a_terminal(scratch: &Scratch, sessions: &Path, id: &str) -> std::process::Output {
+    Command::new(BIN)
+        .args(["attach", id])
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", scratch.path())
+        .env("RADIAN_SESSION_DIR", sessions)
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::null())
+        .output()
+        .expect("the binary runs")
+}
+
+/// `dir` holds nothing (no journal, no draft, no job directory).
+fn assert_empty_dir(dir: &Path, what: &str) {
+    let leftovers: Vec<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()))
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     assert!(
         leftovers.is_empty(),
-        "a refused attach created {leftovers:?} in the session directory"
+        "{what} created {leftovers:?} in {}",
+        dir.display()
     );
 }
 

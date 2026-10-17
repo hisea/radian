@@ -10768,7 +10768,59 @@ async fn pty_attach_follow_shows_new_committed_events() {
     assert_eq!(pty.wait_for_exit(3), Some(0), "q must quit the view");
 }
 
-/// A3: with `attach` up, keys that are neither scroll nor quit keys change nothing — the app
+/// A session id becomes a file name, so a path-like id must be refused before anything is read:
+/// one level above the session directory sits a real, readable session (the decoy), and its
+/// text must never reach the screen. The refusal is the same rule `--resume` applies
+/// (`validate_session_id`).
+///
+/// Mutation: drop the validation and build the path from the raw id → the decoy is opened, its
+/// `ATTACH-OLD-USER` shows, and the refusal line is missing → FAILED.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_attach_refuses_a_path_like_id_without_reading_it() {
+    let _serial = pty_guard();
+    let scratch = TempDir::new("attach-bad-id");
+    // `<scratch>/decoy.jsonl`, which is where `attach ../decoy` would resolve to.
+    let _decoy = attach_session(scratch.path(), "decoy", 0).await;
+    let sessions = scratch.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+
+    let mut pty = Pty::spawn(
+        &[
+            "attach",
+            "../decoy",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_raw("must be 1-128 characters of [A-Za-z0-9._-]", 5),
+        "the one-line id refusal is not on the terminal:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !String::from_utf8_lossy(&pty.raw()).contains("ATTACH-OLD-USER"),
+        "the file outside the session directory was read:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        {
+            assert!(
+                pty.wait_for_exit(3).is_some(),
+                "the refusal did not end the process:\n{}",
+                pty.screen()
+            );
+            // `wait_for_exit` reports the shell wrapper's status; the app's own code is the
+            // `EXITED:<n>` line it printed.
+            pty.app_exit_code()
+        },
+        Some(2),
+        "the refusal exits non-zero:\n{}",
+        pty.screen()
+    );
+}
 /// stays up, the journal's bytes are identical, no file appears in the session directory and
 /// no control-port socket is created. attach has no input path at all, so this holds by
 /// construction; the test is what keeps it so.
