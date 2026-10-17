@@ -201,6 +201,20 @@ fn spawn_direct_keeping_slave(
 
 const BIN: &str = env!("CARGO_BIN_EXE_radian");
 
+/// ADR 0016: a test that depends on **sandbox behaviour** cannot run
+/// inside another sandbox. The nested `sandbox-exec` a probe starts is refused by the kernel
+/// (`sandbox_apply: Operation not permitted`), and what the outer sandbox allows is unknown, so
+/// the test prints a fixed marker and returns. `cargo` still counts it as passed: the verify
+/// output and every report must list the marker lines as **not run**, never as passing.
+macro_rules! skip_inside_sandbox {
+    ($name:literal) => {
+        if radian_sandbox::confined_by_outer_sandbox() {
+            println!("radian-test: skipped inside a sandbox: {}", $name);
+            return;
+        }
+    };
+}
+
 /// The pty tests spawn real processes and mock servers. Running all of them at once makes
 /// them flake on a busy machine, and running them one at a time made this binary about 140 s
 /// of the workspace test run (2026-10-15). A small counting gate allows a few at once:
@@ -308,6 +322,22 @@ impl Pty {
         rows: u16,
         cols: u16,
     ) -> Self {
+        let mut argv = vec![BIN.to_owned()];
+        argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+        Self::spawn_argv(&argv, envs, config, rows, cols)
+    }
+
+    /// Like [`Pty::spawn_full_mode`], with the whole command line given: `argv[0]` is the
+    /// program the pty's shell runs and the rest are its arguments. ADR 0016
+    /// acceptance 2 starts `radian` under `sandbox-exec`, which needs a launcher in front of
+    /// the bin.
+    fn spawn_argv(
+        argv: &[String],
+        envs: &[(&str, &str)],
+        config: TestConfig<'_>,
+        rows: u16,
+        cols: u16,
+    ) -> Self {
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -320,8 +350,7 @@ impl Pty {
         cmd.arg("-c");
         cmd.arg(r#""$@"; echo "EXITED:$?"; stty -a"#);
         cmd.arg("sh");
-        cmd.arg(BIN);
-        for arg in args {
+        for arg in argv {
             cmd.arg(arg);
         }
         // Keep the environment small and deterministic; the mock server needs no key.
@@ -2038,6 +2067,7 @@ async fn pty_without_a_window_the_status_bar_says_the_budget_is_off() {
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
 #[allow(clippy::await_holding_lock)]
 async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
+    skip_inside_sandbox!("pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed");
     let _serial = pty_guard();
     let dir = TempDir::new("probe-fail");
     let ws = dir.path().join("ws");
@@ -2084,6 +2114,152 @@ async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
         "no request may be sent when the sandbox cannot be enforced"
     );
 }
+
+/// ADR 0016 acceptance 2: under a deny-default outer sandbox `radian` does **not**
+/// refuse. It inherits the outer sandbox, the startup line says so, and the constraint it
+/// reports is really the outer one's: a write outside the profile's writable subtree fails, one
+/// inside succeeds. The profile is the smallest that lets the TUI start (measured on macOS 27,
+/// 2026-10-16); `(deny default)` is what makes the nested `sandbox-exec` probe impossible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_an_outer_sandbox_is_inherited_instead_of_refused() {
+    skip_inside_sandbox!("pty_an_outer_sandbox_is_inherited_instead_of_refused");
+    let _serial = pty_guard();
+    let dir = TempDir::new("inherited");
+    let ws = dir.path().join("ws");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    // `HOME`, `TMPDIR` and the session directory live inside the one writable subtree, so the
+    // profile needs a single write rule and `outside/` is really outside it.
+    let home = ws.join("home");
+    let tmp = ws.join("tmp");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&tmp).unwrap();
+    let leak = outside.join("leak");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let argv = vec![
+        SANDBOX_EXEC.to_owned(),
+        "-p".to_owned(),
+        outer_profile(&ws),
+        "--".to_owned(),
+        BIN.to_owned(),
+        "--model".to_owned(),
+        "mock".to_owned(),
+        "--base-url".to_owned(),
+        server.base_url.clone(),
+        "--session-dir".to_owned(),
+        ws.join("sessions").to_str().unwrap().to_owned(),
+        "--session-id".to_owned(),
+        "inherited".to_owned(),
+        "--workspace".to_owned(),
+        ws.to_str().unwrap().to_owned(),
+    ];
+    let mut pty = Pty::spawn_argv(
+        &argv,
+        &[
+            ("HOME", home.to_str().unwrap()),
+            ("TMPDIR", tmp.to_str().unwrap()),
+        ],
+        TestConfig::Classic,
+        30,
+        110,
+    );
+    // No refusal: the composer is up.
+    assert!(
+        pty.wait_for_screen("message", 20),
+        "the app refused to start under the outer sandbox:\n{}",
+        pty.screen()
+    );
+    pty.expand_startup();
+    let startup = pty
+        .screen()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        startup.contains("sandbox inherited"),
+        "the startup line must say the sandbox is inherited:\n{startup}"
+    );
+
+    // A write outside the writable subtree is denied by the **outer** sandbox (the `!` command
+    // reports the shell's exit status through a file it is allowed to write).
+    pty.send(
+        format!(
+            "!printf x > {}; echo $? > ./outside_status\r",
+            leak.display()
+        )
+        .as_bytes(),
+    );
+    let status = ws.join("outside_status");
+    assert!(
+        wait_for_bang_file(&mut pty, &status),
+        "the `!` command outside the workspace did not finish:\n{}",
+        pty.screen()
+    );
+    let code = std::fs::read_to_string(&status).unwrap();
+    assert_ne!(
+        code.trim(),
+        "0",
+        "the outer sandbox must deny a write outside the writable subtree"
+    );
+    assert!(!leak.exists(), "a file outside the workspace was created");
+
+    // The same command inside the writable subtree succeeds.
+    pty.send(b"!printf x > ./inside\r");
+    let inside = ws.join("inside");
+    assert!(
+        wait_for_bang_file(&mut pty, &inside),
+        "the `!` command inside the workspace did not finish:\n{}",
+        pty.screen()
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The smallest `(deny default)` profile under which the TUI starts (ADR 0016
+/// acceptance 2, measured on macOS 27, 2026-10-16). Reads are open — the point is the write
+/// rule and the deny default — and writes are limited to `ws`, which holds the workspace, the
+/// session file, `HOME` and `TMPDIR`. `process*` is what lets `sandbox-exec` exec the bin (and
+/// what a nested `sandbox-exec` would need in vain); the Mach/sysctl/IPC/signal allows are what
+/// the Rust runtime and tokio need to come up under `(deny default)`.
+fn outer_profile(ws: &Path) -> String {
+    let ws = std::fs::canonicalize(ws).unwrap();
+    format!(
+        "(version 1)\n\
+         (deny default)\n\
+         (allow file-read*)\n\
+         (allow process*)\n\
+         (allow sysctl*)\n\
+         (allow mach*)\n\
+         (allow ipc*)\n\
+         (allow system*)\n\
+         (allow signal)\n\
+         (allow file-ioctl)\n\
+         (allow file-write* (subpath \"{}\"))\n",
+        ws.display()
+    )
+}
+
+/// Waits (bounded) for a file the `!` command writes, pumping the screen so the app keeps
+/// draining the pty. The file's existence is the synchronization; the deadline only bounds a
+/// failure.
+fn wait_for_bang_file(pty: &mut Pty, path: &Path) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        pty.pump();
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    path.exists()
+}
+
+/// The system launcher: ADR 0016 acceptance 2 wraps the bin in a deny-default
+/// profile.
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// The shell approval shows the whole command, and a capped result keeps the truncation
 /// marker visible.
@@ -2705,6 +2881,7 @@ async fn pty_the_brand_config_is_the_banner_fallback() {
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
 #[allow(clippy::await_holding_lock)]
 async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
+    skip_inside_sandbox!("pty_the_workspace_write_notice_names_the_mcp_sandbox_gap");
     let _serial = pty_guard();
     let dir = TempDir::new("notice");
     let ws = dir.path().join("ws");
@@ -2756,6 +2933,7 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
+    skip_inside_sandbox!("pty_the_startup_summary_names_the_real_sandbox_backend");
     let _serial = pty_guard();
     let dir = TempDir::new("summary-sandbox");
     let ws = dir.path().join("ws");
@@ -10164,6 +10342,7 @@ async fn pty_ctrl_c_stops_a_running_bang() {
 /// `Command`. A structural test pins it, so a future edit cannot quietly bypass the sandbox.
 #[test]
 fn the_bang_command_runs_through_the_sandboxed_executor() {
+    skip_inside_sandbox!("the_bang_command_runs_through_the_sandboxed_executor");
     let source =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli.rs")).unwrap();
     assert!(
