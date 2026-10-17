@@ -1,7 +1,9 @@
 //! Stopping a job (or a foreground call) must reach **every process of its session**, not only
 //! its process group (dogfood bug 2026-10-17): a child that calls `setpgid` — GNU `timeout`
 //! does, and so does a shell's own job control — leaves the process group but keeps the session,
-//! so a group-only kill leaves it running, reparented to pid 1.
+//! so a group-only kill leaves it running, reparented to pid 1. The test builds that child with
+//! `perl` (see [`escaping_child`]) rather than GNU `timeout`, which is coreutils, not a macOS
+//! tool.
 //!
 //! The child is found by the pid the job itself prints (`$!`), and the shape is asserted before
 //! anything is killed (different process group, same session): a child that never left the group
@@ -73,18 +75,56 @@ fn structured(output: &ToolOutput) -> Value {
     output.structured.clone().expect("structured output")
 }
 
-/// The command under test: the leader (`$$`) starts a child that leaves the job's process group
-/// but keeps its session — GNU `timeout` calls `setpgid` for itself — writes both pids, and
-/// waits. `timeout`'s own 60 s is far beyond every deadline here.
-const CHILD_LEAVES_THE_GROUP: &str =
-    "timeout 60 sleep 600 & echo $$ > leader.pid; echo $! > child.pid; wait";
+/// `perl`, resolved once from PATH. The escaping child is built with it because the test needs
+/// exactly one thing: a child that calls `setpgid` for itself. GNU `timeout` does that too, but
+/// `timeout` is coreutils (a homebrew install), not a macOS tool. A missing `perl` is a
+/// **test failure** with this message, never a skip.
+fn perl() -> &'static str {
+    static PERL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PERL.get_or_init(|| {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("perl"))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| {
+                panic!(
+                    "this test needs `perl` on PATH to build a child that calls `setpgid` (GNU \
+                     `timeout` is coreutils, not a macOS tool); `perl` ships with a stock macOS, \
+                     so its absence means a broken test environment"
+                )
+            })
+            .display()
+            .to_string()
+    })
+}
 
-/// The leader starts the child that leaves the group, then blocks on the test's fifo and exits 0:
-/// on this path the supervisor's **own** kill is what has to reach the child (no `job_kill` and
-/// no timeout fires). The fifo is what makes the shape observable: the leader is still alive when
-/// the test reads the pids, and the kill runs only once the test lets it exit.
-const LEADER_EXITS_WITH_A_CHILD: &str = "timeout 60 sleep 600 & echo $$ > leader.pid; echo $! > \
-     child.pid; cat gate > /dev/null; exit 0";
+/// The escaping child: `perl` calls `setpgid(0,0)` — the same call GNU `timeout` makes — and
+/// `exec`s `sleep`, so it leaves the job's process group but keeps the job's **session**.
+fn escaping_child() -> String {
+    format!(
+        "{} -e 'use POSIX; setpgid(0,0); exec @ARGV' sleep 600",
+        perl()
+    )
+}
+
+/// The command under test: the leader (`$$`) starts the escaping child, writes both pids, and
+/// waits for it.
+fn child_leaves_the_group() -> String {
+    format!(
+        "{} & echo $$ > leader.pid; echo $! > child.pid; wait",
+        escaping_child()
+    )
+}
+
+/// The leader starts the escaping child, then blocks on the test's fifo and exits 0: on this path
+/// the supervisor's **own** kill is what has to reach the child (no `job_kill` and no timeout
+/// fires). The fifo is what makes the shape observable: the leader is still alive when the test
+/// reads the pids, and the kill runs only once the test lets it exit.
+fn leader_exits_with_a_child() -> String {
+    format!(
+        "{} & echo $$ > leader.pid; echo $! > child.pid; cat gate > /dev/null; exit 0",
+        escaping_child()
+    )
+}
 
 fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
@@ -201,7 +241,7 @@ async fn wait_for_pid(dir: &Path, name: &str) -> i32 {
         }
         assert!(
             start.elapsed() < Duration::from_secs(10),
-            "timed out: {name} (is GNU `timeout` on PATH?)"
+            "timed out: {name} (did the job's command start at all?)"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -237,8 +277,8 @@ async fn session_empties(sid: i32, limit: Duration) -> bool {
 
 /// Reads both pids the job printed and waits (bounded) for the shape: the child is in the job's
 /// session but **not** in its process group. Without that, a group-only kill would suffice and
-/// the test would prove nothing. The shell writes `$!` before the child `exec`s, and GNU
-/// `timeout` calls `setpgid` only once it runs, so the shape is polled rather than sampled once.
+/// the test would prove nothing. The shell writes `$!` before the child runs, and the child calls
+/// `setpgid` only once `perl` starts, so the shape is polled rather than sampled once.
 async fn escaping_pids(root: &Path) -> (i32, i32) {
     let leader = wait_for_pid(root, "leader.pid").await;
     let child = wait_for_pid(root, "child.pid").await;
@@ -267,14 +307,14 @@ async fn escaping_pids(root: &Path) -> (i32, i32) {
     (leader, child)
 }
 
-/// Starts [`CHILD_LEAVES_THE_GROUP`] as a background job and returns
+/// Starts [`child_leaves_the_group`] as a background job and returns
 /// `(job_id, leader pid, child pid, guard)`.
 async fn start_background(
     session: &CodingSession,
     root: &Path,
     timeout_secs: Option<u64>,
 ) -> (String, i32, i32, Leftovers) {
-    let mut args = json!({"command": CHILD_LEAVES_THE_GROUP, "background": true});
+    let mut args = json!({"command": child_leaves_the_group(), "background": true});
     if let Some(secs) = timeout_secs {
         args["timeout_secs"] = json!(secs);
     }
@@ -407,7 +447,7 @@ async fn a_natural_exit_reaches_a_child_that_left_the_process_group() {
     let output = exec(
         &session,
         "shell",
-        json!({"command": LEADER_EXITS_WITH_A_CHILD, "background": true}),
+        json!({"command": leader_exits_with_a_child(), "background": true}),
         CancellationToken::new(),
     )
     .await
@@ -447,7 +487,7 @@ async fn a_foreground_timeout_reaches_a_child_that_left_the_process_group() {
     let call = exec(
         &session,
         "shell",
-        json!({"command": CHILD_LEAVES_THE_GROUP, "timeout_secs": 3}),
+        json!({"command": child_leaves_the_group(), "timeout_secs": 3}),
         CancellationToken::new(),
     );
     let pids = escaping_pids(&root);
