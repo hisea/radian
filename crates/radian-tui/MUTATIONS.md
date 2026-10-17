@@ -2096,3 +2096,27 @@ Base `5cfb0b1` · worktree `.radian-worktrees/oauth-redact`。每个脱敏名单
 `mod tests`：注册表是进程级的，同一个二进制里加值会让 `terminal.rs` 两条对
 `shared_secrets` 做 `==` 全等断言的测试变得不确定。
 
+## pick-stderr: the `--pick` path's startup diagnostics (2026-10-17)
+
+Base `f4c2c09` · branch `dogfood/pick-stderr` · worktree `.radian-worktrees/pick-stderr`.
+`--pick` (and a valueless `--resume`) enter the alternate screen *before* the session exists, so
+every startup `eprintln!` between the picker and the session landed on the alternate screen; the
+frame diff skips the cells that did not change, so the text (`[control] <sock>`, the trust status
+line) stayed drawn over the input box. `StartupLog` now collects those lines,
+and the startup block takes them. A memory warning becomes a transcript notice instead of stderr
+(the rule ADR 0021 already states for the memory notice).
+
+Each mutation was applied in place in `src/cli.rs`, restored from a byte-for-byte copy and
+compared (`cmp`) after every run. Command:
+`cargo test -p radian-tui --test pty --locked --no-fail-fast <name>`.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| PS-T1 | on the `--pick` path the startup diagnostics are not written to the terminal | `startup_log.deferred = Some(Vec::new())` dropped, so nothing is deferred | `pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen` FAILED (the raw stream after `?1049h` carries `[control] `) |
+| PS-T2 | every `eprintln!` site on that path goes through the log | the `[control] <path>` site prints with `eprintln!` again | same test FAILED |
+| PS-T3 | the block takes the collected lines | `startup_lines.extend(startup_log.take())` removed | same test FAILED (no `[control] ` line in the block) |
+| PS-T4 | the trust line is not collected (the block already carries it) | `StartupLog::print_before_screen` → `line` | same test FAILED (the trust line appears twice) |
+| PS-T5 | a memory warning is a transcript notice, not stderr | `memory_warning` reverted to `eprintln!` | `pty_a_memory_warning_is_a_transcript_notice_not_stderr` FAILED |
+
+5/5 caught; `src/cli.rs` compared byte-identical after every restore.
+

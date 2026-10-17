@@ -6562,7 +6562,9 @@ async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
         !after_enter.contains("project resources: not loaded"),
         "a startup diagnostic was written into the alternate screen:\n{after_enter}"
     );
-    // Deferring must not lose them: the transcript's startup block carries both.
+    // Deferring must not lose them: the transcript's startup block carries both. The trust line
+    // is pushed there for **every** run (ADR 0031 T3), so deferring it as well would show it
+    // twice; it must appear exactly once.
     pty.expand_startup();
     assert!(
         pty.wait_for_screen("[control] ", 10),
@@ -6570,8 +6572,56 @@ async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("project resources: not loaded", 10),
-        "the trust status line is missing from the startup block:\n{}",
+        pty.wait_until(10, |screen| {
+            screen.matches("project resources: not loaded").count() == 1
+        }),
+        "the trust status line must be in the startup block exactly once:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The same rule, for the runtime half of the startup diagnostics: a memory warning (a malformed
+/// context file, a bad skill, a failed memory read) is a line the user must see, so it becomes a
+/// transcript notice rather than stderr, which the fullscreen UI draws over — ADR 0021 revision
+/// 1's rule for the memory *notice*, applied to the warning. On the `--pick` path the startup
+/// ones would otherwise land on the alternate screen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_memory_warning_is_a_transcript_notice_not_stderr() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("memory-warning");
+    let home = TempDir::new("memory-warning-home");
+    // A user skill whose frontmatter declares `allowed-tools`: discovery warns once through the
+    // host's memory-warning seam while the session opens.
+    std::fs::create_dir_all(home.path().join("skills/warny")).unwrap();
+    std::fs::write(
+        home.path().join("skills/warny/SKILL.md"),
+        "---\nname: warny\ndescription: Warns.\nallowed-tools: Read\n---\nBODY\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "memory-warning",
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        24,
+        100,
+    );
+    // Before the terminal is entered the old line went to stderr, which the alternate screen
+    // then covered: the notice is what makes it visible at all.
+    assert!(
+        pty.wait_for_screen("radian: [memory] skill", 10),
+        "the memory warning is not in the transcript:\n{}",
         pty.screen()
     );
     pty.quit();
