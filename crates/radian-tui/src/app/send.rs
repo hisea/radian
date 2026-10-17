@@ -16,8 +16,8 @@ impl App {
             .as_deref()
             .unwrap_or("the session ended");
         format!(
-            "the session has ended ({reason}); the message was not sent; continue it with \
-             `radian --resume {}`",
+            "the session has ended ({reason}); the message was not sent — resume the session \
+             with `radian --resume {}`",
             self.session.session_id
         )
     }
