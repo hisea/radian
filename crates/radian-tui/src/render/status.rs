@@ -37,10 +37,19 @@ fn status_segments(app: &App) -> Vec<Segment> {
     // the whole status bar is one instant.
     let session = app.session.projection.read();
     let turn = session.turn();
-    let turn_style = match turn {
-        TurnState::Idle => app.theme.turn_idle,
-        TurnState::Running => app.theme.turn_running,
-        TurnState::Cancelled => app.theme.turn_cancelled,
+    // A driver that stopped is a terminal state, and `idle` would be a lie: the turn state
+    // says a new turn can start. Rank it above the projection's own label.
+    let (turn_text, turn_style) = if app.session.session_ended.is_some() {
+        ("ended".to_string(), app.theme.turn_cancelled)
+    } else {
+        (
+            turn.label().to_string(),
+            match turn {
+                TurnState::Idle => app.theme.turn_idle,
+                TurnState::Running => app.theme.turn_running,
+                TurnState::Cancelled => app.theme.turn_cancelled,
+            },
+        )
     };
     let position = if app.session.max_scroll == 0 {
         "all".to_string()
@@ -53,7 +62,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.model,
         },
         Segment {
-            text: turn.label().to_string(),
+            text: turn_text,
             style: turn_style,
         },
     ];

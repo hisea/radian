@@ -6,10 +6,38 @@
 use super::*;
 
 impl App {
+    /// The one notice a submit gets once the session ended (the driver stopped): no turn can
+    /// start, so say so and say how to continue the session. Nothing is accepted into an inbox
+    /// that no driver will read.
+    pub(super) fn session_ended_notice(&self) -> String {
+        let reason = self
+            .session
+            .session_ended
+            .as_deref()
+            .unwrap_or("the session ended");
+        format!(
+            "the session has ended ({reason}); the message was not sent; continue it with \
+             `radian --resume {}`",
+            self.session.session_id
+        )
+    }
+
+    /// Refuses a submit after the session ended, with the notice above. `None` means the
+    /// session is live and the caller goes on.
+    pub(super) fn refuse_if_session_ended(&mut self) -> Option<UpdateResult> {
+        self.session.session_ended.as_ref()?;
+        self.push_notice(self.session_ended_notice());
+        Some(UpdateResult::dirty())
+    }
+
     /// Starts a send. The `@` references are expanded by the loop first (an effect), and the
     /// result becomes the follow-up or steer effect. Whether it steers is decided here, because
     /// the turn state is app state.
     pub(super) fn begin_send(&mut self, text: String) -> UpdateResult {
+        if let Some(refused) = self.refuse_if_session_ended() {
+            self.restore_input(text);
+            return refused;
+        }
         let kind = if self.turn() == TurnState::Running {
             PendingSend::Steer
         } else {
@@ -63,6 +91,9 @@ impl App {
     ) -> UpdateResult {
         match result {
             Ok(text) => {
+                if let Some(refused) = self.refuse_if_session_ended() {
+                    return refused;
+                }
                 let message = Message::user(text);
                 UpdateResult::effect(if steer {
                     Effect::Steer(message)
@@ -89,6 +120,10 @@ impl App {
         };
         match result {
             Ok(expansion) => {
+                if let Some(refused) = self.refuse_if_session_ended() {
+                    self.restore_input(pending.text);
+                    return refused;
+                }
                 for warning in &expansion.warnings {
                     self.session
                         .entries
