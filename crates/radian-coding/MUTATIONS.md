@@ -571,3 +571,40 @@ unconditionally, so the same test fails on it for the same reason. The other hal
 (`a_foreground_timeout_secs_still_kills_the_command`) is the unchanged foreground path; the
 revision-1 adoption-deadline test (`an_adopted_job_is_killed_by_the_original_timeout`) is green
 without change.
+
+## ADR 0037: a `job_output wait` on an already-settled job waited out its timeout (2026-10-17)
+
+`settle` used `cell.settled.send(true)`, and tokio's `Sender::send` returns `Err` **without
+storing** the value when `receiver_count() == 0`; `start`/`adopt` drop the receiver from
+`watch::channel(false)` at once, so a job that settled with no waiter left the watched value
+`false` and a later `output(wait: true)` slept to its timeout (observed in a lead session: 300 s,
+with `[still running after 300000 ms; the job was not killed]` and `[status: exited 0]` in one
+text). The fix: `send_replace(true)` in `settle`, a pre-wait state check in `output` (a settled
+job never waits), and the `[still running ...]` line only while the state says running.
+
+Mutations were applied in place, restored from a `cp` in `.radian/scratch/mut/` and confirmed
+byte-identical with `cmp` before the next step (no `git checkout --`/`restore`/`stash`);
+`git status --short` was checked after each run.
+
+Runs:
+`cargo test -p radian-coding --test jobs --locked --no-fail-fast settled` and
+`cargo test -p radian-coding --lib --locked --no-fail-fast jobs::`
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| JW-1 | `settle`: `send_replace(true)` → `send(true)`, pre-wait state check kept | ❌ lib 1 failed / ✅ integration 2 passed in 0.31 s | `a_settle_with_no_waiter_still_stores_the_watched_value` (white-box) — the two integration tests never reach the watch, because the pre-wait state check returns first |
+| JW-2 | pre-wait state check dropped, `send_replace` kept | ✅ 2 passed in 0.31 s — **not caught alone** | none (belt and braces: `send_replace` alone already makes a late subscriber see `true`) |
+| JW-3 | `[still running ...]` printed whenever the wait timed out (parts 1+2 kept) | ✅ 2 passed in 0.31 s — **not caught alone** | none (parts 1+2 make `waited_out` unreachable on a settled job; the raced case is not deterministic) |
+| JW-4 | the pre-fix code for parts 1+2 (`send`, no state check) | ❌ 2 failed in 30.31 s | `a_wait_on_a_settled_job_returns_at_once` (`must return at once, not after its timeout: 30.0027215s`), `a_wait_on_a_settled_adopted_job_returns_at_once` (`30.002252709s`) |
+| JW-5 | the pre-fix code entirely (`send` + no state check + unconditional `[still running ...]`) | ❌ 2 failed in 30.31 s, on the message assertion first | both new tests: `a settled job must never be reported as still running: done` / `[still running after 30000 ms; the job was not killed]` / `[status: exited 0]` |
+
+JW-4 is the "old code" failure the brief asks for: the new tests wait the full 30 s `timeout_ms`
+and fail the `< 2 s` bound (measured 30.0027 s and 30.0023 s). JW-5 is the observed bug verbatim:
+the same 30 s wait whose text carries both `[still running after 30000 ms]` and
+`[status: exited 0]`.
+
+The white-box test `a_settle_with_no_waiter_still_stores_the_watched_value` is what catches the
+`send` mutation in `settle` alone (JW-1); behaviourally the two integration tests only fail when
+the pre-wait state check is absent too (JW-4). The pre-wait state check (JW-2) and the message
+guard (JW-3) are each unreachable alone and no deterministic test catches either: they are belt
+and braces over `send_replace`, recorded honestly.
