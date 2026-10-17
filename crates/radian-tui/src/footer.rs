@@ -18,9 +18,12 @@ use crate::app::App;
 use crate::theme::Role;
 
 mod components;
+mod presets;
 mod rows;
 
+pub use presets::{Preset, export_preset};
 pub use rows::{RowPosition, fold_legacy_widgets};
+pub(crate) use presets::preset_footer_rows;
 pub(crate) use rows::{
     Item, ItemStyle, Row, build_rows, canonical_id, is_command_item, merge_into_item,
     parse_item_style,
@@ -182,34 +185,6 @@ pub struct FrameGlyphs {
     /// The meta row's brackets (ADR 0028 rule 3).
     pub bracket_left: &'static str,
     pub bracket_right: &'static str,
-}
-
-/// Which footer the session shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Preset {
-    /// The default (ADR 0027): three rows — the usage widget (absent without data),
-    /// the identity row, and the numbers row.
-    #[default]
-    Deck,
-    /// The revision-1 two-row preset: the identity row and the numbers row (owner
-    /// 2026-10-17: `full` also shows `jobs`, this session's running background jobs).
-    Full,
-    /// The earlier two-row preset: model/cwd/branch/context bar/reasoning, then tokens/cost.
-    Pi,
-    /// Today's one status line, byte-for-byte (drawn by the renderer).
-    Classic,
-}
-
-impl Preset {
-    pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "deck" => Some(Self::Deck),
-            "full" => Some(Self::Full),
-            "pi" => Some(Self::Pi),
-            "classic" => Some(Self::Classic),
-            _ => None,
-        }
-    }
 }
 
 /// The session's footer.
@@ -397,68 +372,6 @@ impl Footer {
             .filter(|line| !line.spans.is_empty())
             .collect()
     }
-}
-
-/// One built-in preset's TOML (ADR 0027): `deck`, `full`, `pi`
-/// and `classic` are data files under `crates/radian-tui/presets/`, shipped in the binary.
-fn preset_source(preset: Preset) -> &'static str {
-    match preset {
-        Preset::Deck => include_str!("../presets/deck.toml"),
-        Preset::Full => include_str!("../presets/full.toml"),
-        Preset::Pi => include_str!("../presets/pi.toml"),
-        Preset::Classic => include_str!("../presets/classic.toml"),
-    }
-}
-
-/// The shipped TOML of a named preset, for `radian footer export <preset>` (ADR 0027
-/// revision 14 decision 2): the exact file bytes, so a user can paste them under
-/// `[tui.footer]` and get the same footer. `Err` names the four presets.
-pub fn export_preset(name: &str) -> Result<&'static str, String> {
-    match Preset::parse(name) {
-        Some(preset) => Ok(preset_source(preset)),
-        None => Err(format!(
-            "unknown footer preset {name:?}; expected one of deck, full, pi, classic"
-        )),
-    }
-}
-
-/// Parses a built-in preset with the user's config parser (ADR 0027):
-/// the file holds the config's `[tui.footer]` section verbatim, so it is parsed by
-/// `radian_host::config::parse` exactly like a user config. A preset that fails to parse (or
-/// skips a key) is a programming error: the all-four-parse test fails on it, so this never
-/// runs with a bad file outside a broken build.
-fn preset_config(preset: Preset) -> TuiFooterConfig {
-    let text = format!("schema_version = 1\n{}", preset_source(preset));
-    let config =
-        radian_host::config::parse(std::path::Path::new("<built-in footer preset>"), &text)
-            .expect("a built-in footer preset parses");
-    assert!(
-        config.skipped.is_empty(),
-        "a built-in footer preset has no skipped keys: {:?}",
-        config.skipped
-    );
-    config.tui.footer
-}
-
-/// The built-in preset's rows, resolved like user-configured rows. A `Footer` with no rows
-/// (only `Footer::default()`, before any config is applied) draws these through `lines`;
-/// `from_config` builds them the same way and then merges the user's per-field `items` config
-/// on top, exactly as the old Rust tables did.
-fn preset_footer_rows(preset: Preset, warnings: &mut Vec<String>) -> Vec<Row> {
-    let preset_cfg = preset_config(preset);
-    let separator = preset_cfg
-        .separator
-        .clone()
-        .unwrap_or_else(|| " · ".to_string());
-    build_rows(
-        &preset_cfg.rows,
-        &separator,
-        &ItemStyle::Role(Role::FooterSeparator),
-        &std::collections::BTreeMap::new(),
-        &std::collections::BTreeSet::new(),
-        &mut std::collections::BTreeSet::new(),
-        warnings,
-    )
 }
 
 /// The used fraction of the context window, `None` when either the budget or the usage report
@@ -943,7 +856,7 @@ mod tests {
         for preset in [Preset::Deck, Preset::Full, Preset::Pi] {
             // The presets are TOML now (ADR 0027); the parsed rows are
             // what the renderer reads, so the coverage check reads them too.
-            let config = preset_config(preset);
+            let config = presets::preset_config(preset);
             for row in &config.rows {
                 for item in row.left.iter().chain(row.right.iter()) {
                     let glyph = components::builtin(&item.id).map_or("", |component| {
