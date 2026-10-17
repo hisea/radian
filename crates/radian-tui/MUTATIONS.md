@@ -2118,3 +2118,27 @@ PageUp（footer 从 `follow` 变 `paused`）作为 happens-before，之后的字
 
 A4 不设变异：它本身就是「attach 首帧 ≤ 2 × `--resume` 首帧」的同机测量（同一次运行里两者各跑
 三次取中位数）；debug 构建下 10k 条首帧是 attach 1185 ms、resume 1473 ms，比值约 0.8。
+## pick-stderr: the `--pick` path's startup diagnostics (2026-10-17)
+
+Base `f4c2c09` · branch `dogfood/pick-stderr` · worktree `.radian-worktrees/pick-stderr`.
+`--pick` (and a valueless `--resume`) enter the alternate screen *before* the session exists, so
+every startup `eprintln!` between the picker and the session landed on the alternate screen; the
+frame diff skips the cells that did not change, so the text (`[control] <sock>`, the trust status
+line) stayed drawn over the input box. `StartupLog` now collects those lines,
+and the startup block takes them. A memory warning becomes a transcript notice instead of stderr
+(the rule ADR 0021 already states for the memory notice).
+
+Each mutation was applied in place in `src/cli.rs`, restored from a byte-for-byte copy and
+compared (`cmp`) after every run. Command:
+`cargo test -p radian-tui --test pty --locked --no-fail-fast <name>`.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| PS-T1 | on the `--pick` path the startup diagnostics are not written to the terminal | `startup_log.deferred = Some(Vec::new())` dropped, so nothing is deferred | `pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen` FAILED (the raw stream after `?1049h` carries `[control] `) |
+| PS-T2 | every `eprintln!` site on that path goes through the log | the `[control] <path>` site prints with `eprintln!` again | same test FAILED |
+| PS-T3 | the block takes the collected lines | `startup_lines.extend(startup_log.take())` removed | same test FAILED (no `[control] ` line in the block) |
+| PS-T4 | the trust line is not collected (the block already carries it) | `StartupLog::print_before_screen` → `line` | same test FAILED (the trust line appears twice) |
+| PS-T5 | a memory warning is a transcript notice, not stderr | `memory_warning` reverted to `eprintln!` | `pty_a_memory_warning_is_a_transcript_notice_not_stderr` FAILED |
+
+5/5 caught; `src/cli.rs` compared byte-identical after every restore.
+

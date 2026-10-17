@@ -743,6 +743,44 @@ fn print_exit_line(message: &str) {
     let _ = done_rx.recv_timeout(EXIT_LINE_WAIT);
 }
 
+/// Where the startup diagnostics go.
+///
+/// A plain run prints them to stderr **before** the alternate screen is entered, where they are
+/// harmless (their own scrollback; the comments at the `[config]`/`eprintln!` sites explain the
+/// rule). `--pick` (and a valueless `--resume`) enter the alternate screen *before* the session
+/// exists, so from then until the session's first frame every startup diagnostic would land on
+/// the alternate screen — and the renderer's frame diff skips the cells that did not change, so
+/// the text stays drawn where the cursor happened to be (the input box) and never clears (owner
+/// 2026-10-17). On that path the lines are collected here and appended to the transcript's
+/// startup block, which is where the trust status line already goes (ADR 0031 T3).
+struct StartupLog {
+    /// `None` before the alternate screen is up (print); `Some` once it is (collect).
+    deferred: Option<Vec<String>>,
+}
+
+impl StartupLog {
+    /// A diagnostic line: printed on the normal screen, collected inside the alternate one.
+    fn line(&mut self, text: impl Into<String>) {
+        match &mut self.deferred {
+            Some(lines) => lines.push(text.into()),
+            None => eprintln!("{}", text.into()),
+        }
+    }
+
+    /// A line the startup block **already** carries (`trust::status_line`): printed on the
+    /// normal screen, dropped inside the alternate one, where the block shows it anyway.
+    fn print_before_screen(&self, text: &str) {
+        if self.deferred.is_none() {
+            eprintln!("{text}");
+        }
+    }
+
+    /// Takes the lines collected inside the alternate screen, in order.
+    fn take(&mut self) -> Vec<String> {
+        self.deferred.take().unwrap_or_default()
+    }
+}
+
 fn run(
     cli: Cli,
     runtime: &tokio::runtime::Runtime,
@@ -871,8 +909,13 @@ fn run(
     // session itself, so a refusal leaves no alternate screen behind (dogfooding D2).
     let mouse = config.tui.mouse.unwrap_or(true);
     let mut startup_terminal = None;
+    // Every startup diagnostic from here on goes through this: printed on the normal screen,
+    // or collected for the transcript's startup block once the alternate screen is up (the
+    // `--pick` path).
+    let mut startup_log = StartupLog { deferred: None };
     if startup_picker.is_some() {
         startup_terminal = Some(enter_terminal(mouse)?);
+        startup_log.deferred = Some(Vec::new());
         spawn_input_thread(tx.clone());
     }
     // ADR 0023 U4 / plan B: `--pick` is the session picker **overlay**, not a separate
@@ -965,7 +1008,7 @@ fn run(
     let remembered_tier = match radian_host::access::remembered_for(&workspace_path) {
         Ok(tier) => tier.map(radian_tui::profile::tier_of),
         Err(warning) => {
-            eprintln!("[access] {warning}");
+            startup_log.line(format!("[access] {warning}"));
             None
         }
     };
@@ -1021,7 +1064,7 @@ fn run(
     )?;
     if let Some(warning) = &provider_warning {
         // A display conflict, not an error: the startup line says which side won.
-        eprintln!("[provider] {warning}");
+        startup_log.line(format!("[provider] {warning}"));
     }
     let key_id = provider_ref.key_id().to_owned();
     let provider = provider_ref.protocol_for(&model_name).adapter();
@@ -1045,11 +1088,11 @@ fn run(
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
     );
     if legacy_thinking {
-        eprintln!(
+        startup_log.line(format!(
             "radian: [thinking] the legacy `--thinking {}` spelling is deprecated; use one of {}",
             cli.thinking.as_deref().unwrap_or_default(),
             radian_host::THINKING_LEVELS.join("|")
-        );
+        ));
     }
     // `--max-tokens` is Anthropic-only; under openai-compatible it would be ignored, so this is
     // an error before the session file exists (dogfooding D15). `--thinking` left this check in
@@ -1145,10 +1188,10 @@ fn run(
     match window.startup_check() {
         radian_host::WindowCheck::Ok => {}
         radian_host::WindowCheck::Refuse(message) => return Err(RunError::Startup(message)),
-        radian_host::WindowCheck::Warn(message) => eprintln!("{message}"),
+        radian_host::WindowCheck::Warn(message) => startup_log.line(message),
     }
     if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
-        eprintln!("{warning}");
+        startup_log.line(warning);
     }
 
     // `--resume` with no value: the picker in "resume only" mode.
@@ -1211,7 +1254,7 @@ fn run(
         cli.no_auto_compact,
     );
     if let Some(notice) = compaction_notice {
-        eprintln!("radian: [compaction] {notice}");
+        startup_log.line(format!("radian: [compaction] {notice}"));
     }
     // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
@@ -1415,13 +1458,13 @@ fn run(
         ) {
             Ok(server) => server,
             Err(error) => {
-                eprintln!("[control] disabled: {error}");
+                startup_log.line(format!("[control] disabled: {error}"));
                 None
             }
         }
     };
     if let Some(server) = &control {
-        eprintln!("[control] {}", server.path().display());
+        startup_log.line(format!("[control] {}", server.path().display()));
     }
     // Held for the whole session: the socket is removed on the normal return and on the panic
     // unwind, even while the driver task still holds a reference to the server (ADR 0030 O6).
@@ -1477,7 +1520,19 @@ fn run(
     let before_driver: Option<Arc<dyn Fn() + Send + Sync>> = cli
         .panic_in_driver
         .then(|| Arc::new(panic_in_driver) as Arc<dyn Fn() + Send + Sync>);
-    let memory_warning = Arc::new(|message: &str| eprintln!("radian: [memory] {message}"));
+    // ADR 0021: a memory line the user must see goes into the transcript as a
+    // notice instead of stderr, which the fullscreen UI would draw over. That rule covers a
+    // warning too: it fires both at startup (a malformed context file, a bad skill) and
+    // mid-turn (a failed memory read), and on the `--pick` path the startup ones would land on
+    // the alternate screen.
+    let memory_warning = {
+        let tx = tx.clone();
+        Arc::new(move |message: &str| {
+            let _ = tx.send(UiEvent::Command(AppInput::SessionDone(vec![format!(
+                "radian: [memory] {message}"
+            )])));
+        })
+    };
     // ADR 0021: the memory tools' notice (the project a default-scope write
     // registered) is a line the user must see, so it goes into the transcript as a notice
     // instead of stderr, which the fullscreen UI would draw over.
@@ -1504,9 +1559,11 @@ fn run(
     let (trust_setup, trust_warning) =
         radian_host::trust::load_for(&workspace_path, cli_trust, true);
     if let Some(warning) = &trust_warning {
-        eprintln!("[trust] {warning}");
+        startup_log.line(format!("[trust] {warning}"));
     }
-    eprintln!("{}", radian_host::trust::status_line(&trust_setup));
+    // The status line is in the startup block either way (`trust::status_line` is pushed there
+    // once the session exists): inside the alternate screen the block is where it shows.
+    startup_log.print_before_screen(&radian_host::trust::status_line(&trust_setup));
 
     // ADR 0030 slice 9: the orchestration snapshot (user config + a trusted project file) is
     // installed process-wide before any session opens; the startup lines list the verify/policy
@@ -1517,10 +1574,10 @@ fn run(
         &config.orchestration,
     );
     for warning in &orchestration_warnings {
-        eprintln!("[orchestration] {warning}");
+        startup_log.line(format!("[orchestration] {warning}"));
     }
     for line in orchestration.startup_lines() {
-        eprintln!("{line}");
+        startup_log.line(line);
     }
     radian_host::orchestration::set_process(orchestration);
 
@@ -1766,10 +1823,10 @@ fn run(
             .as_deref()
             .is_some_and(|p| p != recorded_provider);
         if model_differs || provider_differs {
-            eprintln!(
+            startup_log.line(format!(
                 "radian: resume recorded {recorded_provider}/{recorded_model}; using the command \
                  line's {provider_name}/{model_name}"
-            );
+            ));
             session
                 .queue_config(radian_host::ModelRoute::new(&provider_name, &model_name).to_value());
         }
@@ -1788,11 +1845,11 @@ fn run(
     // the authority for the next resume.
     if cli.resume.is_some() && cli.profile.is_some() && resumed_tier != cli_tier {
         if let Some(recorded) = resumed_tier {
-            eprintln!(
+            startup_log.line(format!(
                 "radian: resume recorded tier {}; using the command line's {}",
                 recorded.as_str(),
                 tier.as_str()
-            );
+            ));
         }
         session
             .config_queue()
@@ -2063,7 +2120,9 @@ fn run(
         match radian_tui::composer::take_draft(&path) {
             Ok(Some(text)) => app.input.set_text(&text),
             Ok(None) => {}
-            Err(error) => eprintln!("[draft] cannot read {}: {error}", path.display()),
+            Err(error) => {
+                startup_log.line(format!("[draft] cannot read {}: {error}", path.display()))
+            }
         }
     }
     // the startup information is one collapsible block (wordmark, one
@@ -2163,6 +2222,11 @@ fn run(
     startup_lines.push(session_line);
     // ADR 0031 T3: the trust state, in the startup block (same style as `ask_user: off`).
     startup_lines.push(radian_host::trust::status_line(&session.trust()));
+    // The startup diagnostics the `--pick` path could not print: the
+    // alternate screen was already up, so they were collected instead (`StartupLog`). They
+    // belong to the startup block, next to the trust line that was already carried here. On a
+    // plain run the log collected nothing: the same lines were printed before the terminal.
+    startup_lines.extend(startup_log.take());
     // The safety lines are never folded away: a workspace boundary that
     // was not the user's choice, and every config-file warning/ignored key. The config
     // warnings are also printed before the alternate screen, where a crash can still show
