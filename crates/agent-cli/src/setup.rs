@@ -13,8 +13,9 @@ use radian_host::{
     resolve_workspace, validate_session_id,
 };
 
+use super::inspect::session_dir;
 use super::profile;
-use super::{Cli, SetupError, session_dir};
+use super::{Cli, SetupError};
 
 pub(crate) struct Setup {
     pub(crate) model: radian_host::SwitchableModel,
