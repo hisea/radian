@@ -8,8 +8,8 @@ use std::path::Path;
 use agent_core::{JournalRecord, Message, TranscriptJournal};
 use common::{TempDir, created};
 use radian_session::{
-    EventData, ForkError, ForkParent, ForkRequest, RuntimeEvent, Session, SessionCreatedData,
-    SessionJournal, TurnOutcome, fork, fork_point_history, fork_with_journal, last_fork_point,
+    EventData, ForkError, ForkRequest, RuntimeEvent, Session, SessionJournal, TurnOutcome, fork,
+    fork_point_history, fork_with_journal, last_fork_point,
 };
 use serde_json::json;
 
@@ -322,46 +322,6 @@ async fn the_parent_gains_only_the_forked_record_and_the_seqs_match() {
     };
     assert_eq!(forked["parent_seq"], json!(boundary), "{forked}");
     assert_eq!(forked["child_session_id"], json!(child), "{forked}");
-}
-
-/// ADR 0030 O2: a task agent's `SessionCreated.parent` carries `relation: "task"` with the
-/// lead's id and the seq of the lead's `TaskSpawned`. No producer writes this yet (Slice 4);
-/// the schema and its reader are pinned here.
-#[tokio::test]
-async fn a_task_child_records_relation_task() {
-    let dir = TempDir::new("task-child");
-    let path = dir.file("task.jsonl");
-    let created = SessionCreatedData::task(
-        "/work/example",
-        json!({"model": {"provider": "example", "model": "m-1"}}),
-        ForkParent::task("lead-1", 7),
-    );
-    {
-        let journal = SessionJournal::create(&path, "task-1", created).unwrap();
-        journal
-            .append(JournalRecord::Message {
-                index: 0,
-                message: Message::user("the brief"),
-            })
-            .await
-            .unwrap();
-    }
-
-    let session = Session::open(&path).unwrap();
-    let created = session
-        .events()
-        .iter()
-        .find(|event| event.event == "SessionCreated")
-        .unwrap();
-    let EventData::Other(data) = &created.data else {
-        panic!("SessionCreated is kept as Other");
-    };
-    assert_eq!(
-        data["parent"],
-        json!({"session_id": "lead-1", "seq": 7, "relation": "task"}),
-        "{data}"
-    );
-    assert_eq!(session.history().unwrap(), vec![Message::user("the brief")]);
 }
 
 #[tokio::test]

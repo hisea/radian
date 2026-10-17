@@ -347,20 +347,6 @@ fn edge_cases() -> Vec<(String, String)> {
             "memory.injection.addition_budget.wrong_type",
             "schema_version = 1\n[memory.injection]\naddition_budget = \"x\"\n",
         ),
-        // ---- git: a non-table or an unknown key is silently ignored ----
-        (
-            "git.protected_branches",
-            "schema_version = 1\n[git]\nprotected_branches = [\"release\"]\n",
-        ),
-        (
-            "git.protected_branches.bad_element",
-            "schema_version = 1\n[git]\nprotected_branches = [\"release\", 3]\n",
-        ),
-        (
-            "git.allowed_filters.empty",
-            "schema_version = 1\n[git]\nallowed_filters = []\n",
-        ),
-        ("git.section_not_a_table", "schema_version = 1\ngit = 3\n"),
         // ---- shell: a bad value is skipped, a non-table is ignored ----
         (
             "shell.desktop",

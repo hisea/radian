@@ -555,7 +555,6 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     with_format("cwd", "{repo}"),
                     with_format("git_branch", "{branch}{dirty}"),
                     item("worktree"),
-                    item("tasks"),
                 ],
                 vec![item("context_bar"), item("reasoning")],
             ),
@@ -1457,7 +1456,6 @@ mod tests {
             "elapsed",
             "cost",
             "pending",
-            "tasks",
             "mcp",
             "scroll",
         ] {
@@ -1497,7 +1495,7 @@ mod tests {
         // The `631c8dd` `item_priority` table, plus `usage` (ADR 0027):
         // it replaces the usage contribution id, which the table never named and which
         // therefore kept the generic 50.
-        let expected: [(&str, i64); 21] = [
+        let expected: [(&str, i64); 20] = [
             ("brand", 92),
             ("host", 78),
             ("model", 90),
@@ -1516,7 +1514,6 @@ mod tests {
             ("elapsed", 35),
             ("cost", 40),
             ("pending", 70),
-            ("tasks", 72),
             ("mcp", 55),
             ("scroll", 20),
         ];
@@ -1538,7 +1535,7 @@ mod tests {
     fn the_registry_matches_the_pre_refactor_placeholder_table() {
         // Plus `usage` (ADR 0027), whose one placeholder is the whole
         // line, like a `command` item's `{value}`.
-        let expected: [(&str, &[&str]); 21] = [
+        let expected: [(&str, &[&str]); 20] = [
             ("brand", &["brand"]),
             ("host", &["host"]),
             ("model", &["display_name", "id", "provider"]),
@@ -1560,7 +1557,6 @@ mod tests {
             ("elapsed", &["elapsed"]),
             ("cost", &["usd"]),
             ("pending", &["count"]),
-            ("tasks", &["running", "total"]),
             ("mcp", &["mcp"]),
             ("scroll", &["position", "mode"]),
         ];
@@ -1585,7 +1581,7 @@ mod tests {
     #[test]
     fn the_registry_matches_the_pre_refactor_role_table() {
         let app = app_with_glyphs("nerd");
-        let expected: [(&str, Option<Role>); 21] = [
+        let expected: [(&str, Option<Role>); 20] = [
             ("brand", Some(Role::Text)),
             ("host", Some(Role::NoticeBody)),
             ("model", Some(Role::Model)),
@@ -1606,7 +1602,6 @@ mod tests {
             ("elapsed", Some(Role::Truncation)),
             ("cost", None),
             ("pending", Some(Role::TurnRunning)),
-            ("tasks", Some(Role::TurnRunning)),
             ("mcp", Some(Role::Mcp)),
             ("scroll", None),
         ];
@@ -1640,7 +1635,7 @@ mod tests {
     /// `context_bar` row, so its default icon was empty in every set.
     #[test]
     fn the_registry_matches_the_pre_refactor_glyph_table() {
-        let expected: [(&str, [&str; 3]); 21] = [
+        let expected: [(&str, [&str; 3]); 20] = [
             ("brand", ["", "", ""]),
             ("host", ["@ ", "\u{f109} ", "host "]),
             ("model", ["", "", ""]),
@@ -1659,7 +1654,6 @@ mod tests {
             ("elapsed", ["", "\u{f017} ", "t "]),
             ("cost", ["", "", ""]),
             ("pending", ["", "", ""]),
-            ("tasks", ["", "", ""]),
             ("mcp", ["", "", ""]),
             ("scroll", ["", "", ""]),
         ];

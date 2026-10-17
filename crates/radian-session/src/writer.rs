@@ -31,11 +31,11 @@ const LOCK_RETRY_FIRST: Duration = Duration::from_millis(1);
 
 /// The parent a derived session came from. For a fork (ADR 0022) it names the parent and the
 /// fork point — the seq of a `TurnFinished` (or 0 for "the session start"), which is also what
-/// the parent's `SessionForked` records. For a task agent (ADR 0030 O2) it names the lead and
-/// the seq of the lead's `TaskSpawned`.
+/// the parent's `SessionForked` records.
 ///
-/// `relation` distinguishes the two. A `parent` written before ADR 0030 carries no `relation`
-/// and reads as `"fork"` via `default_relation`; ADR 0006 §7(a) forward compatibility.
+/// `relation` distinguishes derived-session kinds. A `parent` written before ADR 0030 carries no
+/// `relation` and reads as `"fork"` via `default_relation`; ADR 0006 §7(a) forward
+/// compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkParent {
     pub session_id: String,
@@ -57,16 +57,6 @@ impl ForkParent {
             session_id: session_id.into(),
             seq,
             relation: "fork".to_owned(),
-        }
-    }
-
-    /// A task agent's parent lead (ADR 0030 O2). `seq` is the lead's `TaskSpawned` seq. Slice 4
-    /// is the first producer; this slice only constructs it in a test.
-    pub fn task(session_id: impl Into<String>, seq: u64) -> Self {
-        Self {
-            session_id: session_id.into(),
-            seq,
-            relation: "task".to_owned(),
         }
     }
 
@@ -104,16 +94,6 @@ impl SessionCreatedData {
         config_snapshot: Value,
         parent: ForkParent,
     ) -> Self {
-        Self {
-            workspace: workspace.into(),
-            config_snapshot,
-            parent: Some(parent),
-        }
-    }
-
-    /// The `SessionCreated` payload of a task agent (ADR 0030 O2): `parent` names the lead and
-    /// the seq of the lead's `TaskSpawned`. Slice 4 is the first producer.
-    pub fn task(workspace: impl Into<String>, config_snapshot: Value, parent: ForkParent) -> Self {
         Self {
             workspace: workspace.into(),
             config_snapshot,
@@ -183,8 +163,8 @@ fn must_sync(event: &str) -> bool {
     [
         // The first line.
         EVT_SESSION_CREATED.0,
-        // Before a tool runs (and before the `git_commit` tool or a background `shell` start,
-        // which are tool calls). It also flushes the assistant message that declared the calls.
+        // Before a tool runs (and before a background `shell` start, which is a tool call). It
+        // also flushes the assistant message that declared the calls.
         EVT_TOOL_STARTED.0,
         // Turn boundaries.
         EVT_TURN_FINISHED,
