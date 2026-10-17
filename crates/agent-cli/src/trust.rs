@@ -7,7 +7,7 @@ use std::io::{IsTerminal, Write};
 
 use radian_host::memory::commands::CommandError;
 
-use super::LineHub;
+use super::ui::LineHub;
 
 /// The startup trust question (ADR 0031 T3), the same one-line terminal shape as the
 /// approval: a numbered list, Enter takes the default (do not trust this directory). An

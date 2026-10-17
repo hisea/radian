@@ -17,7 +17,7 @@ use super::events::{
     Next, TurnEnd, force_exit, next_event, report_error, report_task, shutdown, wait_for_turn,
 };
 use super::redact::redact;
-use super::{LineHub, Ui};
+use super::ui::{LineHub, Ui};
 
 /// The single place a turn's source is decided.
 ///

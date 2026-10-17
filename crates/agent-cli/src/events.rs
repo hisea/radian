@@ -10,7 +10,7 @@ use radian_runtime::{CancelCause, Inbox};
 use tokio::sync::{Notify, mpsc};
 
 use super::redact::redact;
-use super::{LineHub, Ui};
+use super::ui::{LineHub, Ui};
 
 /// What the interactive loop is waiting for.
 pub(crate) enum Next {

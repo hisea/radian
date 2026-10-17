@@ -18,8 +18,8 @@ use super::profile;
 use super::redact::redact;
 use super::trust::trust_prompt;
 use super::turn::{Run, interactive_loop, one_shot};
+use super::ui::{LineHub, Ui};
 use super::{Cli, Setup, SetupError};
-use super::{LineHub, Ui};
 
 pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let interactive = cli.prompt.is_none();
