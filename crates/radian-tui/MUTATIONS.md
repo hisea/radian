@@ -2323,3 +2323,31 @@ with hostname `testhost`) were rendered from the pristine `525daf0` tree (`git a
 | S5-2 | a preset's item order is the shipped order | `"model"`/`"cwd"` swapped in `pi.toml`'s first row | `--test footer_presets -- the_four_presets_render_byte_identical` ✅ 1 failed (`screen changed for preset=pi glyphs=unicode width=40`) |
 
 2/2 caught; no misses.
+
+## ADR 0027 slice ⑤ fix round 1 (p1 review of 83cb172, 2026-10-17)
+
+Base `83cb172` · branch `dogfood/footer-s5`. The 80 goldens were regenerated from the old
+code `525daf0` with the full-coverage fixture (scratch worktree
+`git worktree add --detach /tmp/footer-525 525daf0`, throwaway `zz_golden_gen` test,
+deleted after use, worktree removed): the fixture `App` now populates every component a
+preset can show — usage snapshot (`Usage (remaining): 5h: 98% · 7d: 81% · 5h ↺1h0m`),
+model `Mock 5`, dirty contributor branch `feature/fixture ?3`, repo `fixture-repo`,
+worktree `fixture-wt`, tokens in 19K / out 760 / cache 33K / cache-write 12K, priced
+fee `$0.096`, context `41.3%/1.0M ~` (auto-compact on), speed `50.0 tok/s`, elapsed
+`2.0s`, host `testhost`, session `# s`, reasoning `* high` — so every item of every preset
+draws at the widest width. The new code renders all 80 byte-identical
+(`the_four_presets_render_byte_identical`), except `full` with a running job, as before.
+The guard `every_preset_item_appears_in_its_widest_golden` parses each preset file and
+asserts every named row item's fixture marker is in the unicode width-120 golden (`jobs`
+against a with-job screen; `classic` names no rows); the parse test also asserts each
+file declares its own `preset`. Mutations in the preset files in place, each restored
+from a `cp` in `/tmp/` and confirmed byte-identical with `cmp`; every run with
+`--no-fail-fast`, each only its catching binary (`--test footer_presets`).
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| S5R1-1 | `full`'s numbers-row order is the shipped order | `"speed"`/`"cost"` swapped in `full.toml` | `--test footer_presets -- the_four_presets_render_byte_identical` ✅ 1 failed (`screen changed for preset=full glyphs=unicode width=60`; p1's exact case, green before the fixture fix) |
+| S5R1-2 | `full`'s numbers row carries `elapsed` | `"elapsed"` dropped from `full.toml` | `--test footer_presets -- the_four_presets_render_byte_identical` ✅ 1 failed (`screen changed for preset=full glyphs=unicode width=60`) |
+| S5R1-3 | `classic.toml` is the `classic` preset section | the `preset`/`separator` values swapped in `classic.toml` (`preset = " · "`, `separator = "classic"`) | `--test footer_presets -- all_four_built_in_presets_parse` ✅ 1 failed (`classic: the file declares its own preset`) and `exported_presets_round_trip_through_the_user_config` ✅ 1 failed (`classic: the export resolves to the preset's rows`) |
+
+3/3 caught; no misses.

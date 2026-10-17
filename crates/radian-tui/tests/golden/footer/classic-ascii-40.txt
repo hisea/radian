@@ -6,7 +6,7 @@
                                         
                                         
                                         
-────────────────────────────────────────
+── *  Working ──────────────────────────
 ❯ (type a message, Enter to send, Ctrl-J
 ────────────────────────────────────────
- mock  · idle · usage none · mcp off…   
+ mock  · running · usage 19000/760…     

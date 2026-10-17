@@ -6,7 +6,14 @@
 //! every preset × every glyph set × widths 40/60/80/100/120, no running jobs. `full` with no
 //! running job stays byte-identical; `full` with a job is covered by
 //! `full_shows_jobs_while_deck_does_not` below.
+//!
+//! The fixture populates **every** component a preset can show (p1 review of 83cb172: the old
+//! fixture left `speed`/`cost` empty, so a swap of those two items stayed green). Tokens
+//! in/out/cache(/write), speed, cost, context (percent/budget/auto), elapsed, reasoning,
+//! host, session, a dirty branch, the repo name, the worktree, and a usage snapshot all carry
+//! distinct non-empty values, so every item of every preset draws at the widest width.
 
+use agent_core::{BudgetReport, UsageSource};
 use radian_host::config::TuiFooterConfig;
 use radian_session::RuntimeEvent;
 use radian_tui::App;
@@ -18,9 +25,42 @@ const WIDTHS: [u16; 5] = [40, 60, 80, 100, 120];
 const GLYPHS: [&str; 4] = ["unicode", "nerd", "ascii", "emoji"];
 const PRESETS: [&str; 4] = ["deck", "full", "pi", "classic"];
 
-/// The fixed `App` both the golden generation and this test render: the same facts the
-/// existing footer tests use, plus a fixed hostname (the `full` preset shows `host`, which
-/// would otherwise bake in the machine's name).
+/// One normal contribution segment, the way the background contributors publish.
+fn publish(app: &App, item: &str, text: &str) {
+    app.contributions.write(
+        item,
+        vec![radian_host::Segment::new(
+            text,
+            radian_host::SegmentRole::Normal,
+        )],
+    );
+}
+
+/// One usage window: `remaining` percent and an optional reset countdown.
+fn window(label: &str, percent: f64, resets_at: Option<&str>) -> radian_host::UsageWindow {
+    radian_host::UsageWindow {
+        label: label.to_string(),
+        remaining: Some(radian_host::Remaining::Percent(percent)),
+        resets_at: resets_at.map(str::to_string),
+    }
+}
+
+/// The `usage` item's snapshot, the way a descriptor's `Endpoint` fetch writes it.
+fn publish_snapshot(app: &App, snapshot: radian_host::UsageSnapshot) {
+    app.contributions
+        .write_contribution(radian_host::Contribution {
+            item: radian_host::USAGE_ITEM.to_string(),
+            segments: Vec::new(),
+            stale: false,
+            symbol: None,
+            usage: Some(snapshot),
+        });
+}
+
+/// The fixed `App` both the golden generation and this test render: every component a preset
+/// can show carries a distinct non-empty value, so at the widest width every item draws. The
+/// same builder runs on the old tree (the generator) and the new one (this test); the host
+/// name is fixed because `full` shows `host`.
 fn fixed_app(preset: &str, glyphs: &str) -> App {
     let mut app = App::new("mock", "s");
     app.set_hostname(Some("testhost".to_string()));
@@ -30,7 +70,62 @@ fn fixed_app(preset: &str, glyphs: &str) -> App {
         Some("opencode-go".to_string()),
         Some("high".to_string()),
     );
-    app.set_git_branch(Some("main".to_string()));
+    // A dirty contributor branch, the repo name and the worktree: `git_branch` draws
+    // `{branch}{dirty}`, `cwd` draws `{repo}`, `worktree` draws its contributor value.
+    publish(&app, "git_branch", "feature/fixture");
+    publish(&app, "git_modified", "2");
+    publish(&app, "git_untracked", "1");
+    publish(&app, "git_root", "fixture-repo");
+    publish(&app, "worktree", "fixture-wt");
+    // The session's usage totals and fee: priced at $3/Mtok in, $15/Mtok out, $0.30/Mtok
+    // cache-read and $1.50/Mtok cache-write, so every `tokens`/`cost` placeholder is filled.
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 3_000_000,
+        output: 15_000_000,
+        cache_read: Some(300_000),
+        cache_write: Some(1_500_000),
+        tiers: Vec::new(),
+    }));
+    app.session.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(19_000),
+        output: Some(760),
+        cache_read: Some(33_000),
+        cache_write: Some(12_000),
+        input_includes_cache: Some(false),
+        ..Default::default()
+    });
+    // The context window and this request's report: 413K of 1M is 41.3%, and auto-compact
+    // is on so `{auto}` draws too.
+    app.session.projection.set_context_window(Some(1_000_000));
+    app.session
+        .projection
+        .set_request_started(Some(BudgetReport {
+            source: UsageSource::Estimated,
+            projected_tokens: 413_000,
+            input_budget_tokens: 1_000_000,
+            request_bytes: 0,
+            baseline_input_tokens: None,
+            estimated_growth_tokens: None,
+        }));
+    app.set_auto_compact(true);
+    // One finished generation on the injected clock: 100 tokens in 2s is 50.0 tok/s, and the
+    // elapsed item shows the finished 2.0s.
+    let base = std::time::Instant::now();
+    app.session.timer.request_started(base);
+    app.session
+        .timer
+        .response_finished(base + std::time::Duration::from_secs(2), Some(100));
+    app.set_now(base + std::time::Duration::from_secs(9));
+    // The current provider's usage snapshot: `deck`'s first row draws it as one line.
+    publish_snapshot(
+        &app,
+        radian_host::UsageSnapshot {
+            provider: "opencode-go".to_string(),
+            title: "Usage".to_string(),
+            windows: vec![window("5h", 98.0, Some("1h0m")), window("7d", 81.0, None)],
+            plan: None,
+        },
+    );
     let warnings = app.apply_footer(&TuiFooterConfig {
         preset: Some(preset.to_string()),
         glyphs: Some(glyphs.to_string()),
@@ -80,17 +175,6 @@ fn the_four_presets_render_byte_identical() {
 /// its no-job golden (no `jobs` row, nothing shown).
 #[test]
 fn full_shows_jobs_while_deck_does_not() {
-    fn start_job(app: &mut App) {
-        let start = std::time::Instant::now();
-        app.set_now(start);
-        app.update(Input::Runtime(RuntimeEvent::BackgroundJobStarted {
-            job_id: "job-1".to_string(),
-            command: "make test".to_string(),
-            output: "available through job_output".to_string(),
-        }));
-        app.set_now(start + std::time::Duration::from_secs(18 * 60));
-    }
-
     let mut full = fixed_app("full", "unicode");
     start_job(&mut full);
     let rendered = screen(&mut full, 100);
@@ -107,6 +191,92 @@ fn full_shows_jobs_while_deck_does_not() {
         golden_for("deck", "unicode", 100),
         "deck with a running job stays byte-identical"
     );
+}
+
+fn start_job(app: &mut App) {
+    let start = std::time::Instant::now();
+    app.set_now(start);
+    app.update(Input::Runtime(RuntimeEvent::BackgroundJobStarted {
+        job_id: "job-1".to_string(),
+        command: "make test".to_string(),
+        output: "available through job_output".to_string(),
+    }));
+    app.set_now(start + std::time::Duration::from_secs(18 * 60));
+}
+
+/// Every item named in each preset file appears in its widest golden (p1 review of 83cb172:
+/// the old fixture left `speed`/`cost` empty, so a `speed`/`cost` swap stayed green). The
+/// marker is the fixture value that proves the item drew; an id with no marker is a hard
+/// failure, so a preset change without fixture coverage fails loudly. `jobs` hides with no
+/// job running, so it is checked against a with-job screen instead.
+#[test]
+fn every_preset_item_appears_in_its_widest_golden() {
+    // (preset, item id, marker): the marker is the fixture value that proves the item drew
+    // in the unicode width-120 golden.
+    let markers: &[(&str, &str, &str)] = &[
+        ("deck", "usage", "Usage (remaining): 5h: 98%"),
+        ("deck", "model", "Mock 5"),
+        ("deck", "cwd", "fixture-repo"),
+        ("deck", "git_branch", "feature/fixture ?3"),
+        ("deck", "worktree", "worktree fixture-wt"),
+        ("deck", "context", "41.3%"),
+        ("deck", "reasoning", "* high"),
+        ("deck", "tokens", "R33K"),
+        ("deck", "cost", "$0.096"),
+        ("full", "brand", "R · @ testhost"),
+        ("full", "host", "@ testhost"),
+        ("full", "model", "Mock 5"),
+        ("full", "reasoning", "* high"),
+        ("full", "cwd", "fixture-repo"),
+        ("full", "git_branch", "feature/fixture ?3"),
+        ("full", "session", "# s"),
+        ("full", "tokens", "↓760"),
+        ("full", "speed", "50.0 tok/s"),
+        ("full", "cost", "$0.096"),
+        ("full", "context", "41.3%/1.0M ~"),
+        ("full", "elapsed", "2.0s"),
+        ("pi", "model", "Mock 5"),
+        ("pi", "cwd", "/tmp/ws"),
+        ("pi", "git_branch", "feature/fixture"),
+        ("pi", "context", "41.3%"),
+        ("pi", "reasoning", "* high"),
+        ("pi", "tokens", "R33K"),
+        ("pi", "cost", "$0.096"),
+    ];
+    for preset in PRESETS {
+        let exported = radian_tui::footer::export_preset(preset).expect("a shipped preset");
+        let text = format!("schema_version = 1\n{exported}");
+        let config = radian_host::config::parse(std::path::Path::new("guard"), &text)
+            .expect("a built-in preset parses");
+        for row in &config.tui.footer.rows {
+            for item in row.left.iter().chain(row.right.iter()) {
+                if item.id == "jobs" {
+                    let mut app = fixed_app(preset, "unicode");
+                    start_job(&mut app);
+                    let rendered = screen(&mut app, 120);
+                    assert!(
+                        rendered.contains("1 job"),
+                        "{preset}: the with-job screen shows the `jobs` item"
+                    );
+                    continue;
+                }
+                let (_, _, marker) = markers
+                    .iter()
+                    .find(|(p, id, _)| *p == preset && *id == item.id)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{preset}: item {:?} has no guard marker — extend the marker table and the fixture",
+                            item.id
+                        )
+                    });
+                assert!(
+                    golden_for(preset, "unicode", 120).contains(marker),
+                    "{preset}: item {:?} (marker {marker:?}) is missing from the widest golden",
+                    item.id
+                );
+            }
+        }
+    }
 }
 
 /// `radian footer export <preset>` prints the preset's TOML exactly (item 3): using the
@@ -172,6 +342,13 @@ fn all_four_built_in_presets_parse() {
             config.skipped.is_empty(),
             "{preset}: no skipped keys: {:?}",
             config.skipped
+        );
+        // The file declares its own preset: `classic`'s two keys are covered too, so a swap
+        // of their values fails here (and in the export round trip below).
+        assert_eq!(
+            config.tui.footer.preset.as_deref(),
+            Some(preset),
+            "{preset}: the file declares its own preset"
         );
         if preset == "classic" {
             assert!(config.tui.footer.rows.is_empty(), "classic carries no rows");
