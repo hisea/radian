@@ -48,10 +48,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     // ADR 0023 U4: the middle of the frame is drawn by the top modal (the approval box
     // replaces the input box), then the find overlay, then the ordinary input box.
-    // `[tui.widgets]` (ADR 0027 C3): one line above and/or below the input box.
-    let above_widgets = crate::footer::widget_line(app, &app.widgets.above_input);
-    let below_widgets = crate::footer::widget_line(app, &app.widgets.below_input);
-    let widget_rows = u16::from(above_widgets.is_some()) + u16::from(below_widgets.is_some());
+    // ADR 0027: the input-adjacent rows live in the footer now (each
+    // `[[tui.footer.rows]]` has a `position`); empty rows take no space.
+    let above_lines = app.footer.above_input_lines(app, area.width as usize);
+    let below_lines = app.footer.below_input_lines(app, area.width as usize);
+    let widget_rows = (above_lines.len() + below_lines.len()) as u16;
     // ADR 0035: the completion menu's visible rows are omp's
     // `max(3, min(10, viewport - used - 2))`, where `used` is the input box, the widgets and
     // the status bar.
@@ -120,19 +121,27 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(status_height),
     ])
     .split(area);
-    // The middle block: the line above the input, the input/modal itself, the line below.
+    // The middle block: the lines above the input, the input/modal itself, the lines below.
     let middle_chunks = Layout::vertical([
-        Constraint::Length(u16::from(above_widgets.is_some())),
+        Constraint::Length(above_lines.len() as u16),
         Constraint::Min(1),
-        Constraint::Length(u16::from(below_widgets.is_some())),
+        Constraint::Length(below_lines.len() as u16),
     ])
     .split(chunks[2]);
     let input_area = middle_chunks[1];
-    if let Some(line) = &above_widgets {
-        frame.render_widget(Paragraph::new(line.clone()), middle_chunks[0]);
+    if !above_lines.is_empty() {
+        let rows =
+            Layout::vertical(vec![Constraint::Length(1); above_lines.len()]).split(middle_chunks[0]);
+        for (line, area) in above_lines.iter().zip(rows.iter()) {
+            frame.render_widget(Paragraph::new(line.clone()), *area);
+        }
     }
-    if let Some(line) = &below_widgets {
-        frame.render_widget(Paragraph::new(line.clone()), middle_chunks[2]);
+    if !below_lines.is_empty() {
+        let rows =
+            Layout::vertical(vec![Constraint::Length(1); below_lines.len()]).split(middle_chunks[2]);
+        for (line, area) in below_lines.iter().zip(rows.iter()) {
+            frame.render_widget(Paragraph::new(line.clone()), *area);
+        }
     }
 
     // Measure first (cached per entry), so the scroll position is clamped against the real

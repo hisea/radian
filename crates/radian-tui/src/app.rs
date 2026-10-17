@@ -553,8 +553,6 @@ pub struct App {
     /// decision 4). The loop publishes a snapshot as the facts change; the command producers read
     /// it, so the draw path never runs a command and the command never blocks a frame.
     pub footer_context: std::sync::Arc<radian_host::FooterContext>,
-    /// `[tui.widgets]`: contributor items on a line above/below the input box (ADR 0027 C3).
-    pub widgets: radian_host::config::TuiWidgetsConfig,
     /// The input composer: text plus a cursor (ADR 0009 Phase 4).
     pub input: Composer,
     pub quit: bool,

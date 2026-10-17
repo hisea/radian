@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 
 use radian_host::SegmentRole;
-use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig};
+use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig, TuiFooterRowConfig, TuiWidgetsConfig};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -323,6 +323,70 @@ struct Row {
     /// The separator's style (ADR 0027): the `footer_separator` role by default,
     /// `[tui.footer] separator_style` can make it a color.
     separator_style: ItemStyle,
+    /// Where the row draws (ADR 0027).
+    position: RowPosition,
+}
+
+/// Where one footer row draws (ADR 0027): the status area, or a line
+/// above/below the input box. The default is the footer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowPosition {
+    /// The status area (the default).
+    #[default]
+    Footer,
+    /// One line above the input box.
+    AboveInput,
+    /// One line below the input box.
+    BelowInput,
+}
+
+impl RowPosition {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "footer" => Some(Self::Footer),
+            "above_input" => Some(Self::AboveInput),
+            "below_input" => Some(Self::BelowInput),
+            _ => None,
+        }
+    }
+}
+
+/// Folds the legacy `[tui.widgets]` block into footer rows (ADR 0027):
+/// one row per non-empty slot, bare ids (a bare id takes `[tui.footer.items.<id>]` exactly like
+/// a row id, so a colour configured there applies here too), positioned above/below the input
+/// with the footer's separator. Returns the one deprecation warning, or `None` when the block
+/// is empty. The block is removed after one version.
+pub fn fold_legacy_widgets(
+    config: &mut TuiFooterConfig,
+    widgets: &TuiWidgetsConfig,
+) -> Option<String> {
+    if widgets.above_input.is_empty() && widgets.below_input.is_empty() {
+        return None;
+    }
+    for (ids, position) in [
+        (&widgets.above_input, "above_input"),
+        (&widgets.below_input, "below_input"),
+    ] {
+        if ids.is_empty() {
+            continue;
+        }
+        config.rows.push(TuiFooterRowConfig {
+            left: ids
+                .iter()
+                .map(|id| TuiFooterItemConfig {
+                    id: id.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            position: Some(position.to_string()),
+            ..Default::default()
+        });
+    }
+    Some(
+        "tui.widgets is deprecated; move its ids into [[tui.footer.rows]] with position = \
+         \"above_input\"|\"below_input\""
+            .to_string(),
+    )
 }
 
 impl Default for Row {
@@ -332,6 +396,7 @@ impl Default for Row {
             right: Vec::new(),
             separator: String::new(),
             separator_style: ItemStyle::Role(Role::FooterSeparator),
+            position: RowPosition::Footer,
         }
     }
 }
@@ -442,23 +507,36 @@ impl Footer {
             config
                 .rows
                 .iter()
-                .map(|row| Row {
-                    left: row
-                        .left
-                        .iter()
-                        .filter_map(|item| {
-                            resolve_item(item, &items, &command_ids, &mut aliased, &mut warnings)
-                        })
-                        .collect(),
-                    right: row
-                        .right
-                        .iter()
-                        .filter_map(|item| {
-                            resolve_item(item, &items, &command_ids, &mut aliased, &mut warnings)
-                        })
-                        .collect(),
-                    separator: row.separator.clone().unwrap_or_else(|| separator.clone()),
-                    separator_style: separator_style.clone(),
+                .map(|row| {
+                    let position = match row.position.as_deref() {
+                        None => RowPosition::Footer,
+                        Some(name) => RowPosition::parse(name).unwrap_or_else(|| {
+                            warnings.push(format!(
+                                "tui.footer.rows: position {name:?} is not one of \
+                                 footer|above_input|below_input; using footer"
+                            ));
+                            RowPosition::Footer
+                        }),
+                    };
+                    Row {
+                        left: row
+                            .left
+                            .iter()
+                            .filter_map(|item| {
+                                resolve_item(item, &items, &command_ids, &mut aliased, &mut warnings)
+                            })
+                            .collect(),
+                        right: row
+                            .right
+                            .iter()
+                            .filter_map(|item| {
+                                resolve_item(item, &items, &command_ids, &mut aliased, &mut warnings)
+                            })
+                            .collect(),
+                        separator: row.separator.clone().unwrap_or_else(|| separator.clone()),
+                        separator_style: separator_style.clone(),
+                        position,
+                    }
                 })
                 .collect()
         };
@@ -484,7 +562,9 @@ impl Footer {
     }
 
     /// The footer's lines at `width`. The `classic` preset is the renderer's (it draws the
-    /// pre-ADR one-line status bar); `pi` builds its rows here.
+    /// pre-ADR one-line status bar); `pi` builds its rows here. Only rows positioned at the
+    /// footer (ADR 0027); the input-adjacent rows draw through
+    /// [`Footer::above_input_lines`] and [`Footer::below_input_lines`].
     pub fn lines(&self, app: &App, width: usize) -> Vec<Line<'static>> {
         let rows: Cow<'_, [Row]> = if self.rows.is_empty() {
             Cow::Owned(preset_rows(self.preset, self.glyphs))
@@ -494,6 +574,7 @@ impl Footer {
         // A row with no data renders empty (the deck's usage row, revision 3): drop it so it
         // never leaves a blank line.
         rows.iter()
+            .filter(|row| row.position == RowPosition::Footer)
             .map(|row| render_row(app, row, width, self.context_line))
             .filter(|line| !line.spans.is_empty())
             .map(|mut line| {
@@ -506,6 +587,31 @@ impl Footer {
                 }
                 line
             })
+            .collect()
+    }
+
+    /// The rows positioned above the input box (ADR 0027), at `width`.
+    /// Empty rows are dropped, so a row with no data takes no space.
+    pub fn above_input_lines(&self, app: &App, width: usize) -> Vec<Line<'static>> {
+        self.position_lines(app, width, RowPosition::AboveInput)
+    }
+
+    /// The rows positioned below the input box (ADR 0027), at `width`.
+    pub fn below_input_lines(&self, app: &App, width: usize) -> Vec<Line<'static>> {
+        self.position_lines(app, width, RowPosition::BelowInput)
+    }
+
+    fn position_lines(
+        &self,
+        app: &App,
+        width: usize,
+        position: RowPosition,
+    ) -> Vec<Line<'static>> {
+        self.rows
+            .iter()
+            .filter(|row| row.position == position)
+            .map(|row| render_row(app, row, width, self.context_line))
+            .filter(|line| !line.spans.is_empty())
             .collect()
     }
 }
@@ -541,6 +647,7 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
         right,
         separator: " │ ".to_string(),
         separator_style: ItemStyle::Role(Role::FooterSeparator),
+        position: RowPosition::Footer,
     };
     match preset {
         Preset::Deck => vec![
@@ -590,6 +697,7 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                 right: Vec::new(),
                 separator: " │ ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
+                position: RowPosition::Footer,
             },
             Row {
                 // The numbers row: tokens (in/out/cache), speed, cost, context (share/window
@@ -607,6 +715,7 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                 right: Vec::new(),
                 separator: " │ ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
+                position: RowPosition::Footer,
             },
         ],
         Preset::Pi => vec![
@@ -620,12 +729,14 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                 right: vec![item("reasoning")],
                 separator: " │ ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
+                position: RowPosition::Footer,
             },
             Row {
                 left: vec![item("tokens"), item("cost")],
                 right: Vec::new(),
                 separator: " │ ".to_string(),
                 separator_style: ItemStyle::Role(Role::FooterSeparator),
+                position: RowPosition::Footer,
             },
         ],
         Preset::Classic => Vec::new(),
@@ -1219,52 +1330,6 @@ fn inline_styles(format: &str) -> Vec<String> {
         rest = &after[close + 1..];
     }
     out
-}
-
-/// One `[tui.widgets]` slot as a line (ADR 0027 C3): the configured item ids in order, joined
-/// by the footer's separator. `None` when none of them has data, so the row takes no space.
-pub fn widget_line(app: &App, ids: &[String]) -> Option<Line<'static>> {
-    let separator = " │ ";
-    let separator_style = ItemStyle::Role(Role::FooterSeparator).resolve(app);
-    let mut pieces: Vec<Piece> = Vec::new();
-    for id in ids {
-        // An id an earlier version used for a provider's usage row works here too: a widget
-        // carries the same item ids a row does (ADR 0027). The
-        // `[tui.widgets]` block's own deprecation warning belongs to slice ③, which folds
-        // widgets into rows; drawing must not regress in the meantime.
-        let id: &str = match radian_host::usage_item_alias(id) {
-            Some(current) => current,
-            None => id,
-        };
-        let item = Item {
-            id: id.to_owned(),
-            icon: None,
-            symbol_style: None,
-            format: None,
-            style: None,
-            priority: components::priority(id),
-            thresholds: components::thresholds(id),
-            params: Vec::new(),
-            disabled: false,
-            unknown: components::builtin(id).is_none(),
-        };
-        if let Some(piece) = render_item(app, &item) {
-            pieces.push(piece);
-        }
-    }
-    if pieces.is_empty() {
-        return None;
-    }
-    let mut spans: Vec<Span> = Vec::new();
-    for (index, piece) in pieces.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(separator.to_string(), separator_style));
-        }
-        for (text, style) in &piece.spans {
-            spans.push(Span::styled(text.clone(), *style));
-        }
-    }
-    Some(Line::from(spans))
 }
 
 #[cfg(test)]

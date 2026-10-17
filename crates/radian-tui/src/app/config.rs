@@ -14,7 +14,6 @@ impl App {
             footer: crate::footer::Footer::default(),
             contributions: radian_host::ContributionStore::new(),
             footer_context: radian_host::FooterContext::new(),
-            widgets: radian_host::config::TuiWidgetsConfig::default(),
             input: Composer::new(),
             quit: false,
             pending: 0,
@@ -236,9 +235,14 @@ impl App {
             self.clipboard = ClipboardMode::Osc52;
             warnings.push("tui.clipboard = \"pbcopy\" is macOS-only; using osc52".into());
         }
-        // `[tui.footer]` (ADR 0027 C2) and `[tui.widgets]` (C3).
-        self.widgets = config.tui.widgets.clone();
-        warnings.extend(self.apply_footer(&config.tui.footer));
+        // `[tui.footer]` (ADR 0027 C2); the legacy `[tui.widgets]` (C3) folds into rows
+        // positioned above/below the input (ADR 0027), with one warning.
+        let mut footer = config.tui.footer.clone();
+        if let Some(warning) = crate::footer::fold_legacy_widgets(&mut footer, &config.tui.widgets)
+        {
+            warnings.push(warning);
+        }
+        warnings.extend(self.apply_footer(&footer));
         warnings.extend(
             config
                 .skipped

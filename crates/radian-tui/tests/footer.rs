@@ -469,35 +469,109 @@ fn a_stale_contribution_draws_with_the_dim_role() {
     );
 }
 
-/// `[tui.widgets]` puts a contributor line above and/or below the input box (ADR 0027 C3).
+/// Rows positioned above/below the input draw around it (ADR 0027),
+/// and an input-adjacent row reads `[tui.footer.items.<id>]` like a footer row does. (`status`
+/// fixes its own text style from the contribution role, so the items-table colour shows on its
+/// symbol; the old `widget_line` path read none of the items table.)
 #[test]
-fn widgets_render_above_and_below_the_input() {
+fn rows_draw_above_and_below_the_input_with_items_config() {
+    use radian_host::config::TuiFooterRowConfig;
+    let mut config = items(&[(
+        "status",
+        TuiFooterItemConfig {
+            id: "status".to_string(),
+            icon: Some("● ".to_string()),
+            symbol_style: Some("red".to_string()),
+            ..Default::default()
+        },
+    )]);
+    config.rows = vec![
+        TuiFooterRowConfig {
+            left: vec![item("status")],
+            position: Some("above_input".to_string()),
+            ..Default::default()
+        },
+        TuiFooterRowConfig {
+            left: vec![item("status")],
+            position: Some("below_input".to_string()),
+            ..Default::default()
+        },
+    ];
     let mut app = App::new("mock", "s");
-    app.widgets = radian_host::config::TuiWidgetsConfig {
-        above_input: vec!["status".to_string()],
-        below_input: Vec::new(),
-    };
-    publish(&app, "status.thing", "ABOVE-WIDGET");
+    let warnings = app.apply_footer(&config);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    publish(&app, "status.thing", "EDGE-WIDGET");
     let terminal = render(&mut app, 80, 14);
     let text = screen(&terminal);
-    let above = text.find("ABOVE-WIDGET").expect("the above widget");
+    let above = text.find("EDGE-WIDGET").expect("the above row");
     let input = text.find("(type a message").expect("the input hint");
     assert!(
         above < input,
-        "the above widget precedes the input:\n{text}"
+        "the above row precedes the input:\n{text}"
     );
+    let below = text.rfind("EDGE-WIDGET").expect("the below row");
+    assert!(below > input, "the below row follows the input:\n{text}");
+    // The above row takes the items-table symbol colour (rev14 slice ③ acceptance).
+    let height = 14;
+    let mut coloured = false;
+    for y in 0..height {
+        if row(&terminal, y).contains("EDGE-WIDGET")
+            && fg_at(&terminal, y, "●") == Some(Color::Red)
+        {
+            coloured = true;
+        }
+    }
+    assert!(coloured, "the above/below row uses items.status red:\n{text}");
+}
 
+/// The old `[tui.widgets]` block still works for one version: one warning, and its ids draw
+/// above/below the input as rows (ADR 0027).
+#[test]
+fn legacy_widgets_convert_to_positioned_rows_with_one_warning() {
+    let parsed = radian_host::config::parse(
+        std::path::Path::new("/tmp/config.toml"),
+        "schema_version = 1\n[tui.widgets]\nabove_input = [\"status\"]\nbelow_input = [\"status\"]\n",
+    )
+    .unwrap();
     let mut app = App::new("mock", "s");
-    app.widgets = radian_host::config::TuiWidgetsConfig {
-        above_input: Vec::new(),
-        below_input: vec!["status".to_string()],
-    };
-    publish(&app, "status.thing", "BELOW-WIDGET");
+    let warnings = app.apply_config(&parsed, false).unwrap();
+    assert_eq!(
+        warnings.iter().filter(|w| w.contains("tui.widgets")).count(),
+        1,
+        "exactly one widgets warning: {warnings:?}"
+    );
+    publish(&app, "status.thing", "LEGACY-WIDGET");
     let terminal = render(&mut app, 80, 14);
     let text = screen(&terminal);
+    let above = text.find("LEGACY-WIDGET").expect("the converted above row");
     let input = text.find("(type a message").expect("the input hint");
-    let below = text.find("BELOW-WIDGET").expect("the below widget");
-    assert!(input < below, "the below widget follows the input:\n{text}");
+    assert!(above < input, "the converted row precedes the input:\n{text}");
+    let below = text.rfind("LEGACY-WIDGET").expect("the converted below row");
+    assert!(below > input, "the converted row follows the input:\n{text}");
+}
+
+/// A bad row position warns and falls back to the footer (never a refusal).
+#[test]
+fn a_bad_row_position_warns_and_falls_back_to_the_footer() {
+    use radian_host::config::TuiFooterRowConfig;
+    let config = TuiFooterConfig {
+        rows: vec![TuiFooterRowConfig {
+            left: vec![item("session")],
+            position: Some("sideways".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut app = App::new("mock", "s");
+    let warnings = app.apply_footer(&config);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("position"), "{warnings:?}");
+    let terminal = render(&mut app, 80, 12);
+    assert!(
+        row(&terminal, 11).contains('s'),
+        "the row draws in the footer:\n{}",
+        screen(&terminal)
+    );
 }
 
 /// The `brand` and `host` items (ADR 0027): the `㎭` wordmark (or `rad` under the
