@@ -255,7 +255,8 @@ find_next = ["ctrl-g", "shift-enter"]
   default to on; `false` hides them.
 - `footer` (ADR 0027 C2, revision 3): the status area's rows. `preset` is `deck` (the default,
   three rows: the current provider's `usage` line — dropped when it has no snapshot — then
-  `model`/`cwd`/`git_branch`/`worktree` with `context_bar`/`reasoning` on the right, then
+  `model`/`cwd`/`git_branch`/`worktree` with `context` (`{bar} {percent}%`)/
+  `reasoning` on the right, then
   `tokens`/`cost`/`context` on the right), `full` (revision 1's two rows), `pi` (the earlier two
   rows) or `classic` (today's one line, byte-for-byte). `separator` joins items (default
   `" │ "`, any string), each row may override it, and `separator_style` styles it (default the
@@ -269,7 +270,9 @@ find_next = ["ctrl-g", "shift-enter"]
   included - so the footer inherits the terminal's own background.
   `[tui.footer.items.<id>]` gives one item its `symbol`/`style`/`symbol_style`/`format`/
   `disabled`; a bare id in a row takes it, an inline table wins. Each `[[tui.footer.rows]]` has
-  a `left` and a `right` group; an item is a bare id or a table with `item`, `icon`/`symbol`,
+  a `left` and a `right` group and a `position` (`footer` the default, `above_input` or
+  `below_input` to draw the row around the input box instead of in the status area); an item is
+  a bare id or a table with `item`, `icon`/`symbol`,
   `format`, `style`, `symbol_style`, `priority`, `thresholds = [{ at = 70, style = "warn" }, …]`
   and the item's own parameters. A `style` (or `[text](style)` inline) is a theme role
   (`accent`, `muted`, `footer_separator`, pi's `dim`/`warn`/`error`/`ok`/`text`) or a
@@ -309,8 +312,7 @@ find_next = ["ctrl-g", "shift-enter"]
 | `cwd` | `{path}`, `{path_home}`, `{basename}`, `{repo}`, `{worktree}` | `{path_home}` (`$HOME` → `~`); `{repo}` falls back to the directory name, `{worktree}` is the contributor's current worktree |
 | `git_branch` | `{branch}`, `{dirty}`, `{modified}`, `{untracked}` | `{branch}`; `{dirty}` is ` ?<total>` while the tree has changes (contributor) |
 | `session` | `{id}` | the session id |
-| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{auto}` is `~` (`auto` under ascii) while auto-compaction is on |
-| `context_bar` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{bar} {percent}%`, `width` 10, `fill` `━`, `empty` `─` |
+| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{bar}` is the `width` 10 (`fill` `━`, `empty` `─`) bar, all three overridable per item; `{auto}` is `~` (`auto` under ascii) while auto-compaction is on. The old `context_bar` id is an alias of `context` for one version (one warning) |
 | `tokens` | `{in}`, `{out}`, `{cache}`, `{cache_write}` | `^{in} v{out} R{cache}`; compact K/M, `-` when a provider never reported one. `{cache_write}` (ADR 0027) is a cache **write**, billed at its own rate but deliberately **not** in the default format, so the row does not grow |
 | `cost` | `{usd}` | the session's accumulated fee: each call priced at the route's price **when it arrived** (`radian_host::cost`), so a `/model` switch does not re-price history. The cached tokens are billed once at the cache rate (`uncached_input()`). Hidden until some call had something to bill and when the catalog has no price — never a fabricated number, never `$0.00` |
 | `speed` | `{speed}` | `42.1 tok/s`, the last finished generation's reported output over its measured time |
@@ -325,8 +327,9 @@ find_next = ["ctrl-g", "shift-enter"]
 | `command` item (`[tui.footer.items.<id>] command = "…"`) | `{value}` | the command's first stdout line; JSON `{"text","style","symbol"}` sets the role and symbol (ADR 0027) |
 
 `worktree`/`status` 来自贡献者存储（ADR 0027 C3）：一个 `git` 贡献者每 5 s 在后台刷新
-`git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。`[tui.widgets]`
-的 `above_input`/`below_input` 把同样的条目 id 放到输入框上/下一行。
+`git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。每行有一个
+`position`（`footer` 默认、或 `above_input`/`below_input` 把它放到输入框上/下一行）。
+旧的 `[tui.widgets]` 块按原语义折成带 `position` 的行，警告一次，保留一个版本。
 
 #### Glyph coverage (ADR 0027 and 6)
 

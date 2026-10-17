@@ -234,7 +234,7 @@ pub(crate) struct Item {
     pub(crate) style: Option<ItemStyle>,
     pub(crate) priority: i64,
     pub(crate) thresholds: Vec<(i64, ItemStyle)>,
-    /// The component's own parameters (`context_bar`'s `width`/`fill`/`empty`, `status`'s
+    /// The component's own parameters (`context`'s `width`/`fill`/`empty`, `status`'s
     /// `keys`), read by its `data`.
     pub(crate) params: Vec<(String, String)>,
     /// `disabled = true` in `[tui.footer.items.<id>]` hides the item everywhere.
@@ -655,7 +655,10 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
             // snapshot the item is empty and `lines` drops the whole row, so it never leaves a
             // blank line.
             row(vec![item("usage")], Vec::new()),
-            // Row 2: identity, with the context bar and reasoning on the right.
+            // Row 2: identity, with the context bar and reasoning on the right. The bar is
+            // the `context` component's `{bar}` (ADR 0027 merged
+            // `context_bar` into it); the empty icon keeps the nerd/ascii sets symbol-free,
+            // exactly as the old id drew.
             row(
                 vec![
                     item("model"),
@@ -663,7 +666,10 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     with_format("git_branch", "{branch}{dirty}"),
                     item("worktree"),
                 ],
-                vec![item("context_bar"), item("reasoning")],
+                vec![
+                    no_symbol("context", "{bar} {percent}%"),
+                    item("reasoning"),
+                ],
             ),
             // Row 3: the numbers, right-aligned, single spaces (revision 3's sample
             // `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M`).
@@ -724,7 +730,7 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
                     item("model"),
                     item("cwd"),
                     item("git_branch"),
-                    item("context_bar"),
+                    no_symbol("context", "{bar} {percent}%"),
                 ],
                 right: vec![item("reasoning")],
                 separator: " │ ".to_string(),
@@ -743,14 +749,28 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
     }
 }
 
-/// The current id a configured item id means (ADR 0027): `radian_host`
-/// knows which ids an earlier version used for a provider's usage row, and such an id stays an
-/// alias of `usage` for one version. The warning names the new id, once per old id.
+/// The current id a configured item id means. Two earlier-version ids keep working for one
+/// version, each with one warning naming the new id:
+/// - ADR 0027: `radian_host` knows which ids an earlier version used
+///   for a provider's usage row; such an id stays an alias of `usage`.
+/// - ADR 0027: `context_bar` merged into `context`, `{bar}` its
+///   placeholder.
 fn canonical_id(
     id: &str,
     warned: &mut std::collections::BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) -> String {
+    // ADR 0027: the old `context_bar` id is the `context` component.
+    if id == "context_bar" {
+        if warned.insert(id.to_owned()) {
+            warnings.push(
+                "tui.footer: item \"context_bar\" is the old id for \"context\"; the old id \
+                 works for one version"
+                    .to_string(),
+            );
+        }
+        return "context".to_owned();
+    }
     let Some(current) = radian_host::usage_item_alias(id) else {
         return id.to_owned();
     };
@@ -1514,7 +1534,6 @@ mod tests {
             "status",
             "session",
             "context",
-            "context_bar",
             "usage",
             "tokens",
             "speed",
@@ -1554,13 +1573,15 @@ mod tests {
     /// from `631c8dd` exactly. The refactor dropped the `item_priority` overrides of `brand`,
     /// `model` and `host`, so they silently fell back to the generic 50; this pins **every**
     /// built-in id's default priority, so a missing override fails here instead of only changing a
-    /// narrow-terminal truncation order.
+    /// narrow-terminal truncation order. Slice ③ merged `context_bar` into `context` (decision 6),
+    /// so the table has one row fewer than `631c8dd`'s.
     #[test]
     fn the_registry_matches_the_pre_refactor_priority_table() {
         // The `631c8dd` `item_priority` table, plus `usage` (ADR 0027):
         // it replaces the usage contribution id, which the table never named and which
-        // therefore kept the generic 50.
-        let expected: [(&str, i64); 20] = [
+        // therefore kept the generic 50. Minus `context_bar` (decision 6 merged it into
+        // `context`, keeping its 85).
+        let expected: [(&str, i64); 19] = [
             ("brand", 92),
             ("host", 78),
             ("model", 90),
@@ -1572,7 +1593,6 @@ mod tests {
             ("status", 45),
             ("session", 65),
             ("context", 85),
-            ("context_bar", 85),
             ("usage", 50),
             ("tokens", 50),
             ("speed", 55),
@@ -1595,12 +1615,13 @@ mod tests {
     }
 
     /// ADR 0027: the registry's `placeholders` must match the `631c8dd`
-    /// `item_placeholders` table, id for id.
+    /// `item_placeholders` table, id for id. Slice ③ merged `context_bar` into `context`
+    /// (decision 6): `context` keeps the shared five placeholders, the old row is gone.
     #[test]
     fn the_registry_matches_the_pre_refactor_placeholder_table() {
         // Plus `usage` (ADR 0027), whose one placeholder is the whole
         // line, like a `command` item's `{value}`.
-        let expected: [(&str, &[&str]); 20] = [
+        let expected: [(&str, &[&str]); 19] = [
             ("brand", &["brand"]),
             ("host", &["host"]),
             ("model", &["display_name", "id", "provider"]),
@@ -1615,7 +1636,6 @@ mod tests {
             ("status", &["status"]),
             ("session", &["id"]),
             ("context", &["bar", "percent", "used", "budget", "auto"]),
-            ("context_bar", &["bar", "percent", "used", "budget", "auto"]),
             ("usage", &["value"]),
             ("tokens", &["in", "out", "cache", "cache_write"]),
             ("speed", &["speed"]),
@@ -1646,7 +1666,7 @@ mod tests {
     #[test]
     fn the_registry_matches_the_pre_refactor_role_table() {
         let app = app_with_glyphs("nerd");
-        let expected: [(&str, Option<Role>); 20] = [
+        let expected: [(&str, Option<Role>); 19] = [
             ("brand", Some(Role::Text)),
             ("host", Some(Role::NoticeBody)),
             ("model", Some(Role::Model)),
@@ -1658,7 +1678,6 @@ mod tests {
             ("status", None),
             ("session", None),
             ("context", Some(Role::Budget)),
-            ("context_bar", Some(Role::Budget)),
             // The snapshot's style is the data's own (fresh `text`, stale `dim`), like a
             // contribution's role before the refactor.
             ("usage", None),
@@ -1677,7 +1696,9 @@ mod tests {
     }
 
     /// ADR 0027: the registry's default thresholds must match the `631c8dd`
-    /// `default_thresholds` table (`context`/`context_bar`/`cost` at 70/90; every other id empty).
+    /// `default_thresholds` table (`context`/`cost` at 70/90; every other id empty). Slice ③
+    /// merged `context_bar` into `context`, so its row is gone; the pair it shared survives on
+    /// `context`.
     #[test]
     fn the_registry_matches_the_pre_refactor_threshold_table() {
         let numeric = vec![
@@ -1685,7 +1706,7 @@ mod tests {
             (90, ItemStyle::Role(Role::ToolResultError)),
         ];
         for id in components::ids() {
-            let expected = if matches!(id, "context" | "context_bar" | "cost") {
+            let expected = if matches!(id, "context" | "cost") {
                 numeric.clone()
             } else {
                 Vec::new()
@@ -1695,12 +1716,12 @@ mod tests {
     }
 
     /// ADR 0027: the registry's default glyph in the three selectable sets
-    /// must match the `631c8dd` `glyph` table (`emoji`, index 3, is not selectable until slice ③
-    /// and stays empty). The refactor gave `context_bar` the `context` icons; the old table had no
-    /// `context_bar` row, so its default icon was empty in every set.
+    /// must match the `631c8dd` `glyph` table (`emoji`, index 3, is not selectable until slice
+    /// ③'s item 3 and stays empty; item 2 only removes `context_bar`, merged into `context` by
+    /// decision 6, whose row had an empty icon in every set).
     #[test]
     fn the_registry_matches_the_pre_refactor_glyph_table() {
-        let expected: [(&str, [&str; 3]); 20] = [
+        let expected: [(&str, [&str; 3]); 19] = [
             ("brand", ["", "", ""]),
             ("host", ["@ ", "\u{f109} ", "host "]),
             ("model", ["", "", ""]),
@@ -1712,7 +1733,6 @@ mod tests {
             ("status", ["", "", ""]),
             ("session", ["# ", "", "# "]),
             ("context", ["", "\u{f035b} ", "["]),
-            ("context_bar", ["", "", ""]),
             ("usage", ["", "", ""]),
             ("tokens", ["", "", ""]),
             ("speed", ["\u{bb} ", "\u{f0e7} ", "spd "]),

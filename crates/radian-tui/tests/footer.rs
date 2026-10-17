@@ -178,8 +178,13 @@ fn the_context_thresholds_change_the_style() {
     for (tokens, expected_role) in [(750u64, "warn"), (950, "error")] {
         let mut app = App::new("mock", "s");
         // The default `full` preset uses the text `context`; this test is about the bar, so
-        // it asks for `context_bar` explicitly.
-        app.apply_footer(&rows(vec![item("context_bar")]));
+        // it asks for `{bar}` explicitly.
+        let warnings = app.apply_footer(&rows(vec![TuiFooterItemConfig {
+            id: "context".to_string(),
+            format: Some("{bar}".to_string()),
+            ..Default::default()
+        }]));
+        assert!(warnings.is_empty(), "{warnings:?}");
         app.session.projection.set_context_window(Some(1000));
         app.session
             .projection
@@ -202,8 +207,9 @@ fn the_context_thresholds_change_the_style() {
     }
 }
 
-/// `context_bar`'s own parameters: `width` cells, `fill` for the used part, `empty` for the
-/// rest.
+/// `context`'s `{bar}` placeholder (ADR 0027 merged `context_bar`
+/// into it): `width` cells, `fill` for the used part, `empty` for the rest. The old
+/// `context_bar` id keeps working with exactly one warning.
 #[test]
 fn the_context_bar_takes_width_fill_and_empty() {
     let config = TuiFooterConfig {
@@ -223,7 +229,12 @@ fn the_context_bar_takes_width_fill_and_empty() {
         ..Default::default()
     };
     let mut app = App::new("mock", "s");
-    app.apply_footer(&config);
+    let warnings = app.apply_footer(&config);
+    assert_eq!(
+        warnings.iter().filter(|w| w.contains("context_bar")).count(),
+        1,
+        "the old id warns exactly once: {warnings:?}"
+    );
     app.session.projection.set_context_window(Some(1000));
     app.session
         .projection

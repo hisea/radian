@@ -17,7 +17,6 @@ use super::{Glyphs, Item, ItemStyle};
 
 mod brand;
 mod context;
-mod context_bar;
 mod cost;
 mod cwd;
 mod elapsed;
@@ -106,7 +105,7 @@ pub(crate) trait Component: Sync {
         Vec::new()
     }
     /// The item's data at draw time, or `None` when it has nothing (the item hides; v5 §5: never
-    /// a fabricated number). `item` carries the configured per-item parameters (`context_bar`'s
+    /// a fabricated number). `item` carries the configured per-item parameters (`context`'s
     /// `width`/`fill`/`empty`, `status`'s `keys`).
     fn data(&self, app: &App, item: &Item) -> Option<ItemData>;
 }
@@ -124,7 +123,6 @@ static COMPONENTS: &[&'static dyn Component] = &[
     &status::Status,
     &session::Session,
     &context::Context,
-    &context_bar::ContextBar,
     &usage::Usage,
     &tokens::Tokens,
     &speed::Speed,
