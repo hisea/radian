@@ -39,18 +39,32 @@ pub struct Case {
     pub expect: Expect,
     pub sandbox: Outcome,
     pub control: Outcome,
+    /// `Some(reason)` when this machine cannot exercise the case at all, so a sandbox
+    /// "failure" would prove nothing: the case renders as `SKIP` and never counts as a
+    /// failure. The `TIOCSTI` case is the one user today (the kernel can refuse the ioctl for
+    /// the control too).
+    pub skip: Option<String>,
     pub note: String,
 }
 
 impl Case {
     /// A case passes only when the sandbox behaved as expected **and** the control confirms
     /// the command itself is sound: an escape must succeed without the sandbox; ordinary use
-    /// must succeed both ways.
+    /// must succeed both ways. A skipped case ([`Self::skip`]) never fails the matrix: there
+    /// is no working control, so it is reported as `SKIP`, not as a pass and not as a failure.
     pub fn passed(&self) -> bool {
+        if self.skip.is_some() {
+            return true;
+        }
         match self.expect {
             Expect::MustFail => !self.sandbox.succeeded && self.control.succeeded,
             Expect::MustSucceed => self.sandbox.succeeded && self.control.succeeded,
         }
+    }
+
+    /// Whether this case was skipped for this machine (see [`Self::skip`]).
+    pub fn skipped(&self) -> bool {
+        self.skip.is_some()
     }
 }
 
@@ -85,6 +99,8 @@ impl Matrix {
                 "control_succeeded": c.control.succeeded,
                 "control_detail": c.control.detail,
                 "passed": c.passed(),
+                "skipped": c.skipped(),
+                "skip": c.skip,
                 "note": c.note,
             })).collect::<Vec<_>>(),
             "orphans": self.orphans,
@@ -108,13 +124,29 @@ impl Matrix {
                 },
                 if c.sandbox.succeeded { "ok" } else { "denied" },
                 if c.control.succeeded { "ok" } else { "denied" },
-                if c.passed() { "PASS" } else { "FAIL" },
+                if c.skipped() {
+                    "SKIP"
+                } else if c.passed() {
+                    "PASS"
+                } else {
+                    "FAIL"
+                },
+            ));
+        }
+        let skipped: Vec<&Case> = self.cases.iter().filter(|c| c.skipped()).collect();
+        for c in &skipped {
+            out.push_str(&format!(
+                "skipped: {} / {}: {}\n",
+                c.group,
+                c.name,
+                c.skip.as_deref().unwrap_or("")
             ));
         }
         out.push_str(&format!(
-            "\n{} cases, {} failed\n\norphan check:\n{}\n",
+            "\n{} cases, {} failed, {} skipped\n\norphan check:\n{}\n",
             self.cases.len(),
             self.failures().len(),
+            skipped.len(),
             self.orphans
         ));
         out
@@ -279,6 +311,7 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
 }
 
 impl Rig {
+    /// Records a case and returns it, so a caller can mark it skipped (see [`Case::skip`]).
     fn record(
         &mut self,
         group: &'static str,
@@ -287,15 +320,17 @@ impl Rig {
         sandbox: Outcome,
         control: Outcome,
         note: &str,
-    ) {
+    ) -> &mut Case {
         self.cases.push(Case {
             group,
             name: name.to_string(),
             expect,
             sandbox,
             control,
+            skip: None,
             note: note.to_string(),
         });
+        self.cases.last_mut().expect("just recorded")
     }
 
     fn sh_case(
@@ -525,28 +560,37 @@ impl Rig {
             "python3 -c 'import os,fcntl,termios,sys; os.setsid(); fd=os.open(sys.argv[1], os.O_RDWR|os.O_NOCTTY); fcntl.ioctl(fd, termios.TIOCSCTTY, 0); fcntl.ioctl(fd, termios.TIOCSTI, b\"X\")' {slave}"
         );
         let (ct_exit, ct_bytes) = run_shell_with_pty(control, &with_ctty, &pty);
-        self.record(
+        let sandbox_succeeded = !sb_bytes.is_empty();
+        let control_succeeded = !ct_bytes.is_empty();
+        let sandbox_outcome = Outcome {
+            succeeded: sandbox_succeeded,
+            detail: format!(
+                "master_bytes={} injector={}",
+                sb_bytes.len(),
+                sb_exit.detail
+            ),
+        };
+        let control_outcome = Outcome {
+            succeeded: control_succeeded,
+            detail: format!(
+                "master_bytes={} injector={}",
+                ct_bytes.len(),
+                ct_exit.detail
+            ),
+        };
+        let note = "the sandbox cannot inject into an outside terminal; the control (same slave \
+                    as its controlling terminal) can";
+        let case = self.record(
             "devices",
             "tiocsti_outside_terminal",
             Expect::MustFail,
-            Outcome {
-                succeeded: !sb_bytes.is_empty(),
-                detail: format!(
-                    "master_bytes={} injector={}",
-                    sb_bytes.len(),
-                    sb_exit.detail
-                ),
-            },
-            Outcome {
-                succeeded: !ct_bytes.is_empty(),
-                detail: format!(
-                    "master_bytes={} injector={}",
-                    ct_bytes.len(),
-                    ct_exit.detail
-                ),
-            },
-            "the sandbox cannot inject into an outside terminal; the control (same slave as its controlling terminal) can",
+            sandbox_outcome,
+            control_outcome,
+            note,
         );
+        // No working control means the case proves nothing on this machine (the kernel refuses
+        // `TIOCSTI` for the control too); it is reported as skipped, never failed.
+        case.skip = tiocsti_skip_reason(control_succeeded);
     }
 
     fn environment(&mut self, sandbox: &Sandbox, control: &Sandbox, name: &str, value: &str) {
@@ -915,6 +959,33 @@ impl Rig {
 }
 
 // ---------- running ----------
+
+/// Whether the `TIOCSTI` case can prove anything on this machine. The judge is the pty master:
+/// with a working control, a sandbox that manages to inject is a real failure. When the
+/// **control** is denied too, no byte ever reaches the master, so a sandbox "failure" would be
+/// meaningless — the kernel itself refuses the ioctl. Since Linux 6.2 `TIOCSTI` is off unless
+/// `dev.tty.legacy_tiocsti` is 1 (the new-kernel default is 0), and it refuses the ioctl for
+/// every process, the control included. `Some(reason)` marks the case skipped so
+/// [`Matrix::failures`] does not count it; `None` keeps it a real PASS/FAIL.
+#[cfg(unix)]
+fn tiocsti_skip_reason(control_succeeded: bool) -> Option<String> {
+    (!control_succeeded).then(|| {
+        format!(
+            "the control could not TIOCSTI either, so the case proves nothing: the kernel \
+             refuses TIOCSTI for every process (dev.tty.legacy_tiocsti = {})",
+            legacy_tiocsti()
+        )
+    })
+}
+
+/// The kernel's `dev.tty.legacy_tiocsti` knob. The file exists only on Linux; elsewhere (macOS)
+/// the reason string says so.
+#[cfg(unix)]
+fn legacy_tiocsti() -> String {
+    std::fs::read_to_string("/proc/sys/dev/tty/legacy_tiocsti")
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_else(|_| "unavailable (not Linux)".to_owned())
+}
 
 fn run_shell(sandbox: &Sandbox, script: &str) -> Outcome {
     let command = match sandbox.command("/bin/sh", ["-c", script]) {
@@ -1396,4 +1467,74 @@ pub fn startup_overhead(n: usize) -> Result<Overhead, SandboxError> {
     }
     let _ = std::fs::remove_dir_all(&root);
     Ok(Overhead { bare, sandboxed })
+}
+
+/// The verdict logic behind the `TIOCSTI` case's skip, checked without a pty or a kernel:
+/// `tiocsti_skip_reason` is only ever fed the control's result, so a faked control exercises
+/// exactly the branch the real case takes on this machine.
+#[cfg(all(test, unix))]
+mod tiocsti_verdict_tests {
+    use super::*;
+
+    fn outcome(succeeded: bool) -> Outcome {
+        Outcome {
+            succeeded,
+            detail: String::new(),
+        }
+    }
+
+    /// A `TIOCSTI` case is only skipped when the control could not inject; the skip reason
+    /// always comes from the control's result.
+    fn case(sandbox_injected: bool, control_injected: bool) -> Case {
+        Case {
+            group: "devices",
+            name: "tiocsti_outside_terminal".to_owned(),
+            expect: Expect::MustFail,
+            sandbox: outcome(sandbox_injected),
+            control: outcome(control_injected),
+            skip: tiocsti_skip_reason(control_injected),
+            note: String::new(),
+        }
+    }
+
+    /// A skip never softens a case that could prove something: as long as the control injects,
+    /// a sandbox that injects too is a real FAIL.
+    #[test]
+    fn a_case_with_a_working_control_still_fails_when_the_sandbox_injects() {
+        let case = case(true, true);
+        assert!(
+            case.skip.is_none(),
+            "a working control must not skip the case"
+        );
+        assert!(
+            !case.passed(),
+            "an escape with a working control must fail the matrix"
+        );
+    }
+
+    /// The ordinary PASS: the control injects, the sandbox is denied.
+    #[test]
+    fn a_case_with_a_working_control_passes_when_the_sandbox_is_denied() {
+        assert!(case(false, true).passed());
+    }
+
+    /// When the kernel refuses TIOCSTI for the control too, the case proves nothing: it is
+    /// skipped, the reason names the kernel knob, and it is never counted as a failure.
+    #[test]
+    fn a_case_whose_control_is_denied_is_skipped_not_failed() {
+        let case = case(false, false);
+        assert!(
+            case.skipped(),
+            "a control that cannot inject must skip the case"
+        );
+        assert!(case.passed(), "a skipped case must not fail the matrix");
+        assert!(
+            case.skip
+                .as_deref()
+                .unwrap_or("")
+                .contains("legacy_tiocsti"),
+            "the skip reason names the kernel knob: {:?}",
+            case.skip
+        );
+    }
 }
