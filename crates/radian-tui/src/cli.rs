@@ -809,13 +809,6 @@ fn resume_extra_args(cli: &Cli, workspace: &Path) -> Vec<String> {
     parts
 }
 
-/// Test hook (`--block-input`): a path whose creation marks "the read is now blocked forever".
-/// Set once in `run`; `read_input` writes it and parks.
-/// Test hook (`--panic-in-driver`): the driver task panics, so the exit path can be checked.
-fn panic_in_driver() {
-    panic!("radian: driver task panic test");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,7 +5,14 @@
 
 use super::*;
 
+/// Test hook (`--block-input`): a path whose creation marks "the read is now blocked forever".
+/// Set once in `run`; `read_input` writes it and parks.
 pub(super) static BLOCK_INPUT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Test hook (`--panic-in-driver`): the driver task panics, so the exit path can be checked.
+pub(super) fn panic_in_driver() {
+    panic!("radian: driver task panic test");
+}
 
 /// The `--exit-trace` file (test hook). One `OnceLock` so every call site reads the same
 /// path; unset in production, where [`exit_trace`] is a no-op.

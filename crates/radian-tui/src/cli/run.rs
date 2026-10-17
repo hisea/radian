@@ -4,6 +4,7 @@
 //! resume line.
 
 use super::herdr::herdr_reporter;
+use super::tty::panic_in_driver;
 use super::session::{
     JournalAudit, SessionHost, coding_root, list_sessions, prepare_picker, session_dir,
 };
