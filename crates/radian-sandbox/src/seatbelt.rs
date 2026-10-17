@@ -196,7 +196,23 @@ pub(crate) fn profile_text(policy: &SandboxPolicy) -> String {
         // Git metadata carve-outs (a deeper deny over the workspace allow, so SBPL's
         // last-match rule makes them win). `ReadOnly` keeps the whole `.git` (or worktree
         // pointer file) read-only; `WritableExceptExec` (ADR 0038) opens it except for the
-        // entries git can execute.
+        // entries git can execute. A linked worktree's per-worktree git dir and its shared
+        // common dir usually live **outside** the workspace (ADR 0043 decision 1), so under
+        // `WritableExceptExec` every discovered git **directory** first gets its own allow:
+        // without it native `git commit` cannot write the index, refs or object store.
+        if policy.git_access == GitAccess::WritableExceptExec {
+            for path in &policy.read_only {
+                if path.is_dir() {
+                    profile.push_str(&format!(
+                        "(allow file-write* (subpath {}))\n",
+                        sbpl_string(&path.to_string_lossy())
+                    ));
+                }
+            }
+        }
+        // Every deny follows every allow: the per-worktree git dir sits **under** the common
+        // dir, so the common dir's `worktrees/<name>/...` deny must come after the allow of the
+        // nested git dir, and no allow may come after a deny (SBPL's last match would win).
         for path in &policy.read_only {
             match policy.git_access {
                 GitAccess::ReadOnly => {

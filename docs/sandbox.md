@@ -185,6 +185,15 @@ Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就�
 gitdir 与共享 common dir，三者经同一函数处理——在整块可写之下追加；发现到的是**文件**（worktree 的
 `.git` 指针）时则整块拒写）：
 
+**linked worktree：git 目录可能在工作区之外**（ADR 0043 决定 1：工作区本身就是 worktree、host 仓库
+在别处，于是 per-worktree gitdir 与 common dir 都在 workspace 的 `subpath` allow 之外，ADR 0038 决定 4
+的原文在这里原本落不了地）。`WritableExceptExec` 因此对**每个发现到的 git 目录**先发一条
+`(allow file-write* (subpath <dir>))`，**再**发下面这批 deny：所有 allow 都在所有 deny 之前，因为
+per-worktree gitdir 就嵌在 common dir 之下——若某条 allow 跟在 deny 之后，common dir 的
+`worktrees/<name>/{gitdir,config.worktree}` deny 会被嵌套目录的 allow 反压。allow 只覆盖发现到的
+这两个目录本身，**绝不**放宽到 common dir 的父目录（host 仓库的工作树在工作区外，照旧只读）。
+`ReadOnly` 不发任何 allow（整块只读不变）：
+
 - `(deny file-write* (literal <git>/config))`
 - `(deny file-write* (literal <git>/config.worktree))`
 - `(deny file-write* (subpath <git>/hooks))`（`subpath` 让整个目录及其下、以及尚不存在的 `hooks/` 都拒）
@@ -215,9 +224,19 @@ gitdir 与共享 common dir，三者经同一函数处理——在整块可写�
 `seatbelt::tests::writable_except_exec_carves_out_only_the_exec_entries` 与
 `a_worktree_pointer_file_keeps_the_full_deny` 钉住。
 
+**工作区之外的 linked worktree**（ADR 0043 切片 ⓪B）：同文件另有一个 scratch——workspace **就是**
+一个 linked worktree，host 仓库（及其 common dir）在它之外——
+`linked_worktree_outside_the_workspace_allows_native_git`（`git merge --ff-only`、原生 `git commit`、
+`git branch` 成功；同一脚本在 `ReadOnly` 下拒绝）与
+`linked_worktree_outside_the_workspace_denies_exec_and_non_git_paths`（common dir 的 `config`、`hooks/`，
+`worktrees/<name>/{gitdir,config.worktree}`、worktree 的 `.git` 指针文件，以及 **host 仓库工作树里的
+文件**全被拒）。
+
 **未验证 / Linux**：ADR 0038 切片①**只在 macOS 上实施**。Linux（bwrap）无论 `git_access` 取何值都
 保持今天的整块 `--ro-bind` 只读（`bwrap.rs` 里带注释）；任何"Linux 也只留执行入口只读"的说法都要等
-VM 恢复、`sandbox-escape` 矩阵在 VM 上重跑之后才算数。当前状态：**Linux pending，未改、未验证**。
+VM 恢复、`sandbox-escape` 矩阵在 VM 上重跑之后才算数。**linked worktree（ADR 0043 切片 ⓪B）在 Linux 上
+也照旧只读**：per-worktree gitdir 与 common dir 即使在工作区之外也保持 `--ro-bind`，沙箱里原生
+`git commit`（含 worktree 里的）仍按设计失败。当前状态：**Linux pending，未改、未验证**。
 
 ## ADR 0038 切片④：面向模型的文案按会话说真话（macOS）
 
