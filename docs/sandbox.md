@@ -361,7 +361,7 @@ minimal --default-toolchain 1.88.0 --no-modify-path` 安装，全部落在 `/tmp
 `~/.cargo`/`~/.rustup`，本就在默认 allow 的 `HOME` 之下。）
 
 **4. 发现并修复**：`radian-coding/tests/git.rs` 的
-`git_status_and_diff_report_the_worktree_and_leave_dot_git_untouched` 在 Linux 上约 **1/3 概率失败**，
+`git_diff_stat_reports_the_worktree_and_leaves_dot_git_untouched` 在 Linux 上约 **1/3 概率失败**，
 差分定位到 `.git/objects/maintenance.lock` 出现。根因是 setup 的 `git commit` 触发了 git 的**后台
 auto-maintenance**（git 2.55 会跑；macOS 的 2.53 不跑），与本切片的只读 git 工具无关。修复：测试仓库
 `git config maintenance.auto false` + `gc.auto 0`。变异（去掉这两行）在 VM 上 20 次跑出 **5 次失败**；

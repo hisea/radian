@@ -1,5 +1,6 @@
 //! Built-in coding tools for radian: `read`, `write`, `patch`, `list`, `glob`, `grep`,
-//! `git_status`, `git_diff`, and (only when the host supplies a sandbox) `shell`. [`AskTools`]
+//! `git_diff` (`stat: true` gives the status and a `--stat` summary), and (only when the host
+//! supplies a sandbox) `shell`. [`AskTools`]
 //! is the separate `ask_user` provider: a host with no workspace still mounts it (ADR 0024
 //! Q5). See `README.md` next to this crate for the tool/limit tables.
 //!

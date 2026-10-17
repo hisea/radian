@@ -39,7 +39,7 @@ pub struct Limits {
     pub default_grep_matches_per_file: usize,
     /// Hard cap on a model-supplied `grep` `context` line count.
     pub max_grep_context: usize,
-    /// Output cap for `git_status`/`git_diff`.
+    /// Output cap for `git_diff`.
     pub max_git_output_bytes: usize,
     /// How long a git invocation may run.
     pub git_timeout: Duration,

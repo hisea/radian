@@ -20,7 +20,7 @@ fn repo(dir: &TempDir) -> std::path::PathBuf {
     git(&root, &["config", "user.name", "Test"]);
     // `git commit` triggers git's background auto-maintenance, which can create
     // `.git/objects/maintenance.lock` after this setup returns and race the `.git` snapshot
-    // in `git_status_and_diff_...`. That is git's own job, not the read-only tools', so pin
+    // in `git_diff_stat_reports_...`. That is git's own job, not the read-only tools', so pin
     // the repo: no auto maintenance, no auto gc. (Observed on git 2.55 in the Linux VM; the
     // macOS git 2.53 did not run it, which is why the test only flaked there.)
     git(&root, &["config", "maintenance.auto", "false"]);
@@ -238,7 +238,7 @@ async fn git_tools_are_not_confused_with_the_other_tools() {
 }
 
 /// ADR 0039 decision 3: the read-only git tools run in the host, so a model-writable
-/// `.gitattributes` naming a marker filter must not make `git_status`/`git_diff` run the clean
+/// `.gitattributes` naming a marker filter must not make `git_diff` run the clean
 /// filter of a stat-dirty file.
 #[tokio::test]
 async fn the_git_tools_never_run_a_repository_filter() {
@@ -278,6 +278,6 @@ async fn the_git_tools_never_run_a_repository_filter() {
     let _ = call(&tools, "git_diff", json!({})).await.expect("diff");
     assert!(
         !marker.exists(),
-        "git_status/git_diff must not run a repository filter in the host"
+        "git_diff must not run a repository filter in the host"
     );
 }

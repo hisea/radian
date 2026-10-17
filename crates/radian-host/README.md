@@ -154,9 +154,12 @@ End to end through the CLI: `agent-cli/tests/cli.rs` (`memory_…`), including a
 
 ### The agent's memory tools (ADR 0021 D5/D7)
 
-`radian_host::memory::tools` adds `memory_search`, `memory_get`, `memory_save` and
-`memory_revise` as a third built-in source in `HostTools` (`HostTools::new(coding, memory,
-mcp)`); their names join the duplicate-name check. Every write is `Source::Agent`, so the
+`radian_host::memory::tools` adds `memory_search` (a keyword search, or a full read of records
+by `ids`), `memory_save` and `memory_revise` as a third built-in source in `HostTools`
+(`HostTools::new(coding, memory, mcp)`); their names join the duplicate-name check.
+`memory_get` is a one-version alias for `memory_search { ids: [id] }` (ADR 0043 decision 3):
+registered for preflight, never advertised, and its result opens with one line naming the
+rename. Every write is `Source::Agent`, so the
 store refuses to revise a user record and a user key still wins (`KeyConflict`). A
 default-scope `memory_save` registers a git workspace whose project is not registered yet (ADR
 0021 revision 1) and reports the notice through `MemoryTools::with_notice`, which the session
