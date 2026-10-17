@@ -632,6 +632,7 @@ mod tests {
         assert!(warnings[0].contains("command"), "{warnings:?}");
     }
 
+    #[cfg(target_os = "linux")]
     fn retry_scratch(label: &str) -> std::path::PathBuf {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -644,6 +645,7 @@ mod tests {
         dir
     }
 
+    #[cfg(target_os = "linux")]
     fn retry_script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -655,6 +657,7 @@ mod tests {
         path
     }
 
+    #[cfg(target_os = "linux")]
     fn retry_contributor(program: &std::path::Path, dir: &std::path::Path) -> CommandContributor {
         CommandContributor::new(
             CommandSpec {
