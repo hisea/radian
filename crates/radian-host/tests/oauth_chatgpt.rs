@@ -394,6 +394,80 @@ async fn refresh_runs_only_within_the_margin_and_writes_back() {
     assert_eq!(entry.refresh, "r1");
 }
 
+/// ADR 0026: a token obtained **mid-session** must be redactable the
+/// moment it is written. A redaction list read from `resolved_keys()` at startup cannot carry
+/// it, so `store_token` registers what it writes. The registry is process-global, so every
+/// value here is unique to this test and it never asserts the registry is empty.
+#[tokio::test]
+async fn a_refresh_registers_the_new_tokens_for_redaction() {
+    let server = FakeServer::start();
+    let scratch = Scratch::new("refresh-registers");
+    let mut store = scratch.open();
+
+    // A still-valid token first: `ensure_fresh_in` returns it without writing anything, so
+    // neither it nor its refresh token is registered — only `store_token` registers, never a
+    // direct `upsert_oauth`.
+    let untouched_access = fake_access_token("acct-refresh-registers-untouched");
+    let untouched_refresh = "refresh-registers-untouched-1";
+    store
+        .upsert_oauth(
+            "chatgpt",
+            &OAuthEntry {
+                access: untouched_access.clone(),
+                refresh: untouched_refresh.into(),
+                expires_at_millis: now_millis() + Duration::from_secs(3600).as_millis() as u64,
+            },
+        )
+        .unwrap();
+    let access = radian_host::oauth_ensure_fresh_in(&server.endpoints(), &mut store)
+        .await
+        .unwrap();
+    assert_eq!(access, untouched_access);
+    assert_eq!(server.request_count("/oauth/token"), 0, "no refresh yet");
+    let registered = radian_host::registered_secrets();
+    assert!(
+        !registered.contains(&untouched_access),
+        "a token that was not refreshed must not be registered: {registered:?}"
+    );
+    assert!(
+        !registered.contains(&untouched_refresh.to_owned()),
+        "neither must its refresh token: {registered:?}"
+    );
+
+    // Within the margin: the refresh writes a new pair, and both values are already in the
+    // list a redactor reads *now*.
+    store
+        .upsert_oauth(
+            "chatgpt",
+            &OAuthEntry {
+                access: "stale".into(),
+                refresh: "r0".into(),
+                expires_at_millis: now_millis() + 1_000, // 1s: inside REFRESH_MARGIN (120s)
+            },
+        )
+        .unwrap();
+    let fresh_access = fake_access_token("acct-refresh-registers-fresh");
+    let fresh_refresh = "refresh-registers-fresh-1";
+    server.push(
+        "/oauth/token",
+        200,
+        &token_body(&fresh_access, fresh_refresh, 3600),
+    );
+    let access = radian_host::oauth_ensure_fresh_in(&server.endpoints(), &mut store)
+        .await
+        .unwrap();
+    assert_eq!(access, fresh_access);
+    let registered = radian_host::registered_secrets();
+    assert!(
+        registered.contains(&fresh_access),
+        "the refreshed access token must be registered for redaction: {registered:?}"
+    );
+    assert!(
+        registered.contains(&fresh_refresh.to_owned()),
+        "the rotated refresh token must be registered too: {registered:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_refresh_failure_tells_the_user_to_log_in_again() {
     let server = FakeServer::start();

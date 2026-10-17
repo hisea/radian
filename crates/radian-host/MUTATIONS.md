@@ -1478,3 +1478,16 @@ refused with "no agent definition ``". Run: `cargo test -p radian-host --test le
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | SB-A | `spawn` parses `SpawnArgs` without `.without_blank_fields()` (the old code) | caught (rc=101) | `spawn_task_treats_blank_optional_fields_as_omitted` |
+
+## oauth-redact: a `chatgpt` token refreshed mid-session must be redactable too (2026-10-16)
+
+Owner report: every redaction list is read from `resolved_keys()` at startup, so about an hour
+into a session (the first `ensure_fresh` refresh, `model.rs:204`) the list no longer carries the
+access token the session is using. Run: `cargo test -p radian-host --locked --no-fail-fast
+--test oauth_chatgpt a_refresh_registers`. The mutation edits `src/oauth_chatgpt.rs` in place,
+saving a copy to `.radian/scratch/mut/` first and comparing the restored file with `cmp`; after
+the run `git status --short` shows only the intended files.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| OR-H1 | `oauth_chatgpt::store_token` drops its two `secrets::register(...)` lines (the refresh still writes the pair, nothing registers it) | ✅ 1 failed | `a_refresh_registers_the_new_tokens_for_redaction` (`registered_secrets()` is `[]`, so `contains(&fresh_access)` fails) |

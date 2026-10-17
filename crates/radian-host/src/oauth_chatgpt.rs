@@ -821,11 +821,21 @@ impl std::fmt::Display for RefreshError {
 
 impl std::error::Error for RefreshError {}
 
-/// Writes `token` as the `chatgpt` `oauth` entry (login and refresh share this).
+/// Writes `token` as the `chatgpt` `oauth` entry (login and refresh share this) **and
+/// registers both tokens for redaction** (ADR 0026: an OAuth token is
+/// redacted exactly like an API key).
+///
+/// This is the one place a `chatgpt` token enters the process: `/login` calls it through the
+/// TUI's `store_oauth_outcome`, and [`ensure_fresh_in`] calls it on every mid-session refresh.
+/// A redaction list read from `resolved_keys()` before that refresh cannot carry the new
+/// values, so they are registered here — *before* the write, because the caller may report the
+/// write's failure with the token in the message.
 pub fn store_token(
     store: &mut crate::auth::AuthStore,
     token: &TokenResponse,
 ) -> Result<(), crate::auth::AuthError> {
+    crate::secrets::register(&token.access);
+    crate::secrets::register(&token.refresh);
     store.upsert_oauth(
         PROVIDER_ID,
         &crate::auth::OAuthEntry {
