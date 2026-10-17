@@ -1172,6 +1172,34 @@ pub fn now_utc() -> String {
         .to_string()
 }
 
+/// Whether a live writer holds the session file's exclusive lock — i.e. a session process is
+/// running (ADR 0043 D14: `radian attach` uses this to tell a live session's open tool calls
+/// from a crash's synthesised results).
+///
+/// Read-only and non-blocking: the file is opened for reading and a **shared** lock is tried.
+/// A shared lock is granted only while no writer holds the exclusive one, so two readers
+/// probing at the same time both succeed (neither is mistaken for a writer), and the probe
+/// never blocks a session and never writes. A file a writer holds returns `WouldBlock`; a
+/// missing file is not live.
+pub fn session_is_live(path: impl AsRef<Path>) -> bool {
+    let Ok(file) = File::open(path.as_ref()) else {
+        return false;
+    };
+    // Fully qualified: Rust 1.89+ added inherent `File::try_lock_shared`/`unlock`, which would
+    // otherwise shadow the `fs2` trait at the project's 1.88 MSRV and return a different error
+    // type. `fs2` is the writer's own locking implementation.
+    match fs2::FileExt::try_lock_shared(&file) {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&file);
+            false
+        }
+        // `fs2` surfaces the raw `flock` errno, so an exclusive holder is `EWOULDBLOCK`.
+        Err(e) if e.kind() == ErrorKind::WouldBlock => true,
+        // Any other error: do not claim a session that is not there.
+        Err(_) => false,
+    }
+}
+
 fn io_err(path: &Path, source: std::io::Error) -> WriteError {
     WriteError::Io {
         path: path.to_path_buf(),
@@ -1250,7 +1278,7 @@ fn scan_lines(file: &mut File, path: &Path) -> Result<Option<u64>, WriteError> {
 
 #[cfg(test)]
 mod tests {
-    use super::must_sync;
+    use super::{SessionCreatedData, SessionJournal, must_sync, session_is_live};
 
     /// ADR 0040 decision 2's sync set is exactly these names; a name added to or removed from
     /// the set is a decision change, so it is pinned here as well as behaviorally.
@@ -1293,5 +1321,36 @@ mod tests {
         for name in non_sync {
             assert!(!must_sync(name), "{name} must not be a sync point");
         }
+    }
+
+    /// The liveness probe (ADR 0043 D14): a `SessionJournal` holds the writer's exclusive lock
+    /// for its lifetime, so the probe reports live while it exists and not-live after it is
+    /// dropped. The probe takes only a **shared** lock and releases it at once, so it never
+    /// blocks the writer and repeated probes agree.
+    #[test]
+    fn the_liveness_probe_follows_the_writer_lock() {
+        let dir = std::env::temp_dir().join(format!("radian-live-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("live.jsonl");
+
+        assert!(!session_is_live(&path), "a missing file is not live");
+        let journal = SessionJournal::create(
+            &path,
+            "live",
+            SessionCreatedData::new("/w", serde_json::json!({})),
+        )
+        .unwrap();
+        assert!(session_is_live(&path), "the writer holds the lock");
+        assert!(
+            session_is_live(&path),
+            "the probe released its shared lock, so a second probe agrees"
+        );
+        drop(journal);
+        assert!(
+            !session_is_live(&path),
+            "the lock is released with the journal"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

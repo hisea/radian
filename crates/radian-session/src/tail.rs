@@ -161,6 +161,14 @@ impl JournalTail {
         &self.path
     }
 
+    /// How many of [`JournalTail::poll`]'s history messages are the **committed** transcript.
+    /// The repaired suffix (`history()[committed_len()..]`, ADR 0002) is one result per call
+    /// with no committed result message yet: an open call of a running turn, or a call a crash
+    /// left unanswered.
+    pub fn committed_len(&self) -> usize {
+        self.scanner.committed_len()
+    }
+
     /// The end of the committed prefix read so far.
     pub fn offset(&self) -> u64 {
         self.offset

@@ -282,6 +282,176 @@ fn a_follow_read_shows_a_new_committed_message() {
     assert_eq!(view.history().len(), 3, "the folded history grew by one");
 }
 
+/// One assistant message that requests `n` `read` calls (`a`, `b`, …), the shape the fold's
+/// repair works from (a call with no committed result message).
+fn assistant_with_calls(n: usize) -> agent_core::Message {
+    agent_core::Message::Assistant {
+        content: Vec::new(),
+        reasoning: Vec::new(),
+        tool_calls: (0..n)
+            .map(|i| {
+                let id = ((b'a' + i as u8) as char).to_string();
+                agent_core::ToolCall {
+                    id: id.clone(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": format!("{id}.txt")}),
+                }
+            })
+            .collect(),
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    }
+}
+
+/// A `ToolExecutionSettled` body and the committed `Message::Tool` for the same result.
+fn settled(call_id: &str, text: &str) -> (serde_json::Value, agent_core::Message) {
+    let result =
+        agent_core::ToolResult::success(call_id, vec![agent_core::ContentPart::text(text)]);
+    (
+        serde_json::json!({"call_id": call_id, "result": result}),
+        agent_core::Message::Tool {
+            result,
+            meta: Default::default(),
+        },
+    )
+}
+
+/// A journal whose open turn has requested three calls, one started, none settled. The repaired
+/// suffix (ADR 0002) is therefore one synthesised result per call.
+fn open_call_journal() -> Vec<String> {
+    vec![
+        envelope(
+            0,
+            "SessionCreated",
+            true,
+            serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+        ),
+        envelope(
+            1,
+            "TurnStarted",
+            true,
+            serde_json::json!({"turn_id": "t-1"}),
+        ),
+        envelope(
+            2,
+            "MessageAppended",
+            true,
+            appended(0, assistant_with_calls(3)),
+        ),
+        envelope(
+            3,
+            "ToolExecutionStarted",
+            true,
+            serde_json::json!({"call_id": "a", "name": "read", "arguments": {"path": "a.txt"}}),
+        ),
+    ]
+}
+
+/// On a **live** session (a writer holds the file's lock) the open calls are `running`/`queued`,
+/// never the fold's crash wording; the settles then commit the real results and replace them.
+///
+/// Mutation: keep using the recovery fold for a live session (push the synthesised results) →
+/// the first half fails (`had not started executing` on screen).
+#[test]
+fn a_live_sessions_open_calls_show_as_running_and_queued_then_their_results() {
+    let scratch = Scratch::new("live-calls");
+    // The file's `session_id` (the envelope helper's) must match, so `SessionJournal::resume`
+    // takes the lock over the same session.
+    let id = "attach-sid";
+    let path = scratch.file(&format!("{id}.jsonl"));
+    std::fs::write(&path, format!("{}\n", open_call_journal().join("\n"))).unwrap();
+    // The writer's lock, held for the rest of the test: this is what makes the session live.
+    let _journal = radian_session::SessionJournal::resume(&path, id).expect("take the writer lock");
+
+    let mut view = AttachView::open(&path, id).expect("the view opens");
+    let shown = screen(&mut view, 80, 24);
+    assert_eq!(
+        shown.matches("running:").count(),
+        1,
+        "one started call is running:\n{shown}"
+    );
+    assert_eq!(
+        shown.matches("queued:").count(),
+        2,
+        "two calls have not started:\n{shown}"
+    );
+    assert!(
+        shown.contains("running: read a.txt")
+            && shown.contains("queued: read b.txt")
+            && shown.contains("queued: read c.txt"),
+        "the lines name the calls:\n{shown}"
+    );
+    assert!(
+        !shown.contains("interrupted") && !shown.contains("had not started"),
+        "a live session's open calls are not a crash:\n{shown}"
+    );
+
+    // The runtime settles all three: the marker, then the committed result message (ADR 0002).
+    let mut lines = open_call_journal();
+    let mut seq = lines.len() as u64;
+    let results = [("a", "RESULT-A"), ("b", "RESULT-B"), ("c", "RESULT-C")];
+    for (index, (call_id, text)) in results.into_iter().enumerate() {
+        let (settle, result) = settled(call_id, text);
+        lines.push(envelope(seq, "ToolExecutionSettled", true, settle));
+        lines.push(envelope(
+            seq + 1,
+            "MessageAppended",
+            true,
+            appended(index as u64 + 1, result),
+        ));
+        seq += 2;
+    }
+    append(&path, &lines[4..]);
+    assert!(
+        view.poll().expect("the new lines fold"),
+        "the frame changed"
+    );
+    let shown = screen(&mut view, 80, 24);
+    assert!(
+        !shown.contains("queued:") && !shown.contains("running:"),
+        "no pending line is left:\n{shown}"
+    );
+    assert_eq!(
+        shown.matches('✓').count(),
+        3,
+        "the three calls are settled with their real results:\n{shown}"
+    );
+    let history = view
+        .history()
+        .iter()
+        .map(agent_core::Message::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        history.contains("RESULT-A") && history.contains("RESULT-C"),
+        "the committed results are in the fold:\n{history}"
+    );
+    assert!(
+        !history.contains("interrupted") && !history.contains("had not started"),
+        "the fold carries no crash wording for the settled calls:\n{history}"
+    );
+}
+
+/// A session that is **not** live keeps the fold's recovery wording: nothing holds the lock, so
+/// those calls really did not finish. This is the other half of the liveness gate.
+///
+/// Mutation: treat every session as live (skip the probe) → this fails (`queued:` on screen
+/// instead of the crash wording).
+#[test]
+fn a_dead_sessions_open_calls_keep_the_recovery_wording() {
+    let (_scratch, mut view) = open_view("dead-calls", "dead-calls", &open_call_journal());
+    let shown = screen(&mut view, 80, 24);
+    assert!(
+        shown.contains("had not started executing"),
+        "a session with no live writer shows the recovery wording:\n{shown}"
+    );
+    assert!(
+        !shown.contains("queued:"),
+        "no pending line for a dead session:\n{shown}"
+    );
+}
+
 // ---------- the view's chrome and input ----------
 
 /// The footer carries the attach facts and nothing that belongs to the session's process.

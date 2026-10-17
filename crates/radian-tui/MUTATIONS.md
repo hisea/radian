@@ -2274,3 +2274,17 @@ a_printable_key_in_the_main_view_is_warned_about`.
 |---|---|---|---|
 | MC-3 | `app/transcript.rs` 的 `BudgetExceeded` notice 删掉（`if false`） | `app::transcript::tests::a_budget_exceeded_turn_shows_the_notice_naming_the_flag`（"a notice" 找不到） | ✅ 1 failed |
 
+
+## `attach` 把活会话的未决工具调用显示为 queued/running（ADR 0043 D14）
+
+journal 的 fold 会为每个没有已提交结果的调用合成一个崩溃结果（ADR 0002）；活会话（有 writer
+持有文件锁，`radian_session::session_is_live`）里那正是运行时已请求未开始（`queued`）或已开始
+未结束（`running`）的调用，所以改显示成 `queued:`/`running:` 行，settle 提交后由真实结果替换；
+只有**不是**活会话才出恢复用语。变异在源码原地改，从 `/tmp/mut/` 的 `cp` 副本还原并 `cmp` 一致
+（不用 `git checkout --`/`restore`）。命令：`timeout 400 cargo test -p radian-tui --locked
+--no-fail-fast --test attach sessions_open_calls`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| AT-M1 | `JournalObserver::live()` 恒 `false`（活会话也走恢复 fold） | `attach::a_live_sessions_open_calls_show_as_running_and_queued_then_their_results`（屏上出现 `had not started executing`，`running:` 计数为 0） | ✅ 1 failed |
+| AT-M2 | `JournalObserver::live()` 恒 `true`（死会话也当成活） | `attach::a_dead_sessions_open_calls_keep_the_recovery_wording`（屏上没有恢复用语） | ✅ 1 failed |

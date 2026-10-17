@@ -840,6 +840,13 @@ impl LineScanner {
     pub(crate) fn recovered_history(&self) -> Vec<Message> {
         self.fold.recovered_history()
     }
+
+    /// How many of [`LineScanner::recovered_history`]'s messages are the **committed**
+    /// transcript: `recovered_history()[committed_len()..]` is the repaired suffix (one result
+    /// per call that has no committed result message yet, ADR 0002).
+    pub(crate) fn committed_len(&self) -> usize {
+        self.fold.history().len()
+    }
 }
 
 /// A fully parsed session file. Unknown non-critical events are not part of `events`; they
