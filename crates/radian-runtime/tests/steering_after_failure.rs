@@ -5,7 +5,8 @@
 //! at the next safe point. On an `end_turn` finish Core keeps the turn going when steering is
 //! pending, but a model error — and any non-`end_turn` finish such as `max_tokens` — ends the
 //! turn with the steer still unapplied. The entry was claimed but never admitted; the driver
-//! puts it back at the front of its lane so the next turn uses it exactly once.
+//! puts it back at the front of its lane, and (ADR 0011) that requeued waking
+//! entry opens the next turn by itself, so the steer is used exactly once without a followup.
 
 mod common;
 
@@ -77,7 +78,8 @@ fn last_status(recorder: &Recorder) -> Option<RunStatus> {
 }
 
 /// Opens a driver over a real session and runs the scenario: turn 1 calls the `gate` tool,
-/// the steer is injected while the second model call is in flight, then turn 2 runs. Returns
+/// the steer is injected while the second model call is in flight, the turn ends without
+/// applying it, and the requeued steer opens turn 2 by itself (ADR 0011). Returns
 /// the request bodies and the session path.
 async fn run_scenario(
     label: &str,
@@ -136,8 +138,8 @@ async fn run_scenario(
     recorder.wait_finished().await;
     let first_status = last_status(&recorder).expect("a turn finished");
 
-    // Turn 2: the requeued steer joins the next turn and the model answers.
-    inbox.followup("second", InputSource::User).await.unwrap();
+    // ADR 0011: the requeued steer opens the next turn itself, as its first
+    // input — no followup is needed to pick it up.
     recorder.wait_finished().await;
     assert_eq!(last_status(&recorder), Some(RunStatus::Completed));
     inbox.close();

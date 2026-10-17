@@ -2417,8 +2417,12 @@ async fn a_killed_session_resumes_without_replaying_the_tool() {
     let path = sessions.join("s-kill.jsonl");
     // `fx__sleep` ignores cancellation, so the turn is genuinely mid-tool when the process
     // dies; the fixture has no `FIXTURE_IGNORE_EOF`, so killing the CLI releases it.
+    // The resumed session has a pending steer, which (ADR 0011) opens a turn by
+    // itself as soon as the driver runs — before the `-p next` followup. The three replies
+    // cover the killed turn's tool call and whichever of the resumed turns runs first.
     let server = MockServer::start(vec![
         tool_reply("call_1", "fx__sleep", "{\"ms\": 30000}"),
+        text_reply("done"),
         text_reply("done"),
     ])
     .await;

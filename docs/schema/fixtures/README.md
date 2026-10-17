@@ -10,6 +10,7 @@
 | `unknown-event-noncritical.jsonl` | 未知事件类型 `SpinProgressRecorded`，`critical:false`。5 个事件。 | **接受**；跳过并记录 `(seq=1, SpinProgressRecorded)`；其余 4 个事件重建。 | AC-S-3(b) |
 | `unknown-event-critical.jsonl` | 未知事件类型 `LedgerCommitted`，`critical:true`。2 个事件。 | **拒绝打开**；错误必须点名：文件、行号（第 2 行 / seq=1）、事件名、读取方支持的 schema 版本。 | AC-S-3(b) |
 | `unknown-enum-values.jsonl` | 已知事件里的**字段值**是未来枚举值：`InboxEnqueued.lane`、两条 `TurnFinished` 的 `outcome`/`reason`、`PermissionResolved` 的 `decision`/`approver`。6 个事件。 | **接受**，0 跳过；未知枚举值映射为 `Unknown`（ADR 0006 §7(d)），不报错、不跳过整行；无 `MessageAppended`，`replay` 为空、`repair` 为空。 | AC-S-3(d) / AC-S-4（枚举前向样本） |
+| `inbox-wake.jsonl` | ADR 0011 的 `InboxEnqueued.wake`：一条 `next_step` 记录**带** `"wake":true`（一次 steer），一条同 lane 记录**没有**该字段（修订前的旧记录，按 lane 推成 inject）。3 个事件。 | **接受**，0 跳过；`wake` 是**可选**字段（缺省即旧记录的语义：`next_step` 不唤醒），带它时必须是布尔值；两条都不进 `replay`/`repair`。 | ADR 0011 / ADR 0006 §5.5、§7(a) |
 | `schema-version-newer.jsonl` | 每行 `schema_version: 2`（高于 v1）。2 个事件。 | **只读打开或拒绝打开**（宿主二选一），**绝不能以 v1 语义追加写入**；追加模式必须直接报错。 | AC-S-3(c) |
 | `truncated-tail.jsonl` | 5 个合法行 + 一个截断的尾部（无 LF 的半行）。 | **接受（丢弃尾部）**：torn tail 字节不解析、不计 `seq`、不进 replay；重放得到前 5 个事件（seq 0..4）；安全追加前必须先截断到第 5 行的 LF 之后。 | ADR 0006 §3.2 |
 | `crash-after-started.jsonl` | assistant 声明两个调用：`call-1` 完整（Started+Settled+结果消息），`call-2` 只有 `ToolExecutionStarted`、无 Settled、无结果消息；无 `TurnFinished`。8 个事件。 | **接受**（文件本身合法）；按 ADR 0002 恢复规则，`call-2` 补 `error_code = "outcome_unknown_after_crash"` 的合成结果，`call-1` 原样；Phase 1 的恢复测试直接使用。 | ADR 0002 崩溃语义 / ADR 0006 §15-2 |

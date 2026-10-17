@@ -24,6 +24,7 @@ fn inbox_event(text: &str) -> RuntimeEvent {
         message_id: MessageId(format!("m-{text}")),
         lane: InboxLane::NextTurn,
         source: InputSource::User,
+        wake: true,
     }
 }
 
