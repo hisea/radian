@@ -6489,6 +6489,95 @@ async fn pty_pick_resumes_the_selected_id_and_enters_once() {
     );
 }
 
+/// (screenshot): `--pick` enters the alternate screen **before** the session
+/// exists, so every startup diagnostic printed with `eprintln!` between the picker and the
+/// session lands on the alternate screen. The renderer diffs a frame against the *previous*
+/// frame's cells and skips the ones that did not change, so those bytes stay where they were
+/// written: `[control] <sock>` and the trust status line sat drawn over the input box and never
+/// cleared. On this path the startup diagnostics must not reach the terminal at all.
+///
+/// The check reads the **raw** output, not the `vt100` screen: the stray bytes are in the
+/// stream every time, while whether the diff happens to overwrite a given cell depends on the
+/// layout. The second half of the test pins that nothing is lost: the same lines are in the
+/// transcript's startup block.
+///
+/// (p1's earlier screen-content attempts at 24x100 passed on the old code because they waited
+/// for the seeded history text — which the picker already shows in the row's summary — so they
+/// asserted before the session's first frame. Waiting for `(Ctrl-P to expand)`, which only the
+/// session phase draws, is what makes the stray text observable.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("pick-stderr");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_session(&sessions, "alpha", &workspace, "ALPHA-HISTORY").await;
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--pick",
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("filter:", 10), "{}", pty.screen());
+    // Enter resumes the only row (alpha): the picker ends and the session starts in the same
+    // terminal, so everything printed in between lands on the alternate screen.
+    pty.send(b"\r");
+    // Wait for the **session**, not the picker: the row's summary is the seeded user message
+    // ("ALPHA-HISTORY"), so waiting for that alone matches the picker and returns too early.
+    // The folded startup line exists only once the session phase has drawn.
+    assert!(
+        pty.wait_for_screen("(Ctrl-P to expand)", 10),
+        "the session did not start after the pick:\n{}",
+        pty.screen()
+    );
+    let raw = String::from_utf8_lossy(&pty.raw()).into_owned();
+    let (_, after_enter) = raw
+        .split_once("\u{1b}[?1049h")
+        .unwrap_or_else(|| panic!("the alternate screen was never entered:\n{raw}"));
+    // The two diagnostics this path produces every time: the control socket line and the trust
+    // status line (the workspace has no project resources, so the decision is the default).
+    assert!(
+        !after_enter.contains("[control] "),
+        "a startup diagnostic was written into the alternate screen:\n{after_enter}"
+    );
+    assert!(
+        !after_enter.contains("project resources: not loaded"),
+        "a startup diagnostic was written into the alternate screen:\n{after_enter}"
+    );
+    // Deferring must not lose them: the transcript's startup block carries both.
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("[control] ", 10),
+        "the control socket line is missing from the startup block:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("project resources: not loaded", 10),
+        "the trust status line is missing from the startup block:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// The signal watchdog's forced exit restores the terminal too: a still-alive terminal must
 /// stop receiving mouse reports after the app is gone. `--slow-draw` makes the main loop miss
 /// the 3 s watchdog (the reader runs on its own thread since ADR 0023 U2, so `--block-input`
