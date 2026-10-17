@@ -310,6 +310,87 @@ fn the_slash_completion_walks_the_command_tree() {
     assert_eq!(app.input, "/memory ", "and keeps the text");
 }
 
+/// Owner bug report 2026-10-17 (`pty_model_switches_to_chatgpt_with_an_oauth_login` flaked
+/// under load): the `/model` answer for an **exact** route must never arm the menu, even when a
+/// longer model id shares its prefix (`gpt-5.4` vs. `gpt-5.4-mini`, `radian-host`'s descriptor).
+/// Armed, Enter accepts the highlighted row instead of submitting the finished line — the switch
+/// is never queued and, because the answer's arrival races the Enter key, the same input passes
+/// or fails depending on load. The rule is `command::is_exact_candidate`, asked by both
+/// completion paths.
+#[test]
+fn an_exact_model_route_is_not_armed_even_with_a_prefix_sibling() {
+    let mut app = App::new("m", "s");
+    for c in "/model chatgpt/gpt-5.4".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    let result = app.update(Input::CompletionsReady {
+        fetch: radian_tui::command::Fetch::ModelRoute {
+            provider: None,
+            partial: "chatgpt/gpt-5.4".into(),
+        },
+        candidates: vec![
+            candidate("chatgpt/gpt-5.4", "chatgpt"),
+            candidate("chatgpt/gpt-5.4-mini", "chatgpt"),
+        ],
+    });
+    assert!(result.dirty);
+    assert!(
+        app.completion().is_none(),
+        "an exact route is not a completion to accept: {:?}",
+        app.completion()
+    );
+    // Enter submits the finished line: the switch, never a candidate acceptance.
+    let effects = app.on_key(key(KeyCode::Enter)).effects;
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::ModelSwitch { provider, model }]
+                if provider == "chatgpt" && model == "gpt-5.4"
+        ),
+        "Enter must submit `/model chatgpt/gpt-5.4`: {effects:?}"
+    );
+    assert!(app.input.is_empty(), "the submitted line is taken");
+}
+
+/// The sibling of the test above: a **partial** word is still completed, prefix siblings and all,
+/// so the fix above cannot be "never offer a model whose id starts with the typed word".
+#[test]
+fn a_partial_model_route_still_lists_its_prefix_siblings() {
+    let mut app = App::new("m", "s");
+    for c in "/model chatgpt/gpt-5".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    app.update(Input::CompletionsReady {
+        fetch: radian_tui::command::Fetch::ModelRoute {
+            provider: None,
+            partial: "chatgpt/gpt-5".into(),
+        },
+        candidates: vec![
+            candidate("chatgpt/gpt-5.4", "chatgpt"),
+            candidate("chatgpt/gpt-5.4-mini", "chatgpt"),
+        ],
+    });
+    let rows = app.completion().expect("the partial lists both").to_vec();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    // Enter accepts the highlighted row (it never runs the command).
+    let effects = app.on_key(key(KeyCode::Enter)).effects;
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ModelSwitch { .. })),
+        "a completion was picked, not sent: {effects:?}"
+    );
+    assert_eq!(app.input, "/model chatgpt/gpt-5.4 ");
+}
+
+fn candidate(insert: &str, description: &str) -> radian_tui::command::Candidate {
+    radian_tui::command::Candidate {
+        insert: insert.into(),
+        description: description.into(),
+        current: false,
+    }
+}
+
 /// A level whose candidates need the host asks with an effect; the answer becomes the list, and
 /// a stale answer (for a fetch the line has moved past) is dropped.
 #[test]
