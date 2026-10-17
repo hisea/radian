@@ -5,6 +5,10 @@
 //! sandbox failure is never mistaken for a missing file or a typo (the escape matrix's rule).
 //! This is macOS-only on purpose: ADR 0038 slice 1 leaves the Linux backend on today's
 //! behaviour (the whole `.git` read-only) until the VM matrix can run.
+//!
+//! ADR 0043 decision 1 extends the same rule to a **linked worktree** whose host repository
+//! lives outside the workspace: the discovered per-worktree git dir and the shared common dir
+//! are not under the workspace allow, so `WritableExceptExec` opens each one explicitly.
 
 #![cfg(target_os = "macos")]
 
@@ -189,12 +193,17 @@ fn q(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
-/// A writable sandbox over `scratch.ws` with the given git access.
-fn sandbox(scratch: &Scratch, access: GitAccess) -> Sandbox {
-    let policy = SandboxPolicy::workspace_write(&scratch.ws)
+/// A writable sandbox over `workspace` with the given git access.
+fn sandbox_for(workspace: &Path, access: GitAccess) -> Sandbox {
+    let policy = SandboxPolicy::workspace_write(workspace)
         .unwrap()
         .git_access(access);
     Sandbox::from_policy(policy).expect("the macOS backend must probe")
+}
+
+/// A writable sandbox over `scratch.ws` with the given git access.
+fn sandbox(scratch: &Scratch, access: GitAccess) -> Sandbox {
+    sandbox_for(&scratch.ws, access)
 }
 
 #[test]
@@ -482,6 +491,186 @@ fn readonly_keeps_the_whole_git_read_only() {
             "cd {} && git --no-optional-locks status --porcelain",
             q(&scratch.proj)
         ),
+    );
+}
+
+/// A workspace that **is** a linked worktree whose host repository — and so the shared common
+/// dir — lives **outside** the workspace (ADR 0043 decision 1). Discovery finds a `.git`
+/// pointer file, the per-worktree git dir and the common dir; neither git dir is under the
+/// workspace `subpath` allow, so `WritableExceptExec` must open each one itself or native git
+/// cannot commit.
+struct LinkedScratch {
+    root: PathBuf,
+    /// The linked worktree, and the sandbox workspace: `root/worktree`.
+    ws: PathBuf,
+    /// The host repository, outside the workspace: `root/host`.
+    host: PathBuf,
+    /// The shared common dir: `root/host/.git`.
+    common: PathBuf,
+    /// The per-worktree git dir: `common/worktrees/<name>`.
+    per: PathBuf,
+}
+
+impl LinkedScratch {
+    fn new() -> Self {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "radian-git-writable-outside-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+
+        let host = root.join("host");
+        std::fs::create_dir_all(&host).unwrap();
+        init_repo(&host, "README");
+        let ws = root.join("worktree");
+        git(
+            &host,
+            &["worktree", "add", "-q", ws.to_str().unwrap(), "-b", "wt"],
+        );
+        // A branch made after the worktree was, so `git merge --ff-only advance` in the
+        // worktree has somewhere to fast-forward to (the branch name is explicit, unlike the
+        // host's default branch).
+        git(&host, &["checkout", "-q", "-b", "advance"]);
+        std::fs::write(host.join("README"), "hello\ntwo\n").unwrap();
+        git(&host, &["commit", "-aqm", "two"]);
+
+        let common = std::fs::canonicalize(host.join(".git")).unwrap();
+        // The administrative dir's name is git's choice (the worktree path's basename), so read
+        // it rather than deriving it.
+        let worktrees = common.join("worktrees");
+        let per = std::fs::read_dir(&worktrees)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|entry| std::fs::canonicalize(entry.path()).unwrap())
+            .expect("a per-worktree administrative dir");
+
+        Self {
+            root,
+            ws,
+            host,
+            common,
+            per,
+        }
+    }
+}
+
+impl Drop for LinkedScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// ADR 0043 decision 1: the workspace is a linked worktree of a repository that lives outside
+/// it, so the per-worktree git dir and the shared common dir lie outside the workspace allow.
+/// Native `git commit`, `git branch` and `git merge --ff-only` must still succeed there (writes
+/// to the common dir's refs/objects and the per-worktree index/logs), while `ReadOnly` still
+/// refuses the commit.
+#[test]
+fn linked_worktree_outside_the_workspace_allows_native_git() {
+    let scratch = LinkedScratch::new();
+    let control = Sandbox::new(SandboxMode::FullAccess, &scratch.ws).unwrap();
+    let writable = sandbox_for(&scratch.ws, GitAccess::WritableExceptExec);
+    let identity = "-c user.name=Sandbox -c user.email=sandbox@example.com";
+    let p = q(&scratch.ws);
+
+    // A fast-forward writes the common dir's `refs/heads/wt` and the per-worktree index.
+    expect(
+        &writable,
+        &control,
+        "worktree_merge_ff_only",
+        true,
+        &format!("cd {p} && git merge --ff-only advance"),
+    );
+    // A native commit: a new object in the common dir, index and per-worktree log local.
+    expect(
+        &writable,
+        &control,
+        "worktree_git_commit",
+        true,
+        &format!("cd {p} && printf 'w\\n' >> README && git {identity} commit -aqm wt"),
+    );
+    expect(
+        &writable,
+        &control,
+        "worktree_git_branch",
+        true,
+        &format!("cd {p} && git branch sbx-wt-branch && git branch -D sbx-wt-branch"),
+    );
+
+    // `ReadOnly` (what a task agent keeps) refuses the same commit: every discovered entry,
+    // including the dirs outside the workspace, stays wholly read-only.
+    let read_only = sandbox_for(&scratch.ws, GitAccess::ReadOnly);
+    expect(
+        &read_only,
+        &control,
+        "worktree_git_commit_readonly",
+        false,
+        &format!("cd {p} && printf 'r\\n' >> README && git {identity} commit -aqm ro"),
+    );
+}
+
+/// The exec entries of a linked worktree whose host is outside the workspace stay denied, and
+/// so does the host repository's own working tree (outside the workspace and not metadata).
+#[test]
+fn linked_worktree_outside_the_workspace_denies_exec_and_non_git_paths() {
+    let scratch = LinkedScratch::new();
+    let control = Sandbox::new(SandboxMode::FullAccess, &scratch.ws).unwrap();
+    let writable = sandbox_for(&scratch.ws, GitAccess::WritableExceptExec);
+
+    // The common dir's executable entries.
+    expect(
+        &writable,
+        &control,
+        "common_config",
+        false,
+        &format!("cd {} && git config core.sbx-harness 1", q(&scratch.host)),
+    );
+    expect(
+        &writable,
+        &control,
+        "common_hook",
+        false,
+        &format!(
+            "printf x > {}",
+            q(&scratch.common.join("hooks/sbx-new-hook"))
+        ),
+    );
+    // The per-worktree link files. `gitdir` is the one a nested per-worktree allow must not
+    // override: it is matched by the common dir's `worktrees/<name>/gitdir` deny.
+    expect(
+        &writable,
+        &control,
+        "worktree_gitdir",
+        false,
+        &format!("printf x > {}", q(&scratch.per.join("gitdir"))),
+    );
+    expect(
+        &writable,
+        &control,
+        "worktree_config_worktree",
+        false,
+        &format!("printf x > {}", q(&scratch.per.join("config.worktree"))),
+    );
+    // The worktree's `.git` is a pointer FILE and keeps the full deny.
+    expect(
+        &writable,
+        &control,
+        "worktree_pointer_file",
+        false,
+        &format!("printf x > {}", q(&scratch.ws.join(".git"))),
+    );
+    // The host repository's working tree: outside the workspace, not git metadata.
+    expect(
+        &writable,
+        &control,
+        "host_working_tree",
+        false,
+        &format!("printf x > {}", q(&scratch.host.join("README"))),
     );
 }
 
