@@ -2303,3 +2303,23 @@ vacuous. The `·` (U+00B7) coverage check could not run the repo's fontTools scr
 network for the venv), so a stdlib-only cmap reader (TTC + format 4/12, deleted after use)
 verified all six reference fonts map U+00B7 and none maps the emoji codepoints; the script
 itself was validated both ways.
+
+## ADR 0027 slice ⑤ items 1–2 (footer presets as TOML, byte-identity) (2026-10-17)
+
+Base `0b5d0ca` · branch `dogfood/footer-s5`. Mutations in source in place, each restored
+from a `cp` in `/tmp/` and confirmed byte-identical with `cmp`. Every run with
+`--no-fail-fast`; each mutation run only its catching binary (`--test footer_presets`).
+The byte-identity itself is proved mechanically, not by mutation: the 80 golden screens
+(`tests/golden/footer/`: 4 presets × 4 glyph sets × widths 40/60/80/100/120, fixed `App`
+with hostname `testhost`) were rendered from the pristine `525daf0` tree (`git archive` to
+`/tmp/footer-before`, read-only; throwaway `zz_gen` test, deleted after use) and committed;
+`the_four_presets_render_byte_identical` re-renders them against the TOML-driven code.
+`full` with no running job stays byte-identical (its new `jobs` item hides with no data);
+`full` with one running job shows `1 job`/`18m` while `deck` with one stays byte-identical.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| S5-1 | `deck` has no `jobs` row | `"jobs"` added to `deck.toml`'s numbers row | `--test footer_presets -- full_shows_jobs_while_deck_does_not` ✅ 1 failed (deck with a job no longer equals its no-job golden) |
+| S5-2 | a preset's item order is the shipped order | `"model"`/`"cwd"` swapped in `pi.toml`'s first row | `--test footer_presets -- the_four_presets_render_byte_identical` ✅ 1 failed (`screen changed for preset=pi glyphs=unicode width=40`) |
+
+2/2 caught; no misses.
