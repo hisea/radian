@@ -186,3 +186,94 @@ pub(super) fn startup_preamble(
         startup_picker,
     }))
 }
+
+/// How the `--pick` (and valueless `--resume`) pre-session phase ends.
+pub(super) enum PickDone {
+    /// Leave `run()` with this reason (`None` = the ordinary clean exit).
+    Leave(Option<String>),
+    /// Continue into the session phase with this `resume` id.
+    Continue { resume: Option<String> },
+}
+
+/// `run()`'s picker phase (ADR 0023 U4 / plan B): runs the `--pick` overlay in the
+/// already-entered terminal until the user chooses. A plain run has no picker and this is
+/// a no-op returning the `resume` it was given. The two early exits (a signal, a quit)
+/// become `PickDone::Leave`, so the caller returns them unchanged.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_picker_phase(
+    app: &mut App,
+    startup_picker: Option<radian_tui::picker::Picker>,
+    startup_terminal: &mut Option<(
+        radian_tui::terminal::TtyGuard,
+        Terminal<CrosstermBackend<std::io::Stdout>>,
+    )>,
+    resume: Option<String>,
+    cli: &Cli,
+    config: &radian_host::Config,
+    rx: &Receiver<UiEvent>,
+    tx: &Sender<UiEvent>,
+) -> Result<PickDone, RunError> {
+    // ADR 0023 U4 / plan B: `--pick` is the session picker **overlay**, not a separate
+    // terminal loop. The process enters the terminal once; the loop runs a pre-session phase
+    // (the picker only) until the user chooses, then the ordinary session phase takes over in
+    // the same terminal. No session file, journal, driver or MCP connection exists until the
+    // choice is made (the session id and any `{session_id}` header are resolved after it).
+    if let Some(picker) = startup_picker {
+        radian_session::trace::mark("picker/before-first-frame");
+        let (guard, terminal) = startup_terminal
+            .as_mut()
+            .expect("the terminal was entered for the picker");
+        app.start_picking(picker);
+        let signal = ui_loop(
+            terminal,
+            &mut *app,
+            rx,
+            tx,
+            Phase::Picking,
+            // The picking phase has no resolved model yet (review M1): the route is only a
+            // fallback for the `/thinking` clamp, which the picker overlay cannot reach. No
+            // session exists, so nothing is billed: the price resolver answers "no price".
+            (
+                cli.provider.clone().unwrap_or_default(),
+                cli.model.clone().unwrap_or_default(),
+            ),
+            Arc::new(|_: &str, _: &str| None),
+            &config.providers,
+            config.tui.theme.clone(),
+            cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            // The picker phase has no session and no sandbox yet.
+            None,
+            None,
+            None,
+            // The picker phase has no session to report (ADR 0034 H1).
+            None,
+        )?;
+        if let Some(signal) = signal {
+            // A signal during the pre-session phase leaves exactly like the session phase —
+            // restore the terminal, exit 128 + signal, print the reason — but there is no
+            // session to name, so no `--resume` hint. No session file has been created.
+            radian_tui::signals::confirm_exit();
+            guard.restore();
+            return Ok(PickDone::Leave(Some(format!(
+                "received {}",
+                radian_tui::signals::name(signal)
+            ))));
+        }
+        app.finish_picking();
+        let resume = match app.take_picker_outcome() {
+            Some(radian_tui::picker::Outcome::Resume(id)) => {
+                return Ok(PickDone::Continue { resume: Some(id) });
+            }
+            Some(radian_tui::picker::Outcome::New) => resume,
+            // `Quit`, Ctrl-C, or the terminal going away before any session: nothing was
+            // created, so leave through the ordinary clean-exit path.
+            _ => {
+                radian_tui::signals::confirm_exit();
+                guard.restore();
+                return Ok(PickDone::Leave(None));
+            }
+        };
+        return Ok(PickDone::Continue { resume });
+    }
+    Ok(PickDone::Continue { resume })
+}

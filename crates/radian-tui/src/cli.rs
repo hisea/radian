@@ -741,63 +741,19 @@ fn run(
         pick_notice,
         startup_picker,
     } = startup;
-    // ADR 0023 U4 / plan B: `--pick` is the session picker **overlay**, not a separate
-    // terminal loop. The process enters the terminal once; the loop runs a pre-session phase
-    // (the picker only) until the user chooses, then the ordinary session phase takes over in
-    // the same terminal. No session file, journal, driver or MCP connection exists until the
-    // choice is made (the session id and any `{session_id}` header are resolved after it).
-    if let Some(picker) = startup_picker {
-        radian_session::trace::mark("picker/before-first-frame");
-        let (guard, terminal) = startup_terminal
-            .as_mut()
-            .expect("the terminal was entered for the picker");
-        app.start_picking(picker);
-        let signal = ui_loop(
-            terminal,
-            &mut app,
-            &rx,
-            &tx,
-            Phase::Picking,
-            // The picking phase has no resolved model yet (review M1): the route is only a
-            // fallback for the `/thinking` clamp, which the picker overlay cannot reach. No
-            // session exists, so nothing is billed: the price resolver answers "no price".
-            (
-                cli.provider.clone().unwrap_or_default(),
-                cli.model.clone().unwrap_or_default(),
-            ),
-            Arc::new(|_: &str, _: &str| None),
-            &config.providers,
-            config.tui.theme.clone(),
-            cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            // The picker phase has no session and no sandbox yet.
-            None,
-            None,
-            None,
-            // The picker phase has no session to report (ADR 0034 H1).
-            None,
-        )?;
-        if let Some(signal) = signal {
-            // A signal during the pre-session phase leaves exactly like the session phase —
-            // restore the terminal, exit 128 + signal, print the reason — but there is no
-            // session to name, so no `--resume` hint. No session file has been created.
-            radian_tui::signals::confirm_exit();
-            guard.restore();
-            return Ok(Some(format!(
-                "received {}",
-                radian_tui::signals::name(signal)
-            )));
-        }
-        app.finish_picking();
-        match app.take_picker_outcome() {
-            Some(radian_tui::picker::Outcome::Resume(id)) => resume = Some(id),
-            Some(radian_tui::picker::Outcome::New) => {}
-            // `Quit`, Ctrl-C, or the terminal going away before any session: nothing was
-            // created, so leave through the ordinary clean-exit path.
-            _ => {
-                radian_tui::signals::confirm_exit();
-                guard.restore();
-                return Ok(None);
-            }
+    match run_startup::run_picker_phase(
+        &mut app,
+        startup_picker,
+        &mut startup_terminal,
+        resume,
+        &cli,
+        &config,
+        &rx,
+        &tx,
+    )? {
+        run_startup::PickDone::Leave(reason) => return Ok(reason),
+        run_startup::PickDone::Continue { resume: next } => {
+            resume = next;
         }
     }
 
