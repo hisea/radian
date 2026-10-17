@@ -1553,3 +1553,11 @@ The providers send a tool result's text only, so `task_status`/`list_tasks` fact
 | LV-1 | `run` returns `dispatch(..)` without `with_visible_facts` (the old code) | caught (rc=101) | `status_and_list_report_every_task`, `wait_task_returns_a_question_then_the_finish` (the request id is not in the text) |
 | LV-2 | `observed_status` drops `usage` | caught (rc=101) | `status_and_list_report_every_task` |
 | LV-3 | the driver journals `TurnStarted` but does not forward it to the sink (the old code) | caught (rc=101) | `wait_task_returns_a_question_then_the_finish` (`running` false while the question holds the turn); also radian-runtime `the_runtime_events_sink_hears_the_turn_start_before_its_end` |
+
+## JobNotifier: an ended session releases its journal (2026-10-17)
+
+The notifier held `Arc<Jobs>` while its task waited for the registry's channel to close; the sender lives in that registry, so it never closed and every ended session leaked its task, journal (and lock) and inbox. Run: `cargo test -p radian-host --test job_notify`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| JN-1 | `spawn` keeps a strong registry reference (`std::mem::forget(jobs)` instead of `drop(jobs)`; the old code's strong field has the same effect) | caught (rc=101, "still holds the journal: 2 references") | `an_ended_session_releases_its_journal` |
