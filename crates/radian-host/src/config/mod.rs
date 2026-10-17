@@ -24,11 +24,13 @@ pub mod migrate_pi;
 pub mod theme_write;
 
 mod error;
+mod model;
 mod tui;
 
 use std::path::{Path, PathBuf};
 
 pub use error::ConfigError;
+pub use model::ModelConfig;
 pub use tui::{
     TuiColorOverride, TuiColorValue, TuiConfig, TuiFooterConfig, TuiFooterItemConfig,
     TuiFooterRowConfig, TuiWidgetsConfig,
@@ -59,21 +61,6 @@ const SENSITIVE_KEYS: [&str; 7] = [
 
 /// The obvious secret prefixes (ADR 0008 §4.2 rule 2, matching the reference checker).
 const SECRET_PREFIXES: [&str; 6] = ["sk-", "sk_", "xoxb-", "ghp_", "AKIA", "Bearer "];
-
-/// The wired model route (ADR 0008 §2). Every field is `None` when the file did not set it;
-/// the host then keeps its own default and the command line always wins.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ModelConfig {
-    pub provider: Option<String>,
-    pub base_url: Option<String>,
-    pub model: Option<String>,
-    pub headers: Vec<(String, String)>,
-    pub context_window: Option<u64>,
-    /// `[model] retries` (ADR 0017): how many times a transient model failure is
-    /// retried inside one model call. `None` means the host's default
-    /// ([`agent_core::DEFAULT_MODEL_RETRIES`]); `0` disables retrying.
-    pub retries: Option<u32>,
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PermissionsConfig {
@@ -325,7 +312,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
     for (key, value) in table {
         match key.as_str() {
             "schema_version" => {}
-            "model" => parse_model(value, path, read_only, &mut config)?,
+            "model" => model::parse_model(value, path, read_only, &mut config)?,
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
             "sandbox" => parse_sandbox(value, path, &mut config)?,
             "integrations" => parse_integrations(value, path, &mut config)?,
@@ -335,7 +322,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "memory" => parse_memory(value, path, &mut config)?,
             "shell" => parse_shell(value, &mut config)?,
             "tui" => tui::parse_tui(value, path, &mut config)?,
-            "providers" => parse_providers(value, path, &mut config)?,
+            "providers" => model::parse_providers(value, path, &mut config)?,
             // Known by the ADR, not wired in this slice: the hosts take MCP servers from
             // `--mcp-config`. Ignored, and named on the startup line.
             "mcp" => config.skipped.push("mcp".into()),
@@ -351,149 +338,6 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
 /// wire protocols, `base_url` a non-empty string; the name must be valid and must not shadow
 /// a built-in id — a bad name is refused, never warned around (the hosts would silently
 /// resolve the built-in instead).
-fn parse_providers(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
-    let Some(table) = value.as_table() else {
-        return Err(wrong_type(path, "providers", "a table"));
-    };
-    for (name, value) in table {
-        let Some(spec) = value.as_table() else {
-            return Err(wrong_type(path, &format!("providers.{name}"), "a table"));
-        };
-        if let Some(reason) = crate::provider::name_error(name) {
-            return Err(ConfigError::InvalidProviderName {
-                path: path.to_path_buf(),
-                name: name.clone(),
-                reason,
-            });
-        }
-        let mut decl = crate::provider::ProviderDecl {
-            kind: String::new(),
-            base_url: String::new(),
-            reasoning_replay: None,
-        };
-        for (field, value) in spec {
-            match (field.as_str(), value) {
-                ("kind", Value::String(kind))
-                    if matches!(kind.as_str(), "openai-compatible" | "anthropic") =>
-                {
-                    decl.kind = kind.clone();
-                }
-                // D10: only the two wire protocols exist in this build; anything else is a
-                // structural error, not a display preference to skip.
-                ("kind", _) => {
-                    return Err(wrong_type(
-                        path,
-                        &format!("providers.{name}.kind"),
-                        "one of openai-compatible|anthropic",
-                    ));
-                }
-                ("base_url", Value::String(base_url)) if !base_url.is_empty() => {
-                    decl.base_url = base_url.clone();
-                }
-                ("base_url", Value::String(_)) => {
-                    return Err(ConfigError::InvalidProviderName {
-                        path: path.to_path_buf(),
-                        name: name.clone(),
-                        reason: "base_url must not be empty".into(),
-                    });
-                }
-                ("base_url", _) => {
-                    return Err(wrong_type(
-                        path,
-                        &format!("providers.{name}.base_url"),
-                        "a string",
-                    ));
-                }
-                // ADR 0014 Q2: a field name overrides the catalog, `false` turns
-                // replay off. `true` names no field, so it is refused rather than guessed.
-                ("reasoning_replay", Value::String(field)) if !field.is_empty() => {
-                    decl.reasoning_replay = Some(crate::provider::ReasoningReplayOverride::Field(
-                        field.clone(),
-                    ));
-                }
-                ("reasoning_replay", Value::Boolean(false)) => {
-                    decl.reasoning_replay = Some(crate::provider::ReasoningReplayOverride::Off);
-                }
-                ("reasoning_replay", _) => {
-                    return Err(wrong_type(
-                        path,
-                        &format!("providers.{name}.reasoning_replay"),
-                        "a non-empty string or false",
-                    ));
-                }
-                (other, _) => config.skipped.push(format!("providers.{name}.{other}")),
-            }
-        }
-        config.providers.insert(name.clone(), decl);
-    }
-    Ok(())
-}
-
-fn parse_model(
-    value: &Value,
-    path: &Path,
-    read_only: bool,
-    config: &mut Config,
-) -> Result<(), ConfigError> {
-    let Some(table) = value.as_table() else {
-        return Err(wrong_type(path, "model", "a table"));
-    };
-    for (key, value) in table {
-        match (key.as_str(), value) {
-            ("provider", Value::String(s)) => config.model.provider = Some(s.clone()),
-            ("base_url", Value::String(s)) => config.model.base_url = Some(s.clone()),
-            ("model", Value::String(s)) => config.model.model = Some(s.clone()),
-            // ADR 0026 D2: `model.api_key` is refused, never silently ignored (a silent ignore
-            // would make the user think the key took effect).
-            ("api_key", _) => {
-                return Err(ConfigError::ApiKeyRemoved {
-                    path: path.to_path_buf(),
-                });
-            }
-            ("headers", Value::Table(headers)) => {
-                for (name, value) in headers {
-                    if let Value::String(value) = value {
-                        config.model.headers.push((name.clone(), value.clone()));
-                    } else {
-                        config.skipped.push(format!("model.headers.{name}"));
-                    }
-                }
-            }
-            // ADR 0015 (with ADR 0018's "0 or missing is unknown"): a zero window means
-            // **unset**, not a real zero-token window — the guard stays off exactly as if the
-            // key were absent. It is a valid "off" value in the same shape as `retries = 0`
-            // below. A negative or non-integer value is still refused rather than guessed
-            // (fail-closed).
-            ("context_window", Value::Integer(window)) if *window >= 0 => {
-                config.model.context_window = (*window > 0).then_some(*window as u64);
-            }
-            ("context_window", _) => {
-                return Err(wrong_type(
-                    path,
-                    "model.context_window",
-                    "a non-negative integer",
-                ));
-            }
-            // ADR 0017: `[model] retries = 3`; `0` disables retrying. A negative or
-            // non-integer value is refused rather than guessed (fail-closed).
-            ("retries", Value::Integer(n)) if *n >= 0 => {
-                config.model.retries = Some(*n as u32);
-            }
-            ("retries", _) => {
-                return Err(wrong_type(path, "model.retries", "a non-negative integer"));
-            }
-            // Known by the ADR, not wired here (the host's `--include-usage` controls it).
-            ("include_usage", _) => config.skipped.push("model.include_usage".into()),
-            (other, _) => {
-                if !read_only || table.contains_key(other) {
-                    config.skipped.push(format!("model.{other}"));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// The profile names ADR 0008 §2 lists (`ask`/`allow`/`deny`) plus the tiers ADR 0012/0016
 /// define. A value outside this set is refused rather than guessed (fail-closed).
 const KNOWN_PROFILES: [&str; 8] = [
