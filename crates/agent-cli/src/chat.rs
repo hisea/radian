@@ -13,12 +13,13 @@ use radian_permissions::{Approver, AuditSink};
 use tokio::sync::{Notify, mpsc};
 
 use super::approval::{JournalAudit, TerminalApprover};
+use super::events::spawn_signals;
 use super::profile;
 use super::redact::redact;
 use super::trust::trust_prompt;
 use super::turn::{Run, interactive_loop, one_shot};
 use super::{Cli, Setup, SetupError};
-use super::{LineHub, Ui, spawn_signals};
+use super::{LineHub, Ui};
 
 pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let interactive = cli.prompt.is_none();
