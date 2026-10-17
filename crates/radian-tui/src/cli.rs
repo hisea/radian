@@ -69,8 +69,10 @@ struct Cli {
     #[arg(help_heading = "TUI", long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Expose the built-in file and read-only git tools rooted at this directory
-    /// (read/write/patch/list, git_status/git_diff). No shell is provided.
+    /// Expose the built-in file tools rooted at this directory (read/write/patch/list,
+    /// glob/grep, git_diff). The `shell` tool is exposed as well unless the tier is `safe`,
+    /// which builds no sandbox; under `workspace` it runs confined, under `full` (the default)
+    /// unsandboxed. Omitted, the current directory is the workspace.
     #[arg(help_heading = "TUI", long, short = 'w', value_name = "DIR")]
     workspace: Option<PathBuf>,
 
@@ -351,10 +353,10 @@ enum RadianCommand {
         session_dir: Option<PathBuf>,
     },
 
-    /// Reserved for ADR 0030's control port: a named agent serving its session over a local
-    /// endpoint. Not implemented yet - it refuses with a usage-class exit code.
+    /// Reserved; not implemented. Would serve a session over a local endpoint; it refuses with
+    /// a usage-class exit code.
     Serve,
-    /// Reserved for ADR 0030's MCP server mode. Not implemented yet - it refuses with a
+    /// Reserved; not implemented. Would serve the session's tools over MCP; it refuses with a
     /// usage-class exit code.
     Mcp,
 }
@@ -418,8 +420,9 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
             follow,
             session_dir,
         } => run_attach(session_dir.as_deref(), &session_id, follow),
-        // Reserved names (ADR 0032): the shape is fixed now so scripts and docs can use it,
-        // the implementation is ADR 0030's. A usage-class refusal (2), never a silent no-op.
+        // Reserved names (ADR 0032): the shape is fixed now so scripts and docs can use it.
+        // ADR 0043 shelved ADR 0030's control port and MCP server mode, so nothing implements
+        // them; a usage-class refusal (2), never a silent no-op.
         RadianCommand::Serve => reserved("serve"),
         RadianCommand::Mcp => reserved("mcp"),
     }
@@ -473,7 +476,7 @@ fn run_theme(command: ThemeCommand) -> ExitCode {
 
 /// Refuses a reserved subcommand: one line on stderr and the usage-class exit code.
 fn reserved(name: &str) -> ExitCode {
-    eprintln!("radian: `{name}` is reserved for ADR 0030's control port; not implemented yet");
+    eprintln!("radian: `{name}` is reserved; not implemented yet");
     ExitCode::from(2)
 }
 

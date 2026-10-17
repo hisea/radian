@@ -118,9 +118,11 @@ async fn radian_serve_and_mcp_are_reserved_and_refuse_with_two() {
         assert_eq!(code, 2, "{name}: a usage-class refusal");
         assert!(out.is_empty(), "{name}: stdout stays clean: {out}");
         assert!(
-            err.contains("reserved for ADR 0030") && err.contains("not implemented"),
+            err.contains("reserved") && err.contains("not implemented"),
             "{name}: {err}"
         );
+        // ADR 0030 is shelved (ADR 0043), so the refusal must not name it.
+        assert!(!err.contains("0030"), "{name}: {err}");
     }
 }
 

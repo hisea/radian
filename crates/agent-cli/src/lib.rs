@@ -101,9 +101,10 @@ pub struct Cli {
     #[arg(long)]
     mcp_config: Option<String>,
 
-    /// Expose the built-in file and read-only tools rooted at this directory
-    /// (read/write/patch/list, glob/grep, git_diff). Under `workspace` this also
-    /// exposes `shell`, which runs only inside the sandbox.
+    /// Expose the built-in file tools rooted at this directory (read/write/patch/list,
+    /// glob/grep, git_diff). The `shell` tool is exposed as well unless the profile is `safe`
+    /// (which builds no sandbox): `workspace` confines it, `full` (the default) is
+    /// unsandboxed.
     #[arg(long)]
     workspace: Option<String>,
 
