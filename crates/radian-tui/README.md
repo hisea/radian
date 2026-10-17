@@ -712,6 +712,15 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   must say the shell description and the startup line are fixed for this session; a new session
   must show the read-only wording. pty automation cannot see the model-facing description, so
   this one is yours (ADR 0009).
+- **starting inside an outer sandbox** (ADR 0016): run `radian` from a context that is
+  already confined — e.g. `sandbox-exec -p '(version 1)(deny default)(allow file-read*)(allow
+  process*)(allow sysctl*)(allow mach*)(allow ipc*)(allow system*)(allow signal)(allow
+  file-ioctl)(allow file-write* (subpath "<workspace>"))' radian --workspace <workspace>`. It
+  must **start** (no refusal), and the expanded startup line and `/access` must read `workspace ·
+  sandbox inherited (an outer sandbox confines this process; radian's own rules are not applied)`.
+  A `!printf x > <outside>` must fail and `!printf x > ./inside` succeed: those are the outer
+  sandbox's rules, and radian claims nothing about them (no deny-read list, no `.git` wording, no
+  network state). `tests/pty.rs` covers the same path in automation; the feel is yours.
 - **the input area's two styles** (owner UI review; ADR 0035 and the
   2026-10-16 note): the default is `lines` — a rule above and below with the `❯ ` prompt; is it
   comfortable? Compare `input_style = "box"` (the thin half frame). For the `box` frame: does the

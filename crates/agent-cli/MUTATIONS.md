@@ -356,3 +356,16 @@ Base `2f41f69` · 直接改源码、跑单个测试、从 `.radian/scratch/mut/`
 | S6B2-1 | `lib.rs` 的 `task_builder: Some(task_builder)` 改回 `None`（headless lead 不挂 lead tools） | `a_headless_lead_mounts_the_task_tools`（tools 列表里没有 `spawn_task` 等） | ✅ |
 
 1/1 抓住。
+
+## ADR 0016：`agent-cli` 的 `build_sandbox` 继承外层沙箱（2026-10-16）
+
+worktree `.radian-worktrees/inherited-sandbox`，分支 `dogfood/inherited-sandbox`。变异只改
+`src/profile.rs`，跑 `cargo test -p agent-cli --locked --no-fail-fast --test cli`，跑完从副本还原并
+`cmp` 确认逐字节一致。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| IS-11 | `workspace` 档位无条件选 `inherited`（不看内核；`RADIAN_SANDBOX_PROBE_FAIL=1` 也就不再拒绝） | `a_failed_sandbox_probe_refuses_instead_of_degrading` | ✅ FAILED |
+
+1/1 抓住。与 `radian-tui` 的同名变异（其 MUTATIONS.md 的 IS-4/IS-5）是同一形态：两处
+`build_sandbox` 都必须先问内核，且探测失败仍是拒绝。

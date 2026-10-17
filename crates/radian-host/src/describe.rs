@@ -220,6 +220,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(line.contains("sandbox inherited"), "{line}");
+        // The line is the exact one the ADR names, not the `workspace` tier's `(probe: …)`
+        // line with `inherited` as the backend name in it: the wording is the whole point here.
+        assert!(
+            line.contains("an outer sandbox confines this process"),
+            "{line}"
+        );
+        assert!(line.contains("radian's own rules are not applied"), "{line}");
         assert!(facts.contains("outer sandbox"), "{facts}");
         for forbidden in [
             "not readable",

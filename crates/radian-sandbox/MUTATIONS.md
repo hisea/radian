@@ -150,3 +150,21 @@ GW-6 证明新测试抓住这个回归。**GW-8 的测试要小心**：若嵌套
 的 gitdir 加进只读清单，`literal .../config` 就替 regex 挡住写——测试会**空过**。所以测试里的两级子模块
 故意**没有工作树**（`nest/.git/modules/a/modules/b` 在，`nest/a`、`nest/a/b` 已删），只有多级 regex
 护得住；否则 GW-8 抓不住（本次第一版测试就是这样空过的）。
+
+## ADR 0016：`confined_by_outer_sandbox` 与 `inherited` 后端（2026-10-16）
+
+worktree `.radian-worktrees/inherited-sandbox`，分支 `dogfood/inherited-sandbox`。每个变异只改一个
+文件，跑完把保存的原文写回并 `cmp` 确认逐字节一致（副本在 `.radian/mut/`）。只跑应当抓住它的测试
+二进制。本 crate 的变异如下；`radian-tui` 的 `build_sandbox`/PTY、`radian-host` 的 `describe`、
+`agent-cli` 的 `build_sandbox` 各有自己的表（同一轮）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| IS-1 | `confined_by_outer_sandbox` 恒返回 `false`（`result > 0` → `false`） | `escape_macos`（acceptance 1：`sandbox-exec -p '(version 1)(allow default)'` 下的 `sandbox-confined` 必须打印 `true`）；另跑 `radian-tui` 的 `pty_an_outer_sandbox_is_inherited_instead_of_refused`（内层探测失败即拒绝，启动不了） | ✅ 两个二进制各 FAILED |
+| IS-2 | 恒返回 `true` | 不是某个测试的断言：沙箱**外**也打出了 `radian-test: skipped inside a sandbox:` 标记（acceptance 5 的第二条「沙箱外一行都没有」）；`grep -c 'radian-test:'` 检查失败 | ✅（见下） |
+| IS-3 | `inherited` 后端的 `command()` 去掉 `apply_env`（子进程继承整个宿主环境） | `backend::the_inherited_backend_keeps_the_environment_whitelist_and_no_local_rules`（`/usr/bin/env` 的输出多出 `CARGO_*`、`RUSTUP_*` 等） | ✅ |
+
+3/3 抓住。**IS-2 的说明**：函数恒真时，`escape_macos` 与四个清单里的 PTY 测试都会走「跳过」分支而
+**空过**，所以它由 acceptance 5 的标记计数检查抓住——沙箱外运行同一批测试并 `grep -c 'radian-test:'`
+应为 0，变异后清单里的测试在沙箱外也各打一行（本次抽查了其中两个二进制，各一行）。这正是 acceptance 5
+要求「沙箱外一行都没有」的原因。

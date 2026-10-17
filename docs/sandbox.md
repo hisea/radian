@@ -30,6 +30,41 @@ controlling-terminal 检查堵住 `TIOCSTI`（矩阵新增 `tiocsti_outside_term
 macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在一个临时 workspace 里同时验证
 "工作区外写被拒"和"工作区内写成功"，两者缺一即失败。
 
+## 嵌套：已在沙箱内的 radian 沿用外层（ADR 0016，2026-10-16 实测）
+
+radian 的 `workspace` 沙箱里再起一层 `sandbox-exec` 被内核拒绝，所以嵌套场景下探测必然失败。实测
+（macOS 27，`sandbox-exec`；p1 与 w8:p7 各自独立复现）：
+
+| 外层 profile | 内层 `sandbox-exec -p '(version 1)(allow default)' /bin/echo` |
+|---|---|
+| `(allow default)` | 成功 |
+| `(deny default)` + `process* / file* / sysctl* / mach* / ipc* / system* / signal` 全放行 | `sandbox-exec: sandbox_apply: Operation not permitted` |
+
+哪条 SBPL 规则控制它**未从 Apple 文档核实**；两边都没找到能放开的写法，所以不是改一条规则能解决的。
+
+**内核给「已被约束」的信号**：`libsystem_sandbox.dylib` 导出
+`sandbox_check(pid_t pid, const char *operation, int type, ...)`。`sandbox_check(getpid(), NULL, 0)`
+在沙箱外返回 0，在 `sandbox-exec` 下（`(allow default)` 与 `(deny default)` 两种都试过）返回 1。
+没有公开头文件（SDK 的 `sandbox.h` 只有已弃用的 `sandbox_init`），`radian-sandbox` 用
+`unsafe extern "C"` 自己声明，符号由 libSystem 的共享缓存解析。**未核实**：`type` 参数的语义
+（0 实测可用）；以及 `sandbox_check` 在别的 macOS 版本、CI 上的行为——`<0`（调用出错）按「未被
+约束」处理（fail closed，回到今天的探测与拒绝路径）。
+
+**行为**：档位 `workspace` 且 `confined_by_outer_sandbox()` 为真时，radian **不再建第二层**。`inherited`
+后端只按宿主侧规则起命令（`allow_env` 白名单、工作区作为 cwd、`TMPDIR` 指向工作区内的
+`.radian-sandbox/tmp`）；不建 policy、不探测；启动行与 `/access` 写
+`workspace · sandbox inherited (an outer sandbox confines this process; radian's own rules are
+not applied)`，且不声称禁读清单、`.git` 只读、网络状态或 Unix socket 白名单——这些由外层决定，
+radian 看不到。检测只问内核：任何环境变量、配置键、参数都不能选中 `inherited`。**沙箱外一切照旧**：
+探测失败仍拒绝，`RADIAN_SANDBOX_PROBE_FAIL=1` 仍只能造成拒绝（`build_sandbox` 先问内核，再走原来的
+策略与探测）。依赖沙箱行为的测试（决定 6 的清单）在 `inherited` 下打印一行
+`radian-test: skipped inside a sandbox: <测试名>` 后返回；cargo 仍计它通过，所以 verify 输出与报告
+**必须**把这些标记列成「没跑」。
+
+**Linux 未核实**（决定 7）：bwrap 套 bwrap 是否可行、内核给不给「已被约束」的信号都没有测。
+`confined_by_outer_sandbox()` 在非 macOS 返回 `false`，Linux 保持今天的行为（探测失败即拒绝）；
+Linux VM 验证恢复时一并做。
+
 ## 运行中切换档位（ADR 0038 切片 ②，2026-10-15）
 
 档位不再固定：`/access safe|workspace|full` 可以在会话里切换，从**下一次工具调用**起生效。
