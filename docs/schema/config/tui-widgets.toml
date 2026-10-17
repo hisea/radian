@@ -4,4 +4,4 @@ schema_version = 1
 
 [tui.widgets]
 above_input = ["status"]
-below_input = ["opencode-go.usage"]
+below_input = ["usage"]

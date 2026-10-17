@@ -2615,14 +2615,11 @@ mod widget_tests {
             "schema_version = 1\n",
             "[tui.widgets]\n",
             "above_input = [\"status\"]\n",
-            "below_input = [\"opencode-go.usage\"]\n",
+            "below_input = [\"usage\"]\n",
         ))
         .unwrap();
         assert_eq!(config.tui.widgets.above_input, vec!["status".to_string()]);
-        assert_eq!(
-            config.tui.widgets.below_input,
-            vec!["opencode-go.usage".to_string()]
-        );
+        assert_eq!(config.tui.widgets.below_input, vec!["usage".to_string()]);
         // An unknown key or a non-string entry is skipped, never refused.
         let config = parse_str("schema_version = 1\n[tui.widgets]\nfuture = [\"x\"]\n").unwrap();
         assert!(config.skipped.iter().any(|k| k == "tui.widgets.future"));

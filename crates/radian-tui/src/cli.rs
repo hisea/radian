@@ -1739,13 +1739,15 @@ fn run(
         Arc::clone(&contributions),
         Arc::clone(&on_tick),
     );
-    // ADR 0027 C4 + revision 5: the opencode-go usage contributor. It is spawned only when a
-    // key is stored, but it refreshes (and its row shows) only while the **current** model's
-    // provider is opencode-go. The watch channel is that gate: the UI flips it on a `/model`
-    // switch. The key never leaves this spawn: only the display text enters the store.
+    // ADR 0027 C4 + revision 5 + revision 14 decision 3: the provider's usage source comes
+    // from its descriptor (`usage = Endpoint`). It is spawned only when a key is stored, but it
+    // refreshes (and its row shows) only while the **current** model's provider is
+    // opencode-go. The watch channel is that gate: the UI flips it on a `/model` switch. The
+    // key never leaves this spawn: only the snapshot enters the store.
     // `usage_period_secs = 0` turns it off; the period is clamped to 15 s–10 min.
     let usage_gate = if let Some(period) = usage_period(config.tui.usage_period_secs)
         && let Ok(Some(key)) = radian_host::auth::resolve_key("opencode-go")
+        && let Some(endpoint) = radian_host::usage_endpoint("opencode-go")
     {
         // The startup model decides the first state (a resumed route wins over the CLI's).
         let startup_provider = session
@@ -1753,9 +1755,13 @@ fn run(
             .map(|(provider, _)| provider)
             .unwrap_or_else(|| provider_name.clone());
         let (gate_tx, gate_rx) = tokio::sync::watch::channel(startup_provider == "opencode-go");
-        radian_host::spawn_contributor_gated(
+        radian_host::spawn_usage_gated(
             runtime.handle(),
-            Arc::new(radian_host::OpencodeGoUsage::new(key.key.clone(), period)),
+            (endpoint.build)(&radian_host::UsageArgs {
+                session_id: session_id.clone(),
+                secret: Some(key.key.clone()),
+            }),
+            period,
             Arc::clone(&contributions),
             Arc::clone(&on_tick),
             gate_rx,
@@ -1764,11 +1770,12 @@ fn run(
     } else {
         None
     };
-    // The same C4 mechanism for `chatgpt` (ADR 0026): gated on
-    // `has_login("chatgpt")` rather than a resolved api_key (there is none — the contributor
+    // The same mechanism for `chatgpt` (ADR 0026), gated on
+    // `has_login("chatgpt")` rather than a resolved api_key (there is none — the source
     // refreshes the oauth entry itself, per call, exactly like `ChatGptModel`).
     let chatgpt_usage_gate = if let Some(period) = usage_period(config.tui.usage_period_secs)
         && radian_host::has_login("chatgpt")
+        && let Some(endpoint) = radian_host::usage_endpoint(radian_host::CHATGPT_PROVIDER_ID)
     {
         let startup_provider = session
             .model_route()
@@ -1776,9 +1783,13 @@ fn run(
             .unwrap_or_else(|| provider_name.clone());
         let (gate_tx, gate_rx) =
             tokio::sync::watch::channel(chatgpt_usage_active(&startup_provider));
-        radian_host::spawn_contributor_gated(
+        radian_host::spawn_usage_gated(
             runtime.handle(),
-            Arc::new(radian_host::ChatGptUsage::new(session_id.clone(), period)),
+            (endpoint.build)(&radian_host::UsageArgs {
+                session_id: session_id.clone(),
+                secret: None,
+            }),
+            period,
             Arc::clone(&contributions),
             Arc::clone(&on_tick),
             gate_rx,

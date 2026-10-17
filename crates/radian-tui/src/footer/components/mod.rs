@@ -34,6 +34,7 @@ mod status;
 mod tasks;
 mod tier;
 mod tokens;
+mod usage;
 mod worktree;
 
 /// The facts one component reads at draw time. `values` are the `{placeholder}` values, `numeric`
@@ -125,6 +126,7 @@ static COMPONENTS: &[&'static dyn Component] = &[
     &session::Session,
     &context::Context,
     &context_bar::ContextBar,
+    &usage::Usage,
     &tokens::Tokens,
     &speed::Speed,
     &elapsed::Elapsed,

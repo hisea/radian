@@ -180,8 +180,8 @@ pub struct FrameGlyphs {
 /// Which footer the session shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
-    /// The default (ADR 0027): three rows — the opencode-go usage widget (absent
-    /// without data), the identity row, and the numbers row.
+    /// The default (ADR 0027): three rows — the usage widget (absent without data),
+    /// the identity row, and the numbers row.
     #[default]
     Deck,
     /// The revision-1 two-row preset: the identity row and the numbers row.
@@ -354,6 +354,10 @@ impl Footer {
     /// their warnings are collected here (once) and shown at startup.
     pub fn from_config(config: &TuiFooterConfig) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
+        // The old item ids already warned about (ADR 0027: an earlier
+        // version's id keeps working for one version, with one startup warning naming the new
+        // one).
+        let mut aliased: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let preset = match config.preset.as_deref() {
             None => Preset::Deck,
             Some(name) => Preset::parse(name).unwrap_or_else(|| {
@@ -411,12 +415,20 @@ impl Footer {
                     .map(|item| item.id.clone()),
             )
             .collect();
+        // The per-field `items` table, with an earlier version's usage ids canonicalized
+        // (ADR 0027), so an old id written in `[tui.footer.items]` lands
+        // on the `usage` item. A `usage` block wins when both are written.
+        let mut items: std::collections::BTreeMap<String, TuiFooterItemConfig> = Default::default();
+        for (id, field) in &config.items {
+            let id = canonical_id(id, &mut aliased, &mut warnings);
+            items.insert(id, field.clone());
+        }
         let rows: Vec<Row> = if config.rows.is_empty() {
             // The built-in preset, then the per-field `items` config on top.
             let mut rows = preset_rows(preset, glyphs);
             for row in &mut rows {
                 for item in row.left.iter_mut().chain(row.right.iter_mut()) {
-                    if let Some(field) = config.items.get(&item.id) {
+                    if let Some(field) = items.get(&item.id) {
                         merge_into_item(item, field, &mut warnings);
                     }
                 }
@@ -435,14 +447,14 @@ impl Footer {
                         .left
                         .iter()
                         .filter_map(|item| {
-                            resolve_item(item, &config.items, &command_ids, &mut warnings)
+                            resolve_item(item, &items, &command_ids, &mut aliased, &mut warnings)
                         })
                         .collect(),
                     right: row
                         .right
                         .iter()
                         .filter_map(|item| {
-                            resolve_item(item, &config.items, &command_ids, &mut warnings)
+                            resolve_item(item, &items, &command_ids, &mut aliased, &mut warnings)
                         })
                         .collect(),
                     separator: row.separator.clone().unwrap_or_else(|| separator.clone()),
@@ -532,9 +544,10 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
     };
     match preset {
         Preset::Deck => vec![
-            // Row 1: the opencode-go usage widget (ADR 0027 C4). With no data every item is
-            // empty and `lines` drops the whole row, so it never leaves a blank line.
-            row(vec![item("opencode-go.usage")], Vec::new()),
+            // Row 1: the current provider's usage (ADR 0027). With no
+            // snapshot the item is empty and `lines` drops the whole row, so it never leaves a
+            // blank line.
+            row(vec![item("usage")], Vec::new()),
             // Row 2: identity, with the context bar and reasoning on the right.
             row(
                 vec![
@@ -620,6 +633,26 @@ fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
     }
 }
 
+/// The current id a configured item id means (ADR 0027): `radian_host`
+/// knows which ids an earlier version used for a provider's usage row, and such an id stays an
+/// alias of `usage` for one version. The warning names the new id, once per old id.
+fn canonical_id(
+    id: &str,
+    warned: &mut std::collections::BTreeSet<String>,
+    warnings: &mut Vec<String>,
+) -> String {
+    let Some(current) = radian_host::usage_item_alias(id) else {
+        return id.to_owned();
+    };
+    if warned.insert(id.to_owned()) {
+        warnings.push(format!(
+            "tui.footer: item {id:?} is the old id for {current:?}; the old id works for one \
+             version"
+        ));
+    }
+    current.to_owned()
+}
+
 /// Whether a parsed item carries no options of its own (a bare id in a row). A bare id takes
 /// its options from `[tui.footer.items.<id>]`; an inline table does not (revision 3).
 fn is_bare(config: &TuiFooterItemConfig) -> bool {
@@ -644,6 +677,7 @@ fn resolve_item(
     config: &TuiFooterItemConfig,
     items: &std::collections::BTreeMap<String, TuiFooterItemConfig>,
     command_ids: &std::collections::BTreeSet<String>,
+    warned: &mut std::collections::BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) -> Option<Item> {
     // A bare id takes the per-field `items` config; an inline table is used as written.
@@ -655,7 +689,9 @@ fn resolve_item(
     if effective.disabled {
         return None;
     }
-    let id = effective.id.clone();
+    // An id an earlier version used for a provider's usage row is the `usage` component here
+    // (ADR 0027), with one warning.
+    let id = canonical_id(&effective.id, warned, warnings);
     // A `command` id is known (its producer publishes it); an ordinary id no built-in claims is
     // shown raw until a contributor publishes it, with one warning.
     let command = command_ids.contains(&id);
@@ -1193,8 +1229,16 @@ pub fn widget_line(app: &App, ids: &[String]) -> Option<Line<'static>> {
     let separator_style = ItemStyle::Role(Role::FooterSeparator).resolve(app);
     let mut pieces: Vec<Piece> = Vec::new();
     for id in ids {
+        // An id an earlier version used for a provider's usage row works here too: a widget
+        // carries the same item ids a row does (ADR 0027). The
+        // `[tui.widgets]` block's own deprecation warning belongs to slice ③, which folds
+        // widgets into rows; drawing must not regress in the meantime.
+        let id: &str = match radian_host::usage_item_alias(id) {
+            Some(current) => current,
+            None => id,
+        };
         let item = Item {
-            id: id.clone(),
+            id: id.to_owned(),
             icon: None,
             symbol_style: None,
             format: None,
@@ -1407,6 +1451,7 @@ mod tests {
             "session",
             "context",
             "context_bar",
+            "usage",
             "tokens",
             "speed",
             "elapsed",
@@ -1449,8 +1494,10 @@ mod tests {
     /// narrow-terminal truncation order.
     #[test]
     fn the_registry_matches_the_pre_refactor_priority_table() {
-        // The `631c8dd` `item_priority` table.
-        let expected: [(&str, i64); 20] = [
+        // The `631c8dd` `item_priority` table, plus `usage` (ADR 0027):
+        // it replaces the usage contribution id, which the table never named and which
+        // therefore kept the generic 50.
+        let expected: [(&str, i64); 21] = [
             ("brand", 92),
             ("host", 78),
             ("model", 90),
@@ -1463,6 +1510,7 @@ mod tests {
             ("session", 65),
             ("context", 85),
             ("context_bar", 85),
+            ("usage", 50),
             ("tokens", 50),
             ("speed", 55),
             ("elapsed", 35),
@@ -1488,7 +1536,9 @@ mod tests {
     /// `item_placeholders` table, id for id.
     #[test]
     fn the_registry_matches_the_pre_refactor_placeholder_table() {
-        let expected: [(&str, &[&str]); 20] = [
+        // Plus `usage` (ADR 0027), whose one placeholder is the whole
+        // line, like a `command` item's `{value}`.
+        let expected: [(&str, &[&str]); 21] = [
             ("brand", &["brand"]),
             ("host", &["host"]),
             ("model", &["display_name", "id", "provider"]),
@@ -1504,6 +1554,7 @@ mod tests {
             ("session", &["id"]),
             ("context", &["bar", "percent", "used", "budget", "auto"]),
             ("context_bar", &["bar", "percent", "used", "budget", "auto"]),
+            ("usage", &["value"]),
             ("tokens", &["in", "out", "cache", "cache_write"]),
             ("speed", &["speed"]),
             ("elapsed", &["elapsed"]),
@@ -1534,7 +1585,7 @@ mod tests {
     #[test]
     fn the_registry_matches_the_pre_refactor_role_table() {
         let app = app_with_glyphs("nerd");
-        let expected: [(&str, Option<Role>); 20] = [
+        let expected: [(&str, Option<Role>); 21] = [
             ("brand", Some(Role::Text)),
             ("host", Some(Role::NoticeBody)),
             ("model", Some(Role::Model)),
@@ -1547,6 +1598,9 @@ mod tests {
             ("session", None),
             ("context", Some(Role::Budget)),
             ("context_bar", Some(Role::Budget)),
+            // The snapshot's style is the data's own (fresh `text`, stale `dim`), like a
+            // contribution's role before the refactor.
+            ("usage", None),
             ("tokens", Some(Role::Usage)),
             ("speed", Some(Role::Usage)),
             ("elapsed", Some(Role::Truncation)),
@@ -1586,7 +1640,7 @@ mod tests {
     /// `context_bar` row, so its default icon was empty in every set.
     #[test]
     fn the_registry_matches_the_pre_refactor_glyph_table() {
-        let expected: [(&str, [&str; 3]); 20] = [
+        let expected: [(&str, [&str; 3]); 21] = [
             ("brand", ["", "", ""]),
             ("host", ["@ ", "\u{f109} ", "host "]),
             ("model", ["", "", ""]),
@@ -1599,6 +1653,7 @@ mod tests {
             ("session", ["# ", "", "# "]),
             ("context", ["", "\u{f035b} ", "["]),
             ("context_bar", ["", "", ""]),
+            ("usage", ["", "", ""]),
             ("tokens", ["", "", ""]),
             ("speed", ["\u{bb} ", "\u{f0e7} ", "spd "]),
             ("elapsed", ["", "\u{f017} ", "t "]),
@@ -1657,6 +1712,51 @@ mod tests {
             code.contains("components::lookup("),
             "the renderer dispatches through the component registry"
         );
+    }
+
+    /// ADR 0027 slice ②'s acceptance: no source file under `src/footer*` names a
+    /// provider (the acceptance is a text search for a provider's name over exactly these
+    /// files). The `usage` component draws whatever snapshot the store holds, and which
+    /// providers publish one — and under which ids — is the descriptors' business, not the
+    /// footer's. The needles come from the descriptors themselves, so this test's own text
+    /// need not spell any of them.
+    #[test]
+    fn no_footer_source_names_a_provider() {
+        fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("a readable directory") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    collect(&path, out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sources = vec![src.join("footer.rs")];
+        collect(&src.join("footer"), &mut sources);
+        assert!(sources.len() > 1, "the footer module's files are found");
+        let mut needles: Vec<String> = Vec::new();
+        for descriptor in radian_host::descriptors() {
+            needles.push(descriptor.id.to_owned());
+            if let Some(radian_host::UsageSource::Endpoint(endpoint)) = &descriptor.usage {
+                needles.extend(endpoint.legacy_item_ids.iter().map(|id| (*id).to_owned()));
+            }
+        }
+        assert!(
+            needles.iter().any(|needle| needle.contains('.')),
+            "the search covers the old item ids too"
+        );
+        for path in sources {
+            let text = std::fs::read_to_string(&path).expect("a readable source");
+            for needle in &needles {
+                assert!(
+                    !text.contains(needle.as_str()),
+                    "{} names {needle:?}; the footer must not",
+                    path.display()
+                );
+            }
+        }
     }
 
     /// ADR 0027: an arbitrary id a contributor publishes resolves through

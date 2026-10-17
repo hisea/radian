@@ -4353,6 +4353,15 @@ impl App {
             command::Outcome::Thinking(level) => {
                 UpdateResult::effect(Effect::SetThinking { level })
             }
+            // `/usage` (ADR 0027): the snapshot is already in the store —
+            // the background source wrote it — so this reads it and prints; no effect, and no
+            // network of its own.
+            command::Outcome::Usage => {
+                for line in self.usage_lines() {
+                    self.push_notice(line);
+                }
+                UpdateResult::dirty()
+            }
             command::Outcome::Model(switch) => UpdateResult::effect(Effect::ModelSwitch {
                 provider: switch.provider,
                 model: switch.model,
@@ -4520,6 +4529,34 @@ impl App {
             command::Outcome::Send(request) => UpdateResult::effect(Effect::Send(request)),
             command::Outcome::Message => UpdateResult::none(),
         }
+    }
+
+    /// `/usage`'s lines (ADR 0027): the current provider's snapshot,
+    /// every window of it. With no provider, no usage source for the routed provider, or no
+    /// snapshot yet, one line says so instead.
+    fn usage_lines(&self) -> Vec<String> {
+        let Some(provider) = self.session.provider.as_deref() else {
+            return vec!["usage: no provider is routed yet".to_owned()];
+        };
+        if !radian_host::has_usage_source(provider) {
+            return vec![format!("usage: {provider} has no usage source")];
+        }
+        let Some(snapshot) =
+            self.contributions
+                .get(radian_host::USAGE_ITEM)
+                .and_then(|contribution| {
+                    contribution
+                        .usage
+                        .map(|snapshot| (snapshot, contribution.stale))
+                })
+        else {
+            return vec![format!("usage: no snapshot yet for {provider}")];
+        };
+        let (snapshot, stale) = snapshot;
+        if snapshot.provider != provider {
+            return vec![format!("usage: no snapshot yet for {provider}")];
+        }
+        command::usage_notices(&snapshot, stale)
     }
 
     /// The `/model` decision (ADR 0026 D5/D7). The loop has already refused a provider without
