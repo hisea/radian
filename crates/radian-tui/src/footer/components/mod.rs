@@ -88,9 +88,8 @@ pub(crate) trait Component: Sync {
     fn id(&self) -> &str;
     /// The `{placeholder}`s its `data` fills, for parse-time validation and its README row.
     fn placeholders(&self) -> &'static [&'static str];
-    /// The default icon in each glyph set, `[unicode, nerd, ascii, emoji]`. `emoji` (index 3) is
-    /// declared by every component, but `tui.footer.glyphs` does not accept `emoji` until slice
-    /// ③, so only the first three are ever selected today. An empty string is "no icon".
+    /// The default icon in each glyph set, `[unicode, nerd, ascii, emoji]` (ADR 0027 revision
+    /// 14 decision 7 added the fourth). An empty string is "no icon".
     fn glyphs(&self) -> [&'static str; 4];
     /// The default theme role, after a threshold and a configured `style` (ADR 0027 C2).
     fn role(&self, _app: &App) -> Option<Role> {
@@ -162,12 +161,13 @@ pub(crate) fn thresholds(id: &str) -> Vec<(i64, ItemStyle)> {
     builtin(id).map_or_else(Vec::new, Component::thresholds)
 }
 
-/// A component's default glyph in the configured set (`emoji` is never selected today).
+/// A component's default glyph in the configured set.
 pub(crate) fn glyph_of(component: &dyn Component, glyphs: Glyphs) -> &'static str {
     component.glyphs()[match glyphs {
         Glyphs::Unicode => 0,
         Glyphs::Nerd => 1,
         Glyphs::Ascii => 2,
+        Glyphs::Emoji => 3,
     }]
 }
 

@@ -19,7 +19,7 @@ impl Component for Elapsed {
 
     fn glyphs(&self) -> [&'static str; 4] {
         // The unicode icon was dropped (ADR 0027: no covered glyph).
-        ["", "\u{f017} ", "t ", ""]
+        ["", "\u{f017} ", "t ", "⏱ "]
     }
 
     fn priority(&self) -> i64 {

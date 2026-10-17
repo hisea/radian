@@ -475,7 +475,8 @@ impl MdGlyphs {
                 rail: "│ ",
                 dash: '─',
             },
-            crate::footer::Glyphs::Unicode => Self {
+            // The emoji tier draws the unicode set (ADR 0027).
+            crate::footer::Glyphs::Unicode | crate::footer::Glyphs::Emoji => Self {
                 bullet: "- ",
                 quote: "▏ ",
                 task_unchecked: "☐ ",

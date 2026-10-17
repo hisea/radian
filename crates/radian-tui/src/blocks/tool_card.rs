@@ -271,6 +271,9 @@ pub(crate) fn status_marks(glyphs: crate::footer::Glyphs) -> (char, char) {
         crate::footer::Glyphs::Unicode => ('✓', '×'),
         crate::footer::Glyphs::Nerd => ('\u{f00c}', '\u{f00d}'),
         crate::footer::Glyphs::Ascii => ('+', 'x'),
+        // The emoji set's ballot boxes, from the system emoji font (ADR 0027
+        // decision 7).
+        crate::footer::Glyphs::Emoji => ('✅', '❌'),
     }
 }
 

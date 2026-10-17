@@ -20,7 +20,7 @@ impl Component for Host {
     fn glyphs(&self) -> [&'static str; 4] {
         // ADR 0027: `@`, the nerd `f109`, the word `host`; `⌂` is not in all six
         // reference fonts.
-        ["@ ", "\u{f109} ", "host ", ""]
+        ["@ ", "\u{f109} ", "host ", "💻 "]
     }
 
     fn priority(&self) -> i64 {

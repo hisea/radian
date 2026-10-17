@@ -18,7 +18,7 @@ impl Component for Speed {
     }
 
     fn glyphs(&self) -> [&'static str; 4] {
-        ["\u{bb} ", "\u{f0e7} ", "spd ", ""]
+        ["\u{bb} ", "\u{f0e7} ", "spd ", "🚀 "]
     }
 
     fn priority(&self) -> i64 {

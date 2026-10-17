@@ -27,10 +27,10 @@ impl Component for Tokens {
 
     fn data(&self, app: &App, _item: &Item) -> Option<ItemData> {
         let session = app.session.projection.read();
-        // The default format is a tier default (ADR 0027 item 2): the unicode tier's
-        // arrows, or `^`/`v`. A user-configured format always wins.
+        // The default format is a tier default (ADR 0027 item 2): the unicode and
+        // emoji tiers' arrows, or `^`/`v`. A user-configured format always wins.
         let default_format = match app.footer_glyphs() {
-            Glyphs::Unicode => "↑{in} ↓{out} R{cache}",
+            Glyphs::Unicode | Glyphs::Emoji => "↑{in} ↓{out} R{cache}",
             Glyphs::Nerd | Glyphs::Ascii => "^{in} v{out} R{cache}",
         };
         Some(

@@ -32,7 +32,7 @@ impl Component for Reasoning {
     }
 
     fn glyphs(&self) -> [&'static str; 4] {
-        ["* ", "\u{f0eb} ", "* ", ""]
+        ["* ", "\u{f0eb} ", "* ", "🧠 "]
     }
 
     fn priority(&self) -> i64 {

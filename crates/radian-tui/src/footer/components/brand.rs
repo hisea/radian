@@ -32,7 +32,10 @@ impl Component for Brand {
         // `notice_label`, so the mark follows a theme switch; a configured `tui.brand` keeps
         // this style in every glyph set.
         Some(
-            if app.footer_glyphs() == Glyphs::Unicode || app.brand.is_some() {
+            if app.footer_glyphs() == Glyphs::Unicode
+                || app.footer_glyphs() == Glyphs::Emoji
+                || app.brand.is_some()
+            {
                 Role::NoticeLabel
             } else {
                 Role::Text

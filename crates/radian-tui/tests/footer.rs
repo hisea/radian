@@ -1064,12 +1064,14 @@ fn the_context_auto_marker_follows_the_switch() {
 
 /// Every new item carries a glyph in all three sets (ADR 0027), and the sets differ.
 #[test]
-fn the_new_items_have_glyphs_in_all_three_sets() {
-    // The unicode `elapsed` icon was dropped (ADR 0027: no covered glyph).
+fn the_new_items_have_glyphs_in_every_set() {
+    // The unicode `elapsed` icon was dropped (ADR 0027: no covered glyph); the
+    // emoji set (ADR 0027) draws from the system emoji font.
     for (set, host, speed, elapsed) in [
         ("unicode", '@', '»', None),
         ("nerd", '\u{f109}', '\u{f0e7}', Some('\u{f017}')),
         ("ascii", 'h', 's', Some('t')),
+        ("emoji", '💻', '🚀', Some('⏱')),
     ] {
         let mut app = App::new("mock", "s");
         app.set_hostname(Some("box".to_string()));

@@ -30,6 +30,9 @@ pub fn brand_mark(glyphs: Glyphs) -> &'static str {
         Glyphs::Nerd => "\u{f0c20}",
         Glyphs::Unicode => "R",
         Glyphs::Ascii => "rad",
+        // The emoji set's mark (ADR 0027): a high-voltage bolt, one
+        // cell, drawn by the system emoji font like every other emoji-tier glyph.
+        Glyphs::Emoji => "⚡",
     }
 }
 
@@ -43,6 +46,9 @@ pub enum Glyphs {
     Nerd,
     /// Pure ASCII.
     Ascii,
+    /// Emoji (ADR 0027): drawn by the system emoji font, so the
+    /// six-font coverage rule does not apply to this tier.
+    Emoji,
 }
 
 impl Glyphs {
@@ -51,15 +57,16 @@ impl Glyphs {
             "unicode" => Some(Self::Unicode),
             "nerd" => Some(Self::Nerd),
             "ascii" => Some(Self::Ascii),
+            "emoji" => Some(Self::Emoji),
             _ => None,
         }
     }
 
     /// The card frame's characters (ADR 0028 rule 2): unicode box drawing for the
-    /// unicode and nerd sets, `+ - |` for ascii.
+    /// unicode, nerd and emoji sets, `+ - |` for ascii.
     pub fn frame(self) -> FrameGlyphs {
         match self {
-            Self::Unicode | Self::Nerd => FrameGlyphs {
+            Self::Unicode | Self::Nerd | Self::Emoji => FrameGlyphs {
                 top_left: "┌",
                 top_right: "┐",
                 bottom_left: "└",
@@ -89,42 +96,44 @@ impl Glyphs {
     /// The tool-call status glyphs (ADR 0028 rule 4): running, success, failure.
     /// The unicode set is covered by all six checked fonts (ADR 0027 and 6): omp's
     /// `⟳`/`✔`/`✘` are not, so `~`/`✓`/`×` stand in. The Nerd set uses the Font Awesome
-    /// codepoints; the ASCII set is plain.
+    /// codepoints; the ASCII set is plain. The emoji set draws the hourglass and the ballot
+    /// boxes from the system emoji font (ADR 0027).
     pub fn tool_status(self) -> [&'static str; 3] {
         match self {
             Self::Unicode => ["~", "✓", "×"],
             Self::Nerd => ["\u{f110}", "\u{f00c}", "\u{f00d}"],
             Self::Ascii => ["*", "+", "x"],
+            Self::Emoji => ["⏳", "✅", "❌"],
         }
     }
 
-    /// The token arrows: the unicode tier uses `↑`/`↓` (revision 6 item 2; both are in all six
-    /// checked fonts), the other tiers keep `^`/`v`.
+    /// The token arrows: the unicode and emoji tiers use `↑`/`↓` (revision 6 item 2; both are
+    /// in all six checked fonts), the other tiers keep `^`/`v`.
     pub fn token_arrows(self) -> (&'static str, &'static str) {
         match self {
-            Self::Unicode => ("↑", "↓"),
+            Self::Unicode | Self::Emoji => ("↑", "↓"),
             Self::Nerd | Self::Ascii => ("^", "v"),
         }
     }
 
     /// The marker column's **folded** spelling (ADR 0035's 2026-10-16 "折叠标记统一" note): the
     /// thinking channel's folded one-liner and an expandable tool head that shows only its head
-    /// both take it. `◼ ` on the unicode and nerd tiers, `+ ` under `ascii`. `◼`/`◻` miss four
-    /// of the six reference fonts: the owner chose the pair anyway, a documented exception like
-    /// the ask record's `◉`/`○`.
+    /// both take it. `◼ ` on the unicode, nerd and emoji tiers, `+ ` under `ascii`. `◼`/`◻`
+    /// miss four of the six reference fonts: the owner chose the pair anyway, a documented
+    /// exception like the ask record's `◉`/`○`.
     pub fn fold_marker(self) -> &'static str {
         match self {
-            Self::Unicode | Self::Nerd => "◼ ",
+            Self::Unicode | Self::Nerd | Self::Emoji => "◼ ",
             Self::Ascii => "+ ",
         }
     }
 
     /// The marker column's **expanded** spelling (same note): a body drawn under the head (the
     /// `errors` preview, an error body, `Ctrl-O`/search expansion, the expanded thinking
-    /// channel). `◻ ` on the unicode and nerd tiers, `- ` under `ascii`.
+    /// channel). `◻ ` on the unicode, nerd and emoji tiers, `- ` under `ascii`.
     pub fn open_marker(self) -> &'static str {
         match self {
-            Self::Unicode | Self::Nerd => "◻ ",
+            Self::Unicode | Self::Nerd | Self::Emoji => "◻ ",
             Self::Ascii => "- ",
         }
     }
@@ -436,7 +445,7 @@ impl Footer {
             None => Glyphs::Unicode,
             Some(name) => Glyphs::parse(name).unwrap_or_else(|| {
                 warnings.push(format!(
-                    "tui.footer.glyphs = {name:?} is not one of unicode|nerd|ascii; using unicode"
+                    "tui.footer.glyphs = {name:?} is not one of unicode|nerd|ascii|emoji; using unicode"
                 ));
                 Glyphs::Unicode
             }),
@@ -1395,11 +1404,12 @@ mod tests {
         }
     }
 
-    /// The brand mark is per glyph set (ADR 0027): Nerd Font, unicode `R`, ascii
-    /// `rad`; `㎭` is gone.
+    /// The brand mark is per glyph set (ADR 0027, plus the emoji set from
+    /// revision 14 decision 7): Nerd Font, unicode `R`, ascii `rad`, emoji bolt; `㎭`
+    /// is gone.
     #[test]
     fn the_brand_mark_is_per_glyph_set() {
-        for (name, expected) in [("unicode", "R"), ("nerd", "\u{f0c20}"), ("ascii", "rad")] {
+        for (name, expected) in [("unicode", "R"), ("nerd", "\u{f0c20}"), ("ascii", "rad"), ("emoji", "⚡")] {
             let app = app_with_glyphs(name);
             let item = bare_item("brand");
             let component = components::builtin("brand").expect("the brand component");
@@ -1716,31 +1726,32 @@ mod tests {
     }
 
     /// ADR 0027: the registry's default glyph in the three selectable sets
-    /// must match the `631c8dd` `glyph` table (`emoji`, index 3, is not selectable until slice
-    /// ③'s item 3 and stays empty; item 2 only removes `context_bar`, merged into `context` by
-    /// decision 6, whose row had an empty icon in every set).
+    /// must match the `631c8dd` `glyph` table; decision 7 adds the fourth, emoji column, drawn
+    /// by the system emoji font (the six-font coverage rule does not apply to it). Slice ③
+    /// item 2 only removes `context_bar`, merged into `context` by decision 6, whose row had
+    /// an empty icon in every set.
     #[test]
     fn the_registry_matches_the_pre_refactor_glyph_table() {
-        let expected: [(&str, [&str; 3]); 19] = [
-            ("brand", ["", "", ""]),
-            ("host", ["@ ", "\u{f109} ", "host "]),
-            ("model", ["", "", ""]),
-            ("reasoning", ["* ", "\u{f0eb} ", "* "]),
-            ("tier", ["", "", ""]),
-            ("cwd", ["", "", ""]),
-            ("git_branch", ["", "\u{e0a0} ", ""]),
-            ("worktree", ["", "", ""]),
-            ("status", ["", "", ""]),
-            ("session", ["# ", "", "# "]),
-            ("context", ["", "\u{f035b} ", "["]),
-            ("usage", ["", "", ""]),
-            ("tokens", ["", "", ""]),
-            ("speed", ["\u{bb} ", "\u{f0e7} ", "spd "]),
-            ("elapsed", ["", "\u{f017} ", "t "]),
-            ("cost", ["", "", ""]),
-            ("pending", ["", "", ""]),
-            ("mcp", ["", "", ""]),
-            ("scroll", ["", "", ""]),
+        let expected: [(&str, [&str; 4]); 19] = [
+            ("brand", ["", "", "", ""]),
+            ("host", ["@ ", "\u{f109} ", "host ", "💻 "]),
+            ("model", ["", "", "", ""]),
+            ("reasoning", ["* ", "\u{f0eb} ", "* ", "🧠 "]),
+            ("tier", ["", "", "", ""]),
+            ("cwd", ["", "", "", ""]),
+            ("git_branch", ["", "\u{e0a0} ", "", ""]),
+            ("worktree", ["", "", "", ""]),
+            ("status", ["", "", "", ""]),
+            ("session", ["# ", "", "# ", "# "]),
+            ("context", ["", "\u{f035b} ", "[", ""]),
+            ("usage", ["", "", "", ""]),
+            ("tokens", ["", "", "", ""]),
+            ("speed", ["\u{bb} ", "\u{f0e7} ", "spd ", "🚀 "]),
+            ("elapsed", ["", "\u{f017} ", "t ", "⏱ "]),
+            ("cost", ["", "", "", ""]),
+            ("pending", ["", "", "", ""]),
+            ("mcp", ["", "", "", ""]),
+            ("scroll", ["", "", "", ""]),
         ];
         assert_eq!(
             components::ids().len(),
@@ -1749,13 +1760,11 @@ mod tests {
         );
         for (id, glyphs) in expected {
             let component = components::builtin(id).expect("registered");
-            let [unicode, nerd, ascii, emoji] = component.glyphs();
             assert_eq!(
-                [unicode, nerd, ascii],
+                component.glyphs(),
                 glyphs,
-                "default glyphs for {id} (unicode/nerd/ascii)"
+                "default glyphs for {id} (unicode/nerd/ascii/emoji)"
             );
-            assert_eq!(emoji, "", "{id}'s emoji glyph is not selectable yet");
         }
     }
 

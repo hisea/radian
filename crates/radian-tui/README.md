@@ -260,7 +260,10 @@ find_next = ["ctrl-g", "shift-enter"]
   `tokens`/`cost`/`context` on the right), `full` (revision 1's two rows), `pi` (the earlier two
   rows) or `classic` (today's one line, byte-for-byte). `separator` joins items (default
   `" │ "`, any string), each row may override it, and `separator_style` styles it (default the
-  `footer_separator` role, dim). `glyphs` is `unicode` (default), `nerd` or `ascii`.
+  `footer_separator` role, dim). `glyphs` is `unicode` (default), `nerd`, `ascii` or
+  `emoji` (ADR 0027: unicode icons where they exist, emoji where they
+  read better — `💻` host, `🧠` reasoning, `#` session, `🚀` speed, `⏱` elapsed, `⚡` brand —
+  drawn by the system emoji font, so the six-font coverage table does not apply to this tier).
   `context_line` is `off` (default; the gap between a row's left and right groups is spaces) or
   `percentage` (ADR 0027 item 4, following omp's `statusLine.contextLine`: the gap
   becomes a `─` rule, the used fraction of the context window in the `budget` role and the rest
@@ -304,7 +307,7 @@ find_next = ["ctrl-g", "shift-enter"]
 
 | item | placeholders | default |
 |---|---|---|
-| `brand` | `{brand}` | `R` (bold accent, unicode) / `󰰠` (nerd) / `rad` (ascii); ADR 0027 |
+| `brand` | `{brand}` | `R` (bold accent, unicode) / `󰰠` (nerd) / `rad` (ascii) / `⚡` (emoji); ADR 0027 |
 | `host` | `{host}` | the machine's hostname, read once at startup |
 | `model` | `{display_name}`, `{id}`, `{provider}` | the model's display name (or id) |
 | `reasoning` | `{level}` | the thinking level, one theme role per level |
@@ -351,7 +354,8 @@ Check a glyph with `crates/radian-tui/scripts/check-glyph-coverage.py` (needs `f
 throwaway venv; it is not a repository dependency and not part of `cargo test`). A font that is
 not installed is printed as `未查`, never guessed. The unit test
 `footer::tests::unicode_tier_glyphs_are_all_verified_covered` keeps a new unicode-tier glyph
-from slipping in unchecked.
+from slipping in unchecked. The `emoji` tier (ADR 0027) is outside this
+check: its glyphs come from the system emoji font, not the six reference fonts.
 
 | glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Source Code Pro |
 |---|---|---|---|---|---|---|---|---|

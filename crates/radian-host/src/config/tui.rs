@@ -178,7 +178,8 @@ pub struct TuiFooterConfig {
     /// `separator_style`: the separator's style — a theme role or a color (ADR 0027 revision
     /// 3). The TUI parses it; the default is the `footer_separator` role.
     pub separator_style: Option<String>,
-    /// `glyphs`: `"unicode"` (the default), `"nerd"` or `"ascii"`. The TUI validates it.
+    /// `glyphs`: `"unicode"` (the default), `"nerd"`, `"ascii"` or `"emoji"` (ADR 0027
+    /// revision 14 decision 7). The TUI validates it.
     pub glyphs: Option<String>,
     /// `context_line`: `"off"` (the default) or `"percentage"`. ADR 0027 item 4:
     /// `percentage` fills the gap between a row's left and right groups with the context

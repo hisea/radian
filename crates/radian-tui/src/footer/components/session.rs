@@ -17,7 +17,7 @@ impl Component for Session {
     }
 
     fn glyphs(&self) -> [&'static str; 4] {
-        ["# ", "", "# ", ""]
+        ["# ", "", "# ", "# "]
     }
 
     fn priority(&self) -> i64 {
