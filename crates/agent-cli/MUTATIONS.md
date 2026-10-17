@@ -356,3 +356,20 @@ Base `2f41f69` · 直接改源码、跑单个测试、从 `.radian/scratch/mut/`
 | S6B2-1 | `lib.rs` 的 `task_builder: Some(task_builder)` 改回 `None`（headless lead 不挂 lead tools） | `a_headless_lead_mounts_the_task_tools`（tools 列表里没有 `spawn_task` 等） | ✅ |
 
 1/1 抓住。
+
+## oauth-redact：启动后才登记的 token 也要脱敏（2026-10-16）
+
+Base `5cfb0b1` · worktree `.radian-worktrees/oauth-redact`。两条名单（`Setup::secrets` 用于所有
+报错、`export_secrets` 用于导出/搜索）都只在启动时读一次 `resolved_keys()`；`chatgpt` 的 access
+token 在会话里被 `ensure_fresh` 刷新并写回 `auth.json` 之后，回显它的 401 或导出就会原文带出
+token（ADR 0026 禁止）。两个读点都改成走 `redaction_secrets()`（每次脱敏时现读
+`radian_host::registered_secrets()`）。变异直接改 `src/lib.rs`，改前 `cp` 到
+`.radian/scratch/mut/`，改后 `cp` 还原并 `cmp` 一致（`git status --short` 跑完只剩被测文件）。
+命令：`timeout 300 cargo test -p agent-cli --locked --no-fail-fast --lib the_error_and_export`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| OR-C1 | `redact` 直接遍历入参（不再经 `redaction_secrets`） | `tests::the_error_and_export_lists_carry_a_value_registered_after_startup`（输出里留着 `late-cli-token-…`） | ✅ 1 failed |
+| OR-C2 | `export_secrets` 末尾返回原 `secrets`（去掉 `redaction_secrets`） | 同上（`the export list must carry the registered token: []`） | ✅ 1 failed |
+
+2/2 抓住。
