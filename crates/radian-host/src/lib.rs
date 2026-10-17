@@ -120,7 +120,7 @@ pub use headers::{
     take_child_headers_from_env,
 };
 pub use headers_usage::{
-    ANTHROPIC_HEADERS, OPENAI_HEADERS, HeadersUsage, HeadersWindow, headers_snapshot,
+    ANTHROPIC_HEADERS, HeadersUsage, HeadersWindow, OPENAI_HEADERS, headers_snapshot,
 };
 pub use home::{
     RADIAN_HOME_ENV, access_dir_for, cache_dir_for, catalog_cache, catalog_cache_for, config_dir,

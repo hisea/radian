@@ -511,10 +511,7 @@ async fn contract_14_rate_limit_headers_are_kept_raw() {
             message_stop(),
         ],
         vec![
-            (
-                "anthropic-ratelimit-requests-limit".into(),
-                "1000".into(),
-            ),
+            ("anthropic-ratelimit-requests-limit".into(), "1000".into()),
             (
                 "anthropic-ratelimit-requests-remaining".into(),
                 "999".into(),

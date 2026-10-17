@@ -1994,7 +1994,12 @@ fn a_provider_without_a_usage_source_draws_no_usage_row() {
     );
     publish_snapshot(
         &app,
-        usage_snapshot("openai-compatible", "Usage", vec![window("5h", 98.0, None)], None),
+        usage_snapshot(
+            "openai-compatible",
+            "Usage",
+            vec![window("5h", 98.0, None)],
+            None,
+        ),
     );
     assert_eq!(app.footer.lines(&app, 100).len(), 2, "no usage row");
     let terminal = render(&mut app, 100, 12);
@@ -2224,11 +2229,15 @@ fn rate_limit_headers_reach_the_usage_row() {
     // `/usage` prints the same snapshot's windows.
     let notices = submit_notices(&mut app, "/usage");
     assert!(
-        notices.iter().any(|notice| notice.contains("requests: 999 remaining")),
+        notices
+            .iter()
+            .any(|notice| notice.contains("requests: 999 remaining")),
         "{notices:?}"
     );
     assert!(
-        notices.iter().any(|notice| notice.contains("tokens: 99900 remaining")),
+        notices
+            .iter()
+            .any(|notice| notice.contains("tokens: 99900 remaining")),
         "{notices:?}"
     );
 }

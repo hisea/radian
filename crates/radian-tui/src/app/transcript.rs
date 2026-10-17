@@ -172,13 +172,14 @@ impl App {
                     && let Some(snapshot) =
                         radian_host::headers_snapshot(&provider, limits.as_ref())
                 {
-                    self.contributions.write_contribution(radian_host::Contribution {
-                        item: radian_host::USAGE_ITEM.to_owned(),
-                        segments: Vec::new(),
-                        stale: false,
-                        symbol: None,
-                        usage: Some(snapshot),
-                    });
+                    self.contributions
+                        .write_contribution(radian_host::Contribution {
+                            item: radian_host::USAGE_ITEM.to_owned(),
+                            segments: Vec::new(),
+                            stale: false,
+                            symbol: None,
+                            usage: Some(snapshot),
+                        });
                 }
             }
             // ADR 0017: a transient failure is being retried. The failed attempt's

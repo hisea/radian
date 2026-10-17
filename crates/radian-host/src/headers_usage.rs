@@ -263,8 +263,8 @@ mod tests {
             ("anthropic-ratelimit-tokens-remaining", "99900"),
             ("anthropic-ratelimit-tokens-reset", "2001-09-09T02:46:40Z"),
         ]);
-        let snapshot = snapshot("anthropic", &ANTHROPIC_HEADERS, Some(&received), now)
-            .expect("a snapshot");
+        let snapshot =
+            snapshot("anthropic", &ANTHROPIC_HEADERS, Some(&received), now).expect("a snapshot");
         assert_eq!(snapshot.provider, "anthropic");
         assert_eq!(snapshot.title, "Anthropic usage");
         assert_eq!(snapshot.plan, None);
@@ -297,7 +297,8 @@ mod tests {
             ("x-ratelimit-remaining-tokens", "199900"),
             ("x-ratelimit-reset-tokens", "6m0s"),
         ]);
-        let snapshot = snapshot("openai", &OPENAI_HEADERS, Some(&received), now).expect("a snapshot");
+        let snapshot =
+            snapshot("openai", &OPENAI_HEADERS, Some(&received), now).expect("a snapshot");
         assert_eq!(snapshot.title, "OpenAI usage");
         assert_eq!(
             snapshot.windows,
@@ -321,15 +322,7 @@ mod tests {
     fn no_headers_is_no_snapshot() {
         let now = SystemTime::UNIX_EPOCH;
         assert!(snapshot("anthropic", &ANTHROPIC_HEADERS, None, now).is_none());
-        assert!(
-            snapshot(
-                "anthropic",
-                &ANTHROPIC_HEADERS,
-                Some(&limits(&[])),
-                now
-            )
-            .is_none()
-        );
+        assert!(snapshot("anthropic", &ANTHROPIC_HEADERS, Some(&limits(&[])), now).is_none());
         assert!(
             snapshot(
                 "anthropic",
@@ -352,8 +345,8 @@ mod tests {
             ("anthropic-ratelimit-tokens-remaining", "50"),
             ("anthropic-ratelimit-tokens-reset", "soon"),
         ]);
-        let snapshot = snapshot("anthropic", &ANTHROPIC_HEADERS, Some(&received), now)
-            .expect("a snapshot");
+        let snapshot =
+            snapshot("anthropic", &ANTHROPIC_HEADERS, Some(&received), now).expect("a snapshot");
         assert_eq!(
             snapshot.windows,
             vec![

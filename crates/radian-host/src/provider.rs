@@ -1085,7 +1085,9 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         headers: no_headers,
         // ADR 0027 slice ④: the `anthropic-ratelimit-*` response
         // headers, parsed per response (no endpoint, no key).
-        usage: Some(UsageSource::Headers(crate::headers_usage::ANTHROPIC_HEADERS)),
+        usage: Some(UsageSource::Headers(
+            crate::headers_usage::ANTHROPIC_HEADERS,
+        )),
     },
     ProviderDescriptor {
         id: "openai",
@@ -1288,10 +1290,7 @@ mod tests {
             assert!(has_usage_source(id), "{id} declares a usage source");
             assert!(usage_endpoint(id).is_none(), "{id} has no endpoint to poll");
             assert!(
-                matches!(
-                    descriptor(id).unwrap().usage,
-                    Some(UsageSource::Headers(_))
-                ),
+                matches!(descriptor(id).unwrap().usage, Some(UsageSource::Headers(_))),
                 "{id} declares the Headers source"
             );
         }
