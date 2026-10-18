@@ -358,6 +358,7 @@ pub(crate) fn run_read(
         mode,
         limits.default_read_bytes,
         limits.default_grep_matches,
+        "output_read",
     )
 }
 

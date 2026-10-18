@@ -271,11 +271,8 @@ pub(crate) fn read_pattern(
 }
 
 /// The read of the output file failed. The path is not shown to the model.
-pub(crate) fn read_failure(error: &std::io::Error) -> ToolFailure {
-    fail(
-        "output_read",
-        format!("could not read the retained output: {error}"),
-    )
+pub(crate) fn read_failure(code: &str, error: &std::io::Error) -> ToolFailure {
+    fail(code, format!("could not read the retained output: {error}"))
 }
 
 /// Which part of the output file a call asks for. `None` is the incremental ring read, which
@@ -410,28 +407,29 @@ pub(crate) fn read_file(
     mode: FileMode,
     budget: usize,
     pattern_cap: usize,
+    failure_code: &str,
 ) -> Result<ToolOutput, ToolFailure> {
     match mode {
         FileMode::Range {
             from_line,
             max_lines,
         } => {
-            let total = count_lines(path).map_err(|e| read_failure(&e))?;
-            let range =
-                read_range(path, from_line, max_lines, budget).map_err(|e| read_failure(&e))?;
+            let total = count_lines(path).map_err(|e| read_failure(failure_code, &e))?;
+            let range = read_range(path, from_line, max_lines, budget)
+                .map_err(|e| read_failure(failure_code, &e))?;
             Ok(render_range(id_field, id, "range", range, total))
         }
         FileMode::Tail { lines } => {
-            let total = count_lines(path).map_err(|e| read_failure(&e))?;
+            let total = count_lines(path).map_err(|e| read_failure(failure_code, &e))?;
             // 1-based: the last `lines` lines are `total - lines + 1 ..= total`.
             let start = total.saturating_sub(lines) + 1;
-            let range =
-                read_range(path, start, Some(lines), budget).map_err(|e| read_failure(&e))?;
+            let range = read_range(path, start, Some(lines), budget)
+                .map_err(|e| read_failure(failure_code, &e))?;
             Ok(render_range(id_field, id, "tail", range, total))
         }
         FileMode::Pattern { source, regex } => {
-            let scan =
-                read_pattern(path, &regex, budget, pattern_cap).map_err(|e| read_failure(&e))?;
+            let scan = read_pattern(path, &regex, budget, pattern_cap)
+                .map_err(|e| read_failure(failure_code, &e))?;
             Ok(render_pattern(id_field, id, &source, scan))
         }
     }

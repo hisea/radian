@@ -1212,6 +1212,7 @@ fn read_output_file(
         mode,
         limits.default_read_bytes,
         limits.default_grep_matches,
+        "jobs_output",
     )
 }
 
