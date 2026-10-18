@@ -873,6 +873,7 @@ async fn pty_mounts_only_the_builtin_tools() {
             "patch",
             "read",
             "shell",
+            "shell_output",
             "skill",
             "subagent",
             "write"

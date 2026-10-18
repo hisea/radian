@@ -9,7 +9,7 @@ use radian_sandbox::{Sandbox, SandboxMode, SandboxSlot};
 
 use crate::read_roots::ReadRoots;
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
-use crate::{fail, git, glob, grep, jobs, list, patch, read, shell, write};
+use crate::{fail, foreground, git, glob, grep, jobs, list, patch, read, shell, write};
 
 /// Resource bounds, all overridable with [`CodingTools::with_limits`]. Defaults are chosen
 /// so a single tool call cannot blow up the model context or the session file.
@@ -58,6 +58,17 @@ pub struct Limits {
     /// cap applies, as before). `Some(ZERO)` is treated as off. A host sets it from
     /// `[shell] auto_background_secs`.
     pub auto_background_after: Option<Duration>,
+    /// The bytes of a **foreground** command's output retained for `shell_output` after its
+    /// model-facing view was truncated. The head+tail in the result is bounded by
+    /// `default_shell_output_bytes`/`max_shell_output_bytes`; this is the larger private file
+    /// the middle can be recovered from. A result that hits this cap says so (the bytes past
+    /// it are not recoverable).
+    pub max_foreground_retained_bytes: usize,
+    /// The bytes every retained foreground output together may hold per session. Keeping a new
+    /// one past this evicts the oldest, whose handle then reads as unknown.
+    pub max_foreground_session_bytes: usize,
+    /// The number of retained foreground outputs per session, evicting the oldest past it.
+    pub max_foreground_items: usize,
 }
 
 impl Default for Limits {
@@ -86,6 +97,13 @@ impl Default for Limits {
             default_shell_timeout: Duration::from_secs(60),
             max_shell_timeout: Duration::from_secs(600),
             auto_background_after: Some(Duration::from_secs(120)),
+            // The model-facing view keeps a bounded head+tail (64 KiB per stream by default);
+            // the retained file is larger so the discarded middle can be recovered, but still
+            // bounded per item and per session. 8 MiB per item covers a large build log's
+            // middle; 32 MiB per session keeps four such items, and eviction drops the oldest.
+            max_foreground_retained_bytes: 8 << 20,
+            max_foreground_session_bytes: 32 << 20,
+            max_foreground_items: 32,
         }
     }
 }
@@ -231,12 +249,20 @@ impl ToolProvider for CodingTools {
         let shell = sandbox
             .as_ref()
             .map(|sandbox| (sandbox.mode(), sandbox.git_writable_except_exec()));
+        // Retained foreground output lives beside the session's jobs, in the same private
+        // directory the host already created 0700 (ADR 0039 decision 1). The registry is *per
+        // session*: its handles and nonce are fresh, so another session's handle is unknown.
+        let foreground = Arc::new(foreground::ForegroundOutputs::new(
+            jobs.dir().join("foreground"),
+            &self.limits,
+        ));
         Ok(CodingSession {
             root: Arc::clone(&self.root),
             limits: self.limits,
             sandbox: self.sandbox.clone(),
             specs: specs(shell),
             jobs,
+            foreground,
         })
     }
 }
@@ -249,6 +275,9 @@ pub struct CodingSession {
     sandbox: SandboxSlot,
     specs: Vec<ToolSpec>,
     jobs: Arc<jobs::Jobs>,
+    /// Retained foreground `shell` output, read by `shell_output`. Per session (its handles are
+    /// refused by any other session).
+    foreground: Arc<foreground::ForegroundOutputs>,
 }
 
 impl CodingSession {
@@ -262,6 +291,12 @@ impl CodingSession {
     /// I/O, so the panic path may call it too.
     pub fn shutdown_jobs(&self) {
         self.jobs.kill_all();
+    }
+
+    /// Session end: drop the retained foreground output and remove its files. Synchronous file
+    /// removal only; the registry state also drops with the session.
+    pub fn shutdown_outputs(&self) {
+        self.foreground.shutdown();
     }
 }
 
@@ -282,6 +317,8 @@ fn specs(shell: Option<(SandboxMode, bool)>) -> Vec<ToolSpec> {
         specs.push(jobs::output_spec());
         specs.push(jobs::list_spec());
         specs.push(jobs::kill_spec());
+        // Only a `shell` call produces retained foreground output.
+        specs.push(foreground::spec());
     }
     specs
 }
@@ -312,6 +349,7 @@ impl ToolSession for CodingSession {
                         &sandbox,
                         &self.limits,
                         &self.jobs,
+                        &self.foreground,
                         &call.arguments,
                         &cx,
                     )
@@ -327,6 +365,7 @@ impl ToolSession for CodingSession {
             "job_output" => jobs::run_output(&self.jobs, &self.limits, &call.arguments, &cx).await,
             "job_list" => jobs::run_list(&self.jobs),
             "job_kill" => jobs::run_kill(&self.jobs, &call.arguments),
+            "shell_output" => foreground::run_read(&self.foreground, &self.limits, &call.arguments),
             other => Err(fail(
                 "unknown_tool",
                 format!("`{other}` is not one of the built-in coding tools"),

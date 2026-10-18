@@ -626,3 +626,29 @@ ME-1 is the "apply the first edit before validating the second" mutation the bri
 fails on the file's contents, not on the error code, which is exactly the all-or-nothing property
 under test. ME-2 shows the conflict rejection is the only thing guarding overlapping ranges:
 without it the two ranges are applied in descending offset order and the file changes silently.
+
+## `shell_output`: a foreground shell result's opaque, bounded output handle (2026-10-17, branch `pi/multi-edit-output`)
+
+A capped foreground `shell` command tees its whole output to a session-private file (the shared
+`output::open_output_file` creator, `O_CREAT|O_EXCL|O_NOFOLLOW` 0600) and returns an opaque handle
+`out-<nonce>-<n>`. `shell_output` resolves the handle only in the session's own registry; a handle
+is never a path, and the retained file is capped per item and per session. Mutations were applied
+in place, the source restored from a `cp` in `/tmp/radian-mut/` and confirmed byte-identical with
+`cmp` after each run; run with `cargo test -p radian-coding --test shell_output --locked
+--no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| SF-1 | `run_read` resolves the handle directly as a path (`PathBuf::from(&args.handle)`), bypassing the registry | ✅ 4 failed | `a_path_like_handle_cannot_open_a_file`, `a_handle_from_another_session_is_unknown`, `a_truncated_command_exposes_a_retrievable_handle`, `the_session_cap_evicts_the_oldest_handle` (the path read gave `output_read` instead of `unknown_output`) |
+| SF-2 | `Retention::push` ignores the per-item cap (`take = bytes.len()`) | ✅ 1 failed | `the_retained_file_is_capped_and_says_so` (`output_retained_cut` was `false`, retained 23893 > 200) |
+| SF-3 | `ForegroundOutputs::finish` never takes the "remove it" branch (`if !keep` → `if false`) | ✅ 1 failed | `a_non_truncated_command_leaves_no_handle_or_file` (one leftover `.out` file for an untruncated command) |
+
+SF-1 is the required "bypass the opaque-handle registry with a path/open" mutation; the path test
+never opens the planted file. SF-2 is the required "omit the cap/retention enforcement" mutation.
+SF-3 pins the "a non-truncated command leaves no artifact" rule: without it the file survives even
+though no handle was returned.
+
+The **shared creator** (`output::open_output_file`, used by both `job_output`'s file and
+`shell_output`'s file) is pinned by the unit test `output::tests::the_creator_refuses_an_existing_file_and_a_symlink`
+and by `job_output_security::a_planted_symlink_at_the_next_output_file_is_not_followed`: a planted
+symlink or pre-existing file at the destination is refused, so it can never receive host output.
