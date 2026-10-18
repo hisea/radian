@@ -10,9 +10,12 @@
 //! The line readers are the same shape `read`/`grep` use: a numbered line range, a `tail_lines`
 //! view, or the lines matching a regex, each bounded by a byte budget and a match cap.
 
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+#[cfg(not(unix))]
+use std::path::PathBuf;
 
 use agent_core::{ContentPart, ToolFailure, ToolOutput};
 use serde::Deserialize;
@@ -80,6 +83,152 @@ pub(crate) fn open_output_read(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+/// A **private** output directory held as a directory fd. Every file inside is opened relative
+/// to this fd (`openat`), so a parent directory swapped for a symlink after the directory was
+/// opened cannot redirect a create or a read. The directory is created 0700 (one level) when
+/// missing and a symlink at the directory path is refused, so a pre-planted parent link cannot
+/// move the retained output outside the root the host chose.
+///
+/// The root is always a caller-supplied directory outside the model's workspace (the session's
+/// jobs directory); see `provider.rs`.
+pub(crate) struct PrivateDir {
+    #[cfg(unix)]
+    dir: File,
+    #[cfg(not(unix))]
+    path: PathBuf,
+}
+
+impl PrivateDir {
+    #[cfg(unix)]
+    pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::io::FromRawFd;
+
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "the private output root is a symlink; refusing",
+                ));
+            }
+            Ok(meta) if !meta.is_dir() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "the private output root is not a directory",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // One level only: the parent is the caller's, not the model's, to create.
+                match std::fs::DirBuilder::new().mode(0o700).create(path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in path"))?;
+        // SAFETY: `c` is a NUL-terminated path; the flags are plain integers.
+        let fd = unsafe {
+            libc::open(
+                c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a fresh descriptor we own.
+        Ok(Self {
+            dir: unsafe { File::from_raw_fd(fd) },
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
+        if !path.exists() {
+            std::fs::create_dir(path)?;
+        }
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the private output root is a symlink; refusing",
+            ));
+        }
+        if !meta.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "the private output root is not a directory",
+            ));
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Creates `name` inside the directory: `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600.
+    #[cfg(unix)]
+    pub(crate) fn create(&self, name: &OsStr) -> std::io::Result<File> {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        let c = std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in name"))?;
+        // SAFETY: `dir` is an open directory fd and `c` a NUL-terminated name.
+        let fd = unsafe {
+            libc::openat(
+                self.dir.as_raw_fd(),
+                c.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a fresh descriptor we own.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn create(&self, name: &OsStr) -> std::io::Result<File> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.path.join(name))
+    }
+
+    /// Opens `name` inside the directory read-only: `O_NOFOLLOW` at every step.
+    #[cfg(unix)]
+    pub(crate) fn open_read(&self, name: &OsStr) -> std::io::Result<File> {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        let c = std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in name"))?;
+        // SAFETY: `dir` is an open directory fd and `c` a NUL-terminated name.
+        let fd = unsafe {
+            libc::openat(
+                self.dir.as_raw_fd(),
+                c.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a fresh descriptor we own.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn open_read(&self, name: &OsStr) -> std::io::Result<File> {
+        OpenOptions::new().read(true).open(self.path.join(name))
+    }
+}
+
 /// The shared file-read arguments of `job_output` and `shell_output`.
 #[derive(Deserialize)]
 pub(crate) struct FileArgs {
@@ -122,10 +271,12 @@ pub(crate) fn file_properties() -> serde_json::Value {
     })
 }
 
-/// The number of lines in `path` as the read tool numbers them: a trailing newline does not add
+/// The number of lines in `file` as the read tool numbers them: a trailing newline does not add
 /// an empty final line, and a non-empty file with no final newline has one more line.
-pub(crate) fn count_lines(path: &Path) -> std::io::Result<u64> {
-    let mut reader = BufReader::new(open_output_read(path)?);
+pub(crate) fn count_lines(file: &File) -> std::io::Result<u64> {
+    let mut handle = file;
+    handle.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(handle);
     let mut count = 0u64;
     let mut any = false;
     let mut last_was_newline = true;
@@ -163,12 +314,14 @@ pub(crate) struct RangeRead {
 /// Reads at most `max_lines` numbered lines from `from_line`, bounded by `budget` bytes. The
 /// skip is constant memory; each line is capped at [`LINE_BYTES`].
 pub(crate) fn read_range(
-    path: &Path,
+    file: &File,
     from_line: u64,
     max_lines: Option<u64>,
     budget: usize,
 ) -> std::io::Result<RangeRead> {
-    let mut reader = BufReader::new(open_output_read(path)?);
+    let mut handle = file;
+    handle.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(handle);
     crate::read::skip_lines(&mut reader, (from_line - 1) as i64)?;
     let mut content = String::new();
     let mut line: Vec<u8> = Vec::new();
@@ -225,12 +378,14 @@ pub(crate) struct PatternRead {
 /// Scans the whole file for `regex`, numbering the matching lines, capped at `cap` matches and
 /// `budget` bytes. The scan continues to end of file so the result can name the total line count.
 pub(crate) fn read_pattern(
-    path: &Path,
+    file: &File,
     regex: &regex::Regex,
     budget: usize,
     cap: usize,
 ) -> std::io::Result<PatternRead> {
-    let mut reader = BufReader::new(open_output_read(path)?);
+    let mut handle = file;
+    handle.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(handle);
     let mut content = String::new();
     let mut line: Vec<u8> = Vec::new();
     let mut lineno = 1u64;
@@ -398,10 +553,10 @@ impl FileMode {
     }
 }
 
-/// Reads a job's or a foreground command's output file in the requested [`FileMode`]. The `id`
-/// is the opaque handle/job id the model gave; it is never a path.
+/// Reads a job's or a foreground command's output in the requested [`FileMode`], from an
+/// already-open fd. The `id` is the opaque handle/job id the model gave; it is never a path.
 pub(crate) fn read_file(
-    path: &Path,
+    file: &File,
     id_field: &str,
     id: &str,
     mode: FileMode,
@@ -414,21 +569,21 @@ pub(crate) fn read_file(
             from_line,
             max_lines,
         } => {
-            let total = count_lines(path).map_err(|e| read_failure(failure_code, &e))?;
-            let range = read_range(path, from_line, max_lines, budget)
+            let total = count_lines(file).map_err(|e| read_failure(failure_code, &e))?;
+            let range = read_range(file, from_line, max_lines, budget)
                 .map_err(|e| read_failure(failure_code, &e))?;
             Ok(render_range(id_field, id, "range", range, total))
         }
         FileMode::Tail { lines } => {
-            let total = count_lines(path).map_err(|e| read_failure(failure_code, &e))?;
+            let total = count_lines(file).map_err(|e| read_failure(failure_code, &e))?;
             // 1-based: the last `lines` lines are `total - lines + 1 ..= total`.
             let start = total.saturating_sub(lines) + 1;
-            let range = read_range(path, start, Some(lines), budget)
+            let range = read_range(file, start, Some(lines), budget)
                 .map_err(|e| read_failure(failure_code, &e))?;
             Ok(render_range(id_field, id, "tail", range, total))
         }
         FileMode::Pattern { source, regex } => {
-            let scan = read_pattern(path, &regex, budget, pattern_cap)
+            let scan = read_pattern(file, &regex, budget, pattern_cap)
                 .map_err(|e| read_failure(failure_code, &e))?;
             Ok(render_pattern(id_field, id, &source, scan))
         }

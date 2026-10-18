@@ -1205,8 +1205,10 @@ fn read_output_file(
 ) -> Result<ToolOutput, ToolFailure> {
     let cell = jobs.get(id)?;
     let path = lock(&cell).output.clone();
+    let file = crate::output::open_output_read(&path)
+        .map_err(|e| crate::output::read_failure("jobs_output", &e))?;
     crate::output::read_file(
-        &path,
+        &file,
         "job_id",
         id,
         mode,

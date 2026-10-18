@@ -231,15 +231,29 @@ impl ToolProvider for CodingTools {
     type Session = CodingSession;
 
     async fn open_session(&self) -> Result<Self::Session, ToolError> {
-        let jobs = match &self.jobs {
-            Some(jobs) => Arc::clone(jobs),
-            // The host always supplies the session-owned registry (`with_jobs`, ADR 0039
-            // decision 1). A provider built directly (tests, an embedded tool set) has no
-            // session directory, so it falls back to a per-workspace directory under `.radian/`
-            // — still opened `O_EXCL|O_NOFOLLOW`, so a pre-planted symlink cannot redirect it.
-            None => Arc::new(jobs::Jobs::new(
-                self.root.root().join(".radian").join("jobs"),
-            )),
+        let (jobs, foreground) = match &self.jobs {
+            Some(jobs) => {
+                let jobs = Arc::clone(jobs);
+                // Retained foreground output lives in the caller-supplied, session-private jobs
+                // directory (ADR 0039 decision 1). The registry is *per session*: its handles
+                // and nonce are fresh, so another session's handle is unknown.
+                let foreground = Arc::new(foreground::ForegroundOutputs::new(
+                    jobs.dir().to_path_buf(),
+                    &self.limits,
+                ));
+                (jobs, Some(foreground))
+            }
+            // A provider built without a caller-supplied private directory (a test, an embedded
+            // tool set) falls back to a per-workspace jobs directory for `job_output` — but a
+            // workspace directory is readable by the model's `read`, so foreground retention is
+            // **off**: there is nowhere safe to put it. No handle is created and `shell_output`
+            // is not advertised; the ordinary truncation notice still says bytes were discarded.
+            None => (
+                Arc::new(jobs::Jobs::new(
+                    self.root.root().join(".radian").join("jobs"),
+                )),
+                None,
+            ),
         };
         // The tool set is fixed here, once per session (ADR 0036): the
         // shell description therefore reflects the tier the session **started** in. A later
@@ -249,18 +263,11 @@ impl ToolProvider for CodingTools {
         let shell = sandbox
             .as_ref()
             .map(|sandbox| (sandbox.mode(), sandbox.git_writable_except_exec()));
-        // Retained foreground output lives beside the session's jobs, in the same private
-        // directory the host already created 0700 (ADR 0039 decision 1). The registry is *per
-        // session*: its handles and nonce are fresh, so another session's handle is unknown.
-        let foreground = Arc::new(foreground::ForegroundOutputs::new(
-            jobs.dir().join("foreground"),
-            &self.limits,
-        ));
         Ok(CodingSession {
             root: Arc::clone(&self.root),
             limits: self.limits,
             sandbox: self.sandbox.clone(),
-            specs: specs(shell),
+            specs: specs(shell, foreground.is_some()),
             jobs,
             foreground,
         })
@@ -275,9 +282,10 @@ pub struct CodingSession {
     sandbox: SandboxSlot,
     specs: Vec<ToolSpec>,
     jobs: Arc<jobs::Jobs>,
-    /// Retained foreground `shell` output, read by `shell_output`. Per session (its handles are
-    /// refused by any other session).
-    foreground: Arc<foreground::ForegroundOutputs>,
+    /// Retained foreground `shell` output, read by `shell_output`. `None` when the provider has
+    /// no caller-supplied private directory (see [`CodingTools::open_session`]), in which case
+    /// neither a handle nor the tool exists.
+    foreground: Option<Arc<foreground::ForegroundOutputs>>,
 }
 
 impl CodingSession {
@@ -296,11 +304,13 @@ impl CodingSession {
     /// Session end: drop the retained foreground output and remove its files. Synchronous file
     /// removal only; the registry state also drops with the session.
     pub fn shutdown_outputs(&self) {
-        self.foreground.shutdown();
+        if let Some(foreground) = &self.foreground {
+            foreground.shutdown();
+        }
     }
 }
 
-fn specs(shell: Option<(SandboxMode, bool)>) -> Vec<ToolSpec> {
+fn specs(shell: Option<(SandboxMode, bool)>, foreground: bool) -> Vec<ToolSpec> {
     let mut specs = vec![
         read::spec(),
         write::spec(),
@@ -317,8 +327,11 @@ fn specs(shell: Option<(SandboxMode, bool)>) -> Vec<ToolSpec> {
         specs.push(jobs::output_spec());
         specs.push(jobs::list_spec());
         specs.push(jobs::kill_spec());
-        // Only a `shell` call produces retained foreground output.
-        specs.push(foreground::spec());
+        // Only a `shell` call produces retained foreground output, and only when there is a
+        // caller-supplied private directory to keep it in.
+        if foreground {
+            specs.push(foreground::spec());
+        }
     }
     specs
 }
@@ -349,7 +362,7 @@ impl ToolSession for CodingSession {
                         &sandbox,
                         &self.limits,
                         &self.jobs,
-                        &self.foreground,
+                        self.foreground.as_deref(),
                         &call.arguments,
                         &cx,
                     )
@@ -365,7 +378,13 @@ impl ToolSession for CodingSession {
             "job_output" => jobs::run_output(&self.jobs, &self.limits, &call.arguments, &cx).await,
             "job_list" => jobs::run_list(&self.jobs),
             "job_kill" => jobs::run_kill(&self.jobs, &call.arguments),
-            "shell_output" => foreground::run_read(&self.foreground, &self.limits, &call.arguments),
+            "shell_output" => match &self.foreground {
+                Some(foreground) => foreground::run_read(foreground, &self.limits, &call.arguments),
+                None => Err(fail(
+                    "unknown_tool",
+                    "`shell_output` needs a caller-supplied private output directory",
+                )),
+            },
             other => Err(fail(
                 "unknown_tool",
                 format!("`{other}` is not one of the built-in coding tools"),

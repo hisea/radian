@@ -652,3 +652,25 @@ The **shared creator** (`output::open_output_file`, used by both `job_output`'s 
 `shell_output`'s file) is pinned by the unit test `output::tests::the_creator_refuses_an_existing_file_and_a_symlink`
 and by `job_output_security::a_planted_symlink_at_the_next_output_file_is_not_followed`: a planted
 symlink or pre-existing file at the destination is refused, so it can never receive host output.
+
+## review fix: the no-host foreground root and the retention cleanup (2026-10-17, branch `pi/multi-edit-output`)
+
+The review found the no-host `CodingTools::with_sandbox` path retaining foreground output under the
+workspace (readable by the model's `read`), and an error path leaking the retention file.
+Foreground retention is now enabled **only** when the provider has a caller-supplied private
+directory (`with_jobs`); the private root is held as an `O_DIRECTORY|O_NOFOLLOW` fd and every file
+is created/read relative to it; and a `Drop` guard removes the file on any path that did not commit
+it. Mutations were applied in place, restored from a `cp` in `/tmp/radian-mut/rf/` and confirmed
+byte-identical with `cmp`; run with
+`cargo test -p radian-coding --test shell_output --locked --no-fail-fast <test>`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RF-1 | the no-host branch retains in the workspace fallback again (`ForegroundOutputs::new` over `jobs.dir()`) | ✅ 1 failed | `the_no_host_provider_retains_nothing_in_the_workspace` (`shell_output` was advertised and a file landed under the workspace) |
+| RF-2 | `RetentionInner::drop` no longer removes the file | ✅ 1 failed | `a_spawn_failure_leaves_no_retained_file` (`1` leftover `.out` file) |
+| RF-3 | `PrivateDir::open` follows a symlinked root (drop the symlink check and `O_NOFOLLOW`) | ✅ 1 failed | `a_planted_root_symlink_cannot_redirect_output` (a handle appeared; output was written through the link) |
+
+RF-2 **survived its first run**: the test's jobs parent did not exist, so `PrivateDir::open`
+failed, no file was ever created, and the assertion passed vacuously. The test now creates the
+session directory tree first, and the mutation then fails on the leftover file. The record keeps
+this because it is the honest picture: an error-cleanup test must prove the file existed first.

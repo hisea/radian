@@ -3,28 +3,34 @@
 //! A foreground command reads through a bounded in-memory head+tail ([`crate::shell`]), so the
 //! bytes between the head and the tail are normally gone. When such a result is truncated, the
 //! model still needs them. This module tees the command's whole output to a private file in the
-//! session's own directory (the same 0700 directory ADR 0039 decision 1 puts job output in), and
+//! session's own directory (the jobs directory ADR 0039 decision 1 already established), and
 //! hands the model an **opaque handle** — never a path.
 //!
 //! The registry is per [`crate::provider::CodingSession`] (its state, and the handle's nonce,
 //! are fresh per session), so a handle from another session is unknown. A handle is
-//! `out-<nonce>-<n>`; the nonce keeps two sessions in one process from ever colliding. The file
-//! is created by [`crate::output::open_output_file`] (`O_CREAT|O_EXCL|O_NOFOLLOW`, 0600), the
-//! same hardened creator `job_output`'s file uses.
+//! `out-<nonce>-<n>`; the nonce keeps two sessions in one process from ever colliding.
 //!
-//! Retention is bounded: at most [`crate::provider::Limits::max_foreground_retained_bytes`] per
-//! item and [`crate::provider::Limits::max_foreground_session_bytes`] across the session (plus
-//! [`crate::provider::Limits::max_foreground_items`] items). Making room evicts the oldest item,
-//! whose handle then reads as unknown. A command whose output fits the model-facing cap creates
-//! no item and leaves no handle: its file is removed as soon as the call ends.
+//! The private root is held as an `O_DIRECTORY|O_NOFOLLOW` fd ([`crate::output::PrivateDir`]) and
+//! every file is created/read relative to it (`O_CREAT|O_EXCL|O_NOFOLLOW`, 0600), so a symlink
+//! planted at the root or swapped in later cannot redirect the output. The root is only enabled
+//! when the provider has a **caller-supplied** session-private directory; a provider built
+//! without one (`CodingTools::with_sandbox` and no `with_jobs`) has no retention and no
+//! `shell_output` — there is no safe place to put it inside the model-readable workspace.
+//!
+//! Retention is bounded: at most [`Limits::max_foreground_retained_bytes`] per item and
+//! [`Limits::max_foreground_session_bytes`] across the session (plus
+//! [`Limits::max_foreground_items`] items). Making room evicts the oldest item, whose handle
+//! then reads as unknown. A command whose output fits the model-facing cap creates no item and
+//! leaves no handle: its file is removed as soon as the call ends (including an error path, via
+//! [`RetentionInner`]'s `Drop`).
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use agent_core::{ToolConcurrency, ToolFailure, ToolOutput, ToolSpec};
 use serde::Deserialize;
@@ -32,6 +38,7 @@ use serde_json::{Value, json};
 
 use crate::args;
 use crate::fail;
+use crate::output::PrivateDir;
 use crate::provider::Limits;
 
 /// One retained item, as the registry tracks it.
@@ -55,8 +62,12 @@ pub(crate) struct ForegroundOutputs {
 }
 
 struct ForegroundInner {
-    /// The private directory the files live in. Outside the workspace (ADR 0039 decision 1).
+    /// The private directory the files live in. A caller-supplied, session-owned directory
+    /// outside the workspace (ADR 0039 decision 1), never a workspace path.
     dir: PathBuf,
+    /// The root fd, opened lazily on the first retained command. `Err` means there is no safe
+    /// private root (missing/unusable/symlinked); retention is then simply unavailable.
+    root: OnceLock<Result<PrivateDir, String>>,
     /// A per-registry random token embedded in every handle, so two sessions in one process
     /// cannot resolve each other's handles even though they share the directory.
     nonce: u64,
@@ -68,12 +79,11 @@ struct ForegroundInner {
 }
 
 impl ForegroundOutputs {
-    /// A registry whose files live under `dir`. `dir` is derived from the session's jobs
-    /// directory by the provider; it is never a workspace path.
     pub(crate) fn new(dir: PathBuf, limits: &Limits) -> Self {
         Self {
             inner: Arc::new(ForegroundInner {
                 dir,
+                root: OnceLock::new(),
                 nonce: random_nonce(),
                 next: AtomicU64::new(1),
                 max_item: limits.max_foreground_retained_bytes as u64,
@@ -84,33 +94,33 @@ impl ForegroundOutputs {
         }
     }
 
-    /// Creates the retained file for one command and returns its sink. The file exists from the
-    /// start (so nothing can be missed) and is removed by [`ForegroundOutputs::finish`] when the
-    /// result turned out not to need it.
-    pub(crate) fn open(&self) -> Result<Retention, ToolFailure> {
-        crate::output::ensure_private_dir(&self.inner.dir).map_err(|e| {
-            fail(
-                "output_retention",
-                format!("could not create the retained-output directory: {e}"),
-            )
-        })?;
+    /// The private root, opened once. `None` when it cannot be used safely.
+    fn root(&self) -> Option<&PrivateDir> {
+        self.inner
+            .root
+            .get_or_init(|| PrivateDir::open(&self.inner.dir).map_err(|e| e.to_string()))
+            .as_ref()
+            .ok()
+    }
+
+    /// Creates the retained file for one command and returns its sink. `None` when there is no
+    /// usable private root, or the file cannot be created exclusively: the shell still runs, it
+    /// just has no retrievable handle.
+    pub(crate) fn open(&self) -> Option<Retention> {
+        let root = self.root()?;
         let n = self.inner.next.fetch_add(1, Ordering::SeqCst);
         let handle = format!("out-{:016x}-{n}", self.inner.nonce);
-        let path = self.inner.dir.join(format!("{handle}.out"));
-        let file = crate::output::open_output_file(&path).map_err(|e| {
-            fail(
-                "output_retention",
-                format!("could not create the retained-output file: {e}"),
-            )
-        })?;
-        Ok(Retention {
+        let name = format!("{handle}.out");
+        let file = root.create(std::ffi::OsStr::new(&name)).ok()?;
+        Some(Retention {
             inner: Arc::new(RetentionInner {
                 handle,
-                path,
+                path: self.inner.dir.join(name),
                 cap: self.inner.max_item,
                 file: Mutex::new(file),
                 retained: AtomicU64::new(0),
                 total: AtomicU64::new(0),
+                finished: AtomicBool::new(false),
             }),
         })
     }
@@ -119,6 +129,9 @@ impl ForegroundOutputs {
     /// stay inside the session bounds) and returns its handle; otherwise the file is removed and
     /// no handle exists.
     pub(crate) fn finish(&self, retention: &Retention, keep: bool) -> Option<String> {
+        // Stop the `Drop` guard first: it must not remove a file this method is about to keep,
+        // and it must not race the explicit removal below.
+        retention.inner.finished.store(true, Ordering::SeqCst);
         let handle = retention.handle().to_owned();
         let path = retention.path().to_owned();
         let retained = retention.retained();
@@ -158,13 +171,15 @@ impl ForegroundOutputs {
         Some(handle)
     }
 
-    /// The private path of a kept item, for a read. `None` for an unknown, malformed or
-    /// cross-session handle — never a filesystem lookup.
-    pub(crate) fn path_for(&self, handle: &str) -> Option<PathBuf> {
-        lock(&self.inner.state)
-            .items
-            .get(handle)
-            .map(|item| item.path.clone())
+    /// Opens a kept item for reading. An unknown, malformed or cross-session handle is
+    /// `unknown_output` — never a filesystem lookup.
+    pub(crate) fn open_read(&self, handle: &str) -> Result<File, ToolFailure> {
+        if !lock(&self.inner.state).items.contains_key(handle) {
+            return Err(unknown_output(handle));
+        }
+        let root = self.root().ok_or_else(|| unknown_output(handle))?;
+        root.open_read(std::ffi::OsStr::new(&format!("{handle}.out")))
+            .map_err(|error| crate::output::read_failure("output_read", &error))
     }
 
     /// Session end: drop every kept item and release its file. Synchronous file removal only, so
@@ -196,6 +211,9 @@ struct RetentionInner {
     retained: AtomicU64,
     /// Every byte the command produced, kept or not.
     total: AtomicU64,
+    /// Set by [`ForegroundOutputs::finish`]: the item is committed, so `Drop` must not touch
+    /// the file again.
+    finished: AtomicBool,
 }
 
 /// One command's live retention sink. Cloned into each stream reader; the `Arc` is shared, so a
@@ -248,14 +266,18 @@ impl Retention {
     }
 }
 
-impl std::io::Write for Retention {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.push(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+/// The cleanup guard for an error or cancellation path: if no [`ForegroundOutputs::finish`]
+/// committed the item, the last clone drops and removes the private file. No asynchronous work,
+/// and nothing on a panic unwind (the file stays in the private directory).
+impl Drop for RetentionInner {
+    fn drop(&mut self) {
+        if self.finished.load(Ordering::Relaxed) {
+            return;
+        }
+        if std::thread::panicking() {
+            return;
+        }
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -340,9 +362,7 @@ pub(crate) fn run_read(
     arguments: &Value,
 ) -> Result<ToolOutput, ToolFailure> {
     let args: ReadArgs = args::parse("shell_output", &schema(), arguments)?;
-    let path = foreground
-        .path_for(&args.handle)
-        .ok_or_else(|| unknown_output(&args.handle))?;
+    let file = foreground.open_read(&args.handle)?;
     let mode = crate::output::FileMode::from_args("shell_output", &args.file, arguments)?
         .ok_or_else(|| {
             args::invalid(
@@ -352,7 +372,7 @@ pub(crate) fn run_read(
             )
         })?;
     crate::output::read_file(
-        &path,
+        &file,
         "handle",
         &args.handle,
         mode,

@@ -257,7 +257,7 @@ pub(crate) async fn run(
     sandbox: &Sandbox,
     limits: &Limits,
     jobs: &Jobs,
-    foreground: &ForegroundOutputs,
+    foreground: Option<&ForegroundOutputs>,
     arguments: &serde_json::Value,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
@@ -299,10 +299,11 @@ pub(crate) async fn run(
         _ => (deadline, None, None),
     };
 
-    // Retain the whole output so a truncated result's discarded middle stays retrievable. The
-    // file is removed again below when nothing was dropped, so a non-truncated command leaves
-    // no retrievable artifact.
-    let retention = foreground.open()?;
+    // Retain the whole output so a truncated result's discarded middle stays retrievable. `None`
+    // when the provider has no caller-supplied private directory (no-hand embedders) or the
+    // private root is unusable: the command runs and its result simply has no handle. The file
+    // is removed again below (or by `Retention`'s drop on an error path) when it is not kept.
+    let retention = foreground.and_then(ForegroundOutputs::open);
 
     let outcome = execute(
         sandbox,
@@ -319,25 +320,29 @@ pub(crate) async fn run(
         // The whole output is teed to a session-private file so a truncated result's discarded
         // middle stays retrievable; nothing is created for a result that needs no handle, and
         // the file is removed again below.
-        Some(retention.clone()),
+        retention.clone(),
     )
     .await?;
     match outcome {
         ExecOutcome::Ran(outcome) => {
             let truncated = outcome.stdout.is_truncated() || outcome.stderr.is_truncated();
-            let retained = if truncated {
-                let view = RetainedView {
-                    handle: retention.handle().to_owned(),
-                    retained_bytes: retention.retained(),
-                    total_bytes: retention.total(),
-                    cut: retention.is_cut(),
-                };
-                foreground.finish(&retention, true);
-                Some(view)
-            } else {
-                // No truncation: no handle, no artifact. The file is removed.
-                foreground.finish(&retention, false);
-                None
+            let retained = match (foreground, &retention) {
+                (Some(foreground), Some(retention)) if truncated => {
+                    let view = RetainedView {
+                        handle: retention.handle().to_owned(),
+                        retained_bytes: retention.retained(),
+                        total_bytes: retention.total(),
+                        cut: retention.is_cut(),
+                    };
+                    foreground.finish(retention, true);
+                    Some(view)
+                }
+                (Some(foreground), Some(retention)) => {
+                    // No truncation: no handle, no artifact. The file is removed.
+                    foreground.finish(retention, false);
+                    None
+                }
+                _ => None,
             };
             Ok(report(
                 &args.command,
@@ -355,7 +360,9 @@ pub(crate) async fn run(
         ExecOutcome::Adopted(info) => {
             // The job's own output file is the retained output now; the foreground file is
             // redundant. Drop it (the pre-adoption bytes already reached the job's file).
-            foreground.finish(&retention, false);
+            if let (Some(foreground), Some(retention)) = (foreground, &retention) {
+                foreground.finish(retention, false);
+            }
             Ok(adopted_report(
                 &args.command,
                 root.root(),
