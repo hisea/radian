@@ -9113,6 +9113,20 @@ fn pty_a_session_started_from_the_filesystem_root_is_refused() {
         Some(2),
         "a startup refusal is a usage/setup error (ADR 0032 A3)"
     );
+    // The refusal is written just before the exit, so it is still in the pty buffer when
+    // `try_wait` succeeds: breaking out of the loop above without draining loses it (on Linux
+    // the fast exit always wins the race, and the assertion below sees an empty buffer). The
+    // child is dead and holds the only slave fd, so no more bytes can arrive: one drain pass
+    // until the master reports EOF/EIO collects everything already queued, with no wait.
+    loop {
+        match master.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => drained.extend_from_slice(&buf[..n]),
+            // Drained (`EAGAIN`) or the slave is closed and the buffer is empty (`EIO` on
+            // Linux): both end the drain.
+            Err(_) => break,
+        }
+    }
     let text = String::from_utf8_lossy(&drained);
     assert!(text.contains("filesystem root"), "{text}");
     assert!(text.contains("--workspace"), "{text}");

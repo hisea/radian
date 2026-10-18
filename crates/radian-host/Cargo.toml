@@ -59,7 +59,9 @@ futures-util.workspace = true
 # revision 1 slice ①) is production code, not a test fixture, so these two features are on
 # unconditionally (the mock-server crates only need them under `testing`).
 # `process`: ADR 0043 decision 1a's `subagent` tool starts a child `radian exec`.
-tokio = { workspace = true, features = ["net", "io-util", "process"] }
+# `time`: the footer command runner bounds each run (`tokio::time::timeout`) and spaces out
+# its `ETXTBSY` spawn retries (`tokio::time::sleep`).
+tokio = { workspace = true, features = ["net", "io-util", "process", "time"] }
 # The configuration file (ADR 0008) is TOML. `toml` reads it; `toml_edit` is the one place
 # that writes it back, format-preserving (`/theme`, ADR 0008 revision).
 toml = "0.8"
