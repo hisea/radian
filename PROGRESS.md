@@ -2,8 +2,8 @@
 
 Worktree `<home>/Code/radian/.radian-worktrees/multi-edit-output`, branch
 `pi/multi-edit-output`. Commits: `5eaafae` (slice 1), `2d5a356` (slice 2),
-`baa47d5` (slice 2 follow-up: keep `job_output`'s read-failure code), and the
-review-fix commit noted at the end. Nothing pushed or merged.
+`baa47d5` (slice 2 follow-up: keep `job_output`'s read-failure code),
+`2a289b4` (review fix: private root, retention cleanup). Nothing pushed or merged.
 
 ## Slice 1 — atomic multi-edit `patch` — DONE (`5eaafae`)
 
