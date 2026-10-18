@@ -1671,6 +1671,53 @@ async fn the_default_role_layers_are_sent() {
     assert!(content.contains("model: m"), "{content}");
 }
 
+/// The `<runtime>` Unix-socket sentence follows the backend, not the tier: Linux bwrap
+/// does not restrict Unix sockets (the accepted gap), so a `workspace` session there must
+/// not tell the model otherwise; macOS seatbelt does, so the sentence stays exactly as
+/// today. Setting the flag from the tier again fails the Linux half.
+#[tokio::test]
+async fn the_workspace_system_prompt_unix_socket_sentence_follows_the_backend() {
+    let dir = scratch("unix-sockets-backend");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let messages = messages_of(&server, 0);
+    let system = &messages.as_array().expect("messages")[0];
+    let content = system["content"].as_str().unwrap_or_default();
+    if cfg!(target_os = "linux") {
+        assert!(
+            !content.contains("Outbound Unix socket connections are denied"),
+            "bwrap does not restrict Unix sockets, so the sentence must be gone: {content}"
+        );
+    } else {
+        assert!(
+            content.contains("Outbound Unix socket connections are denied"),
+            "seatbelt restricts Unix sockets, so the sentence stays: {content}"
+        );
+    }
+}
+
 /// ADR 0036: the `safe` tier mounts no `shell`, so layer 0a does not advertise one.
 #[tokio::test]
 async fn the_safe_tier_runtime_layer_has_no_shell() {

@@ -8,6 +8,12 @@
 //! The whole host filesystem is mounted read-only and the workspace is bound back writable,
 //! so an escape attempt fails with a permission error rather than a missing path — the
 //! control in the harness proves the target really exists.
+//!
+//! Unix sockets are **not** restricted by this backend (the accepted gap, ADR 0016 revision
+//! 1 as decided for Linux): pathname sockets stay reachable through the shared read-only
+//! `--ro-bind / /`, and abstract sockets through the shared network namespace in the
+//! `workspace` tier (only `safe` unshares it). `[sandbox] allow_unix_sockets` therefore has
+//! no effect on Linux; only macOS's seatbelt backend reads it.
 
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
@@ -54,7 +60,7 @@ impl SandboxBackend for Bwrap {
             git_access: GitAccess::default(),
             deny_read: Vec::new(),
             // The probe policy only needs the workspace bind; the unix-socket whitelist is empty
-            // (and the Linux backend does not restrict unix sockets yet, see the module docs).
+            // (the Linux backend does not restrict unix sockets, see the module docs).
             allow_unix_sockets: Vec::new(),
             allow_env: vec!["PATH".into()],
         };
@@ -187,4 +193,31 @@ fn set_env(command: &mut Command, name: &str, fallback: &str) {
 
 fn shell_quote(path: &std::path::Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Linux backend never claims to restrict Unix sockets (the accepted gap): pathname
+    /// sockets stay reachable through the shared `--ro-bind / /`, and abstract sockets
+    /// through the shared network namespace in `workspace` — so the `<runtime>` layer must
+    /// carry no deny sentence there. The old tier-driven flag said otherwise on this
+    /// machine.
+    #[test]
+    fn the_linux_backend_does_not_restrict_unix_sockets() {
+        let ws = std::env::temp_dir().join(format!("radian-bwrap-sockets-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws = std::fs::canonicalize(&ws).unwrap();
+        for network in [true, false] {
+            let policy = SandboxPolicy::new(SandboxMode::WorkspaceWrite, &ws)
+                .unwrap()
+                .network(network);
+            assert!(
+                !BWRAP.restricts_unix_sockets(&policy),
+                "network = {network}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }

@@ -1332,3 +1332,20 @@ Commands: `timeout 300 cargo test -p radian-host --lib --no-fail-fast a_txtbsy` 
 The pty root-refusal drain fix in the same task is test-helper-only
 (`crates/radian-tui/tests/pty.rs`: drain the master after `try_wait` succeeds), so it has rate
 proof but no mutation entry.
+## linux-unix-sockets item 1: the `<runtime>` Unix-socket sentence follows the backend (2026-10-17)
+
+Base `80fdc58d` · in place in this worktree, the source restored from a `cp` in `/tmp/unixsock-mut/`
+and confirmed byte-identical with `cmp`; only the catching binary was run (`--no-fail-fast`). The
+spawned `radian` binary was rebuilt with the mutation in place (the CLI harness refuses a stale
+binary) and rebuilt again after the restore (the restore-build log matches the pre-mutation one).
+
+| # | Mutation | Result | Test(s) that caught it |
+|---|---|---|---|
+| U1 | the `<runtime>` flag back to the tier (`unix_sockets_restricted: workspace_mode` in `session/open.rs`) | ✅ 1 failed (`bwrap does not restrict Unix sockets, so the sentence must be gone`, the false sentence is back on Linux) | `agent-cli cli::the_workspace_system_prompt_unix_socket_sentence_follows_the_backend` |
+
+Commands: `timeout 570 cargo test -p agent-cli --locked --test cli --no-fail-fast
+the_workspace_system_prompt_unix_socket_sentence_follows_the_backend` (after
+`cargo build -p radian-tui --bin radian --locked`, both times). The prompt unit test
+(`radian-host --lib prompt::the_runtime_unix_socket_sentence_follows_the_backend`) does not touch
+`open.rs`, so the end-to-end workspace-session test is the one that reds this wiring mutation;
+on macOS the same test asserts the sentence stays (seatbelt still restricts).
