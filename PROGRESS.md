@@ -1,22 +1,24 @@
 # progress — patched multi-edit + retrievable foreground shell output
 
 Worktree `<home>/Code/radian/.radian-worktrees/multi-edit-output`, branch
-`pi/multi-edit-output`.
+`pi/multi-edit-output`. Two commits: `5eaafae` (slice 1), `2d5a356` (slice 2),
+`baa47d5` (slice 2 follow-up: keep `job_output`'s read-failure code). Nothing
+pushed or merged.
 
-## Slice 1 — atomic multi-edit `patch` — DONE (commit `5eaafae`)
+## Slice 1 — atomic multi-edit `patch` — DONE (`5eaafae`)
 
 - `patch` accepts `{path, edits: [{old, new, replace_all?}]}` next to the legacy
   `{path, old, new, replace_all?}`. Every edit is located against the original bytes before any
-  write; overlapping/identical ranges are rejected naming both edit numbers; adjacent ranges are
-  allowed; the combined result is built in memory, checked against `max_write_bytes`, then
-  written once through the same fd (`O_NOFOLLOW` walk, CRLF preserved). Legacy result shape
+  write; overlapping/identical ranges are rejected naming both 1-based edit numbers; adjacent
+  ranges are allowed; the combined result is built in memory, checked against `max_write_bytes`,
+  then written once through the same fd (`O_NOFOLLOW` walk, CRLF preserved). Legacy result shape
   `{path, replaced, matched, hunks}` and text are unchanged; the new form adds `edits`, per-edit
   `results`, and flattened `hunks`.
-- Tests: `cargo test -p radian-coding --test patch --locked --no-fail-fast` → 23 passed.
-- Mutations ME-1 (write the first edit before validating the rest) and ME-2 (skip the overlap
-  check) recorded in `crates/radian-coding/MUTATIONS.md`.
+- Mutations in `crates/radian-coding/MUTATIONS.md`: ME-1 (write the first edit before validating
+  the rest) caught by `a_missing_second_edit_leaves_the_first_unapplied`; ME-2 (skip the overlap
+  check) caught by `overlapping_ranges_are_refused` and `identical_ranges_are_refused`.
 
-## Slice 2 — foreground shell output retrieval — DONE (this commit)
+## Slice 2 — foreground shell output retrieval — DONE (`2d5a356`, `baa47d5`)
 
 ### Design note (written before coding the tool)
 
@@ -32,42 +34,52 @@ Worktree `<home>/Code/radian/.radian-worktrees/multi-edit-output`, branch
   line readers `job_output` uses, so the two tools cannot drift. `shell_output` requires a read;
   `mode: new` is not offered and is refused.
 - **Storage / retention bounds.** Files live under `<jobs_dir>/foreground/` (the session's own
-  0700 directory, outside the workspace) and are created by the shared `output::open_output_file`
-  (`O_CREAT|O_EXCL|O_NOFOLLOW`, 0600). Bounds: `max_foreground_retained_bytes` per item (default
-  8 MiB), `max_foreground_session_bytes` (32 MiB) and `max_foreground_items` (32) per session;
-  keeping past the session bounds evicts the oldest item, whose handle then reads as unknown.
-  When the per-item cap cuts a file the shell result says exactly how many bytes are retained
-  and how many are **not recoverable**.
-- **Reuse vs separation from job output.** The line readers, the `FileMode` argument handling
-  and the hardened file creator are shared in `src/output.rs`; the foreground registry is a
-  separate object (`src/foreground.rs`) with its own handle space and no process/lifecycle, so a
-  completed foreground command is never a job, `job_list` never shows it, and no job-notification
-  path is touched.
-- **ADR 0037/0039 semantics.** Same private-directory and `O_CREAT|O_EXCL|O_NOFOLLOW` standard
-  as job output (ADR 0039 decision 1); the directory is the session's, never a workspace path. No
-  path is ever put in the model-facing text, structured result, logs or errors — the model only
-  ever presents the opaque handle. A non-truncated command's file is removed and gets no handle,
-  so there is no unnecessary artifact. `shutdown_outputs` drops the registry and removes the
-  files on the normal close path; the panic path does no file I/O (state drops with the session).
-- **No ADR change needed:** this implements the existing intent (bounded, session-private output
-  ADR 0039 already establishes for job output) for the foreground case; it does not weaken 0037
-  or 0039.
+  0700 directory, outside the workspace, on the sandbox deny-read list through the sessions dir
+  ADR 0020 decision 3) and are created by the shared `output::open_output_file`
+  (`O_CREAT|O_EXCL|O_NOFOLLOW`, 0600). Bounds: `max_foreground_retained_bytes` per item (8 MiB),
+  `max_foreground_session_bytes` (32 MiB) and `max_foreground_items` (32) per session; keeping
+  past the session bounds evicts the oldest item, whose handle then reads as unknown. When the
+  per-item cap cuts a file the shell result says how many bytes are retained and how many are
+  **not recoverable**.
+- **Reuse vs separation from job output.** The line readers, `FileMode` handling and the hardened
+  file creator are shared in `src/output.rs`; the foreground registry is a separate object
+  (`src/foreground.rs`) with its own handle space and no process/lifecycle, so a completed
+  foreground command is never a job, `job_list` never shows it, and no job-notification path is
+  touched.
+- **ADR 0037/0039 semantics.** Same private-directory and `O_CREAT|O_EXCL|O_NOFOLLOW` standard as
+  job output (ADR 0039 decision 1). No path is ever put in the model-facing text, structured
+  result, logs or errors. A non-truncated command's file is removed and gets no handle.
+  `shutdown_outputs` drops the registry and removes the files on the normal close path; the panic
+  path does no file I/O (state drops with the session). No ADR was changed: this implements
+  0039's existing intent for the foreground case.
 
-### Implementation
+### Mutations (in `crates/radian-coding/MUTATIONS.md`)
 
-- `src/output.rs` (new): shared `open_output_file`, `open_output_read`, `ensure_private_dir`,
-  `count_lines`, `read_range`, `read_pattern`, `read_file`, `FileArgs`, `FileMode`, renderers.
-  `src/jobs.rs` now delegates its full-file reads to it (no behaviour change).
-- `src/foreground.rs` (new): the registry, the retention sink, the `shell_output` tool.
-- `src/shell.rs`: `StreamSink` tees each stream to the retention until promotion; `report` adds
-  the handle and the cut note; a non-truncated run deletes the file; an adopted run discards it.
-- `src/provider.rs`: per-session `ForegroundOutputs` over `jobs.dir()/foreground/`; the spec and
-  dispatch; `shutdown_outputs`. `Limits` gains the three retention fields.
-- `radian-host`: `builtin_tools` lists `shell_output`; `close` calls `shutdown_outputs`.
+- SF-1 resolve a handle as a path → caught by `a_path_like_handle_cannot_open_a_file` and
+  `a_handle_from_another_session_is_unknown` (plus two more).
+- SF-2 ignore the per-item cap → caught by `the_retained_file_is_capped_and_says_so`.
+- SF-3 never remove an untruncated command's file → caught by
+  `a_non_truncated_command_leaves_no_handle_or_file`.
+- The shared creator is pinned by the `output.rs` unit test and `job_output_security`.
 
-### Tests
+## Verification (committed state, `baa47d5`)
 
-`cargo test -p radian-coding --test shell_output --locked --no-fail-fast` → 9 passed; existing
-`--test shell`, `--test jobs`, `--test job_output_file`, `--test job_output_security` stay green.
-Mutations SF-1 (resolve a handle as a path) and SF-2 (ignore the per-item cap) are recorded in
-`crates/radian-coding/MUTATIONS.md`, each caught by a named test.
+- `cargo fmt --all -- --check` → 0
+- `cargo clippy --workspace --all-targets -- -D warnings` → 0
+- `cargo test --workspace --locked --no-fail-fast` → 0
+- `cargo test -p agent-core --locked --features journal-selfcheck --no-fail-fast` → 0
+- `cargo clippy -p agent-core --all-targets --features journal-selfcheck -- -D warnings` → 0
+- `bash docs/schema/check-fixtures.sh` → 0
+- `bash docs/schema/check-config-fixtures.sh` → 0
+- `cargo +1.88 check --workspace --all-targets` → 0 (MSRV 1.88)
+- Provider contract suites not run: no provider adapter changed.
+
+## Uncertainties
+
+- On resume, a handle from the previous process reads as `unknown_output` (the registry is
+  per-process). This is deliberate and explicit, not silent.
+- `shell_output` has no permission rule of its own; like the `job_*` tools it falls through to
+  the profile's default `ask`. Reading session-private output grants nothing in the workspace.
+- The retained file is removed by `shutdown_outputs` on the normal close path; on a panic it is
+  left in the session-private directory (the registry state still drops). It is never a
+  model-readable path.
