@@ -1,0 +1,9 @@
+# The `classic` preset: today's one status line, byte-for-byte. It is drawn by the
+# renderer, so it carries no rows.
+#
+# A preset file uses the same keys a user writes for `[tui.footer]`: `radian footer export
+# classic` prints this file exactly, and using it as the config's `[tui.footer]` section
+# gives this footer.
+[tui.footer]
+preset = "classic"
+separator = " · "

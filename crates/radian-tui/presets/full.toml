@@ -1,0 +1,31 @@
+# The `full` preset (ADR 0027): the identity row and the numbers row.
+#
+# `full` includes `jobs` (this session's running background jobs and the
+# oldest one's age; empty while none runs, so it takes no space); the other presets do not.
+# A preset file uses the same keys a user writes for `[tui.footer]`: `radian footer export
+# full` prints this file exactly, and using it as the config's `[tui.footer]` section gives
+# this footer.
+[tui.footer]
+preset = "full"
+separator = " · "
+
+[[tui.footer.rows]]
+left = [
+  "brand",
+  "host",
+  "model",
+  "reasoning",
+  { item = "cwd", format = "{repo}" },
+  { item = "git_branch", format = "{branch}{dirty}" },
+  "session",
+]
+
+[[tui.footer.rows]]
+left = [
+  { item = "tokens", format = "{in_arrow}{in} {out_arrow}{out} {cache}" },
+  "speed",
+  "cost",
+  { item = "context", format = "{percent}%/{budget}{auto}" },
+  "elapsed",
+  "jobs",
+]

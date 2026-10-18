@@ -1,0 +1,21 @@
+# The `pi` preset (the earlier two-row preset): the model/cwd/branch row with the
+# context bar and reasoning, then the tokens/cost row.
+#
+# A preset file uses the same keys a user writes for `[tui.footer]`: `radian footer export
+# pi` prints this file exactly, and using it as the config's `[tui.footer]` section gives
+# this footer.
+[tui.footer]
+preset = "pi"
+separator = " · "
+
+[[tui.footer.rows]]
+left = [
+  "model",
+  "cwd",
+  "git_branch",
+  { item = "context", symbol = "", format = "{bar} {percent}%" },
+]
+right = ["reasoning"]
+
+[[tui.footer.rows]]
+left = ["tokens", "cost"]

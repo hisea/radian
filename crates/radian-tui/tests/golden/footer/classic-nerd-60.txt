@@ -1,0 +1,12 @@
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+── ⏺  Working ──────────────────────────────────────────────
+❯ (type a message, Enter to send, Ctrl-J for a new line)    
+────────────────────────────────────────────────────────────
+ mock  · running · usage 19000/760 · mcp off…               

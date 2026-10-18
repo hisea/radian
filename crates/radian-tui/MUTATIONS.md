@@ -2362,3 +2362,51 @@ alternate screen **之前**打印一行并以 0 退出。变异在源码原地�
 arguments were not provided: <SESSION_ID>`，四个测试各在自己的 60 s 等待后断言失败（0 passed /
 4 failed）。核对方式：把 `src/cli.rs`、`src/cli/session.rs`、`src/cli/attach.rs` 换成 `HEAD`
 版本、`--test pty attach_without_an_id` 跑一次，再从 `cp` 副本还原并用 `cmp` 确认一致。
+
+## ADR 0027 slice ⑤ items 1–2 (footer presets as TOML, byte-identity) (2026-10-17)
+
+Base `0b5d0ca` · branch `dogfood/footer-s5`. Mutations in source in place, each restored
+from a `cp` in `/tmp/` and confirmed byte-identical with `cmp`. Every run with
+`--no-fail-fast`; each mutation run only its catching binary (`--test footer_presets`).
+The byte-identity itself is proved mechanically, not by mutation: the 80 golden screens
+(`tests/golden/footer/`: 4 presets × 4 glyph sets × widths 40/60/80/100/120, fixed `App`
+with hostname `testhost`) were rendered from the pristine `525daf0` tree (`git archive` to
+`/tmp/footer-before`, read-only; throwaway `zz_gen` test, deleted after use) and committed;
+`the_four_presets_render_byte_identical` re-renders them against the TOML-driven code.
+`full` with no running job stays byte-identical (its new `jobs` item hides with no data);
+`full` with one running job shows `1 job`/`18m` while `deck` with one stays byte-identical.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| S5-1 | `deck` has no `jobs` row | `"jobs"` added to `deck.toml`'s numbers row | `--test footer_presets -- full_shows_jobs_while_deck_does_not` ✅ 1 failed (deck with a job no longer equals its no-job golden) |
+| S5-2 | a preset's item order is the shipped order | `"model"`/`"cwd"` swapped in `pi.toml`'s first row | `--test footer_presets -- the_four_presets_render_byte_identical` ✅ 1 failed (`screen changed for preset=pi glyphs=unicode width=40`) |
+
+2/2 caught; no misses.
+
+## ADR 0027 slice ⑤ fix round 1 (p1 review of 83cb172, 2026-10-17)
+
+Base `83cb172` · branch `dogfood/footer-s5`. The 80 goldens were regenerated from the old
+code `525daf0` with the full-coverage fixture (scratch worktree
+`git worktree add --detach /tmp/footer-525 525daf0`, throwaway `zz_golden_gen` test,
+deleted after use, worktree removed): the fixture `App` now populates every component a
+preset can show — usage snapshot (`Usage (remaining): 5h: 98% · 7d: 81% · 5h ↺1h0m`),
+model `Mock 5`, dirty contributor branch `feature/fixture ?3`, repo `fixture-repo`,
+worktree `fixture-wt`, tokens in 19K / out 760 / cache 33K / cache-write 12K, priced
+fee `$0.096`, context `41.3%/1.0M ~` (auto-compact on), speed `50.0 tok/s`, elapsed
+`2.0s`, host `testhost`, session `# s`, reasoning `* high` — so every item of every preset
+draws at the widest width. The new code renders all 80 byte-identical
+(`the_four_presets_render_byte_identical`), except `full` with a running job, as before.
+The guard `every_preset_item_appears_in_its_widest_golden` parses each preset file and
+asserts every named row item's fixture marker is in the unicode width-120 golden (`jobs`
+against a with-job screen; `classic` names no rows); the parse test also asserts each
+file declares its own `preset`. Mutations in the preset files in place, each restored
+from a `cp` in `/tmp/` and confirmed byte-identical with `cmp`; every run with
+`--no-fail-fast`, each only its catching binary (`--test footer_presets`).
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| S5R1-1 | `full`'s numbers-row order is the shipped order | `"speed"`/`"cost"` swapped in `full.toml` | `--test footer_presets -- the_four_presets_render_byte_identical` ✅ 1 failed (`screen changed for preset=full glyphs=unicode width=60`; p1's exact case, green before the fixture fix) |
+| S5R1-2 | `full`'s numbers row carries `elapsed` | `"elapsed"` dropped from `full.toml` | `--test footer_presets -- the_four_presets_render_byte_identical` ✅ 1 failed (`screen changed for preset=full glyphs=unicode width=60`) |
+| S5R1-3 | `classic.toml` is the `classic` preset section | the `preset`/`separator` values swapped in `classic.toml` (`preset = " · "`, `separator = "classic"`) | `--test footer_presets -- all_four_built_in_presets_parse` ✅ 1 failed (`classic: the file declares its own preset`) and `exported_presets_round_trip_through_the_user_config` ✅ 1 failed (`classic: the export resolves to the preset's rows`) |
+
+3/3 caught; no misses.
