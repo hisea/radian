@@ -1,0 +1,9 @@
+[project]
+name = "radian-terminal-bench"
+version = "0.1.0"
+description = "Harbor custom agent that benchmarks the radian binary on Terminal-Bench tasks"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.radian-bench]
+agent = "benchmarks.terminal-bench.radian_agent:RadianAgent"
