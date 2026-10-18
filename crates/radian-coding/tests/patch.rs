@@ -372,3 +372,410 @@ async fn a_hunk_at_the_first_and_at_the_last_line() {
         "one\ntwo\nLAST"
     );
 }
+
+// ---------- the multi-edit form (`edits`) ----------
+
+/// Two distinct edits in one call: both are located in the original file and applied together,
+/// and the result carries a per-edit outcome plus the flattened, file-order hunks.
+#[tokio::test]
+async fn two_edits_apply_in_one_call() {
+    let dir = TempDir::new("patch-multi-two");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write(
+        "ws/f.txt",
+        "before one\nkeep\nbefore two\nbefore two again\n",
+    );
+    let tools = tools(&root);
+
+    let output = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "before one", "new": "after one"},
+                {"old": "before two", "new": "after two", "replace_all": true}
+            ]
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "after one\nkeep\nafter two\nafter two again\n"
+    );
+    let value = structured(&output);
+    assert_eq!(value["edits"], json!(2), "{value}");
+    assert_eq!(value["replaced"], json!(3), "{value}");
+    assert_eq!(
+        value["results"],
+        json!([
+            {"edit": 1, "index": 0, "replaced": 1, "matched": "exact"},
+            {"edit": 2, "index": 1, "replaced": 2, "matched": "exact"}
+        ]),
+        "{value}"
+    );
+    // One hunk per replaced range, in file order.
+    assert_eq!(value["hunks"].as_array().unwrap().len(), 3, "{value}");
+    assert_eq!(
+        text(&output),
+        "replaced 3 occurrences across 2 edits in f.txt"
+    );
+}
+
+/// The legacy form keeps its exact result: the same `{path, replaced, matched, hunks}` shape
+/// (no `edits`/`results`), the same text, and the same matching.
+#[tokio::test]
+async fn the_legacy_single_edit_form_is_unchanged() {
+    let dir = TempDir::new("patch-multi-legacy");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "a\n");
+    let tools = tools(&root);
+
+    let output = call(
+        &tools,
+        "patch",
+        json!({"path": "f.txt", "old": "a", "new": "A"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        structured(&output),
+        json!({
+            "path": "f.txt",
+            "replaced": 1,
+            "matched": "exact",
+            "hunks": [{"old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1}],
+        })
+    );
+    assert_eq!(
+        text(&output),
+        "replaced 1 occurrence in f.txt (matched by exact)"
+    );
+    assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "A\n");
+}
+
+/// A missing second edit leaves the first (otherwise valid) edit unapplied: the whole call is
+/// all-or-nothing, and the failure names the offending edit.
+#[tokio::test]
+async fn a_missing_second_edit_leaves_the_first_unapplied() {
+    let dir = TempDir::new("patch-multi-missing");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "alpha beta\n");
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "alpha", "new": "ALPHA"},
+                {"old": "gamma", "new": "GAMMA"}
+            ]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "patch_not_found", "{failure:?}");
+    assert!(
+        failure.message.starts_with("edit 2:"),
+        "the second edit is named: {}",
+        failure.message
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "alpha beta\n",
+        "the first edit must not have been applied"
+    );
+}
+
+/// An ambiguous second edit is refused the same way, and the first edit is not applied.
+#[tokio::test]
+async fn an_ambiguous_second_edit_leaves_the_first_unapplied() {
+    let dir = TempDir::new("patch-multi-ambiguous");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "keep x x\n");
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "keep", "new": "KEEP"},
+                {"old": "x", "new": "y"}
+            ]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "patch_ambiguous", "{failure:?}");
+    assert!(
+        failure.message.starts_with("edit 2:") && failure.message.contains("2 times"),
+        "the second edit is named: {}",
+        failure.message
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "keep x x\n"
+    );
+}
+
+/// Overlapping ranges are refused deterministically, naming both edits, and nothing is written.
+#[tokio::test]
+async fn overlapping_ranges_are_refused() {
+    let dir = TempDir::new("patch-multi-overlap");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "abc\n");
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "ab", "new": "X"},
+                {"old": "bc", "new": "Y"}
+            ]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "patch_conflict", "{failure:?}");
+    assert!(
+        failure.message.contains("edits 1 and 2"),
+        "both edits are named: {}",
+        failure.message
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "abc\n"
+    );
+}
+
+/// An identical range selected by two edits is a conflict too.
+#[tokio::test]
+async fn identical_ranges_are_refused() {
+    let dir = TempDir::new("patch-multi-identical");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "a\n");
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "a", "new": "x"},
+                {"old": "a", "new": "y"}
+            ]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "patch_conflict", "{failure:?}");
+    assert!(
+        failure.message.contains("edits 1 and 2"),
+        "{}",
+        failure.message
+    );
+    assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "a\n");
+}
+
+/// Adjacent, non-overlapping ranges are allowed: `a.end == b.start` is not an overlap. The test
+/// is explicit so a future "reject touching ranges" change cannot pass silently.
+#[tokio::test]
+async fn adjacent_ranges_are_allowed() {
+    let dir = TempDir::new("patch-multi-adjacent");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "ab\n");
+    let tools = tools(&root);
+
+    let output = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "a", "new": "A"},
+                {"old": "b", "new": "B"}
+            ]
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(structured(&output)["replaced"], json!(2));
+    assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "AB\n");
+}
+
+/// A multi-edit call on a CRLF file matches on the LF view, maps the offsets back, and keeps
+/// the file entirely CRLF.
+#[tokio::test]
+async fn multiple_edits_preserve_crlf() {
+    let dir = TempDir::new("patch-multi-crlf");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("f.txt"), "alpha\r\nbeta\r\ngamma\r\n").unwrap();
+    let tools = tools(&root);
+
+    let output = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "alpha\n", "new": "ALPHA\nRENAMED\n"},
+                {"old": "gamma\n", "new": "GAMMA\n"}
+            ]
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(structured(&output)["replaced"], json!(2));
+    let after = std::fs::read(root.join("f.txt")).unwrap();
+    assert_eq!(after, b"ALPHA\r\nRENAMED\r\nbeta\r\nGAMMA\r\n");
+    assert!(
+        after
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte == b'\n')
+            .all(|(index, _)| index > 0 && after[index - 1] == b'\r'),
+        "no bare LF in a CRLF file: {:?}",
+        String::from_utf8_lossy(&after)
+    );
+}
+
+/// An empty `old` in the multi form is refused with the offending edit's number, and nothing is
+/// written.
+#[tokio::test]
+async fn an_empty_old_in_an_edit_names_it() {
+    let dir = TempDir::new("patch-multi-empty-old");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "x\n");
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "x", "new": "X"},
+                {"old": "", "new": "Q"}
+            ]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "patch_invalid", "{failure:?}");
+    assert!(
+        failure.message.starts_with("edit 2:"),
+        "the empty edit is named: {}",
+        failure.message
+    );
+    assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "x\n");
+}
+
+/// The two forms are mutually exclusive; mixing them is a clear argument error, not a silent
+/// ignore of one of them.
+#[tokio::test]
+async fn mixing_the_two_forms_is_refused() {
+    let dir = TempDir::new("patch-multi-mixed");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "a\n");
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "old": "a",
+            "new": "A",
+            "edits": [{"old": "a", "new": "x"}]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "invalid_arguments", "{failure:?}");
+    assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "a\n");
+}
+
+/// The write limit is checked against the **combined** result, after every edit is located and
+/// the result is built in memory; an overflow writes nothing.
+#[tokio::test]
+async fn a_final_write_limit_overflow_leaves_the_file_unchanged() {
+    let dir = TempDir::new("patch-multi-limit");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "one\ntwo\n");
+    let tools = tools(&root).with_limits(radian_coding::Limits {
+        max_write_bytes: 7,
+        ..radian_coding::Limits::default()
+    });
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "one", "new": "ONE"},
+                {"old": "two", "new": "TWO"}
+            ]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "write_limit_exceeded", "{failure:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "one\ntwo\n",
+        "an over-limit result must not be written"
+    );
+}
+
+/// Each edit keeps its own matching layer, and the per-edit outcome says which one located it.
+#[tokio::test]
+async fn each_edit_reports_its_own_matching_layer() {
+    let dir = TempDir::new("patch-multi-layers");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("f.txt"), "plain\n\u{201C}quoted\u{201D}\n").unwrap();
+    let tools = tools(&root);
+
+    let output = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "plain", "new": "PLAIN"},
+                {"old": "\"quoted\"", "new": "\"quoted too\""}
+            ]
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        structured(&output)["results"],
+        json!([
+            {"edit": 1, "index": 0, "replaced": 1, "matched": "exact"},
+            {"edit": 2, "index": 1, "replaced": 1, "matched": "typographic normalisation"}
+        ])
+    );
+}

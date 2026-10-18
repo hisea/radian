@@ -608,3 +608,21 @@ The white-box test `a_settle_with_no_waiter_still_stores_the_watched_value` is w
 the pre-wait state check is absent too (JW-4). The pre-wait state check (JW-2) and the message
 guard (JW-3) are each unreachable alone and no deterministic test catches either: they are belt
 and braces over `send_replace`, recorded honestly.
+
+## `patch`: atomic multiple edits (`edits`) (2026-10-17, branch `pi/multi-edit-output`)
+
+The new form locates every edit against the **original** file before anything is written, rejects
+overlapping/identical ranges, checks the combined size, and only then does the one existing
+truncate/write. Mutations were applied in place, the source restored from a `cp` in
+`/tmp/radian-mut/` and confirmed byte-identical with `cmp` after each run; run with
+`cargo test -p radian-coding --test patch --locked --no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| ME-1 | write the first edit as it resolves, before the later edits are validated (`run` truncates/writes edit 0 inside the resolve loop) | ✅ 1 failed | `a_missing_second_edit_leaves_the_first_unapplied` (`left: "ALPHA beta\n"` — the first edit had been written although the second was missing) |
+| ME-2 | skip the overlap check (`let _ = check_conflicts(&args.path, &resolved);`) | ✅ 2 failed | `overlapping_ranges_are_refused`, `identical_ranges_are_refused` (both returned `Ok` and wrote the file) |
+
+ME-1 is the "apply the first edit before validating the second" mutation the brief names; the test
+fails on the file's contents, not on the error code, which is exactly the all-or-nothing property
+under test. ME-2 shows the conflict rejection is the only thing guarding overlapping ranges:
+without it the two ranges are applied in descending offset order and the file changes silently.
