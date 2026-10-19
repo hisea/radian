@@ -252,7 +252,7 @@ pub async fn open_session(
         for warning in &discovery.warnings {
             memory_warning(warning);
         }
-        // An agent definition's `skills` list is the allow-list for this session's catalog.
+        // The session's skill allow-list keeps only the named skills in this session's catalog.
         // `None` is every discovered skill.
         match &skills_allow {
             Some(allow) => skills::restrict_to(discovery.skills, allow),

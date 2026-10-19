@@ -1,12 +1,12 @@
 //! The process control port (ADR 0043): one Unix socket per hosting process,
-//! JSON lines, the same verbs the inbox and the lead tool registry expose.
+//! JSON lines, the same input verbs the inbox exposes.
 //!
 //! **What it is.** Every process that hosts an interactive or `radian exec` session binds
 //! `$RADIAN_HOME/run/<pid>.sock` (directory 0700, file 0600). The socket is where an external
-//! orchestrator (herdr-style) or a project script drives the session: it can enqueue inputs,
-//! cancel, list the session's task agents, spawn and wait for one, read a task's committed
-//! status, and follow the committed events. There is **no** separate `radian serve` in v0
-//! (ADR 0043): the process that owns a session owns its socket.
+//! script or agent drives the session: it can enqueue `followup`/`steer`/`inject` inputs,
+//! `cancel` the running turn, `list_sessions` (the hosting session), and `subscribe` to the
+//! committed event stream. There are no task verbs (`spawn_task`, `wait_task`, `task_status`)
+//! and no separate `radian serve` (ADR 0043): the process that owns a session owns its socket.
 //!
 //! **Sources (ADR 0043, decided item 4; ADR 0011 L2, ADR 0012).** The source is fixed by
 //! the port, never by the client's word: it defaults to [`InputSource::Scheduler`], a client

@@ -84,10 +84,9 @@ pub enum DriverError {
 pub trait RuntimeEvents: Send + Sync {
     fn on_runtime_event(&self, event: &RuntimeEvent);
 
-    /// the workspace-local worktree root's orchestration hook points (`task_spawned`, `task_finished`, `stalled`,
-    /// `before_merge`): a second, host-side channel the control port fans out to subscribers with
-    /// the stable hook name and a JSON payload. The default is a no-op, so a plain sink (or the
-    /// closure impl below) ignores it and only the control fanout has to override it.
+    /// A generic host-side hook event: the control port forwards it to subscribers with the
+    /// stable name and a JSON payload. The default is a no-op, so a plain sink (or the closure
+    /// impl below) ignores it and only the control fanout has to override it.
     fn on_hook_event(&self, name: &str, data: &serde_json::Value) {
         let _ = (name, data);
     }

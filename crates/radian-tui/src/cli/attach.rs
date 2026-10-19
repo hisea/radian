@@ -19,7 +19,7 @@ enum Start {
     Pick(Box<radian_tui::picker::Picker>),
 }
 
-/// `radian attach [<session>] [--follow]` (ADR 0043 slice ①, decision D14): the read-only view
+/// `radian attach [<session>] [--follow]` (ADR 0043): the read-only view
 /// of another session's committed facts. It reads the journal file and nothing else — no
 /// socket, no token, no write — and the observed session is never told.
 ///

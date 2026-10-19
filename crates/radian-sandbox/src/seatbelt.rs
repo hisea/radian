@@ -384,7 +384,7 @@ mod tests {
 
     /// ADR 0038 decision 4: the effective git access the per-session text reports is the
     /// policy's on this backend, because macos-seatbelt is where the carve-out is implemented.
-    /// `ReadOnly` (the default, and what a task agent keeps) must report `false` so the text
+    /// `ReadOnly` (the default) must report `false` so the text
     /// stays the read-only wording; only `WritableExceptExec` reports the writable one.
     #[test]
     fn the_effective_git_access_follows_the_policy() {

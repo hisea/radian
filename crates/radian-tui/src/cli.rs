@@ -349,7 +349,7 @@ enum RadianCommand {
         command: FooterCommand,
     },
 
-    /// View another session read-only (ADR 0043 slice ①): its committed transcript, rendered
+    /// View another session read-only (ADR 0043): its committed transcript, rendered
     /// with the same blocks a `--resume` uses. No input reaches the session, no socket is
     /// opened, and nothing is written.
     Attach {

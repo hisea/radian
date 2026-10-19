@@ -110,13 +110,13 @@ pub struct SessionSetup {
     pub skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     pub skills_disabled: Vec<String>,
-    /// the agent tool allow-list: the agent definition's built-in tool allow-list. `None` mounts every
-    /// built-in the host has; `Some` mounts only the named ones ("not in the list is not
-    /// mounted"). MCP tools are not in this universe — [`SessionSetup::servers`] governs them.
+    /// The session's built-in tool allow-list. `None` mounts every built-in the host has;
+    /// `Some` mounts only the named ones ("not in the list is not mounted"). MCP tools are not
+    /// in this universe — [`SessionSetup::servers`] governs them.
     pub tools_allow: Option<Vec<String>>,
-    /// the agent tool allow-list: the agent definition's `skills` allow-list. `None` loads every discovered
-    /// skill (today's behaviour); `Some` keeps only the named ones in the catalog, and a name
-    /// discovery did not find is reported at spawn, never a failure.
+    /// The session's skill allow-list. `None` loads every discovered skill; `Some` keeps only
+    /// the named ones in the catalog, and a name discovery did not find is reported at spawn,
+    /// never a failure.
     pub skills_allow: Option<Vec<String>>,
     /// The memory injection configuration (ADR 0021). The host builds it
     /// from `[memory.injection]`; `InjectionConfig::default()` is the documented D6 table.

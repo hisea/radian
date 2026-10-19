@@ -131,8 +131,7 @@ pub fn discover_with_extras(
     discovery
 }
 
-/// the agent tool allow-list: keeps only the discovered skills an agent definition's `skills` list names, in
-/// discovery order. This is the **allow-list** the definition gives a task; it is applied after
+/// Keeps only the discovered skills the session's skill allow-list names, in discovery order. This is the **allow-list** the definition gives a task; it is applied after
 /// discovery, not through `[skills] disabled` — that list only filters the compiled-in skills
 /// (`collect_builtin`), so it cannot disable a user-level or `extra_paths` skill by name.
 pub fn restrict_to(skills: Vec<Skill>, allow: &[String]) -> Vec<Skill> {
@@ -142,7 +141,7 @@ pub fn restrict_to(skills: Vec<Skill>, allow: &[String]) -> Vec<Skill> {
         .collect()
 }
 
-/// the agent tool allow-list: the allow-listed names that discovery did not find, one warning line each. A
+/// The allow-listed skill names that discovery did not find, one warning line each. A
 /// name that does not exist is never a failure: the task loads the rest of its list and the
 /// registry reports these lines in the spawn result.
 pub fn missing(skills: &[Skill], allow: &[String]) -> Vec<String> {
@@ -150,7 +149,9 @@ pub fn missing(skills: &[Skill], allow: &[String]) -> Vec<String> {
         .iter()
         .filter(|name| !skills.iter().any(|skill| &skill.name == *name))
         .map(|name| {
-            format!("skill `{name}` named by the agent definition was not found; it is not loaded")
+            format!(
+                "skill `{name}` named by the session allow-list was not found; it is not loaded"
+            )
         })
         .collect()
 }
@@ -1356,7 +1357,7 @@ mod tests {
         assert_eq!(untouched.system_prompt, None);
     }
 
-    /// the agent tool allow-list: an agent definition's `skills` list is an allow-list over the discovered
+    /// The session's skill allow-list is an allow-list over the discovered
     /// catalog. `restrict_to` keeps only the named skills, in discovery order; `missing` names
     /// the entries discovery did not find, one warning line each.
     #[test]

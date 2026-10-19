@@ -8240,7 +8240,7 @@ async fn pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo() {
     assert_stty_has_echo(stty);
 }
 
-/// ADR 0043 slice ⓪A: a headless `radian exec` mounts neither `git_commit` nor any task/lead/
+/// ADR 0043: a headless `radian exec` mounts neither `git_commit` nor any task/lead/
 /// named tool; its list is the built-in tools only.
 #[tokio::test]
 async fn a_headless_exec_mounts_no_orchestration_tools() {

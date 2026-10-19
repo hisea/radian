@@ -1,30 +1,26 @@
-//! The read-only observer of a session's **committed** facts (ADR 0023 U6, ADR 0043,
-//! revision 5).
+//! The read-only observer of a session's **committed** facts (ADR 0023 U6, ADR 0043).
 //!
 //! [`JournalObserver`] wraps a [`JournalTail`] and folds the events it reads into a
-//! [`SessionProjection`], so a consumer that did not open the session (the lead's
-//! `task_status`, the control port's `subscribe`, the TUI's read-only follow) sees the same
-//! facts the owning process would show. It is the single source of committed facts: the
-//! in-process task projection is meant to be fed through it, so this code serves the control
-//! port and a future out-of-process task alike (ADR 0023 U6).
+//! [`SessionProjection`], so a consumer that did not open the session (the control port's
+//! `subscribe`, `radian attach`, the TUI's read-only follow) sees the same facts the owning
+//! process would show. It is the single source of committed facts.
 //!
-//! **What it answers, and what it does not.** Only "what is it doing" (the projection: turn
-//! state, usage, the last tool) and "when was its last write" (the two stall inputs of ADR
-//! 0030 R5: the last event time and the last successful `write`/`patch` time). A task's
-//! questions and approvals (R9) are **not** here: they are inbox inputs, not committed facts.
+//! **What it answers.** "What is it doing" (the projection: turn state, usage, the last tool)
+//! and "when was its last write" (the last event time and the last successful `write`/`patch`
+//! time). Questions and approvals are **not** here: they are inbox inputs, not committed
+//! facts.
 //!
 //! **Committed means committed.** The tail drops an uncommitted replacement segment (ADR
 //! 0019), so the effective history, the projection and both timestamps never show one. A
 //! torn tail is not read until its line is complete, and a replaced/truncated file resets the
 //! reader (ADR 0023 U6).
 //!
-//! **Trait choice (open question 2).** This is a narrower trait, [`SessionObserver`], not
+//! **Trait choice.** This is a narrower trait, [`SessionObserver`], not
 //! [`SessionFacade`](crate::session::SessionFacade). A facade is a *door*: it requires
 //! `pending`, `answer`, `compact`, `set_approval`, `skills`, `trust`, `jobs` and the rest.
 //! An observer has no inbox, no queue and no command path, so implementing `SessionFacade`
-//! would force fake answers — an empty queue, a `command` that always refuses — and a fake
-//! `Ok(())` is worse than a method that does not exist. The narrower trait says exactly what
-//! the observer can do, and `capabilities()` returns `[Observe]` to match.
+//! would force fake answers. The narrower trait says exactly what the observer can do, and
+//! `capabilities()` returns `[Observe]` to match.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -39,7 +35,7 @@ use crate::session::SessionCapability;
 /// a borrow without owning an array per observer.
 const OBSERVE_ONLY: [SessionCapability; 1] = [SessionCapability::Observe];
 
-/// A tool whose **successful** settle is a file write (the observer stall inputs's "write/patch").
+/// A tool whose **successful** settle is a file write (for the last-write timestamp).
 fn is_write_tool(name: &str) -> bool {
     matches!(name, "write" | "patch")
 }
@@ -52,12 +48,11 @@ pub trait SessionObserver: Send + Sync {
     /// The committed session facts: turn state, usage, the last tool.
     fn projection(&self) -> ProjectionRead<'_>;
 
-    /// The timestamp of the last committed event (the observer stall inputs's stall input). `None` before
-    /// the first event.
+    /// The timestamp of the last committed event. `None` before the first event.
     fn last_event_ts(&self) -> Option<&str>;
 
-    /// The timestamp of the last **successful** `write`/`patch` (the observer stall inputs's stall input):
-    /// the last time the agent wrote a file. `None` when it has not written one yet.
+    /// The timestamp of the last **successful** `write`/`patch`: the last time the agent wrote
+    /// a file. `None` when it has not written one yet.
     fn last_write_ts(&self) -> Option<&str>;
 }
 
@@ -65,8 +60,8 @@ pub trait SessionObserver: Send + Sync {
 pub struct JournalObserver {
     tail: JournalTail,
     projection: SessionProjection,
-    /// The committed transcript, as of the last poll. Not on [`SessionObserver`]: the two
-    /// questions of revision 5 are the projection and the stall inputs. The TUI's read-only
+    /// The committed transcript, as of the last poll. Not on [`SessionObserver`]: the
+    /// observer trait exposes the projection and the two timestamps. The TUI's read-only
     /// follow and the tests read it here.
     history: Vec<Message>,
     last_event_ts: Option<String>,

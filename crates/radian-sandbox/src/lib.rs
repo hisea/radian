@@ -292,8 +292,8 @@ impl Sandbox {
     /// (ADR 0038 decision 4). This is the **effective** answer for this session: the policy may
     /// ask for [`GitAccess::WritableExceptExec`], but the backend must be able to enforce the
     /// carve-out. The shell tool's description and the startup line read this, so a session
-    /// whose `.git` is still read-only (a task agent, or any `workspace` session on a backend
-    /// without the carve-out) keeps the read-only wording.
+    /// whose `.git` is still read-only (any `workspace` session on a backend without the
+    /// carve-out) keeps the read-only wording.
     pub fn git_writable_except_exec(&self) -> bool {
         self.backend.git_writable_except_exec(&self.policy)
     }

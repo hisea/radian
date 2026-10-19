@@ -121,7 +121,7 @@ impl Profile {
                     Action::Deny,
                 )
                 .with_reason("safe mode has no shell"),
-                // the host git rules: `git_commit` writes the repository; safe does not write.
+                // A legacy deny for the removed `git_commit` tool name; safe does not write.
                 Rule::new(
                     ToolMatcher::Name("git_commit".into()),
                     ResourceMatcher::Any,
@@ -214,8 +214,8 @@ impl Profile {
         self
     }
 
-    /// Denies every tool in `names` (the allow-list gate). An agent definition's `tools`
-    /// allow-list is enforced with this: the host passes the built-ins the list does **not**
+    /// Denies every tool in `names` (the allow-list gate). A session's tool allow-list is
+    /// enforced with this: the host passes the built-ins the list does **not**
     /// name, and `deny` outranks `allow`/`ask`, so a listed tool the tier would not mount stays
     /// unmounted and an unlisted tool cannot run. It only ever adds `deny` rules, so it can
     /// narrow a tier but never widen one.
@@ -230,7 +230,7 @@ impl Profile {
                 ResourceMatcher::Any,
                 Action::Deny,
             )
-            .with_reason("not in this agent's tool allow-list (the agent tool allow-list)")
+            .with_reason("not in this session's tool allow-list")
         }));
         self
     }

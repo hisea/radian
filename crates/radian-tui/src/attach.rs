@@ -1,4 +1,4 @@
-//! `radian attach <session> [--follow]` (ADR 0043 slice ①, decision D14): a **read-only** view
+//! `radian attach <session> [--follow]` (ADR 0043): a **read-only** view
 //! of another session's committed facts.
 //!
 //! **What it reads.** The journal is the observation bus (D15): no socket, no token, and the

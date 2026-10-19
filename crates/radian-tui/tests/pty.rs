@@ -781,7 +781,7 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
     assert!(dir.path().join("e2e.jsonl").exists());
 }
 
-/// ADR 0043 slice ⓪A: a fresh TUI session mounts only the built-in tools. No `git_commit` and
+/// ADR 0043: a fresh TUI session mounts only the built-in tools. No `git_commit` and
 /// none of the deleted task/lead/named tools are advertised to the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -943,7 +943,7 @@ async fn pty_the_context_file_reaches_the_model_and_the_startup_line() {
     std::fs::create_dir_all(ws.join(".git")).unwrap();
     std::fs::write(
         ws.join("AGENTS.md"),
-        "CONTEXT-FILE-MARKER: commits go through git_commit.\n",
+        "CONTEXT-FILE-MARKER: commits use native git.\n",
     )
     .unwrap();
     let server = MockServer::start(vec![text_reply("OK")]).await;
@@ -12072,7 +12072,7 @@ async fn pty_resume_restores_the_access_tier() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-// ---------- ADR 0043 slice ①: `radian attach` ----------
+// ---------- ADR 0043: `radian attach` ----------
 
 /// The journal the attach tests read, returned with its writer **still open**: the appender
 /// really is a different process from the reader, and the writer's lock is held the whole time
