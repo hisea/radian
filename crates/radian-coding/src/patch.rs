@@ -10,12 +10,29 @@ use crate::fail;
 use crate::provider::Limits;
 use crate::workspace::{WorkspaceRoot, edit_distance_ci, io_failure};
 
+/// The `patch` call: the legacy single-edit `old`/`new` pair, or the new `edits` array for
+/// several edits to one file. Exactly one form is accepted (see [`edit_spec`]).
 #[derive(Deserialize)]
 struct PatchArgs {
     path: String,
+    #[serde(default)]
+    old: Option<String>,
+    #[serde(default)]
+    new: Option<String>,
+    /// The legacy form's replace-all flag; ignored when `edits` is used.
+    #[serde(default)]
+    replace_all: bool,
+    #[serde(default)]
+    edits: Option<Vec<PatchEdit>>,
+}
+
+/// One entry of the multi-edit form: the same fields the legacy form has, with its own
+/// `replace_all` default (`false`).
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchEdit {
     old: String,
     new: String,
-    /// Replace every located occurrence instead of refusing when there is more than one.
     #[serde(default)]
     replace_all: bool,
 }
@@ -33,18 +50,33 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "old": {
                 "type": "string",
-                "description": "Text to find; must locate exactly one occurrence unless replace_all is true."
+                "description": "Text to find; must locate exactly one occurrence unless replace_all is true. Use with `new` (or use `edits` instead)."
             },
             "new": {
                 "type": "string",
-                "description": "Replacement text."
+                "description": "Replacement text for the legacy `old`/`new` form."
             },
             "replace_all": {
                 "type": "boolean",
                 "description": "Replace every located occurrence instead of refusing when there is more than one; defaults to false."
+            },
+            "edits": {
+                "type": "array",
+                "minItems": 1,
+                "description": "Several edits to the single `path`, applied atomically: every edit is located in the original file, all ranges must be disjoint, and if any edit fails nothing is written. Each entry is `{old, new, replace_all?}` with its own `replace_all` default (false). Use this instead of `old`/`new`.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old": {"type": "string"},
+                        "new": {"type": "string"},
+                        "replace_all": {"type": "boolean"}
+                    },
+                    "required": ["old", "new"],
+                    "additionalProperties": false
+                }
             }
         },
-        "required": ["path", "old", "new"],
+        "required": ["path"],
         "additionalProperties": false
     })
 }
@@ -58,10 +90,13 @@ pub(crate) fn spec() -> ToolSpec {
                       normalised to ASCII on both sides; (3) line by line, ignoring trailing \
                       whitespace. A match at any layer must be unique, or the edit is refused \
                       and the file is unchanged; set replace_all: true to replace every \
-                      located occurrence instead. A CRLF file is matched on an LF view, the \
-                      offsets are mapped back, and the file stays CRLF. When nothing matches, \
-                      the error names the closest region of the file, with line numbers, so \
-                      you do not need another read."
+                      located occurrence instead. For several edits to the one file, pass \
+                      `edits` (an array of `{old, new, replace_all?}`) instead of `old`/`new`: \
+                      every edit is located in the original file, all ranges must be disjoint, \
+                      and if any edit fails nothing is written. A CRLF file is matched on an LF \
+                      view, the offsets are mapped back, and the file stays CRLF. When nothing \
+                      matches, the error names the closest region of the file, with line \
+                      numbers, so you do not need another read."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Exclusive,
@@ -74,12 +109,20 @@ pub(crate) async fn run(
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
     let args: PatchArgs = args::parse("patch", &schema(), arguments)?;
-    if args.old.is_empty() {
-        return Err(fail(
-            "patch_invalid",
-            "`old` must not be empty; use write to create or replace a whole file",
-        ));
-    }
+    let form = edit_spec(&args, arguments)?;
+    let multiple = matches!(form, EditSpec::Multiple(_));
+    let specs: Vec<PatchEdit> = match form {
+        EditSpec::Legacy {
+            old,
+            new,
+            replace_all,
+        } => vec![PatchEdit {
+            old,
+            new,
+            replace_all,
+        }],
+        EditSpec::Multiple(edits) => edits,
+    };
 
     // ADR 0039 decision 2: the target is opened read-write through the root's directory fd
     // (`O_NOFOLLOW` at every component, no `O_CREAT`: a patch target must exist) and the
@@ -97,35 +140,39 @@ pub(crate) async fn run(
         ));
     }
     let content = crate::safe_fs::read_to_string(&file).map_err(|e| io_failure(&args.path, e))?;
+    let crlf = content.contains("\r\n");
 
+    // Every edit is located against the **original** contents before anything is written, so a
+    // later edit can never match text an earlier one inserted, and a failure in any edit leaves
+    // the file untouched.
     let view = LfView::new(&content);
-    let (layer, ranges) = match locate(&view, &args.old) {
-        Located::Found(layer, ranges) => (layer, ranges),
-        // Nothing matched at any layer: say where the closest text is.
-        Located::None => return Err(not_found(&view, &args.path, &args.old)),
-    };
-    if ranges.len() > 1 && !args.replace_all {
-        return Err(fail(
-            "patch_ambiguous",
-            format!(
-                "`old` appears {} times in `{}` (matched by {}); refusing to guess which one; \
-                 the file is unchanged",
-                ranges.len(),
-                args.path,
-                layer.name()
-            ),
-        ));
+    let mut resolved = Vec::with_capacity(specs.len());
+    for (index, spec) in specs.iter().enumerate() {
+        resolved.push(resolve_edit(
+            &view, &args.path, spec, index, multiple, crlf,
+        )?);
     }
+    check_conflicts(&args.path, &resolved)?;
 
-    let replacement = line_ending_new(&args.new, content.contains("\r\n"));
+    // All ranges are offsets into the original file. Sorting by start and applying from the end
+    // keeps every earlier offset valid; the conflict check above guarantees they do not overlap.
+    let mut replacements: Vec<(Range<usize>, String)> = resolved
+        .iter()
+        .flat_map(|edit| {
+            edit.ranges
+                .iter()
+                .cloned()
+                .map(|range| (range, edit.replacement.clone()))
+        })
+        .collect();
+    replacements.sort_by_key(|(range, _)| range.start);
     // Where each replaced range sits in the old file and in the new one (ADR 0028
     // decision 5). The TUI draws one hunk block per range, with each row's line number; the
     // result **text** does not change.
-    let hunks = replacement_hunks(&content, &ranges, &replacement);
+    let hunks = replacement_hunks(&content, &replacements);
     let mut updated = content;
-    // Replace from the end so the earlier ranges' offsets stay valid.
-    for range in ranges.iter().rev() {
-        updated.replace_range(range.clone(), &replacement);
+    for (range, replacement) in replacements.iter().rev() {
+        updated.replace_range(range.clone(), replacement);
     }
     if updated.len() > limits.max_write_bytes {
         return Err(fail(
@@ -144,47 +191,250 @@ pub(crate) async fn run(
         .and_then(|()| file.flush())
         .map_err(|e| io_failure(&args.path, e))?;
 
-    let word = if ranges.len() == 1 {
+    Ok(render_result(&args.path, multiple, &resolved, hunks))
+}
+
+/// The call's edits in one shape: the legacy `old`/`new` pair, or the new `edits` array.
+enum EditSpec {
+    Legacy {
+        old: String,
+        new: String,
+        replace_all: bool,
+    },
+    Multiple(Vec<PatchEdit>),
+}
+
+/// Resolves the two accepted forms. `edits` and the legacy pair are mutually exclusive; the
+/// legacy form keeps its exact behaviour (`old` and `new` are required, `old` must not be empty,
+/// and an empty `new` is a legal deletion).
+fn edit_spec(args: &PatchArgs, raw: &serde_json::Value) -> Result<EditSpec, ToolFailure> {
+    if let Some(edits) = &args.edits {
+        if raw.get("old").is_some() || raw.get("new").is_some() || raw.get("replace_all").is_some()
+        {
+            return Err(args::invalid(
+                "patch",
+                raw,
+                ["use either `edits` or the `old`/`new` pair, not both"],
+            ));
+        }
+        if edits.is_empty() {
+            return Err(args::invalid("patch", raw, ["`edits` must not be empty"]));
+        }
+        for (index, edit) in edits.iter().enumerate() {
+            if edit.old.is_empty() {
+                return Err(fail(
+                    "patch_invalid",
+                    edit_message(
+                        index,
+                        "`old` must not be empty; use write to create or replace a whole file",
+                    ),
+                ));
+            }
+        }
+        return Ok(EditSpec::Multiple(edits.clone()));
+    }
+    let old = legacy_field(args.old.as_deref(), raw, "old")?;
+    let new = legacy_field(args.new.as_deref(), raw, "new")?;
+    if old.is_empty() {
+        return Err(fail(
+            "patch_invalid",
+            "`old` must not be empty; use write to create or replace a whole file",
+        ));
+    }
+    Ok(EditSpec::Legacy {
+        old,
+        new,
+        replace_all: args.replace_all,
+    })
+}
+
+/// A required legacy field. `args::parse` drops an optional property sent as `""`, so a value
+/// that came back `None` is either genuinely absent (an error) or was an empty string — legal
+/// for `new` (a deletion), rejected for `old`. The raw call still carries the key, which tells
+/// the two cases apart.
+fn legacy_field(
+    parsed: Option<&str>,
+    raw: &serde_json::Value,
+    name: &str,
+) -> Result<String, ToolFailure> {
+    if let Some(value) = parsed {
+        return Ok(value.to_owned());
+    }
+    if raw.get(name).and_then(serde_json::Value::as_str).is_some() {
+        return Ok(String::new());
+    }
+    Err(args::invalid(
+        "patch",
+        raw,
+        [format!("missing required argument `{name}`")],
+    ))
+}
+
+/// One edit after its range(s) were located in the **original** file.
+struct ResolvedEdit {
+    /// 0-based position in the call's edit list (the structured `index`).
+    index: usize,
+    layer: Layer,
+    ranges: Vec<Range<usize>>,
+    /// The replacement with the file's line endings, applied to every range above.
+    replacement: String,
+}
+
+/// Locates one edit in the unchanged file and builds its replacement. A failure names the edit
+/// by its 1-based number when the call carries more than one.
+fn resolve_edit(
+    view: &LfView,
+    path: &str,
+    spec: &PatchEdit,
+    index: usize,
+    multiple: bool,
+    crlf: bool,
+) -> Result<ResolvedEdit, ToolFailure> {
+    let (layer, ranges) = match locate(view, &spec.old) {
+        Located::Found(layer, ranges) => (layer, ranges),
+        // Nothing matched at any layer: say where the closest text is.
+        Located::None => {
+            return Err(number_edit(
+                not_found(view, path, &spec.old),
+                index,
+                multiple,
+            ));
+        }
+    };
+    if ranges.len() > 1 && !spec.replace_all {
+        return Err(number_edit(
+            fail(
+                "patch_ambiguous",
+                format!(
+                    "`old` appears {} times in `{}` (matched by {}); refusing to guess which \
+                     one; the file is unchanged",
+                    ranges.len(),
+                    path,
+                    layer.name()
+                ),
+            ),
+            index,
+            multiple,
+        ));
+    }
+    Ok(ResolvedEdit {
+        index,
+        layer,
+        ranges,
+        replacement: line_ending_new(&spec.new, crlf),
+    })
+}
+
+/// Prefixes a failure with its 1-based edit number for the multi-edit form; the legacy form's
+/// messages are unchanged.
+fn number_edit(mut failure: ToolFailure, index: usize, multiple: bool) -> ToolFailure {
+    if multiple {
+        failure.message = edit_message(index, &failure.message);
+    }
+    failure
+}
+
+fn edit_message(index: usize, message: &str) -> String {
+    format!("edit {}: {message}", index + 1)
+}
+
+/// Rejects any two edits whose selected ranges overlap, including an identical range chosen by
+/// two edits, naming both 1-based edit numbers. Adjacent, non-overlapping ranges are allowed:
+/// `a.end == b.start` is not an overlap.
+fn check_conflicts(path: &str, edits: &[ResolvedEdit]) -> Result<(), ToolFailure> {
+    for (position, first) in edits.iter().enumerate() {
+        for second in &edits[position + 1..] {
+            for left in &first.ranges {
+                for right in &second.ranges {
+                    if left.start < right.end && right.start < left.end {
+                        return Err(fail(
+                            "patch_conflict",
+                            format!(
+                                "edits {} and {} select overlapping text in `{path}`; the file \
+                                 is unchanged",
+                                first.index + 1,
+                                second.index + 1
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The tool result. The legacy form keeps its exact `{path, replaced, matched, hunks}` shape
+/// and text; the multi form adds `edits` and a per-edit `results` array. Both carry the
+/// flattened, file-order `hunks` the TUI numbers rows from.
+fn render_result(
+    path: &str,
+    multiple: bool,
+    edits: &[ResolvedEdit],
+    hunks: serde_json::Value,
+) -> ToolOutput {
+    let replaced: usize = edits.iter().map(|edit| edit.ranges.len()).sum();
+    let word = if replaced == 1 {
         "occurrence"
     } else {
         "occurrences"
     };
-    Ok(ToolOutput {
+    if !multiple {
+        let edit = &edits[0];
+        return ToolOutput {
+            content: vec![ContentPart::text(format!(
+                "replaced {replaced} {word} in {path} (matched by {})",
+                edit.layer.name()
+            ))],
+            structured: Some(json!({
+                "path": path,
+                "replaced": replaced,
+                "matched": edit.layer.name(),
+                "hunks": hunks,
+            })),
+        };
+    }
+    let results: Vec<serde_json::Value> = edits
+        .iter()
+        .map(|edit| {
+            json!({
+                "edit": edit.index + 1,
+                "index": edit.index,
+                "replaced": edit.ranges.len(),
+                "matched": edit.layer.name(),
+            })
+        })
+        .collect();
+    ToolOutput {
         content: vec![ContentPart::text(format!(
-            "replaced {} {} in {} (matched by {})",
-            ranges.len(),
-            word,
-            args.path,
-            layer.name()
+            "replaced {replaced} {word} across {} edits in {path}",
+            edits.len()
         ))],
         structured: Some(json!({
-            "path": args.path,
-            "replaced": ranges.len(),
-            "matched": layer.name(),
+            "path": path,
+            "edits": edits.len(),
+            "replaced": replaced,
             "hunks": hunks,
+            "results": results,
         })),
-    })
+    }
 }
 
 /// One hunk per replaced range, in file order: the range's 1-based start line and line count in
-/// the old file, and the replacement's in the new file.
+/// the old file, and its replacement's in the new file.
 ///
-/// `ranges` are ascending (`find_all` returns them in file order), so a hunk's new-file start is
-/// its old-file start plus the line delta every **earlier** hunk introduced: deleting lines
-/// moves the later hunks up, inserting them moves the later hunks down. The TUI numbers the
-/// rows from these (ADR 0028). A line count comes from `str::lines`, which
-/// counts a trailing newline as the end of the last line (`a\nb\n` is two lines) and strips a
-/// `\r` (so a CRLF file counts the same as an LF one).
-fn replacement_hunks(
-    content: &str,
-    ranges: &[Range<usize>],
-    replacement: &str,
-) -> serde_json::Value {
-    let new_lines = replacement.lines().count();
+/// `replacements` are ascending by start offset (the caller sorts the original file's ranges), so
+/// a hunk's new-file start is its old-file start plus the line delta every **earlier** hunk
+/// introduced: deleting lines moves the later hunks up, inserting them moves the later hunks
+/// down. The TUI numbers the rows from these (ADR 0028). A line count comes
+/// from `str::lines`, which counts a trailing newline as the end of the last line (`a\nb\n` is
+/// two lines) and strips a `\r` (so a CRLF file counts the same as an LF one).
+fn replacement_hunks(content: &str, replacements: &[(Range<usize>, String)]) -> serde_json::Value {
     let mut delta: i64 = 0;
-    let hunks: Vec<serde_json::Value> = ranges
+    let hunks: Vec<serde_json::Value> = replacements
         .iter()
-        .map(|range| {
+        .map(|(range, replacement)| {
+            let new_lines = replacement.lines().count();
             let old_start = line_of_offset(content, range.start);
             let old_lines = content[range.clone()].lines().count();
             let new_start = old_start as i64 + delta;

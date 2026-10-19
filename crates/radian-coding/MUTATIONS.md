@@ -608,3 +608,69 @@ The white-box test `a_settle_with_no_waiter_still_stores_the_watched_value` is w
 the pre-wait state check is absent too (JW-4). The pre-wait state check (JW-2) and the message
 guard (JW-3) are each unreachable alone and no deterministic test catches either: they are belt
 and braces over `send_replace`, recorded honestly.
+
+## `patch`: atomic multiple edits (`edits`) (2026-10-17, branch `pi/multi-edit-output`)
+
+The new form locates every edit against the **original** file before anything is written, rejects
+overlapping/identical ranges, checks the combined size, and only then does the one existing
+truncate/write. Mutations were applied in place, the source restored from a `cp` in
+`/tmp/radian-mut/` and confirmed byte-identical with `cmp` after each run; run with
+`cargo test -p radian-coding --test patch --locked --no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| ME-1 | write the first edit as it resolves, before the later edits are validated (`run` truncates/writes edit 0 inside the resolve loop) | ✅ 1 failed | `a_missing_second_edit_leaves_the_first_unapplied` (`left: "ALPHA beta\n"` — the first edit had been written although the second was missing) |
+| ME-2 | skip the overlap check (`let _ = check_conflicts(&args.path, &resolved);`) | ✅ 2 failed | `overlapping_ranges_are_refused`, `identical_ranges_are_refused` (both returned `Ok` and wrote the file) |
+
+ME-1 is the "apply the first edit before validating the second" mutation the brief names; the test
+fails on the file's contents, not on the error code, which is exactly the all-or-nothing property
+under test. ME-2 shows the conflict rejection is the only thing guarding overlapping ranges:
+without it the two ranges are applied in descending offset order and the file changes silently.
+
+## `shell_output`: a foreground shell result's opaque, bounded output handle (2026-10-17, branch `pi/multi-edit-output`)
+
+A capped foreground `shell` command tees its whole output to a session-private file (the shared
+`output::open_output_file` creator, `O_CREAT|O_EXCL|O_NOFOLLOW` 0600) and returns an opaque handle
+`out-<nonce>-<n>`. `shell_output` resolves the handle only in the session's own registry; a handle
+is never a path, and the retained file is capped per item and per session. Mutations were applied
+in place, the source restored from a `cp` in `/tmp/radian-mut/` and confirmed byte-identical with
+`cmp` after each run; run with `cargo test -p radian-coding --test shell_output --locked
+--no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| SF-1 | `run_read` resolves the handle directly as a path (`PathBuf::from(&args.handle)`), bypassing the registry | ✅ 4 failed | `a_path_like_handle_cannot_open_a_file`, `a_handle_from_another_session_is_unknown`, `a_truncated_command_exposes_a_retrievable_handle`, `the_session_cap_evicts_the_oldest_handle` (the path read gave `output_read` instead of `unknown_output`) |
+| SF-2 | `Retention::push` ignores the per-item cap (`take = bytes.len()`) | ✅ 1 failed | `the_retained_file_is_capped_and_says_so` (`output_retained_cut` was `false`, retained 23893 > 200) |
+| SF-3 | `ForegroundOutputs::finish` never takes the "remove it" branch (`if !keep` → `if false`) | ✅ 1 failed | `a_non_truncated_command_leaves_no_handle_or_file` (one leftover `.out` file for an untruncated command) |
+
+SF-1 is the required "bypass the opaque-handle registry with a path/open" mutation; the path test
+never opens the planted file. SF-2 is the required "omit the cap/retention enforcement" mutation.
+SF-3 pins the "a non-truncated command leaves no artifact" rule: without it the file survives even
+though no handle was returned.
+
+The **shared creator** (`output::open_output_file`, used by both `job_output`'s file and
+`shell_output`'s file) is pinned by the unit test `output::tests::the_creator_refuses_an_existing_file_and_a_symlink`
+and by `job_output_security::a_planted_symlink_at_the_next_output_file_is_not_followed`: a planted
+symlink or pre-existing file at the destination is refused, so it can never receive host output.
+
+## review fix: the no-host foreground root and the retention cleanup (2026-10-17, branch `pi/multi-edit-output`)
+
+The review found the no-host `CodingTools::with_sandbox` path retaining foreground output under the
+workspace (readable by the model's `read`), and an error path leaking the retention file.
+Foreground retention is now enabled **only** when the provider has a caller-supplied private
+directory (`with_jobs`); the private root is held as an `O_DIRECTORY|O_NOFOLLOW` fd and every file
+is created/read relative to it; and a `Drop` guard removes the file on any path that did not commit
+it. Mutations were applied in place, restored from a `cp` in `/tmp/radian-mut/rf/` and confirmed
+byte-identical with `cmp`; run with
+`cargo test -p radian-coding --test shell_output --locked --no-fail-fast <test>`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RF-1 | the no-host branch retains in the workspace fallback again (`ForegroundOutputs::new` over `jobs.dir()`) | ✅ 1 failed | `the_no_host_provider_retains_nothing_in_the_workspace` (`shell_output` was advertised and a file landed under the workspace) |
+| RF-2 | `RetentionInner::drop` no longer removes the file | ✅ 1 failed | `a_spawn_failure_leaves_no_retained_file` (`1` leftover `.out` file) |
+| RF-3 | `PrivateDir::open` follows a symlinked root (drop the symlink check and `O_NOFOLLOW`) | ✅ 1 failed | `a_planted_root_symlink_cannot_redirect_output` (a handle appeared; output was written through the link) |
+
+RF-2 **survived its first run**: the test's jobs parent did not exist, so `PrivateDir::open`
+failed, no file was ever created, and the assertion passed vacuously. The test now creates the
+session directory tree first, and the mutation then fails on the leftover file. The record keeps
+this because it is the honest picture: an error-cleanup test must prove the file existed first.

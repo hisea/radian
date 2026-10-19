@@ -9,7 +9,7 @@ use radian_sandbox::{Sandbox, SandboxMode, SandboxSlot};
 
 use crate::read_roots::ReadRoots;
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
-use crate::{fail, git, glob, grep, jobs, list, patch, read, shell, write};
+use crate::{fail, foreground, git, glob, grep, jobs, list, patch, read, shell, write};
 
 /// Resource bounds, all overridable with [`CodingTools::with_limits`]. Defaults are chosen
 /// so a single tool call cannot blow up the model context or the session file.
@@ -58,6 +58,17 @@ pub struct Limits {
     /// cap applies, as before). `Some(ZERO)` is treated as off. A host sets it from
     /// `[shell] auto_background_secs`.
     pub auto_background_after: Option<Duration>,
+    /// The bytes of a **foreground** command's output retained for `shell_output` after its
+    /// model-facing view was truncated. The head+tail in the result is bounded by
+    /// `default_shell_output_bytes`/`max_shell_output_bytes`; this is the larger private file
+    /// the middle can be recovered from. A result that hits this cap says so (the bytes past
+    /// it are not recoverable).
+    pub max_foreground_retained_bytes: usize,
+    /// The bytes every retained foreground output together may hold per session. Keeping a new
+    /// one past this evicts the oldest, whose handle then reads as unknown.
+    pub max_foreground_session_bytes: usize,
+    /// The number of retained foreground outputs per session, evicting the oldest past it.
+    pub max_foreground_items: usize,
 }
 
 impl Default for Limits {
@@ -86,6 +97,13 @@ impl Default for Limits {
             default_shell_timeout: Duration::from_secs(60),
             max_shell_timeout: Duration::from_secs(600),
             auto_background_after: Some(Duration::from_secs(120)),
+            // The model-facing view keeps a bounded head+tail (64 KiB per stream by default);
+            // the retained file is larger so the discarded middle can be recovered, but still
+            // bounded per item and per session. 8 MiB per item covers a large build log's
+            // middle; 32 MiB per session keeps four such items, and eviction drops the oldest.
+            max_foreground_retained_bytes: 8 << 20,
+            max_foreground_session_bytes: 32 << 20,
+            max_foreground_items: 32,
         }
     }
 }
@@ -213,15 +231,29 @@ impl ToolProvider for CodingTools {
     type Session = CodingSession;
 
     async fn open_session(&self) -> Result<Self::Session, ToolError> {
-        let jobs = match &self.jobs {
-            Some(jobs) => Arc::clone(jobs),
-            // The host always supplies the session-owned registry (`with_jobs`, ADR 0039
-            // decision 1). A provider built directly (tests, an embedded tool set) has no
-            // session directory, so it falls back to a per-workspace directory under `.radian/`
-            // — still opened `O_EXCL|O_NOFOLLOW`, so a pre-planted symlink cannot redirect it.
-            None => Arc::new(jobs::Jobs::new(
-                self.root.root().join(".radian").join("jobs"),
-            )),
+        let (jobs, foreground) = match &self.jobs {
+            Some(jobs) => {
+                let jobs = Arc::clone(jobs);
+                // Retained foreground output lives in the caller-supplied, session-private jobs
+                // directory (ADR 0039 decision 1). The registry is *per session*: its handles
+                // and nonce are fresh, so another session's handle is unknown.
+                let foreground = Arc::new(foreground::ForegroundOutputs::new(
+                    jobs.dir().to_path_buf(),
+                    &self.limits,
+                ));
+                (jobs, Some(foreground))
+            }
+            // A provider built without a caller-supplied private directory (a test, an embedded
+            // tool set) falls back to a per-workspace jobs directory for `job_output` — but a
+            // workspace directory is readable by the model's `read`, so foreground retention is
+            // **off**: there is nowhere safe to put it. No handle is created and `shell_output`
+            // is not advertised; the ordinary truncation notice still says bytes were discarded.
+            None => (
+                Arc::new(jobs::Jobs::new(
+                    self.root.root().join(".radian").join("jobs"),
+                )),
+                None,
+            ),
         };
         // The tool set is fixed here, once per session (ADR 0036): the
         // shell description therefore reflects the tier the session **started** in. A later
@@ -235,8 +267,9 @@ impl ToolProvider for CodingTools {
             root: Arc::clone(&self.root),
             limits: self.limits,
             sandbox: self.sandbox.clone(),
-            specs: specs(shell),
+            specs: specs(shell, foreground.is_some()),
             jobs,
+            foreground,
         })
     }
 }
@@ -249,6 +282,10 @@ pub struct CodingSession {
     sandbox: SandboxSlot,
     specs: Vec<ToolSpec>,
     jobs: Arc<jobs::Jobs>,
+    /// Retained foreground `shell` output, read by `shell_output`. `None` when the provider has
+    /// no caller-supplied private directory (see [`CodingTools::open_session`]), in which case
+    /// neither a handle nor the tool exists.
+    foreground: Option<Arc<foreground::ForegroundOutputs>>,
 }
 
 impl CodingSession {
@@ -263,9 +300,17 @@ impl CodingSession {
     pub fn shutdown_jobs(&self) {
         self.jobs.kill_all();
     }
+
+    /// Session end: drop the retained foreground output and remove its files. Synchronous file
+    /// removal only; the registry state also drops with the session.
+    pub fn shutdown_outputs(&self) {
+        if let Some(foreground) = &self.foreground {
+            foreground.shutdown();
+        }
+    }
 }
 
-fn specs(shell: Option<(SandboxMode, bool)>) -> Vec<ToolSpec> {
+fn specs(shell: Option<(SandboxMode, bool)>, foreground: bool) -> Vec<ToolSpec> {
     let mut specs = vec![
         read::spec(),
         write::spec(),
@@ -282,6 +327,11 @@ fn specs(shell: Option<(SandboxMode, bool)>) -> Vec<ToolSpec> {
         specs.push(jobs::output_spec());
         specs.push(jobs::list_spec());
         specs.push(jobs::kill_spec());
+        // Only a `shell` call produces retained foreground output, and only when there is a
+        // caller-supplied private directory to keep it in.
+        if foreground {
+            specs.push(foreground::spec());
+        }
     }
     specs
 }
@@ -312,6 +362,7 @@ impl ToolSession for CodingSession {
                         &sandbox,
                         &self.limits,
                         &self.jobs,
+                        self.foreground.as_deref(),
                         &call.arguments,
                         &cx,
                     )
@@ -327,6 +378,13 @@ impl ToolSession for CodingSession {
             "job_output" => jobs::run_output(&self.jobs, &self.limits, &call.arguments, &cx).await,
             "job_list" => jobs::run_list(&self.jobs),
             "job_kill" => jobs::run_kill(&self.jobs, &call.arguments),
+            "shell_output" => match &self.foreground {
+                Some(foreground) => foreground::run_read(foreground, &self.limits, &call.arguments),
+                None => Err(fail(
+                    "unknown_tool",
+                    "`shell_output` needs a caller-supplied private output directory",
+                )),
+            },
             other => Err(fail(
                 "unknown_tool",
                 format!("`{other}` is not one of the built-in coding tools"),

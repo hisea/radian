@@ -44,6 +44,7 @@ use serde_json::json;
 
 use crate::args;
 use crate::fail;
+use crate::foreground::{ForegroundOutputs, Retention};
 use crate::jobs::{AdoptedHandle, JobCell, Jobs};
 use crate::provider::Limits;
 use crate::workspace::WorkspaceRoot;
@@ -219,6 +220,9 @@ pub async fn run_user_bash(
         cancel,
         // ADR 0037: `!`/`!!` never turn into a background job.
         None,
+        // A user `!` command's output is shown and forgotten; nothing is retained for
+        // `shell_output`.
+        None,
     )
     .await
     .map_err(|failure| failure.message)?;
@@ -253,6 +257,7 @@ pub(crate) async fn run(
     sandbox: &Sandbox,
     limits: &Limits,
     jobs: &Jobs,
+    foreground: Option<&ForegroundOutputs>,
     arguments: &serde_json::Value,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
@@ -294,6 +299,12 @@ pub(crate) async fn run(
         _ => (deadline, None, None),
     };
 
+    // Retain the whole output so a truncated result's discarded middle stays retrievable. `None`
+    // when the provider has no caller-supplied private directory (no-hand embedders) or the
+    // private root is unusable: the command runs and its result simply has no handle. The file
+    // is removed again below (or by `Retention`'s drop on an error path) when it is not kept.
+    let retention = foreground.and_then(ForegroundOutputs::open);
+
     let outcome = execute(
         sandbox,
         &cwd,
@@ -306,31 +317,64 @@ pub(crate) async fn run(
             command: &args.command,
             explicit_deadline,
         }),
+        // The whole output is teed to a session-private file so a truncated result's discarded
+        // middle stays retrievable; nothing is created for a result that needs no handle, and
+        // the file is removed again below.
+        retention.clone(),
     )
     .await?;
     match outcome {
-        ExecOutcome::Ran(outcome) => Ok(report(
-            &args.command,
-            root.root(),
-            &cwd,
-            sandbox.mode(),
-            explicit_deadline.unwrap_or(wait),
-            clamped,
-            output_cap,
-            output_clamped,
-            &outcome,
-        )),
-        ExecOutcome::Adopted(info) => Ok(adopted_report(
-            &args.command,
-            root.root(),
-            &cwd,
-            sandbox.mode(),
-            wait,
-            clamped,
-            output_cap,
-            output_clamped,
-            &info,
-        )),
+        ExecOutcome::Ran(outcome) => {
+            let truncated = outcome.stdout.is_truncated() || outcome.stderr.is_truncated();
+            let retained = match (foreground, &retention) {
+                (Some(foreground), Some(retention)) if truncated => {
+                    let view = RetainedView {
+                        handle: retention.handle().to_owned(),
+                        retained_bytes: retention.retained(),
+                        total_bytes: retention.total(),
+                        cut: retention.is_cut(),
+                    };
+                    foreground.finish(retention, true);
+                    Some(view)
+                }
+                (Some(foreground), Some(retention)) => {
+                    // No truncation: no handle, no artifact. The file is removed.
+                    foreground.finish(retention, false);
+                    None
+                }
+                _ => None,
+            };
+            Ok(report(
+                &args.command,
+                root.root(),
+                &cwd,
+                sandbox.mode(),
+                explicit_deadline.unwrap_or(wait),
+                clamped,
+                output_cap,
+                output_clamped,
+                &outcome,
+                retained,
+            ))
+        }
+        ExecOutcome::Adopted(info) => {
+            // The job's own output file is the retained output now; the foreground file is
+            // redundant. Drop it (the pre-adoption bytes already reached the job's file).
+            if let (Some(foreground), Some(retention)) = (foreground, &retention) {
+                foreground.finish(retention, false);
+            }
+            Ok(adopted_report(
+                &args.command,
+                root.root(),
+                &cwd,
+                sandbox.mode(),
+                wait,
+                clamped,
+                output_cap,
+                output_clamped,
+                &info,
+            ))
+        }
     }
 }
 
@@ -458,6 +502,7 @@ struct Adopt<'a> {
     explicit_deadline: Option<Duration>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     sandbox: &Sandbox,
     cwd: &Path,
@@ -466,11 +511,12 @@ async fn execute(
     output_cap: usize,
     cancel: &CancellationToken,
     adopt: Option<Adopt<'_>>,
+    retain: Option<Retention>,
 ) -> Result<ExecOutcome, ToolFailure> {
     let mut process = sandboxed_command(sandbox, cwd, command)?;
 
     let started = Instant::now();
-    let mut supervised = Supervised::spawn(&mut process, output_cap).map_err(|e| {
+    let mut supervised = Supervised::spawn(&mut process, output_cap, retain).map_err(|e| {
         fail(
             "shell_spawn_failed",
             format!("could not start the command: {e}"),
@@ -671,6 +717,10 @@ impl Capped {
 pub(crate) struct StreamSink {
     capped: Capped,
     job: Option<JobSink>,
+    /// Tees every chunk to the session's retained-output file until the command is promoted to
+    /// a job (ADR 0037); a truncated result is then recoverable through
+    /// `shell_output`.
+    retain: Option<Retention>,
 }
 
 struct JobSink {
@@ -679,16 +729,22 @@ struct JobSink {
 }
 
 impl StreamSink {
-    fn new(cap: usize) -> Self {
+    fn new(cap: usize, retain: Option<Retention>) -> Self {
         Self {
             capped: Capped::with_cap(cap),
             job: None,
+            retain,
         }
     }
 
     fn push(&mut self, bytes: &[u8]) {
         match &mut self.job {
-            None => self.capped.push(bytes),
+            None => {
+                self.capped.push(bytes);
+                if let Some(retain) = &self.retain {
+                    retain.push(bytes);
+                }
+            }
             Some(job) => {
                 let _ = job.file.write_all(bytes);
                 let mut cell = lock(&job.cell);
@@ -705,6 +761,8 @@ impl StreamSink {
         let rendered = self.capped.render();
         let written = self.capped.write_to(&mut file).unwrap_or(0);
         self.capped = Capped::default();
+        // The job's own file is the retained output now; stop teeing to the foreground one.
+        self.retain = None;
         self.job = Some(JobSink { file, cell });
         (written, rendered)
     }
@@ -773,7 +831,11 @@ pub(crate) struct Supervised {
 }
 
 impl Supervised {
-    fn spawn(command: &mut Command, cap: usize) -> std::io::Result<Self> {
+    fn spawn(
+        command: &mut Command,
+        cap: usize,
+        retain: Option<Retention>,
+    ) -> std::io::Result<Self> {
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -804,8 +866,8 @@ impl Supervised {
         // Each stream gets its own budget: a flooding stdout must not squeeze out the one
         // stderr line that explains the failure. Each stream also owns a sink so it can be
         // promoted to a job in place (ADR 0037).
-        let stdout_sink = Arc::new(Mutex::new(StreamSink::new(cap)));
-        let stderr_sink = Arc::new(Mutex::new(StreamSink::new(cap)));
+        let stdout_sink = Arc::new(Mutex::new(StreamSink::new(cap, retain.clone())));
+        let stderr_sink = Arc::new(Mutex::new(StreamSink::new(cap, retain)));
         let (out_tx, out_rx) = mpsc::channel();
         let (err_tx, err_rx) = mpsc::channel();
         {
@@ -1257,6 +1319,7 @@ fn report(
     output_cap: usize,
     output_clamped: bool,
     outcome: &Outcome,
+    retained: Option<RetainedView>,
 ) -> ToolOutput {
     let stdout = outcome.stdout.render();
     let stderr = outcome.stderr.render();
@@ -1310,6 +1373,23 @@ fn report(
             outcome.stderr.total
         ));
     }
+    if let Some(retained) = &retained {
+        let discarded = outcome.stdout.discarded() + outcome.stderr.discarded();
+        text.push_str(&format!(
+            "[{discarded} bytes were discarded from this view; the full output is retained. \
+             Read it with `shell_output` handle={}.]\n",
+            retained.handle
+        ));
+        if retained.cut {
+            text.push_str(&format!(
+                "[the retained output was cut to {} of {} bytes; {} bytes are not \
+                 recoverable]\n",
+                retained.retained_bytes,
+                retained.total_bytes,
+                retained.total_bytes.saturating_sub(retained.retained_bytes)
+            ));
+        }
+    }
     if outcome.drain_incomplete {
         text.push_str("[output was not fully drained after the kill]\n");
     }
@@ -1352,9 +1432,22 @@ fn report(
             "stderr_total_bytes": outcome.stderr.total,
             "stdout_truncated_bytes": outcome.stdout.discarded(),
             "stderr_truncated_bytes": outcome.stderr.discarded(),
+            "output_handle": retained.as_ref().map(|r| r.handle.clone()),
+            "output_retained_bytes": retained.as_ref().map(|r| r.retained_bytes),
+            "output_total_bytes": retained.as_ref().map(|r| r.total_bytes),
+            "output_retained_cut": retained.as_ref().map(|r| r.cut),
             "duration_ms": outcome.duration.as_millis() as u64,
         })),
     }
+}
+
+/// What a truncated foreground result exposes about its retained output: the opaque handle the
+/// model passes to `shell_output`, and the retained/total byte counts so a cut is stated.
+struct RetainedView {
+    handle: String,
+    retained_bytes: u64,
+    total_bytes: u64,
+    cut: bool,
 }
 
 /// The result of a foreground call that was adopted by the job registry in place (ADR 0037

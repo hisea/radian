@@ -127,6 +127,10 @@ impl HostTools {
             push("job_list", "list this session's background jobs");
             push("job_kill", "stop a background job's process group");
             push(
+                "shell_output",
+                "read a truncated foreground shell command's retained output by its opaque handle",
+            );
+            push(
                 "git_diff",
                 "a diff of the working tree; `stat: true` gives the status and a --stat summary",
             );
@@ -331,6 +335,7 @@ impl ToolSession for HostSession {
         // names it here.
         if let Some(coding) = &self.coding {
             coding.shutdown_jobs();
+            coding.shutdown_outputs();
         }
         self.mcp.close().await
     }

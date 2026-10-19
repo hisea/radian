@@ -56,12 +56,14 @@
 
 mod args;
 mod ask;
+mod foreground;
 mod git;
 mod glob;
 mod grep;
 pub mod host_git;
 mod jobs;
 mod list;
+mod output;
 mod patch;
 mod provider;
 mod read;
