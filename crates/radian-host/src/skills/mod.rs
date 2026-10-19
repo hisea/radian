@@ -131,9 +131,10 @@ pub fn discover_with_extras(
     discovery
 }
 
-/// Keeps only the discovered skills the session's skill allow-list names, in discovery order. This is the **allow-list** the definition gives a task; it is applied after
-/// discovery, not through `[skills] disabled` — that list only filters the compiled-in skills
-/// (`collect_builtin`), so it cannot disable a user-level or `extra_paths` skill by name.
+/// Keeps only the discovered skills the session's skill allow-list names, in discovery order.
+/// It is applied after discovery, not through `[skills] disabled` — that list only filters the
+/// compiled-in skills (`collect_builtin`), so it cannot disable a user-level or `extra_paths`
+/// skill by name.
 pub fn restrict_to(skills: Vec<Skill>, allow: &[String]) -> Vec<Skill> {
     skills
         .into_iter()
@@ -141,9 +142,9 @@ pub fn restrict_to(skills: Vec<Skill>, allow: &[String]) -> Vec<Skill> {
         .collect()
 }
 
-/// The allow-listed skill names that discovery did not find, one warning line each. A
-/// name that does not exist is never a failure: the task loads the rest of its list and the
-/// registry reports these lines in the spawn result.
+/// The allow-listed skill names that discovery did not find, one warning line each. A name
+/// that does not exist is never a failure: the session loads the rest of its allow-list and the
+/// host reports these lines at spawn.
 pub fn missing(skills: &[Skill], allow: &[String]) -> Vec<String> {
     allow
         .iter()

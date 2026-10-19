@@ -31,8 +31,8 @@ pub enum TurnOutcome {
     Completed,
     Refused,
     BudgetExceeded,
-    /// The next request would have exceeded the context budget, so it was not sent (ADR
-    /// 0015). The numbers ride on a sibling `ContextBudgetReached` event.
+    /// Typed compatibility value for an old context-budget stop (ADR 0015/0018): a caller
+    /// can serialize it, but the current driver/host does not emit it.
     ContextBudget,
     Failed,
     Poisoned,
@@ -114,8 +114,9 @@ pub struct MemoryInjectedRecord {
     pub scope: Value,
 }
 
-/// One durable fact the runtime owns. `#[non_exhaustive]`: `ContextCompacted`, `Rewound`,
-/// `SessionForked` and `PermissionResolved` will be added when their producers exist.
+/// One durable fact the runtime owns. `#[non_exhaustive]`; the variants below are the
+/// current set. `ContextBudgetReached` is a typed compatibility record with no current
+/// driver/host producer, and `Rewound` is reader-only (no variant here).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum RuntimeEvent {
@@ -161,9 +162,10 @@ pub enum RuntimeEvent {
     /// registry and the slots own its meaning. The optional `profile_ref` sibling of §5.7 is
     /// not exposed yet (no producer in this phase).
     ConfigChanged { revision: u64, change: Value },
-    /// The next model request was not sent because it would have reached the context budget
-    /// (ADR 0015 C6). Audit only: `critical = false`. `source` says whether the projection is
-    /// a fact, a fact plus an estimate, or purely local; `baseline_input_tokens` and
+    /// Typed compatibility record for a context-budget stop (ADR 0015 C6). Audit only:
+    /// `critical = false`. `append_runtime_event` can serialize a caller-supplied record; the
+    /// current driver/host has no production path. `source` says whether the projection is a
+    /// fact, a fact plus an estimate, or purely local; `baseline_input_tokens` and
     /// `estimated_growth_tokens` split the projection so a reader is never shown a mixed
     /// number as a precise report.
     ContextBudgetReached {
@@ -266,8 +268,11 @@ impl RuntimeEvent {
         }
     }
 
-    /// The `critical` flag (ADR 0006 §4). Every runtime event here is critical except
-    /// `PermissionResolved`: it is audit, not state, so a reader may skip it.
+    /// The `critical` flag (ADR 0006 §4). State/rebuild events are `true`; audit events are
+    /// `false` (`TurnFailed`, `ContextBudgetReached`, `PermissionResolved`,
+    /// `ApprovalPolicyChanged`, `MemoryInjected`, `SessionForked`, `ProjectTrustChanged`,
+    /// `UserBash`, `BackgroundJobStarted`, `BackgroundJobSettled`). A reader may skip a
+    /// `false` event without breaking reconstruction.
     pub fn critical(&self) -> bool {
         match self {
             RuntimeEvent::InboxEnqueued { .. }

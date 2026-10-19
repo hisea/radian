@@ -160,8 +160,8 @@ pub enum EventData {
         revision: u64,
         change: Value,
     },
-    /// A context-budget stop (ADR 0015 C6). Typed for an exact round trip; audit only,
-    /// never a transcript record.
+    /// Typed compatibility record for a context-budget stop (ADR 0015 C6). Typed for an
+    /// exact round trip; audit only, never a transcript record; no current host producer.
     ContextBudgetReached {
         turn_id: String,
         source: UsageSource,

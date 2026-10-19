@@ -33,7 +33,7 @@ pub struct HostTools {
     /// host has; `Some` mounts only these names — the others are not
     /// in the model's tool list at all and are not in the `<runtime>` layer (the permission
     /// `deny` the registry still installs is defence in depth beneath that). MCP tools are not
-    /// in this universe; they stay governed by the definition's `mcp` list.
+    /// in this universe; they stay governed by the session's configured MCP servers/provider.
     tool_allow: Option<Vec<String>>,
 }
 
