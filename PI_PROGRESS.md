@@ -1,12 +1,10 @@
 # compact-adrs progress
 
 ## Completed
-- setup: read brief, worktree at .radian-worktrees/compact-adrs on pi/compact-adrs, base 5df781b
+- setup + batch 1: rewrote 0001-0010; renamed 0009 to 0009-fullscreen-only-tui.md
 
 ## Verified
-- (none yet)
+- 0009 rename has no stale path references
 
 ## Next
-- read all docs/adr/ files
-- read current-authority ADRs 0018, 0020, 0026, 0034, 0039, 0040, 0042, 0043
-- batch 1: 0001-0010
+- batch 2: 0011-0020 (0015 rename to 0015-context-budget-estimation.md)
