@@ -245,8 +245,8 @@ impl ToolProvider for HostTools {
         }
         // The session allow-list is a physical unmount. Drop every unlisted built-in spec
         // **and** its dispatch name, so a call to it is an unknown tool, not merely denied. MCP
-        // specs are dynamic and are never filtered here (the definition's `mcp` list governs
-        // them). The permission-layer `deny` for the same names is kept (defence in depth).
+        // specs are dynamic and are never filtered here (the session's configured MCP servers
+        // govern them). The permission-layer `deny` for the same names is kept (defence depth).
         if self.tool_allow.is_some() {
             coding_names.retain(|name| self.allows(name));
             memory_names.retain(|name| self.allows(name));
