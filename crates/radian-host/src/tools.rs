@@ -29,7 +29,7 @@ pub struct HostTools {
     /// never passes it for a session whose `parent` relation is `"subagent"` (depth 1).
     subagent: Option<SubagentTools>,
     mcp: McpToolProvider,
-    /// ADR 0030 O11: the agent definition's built-in tool allow-list. `None` (the default)
+    /// the agent tool allow-list: the agent definition's built-in tool allow-list. `None` (the default)
     /// mounts every built-in the host has; `Some` mounts only these names — the others are not
     /// in the model's tool list at all and are not in the `<runtime>` layer (the permission
     /// `deny` the registry still installs is defence in depth beneath that). MCP tools are not
@@ -54,7 +54,7 @@ impl HostTools {
         }
     }
 
-    /// ADR 0030 O11: mount only the built-in tools this allow-list names (an agent definition's
+    /// the agent tool allow-list: mount only the built-in tools this allow-list names (an agent definition's
     /// `tools`). `None` mounts every built-in the host has. This is the "not in the list is not
     /// mounted" rule; the permission layer's `deny` (the registry's `with_denied_tools`) still
     /// stands beneath it, so a name that somehow reaches the layer is refused too.
@@ -152,7 +152,7 @@ impl HostTools {
                  return its last assistant text",
             );
         }
-        // ADR 0030 O11: an allow-list narrows what is even listed in layer 0a; a built-in it
+        // the agent tool allow-list: an allow-list narrows what is even listed in layer 0a; a built-in it
         // does not name is not mounted and must not appear here.
         if self.tool_allow.is_some() {
             out.retain(|(name, _)| self.allows(name));
@@ -239,7 +239,7 @@ impl ToolProvider for HostTools {
                 built_in_specs.push(spec.clone());
             }
         }
-        // ADR 0030 O11: an allow-list is a physical unmount. Drop every unlisted built-in spec
+        // the agent tool allow-list: an allow-list is a physical unmount. Drop every unlisted built-in spec
         // **and** its dispatch name, so a call to it is an unknown tool, not merely denied. MCP
         // specs are dynamic and are never filtered here (the definition's `mcp` list governs
         // them). The permission-layer `deny` for the same names is kept (defence in depth).

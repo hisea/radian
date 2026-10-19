@@ -1,6 +1,6 @@
 //! Automatic compaction: the **pure planning half** (ADR 0018).
 //!
-//! ADR 0018 replaces the old "stop and ask a human" budget guard with automatic compaction:
+//! ADR 0018 defines automatic compaction from the context-budget projection (ADR 0015):
 //! when the projected input crosses the effective input budget `B`, the conversation is
 //! summarized and the request is retried once. This module is only the part that can be
 //! decided without I/O: how much recent history to keep, which messages form one atomic

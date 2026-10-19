@@ -1,4 +1,4 @@
-# The process control port (ADR 0030 O6, slice 8)
+# The process control port (ADR 0043)
 
 Every Radian process that hosts an interactive (`radian`) or line (`radian exec`) session opens
 a Unix socket and serves a small JSON-lines protocol on it. It is the seam an external driver
@@ -53,7 +53,7 @@ parseable `id` gets `"id": null`.
 | absent, `"scheduler"` | `InputSource::Scheduler` (the default) |
 | `"subagent"` | `InputSource::Subagent` |
 | `"mcp"` | `InputSource::Mcp` |
-| `"user"` | **refused** — the port never accepts `User` (ADR 0030 O6) |
+| `"user"` | **refused** — the port never accepts `User` (ADR 0043) |
 | `"permission_decision"` | **refused** |
 | anything else | refused |
 
@@ -71,8 +71,8 @@ and an unknown verb (including `"approve"`) returns an error and changes nothing
 | `list_sessions` | — | `sessions`: the hosting `main` session (one process serves one session) |
 | `subscribe` | — | response `{"id":n,"ok":true}`, then event lines (see below) |
 
-The task verbs of ADR 0030 (`spawn_task`, `wait_task`, `task_status`) were removed with the
-in-process orchestration by ADR 0043 decision 1; the port now serves input, cancellation,
+The task verbs (`spawn_task`, `wait_task`, `task_status`) are not part of the port: there is no
+in-process orchestration (ADR 0043 decision 1); the port now serves input, cancellation,
 listing and event streaming only.
 
 ### `subscribe`

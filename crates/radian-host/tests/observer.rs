@@ -1,4 +1,4 @@
-//! ADR 0030 slice ① (the observer half): the read-only observer of committed facts, built on
+//! ADR 0043 slice ① (the observer half): the read-only observer of committed facts, built on
 //! `radian-session`'s `JournalTail` (ADR 0023 U6).
 //!
 //! Each test names the mutation it catches where the ADR's test list requires one.
@@ -314,7 +314,7 @@ fn a_replaced_or_truncated_file_resets() {
 }
 
 /// The two stall inputs are the last committed event and the last **successful** `write`/`patch`
-/// (ADR 0030 R5).
+/// (the observer stall inputs).
 #[test]
 fn the_last_event_and_last_write_times_are_committed_facts() {
     let dir = Scratch::new("last-write");

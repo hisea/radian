@@ -1,4 +1,4 @@
-//! The read-only observer of a session's **committed** facts (ADR 0023 U6, ADR 0030 slice ①,
+//! The read-only observer of a session's **committed** facts (ADR 0023 U6, ADR 0043,
 //! revision 5).
 //!
 //! [`JournalObserver`] wraps a [`JournalTail`] and folds the events it reads into a
@@ -6,7 +6,7 @@
 //! `task_status`, the control port's `subscribe`, the TUI's read-only follow) sees the same
 //! facts the owning process would show. It is the single source of committed facts: the
 //! in-process task projection is meant to be fed through it, so this code serves the control
-//! port and a future out-of-process task alike (ADR 0030).
+//! port and a future out-of-process task alike (ADR 0023 U6).
 //!
 //! **What it answers, and what it does not.** Only "what is it doing" (the projection: turn
 //! state, usage, the last tool) and "when was its last write" (the two stall inputs of ADR
@@ -39,7 +39,7 @@ use crate::session::SessionCapability;
 /// a borrow without owning an array per observer.
 const OBSERVE_ONLY: [SessionCapability; 1] = [SessionCapability::Observe];
 
-/// A tool whose **successful** settle is a file write (ADR 0030 R5's "write/patch").
+/// A tool whose **successful** settle is a file write (the observer stall inputs's "write/patch").
 fn is_write_tool(name: &str) -> bool {
     matches!(name, "write" | "patch")
 }
@@ -52,11 +52,11 @@ pub trait SessionObserver: Send + Sync {
     /// The committed session facts: turn state, usage, the last tool.
     fn projection(&self) -> ProjectionRead<'_>;
 
-    /// The timestamp of the last committed event (ADR 0030 R5's stall input). `None` before
+    /// The timestamp of the last committed event (the observer stall inputs's stall input). `None` before
     /// the first event.
     fn last_event_ts(&self) -> Option<&str>;
 
-    /// The timestamp of the last **successful** `write`/`patch` (ADR 0030 R5's stall input):
+    /// The timestamp of the last **successful** `write`/`patch` (the observer stall inputs's stall input):
     /// the last time the agent wrote a file. `None` when it has not written one yet.
     fn last_write_ts(&self) -> Option<&str>;
 }
@@ -117,7 +117,7 @@ impl JournalObserver {
         self.tail.committed_len()
     }
 
-    /// Whether a live session process holds the file's writer lock (ADR 0043 D14): a read-only,
+    /// Whether a live session process holds the file's writer lock (ADR 0043): a read-only,
     /// non-blocking probe, used to tell a running session's open tool calls from a crash's
     /// synthesised results. Never blocks the writer and never writes.
     pub fn live(&self) -> bool {

@@ -290,7 +290,7 @@ impl RuntimeEvent {
     }
 
     /// Builds a `PermissionResolved` event (ADR 0006 §5.9). `policy` names the external policy
-    /// command when one decided (ADR 0030 O2 revision 2), `None` for every other approver.
+    /// command when one decided (ADR 0043), `None` for every other approver.
     pub fn permission_resolved(
         request_id: String,
         call_id: String,

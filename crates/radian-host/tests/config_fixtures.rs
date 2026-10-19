@@ -127,7 +127,7 @@ fn the_unknown_fields_are_ignored_but_reported() {
     assert!(config.skipped.contains(&"tui.theme".to_string()));
 }
 
-/// `control.toml` (ADR 0030 O6, slice 8): `[control] enabled` is carried, defaulting to true.
+/// `control.toml` (ADR 0043): `[control] enabled` is carried, defaulting to true.
 #[test]
 fn the_control_enabled_flag_is_carried() {
     let (path, text) = fixture("control.toml");

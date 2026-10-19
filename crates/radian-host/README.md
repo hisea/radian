@@ -355,5 +355,7 @@ End-to-end, through the binaries (this crate has no integration tests of its own
 boundary) · 0008 (config schema and migration — the file this crate does *not* read) · 0012
 (permission sources; MCP is not sandboxed in this build, and the startup wording must not claim
 otherwise) · 0013 (no telemetry by default; T4: an endpoint named in an error is redacted) ·
-0014 (reasoning content: `--thinking` is Anthropic-only and off by default) · 0016 (the tier
-names; the binaries in this tree still accept only `safe` / `workspace-write` / `full-access`).
+0014 (reasoning content and per-model replay) · 0016 (the tier names and the `workspace`
+tier; `workspace-write`/`full-access` remain accepted aliases) · 0026 (provider descriptors,
+`auth.json` and model switching) · 0043 (one general session, the `subagent` tool, `full` as
+the default and the project access record).

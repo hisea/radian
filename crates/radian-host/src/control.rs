@@ -1,4 +1,4 @@
-//! The process control port (ADR 0030 O6, slice 8): one Unix socket per hosting process,
+//! The process control port (ADR 0043): one Unix socket per hosting process,
 //! JSON lines, the same verbs the inbox and the lead tool registry expose.
 //!
 //! **What it is.** Every process that hosts an interactive or `radian exec` session binds
@@ -6,20 +6,20 @@
 //! orchestrator (herdr-style) or a project script drives the session: it can enqueue inputs,
 //! cancel, list the session's task agents, spawn and wait for one, read a task's committed
 //! status, and follow the committed events. There is **no** separate `radian serve` in v0
-//! (ADR 0030): the process that owns a session owns its socket.
+//! (ADR 0043): the process that owns a session owns its socket.
 //!
-//! **Sources (ADR 0030 O6, decided item 4; ADR 0011 L2, ADR 0012).** The source is fixed by
+//! **Sources (ADR 0043, decided item 4; ADR 0011 L2, ADR 0012).** The source is fixed by
 //! the port, never by the client's word: it defaults to [`InputSource::Scheduler`], a client
 //! may declare `Subagent` or `Mcp`, and `User`/`PermissionDecision` are refused with an error
 //! line. Approvals cannot be answered over the port — there is deliberately no such verb, and
 //! an unknown verb (including an `approve`) changes nothing.
 //!
 //! **Never blocks the runtime.** Handlers run on the runtime and use the async `Inbox`, not
-//! `LocalSession`'s `block_on` wrappers (ADR 0030 O6; the background's rule). `subscribe`
+//! `LocalSession`'s `block_on` wrappers (ADR 0043; the background's rule). `subscribe`
 //! fans the committed events out to each client through a **bounded** per-client channel: a
 //! client that falls behind is disconnected, and the producer never waits on a client.
 //!
-//! **Cleanup (ADR 0030 O6).** The socket is removed when the server is dropped — the normal
+//! **Cleanup (ADR 0043).** The socket is removed when the server is dropped — the normal
 //! exit path and the panic-unwind path both drop it. At startup every `*.sock` whose pid is no
 //! longer alive is removed, so a `kill -9` does not leave it behind.
 
@@ -70,7 +70,7 @@ impl ControlTarget {
 
 /// How many lines may wait for one subscriber before it is disconnected. Small on purpose: a
 /// subscriber that cannot keep up with a live session is dropped, never allowed to slow the
-/// session down (ADR 0030 O6's "缓冲有界，慢客户端被断开").
+/// session down (ADR 0043's "缓冲有界，慢客户端被断开").
 pub const SUBSCRIBER_BUFFER: usize = 32;
 
 /// How much the kernel may buffer for one accepted connection before the writer starts to see
@@ -99,7 +99,7 @@ pub struct ControlServer {
 
 impl ControlServer {
     /// Binds `$RADIAN_HOME/run/<pid>.sock`, creating the directory 0700 and the socket 0600,
-    /// and removing any stale `*.sock` of a dead pid first (ADR 0030 O6). A bind failure is
+    /// and removing any stale `*.sock` of a dead pid first (ADR 0043). A bind failure is
     /// reported to the caller, which then runs without a control port.
     pub fn bind(home: &Path) -> std::io::Result<Arc<Self>> {
         #[cfg(unix)]
@@ -123,7 +123,7 @@ impl ControlServer {
 
     /// A guard that removes this server's socket file when it drops. The host holds it as a
     /// local, so the file goes on the normal return path **and** on a panic unwind even when
-    /// an in-flight connection still holds a reference to the server (ADR 0030 O6).
+    /// an in-flight connection still holds a reference to the server (ADR 0043).
     pub fn guard(&self) -> SocketGuard {
         SocketGuard {
             path: self.path.clone(),
@@ -295,7 +295,7 @@ impl ControlServer {
         // `write` and `read` drop here: the client sees EOF.
     }
 
-    /// Parses and runs one request line, returning the response object (ADR 0030 slice 8's
+    /// Parses and runs one request line, returning the response object (ADR 0043's
     /// protocol: `{"id": n, "verb": …}` → `{"id": n, "ok": true, …}`).
     async fn dispatch(
         &self,
@@ -331,7 +331,7 @@ impl ControlServer {
                 id,
                 format!(
                     "unknown verb `{other}`: the control port has no approval or answer verb \
-                     (ADR 0030 O6)"
+                     (ADR 0043)"
                 ),
             ),
         }
@@ -372,14 +372,14 @@ impl ControlServer {
         }
     }
 
-    /// `list_sessions`: the hosting session (ADR 0030 O6). The port serves one process, so this
+    /// `list_sessions`: the hosting session (ADR 0043). The port serves one process, so this
     /// is one `main` row.
     fn sessions(&self, target: &ControlTarget) -> Vec<Value> {
         vec![json!({ "id": target.session_id, "kind": "main" })]
     }
 }
 
-/// The committed `AgentEvent` stream, fanned out to subscribers (ADR 0030 O6).
+/// The committed `AgentEvent` stream, fanned out to subscribers (ADR 0043).
 struct AgentFanout {
     inner: Arc<dyn EventSink>,
     server: Arc<ControlServer>,
@@ -544,7 +544,7 @@ fn committed_agent(event: &AgentEvent) -> bool {
     )
 }
 
-/// JSON for one `AgentEvent`. `agent-core` is not touched (ADR 0030's "no agent-core change"),
+/// JSON for one `AgentEvent`. `agent-core` is not touched (no `agent-core` change),
 /// so this host-side encoder is the wire form; it is deliberate, not a `Serialize` impl.
 fn agent_event_json(event: &AgentEvent) -> Value {
     let (name, data) = match event {
@@ -678,7 +678,7 @@ fn agent_event_json(event: &AgentEvent) -> Value {
 }
 
 /// A compact, honest form of a budget report (its fields are public but the type is not
-/// `Serialize`; `agent-core` is not changed, ADR 0030).
+/// `Serialize`; `agent-core` is not changed, ADR 0043).
 fn budget_json(budget: Option<&agent_core::BudgetReport>) -> Value {
     match budget {
         Some(report) => json!({
@@ -708,7 +708,7 @@ fn run_status_label(status: &agent_core::RunStatus) -> &'static str {
     }
 }
 
-/// The source a client may declare (ADR 0030 O6, decided item 4). Absent is `Scheduler`;
+/// The source a client may declare (ADR 0043, decided item 4). Absent is `Scheduler`;
 /// `User`/`PermissionDecision` are refused.
 fn parse_source(request: &Value) -> Result<InputSource, String> {
     match request.get("source") {
@@ -717,7 +717,7 @@ fn parse_source(request: &Value) -> Result<InputSource, String> {
             "scheduler" => Ok(InputSource::Scheduler),
             "subagent" => Ok(InputSource::Subagent),
             "mcp" => Ok(InputSource::Mcp),
-            "user" => Err("the control port never accepts the `User` source (ADR 0030 O6)".into()),
+            "user" => Err("the control port never accepts the `User` source (ADR 0043)".into()),
             "permission_decision" => {
                 Err("the control port never accepts the `PermissionDecision` source".into())
             }
@@ -729,7 +729,7 @@ fn parse_source(request: &Value) -> Result<InputSource, String> {
     }
 }
 
-/// A successful response: `{"id": n, "ok": true}` plus the payload's fields (ADR 0030 slice 8's
+/// A successful response: `{"id": n, "ok": true}` plus the payload's fields (ADR 0043's
 /// protocol puts the verb's own fields at the top level). A non-object payload is nested under
 /// `result`.
 fn success(id: Value, payload: Option<Value>) -> Value {
@@ -773,7 +773,7 @@ fn bind_unix(home: &Path) -> std::io::Result<Arc<ControlServer>> {
     }))
 }
 
-/// Removes every `*.sock` in `dir` whose pid is not alive (ADR 0030 O6). A name that is not
+/// Removes every `*.sock` in `dir` whose pid is not alive (ADR 0043). A name that is not
 /// `<pid>.sock` is left alone.
 #[cfg(unix)]
 fn clean_stale_sockets(dir: &Path) {
@@ -808,7 +808,7 @@ fn pid_alive(pid: i32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Sets the socket file's mode (0600; ADR 0030 O6).
+/// Sets the socket file's mode (0600; ADR 0043).
 #[cfg(unix)]
 fn set_socket_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -843,7 +843,7 @@ impl Drop for ControlServer {
     }
 }
 
-/// Removes one control socket file when dropped (ADR 0030 O6). A host keeps this as a local:
+/// Removes one control socket file when dropped (ADR 0043). A host keeps this as a local:
 /// unlike the server's own `Drop`, it is not shared with any task, so the socket is removed on
 /// the normal return path and on a panic unwind even while the process's driver still runs.
 pub struct SocketGuard {

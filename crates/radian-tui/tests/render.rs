@@ -2941,8 +2941,8 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
 }
 
 /// ADR 0024 rule 4: the Ask panel title is `Ask` alone when the asker is this
-/// process's own session, and `Ask · <origin>` only when another session (an ADR 0030 task
-/// agent) is asking. A TUI process has one session today, so `origin == own session` is the
+/// process's own session, and `Ask · <origin>` only when another session is asking. A TUI
+/// process has one session today, so `origin == own session` is the
 /// clean test.
 #[test]
 fn the_ask_panel_title_omits_the_own_session() {

@@ -1,15 +1,12 @@
 # compact-adrs progress
 
 ## Completed
-- batch 1: 0001-0010 (renamed 0009)
-- batch 2: 0011-0020 (renamed 0015)
-- batch 3: 0021-0029 (renamed 0029)
-- batch 4: deleted 0030/0041; rewrote 0031-0043; renamed 0038 to 0038-access-and-git-writes.md
+- all ADR batches (0001-0043; deleted 0030/0041; renamed 0009/0015/0029/0038)
+- cross-reference cleanup: AGENTS.md index, README, docs/sandbox, schema READMEs, crate READMEs, source comments
 
 ## Verified
-- renames/deletes tracked
+- fmt, clippy, workspace tests, journal-selfcheck, clippy(selfcheck), schema scripts, 1.88 check passed once
+- schema scripts rerun after final doc edit
 
 ## Next
-- cross-reference cleanup: AGENTS.md ADR index, README/docs/crate/source references
-- documentation audits
-- acceptance checks
+- commit cleanup; rerun final gates on committed tip; audits; notify

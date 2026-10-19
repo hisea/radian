@@ -41,7 +41,7 @@
 //! - **`git` is invoked as a child process.** It can read `~/.gitconfig` and the repository,
 //!   and it is told not to take optional locks (`--no-optional-locks`); the tests assert
 //!   `.git` is unchanged. No sandbox is applied to it.
-//! - **`shell`'s confinement is exactly the sandbox's.** Under `workspace-write` the
+//! - **`shell`'s confinement is exactly the sandbox's.** Under `workspace` the
 //!   backend confines filesystem writes, sensitive reads and the network; the macOS backend
 //!   leaves `mach-lookup` open, so the IPC boundary is not tightened, and no text may present
 //!   the tool as full credential isolation (ADR 0012). `full-access` is **not** confined at

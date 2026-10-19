@@ -24,8 +24,7 @@ pub const SKILL_FILE_NAME: &str = "SKILL.md";
 pub const SECTION_BUDGET_TOKENS: u64 = 1000;
 
 /// Directories discovery never descends into (the same names `mention` ignores; ADR 0025 S1).
-/// `.radian-worktrees/` holds one full worktree per checkout (ADR 0030 O7; task agents'
-/// worktrees moved out of the workspace in ADR 0039 decision 4), so descending into it would
+/// `.radian-worktrees/` can hold one full worktree per checkout, so descending into it would
 /// discover every skill once per worktree.
 pub const IGNORED_DIRS: &[&str] = &[".git", ".radian-sandbox", ".radian-worktrees"];
 
@@ -132,7 +131,7 @@ pub fn discover_with_extras(
     discovery
 }
 
-/// ADR 0030 O11: keeps only the discovered skills an agent definition's `skills` list names, in
+/// the agent tool allow-list: keeps only the discovered skills an agent definition's `skills` list names, in
 /// discovery order. This is the **allow-list** the definition gives a task; it is applied after
 /// discovery, not through `[skills] disabled` — that list only filters the compiled-in skills
 /// (`collect_builtin`), so it cannot disable a user-level or `extra_paths` skill by name.
@@ -143,7 +142,7 @@ pub fn restrict_to(skills: Vec<Skill>, allow: &[String]) -> Vec<Skill> {
         .collect()
 }
 
-/// ADR 0030 O11: the allow-listed names that discovery did not find, one warning line each. A
+/// the agent tool allow-list: the allow-listed names that discovery did not find, one warning line each. A
 /// name that does not exist is never a failure: the task loads the rest of its list and the
 /// registry reports these lines in the spawn result.
 pub fn missing(skills: &[Skill], allow: &[String]) -> Vec<String> {
@@ -1357,7 +1356,7 @@ mod tests {
         assert_eq!(untouched.system_prompt, None);
     }
 
-    /// ADR 0030 O11: an agent definition's `skills` list is an allow-list over the discovered
+    /// the agent tool allow-list: an agent definition's `skills` list is an allow-list over the discovered
     /// catalog. `restrict_to` keeps only the named skills, in discovery order; `missing` names
     /// the entries discovery did not find, one warning line each.
     #[test]

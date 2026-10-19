@@ -37,7 +37,7 @@ p95 取排序后的第 95 百分位（小样本下即接近最大值，故 p95 �
 启动，读到输入框标题 `message` 为止；`agent` 用管道 stdin 启动，读到 stderr 的 `> ` 提示符
 为止。`--resume` 的会话文件由测量代码按 v1 格式直接写盘（固定输入），最后一条消息是一个
 可见标记。各 10 次（startup）/ 5 次（resume），先做一次 warmup 以排除冷启动。无网络
-（`--base-url` 指向死端口，不跑回合）。**沙箱探针包含在启动内**（默认 `workspace-write`）。
+（`--base-url` 指向死端口，不跑回合）。**沙箱探针包含在启动内**（`workspace` 档位；缺省是 `full`，无探针）。
 
 | 场景 | debug 中位 / p95 | release 中位 / p95 | n |
 |---|---|---|---|
@@ -47,7 +47,7 @@ p95 取排序后的第 95 百分位（小样本下即接近最大值，故 p95 �
 | `agent` 启动到提示符 | 32.3 / 39.2 ms | 54.9 / 80.4 ms | 10 |
 | `radian exec --resume` 1k 条 | 38.5 / 51.7 ms | 41.5 / 76.6 ms | 5 |
 | `radian exec --resume` 10k 条 | 171.2 / 196.5 ms | 54.4 / 59.7 ms | 5 |
-| `workspace-write` 沙箱探针 | 23.7 / 48.6 ms | 26.6 / 52.7 ms | 20 |
+| `workspace` 沙箱探针 | 23.7 / 48.6 ms | 26.6 / 52.7 ms | 20 |
 
 启动在 debug 与 release 差别不大（~100 ms），说明它由**进程启动 + 终端初始化 + 沙箱探针**
 构成，不是计算；`--resume` 10k 的 debug 明显更慢（529 ms vs 161 ms），因为读取/渲染是
@@ -590,7 +590,7 @@ text_len)` 不重渲）。
 **二进制体积**：`cargo build --release -p radian-tui --bin radian`，接入前 23,993,056 字节，
 接入后 **24,169,680 字节**（+176,624，+0.74%）。
 
-**渲染器已换（ADR 0042，2026-10-16）**：上面的数字与体积是 `codex-mermaid` + 修订 6 布局那一版的，
+**渲染器已换（ADR 0042，2026-10-16）**：上面的数字与体积是旧渲染器那一版的，
 此后渲染器换成 vendored 的 `third_party/grok-mermaid`（grok-build 的 `mermaid.rs`：Sugiyama 布局，
 多支持 subgraph / 4 参与者时序图）。接入点仍在 `blocks.rs` 的 `(source, width)` 缓存里，失败仍是
 源码 + 一行原因，所以这里的结论（接入不退化每帧路径）不变；**具体数字与体积要按新渲染器另测**。

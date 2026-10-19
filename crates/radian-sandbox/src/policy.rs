@@ -38,12 +38,12 @@ impl SandboxMode {
 }
 
 /// What a session may do with the git metadata (`.git`) the sandbox discovered (ADR 0038
-/// decision 4). The choice is explicit on the policy so the two kinds of session stay apart:
-/// general and lead sessions get `WritableExceptExec`, task agents keep `ReadOnly`.
+/// decision 4). The choice is explicit on the policy: the default is the narrower `ReadOnly`;
+/// the host's general session asks for `WritableExceptExec`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GitAccess {
-    /// The whole discovered git metadata is read-only. This is what task agents keep (ADR 0030)
-    /// and what the escape matrix's `git_readonly` group asserts. It is the default because it
+    /// The whole discovered git metadata is read-only. This is the default and what the escape
+    /// matrix's `git_readonly` group asserts. It is the default because it
     /// is the narrower grant: a caller must name `WritableExceptExec` to widen it.
     #[default]
     ReadOnly,

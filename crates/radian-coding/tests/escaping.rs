@@ -279,7 +279,7 @@ async fn list_reports_entries_sorted_with_kinds() {
     assert_eq!(info["truncated"], false);
 }
 
-/// `list` omits the workspace-local worktree root (one full checkout per worktree; ADR 0030
+/// `list` omits the workspace-local worktree root (one full checkout per worktree; ADR 0043
 /// O7).
 #[tokio::test]
 async fn list_omits_the_radian_worktrees_directory() {

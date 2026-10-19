@@ -226,8 +226,7 @@ impl SessionKey {
 }
 
 /// Where the `<session>` hook reads its key from. The production one reads the driver's config
-/// slot (ADR 0026 D5); a caller that has another source (a test, or the `/mode` switch of
-/// ADR 0038 slice 3) supplies its own.
+/// slot (ADR 0026 D5); a caller that has another source (including a test) supplies its own.
 pub type SessionKeySource = Arc<dyn Fn() -> SessionKey + Send + Sync>;
 
 /// The hook that appends layer 0b (`<session>`) **after** skills and memory (ADR 0036 D1), so

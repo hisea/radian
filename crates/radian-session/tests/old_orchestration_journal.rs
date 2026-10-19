@@ -32,7 +32,7 @@ const OLD_LEAD_JOURNAL: &str = concat!(
 );
 
 /// The pre-change task agent's own journal: `SessionCreated.parent` carries `relation: "task"`
-/// (ADR 0030 O2) and one brief message. `SessionCreated` is stored opaquely, so this opens
+/// and one brief message. `SessionCreated` is stored opaquely, so this opens
 /// regardless; the case pins that the removed relation value still reads.
 const OLD_TASK_CHILD_JOURNAL: &str = concat!(
     r#"{"schema_version":1,"session_id":"14222222-2222-4222-8222-222222222222","seq":0,"ts":"2026-10-15T09:00:03.100000Z","event":"SessionCreated","critical":true,"data":{"workspace":"/work/example/.radian-worktrees/task-1","config_snapshot":{"model":{"provider":"example","model":"m-1"}},"parent":{"session_id":"14111111-1111-4111-8111-111111111111","seq":3,"relation":"task"}}}"#,
@@ -71,7 +71,7 @@ fn an_old_lead_journal_with_task_events_still_opens_and_replays() {
     );
 }
 
-/// The pre-change task agent's own journal (ADR 0030 O2) still opens: `SessionCreated` is stored
+/// The old task agent's own journal still opens: `SessionCreated` is stored
 /// opaquely, so the removed `relation: "task"` value is preserved and the fold is unaffected.
 #[test]
 fn an_old_task_child_journal_still_opens() {

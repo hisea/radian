@@ -110,11 +110,11 @@ pub struct SessionSetup {
     pub skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     pub skills_disabled: Vec<String>,
-    /// ADR 0030 O11: the agent definition's built-in tool allow-list. `None` mounts every
+    /// the agent tool allow-list: the agent definition's built-in tool allow-list. `None` mounts every
     /// built-in the host has; `Some` mounts only the named ones ("not in the list is not
     /// mounted"). MCP tools are not in this universe — [`SessionSetup::servers`] governs them.
     pub tools_allow: Option<Vec<String>>,
-    /// ADR 0030 O11: the agent definition's `skills` allow-list. `None` loads every discovered
+    /// the agent tool allow-list: the agent definition's `skills` allow-list. `None` loads every discovered
     /// skill (today's behaviour); `Some` keeps only the named ones in the catalog, and a name
     /// discovery did not find is reported at spawn, never a failure.
     pub skills_allow: Option<Vec<String>>,
@@ -156,9 +156,10 @@ pub enum ApprovalRouting {
 pub struct HostBindings {
     /// How approvals are answered (ADR 0023 U7).
     pub approvals: ApprovalRouting,
-    /// A queue to share with another session (ADR 0030 O2): a task agent routes its approvals
-    /// and questions to the **lead's** queue, tagged with its own session id as the origin, so
-    /// the human sees one arrival order. `None` means the session creates its own queue.
+    /// A queue to share with another session (ADR 0022's fork or ADR 0043's subagent): a
+    /// derived session routes its approvals and questions to the parent's queue, tagged with
+    /// its own session id as the origin, so the human sees one arrival order. `None` means the
+    /// session creates its own queue.
     pub shared_queue: Option<Arc<SessionQueue>>,
     /// `true` to advertise `ask_user` and route questions through the queue (a host with an
     /// interactive user, ADR 0024 Q5); `false` for a host with nobody to ask.

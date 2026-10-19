@@ -39,7 +39,7 @@ pub struct AgentConfig {
     pub max_model_calls: u32,
     /// Passed through to the model adapter unchanged.
     pub model_settings: Value,
-    /// Context window and threshold for the budget guard (ADR 0015). `None` disables the
+    /// Context window and estimate ratio for the budget projection (ADR 0015). `None` disables the
     /// guard outright: the core does not guess a window, so no number is ever claimed.
     pub context_budget: Option<ContextBudget>,
     /// Whether a request projected over `B` is compacted before it is sent (ADR 0018).

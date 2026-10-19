@@ -20,13 +20,10 @@ type GrantKey = (String, String);
 /// to deny a call outright (a host policy no rule, grant or approver can widen), or `None` to let
 /// the ordinary path decide.
 ///
-/// This is how ADR 0030 slice 6 mounts the lead tools from the start and lets `/mode` decide
-/// whether they work (ADR 0038 decision 1, ADR 0030 item 5): the host installs a gate
-/// that denies the lead tool names while the session's mode is `general` (with a
-/// "switch with `/mode lead`" hint) and passes them through in `lead`, where a fixed `allow`
-/// rule (ADR 0030's `Profile::with_allowed_tools`) lets them run without a prompt. It is a
-/// **deny-only** seam on purpose: a rule, a session grant or the approver can never lift it, and
-/// it can never raise an action the rules did not already allow.
+/// The host uses this to enforce a built-in tool allow-list: it denies the names a definition
+/// or a session does not mount, and a fixed `allow` rule lets the rest run without a prompt.
+/// It is a **deny-only** seam on purpose: a rule, a session grant or the approver can never
+/// lift it, and it can never raise an action the rules did not already allow.
 pub type ToolGate = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// The permission layer. One instance per session: it holds that session's real-time grants,
@@ -41,13 +38,13 @@ pub struct PermissionHooks {
     /// profile's copy is only the starting value.
     approval: RwLock<ApprovalPolicy>,
     approver: Option<Arc<dyn Approver>>,
-    /// `true` for a task agent (ADR 0030 slice 5): its asks are answered by the task's own
+    /// `true` for a task agent (a non-human session): its asks are answered by the task's own
     /// `Approver` (the three-layer resolver), not by a human. This is the **only** thing that
     /// lets a non-human turn reach the approver; every other non-human source is still denied
     /// before it (ADR 0012). A task can never borrow a human session grant, so this widens
     /// nothing beyond the task's own resolver.
     task_approver: AtomicBool,
-    /// The host's name gate (ADR 0030 slice 6): a deny-only policy consulted before the rules.
+    /// The host's name gate (the host tool gate): a deny-only policy consulted before the rules.
     /// `None` in every existing host.
     tool_gate: RwLock<Option<ToolGate>>,
     audit: Arc<dyn AuditSink>,
@@ -116,7 +113,7 @@ impl PermissionHooks {
         *self.source.lock().unwrap() = source;
     }
 
-    /// Marks this instance as a **task agent** (ADR 0030 slice 5): a non-human `ask` is then
+    /// Marks this instance as a **task agent** (a non-human session): a non-human `ask` is then
     /// handed to the task's own `Approver` (the auto / edge-policy / pending-queue resolver)
     /// instead of being denied outright. It is set by `open_session` only for the task routing;
     /// every other session keeps the fail-closed non-human denial. It never lets a task borrow a
@@ -125,7 +122,7 @@ impl PermissionHooks {
         self.task_approver.store(task_approver, Ordering::SeqCst);
     }
 
-    /// Installs the host's name gate (ADR 0030 slice 6). Deny-only: a call whose tool name the
+    /// Installs the host's name gate (the host tool gate). Deny-only: a call whose tool name the
     /// gate refuses is denied before the rules run, and nothing else can lift it. `None` clears it.
     pub fn set_tool_gate(&self, gate: Option<ToolGate>) {
         *self.tool_gate.write().unwrap_or_else(|e| e.into_inner()) = gate;
@@ -182,7 +179,7 @@ impl PermissionHooks {
             ..call.clone()
         };
         let call = &canonical;
-        // The host's name gate is deny-only and outranks everything (ADR 0030 slice 6): a rule,
+        // The host's name gate is deny-only and outranks everything (the host tool gate): a rule,
         // a grant or the approver can never widen it.
         if let Some(reason) = self.gate(&call.name) {
             self.record(

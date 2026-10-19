@@ -16,7 +16,7 @@ constrain the code are ADRs under `docs/adr/` (see the index at the end of this 
 
 | Crate | What it is | Detailed docs |
 |---|---|---|
-| `agent-core` | The runtime itself: turn loop (`Agent`/`AgentSession`/`ActiveRun`), messages, tools, hooks, steering, the journal seam, events, the context-budget guard. | `crates/agent-core/README.md`, ADR 0001–0007, 0010, 0014, 0015 |
+| `agent-core` | The runtime itself: turn loop (`Agent`/`AgentSession`/`ActiveRun`), messages, tools, hooks, steering, the journal seam, events, context budget estimation. | `crates/agent-core/README.md`, ADR 0001–0007, 0010, 0014, 0015 |
 | `agent-extensions` | MCP stdio servers exposed as `agent-core` tools, under stable `server__tool` aliases. | `crates/agent-extensions/README.md` |
 | `agent-provider-contract` | Adapter-neutral contract suite: the semantics every `Model` implementation must satisfy, independent of wire format. | `docs/provider-contract.md` |
 | `agent-provider-openai-compatible` | Model adapter for OpenAI-compatible Chat Completions (`/chat/completions`), streaming. | `crates/agent-provider-openai-compatible/README.md`, `docs/provider-contract.md` |
@@ -265,7 +265,7 @@ silently on a broken pipe.
 | What | Where |
 |---|---|
 | Design of record | `docs/minimal-headless-rust-agent-runtime-design.md` |
-| Decisions (read before changing code) | `docs/adr/` — 0001 transcript journal · 0002 tool execution markers and recovery · 0003 interrupted streaming prefix · 0004 hot config slots · 0005 host message identity and transcript replacement · 0006 session JSONL v1 · 0007 usage · 0008 config schema and migration · 0009 fullscreen-only first release · 0010 durable vs live events · 0011 durable inbox semantics · 0012 permission sources · 0013 no telemetry by default · 0014 reasoning content · 0015 context budget guard · 0016 tier names, network and devices · 0017 model and hook errors end the turn · 0018 model catalog and auto compaction · 0019 transcript replacement commit · 0020 the `~/.radian/` layout · 0021 memory |
+| Decisions (read before changing code) | `docs/adr/` — 0001 journal ordering · 0002 tool markers and recovery · 0003 interrupted prefix · 0004 hot config slots · 0005 message identity and transcript replacement · 0006 session JSONL v1 · 0007 usage · 0008 config schema and migration · 0009 fullscreen-only TUI · 0010 durable vs live events · 0011 inbox semantics · 0012 permission sources · 0013 no telemetry · 0014 reasoning · 0015 context budget estimation · 0016 tiers, network and devices · 0017 turn errors and retries · 0018 catalog and auto compaction · 0019 replacement commit · 0020 the `~/.radian/` layout · 0021 memory · 0022 fork · 0023 TUI architecture · 0024 `ask_user` · 0025 skills · 0026 providers and model switching · 0027 footer and chrome · 0028 transcript content · 0029 theme files · 0031 project trust · 0032 one binary · 0033 `!`/`!!` · 0034 herdr · 0035 visual language · 0036 system prompt · 0037 background commands · 0038 access and `.git` writes · 0039 host file access · 0040 group commit · 0042 Mermaid · 0043 single-session radian |
 | Sandbox backends: what they really enforce | `docs/sandbox.md` (spikes: `docs/spikes/macos-sandbox.md`, `docs/spikes/linux-sandbox.md`) |
 | Provider contract and its escape hatches | `docs/provider-contract.md`, wire notes in `docs/providers/anthropic-wire-notes.md` |
 | Session format fixtures and their checkers | `docs/schema/` (`check-fixtures.sh`, `check-config-fixtures.sh`, `fixtures/`, `config/`) |

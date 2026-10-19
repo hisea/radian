@@ -63,8 +63,8 @@ mod tests {
     async fn without_a_workspace_no_built_in_tools_exist() {
         let tools = CliTools::new(None, None, McpToolProvider::new(Vec::new()));
         let session = tools.open_session().await.unwrap();
-        // `mermaid_check` was the one always-mounted host tool; ADR 0042's supplement deleted it,
-        // so a host with no workspace provides no built-in tool at all.
+        // There is no always-mounted host tool, so a host with no workspace provides no built-in
+        // tool at all.
         assert!(
             session.tool_specs().is_empty(),
             "{:?}",

@@ -131,9 +131,8 @@ pub async fn open_session(
     // `<sessions_dir>/<session-id>.jobs/`. It is a sibling of the session file, so the
     // sandbox's deny-read rule on the sessions directory covers it.
     let jobs_dir = session_dir.join(format!("{}.jobs", session_id.as_str()));
-    // ADR 0030 O8: the coding tools (and so `shell`) are built **after** the lead registry
-    // below, once the registry has installed the process heavy gate, so every session's shell
-    // reads the configured gate (see the registry block).
+    // Session setup order: the coding tools (and so `shell`) are built here, before the MCP
+    // provider, so a failure in either does not leave half a session behind.
     // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
     // there are coding tools. It is its own provider, so a host without `--workspace` still
     // advertises it. `None` is what the model sees as "no such tool".

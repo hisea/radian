@@ -70,7 +70,7 @@ pub fn trust_dir_for(root: &Path) -> PathBuf {
 pub fn access_dir_for(root: &Path) -> PathBuf {
     root.join("access")
 }
-/// The process control port's directory (ADR 0030 O6, slice 8): `<root>/run`, where each
+/// The process control port's directory (ADR 0043): `<root>/run`, where each
 /// process binds `<pid>.sock` for the duration of its session. Created 0700; the socket file
 /// is 0600. Sandbox-readable is not required (the model never reads it), but the sandbox does
 /// not deny it either.

@@ -1,4 +1,4 @@
-//! ADR 0030 slice 8: the process control port (`radian-host`'s `control`).
+//! ADR 0043: the process control port (`radian-host`'s `control`).
 //!
 //! Every test drives a real [`ControlServer`] over a real session (a mock model provider), so
 //! the socket, the JSON-lines protocol and the source rules are exercised end to end. The
@@ -279,7 +279,7 @@ impl Client {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Sources (ADR 0030 O6, decided item 4): `User` and `PermissionDecision` are refused, and a
+/// Sources (ADR 0043, decided item 4): `User` and `PermissionDecision` are refused, and a
 /// refusal changes nothing (no `InboxEnqueued`); `Scheduler` is accepted and recorded with that
 /// source. `cancel` always goes; an approval/answer verb does not exist.
 #[tokio::test]
@@ -393,7 +393,7 @@ async fn wait_idle(fixture: &Fixture) {
 }
 
 /// `subscribe` fans committed events out to a client, and a client that never reads is
-/// disconnected while turns keep finishing (ADR 0030 O6: bounded buffer, the runtime never
+/// disconnected while turns keep finishing (ADR 0043: bounded buffer, the runtime never
 /// waits on a client).
 #[tokio::test]
 async fn a_slow_subscriber_is_disconnected_and_turns_still_finish() {

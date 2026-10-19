@@ -33,7 +33,7 @@ const LOCK_RETRY_FIRST: Duration = Duration::from_millis(1);
 /// fork point — the seq of a `TurnFinished` (or 0 for "the session start"), which is also what
 /// the parent's `SessionForked` records.
 ///
-/// `relation` distinguishes derived-session kinds. A `parent` written before ADR 0030 carries no
+/// `relation` distinguishes derived-session kinds. A `parent` written before the `relation` field carries no
 /// `relation` and reads as `"fork"` via `default_relation`; ADR 0006 §7(a) forward
 /// compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,7 +44,7 @@ pub struct ForkParent {
     pub relation: String,
 }
 
-/// The `relation` of a `parent` line written before ADR 0030 added the field: an old line read
+/// The `relation` of a `parent` line written before ADR 0043 added the field: an old line read
 /// by a new reader is a fork (ADR 0006 §7a).
 fn default_relation() -> String {
     "fork".to_owned()

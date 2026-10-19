@@ -295,7 +295,7 @@ pub fn question_panel(
     let inner = width.saturating_sub(4).max(1);
     // ADR 0024 rule 4: `Ask` alone when the asker is this process's own session
     // (the ordinary single-session TUI); the origin only distinguishes several sessions. A
-    // TUI process has one session today (ADR 0030 slice 0), so origin == own session is the
+    // TUI process has one session today (the per-session view), so origin == own session is the
     // clean test.
     let title = if form.origin.is_empty() || form.origin == own_session {
         "Ask".to_string()

@@ -175,7 +175,7 @@ Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就�
 **选择放在一个显式策略参数上**：`SandboxPolicy::git_access`。
 
 - `GitAccess::ReadOnly`（**默认**）：发现到的 git 元数据整块只读——就是今天的行为。任务 agent 保持
-  它（ADR 0030/0038 决定 5），逃逸矩阵的 `git_readonly` 组也钉住它。
+  它（ADR 0038 的 `.git` 规则），逃逸矩阵的 `git_readonly` 组也钉住它。
 - `GitAccess::WritableExceptExec`：`.git` 可写，只把**能执行代码的入口**留成只读。`agent-cli` 与
   `radian-tui` 在 `WorkspaceWrite` 档位为通用会话传这个值（各自 `profile.rs` 一条单测钉住接线）。
 
@@ -248,8 +248,7 @@ VM 恢复、`sandbox-escape` 矩阵在 VM 上重跑之后才算数。**linked wo
   `.git/config.worktree`、`.git/hooks/` 仍只读；否则保持今天的只读文案。
 - **启动时的事实句**（`radian-host/src/describe.rs::workspace_sandbox_facts`）同样分两种写法；
   它同时进入启动块与 `<runtime>` 层（ADR 0036）。
-- **`git_commit` 的描述与 `<runtime>` 的工具行**改为"沙箱保持 `.git` 只读时才需要"（任务 agent、
-  Linux），不再声称 `.git` 处处只读；`git_commit` 仍是宿主侧提交工具。
+- **`shell` 的工具描述与 `<runtime>` 的工具行**按后端实际是否放开 `.git` 写权限来写（ADR 0038）；没有 `git_commit` 工具，提交用原生 git。
 
 **判据不是 policy 里的 `git_access`，而是后端实际是否实施**：`Sandbox::git_writable_except_exec`
 （由 `SandboxBackend::git_writable_except_exec` 回答）给出**生效**的答案。`macos-seatbelt` 返回
@@ -374,7 +373,7 @@ auto-maintenance**（git 2.55 会跑；macOS 的 2.53 不跑），与本切片�
 （`cargo test -p agent-cli` 单独跑不会自动构建它，测试里有明确的报错提示），再
 `cargo test -p agent-cli` **49/49 通过**，连跑 3 次稳定。含
 `a_failed_sandbox_probe_refuses_instead_of_degrading`（探针失败即拒绝，模型一次都没跑）、
-`the_startup_text_does_not_claim_credential_isolation`、默认 `workspace-write`、无沙箱不注册 `shell`。
+`the_startup_text_does_not_claim_credential_isolation`、无沙箱不注册 `shell`。
 
 **启动开销**（VM 本机重测，20 次）：裸 `true` 中位 0.93 ms，沙箱内 8.73 ms，**~7.8 ms**（与旧值
 ~8.0 ms 一致）。
@@ -431,10 +430,10 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 ## 评审补充（合并时由评审者追加，2026-10-12）
 
 1. **复现步骤里的文件名错了，已改。** 二进制叫 `sandbox-escape`（`Cargo.toml` 的 `[[bin]] name`），`scp … /tmp/` 后它在 `/tmp/sandbox-escape`，而原文下一行运行的是 `/tmp/radian-sandbox-escape`——照原文复现会直接失败。评审者按原文执行时撞上，已改成 `/tmp/sandbox-escape`。
-2. **"真实 `cargo build` 能跑"的覆盖范围比测试本身更宽，但要说准。** 仓库里的兼容性测试验的是一个**零依赖**的 hello-world（`--offline`）。评审者另外在本机（macOS）沙箱里做了一次**带依赖的真实构建**：一个依赖 `serde_json` 的项目（共 11 个包，依赖从本机 cargo 缓存读取、`--offline`、网络关闭、`Cargo.lock` 在沙箱外预先生成），`cargo build` **成功**，用时约 8 秒。该探针依赖本机缓存状态，因此没有提交成测试。**未验证**：需要联网拉依赖的构建（这次探针是显式关网跑的；ADR 0016 之后 `workspace-write` 默认**开网**，`safe` 关网，ADR 0030 的 task agent 显式关网，关网时这类构建按设计会失败）、带 build script 写工作区外路径的 crate、其他构建系统。
+2. **"真实 `cargo build` 能跑"的覆盖范围比测试本身更宽，但要说准。** 仓库里的兼容性测试验的是一个**零依赖**的 hello-world（`--offline`）。评审者另外在本机（macOS）沙箱里做了一次**带依赖的真实构建**：一个依赖 `serde_json` 的项目（共 11 个包，依赖从本机 cargo 缓存读取、`--offline`、网络关闭、`Cargo.lock` 在沙箱外预先生成），`cargo build` **成功**，用时约 8 秒。该探针依赖本机缓存状态，因此没有提交成测试。**未验证**：需要联网拉依赖的构建（这次探针是显式关网跑的；ADR 0016 之后 `workspace` 默认**开网**，`safe` 关网，关网时这类构建按设计会失败）、带 build script 写工作区外路径的 crate、其他构建系统。
 3. **Linux 结果本轮评审未能独立重跑。**（**后续已补**：2026-10-12 评审者在 VM 上独立重跑，26/26，零差异；见文末“Linux 独立复核”节。） 驱动可以按文档交叉编译（得到静态链接的 aarch64 ELF），但评审时 VM 已不可达（`ssh: … No route to host`）。所以 Linux 的 26/26 目前**以本文作者提交的证据为准**（`tests/data/escape-linux.{txt,json}`），评审者核对了证据文件格式与"每条失败都带关沙箱对照"的列，但没有在 VM 上再跑一次。上一轮 Linux spike 的 26 条中的同类用例评审者是独立复现过的（见 `docs/spikes/linux-sandbox.md`）。
 4. **本切片在 owner 的 Mac 上装了 rustup target `aarch64-unknown-linux-musl`**（用于交叉编译 VM 上跑的驱动）。这是一次开发环境改动，不影响仓库，但值得知道。
-5. **`git add`/`git commit` 在 `workspace-write` 下失败是设计结果**（`.git` 只读覆盖，ADR 0012），不是兼容性缺陷。含义：在该档位下 agent 不能自己提交；提交是宿主或用户在沙箱外做的事——这与计划 Phase 6c "apply/merge/push 保持独立审批步骤" 一致。（**ADR 0038 决定 4 之后已改，2026-10-15**：通用/lead 会话在该档位下 `.git` 可写、可直接提交，执行入口仍只读；任务 agent 仍整块只读。见前文"ADR 0038 切片①"。）
+5. **`git add`/`git commit` 在旧版 `workspace-write` 下失败曾是设计结果**（`.git` 整块只读）。ADR 0038 之后，通用会话在该档位下 `.git` 可写、可直接提交（`config`/`hooks` 等执行入口仍只读）；当前没有 task agent 的整体只读规则。
 
 ## Linux 复验（ADR 0016 之后，2026-10-13）
 

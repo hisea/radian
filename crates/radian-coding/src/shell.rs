@@ -120,9 +120,9 @@ pub(crate) fn schema() -> serde_json::Value {
 ///
 /// `git_writable` is the sandbox's **effective** answer for this session (ADR 0038 decision 4;
 /// [`radian_sandbox::Sandbox::git_writable_except_exec`]), not the policy's request: a general
-/// session in the `workspace` tier on macOS can commit with native git, while a task agent (or
-/// any backend without the carve-out, Linux) still keeps `.git` read-only, and the description
-/// says which. It is ignored outside `workspace` mode.
+/// session in the `workspace` tier on macOS can commit with native git, while any backend
+/// without the carve-out (Linux) still keeps `.git` read-only, and the description says which.
+/// It is ignored outside `workspace` mode.
 pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
     let confinement = match mode {
         SandboxMode::WorkspaceWrite if git_writable => {

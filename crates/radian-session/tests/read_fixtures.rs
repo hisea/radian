@@ -542,7 +542,7 @@ fn the_fork_fixtures_agree_with_the_reference_checker() {
         created["parent"]["seq"], data["parent_seq"],
         "the child's parent.seq equals the parent's parent_seq"
     );
-    // ADR 0030 O2: a `parent` written before `relation` existed reads back as a fork
+    // ADR 0022 / ADR 0006: a `parent` written before `relation` existed reads back as a fork
     // (ADR 0006 §7a). This is the forward-compatibility half of the `relation` field.
     let parent: radian_session::ForkParent =
         serde_json::from_value(created["parent"].clone()).expect("an old parent still parses");

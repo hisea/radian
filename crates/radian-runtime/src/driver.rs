@@ -84,7 +84,7 @@ pub enum DriverError {
 pub trait RuntimeEvents: Send + Sync {
     fn on_runtime_event(&self, event: &RuntimeEvent);
 
-    /// ADR 0030 O7's orchestration hook points (`task_spawned`, `task_finished`, `stalled`,
+    /// the workspace-local worktree root's orchestration hook points (`task_spawned`, `task_finished`, `stalled`,
     /// `before_merge`): a second, host-side channel the control port fans out to subscribers with
     /// the stable hook name and a JSON payload. The default is a no-op, so a plain sink (or the
     /// closure impl below) ignores it and only the control fanout has to override it.
@@ -478,7 +478,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let mut options = self.options.clone();
         // ADR 0036: the tool definitions are never withdrawn mid-session.
         // This driver has no step ceiling (the request carries every mounted tool on every
-        // call); if a per-agent step limit ever lands (ADR 0030), reaching it must
+        // call); if a per-agent step limit ever lands (a future step limit), reaching it must
         // keep the definitions and set `tool_choice: none` instead, so the provider's cached
         // prefix survives.
         // ADR 0026 D7: a `/model` switch moves the budget with the model. `None` keeps the

@@ -451,8 +451,8 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
             session_dir,
         } => run_attach(session_dir.as_deref(), session_id.as_deref(), follow),
         // Reserved names (ADR 0032): the shape is fixed now so scripts and docs can use it.
-        // ADR 0043 shelved ADR 0030's control port and MCP server mode, so nothing implements
-        // them; a usage-class refusal (2), never a silent no-op.
+        // ADR 0043 keeps the control port but has no `serve`/`mcp` server mode, so nothing
+        // implements these names; a usage-class refusal (2), never a silent no-op.
         RadianCommand::Serve => reserved("serve"),
         RadianCommand::Mcp => reserved("mcp"),
     }

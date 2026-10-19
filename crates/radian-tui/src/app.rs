@@ -404,10 +404,10 @@ pub(crate) struct RunningJob {
     pub(crate) started: Instant,
 }
 
-/// The **per-session view** (ADR 0030 slice ⓪): the state that belongs to exactly one
+/// The **per-session view** (the per-session view): the state that belongs to exactly one
 /// session — its transcript and the entries' caches, its projection handle, its scroll and
 /// selection, its pending turn state, and its mode/tier markers. [`App`] owns one of these
-/// today; ADR 0030 slice ⑥ holds several and switches between them, so nothing here is
+/// today; a later session-view slice holds several and switches between them, so nothing here is
 /// shared. Chrome the whole TUI shares (theme, keymap, footer, the input composer, the layer
 /// stack and the terminal-level flags) stays on [`App`].
 pub struct SessionView {
@@ -548,7 +548,7 @@ pub struct SessionView {
 }
 
 /// The whole TUI's state: the global chrome every session view shares, plus exactly one
-/// [`SessionView`] today (ADR 0030 slice ⓪). The chrome is what is set once from config and
+/// [`SessionView`] today (the per-session view). The chrome is what is set once from config and
 /// the terminal (theme, keymap, footer, the input composer, the layer stack, the queue count
 /// and the terminal-level flags); the session's transcript, projection, scroll/selection and
 /// turn state live in [`SessionView`] so a later slice can hold several and switch.
@@ -641,8 +641,8 @@ pub struct App {
     /// info string names a common language. `false` renders every code block as plain text.
     /// Part of `DisplayModes`, so it is in the layout cache key.
     pub highlight_enabled: bool,
-    /// The one session view this process holds today (ADR 0030 slice ⓪). A later slice
-    /// (ADR 0030 slice ⑥) keeps several and switches between them.
+    /// The one session view this process holds today (the per-session view). A later slice
+    /// (a later session-view slice) keeps several and switches between them.
     pub session: SessionView,
 }
 

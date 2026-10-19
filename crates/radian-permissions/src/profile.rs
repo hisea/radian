@@ -121,7 +121,7 @@ impl Profile {
                     Action::Deny,
                 )
                 .with_reason("safe mode has no shell"),
-                // ADR 0030 R10: `git_commit` writes the repository; safe does not write.
+                // the host git rules: `git_commit` writes the repository; safe does not write.
                 Rule::new(
                     ToolMatcher::Name("git_commit".into()),
                     ResourceMatcher::Any,
@@ -193,11 +193,10 @@ impl Profile {
         &self.rules
     }
 
-    /// Allows these tool names in **every** tier, with the normal rule priority (ADR 0030 slice
-    /// 6): the lead tools `spawn_task`, `wait_task`, … write no workspace file and run no
-    /// repository command themselves — the task worktree and its sandbox are the boundary — so
-    /// they never prompt. A `deny` rule still wins, and the host's [`crate::ToolGate`] is checked
-    /// before the rules, so `/mode general` still refuses them (ADR 0038 decision 1).
+    /// Allows these tool names in **every** tier, with the normal rule priority: tools such as
+    /// `ask_user` and `skill` write no workspace file and run no repository command, so they
+    /// never prompt. A `deny` rule still wins, and the host's [`crate::ToolGate`] is checked
+    /// before the rules.
     pub fn with_allowed_tools(mut self, names: &[&str]) -> Self {
         self.rules.extend(names.iter().map(|name| {
             Rule::new(
@@ -215,11 +214,11 @@ impl Profile {
         self
     }
 
-    /// Denies every tool in `names` (ADR 0030 problem 7 = A). An agent definition's `tools`
+    /// Denies every tool in `names` (the allow-list gate). An agent definition's `tools`
     /// allow-list is enforced with this: the host passes the built-ins the list does **not**
     /// name, and `deny` outranks `allow`/`ask`, so a listed tool the tier would not mount stays
     /// unmounted and an unlisted tool cannot run. It only ever adds `deny` rules, so it can
-    /// narrow a tier but never widen one (ADR 0030 O2).
+    /// narrow a tier but never widen one.
     pub fn with_denied_tools<I, S>(mut self, names: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -231,7 +230,7 @@ impl Profile {
                 ResourceMatcher::Any,
                 Action::Deny,
             )
-            .with_reason("not in this agent's tool allow-list (ADR 0030 O11)")
+            .with_reason("not in this agent's tool allow-list (the agent tool allow-list)")
         }));
         self
     }

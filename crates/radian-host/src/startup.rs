@@ -280,9 +280,8 @@ impl SessionSettings {
 /// the registry overwrites the ones a task owns.
 ///
 /// The fields are the [`SessionSetup`] fields a host really decides (see each one's doc there);
-/// the ones that are the same for every host-opened session — the empty config queue, no role, no
-/// agent definition's allow-lists, not a task agent, `/mode` allowed — are set by
-/// [`LeadSetup::setup`] and cannot drift.
+/// the ones that are the same for every host-opened session — the empty config queue, no role,
+/// no agent definition's allow-lists — are set by [`LeadSetup::setup`] and cannot drift.
 pub struct LeadSetup {
     /// The settings both hosts resolve from the config the same way (see [`SessionSettings`]),
     /// and the same value the task builder is built from.

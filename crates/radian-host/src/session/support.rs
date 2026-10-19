@@ -50,7 +50,7 @@ pub(super) fn trust_event(change: &trust::ProjectTrustChanged) -> radian_session
 
 /// Creates or resumes the session file. The caller has already validated everything that can
 /// fail, so this only reports the file's own state. `parent` is the derived-session lineage
-/// (ADR 0022's fork or ADR 0030 O2's task agent): `Some` writes `SessionCreated.parent` with
+/// (ADR 0022's fork or ADR 0043's subagent): `Some` writes `SessionCreated.parent` with
 /// its `relation`, `None` writes an ordinary session.
 pub(super) fn open_journal(
     session_id: &SessionId,

@@ -101,7 +101,7 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         })
     };
 
-    // ADR 0030 slice 8: the process control port. Bound before the session so its fan-out can
+    // ADR 0043: the process control port. Bound before the session so its fan-out can
     // wrap the host's own sinks; a bind failure is a warning, never a startup refusal, so a
     // session always opens. The startup line names the path (a client finds it by pid too).
     let control = match radian_host::ControlServer::bind_if(
@@ -118,7 +118,7 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         eprintln!("[control] {}", server.path().display());
     }
     // Held for the whole session: the socket is removed on the normal return and on a panic
-    // unwind, even while the driver task still holds a reference to the server (ADR 0030 O6).
+    // unwind, even while the driver task still holds a reference to the server (ADR 0043).
     let _control_guard = control.as_ref().map(|server| server.guard());
     let events: Arc<dyn EventSink> = match &control {
         Some(server) => server.events(Arc::clone(&ui) as Arc<dyn EventSink>),
@@ -267,7 +267,7 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     .await
     .map_err(|error| SetupError(error.to_string()))?;
     let session = Arc::new(session);
-    // ADR 0030 O6: start accepting control requests for this session.
+    // ADR 0043: start accepting control requests for this session.
     if let Some(server) = &control {
         server.serve(
             &tokio::runtime::Handle::current(),

@@ -502,7 +502,7 @@ fn approval_policy_names_round_trip() {
     assert_eq!(ApprovalPolicy::parse(""), None);
 }
 
-/// ADR 0030 O2 revision 2 / ADR 0006 §5.9: `runtime_event` threads the optional policy name
+/// ADR 0043 / ADR 0006 §5.9: `runtime_event` threads the optional policy name
 /// through to the session event, and leaves it unset when no policy command decided.
 #[test]
 fn runtime_event_threads_the_optional_policy_name() {
@@ -570,7 +570,7 @@ async fn switching_the_profile_changes_the_next_decision() {
     ));
 }
 
-// ---------- ADR 0030 slice 6: the deny-only tool-name gate ----------
+// ---------- the host tool gate: the deny-only tool-name gate ----------
 
 /// The gate denies a name before the rules run, so an `allow` rule (the lead tools get one via
 /// `with_allowed_tools`) cannot widen it, and the approver is never consulted. Clearing the gate

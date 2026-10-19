@@ -1,4 +1,4 @@
-//! A **structural** test for ADR 0030 O6: the control port's handlers run on the runtime and
+//! A **structural** test for ADR 0043: the control port's handlers run on the runtime and
 //! must use the async `Inbox`, never `LocalSession`'s `block_on` wrappers.
 //!
 //! It is deliberately narrow and honest about what it is: it reads one file's source and greps
@@ -28,7 +28,7 @@ fn control_rs_never_blocks_on_the_runtime() {
         assert!(
             !code.contains(forbidden),
             "src/control.rs must not contain `{forbidden}`: the handlers run on the runtime \
-             and use the async Inbox (ADR 0030 O6)"
+             and use the async Inbox (ADR 0043)"
         );
     }
 }

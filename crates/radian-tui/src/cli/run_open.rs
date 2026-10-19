@@ -9,7 +9,7 @@ use super::*;
 /// Everything `run()`'s input phase builds for `open_session`: the sandbox and its
 /// rebuild builder, the approval policy, the control port, the event sinks and the
 /// trust setup. The control socket guard is returned separately so `run()` holds it
-/// for the whole session (ADR 0030 O6).
+/// for the whole session (ADR 0043).
 pub(super) struct SessionInputs {
     pub(super) sandbox: Option<radian_sandbox::Sandbox>,
     pub(super) inherited_sandbox: bool,
@@ -175,7 +175,7 @@ pub(super) fn build_session_inputs(
     // The renderer reads the session facts from the host's projection, not a private copy
     // (ADR 0023 U5). Set here because the app is created before the session exists (`--pick`).
     app.set_projection(Arc::clone(&projection));
-    // ADR 0030 slice 8: the process control port. Bound before the session so its fan-out can
+    // ADR 0043: the process control port. Bound before the session so its fan-out can
     // wrap the host's own sinks; the startup line names the path. A bind failure is a warning,
     // never a startup refusal. The bind creates a tokio listener, and this setup runs outside
     // the async `run` (sessions are opened with `runtime.block_on`), so enter the runtime first.
@@ -196,7 +196,7 @@ pub(super) fn build_session_inputs(
         startup_log.line(format!("[control] {}", server.path().display()));
     }
     // Held for the whole session: the socket is removed on the normal return and on the panic
-    // unwind, even while the driver task still holds a reference to the server (ADR 0030 O6).
+    // unwind, even while the driver task still holds a reference to the server (ADR 0043).
     let control_guard = control.as_ref().map(|server| server.guard());
     let live_inner: Arc<dyn EventSink> =
         Arc::new(ProjectionSink::new(tx.clone(), Arc::clone(&projection)));
@@ -447,7 +447,7 @@ pub(super) fn open_session_and_refresh(
         ))
         .map_err(|error| error.to_string())?;
     mark("open-session-done");
-    // ADR 0030 O6: start accepting control requests for this session.
+    // ADR 0043: start accepting control requests for this session.
     if let Some(server) = &control {
         server.serve(runtime.handle(), radian_host::ControlTarget::of(&session));
     }

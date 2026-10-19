@@ -38,10 +38,10 @@ Because of this, most behavior tests are pure `update` tests (`tests/update.rs`,
 `tests/input.rs`, `tests/command.rs`, `tests/approval.rs`); the pty tests keep the terminal
 state, the real key protocol and the recovery paths.
 
-### Global state and the session view (ADR 0030 slice ⓪)
+### Global state and the session view
 
-`App` is split in two so a later slice (ADR 0030 slice ⑥) can hold several sessions and
-switch between them. Today exactly one session view exists: `app.session`.
+`App` is split in two so the chrome and a session view stay separate. Today exactly one
+session view exists: `app.session`.
 
 - **`App`** holds the **global chrome** the whole TUI shares: the theme, the keymap, the
   footer and its glyphs, the input composer and its completion state (`slash_completion`,
@@ -719,7 +719,7 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   and the startup summary? pty automation asserts the text, not the feel (ADR 0009).
 - **native `git commit` in the sandbox, and its text** (ADR 0038 slice 4): in a **worktree on
   `main`** of a real repo, start a general `workspace` session and run a `git commit` through
-  `shell` — the commit must land with native git (`git_commit` is not needed). The `shell` tool
+  `shell` — the commit must land with native git. The `shell` tool
   description the model sees and the startup line must say git can commit/branch/stash in the
   sandbox while `.git/config` and `.git/hooks/` stay read-only. After `/access safe` the notice
   must say the shell description and the startup line are fixed for this session; a new session
@@ -1315,7 +1315,7 @@ Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementat
   built-in tools; `never` turns `ask` into a denial.
 - `--max-model-calls N` is the per-turn model call limit, shared with `radian exec` (both
   default to **1000**, `radian_host::DEFAULT_MAX_MODEL_CALLS`), not the core's 32: a coding turn
-  reads many files and a human can cancel, but it stays a fuse, because the context-budget guard
+  reads many files and a human can cancel, but it stays a fuse, because the context budget
   does not stop a loop of small calls. When a turn hits it, the pending tool calls are answered
   with "the model call budget is used up" and the turn ends; a new message starts a fresh
   count, and the TUI shows one notice naming the limit and the flag

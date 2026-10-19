@@ -109,7 +109,7 @@ so no host reimplements them.
 | A failed or dropped `close()` can be retried and still closes | `failed_close_can_be_retried`, `dropped_close_can_be_retried` | `tests/close.rs` |
 
 The mutation records for this crate are `MUTATIONS-R1.md` (reasoning, 10/10 caught),
-`MUTATIONS-0015.md` (budget guard), `MUTATIONS-0007.md` (usage) and `MUTATIONS-0018.md`
+`MUTATIONS-0015.md` (budget estimation), `MUTATIONS-0007.md` (usage) and `MUTATIONS-0018.md`
 (compaction planning). A mutation that stays green
 is reported as a hole, not hidden: `MUTATIONS.md` in `radian-session` records one (no `fsync`)
 that no test in this environment can catch.
@@ -146,7 +146,7 @@ that no test in this environment can catch.
 streaming prefix) · 0004 (hot config slots — records the missing run identity) · 0005 (host
 message identity and `replace_transcript`) · 0006 (session JSONL v1 — the format this crate's
 `JournalRecord` maps onto) · 0007 (usage) · 0010 (durable vs live events) · 0014 (reasoning
-content) · 0015 (context budget guard — superseded by 0018 for the stop) · 0018
+content) · 0015 (context budget estimation) · 0018
 (computed input budget `B = min(I, C − R)`).
 
 ## ADR 0026 D7: per-turn context budget (2026-10-13)

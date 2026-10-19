@@ -38,7 +38,7 @@ pub(crate) struct Setup {
     pub(crate) window: radian_host::Window,
     /// The settings the CLI and the TUI resolve from the config the same way (ADR 0032 slice 5):
     /// the retries, the compaction settings, the skills, the memory injection and the shell
-    /// auto-background. The same value builds the task builder (ADR 0030 slice 6b2).
+    /// auto-background.
     pub(crate) settings: radian_host::SessionSettings,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
     pub(crate) session_id: String,
@@ -68,7 +68,7 @@ pub(crate) struct Setup {
     /// `[sandbox] allow_env` (ADR 0034): environment variable names
     /// added to the sandbox whitelist. Names only.
     pub(crate) allow_env: Vec<String>,
-    /// `[control] enabled` (ADR 0030 O6, slice 8): whether this process binds its control
+    /// `[control] enabled` (ADR 0043): whether this process binds its control
     /// socket at `$RADIAN_HOME/run/<pid>.sock`.
     pub(crate) control_enabled: bool,
     /// The endpoint a subagent child is told to use (`--base-url`): the parent's effective base

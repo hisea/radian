@@ -309,7 +309,7 @@ async fn the_parent_gains_only_the_forked_record_and_the_seqs_match() {
     };
     assert_eq!(data["parent"]["seq"], json!(boundary));
     assert_eq!(data["parent"]["session_id"], json!(parent));
-    // ADR 0030 O2: a fork writes `relation: "fork"` explicitly.
+    // ADR 0022: a fork writes `relation: "fork"` explicitly.
     assert_eq!(data["parent"]["relation"], json!("fork"), "{data}");
     // The parent's SessionForked carries the same seq and names the child.
     let forked = session

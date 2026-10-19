@@ -179,7 +179,7 @@ async fn radian_serve_and_mcp_are_reserved_and_refuse_with_two() {
             err.contains("reserved") && err.contains("not implemented"),
             "{name}: {err}"
         );
-        // ADR 0030 is shelved (ADR 0043), so the refusal must not name it.
+        // The reserved names are not implemented in this build.
         assert!(!err.contains("0030"), "{name}: {err}");
     }
 }
@@ -287,7 +287,7 @@ async fn a_missing_workspace_is_refused_with_the_radian_prefix() {
     assert!(!err.contains("agent: "), "{err}");
 }
 
-/// ADR 0030 O6 (slice 8): a hosting process binds `$RADIAN_HOME/run/<pid>.sock`, names it on
+/// ADR 0043: a hosting process binds `$RADIAN_HOME/run/<pid>.sock`, names it on
 /// the startup line, and removes it when the process exits.
 #[tokio::test]
 async fn the_control_socket_is_named_and_removed_when_the_process_exits() {

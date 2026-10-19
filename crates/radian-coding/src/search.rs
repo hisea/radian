@@ -19,11 +19,9 @@
 //! - no ignore file **above** the base is read and the user's global gitignore is not
 //!   consulted, so the same tree gives the same result on every machine;
 //! - the `.git` directory is pruned, not merely hidden;
-//! - `.radian-worktrees/` is pruned too: it holds one git worktree per checkout, each a full
-//!   tree, so descending into it would return every file once per worktree (and search other
-//!   branches' contents). Task agents' worktrees no longer live there (ADR 0039 decision 4:
-//!   they moved to `~/.radian/worktrees/<repo-key>/`), but the one-off and integration
-//!   worktrees of ADR 0030 O7 still do. The rule is structural, not a `.gitignore` coincidence;
+//! - `.radian-worktrees/` is pruned too: it can hold one git worktree per checkout, each a
+//!   full tree, so descending into it would return every file once per worktree (and search
+//!   other branches' contents). The rule is structural, not a `.gitignore` coincidence;
 //! - symlinks are never followed: a symlinked file is not a match and a symlinked directory is
 //!   not descended, so a link pointing out of the workspace is never read;
 //! - dot-files other than `.git` are included: the model asked for a tree, not for hidden-file
@@ -46,10 +44,8 @@ use crate::safe_fs::{self, EntryKind, OpenMode};
 
 pub(crate) const SKIPPED_DIR_NAMES: &[&str] = &[".git", RADIAN_WORKTREES];
 
-/// The workspace-local root of one-off git worktrees (ADR 0030 O7: the lead's integration
-/// worktree). The walk prunes it; `list` omits the entry, so a directory listing is not
-/// cluttered by N full checkouts of the same tree. A **task** agent's worktree is not here
-/// any more (ADR 0039 decision 4: `~/.radian/worktrees/<repo-key>/<task-id>`).
+/// The workspace-local root of one-off git worktrees. The walk prunes it; `list` omits the
+/// entry, so a directory listing is not cluttered by N full checkouts of the same tree.
 pub(crate) const RADIAN_WORKTREES: &str = ".radian-worktrees";
 
 /// One regular file the walk found: its workspace-relative path and the open, read-only fd

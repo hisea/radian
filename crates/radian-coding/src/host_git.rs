@@ -23,7 +23,7 @@ const FILTER_KEYS: [&str; 3] = ["clean", "smudge", "process"];
 /// The `-c` overrides every host git call carries:
 ///
 /// - `core.fsmonitor=false`, `core.hooksPath=/dev/null`: a repo-config command never runs on
-///   `git add`/`commit`/`checkout` (ADR 0030);
+///   `git add`/`commit`/`checkout` (ADR 0039);
 /// - `core.attributesFile=/dev/null`: the global attributes file cannot name a driver either;
 /// - every `filter.<name>.{clean,smudge,process}` emptied, with `filter.<name>.required=false`,
 ///   for each name in the effective config — so an attributes file can still *name* a driver but

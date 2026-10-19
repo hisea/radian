@@ -163,7 +163,7 @@ impl Default for IntegrationsConfig {
     }
 }
 
-/// `[control]` (ADR 0030 O6, slice 8): the process control port. `enabled` defaults to
+/// `[control]` (ADR 0043): the process control port. `enabled` defaults to
 /// **true** — every hosting process binds `$RADIAN_HOME/run/<pid>.sock` — and `false` turns
 /// the socket off for this process. The socket carries the same verbs O6 lists; a client can
 /// never declare the `User` source and there is no approval verb.
@@ -192,7 +192,7 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     pub sandbox: SandboxConfig,
     pub integrations: IntegrationsConfig,
-    /// `[control]` (ADR 0030 O6, slice 8): the process control port, on by default.
+    /// `[control]` (ADR 0043): the process control port, on by default.
     pub control: ControlConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
@@ -415,7 +415,7 @@ fn parse_integrations(value: &Value, path: &Path, config: &mut Config) -> Result
     Ok(())
 }
 
-/// Parses `[control]` (ADR 0030 O6, slice 8). Only the `enabled` key exists today; an unknown
+/// Parses `[control]` (ADR 0043). Only the `enabled` key exists today; an unknown
 /// key is reported and ignored (the `tui.*` rule, not refuse).
 fn parse_control(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
     let Some(table) = value.as_table() else {
