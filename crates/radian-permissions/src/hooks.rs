@@ -263,7 +263,7 @@ impl PermissionHooks {
             }
         }
 
-        if action == Action::Deny {
+        if action == Action::Allow {
             self.record(
                 &request_id,
                 &call_id,
