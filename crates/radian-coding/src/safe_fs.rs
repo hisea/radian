@@ -39,6 +39,8 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+#[cfg(feature = "testing")]
+use std::sync::Arc;
 
 /// Why a workspace path could not be opened.
 #[derive(Debug)]
@@ -182,11 +184,11 @@ fn normalise_relative(base: &[OsString], target: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(feature = "testing")]
-static RESOLVE_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>> =
+static RESOLVE_HOOK: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>> =
     std::sync::Mutex::new(None);
 
 #[cfg(feature = "testing")]
-static AFTER_OPEN_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>> =
+static AFTER_OPEN_HOOK: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>> =
     std::sync::Mutex::new(None);
 
 /// Test seam: a closure run by the workspace tools right **after** the fd is obtained and
@@ -195,16 +197,21 @@ static AFTER_OPEN_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>> =
 /// re-opened by path here would follow it. Only built with the `testing` feature.
 #[cfg(feature = "testing")]
 pub fn after_open_hook(hook: Option<Box<dyn Fn() + Send + Sync>>) {
-    *AFTER_OPEN_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
+    *AFTER_OPEN_HOOK.lock().unwrap_or_else(|e| e.into_inner()) =
+        hook.map(Arc::from);
 }
 
 pub(crate) fn run_after_open_hook() {
+    // The hook runs without holding the static's lock: two scans blocked in the hook at
+    // once (the overlap tests) must both be inside it, which a lock held across the call
+    // would serialize into two timeouts.
     #[cfg(feature = "testing")]
-    if let Some(hook) = AFTER_OPEN_HOOK
+    let hook = AFTER_OPEN_HOOK
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-    {
+        .clone();
+    #[cfg(feature = "testing")]
+    if let Some(hook) = hook {
         hook();
     }
 }
@@ -213,16 +220,18 @@ pub(crate) fn run_after_open_hook() {
 /// and before the first `openat`. Only built with the `testing` feature.
 #[cfg(feature = "testing")]
 pub fn resolve_hook(hook: Option<Box<dyn Fn() + Send + Sync>>) {
-    *RESOLVE_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
+    *RESOLVE_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook.map(Arc::from);
 }
 
 fn run_resolve_hook() {
+    // See `run_after_open_hook`: the lock is released before the call.
     #[cfg(feature = "testing")]
-    if let Some(hook) = RESOLVE_HOOK
+    let hook = RESOLVE_HOOK
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-    {
+        .clone();
+    #[cfg(feature = "testing")]
+    if let Some(hook) = hook {
         hook();
     }
 }
