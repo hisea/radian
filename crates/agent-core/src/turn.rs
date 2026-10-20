@@ -197,7 +197,9 @@ fn jitter(base: Duration) -> Duration {
 }
 
 /// Marks an error the core retried and gave up on, so the host can report "after N retries"
-/// (ADR 0017, item 5). Only the two transient kinds can carry it.
+/// (ADR 0017, item 5). Every transient kind carries it: `Unavailable` and
+/// `Transport` in their own message, `EmptyResponse` as transporter text — a unit variant
+/// has no message of its own to annotate, and the host only ever sees the text anyway.
 fn after_retries(error: ModelError, retries: u32) -> ModelError {
     let noun = if retries == 1 { "retry" } else { "retries" };
     match error {
@@ -211,8 +213,28 @@ fn after_retries(error: ModelError, retries: u32) -> ModelError {
         ModelError::Transport(message) => {
             ModelError::Transport(format!("{message} (after {retries} {noun})"))
         }
+        ModelError::EmptyResponse => ModelError::Transport(format!(
+            "the model returned an empty response (after {retries} {noun})"
+        )),
         other => other,
     }
+}
+
+/// Whether a model response is an empty final answer (ADR 0017): no tool calls, the turn
+/// is over (`EndTurn`), and every visible text part is empty — `is_empty()`, not `trim()`,
+/// the same rule as the interrupted prefix (ADR 0003 F4): the core never judges what counts
+/// as "meaningful". Reasoning never counts, so a reasoning-only answer is empty; a non-text
+/// part (an image, an opaque block) counts as content. Other stop reasons keep their own
+/// handling — an empty `MaxTokens` answer is still `Incomplete(MaxTokens)` — and tool calls
+/// are dispatched whatever the stop reason.
+fn is_empty_response(response: &ModelResponse) -> bool {
+    if !response.tool_calls.is_empty() || response.stop_reason != StopReason::EndTurn {
+        return false;
+    }
+    response.content.iter().all(|part| match part {
+        ContentPart::Text { text, .. } => text.is_empty(),
+        _ => false,
+    })
 }
 
 /// The outcome of one model call under ADR 0017's transient-retry policy: the
@@ -270,7 +292,7 @@ async fn model_call_with_retries<M: Model>(
             cancellation: interrupt.token.child_token(),
             events: &tap,
         };
-        match race(interrupt, model.complete(request.clone(), mcx)).await {
+        let result = match race(interrupt, model.complete(request.clone(), mcx)).await {
             Raced::Interrupted(reason) => {
                 let (text, reasoning) = tap.take();
                 return ModelCallOutcome::InterruptedInCall {
@@ -279,41 +301,52 @@ async fn model_call_with_retries<M: Model>(
                     reasoning,
                 };
             }
-            Raced::Done(Ok(response)) => return ModelCallOutcome::Done(Ok(response)),
-            Raced::Done(Err(error)) => {
-                // `waited < MAX_RETRY_WAIT` is the spent-budget stop: once the 60 s of this one
-                // call are used up, `retry_delay` can only return 0, and retrying then would
-                // hammer a provider that just said it is busy. The call fails instead, with the
-                // "after N retries" count of the retries that were really made.
-                if error.is_transient() && retries_used < max_retries && waited < MAX_RETRY_WAIT {
-                    retries_used += 1;
-                    let delay = retry_delay(retries_used, error.retry_after(), waited);
-                    waited += delay;
-                    if let Some(sink) = announce {
-                        sink.emit(AgentEvent::ModelRetrying {
-                            attempt: retries_used,
-                            max: max_retries,
-                            delay,
-                            reason: error.to_string(),
-                        });
-                    }
-                    match race(interrupt, tokio::time::sleep(delay)).await {
-                        Raced::Interrupted(reason) => {
-                            return ModelCallOutcome::InterruptedInWait(reason);
-                        }
-                        // The failed attempt's streamed text and reasoning are a live projection
-                        // only (ADR 0010); the next attempt builds its own tap.
-                        Raced::Done(()) => continue,
-                    }
+            Raced::Done(result) => result,
+        };
+        // ADR 0017: an empty final answer is a transient model error, never a success. The
+        // check lives here — inside the retry loop, before `ModelResponseReceived`, hooks,
+        // commit or journal — so the empty attempt takes the transient branch below with the
+        // same retries, waits, cancellation and give-up note, and nothing is committed or
+        // journaled for it: a failed attempt's output is discarded, and its usage has no
+        // assistant message to follow (ADR 0007 J5).
+        let error = match result {
+            Ok(response) if !is_empty_response(&response) => {
+                return ModelCallOutcome::Done(Ok(response));
+            }
+            Ok(_) => ModelError::EmptyResponse,
+            Err(error) => error,
+        };
+        // `waited < MAX_RETRY_WAIT` is the spent-budget stop: once the 60 s of this one
+        // call are used up, `retry_delay` can only return 0, and retrying then would
+        // hammer a provider that just said it is busy. The call fails instead, with the
+        // "after N retries" count of the retries that were really made.
+        if error.is_transient() && retries_used < max_retries && waited < MAX_RETRY_WAIT {
+            retries_used += 1;
+            let delay = retry_delay(retries_used, error.retry_after(), waited);
+            waited += delay;
+            if let Some(sink) = announce {
+                sink.emit(AgentEvent::ModelRetrying {
+                    attempt: retries_used,
+                    max: max_retries,
+                    delay,
+                    reason: error.to_string(),
+                });
+            }
+            match race(interrupt, tokio::time::sleep(delay)).await {
+                Raced::Interrupted(reason) => {
+                    return ModelCallOutcome::InterruptedInWait(reason);
                 }
-                let error = if retries_used > 0 && error.is_transient() {
-                    after_retries(error, retries_used)
-                } else {
-                    error
-                };
-                return ModelCallOutcome::Done(Err(error));
+                // The failed attempt's streamed text and reasoning are a live projection
+                // only (ADR 0010); the next attempt builds its own tap.
+                Raced::Done(()) => continue,
             }
         }
+        let error = if retries_used > 0 && error.is_transient() {
+            after_retries(error, retries_used)
+        } else {
+            error
+        };
+        return ModelCallOutcome::Done(Err(error));
     }
 }
 
