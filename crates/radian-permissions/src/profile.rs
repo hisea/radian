@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use radian_sandbox::SandboxMode;
+use radian_sandbox::{Sandbox, SandboxMode};
 
 use crate::rule::{Action, ResourceMatcher, Rule, ToolMatcher};
 
@@ -71,7 +71,8 @@ impl Preset {
     }
 }
 
-/// Why a profile could not be built (a workspace root that does not resolve).
+/// Why a profile could not be built (a workspace root that does not resolve, or a
+/// sandbox that does not enforce anything).
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileError {
     #[error("{path}: cannot use as the permission workspace root: {source}")]
@@ -81,6 +82,12 @@ pub enum ProfileError {
     },
     #[error("{0}: the permission workspace root is not a directory")]
     NotADirectory(PathBuf),
+    /// A sandboxed profile needs an enforced sandbox: a probed local backend or
+    /// `inherited`, never the transparent `FullAccess` backend.
+    #[error(
+        "a sandboxed `workspace` profile needs an enforced sandbox (a probed local backend or `inherited`), not a transparent one"
+    )]
+    SandboxNotEnforced,
 }
 
 /// One permission profile: a preset's rule set plus its approval policy and sandbox mode.
@@ -126,12 +133,18 @@ impl Profile {
     }
 
     /// The `workspace` tier with a sandbox in force: shell inside the sandbox is `allow`
-    /// (a `deny` rule still wins first, and MCP stays `ask`). The caller must have built
-    /// the sandbox already — a local backend whose probe succeeded, or `inherited` — and
-    /// passes no proof here: the host's build order (sandbox first, then this) is what
-    /// makes the rule mean "inside the sandbox". Using this without one is the mutation
+    /// (a `deny` rule still wins first, and MCP stays `ask`). The proof is the `sandbox`
+    /// argument itself — a probed local backend, or `inherited` — so passing a transparent
+    /// sandbox (`FullAccess`, which enforces nothing) is refused instead of building the
+    /// allow-shell profile. Using the profile without an enforced sandbox is the mutation
     /// `workspace_sandboxed_shell_is_allowed_only_with_a_sandbox` catches.
-    pub fn workspace_write_sandboxed(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
+    pub fn workspace_write_sandboxed(
+        workspace: impl AsRef<Path>,
+        sandbox: &Sandbox,
+    ) -> Result<Self, ProfileError> {
+        if !sandbox.mode().is_enforced() {
+            return Err(ProfileError::SandboxNotEnforced);
+        }
         let mut profile = Self::build(Preset::WorkspaceWrite, workspace, |ws| {
             let mut rules = read_only();
             rules.extend(memory_rules());
@@ -197,11 +210,13 @@ impl Profile {
         &self.rules
     }
 
-    /// Marks the profile as sandboxed after the fact (hosts that add their own rules
-    /// with [`Profile::custom`] on top of a sandboxed session). Only ever narrows the
-    /// question, never the boundary: approval still cannot widen the sandbox.
-    pub fn with_sandboxed(mut self, sandboxed: bool) -> Self {
-        self.sandboxed = sandboxed;
+    /// Marks the profile as sandboxed from an enforced [`Sandbox`] (hosts that add their
+    /// own rules with [`Profile::custom`] on top of a sandboxed session). Only `Some` with
+    /// an enforced mode (`is_enforced`: a probed local backend, or `inherited`) sets the
+    /// flag; `None` and a transparent sandbox leave it unsandboxed. It only ever narrows
+    /// the question, never the boundary: approval still cannot widen the sandbox.
+    pub fn with_sandbox(mut self, sandbox: Option<&Sandbox>) -> Self {
+        self.sandboxed = sandbox.is_some_and(|sandbox| sandbox.mode().is_enforced());
         self
     }
 
