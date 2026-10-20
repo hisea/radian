@@ -8164,6 +8164,168 @@ async fn config_import_pi_requires_from_and_an_existing_directory() {
     assert!(stdout.is_empty(), "{stdout}");
 }
 
+/// `radian config import-claude`: a dry run drafts user + project skills, translates hooks
+/// and reports the slice-B waits on stderr without writing; `--write` writes the config,
+/// the skills and `AGENTS.md` (with the trust-gate notice) and refuses to overwrite without
+/// `--force`.
+#[tokio::test]
+async fn config_import_claude_drafts_and_writes() {
+    let dir = scratch("import-claude");
+    let home = dir.join("claude-home");
+    std::fs::create_dir_all(home.join("commands")).unwrap();
+    std::fs::create_dir_all(home.join("skills")).unwrap();
+    std::fs::write(
+        home.join("commands/review.md"),
+        "---\ndescription: Review a PR diff.\n---\n\nReview $ARGUMENTS now.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".claude.json"),
+        r#"{"mcpServers": {
+            "secret-srv": {"command": "node", "env": {"API_KEY": "sk-test-please-ignore-0000"}}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("settings.json"),
+        r#"{"hooks": {
+            "PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo pre"}]},
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo late", "async": true}]}
+            ]}}"#,
+    )
+    .unwrap();
+    std::fs::write(home.join("CLAUDE.md"), "# Mine\n").unwrap();
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(proj.join(".claude/commands")).unwrap();
+    std::fs::create_dir_all(proj.join(".claude/skills/team")).unwrap();
+    std::fs::write(
+        proj.join(".claude/commands/deploy.md"),
+        "---\ndescription: Deploy.\n---\n\nDeploy $ARGUMENTS.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join(".claude/skills/team/SKILL.md"),
+        "---\nname: team\ndescription: Team.\n---\n\nTeam.\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join(".mcp.json"), r#"{"mcpServers": {}}"#).unwrap();
+    std::fs::write(
+        proj.join(".claude/settings.json"),
+        r#"{"hooks": {"PreToolUse": [{"matcher": "Bash",
+            "hooks": [{"type": "command", "command": "echo proj"}]}]}}"#,
+    )
+    .unwrap();
+    let home_arg = home.to_str().unwrap().to_owned();
+    let proj_arg = proj.to_str().unwrap().to_owned();
+
+    // Dry run: the draft on stdout, the report on stderr, nothing written.
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian_top(
+            &[
+                "config",
+                "import-claude",
+                "--claude-home",
+                &home_arg,
+                "--project",
+                &proj_arg,
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("schema_version"), "{stdout}");
+    assert!(stdout.contains("Review $ARGUMENTS now."), "{stdout}");
+    assert!(!stdout.contains("sk-test-please-ignore"), "{stdout}");
+    assert!(stderr.contains("[import-claude]"), "{stderr}");
+    assert!(stderr.contains("`async`"), "{stderr}");
+    assert!(stderr.contains("waits for the `[mcp]` section"), "{stderr}");
+    assert!(
+        stderr.contains("project hooks wait for slice B"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("nothing was written"), "{stderr}");
+
+    // `--write`: everything lands, with the trust-gate notice for project files.
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let out_arg = out.to_str().unwrap().to_owned();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_top(
+            &[
+                "config",
+                "import-claude",
+                "--claude-home",
+                &home_arg,
+                "--project",
+                &proj_arg,
+                "--write",
+            ],
+            &[("RADIAN_HOME", &out_arg), ("HOME", &out_arg)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("trust-gate resources"), "{stderr}");
+    let config_path = out.join("config/config.toml");
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    radian_host::parse_config(&config_path, &text).expect("the written file reads back");
+    assert!(
+        out.join(".agents/skills/review/SKILL.md").exists(),
+        "{stderr}"
+    );
+    assert!(out.join("AGENTS.md").exists(), "{stderr}");
+    assert!(
+        proj.join(".agents/skills/deploy/SKILL.md").exists(),
+        "{stderr}"
+    );
+    assert!(
+        proj.join(".agents/skills/team/SKILL.md").exists(),
+        "{stderr}"
+    );
+
+    // A second `--write` refuses; `--force` overwrites.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_top(
+            &[
+                "config",
+                "import-claude",
+                "--claude-home",
+                &home_arg,
+                "--write",
+            ],
+            &[("RADIAN_HOME", &out_arg), ("HOME", &out_arg)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_top(
+            &[
+                "config",
+                "import-claude",
+                "--claude-home",
+                &home_arg,
+                "--write",
+                "--force",
+            ],
+            &[("RADIAN_HOME", &out_arg), ("HOME", &out_arg)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    // No source is a usage error.
+    let (code, _, stderr) =
+        feed_and_wait(spawn_radian_top(&["config", "import-claude"], &[]), "").await;
+    assert_eq!(code, 2, "{stderr}");
+}
+
 /// Acceptance 6: a closed stdout is a normal stop (D21), not a panic.
 #[cfg(unix)]
 #[test]
