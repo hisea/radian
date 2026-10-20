@@ -104,7 +104,7 @@ pub use config::{
     parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path, unix_sockets_ignored_warning,
 };
-pub use context::{ContextFiles, LoadedFile, load as load_context_files};
+pub use context::{ContextFiles, ImportedFile, LoadedFile, load as load_context_files};
 pub use contrib::{
     Contribution, ContributionStore, ContributorRunner, GitContributor, NOTICE_AFTER, Segment,
     SegmentRole, StatusContributor, Tick, spawn as spawn_contributor,

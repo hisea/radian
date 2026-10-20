@@ -1851,7 +1851,8 @@ async fn turn_timeout_ends_the_turn() {
     )
     .await;
 
-    assert_eq!(code, 1);
+    // A turn that hits the deadline ends Cancelled(DeadlineExceeded): exit 3 (ADR 0044).
+    assert_eq!(code, 3, "a deadline-exceeded turn exits 3: {stderr}");
     assert!(stderr.contains("DeadlineExceeded"), "{stderr}");
     assert!(
         start.elapsed() < Duration::from_secs(6),

@@ -13,6 +13,9 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use agent_core::{AgentEvent, EventSink, RunStatus};
+use tokio::sync::mpsc::UnboundedSender;
+
+use super::jsonl::live_line;
 
 /// Reads stdin on one dedicated task and hands each line to whoever needs it next: the
 /// interactive prompt loop between turns, tool approval during one. A blocking read cannot
@@ -69,16 +72,22 @@ pub(crate) struct Ui {
     /// True while the approval prompt may read stdin (so the prompt loop must not).
     approval_may_read: AtomicBool,
     last_status: StdMutex<Option<RunStatus>>,
+    /// In `--output jsonl` mode the model text and reasoning deltas become live JSON lines on
+    /// a channel instead of raw stdout text and `[reasoning]` stderr lines. `None` is the
+    /// default mode, which is unchanged byte for byte.
+    jsonl: Option<UnboundedSender<Vec<u8>>>,
     /// The resolved per-turn model call limit (the CLI flag or its default), so a
     /// `BudgetExceeded` turn names the number it ran under.
     max_model_calls: u32,
 }
 
 impl Ui {
-    /// One UI over a run whose per-turn model call limit is `max_model_calls`.
-    pub(crate) fn new(max_model_calls: u32) -> Self {
+    /// One UI over a run whose per-turn model call limit is `max_model_calls`. `jsonl` carries
+    /// the live-line channel for `--output jsonl`, or `None` for the default mode.
+    pub(crate) fn new(max_model_calls: u32, jsonl: Option<UnboundedSender<Vec<u8>>>) -> Self {
         Self {
             max_model_calls,
+            jsonl,
             ..Self::default()
         }
     }
@@ -121,6 +130,10 @@ impl EventSink for Ui {
                 self.started.notify_one();
             }
             AgentEvent::ModelReasoningDelta { text } => {
+                if let Some(tx) = &self.jsonl {
+                    let _ = tx.send(live_line("ModelReasoningDelta", &text));
+                    return;
+                }
                 if !self.reasoning_open.swap(true, Ordering::Relaxed) {
                     eprint!("[reasoning] ");
                 }
@@ -128,6 +141,10 @@ impl EventSink for Ui {
                 let _ = std::io::stderr().flush();
             }
             AgentEvent::ModelTextDelta { text } => {
+                if let Some(tx) = &self.jsonl {
+                    let _ = tx.send(live_line("ModelTextDelta", &text));
+                    return;
+                }
                 if self.reasoning_open.swap(false, Ordering::Relaxed) {
                     eprintln!();
                 }

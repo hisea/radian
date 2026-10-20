@@ -201,6 +201,19 @@ EXPECT = {
         usage_present=True,
         repair={"call-9": "outcome_unknown_after_crash"},
     ),
+    "context-files-imports.jsonl": dict(
+        outcome="accept",
+        events=1,
+        skips=[],
+        # (文件路径, [(导入路径, 字节数)]) —— ADR 0036 C2：快照列出每份文件的导入。
+        context_imports=[
+            (
+                "/work/example/CLAUDE.md",
+                [("/work/example/docs/conventions.md", 3481)],
+            ),
+        ],
+        repair={},
+    ),
 }
 
 
@@ -537,6 +550,33 @@ def check_fixture(name, exp):
         sid, seq = exp["forked"]
         if forked.get("child_session_id") != sid or forked.get("parent_seq") != seq:
             raise Corruption(f"{name}: SessionForked {forked!r} != 期望")
+    if "context_imports" in exp:
+        # ADR 0036 C2：`config_snapshot.context.files[]` 的导入是可选的加法字段——
+        # 有导入的文件带 `imports: [{path, bytes}]`，没有的文件没有该键。
+        created = next(e["data"] for e in events if e["event"] == "SessionCreated")
+        files = created["config_snapshot"]["context"]["files"]
+        for f in files:
+            if not isinstance(f.get("path"), str) or not f["path"]:
+                raise Corruption(f"{name}: context file 的 path 必须是非空字符串")
+            if not isinstance(f.get("bytes"), int) or isinstance(f.get("bytes"), bool):
+                raise Corruption(f"{name}: context file 的 bytes 不是整数")
+            if not isinstance(f.get("truncated"), bool):
+                raise Corruption(f"{name}: context file 的 truncated 不是布尔值")
+            for imp in f.get("imports", []):
+                if set(imp) != {"path", "bytes"}:
+                    raise Corruption(f"{name}: imports 条目字段必须是 path/bytes：{imp!r}")
+                if not isinstance(imp["path"], str) or not imp["path"]:
+                    raise Corruption(f"{name}: imports.path 必须是非空字符串")
+                if not isinstance(imp["bytes"], int) or isinstance(imp["bytes"], bool):
+                    raise Corruption(f"{name}: imports.bytes 不是整数")
+        got = [
+            (f["path"], [(imp["path"], imp["bytes"]) for imp in f.get("imports", [])])
+            for f in files
+        ]
+        if got != [tuple(x) for x in exp["context_imports"]]:
+            raise Corruption(f"{name}: context_imports {got} != 期望 {exp['context_imports']}")
+        if not any(imports for _, imports in got):
+            raise Corruption(f"{name}: 期望至少一份文件带 imports")
     repair = simulate_repair(events)
     if repair != exp.get("repair", {}):
         raise Corruption(f"{name}: repair {repair} != 期望 {exp.get('repair', {})}")
@@ -757,10 +797,99 @@ def check_fixture(name, exp):
     return f"PASS {name}: 接受 {len(events)} 个事件，0 跳过，repair={repair or '∅'}"
 
 
+# `radian exec --output jsonl` 的 closing `Result` 记录（ADR 0044 §2）：它不是 journal 行，
+# 没有信封七字段，单独校验。`exec-result.jsonl` 恰好一行，以 LF 结尾。
+RESULT_FIELDS = {
+    "type", "session_id", "outcome", "exit_code", "stop_reason",
+    "turns", "usage", "cost", "text",
+}
+RESULT_OUTCOMES = {
+    "completed", "refused", "budget_exceeded", "failed",
+    "poisoned", "incomplete", "cancelled", "unknown",
+}
+RESULT_STOP_REASONS = {
+    "completed", "failed", "budget", "deadline", "max_tokens",
+    "content_filtered", "tool_use_without_calls", "refused", "cancelled", "terminated",
+}
+RESULT_USAGE_KEYS = {"input", "output", "cache_read", "cache_write"}
+
+
+def check_result_fixture(name):
+    raw = open(f"fixtures/{name}", "rb").read()
+    if not raw.endswith(b"\n"):
+        raise Corruption(f"{name}: 文件不以 LF 结尾")
+    lines = [l for l in raw.split(b"\n") if l != b""]
+    if len(lines) != 1:
+        raise Corruption(f"{name}: 期望恰好一行 Result 记录，得到 {len(lines)} 行")
+    try:
+        ev = json.loads(lines[0])
+    except json.JSONDecodeError as e:
+        raise Corruption(f"{name}: JSON 解析失败: {e}") from None
+    if not isinstance(ev, dict) or set(ev) != RESULT_FIELDS:
+        raise Corruption(
+            f"{name}: 字段集合不是 Result 的九个字段: "
+            f"{sorted(ev) if isinstance(ev, dict) else type(ev)}"
+        )
+    if ev["type"] != "Result":
+        raise Corruption(f"{name}: type {ev['type']!r} != 'Result'")
+    if not isinstance(ev["session_id"], str) or not ev["session_id"]:
+        raise Corruption(f"{name}: session_id 必须是非空字符串")
+    if ev["outcome"] not in RESULT_OUTCOMES:
+        raise Corruption(f"{name}: outcome {ev['outcome']!r} 不在 ADR 0044 §2 的集合")
+    if not isinstance(ev["exit_code"], int) or isinstance(ev["exit_code"], bool):
+        raise Corruption(f"{name}: exit_code 不是整数")
+    reason = ev["stop_reason"]
+    if not isinstance(reason, str) or not (
+        reason in RESULT_STOP_REASONS
+        or (reason.startswith("unknown:") and len(reason) > len("unknown:"))
+    ):
+        raise Corruption(f"{name}: stop_reason {reason!r} 不在 ADR 0044 §2 的集合")
+    if (
+        not isinstance(ev["turns"], int)
+        or isinstance(ev["turns"], bool)
+        or ev["turns"] < 0
+    ):
+        raise Corruption(f"{name}: turns 不是非负整数")
+    usage = ev["usage"]
+    if not isinstance(usage, dict):
+        raise Corruption(f"{name}: usage 不是对象")
+    unknown = set(usage) - RESULT_USAGE_KEYS
+    if unknown:
+        raise Corruption(f"{name}: usage 有未知字段 {sorted(unknown)}")
+    for key, value in usage.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise Corruption(f"{name}: usage.{key} 不是非负整数")
+    cost = ev["cost"]
+    if cost is not None:
+        if not isinstance(cost, dict) or set(cost) != {"micros", "incomplete", "estimated"}:
+            raise Corruption(f"{name}: cost 不是 null 也不是完整的费用对象")
+        if (
+            not isinstance(cost["micros"], int)
+            or isinstance(cost["micros"], bool)
+            or cost["micros"] < 0
+        ):
+            raise Corruption(f"{name}: cost.micros 不是非负整数")
+        for key in ("incomplete", "estimated"):
+            if not isinstance(cost[key], bool):
+                raise Corruption(f"{name}: cost.{key} 不是布尔值")
+    if not isinstance(ev["text"], str):
+        raise Corruption(f"{name}: text 不是字符串")
+    return f"PASS {name}: Result 记录形状正确"
+
+
+RESULT_FIXTURES = ["exec-result.jsonl"]
+
+
 failures = 0
 for name in sorted(EXPECT):
     try:
         print(check_fixture(name, EXPECT[name]))
+    except Corruption as e:
+        print(f"FAIL {e}")
+        failures += 1
+for name in RESULT_FIXTURES:
+    try:
+        print(check_result_fixture(name))
     except Corruption as e:
         print(f"FAIL {e}")
         failures += 1

@@ -12,6 +12,7 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::ReadError;
 use crate::fee::UsageFee;
@@ -224,6 +225,12 @@ struct Writer {
     /// Bytes written through this writer; it equals the file length while this writer is the
     /// only one holding the lock.
     written_len: u64,
+    /// A byte copy of every committed line, sent after a successful `write_all` for the
+    /// `radian exec --output jsonl` stdout stream. Installed under the same lock that every
+    /// write takes, so installing it also reports the exact prefix length the reader must
+    /// take from the file. The send is unbounded and its failure is dropped: a blocked or
+    /// gone stdout must never stall or fail a journal write.
+    tee: Option<UnboundedSender<Vec<u8>>>,
     /// The file length at the last successful fsync — the durable prefix. Every record written
     /// after it is only `write`+`flush`ed and is carried by the next sync point (ADR 0040).
     synced_len: u64,
@@ -253,6 +260,7 @@ impl Writer {
             file,
             next_seq,
             written_len,
+            tee: None,
             synced_len: written_len,
             #[cfg(feature = "testing")]
             syncs: 0,
@@ -335,6 +343,17 @@ impl SessionJournal {
     /// once, before the session runs; a second call is ignored.
     pub fn set_usage_fee(&self, fee: UsageFeeFn) {
         let _ = self.usage_fee.set(fee);
+    }
+
+    /// Installs the byte tee for `radian exec --output jsonl` and returns the file length at
+    /// that moment. The caller prints the file's first that many bytes itself (the lines
+    /// written before the tee existed) and then prints what the tee sends; because install
+    /// and every write take the same lock, no line is missed or printed twice.
+    pub fn set_tee(&self, sender: UnboundedSender<Vec<u8>>) -> u64 {
+        let mut writer = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let len = writer.written_len;
+        writer.tee = Some(sender);
+        len
     }
 
     /// The `seq` the next append will use.
@@ -728,6 +747,11 @@ fn write_locked(
     bytes.push(b'\n');
     writer.file.write_all(&bytes)?;
     writer.file.flush()?;
+    // The tee carries committed bytes only: a failed write (including the injected crash
+    // above, which returns before any byte is written) sends nothing.
+    if let Some(tee) = &writer.tee {
+        let _ = tee.send(bytes.clone());
+    }
     writer.written_len += bytes.len() as u64;
     if must_sync(event) {
         writer.file.sync_all()?;
@@ -1279,6 +1303,111 @@ fn scan_lines(file: &mut File, path: &Path) -> Result<Option<u64>, WriteError> {
 #[cfg(test)]
 mod tests {
     use super::{SessionCreatedData, SessionJournal, must_sync, session_is_live};
+    use crate::runtime::{RuntimeEvent, TurnOutcome};
+
+    fn tee_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("radian-tee-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn config_changed(revision: u64) -> RuntimeEvent {
+        RuntimeEvent::ConfigChanged {
+            revision,
+            change: serde_json::json!({"approval": "auto"}),
+        }
+    }
+
+    /// The `radian exec --output jsonl` byte tee: installing it after some lines reports the
+    /// exact prefix length, and every line written after the install arrives on the tee
+    /// byte-identical to the file's suffix — no line lost, none doubled. Mutation: delete
+    /// the `tee.send` in `write_locked` → the tee suffix is empty and this fails.
+    #[tokio::test]
+    async fn the_tee_replays_the_suffix_byte_identically() {
+        let dir = tee_dir("suffix");
+        let path = dir.join("tee.jsonl");
+        let journal = SessionJournal::create(
+            &path,
+            "tee",
+            SessionCreatedData::new("/w", serde_json::json!({})),
+        )
+        .unwrap();
+        // Lines before the install: `SessionCreated` plus two runtime events.
+        journal
+            .append_runtime_event(config_changed(1))
+            .await
+            .unwrap();
+        journal
+            .append_runtime_event(RuntimeEvent::TurnStarted {
+                turn_id: "t1".into(),
+            })
+            .await
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let prefix_len = journal.set_tee(tx) as usize;
+        // Lines after the install.
+        journal
+            .append_runtime_event(RuntimeEvent::TurnFinished {
+                turn_id: "t1".into(),
+                outcome: TurnOutcome::Completed,
+                reason: None,
+                stop_reason: None,
+            })
+            .await
+            .unwrap();
+        journal
+            .append_runtime_event(config_changed(2))
+            .await
+            .unwrap();
+        drop(journal);
+        let mut teed = Vec::new();
+        while let Some(bytes) = rx.recv().await {
+            teed.extend_from_slice(&bytes);
+        }
+        let file = std::fs::read(&path).unwrap();
+        let (prefix, suffix) = file.split_at(prefix_len);
+        // The prefix is whole lines: it ends on a line boundary and holds the three lines
+        // written before the install.
+        assert!(
+            prefix.ends_with(b"\n"),
+            "the prefix must end on a line boundary"
+        );
+        assert_eq!(prefix.iter().filter(|b| **b == b'\n').count(), 3);
+        // The tee carries the suffix exactly: the two lines written after the install.
+        assert_eq!(suffix, teed.as_slice());
+        assert_eq!(suffix.iter().filter(|b| **b == b'\n').count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed write sends nothing to the tee (the injected crash returns before any byte
+    /// is written). Mutation: move the `tee.send` above the crash seam → this fails.
+    #[tokio::test]
+    async fn a_failed_write_sends_nothing_to_the_tee() {
+        let dir = tee_dir("failed");
+        let path = dir.join("tee.jsonl");
+        let journal = SessionJournal::create(
+            &path,
+            "tee",
+            SessionCreatedData::new("/w", serde_json::json!({})),
+        )
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        journal.set_tee(tx);
+        journal.crash_at_write(1);
+        assert!(
+            journal
+                .append_runtime_event(config_changed(1))
+                .await
+                .is_err()
+        );
+        drop(journal);
+        assert!(
+            rx.recv().await.is_none(),
+            "a failed write must send nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// ADR 0040 decision 2's sync set is exactly these names; a name added to or removed from
     /// the set is a decision change, so it is pinned here as well as behaviorally.
