@@ -249,9 +249,7 @@ pub async fn open_session(
     // running (the resume path holds the session's exclusive writer lock, so no other live
     // process can own these files either). Only the resume path sweeps; a failure warns
     // once and never fails the open.
-    if resume
-        && let Some(jobs) = jobs.as_ref()
-    {
+    if resume && let Some(jobs) = jobs.as_ref() {
         let summary = jobs.sweep_unregistered();
         if let Some(error) = summary.first_error.as_deref() {
             memory_warning(&format!(

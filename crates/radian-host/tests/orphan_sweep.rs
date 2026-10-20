@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use agent_core::{NoopSink, TurnOptions};
 use radian_host::{
-    HostBindings, SessionCapability, SessionId, SessionProjection, SessionSetup,
-    build_model, open_session,
+    HostBindings, SessionCapability, SessionId, SessionProjection, SessionSetup, build_model,
+    open_session,
 };
 use radian_permissions::{ApprovalError, ApprovalRequest};
 use radian_permissions::{ApprovalOutcome, Approver, NoopAudit, Preset, Profile};
