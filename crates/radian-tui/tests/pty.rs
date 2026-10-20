@@ -1236,9 +1236,9 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
     let dir = TempDir::new("trust-session");
     let home = TempDir::new("trust-home");
     let ws = TempDir::new("trust-ws");
-    std::fs::create_dir_all(ws.path().join(".radian/skills/greet")).unwrap();
+    std::fs::create_dir_all(ws.path().join(".agents/skills/greet")).unwrap();
     std::fs::write(
-        ws.path().join(".radian/skills/greet/SKILL.md"),
+        ws.path().join(".agents/skills/greet/SKILL.md"),
         "---\nname: greet\ndescription: d\n---\nbody\n",
     )
     .unwrap();
@@ -1330,9 +1330,9 @@ async fn pty_trust_sandbox_choice_writes_the_access_record() {
     let dir = TempDir::new("trust-sandbox-session");
     let home = TempDir::new("trust-sandbox-home");
     let ws = TempDir::new("trust-sandbox-ws");
-    std::fs::create_dir_all(ws.path().join(".radian/skills/greet")).unwrap();
+    std::fs::create_dir_all(ws.path().join(".agents/skills/greet")).unwrap();
     std::fs::write(
-        ws.path().join(".radian/skills/greet/SKILL.md"),
+        ws.path().join(".agents/skills/greet/SKILL.md"),
         "---\nname: greet\ndescription: d\n---\nbody\n",
     )
     .unwrap();
@@ -1404,9 +1404,9 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
     let dir = TempDir::new("trust-session-2");
     let home = TempDir::new("trust-home-2");
     let ws = TempDir::new("trust-ws-2");
-    std::fs::create_dir_all(ws.path().join(".radian/skills/greet")).unwrap();
+    std::fs::create_dir_all(ws.path().join(".agents/skills/greet")).unwrap();
     std::fs::write(
-        ws.path().join(".radian/skills/greet/SKILL.md"),
+        ws.path().join(".agents/skills/greet/SKILL.md"),
         "---\nname: greet\ndescription: d\n---\nbody\n",
     )
     .unwrap();
@@ -7551,9 +7551,10 @@ async fn pty_a_memory_warning_is_a_transcript_notice_not_stderr() {
         100,
     );
     // Before the terminal is entered the old line went to stderr, which the alternate screen
-    // then covered: the notice is what makes it visible at all.
+    // then covered: the notice is what makes it visible at all. The `allowed-tools`
+    // declarations of every skill arrive as one merged line per session.
     assert!(
-        pty.wait_for_screen("radian: [memory] skill", wait_positive()),
+        pty.wait_for_screen("radian: [memory] 1 skill declares", wait_positive()),
         "the memory warning is not in the transcript:\n{}",
         pty.screen()
     );
