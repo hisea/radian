@@ -12,6 +12,7 @@ import json
 import shlex
 import struct
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 # The env var the trial container carries the model credential under. It is the
@@ -152,6 +153,126 @@ def build_command(
     parts += ["-p", shlex.quote(instruction)]
     parts += [">", shlex.quote(stdout_path), "2>", shlex.quote(stderr_path)]
     return " ".join(parts)
+
+
+# Journal event names that carry billed model usage
+# (`crates/radian-session/src/reader.rs`): a conversation request and a
+# summarization call. Both count — the summarizer's calls are real money.
+_USAGE_EVENT_NAMES = ("ModelUsageRecorded", "CompactionUsageRecorded")
+
+
+@dataclass(frozen=True)
+class SessionUsage:
+    """Token and cost totals summed across one trial's session journals.
+
+    `None` means "not reported", never zero: a counter no record mentioned
+    stays `None` so Harbor shows it as unknown rather than as a measured 0.
+    """
+
+    n_input_tokens: int | None = None
+    n_cache_tokens: int | None = None
+    n_output_tokens: int | None = None
+    cost_usd: float | None = None
+
+
+def _as_count(value: object) -> int | None:
+    """A reported counter, or `None` when the field is absent or misshapen."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def summarize_session_usage(sessions_dir: str | Path) -> SessionUsage:
+    """Sum usage across the `*.jsonl` session journals in `sessions_dir`.
+
+    Adds `data.usage` input/output/cache_read over both usage event names and
+    converts summed `data.fee.micros` (micro-dollars) to USD. A missing
+    directory, an unreadable file, a record without `data.usage`, and an
+    unparsable line are all skipped, never fatal: a half-written journal
+    (the trial was killed mid-turn) still reports what it recorded.
+    """
+    input_tokens = 0
+    cache_tokens = 0
+    output_tokens = 0
+    micros = 0
+    seen_input = False
+    seen_cache = False
+    seen_output = False
+    seen_fee = False
+    try:
+        files = sorted(Path(sessions_dir).glob("*.jsonl"))
+    except OSError:
+        return SessionUsage()
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if record.get("event") not in _USAGE_EVENT_NAMES:
+                continue
+            data = record.get("data")
+            if not isinstance(data, dict):
+                continue
+            usage = data.get("usage")
+            if isinstance(usage, dict):
+                count = _as_count(usage.get("input"))
+                if count is not None:
+                    input_tokens += count
+                    seen_input = True
+                count = _as_count(usage.get("cache_read"))
+                if count is not None:
+                    cache_tokens += count
+                    seen_cache = True
+                count = _as_count(usage.get("output"))
+                if count is not None:
+                    output_tokens += count
+                    seen_output = True
+            fee = data.get("fee")
+            if isinstance(fee, dict):
+                fee_micros = _as_count(fee.get("micros"))
+                if fee_micros is not None:
+                    micros += fee_micros
+                    seen_fee = True
+    return SessionUsage(
+        n_input_tokens=input_tokens if seen_input else None,
+        n_cache_tokens=cache_tokens if seen_cache else None,
+        n_output_tokens=output_tokens if seen_output else None,
+        cost_usd=micros / 1_000_000 if seen_fee else None,
+    )
+
+
+# Seconds radian keeps clear of the exec kill so the turn ends and the journal
+# is written before Harbor kills it. The task's own agent timeout never reaches
+# the agent object (Harbor applies it as an external `asyncio.wait_for` around
+# `run()`), so the only reachable deadline is the adapter-side exec timeout.
+_TURN_TIMEOUT_MARGIN_SECS = 60
+_TURN_TIMEOUT_FLOOR_SECS = 60
+
+
+def derive_turn_timeout_secs(
+    explicit: int | None, exec_timeout_secs: int | None
+) -> int | None:
+    """Settle the `--turn-timeout-secs` for one trial.
+
+    An explicit option always wins. Otherwise, when the adapter-side exec
+    timeout is set, the turn timeout is that deadline minus a margin (floored),
+    so radian wraps up and writes its journal instead of dying mid-turn. When
+    neither is set there is no reachable deadline and the flag stays off.
+    """
+    if explicit is not None:
+        return explicit
+    if exec_timeout_secs is None:
+        return None
+    return max(_TURN_TIMEOUT_FLOOR_SECS, exec_timeout_secs - _TURN_TIMEOUT_MARGIN_SECS)
 
 
 def redact_base_url(raw: str | None) -> str | None:
