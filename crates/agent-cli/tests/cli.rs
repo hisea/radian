@@ -3133,16 +3133,34 @@ fn shell_reply(id: &str, command: &str) -> Reply {
     tool_reply(id, "shell", &json!({"command": command}).to_string())
 }
 
-/// 3: a shell command asks; "allow once" runs it; the *next* identical command asks again.
-/// Runs under `--profile workspace`, the tier that still asks.
+/// A shell call that asks to leave the sandbox: the ask-mechanics tests below use these,
+/// because slice 1 of `sandbox-auto-allow-shell` lets a sandboxed `workspace` shell run
+/// without asking. An approved outside call really runs unsandboxed, so these stay on
+/// harmless `echo` commands.
+fn outside_reply(id: &str, command: &str) -> Reply {
+    tool_reply(
+        id,
+        "shell",
+        &json!({
+            "command": command,
+            "outside_sandbox": true,
+            "outside_sandbox_reason": "the test leaves the sandbox on purpose",
+        })
+        .to_string(),
+    )
+}
+
+/// 3: a shell call that leaves the sandbox asks; "allow once" runs it; the *next*
+/// identical call asks again. Runs under `--profile workspace` with `outside_sandbox`
+/// calls — a sandboxed shell no longer asks (slice 1 of `sandbox-auto-allow-shell`).
 #[tokio::test]
 async fn a_shell_command_asks_every_time_when_allowed_once() {
     let dir = scratch("shell-ask");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![
-        shell_reply("c1", "echo hi"),
-        shell_reply("c2", "echo hi"),
+        outside_reply("c1", "echo hi"),
+        outside_reply("c2", "echo hi"),
         text_reply("done"),
     ])
     .await;
@@ -3183,20 +3201,28 @@ async fn a_shell_command_asks_every_time_when_allowed_once() {
 }
 
 /// 4: "allow for this session" covers the next call in the same turn; a resumed session has
-/// no grant and asks again.
+/// no grant and asks again. Uses `outside_sandbox` calls: a sandboxed `workspace` shell
+/// no longer asks (slice 1 of `sandbox-auto-allow-shell`), and the grant never crosses
+/// the sandbox boundary.
 #[tokio::test]
 async fn allow_for_session_covers_the_turn_and_not_a_resume() {
     let sessions = fresh_session_dir();
     let dir = scratch("shell-session");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
+    let outside_args = json!({
+        "command": "echo hi",
+        "outside_sandbox": true,
+        "outside_sandbox_reason": "the test leaves the sandbox on purpose",
+    })
+    .to_string();
     let two_calls = Reply::sse(&[
         chunk(
             json!({"tool_calls": [
                 {"index": 0, "id": "c1", "type": "function",
-                 "function": {"name": "shell", "arguments": "{\"command\":\"echo hi\"}"}},
+                 "function": {"name": "shell", "arguments": outside_args}},
                 {"index": 1, "id": "c2", "type": "function",
-                 "function": {"name": "shell", "arguments": "{\"command\":\"echo hi\"}"}}
+                 "function": {"name": "shell", "arguments": outside_args.clone()}}
             ]}),
             None,
         ),
@@ -3205,7 +3231,7 @@ async fn allow_for_session_covers_the_turn_and_not_a_resume() {
     let server = MockServer::start(vec![
         two_calls,
         text_reply("done"),
-        shell_reply("c3", "echo hi"),
+        outside_reply("c3", "echo hi"),
         text_reply("done again"),
     ])
     .await;
@@ -3273,7 +3299,9 @@ async fn allow_for_session_covers_the_turn_and_not_a_resume() {
 }
 
 /// 5: an allow rule is matched at the subcommand level, so a composite command always asks.
-/// Runs under `--profile workspace`, the tier that still asks.
+/// Runs under `--profile workspace` with an allow rule: the simple command runs silent
+/// (allowed by the rule — and by the sandboxed tier since slice 1), only the composite
+/// asks.
 #[tokio::test]
 async fn a_composite_shell_command_always_asks() {
     let dir = scratch("composite");
@@ -3334,17 +3362,15 @@ async fn a_composite_shell_command_always_asks() {
     );
 }
 
-/// 6: `--approval never` turns an `ask` into a denial: the command never runs.
+/// 6: `--approval never` turns an `ask` into a denial: the command never runs. Uses an
+/// `outside_sandbox` call — a sandboxed `workspace` shell no longer asks (slice 1 of
+/// `sandbox-auto-allow-shell`).
 #[tokio::test]
 async fn never_turns_ask_into_a_denial() {
     let dir = scratch("never-deny");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let server = MockServer::start(vec![
-        tool_reply("c1", "shell", r#"{"command":"echo hi"}"#),
-        text_reply("done"),
-    ])
-    .await;
+    let server = MockServer::start(vec![outside_reply("c1", "echo hi"), text_reply("done")]).await;
 
     let (code, _, stderr) = feed_and_wait(
         spawn_radian(
@@ -3370,7 +3396,14 @@ async fn never_turns_ask_into_a_denial() {
 
     assert_eq!(code, 0, "{stderr}");
     let result = tool_result_content(&server, 1);
-    assert!(result.contains("denied"), "{result}");
+    assert!(
+        result.contains("outside the sandbox"),
+        "the denial must name what was refused: {result}"
+    );
+    assert!(
+        !result.contains("exit code: 0"),
+        "the command never runs: {result}"
+    );
 }
 
 /// `full` runs shell with no terminal and no `--yes`: nothing asks, so the command runs
@@ -3419,13 +3452,109 @@ async fn full_runs_shell_without_a_terminal_and_without_yes() {
     assert!(!result.contains("not approved"), "{result}");
 }
 
+/// Slice 1 of `sandbox-auto-allow-shell`: headless `radian exec --profile workspace`
+/// without `--yes` runs a sandboxed shell with no prompt — the tier's blanket `allow`
+/// answers it (`approver = policy`), the way `full` already did. Reverting the blanket
+/// `allow` denies the call (no terminal to ask in), so this test is that mutation's
+/// end-to-end catcher.
+#[tokio::test]
+async fn workspace_runs_a_sandboxed_shell_without_a_terminal_and_without_yes() {
+    let dir = scratch("workspace-shell-no-yes");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        shell_reply("c1", "echo $((40 + 2))"),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !stderr.contains("[y/N]"),
+        "nothing may ask for a sandboxed shell: {stderr}"
+    );
+    let result = tool_result_for(&server, 1, "c1");
+    assert!(result.contains("42"), "the command ran: {result}");
+    assert!(!result.contains("denied"), "{result}");
+    assert!(!result.contains("not approved"), "{result}");
+}
+
+/// Slice 1 of `sandbox-auto-allow-shell`: the same headless run with an
+/// `outside_sandbox` request is denied with a clear result — `ask` with no approver is
+/// denied as before, and nothing re-runs the command outside automatically. Letting it
+/// skip `ask` runs the call, so this test is that mutation's end-to-end catcher.
+#[tokio::test]
+async fn workspace_outside_sandbox_is_denied_without_a_terminal() {
+    let dir = scratch("workspace-outside-no-yes");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        outside_reply("c1", "echo SHOULD-NOT-RUN"),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let result = tool_result_for(&server, 1, "c1");
+    assert!(
+        result.contains("not approved") || result.contains("denied"),
+        "the outside call must be denied with a clear result: {result}"
+    );
+    assert!(
+        !result.contains("exit code: 0"),
+        "the command must not have run: {result}"
+    );
+}
+
 /// 7: Ctrl-C while waiting for a shell approval cancels the turn; the process does not hang.
+/// Uses an `outside_sandbox` call so there is an approval to cancel (a sandboxed
+/// `workspace` shell no longer asks since slice 1).
 #[tokio::test]
 async fn cancelling_at_the_shell_approval_does_not_hang() {
     let dir = scratch("shell-cancel");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let server = MockServer::start(vec![shell_reply("c1", "echo hi"), text_reply("done")]).await;
+    let server = MockServer::start(vec![outside_reply("c1", "echo hi"), text_reply("done")]).await;
 
     let mut child = Running::spawn(
         &[
