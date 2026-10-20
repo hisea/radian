@@ -2682,12 +2682,15 @@ async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// A compound command is never matched by an allow rule, so it always asks. Runs under
-/// `--profile workspace`, the tier that still asks (`full` allows every segment).
+/// Slice 1 of `sandbox-auto-allow-shell`: a compound runs without a prompt inside the
+/// sandbox — the tier's blanket `allow` covers every segment, so the allow rule (which
+/// never matched compounds) is irrelevant to it. The ask itself stays covered end to
+/// end by the `pty_approval_*` tests; the unit tests in `workspace_sandbox.rs` pin the
+/// unsandboxed compound ask.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
 #[allow(clippy::await_holding_lock)]
-async fn pty_a_compound_shell_command_always_asks() {
+async fn pty_a_sandboxed_compound_shell_command_runs_without_asking() {
     let _serial = pty_guard();
     let dir = TempDir::new("shell-compound");
     let ws = dir.path().join("ws");
@@ -2749,26 +2752,39 @@ async fn pty_a_compound_shell_command_always_asks() {
         pty.screen()
     );
 
-    // The compound one is not a simple command, so the allow rule cannot match it.
+    // The compound runs at once under the tier blanket: no approval box, the turn goes
+    // straight to the marker.
     pty.send(b"second\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", wait_positive()),
-        "a compound command must ask:\n{}",
-        pty.screen()
-    );
-    assert!(
-        pty.screen().contains(compound),
-        "the prompt must show the whole compound command:\n{}",
-        pty.screen()
-    );
-    pty.send(b"n");
-    assert!(
         pty.wait_for_screen("SECOND-DONE", wait_positive()),
-        "{}",
+        "the compound command did not finish:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("approve tool call?"),
+        "a sandboxed compound must not ask:\n{}",
         pty.screen()
     );
 
     pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    // The tier blanket allowed the compound: the decision is durable and audited as policy.
+    let session = std::fs::read_to_string(sessions.join("shell-compound.jsonl")).unwrap();
+    let compound_decision = session
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value["event"] == "PermissionResolved")
+        .map(|value| value["data"].clone())
+        .find(|data| data["call_id"] == "call_2")
+        .expect("the compound call must have a decision");
+    assert_eq!(
+        compound_decision["decision"], "allow",
+        "{compound_decision:#?}"
+    );
+    assert_eq!(
+        compound_decision["approver"], "policy",
+        "the tier blanket decided it: {compound_decision:#?}"
+    );
 }
 
 /// A panic inside the driver task is caught by the runtime. The UI must notice that the

@@ -3298,19 +3298,23 @@ async fn allow_for_session_covers_the_turn_and_not_a_resume() {
     assert!(stderr.contains("[y/N]"), "resume must ask again: {stderr}");
 }
 
-/// 5: an allow rule is matched at the subcommand level, so a composite command always asks.
-/// Runs under `--profile workspace` with an allow rule: the simple command runs silent
-/// (allowed by the rule — and by the sandboxed tier since slice 1), only the composite
-/// asks.
+/// Slice 1 of `sandbox-auto-allow-shell`: a compound runs without a prompt inside the
+/// sandbox — the tier's blanket `allow` covers every segment (`approver = policy`), so
+/// no allow rule is involved at all. The unsandboxed ask stays covered end to end by the
+/// `outside_sandbox` tests (`a_shell_command_asks_every_time_when_allowed_once`,
+/// `allow_for_session_covers_the_turn_and_not_a_resume`,
+/// `never_turns_ask_into_a_denial`, `every_decision_is_audited_once_with_the_right_approver`);
+/// the unit tests in `workspace_sandbox.rs` pin the unsandboxed compound ask.
 #[tokio::test]
-async fn a_composite_shell_command_always_asks() {
-    let dir = scratch("composite");
+async fn a_sandboxed_compound_shell_command_runs_without_a_prompt() {
+    let sessions = fresh_session_dir();
+    let dir = scratch("compound-sandboxed");
     let ws = dir.join("ws");
-    let outside = dir.join("outside");
     std::fs::create_dir_all(&ws).unwrap();
-    std::fs::create_dir_all(&outside).unwrap();
-    let sentinel = outside.join("escaped.txt");
-    let composite = format!("git status; touch {}", sentinel.display());
+    // Inside the workspace: the shell really runs, and a confined sandbox still lets
+    // workspace-local writes through, so the marker proves execution either way.
+    let marker = ws.join("compound-ran.txt");
+    let composite = format!("git status; touch {}", marker.display());
     let server = MockServer::start(vec![
         shell_reply("c1", "git status"),
         shell_reply("c2", &composite),
@@ -3328,38 +3332,58 @@ async fn a_composite_shell_command_always_asks() {
             ws.to_str().unwrap(),
             "--profile",
             "workspace",
-            "--allow-shell-command",
-            "git status",
+            "--session-id",
+            "s-compound",
+            "--session-dir",
+            sessions.to_str().unwrap(),
         ],
         &[],
     );
     child.write("go\n").await;
-    // The simple command is allowed by the rule; only the composite asks.
-    child.wait_for_stderr_count("[y/N]", 1).await;
-    child.write("n\n").await;
+    // No prompt to wait for: gate on the model's third request (two tool calls, then the
+    // final text) instead.
+    wait_until("both shell calls to reach the model", || {
+        server.requests().len() >= 3
+    })
+    .await;
     child.write("/exit\n").await;
     let (code, _, stderr) = child.finish().await;
 
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(
-        stderr.matches("[y/N]").count(),
-        1,
-        "only the composite may ask: {stderr}"
-    );
     assert!(
-        !sentinel.exists(),
-        "a composite command must never be let through by an allow rule"
+        !stderr.contains("[y/N]"),
+        "nothing may ask for a sandboxed shell: {stderr}"
     );
+    assert!(marker.exists(), "the compound ran: {stderr}");
     let simple = tool_result_for(&server, 1, "c1");
     assert!(
         simple.contains("$ git status") && !simple.contains("denied"),
-        "the allowed simple command ran: {simple}"
+        "the simple command ran: {simple}"
     );
-    let composite = tool_result_for(&server, 2, "c2");
+    let compound = tool_result_for(&server, 2, "c2");
     assert!(
-        composite.contains("denied"),
-        "the composite was denied: {composite}"
+        !compound.contains("denied"),
+        "the compound was not denied: {compound}"
     );
+
+    let raw = std::fs::read_to_string(sessions.join("s-compound.jsonl")).unwrap();
+    let decisions: Vec<Value> = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|value| value["event"] == "PermissionResolved")
+        .map(|value| value["data"].clone())
+        .collect();
+    for call in ["c1", "c2"] {
+        let decision = decisions
+            .iter()
+            .find(|d| d["call_id"] == call)
+            .unwrap_or_else(|| panic!("no decision for {call}: {decisions:#?}"));
+        assert_eq!(decision["decision"], "allow", "{decision:#?}");
+        assert_eq!(
+            decision["approver"], "policy",
+            "the tier blanket decided it: {decision:#?}"
+        );
+    }
 }
 
 /// 6: `--approval never` turns an `ask` into a denial: the command never runs. Uses an
