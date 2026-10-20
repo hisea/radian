@@ -21,7 +21,7 @@
 - stdin 用 Claude 的字段名：`hook_event_name`、`tool_name`、`tool_input`、`tool_response`、`cwd`、`session_id`。exit 0、exit 2、其他退出码，以及 `hookSpecificOutput.permissionDecision:"deny"` 和 `updatedInput`，含义与 Claude 相同。
 - **`allow` 与 `ask` 拒收**（与 Codex 一致，符合 ADR 0012 P1"不能放宽"）；hook 出错或超时按 ADR 0017 fail closed。
 - `matcher` 只认 Radian 的工具名。工具名和参数名**不做运行时别名**：翻译只在 `import-claude.md` 的导入命令里做（`Edit|Write` → `patch|write`、`Bash` → `shell`），并提示脚本里的 `.tool_input.file_path` 要改成 `.path`；不给 `tool_input_claude` 视图。
-- 安全：用户级 hook 直接生效；项目级 hook 进 ADR 0031 信任门，并按内容哈希确认（Codex 的做法：文件变了重新问）；`workspace` 档下 hook 在沙箱里跑；**永远不读 `.claude/settings.json` 里的 hook**，别家的项目 hook 只能经 `import-claude.md` 的一次性导入由用户自己执行。
+- 安全：用户级 hook 直接生效；项目级 hook 进 ADR 0031 信任门：目录受信任就加载，不按内容哈希确认，文件后来改了也照样加载＼�与 `mcp-servers-json.md` 同一规则）；`workspace` 档下 hook 在沙箱里跑；**永远不读 `.claude/settings.json` 里的 hook**，别家的项目 hook 只能经 `import-claude.md` 的一次性导入由用户自己执行。
 - 实现落在宿主（`radian-host`）的 `Hooks` 实现里，不改 `agent-core` 的 trait；重复调用检测之类的宿主 hook 也走这条路。
 - `Stop` 钩子一旦配置就启用续跑，不另设开关；上限 3 次固定，不加配置项。
 - `PreToolUse` 的 `updatedInput` 走 ADR 0012 的 `Rewrite`：参数再校验、不重跑 hook；新 ADR 写明。
@@ -44,7 +44,7 @@
 决定＼�：
 
 - 选 (a)：每次编辑同步跑，不做批处理，不做延后执行。
-- 编辑后检查是**项目级设置**：只在项目的 `.radian/hooks.json` 里配了命中编辑工具的 `PostToolUse` 条目时才跑（照上面的信任门与内容哈希确认）；没配就什么都不发生。Radian 不内置任何语言的检查命令，也不根据仓库里有 `Cargo.toml`、`tsconfig.json` 之类自动启用。用户级 `[hooks]` 照常可用，但仓库该跑什么检查属于仓库。
+- 编辑后检查是**项目级设置**：只在项目的 `.radian/hooks.json` 里配了命中编辑工具的 `PostToolUse` 条目时才跑（照上面的信任门：目录受信任才跑）；没配就什么都不发生。Radian 不内置任何语言的检查命令，也不根据仓库里有 `Cargo.toml`、`tsconfig.json` 之类自动启用。用户级 `[hooks]` 照常可用，但仓库该跑什么检查属于仓库。
 - (b) 延后执行不做；只有落地后的数据（每次编辑的检查实际时长、hook 启用后那 755 次自检轮降了多少）说明等待过长时再回到这里。
 - 原 `post-edit-diagnostics.md`（idea）并入本条后删除：它的"按 glob 配置的检查命令"和"通用 `post_tool` 命令 hook"就是本条的项目级 `PostToolUse`；它的第 1 层（内置、零配置、默认开的 tree-sitter 语法检查）与"不内置、不自动启用"冲突，不做。
 - 新 ADR 写明 hook 输出进入上下文的位置（紧跟在该次编辑的工具结果后）与时机（同步，该次调用返回前）。
@@ -71,8 +71,10 @@
 ## 切片 B 还剩什么（未定，不在本任务）
 
 - 项目级 `<workspace>/.radian/hooks.json`：文件形状（与用户级 `[hooks]` 同构的 JSON）、加载时机、
-  未受信任时不运行、内容哈希确认（文件变了重新问）的完整规则。prompt 设计未定：它要与项目级
-  `.mcp.json` 共用一套设计，见 `mcp-servers-json.md`。
+  未受信任时不运行。信任规则已定＼�与 `.mcp.json` 共用，见 `mcp-servers-json.md`）：
+  目录受信任就加载，不按哈希，文件改了也不重新问；信任弹窗列出将加载的 hook（事件、`matcher`、
+  `command`）；`--trust` 覆盖本次进程；会话中途改动下次启动生效。落地时同分支在 ADR 0045 §1 删掉
+  「内容哈希确认」这几个字（docs-only commit）。
 - ADR 0031 T1 的触发清单加 `.radian/hooks.json`；项目级"编辑后检查"的用法（本文件末节"编辑后检查是
   **项目级设置**"整段、「未配置项目级 `PostToolUse`」与「未受信任的项目」两条验收）；`trust.rs` 不碰。
 - 用户级 `[hooks]` 与项目级 `hooks.json` 的叠加规则（都命中时跑两次还是合并？顺序？一方 exit 2 另一方
