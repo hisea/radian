@@ -1,0 +1,14 @@
+# ADR 0008 §8：`[mcp]` 用自有形式——`[[mcp.servers]]` 条目，与 `--mcp-config`
+# 文件的 `{"servers": [...]}` 同形。宿主把它与 `--mcp-config` 合并（同 id 时命令
+# 行胜出一行警告）。
+schema_version = 1
+
+[[mcp.servers]]
+id = "files"
+command = "/work/example/mcp-files"
+args = ["--root", "/work/example"]
+
+[[mcp.servers]]
+id = "timer"
+command = "/work/example/mcp-timer"
+inherit_env = ["HOME"]

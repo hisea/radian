@@ -38,6 +38,8 @@ fn the_reader_matches_the_reference_checker() {
         ("skills-extra-paths.toml", "accept"),
         ("skills-builtin.toml", "accept"),
         ("shell-auto-background.toml", "accept"),
+        ("mcp-servers.toml", "accept"),
+        ("mcp-mcp-servers.toml", "accept"),
         ("memory-injection.toml", "accept"),
         ("integrations-herdr.toml", "accept"),
         ("control.toml", "accept"),
@@ -224,6 +226,61 @@ fn the_tui_theme_colors_fixture_is_carried_raw() {
     assert!(get("mdHeading").underline == Some(false));
 }
 
+/// `mcp-servers.toml` (ADR 0008 §8): the `[[mcp.servers]]` form is carried, two
+/// servers, no warnings, and `mcp` is never a skipped key.
+#[test]
+fn the_mcp_servers_fixture_is_carried() {
+    let (path, text) = fixture("mcp-servers.toml");
+    let config = config::parse(&path, &text).unwrap();
+    let ids: Vec<&str> = config
+        .mcp
+        .servers
+        .iter()
+        .map(|server| server.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["files", "timer"]);
+    assert!(config.mcp.warnings.is_empty(), "{:?}", config.mcp.warnings);
+    assert!(
+        !config.skipped.iter().any(|key| key == "mcp"),
+        "{:?}",
+        config.skipped
+    );
+}
+
+/// `mcp-mcp-servers.toml` (ADR 0008 §8): the shared form is carried with the `HOME`
+/// default; the remote entry is skipped with a warning and starts nothing.
+#[test]
+fn the_mcp_mcp_servers_fixture_skips_the_remote_entry() {
+    let (path, text) = fixture("mcp-mcp-servers.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.mcp.servers.len(), 1);
+    assert_eq!(config.mcp.servers[0].id, "files");
+    assert_eq!(
+        config.mcp.servers[0].inherit_env,
+        vec![std::ffi::OsString::from("HOME")]
+    );
+    assert_eq!(config.mcp.warnings.len(), 1, "{:?}", config.mcp.warnings);
+    assert!(
+        config.mcp.warnings[0].contains("skipped `web`"),
+        "{:?}",
+        config.mcp.warnings
+    );
+}
+
+/// `minimal.toml` carries its `[[mcp.servers]]` entry: the user config's example server
+/// is wired now, not skipped.
+#[test]
+fn the_minimal_fixture_mcp_server_is_wired() {
+    let (path, text) = fixture("minimal.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.mcp.servers.len(), 1);
+    assert_eq!(config.mcp.servers[0].id, "files");
+    assert!(
+        !config.skipped.iter().any(|key| key == "mcp"),
+        "{:?}",
+        config.skipped
+    );
+}
 /// `memory-injection.toml` (ADR 0021): the two keys this revision adds
 /// are read; the rest of D6's table is known but unwired, so it is reported as skipped rather
 /// than refused.
