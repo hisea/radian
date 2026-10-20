@@ -170,32 +170,77 @@ async fn sandboxed_workspace_user_ask_still_asks() {
     assert_eq!(audit.events()[0].approver, AuditApprover::User);
 }
 
-/// A compound still asks inside the sandbox unless every segment is covered by a named
-/// user `allow` rule or the read-only table: the tier's blanket `allow` covers no
-/// segment. Letting it cover one (so `echo ok; echo two` runs silent) never reaches
-/// the approver, so this test is that mutation's catcher.
+/// In a sandboxed `workspace` session the tier's blanket `allow` covers every
+/// segment — a true compound, a `cd` (even one leaving the workspace: the sandbox
+/// confines it) and a wrapper. Removing the sandboxed-workspace case (so the
+/// blanket never covers a segment) makes this ask, so this test is that
+/// mutation's catcher.
 #[tokio::test]
-async fn sandboxed_workspace_compound_still_asks() {
-    let dir = TempDir::new("sandboxed-compound");
+async fn sandboxed_workspace_blanket_covers_compound_cd_and_wrapper() {
+    let dir = TempDir::new("sandboxed-blanket-segments");
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
     let audit = Arc::new(RecordingAudit::default());
     let (hooks, approver) = hooks_with(
         Profile::workspace_write_sandboxed(dir.path()).unwrap(),
+        vec![],
+        &audit,
+    );
+    assert!(hooks.profile().shell_blanket_allow());
+    for command in [
+        "cargo fmt && cargo test",
+        "cd sub && cargo test",
+        "cd .. && cargo test",
+        "ls | xargs wc",
+    ] {
+        let decision = decide_shell(&hooks, json!({ "command": command }))
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, ToolDecision::Allow),
+            "{command:?} must be allowed inside the sandbox, got {decision:?}"
+        );
+    }
+    assert_eq!(approver.calls(), 0, "nothing sandboxed may ask");
+    let events = audit.events();
+    assert_eq!(events.len(), 4, "{events:?}");
+    for event in &events {
+        assert_eq!(event.decision, ResolvedDecision::Allow);
+        assert_eq!(event.approver, AuditApprover::Policy);
+    }
+}
+
+/// Without a sandbox the same commands still ask: no blanket `allow` covers a
+/// segment, a `cd` needs a rule plus an inside target, and a wrapper never allows.
+#[tokio::test]
+async fn unsandboxed_workspace_compound_cd_and_wrapper_still_ask() {
+    let dir = TempDir::new("unsandboxed-segments-ask");
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    let audit = Arc::new(RecordingAudit::default());
+    let (hooks, approver) = hooks_with(
+        Profile::workspace_write(dir.path()).unwrap(),
         vec![
+            ApprovalOutcome::Deny { reason: None },
+            ApprovalOutcome::Deny { reason: None },
             ApprovalOutcome::Deny { reason: None },
             ApprovalOutcome::Deny { reason: None },
         ],
         &audit,
     );
-    for command in ["echo ok; echo two", "cargo test && rm -rf x"] {
+    assert!(!hooks.profile().shell_blanket_allow());
+    for command in [
+        "cargo fmt && cargo test",
+        "cd sub && cargo test",
+        "ls | xargs wc",
+    ] {
         let decision = decide_shell(&hooks, json!({ "command": command }))
             .await
             .unwrap();
         assert!(
             matches!(decision, ToolDecision::Deny { .. }),
-            "{command:?} must ask inside the sandbox, got {decision:?}"
+            "{command:?} must ask without a sandbox, got {decision:?}"
         );
     }
-    assert_eq!(approver.calls(), 2, "both compounds must ask");
+    assert_eq!(approver.calls(), 3, "every command must reach the approver");
 }
 
 /// …while a compound whose every segment the read-only table covers stays silent.

@@ -14,10 +14,11 @@
 //!   a match for the whole rule prefix. Any segment matching denies the whole command.
 //!
 //! A compound command (`a && b`) is allowed only when **every** `&&`/`||`/`;`/`|` segment
-//! is allowed — by a user `allow` rule or by the read-only table — with the effective
-//! directory carried through `cd` segments. See [`segments`], [`WRAPPER_PROGRAMS`] and
-//! [`cd_target`]: a wrapper first token never allows, and `cd` only moves inside the
-//! `workspace` tier.
+//! is allowed — by a user `allow` rule, by the tier's blanket `allow` (`full`, or
+//! `workspace` with a sandbox in force), or by the read-only table — with the
+//! effective directory carried through `cd` segments. See [`segments`],
+//! [`WRAPPER_PROGRAMS`] and [`cd_target`]: without a blanket `allow` a wrapper
+//! first token never allows, and `cd` only moves inside the `workspace` tier.
 //!
 //! What this **cannot** see, and never claims to: shell aliases, `eval`, a called program
 //! that starts its own shell, `.`/`source`, or `sh -c "…"` where the nested command is a

@@ -138,9 +138,9 @@ impl Profile {
             rules.extend(write_under(ws));
             rules.extend([
                 // Inside the sandbox: the OS boundary, not the prompt, is what confines
-                // the command. Deliberately reason-less, so a compound segment matched
-                // only by this rule still falls through to the read-only table and then
-                // to `ask` (only a named user `allow` rule covers a segment).
+                // the command — so, like `full`, it covers every compound segment,
+                // every `cd` (even one leaving the workspace) and every wrapper.
+                // A `deny` rule still wins first, and a named `ask` rule still asks.
                 Rule::new(
                     ToolMatcher::Name("shell".into()),
                     ResourceMatcher::Any,
@@ -209,6 +209,20 @@ impl Profile {
     /// matched only by the tier's blanket `allow` still falls through to `ask`.
     pub fn is_sandboxed(&self) -> bool {
         self.sandboxed
+    }
+
+    /// Whether the tier's shell rule is a blanket `allow` (the `full` tier, or the
+    /// `workspace` tier with a sandbox in force): the permission layer trusts it as
+    /// the execution boundary, so a compound, a `cd` segment (even one leaving the
+    /// workspace — the sandbox confines it) and a wrapper segment are judged like
+    /// any other call there. Inspected from the rule set, not from the preset name,
+    /// so a custom profile without the blanket rule never counts as blanket-allowed.
+    pub fn shell_blanket_allow(&self) -> bool {
+        self.rules.iter().any(|rule| {
+            rule.action == Action::Allow
+                && matches!(&rule.tool, ToolMatcher::Name(name) if name == "shell")
+                && matches!(rule.resource, ResourceMatcher::Any)
+        })
     }
 
     /// Allows these tool names in **every** tier, with the normal rule priority: tools such as
