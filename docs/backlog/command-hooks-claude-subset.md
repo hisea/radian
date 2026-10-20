@@ -1,9 +1,9 @@
 # 外部命令 hook：与 Claude Code / Codex 同构的子集
 
-- 状态：decided＼�
+- 状态：decided＼�；编辑后 hook 的批处理方式待决，见末节
 - 顺序：生态兼容四件事的第 3/4＼�按 `context-at-imports` → `mcp-servers-json` → `command-hooks-claude-subset` → `import-claude` 做；ACP 暂定不做）
 - 涉及 ADR：新 ADR（命令 hook）；0012（hook 不能放宽权限）、0031（项目级 hook 进信任门）、0011（`stop` 钩子续跑走 inbox）、0017（hook 出错结束回合）、0016（`workspace` 档下 hook 进沙箱）
-- 来源：总报告 `docs/research/2026-10-18-area-deep-dive/README.md` 第 17 条（两个外部命令 hook）；`11-ecosystem-compat.md` §5.5、§6 ③（字段对齐）
+- 来源：总报告 `docs/research/2026-10-18-area-deep-dive/README.md` 第 17 条（两个外部命令 hook）；`11-ecosystem-compat.md` §5.5、§6 ③（字段对齐）；批处理一节来自 `8-extensibility.md` §6 ⑥ 与 的要求（数据已说明要一并考虑）
 
 ## 背景
 
@@ -25,6 +25,23 @@
 - 实现落在宿主（`radian-host`）的 `Hooks` 实现里，不改 `agent-core` 的 trait；重复调用检测之类的宿主 hook 也走这条路。
 - `Stop` 钩子一旦配置就启用续跑，不另设开关；上限 3 次固定，不加配置项。
 - `PreToolUse` 的 `updatedInput` 走 ADR 0012 的 `Rewrite`：参数再校验、不重跑 hook；新 ADR 写明。
+
+## 待决问题：编辑后 hook 的批处理＼�
+
+背景（2026-10-20 对本机 160 个 session 的 journal 统计，15,000 次工具调用）：
+
+- 含编辑（`patch`/`write`）的 assistant 消息 3,054 条，92% 只有一次编辑；同一条消息里有 ≥2 次并行编辑的只占 8%。Claude Code 的 `PostToolBatch`（一条消息里的并行调用全部结束后触发一次，再发下一次模型请求）只能覆盖这 8%，不值得单独做一个事件。
+- 跨轮的连续编辑才是主要形态：连续只做编辑的消息段 1,647 段，33% 长度 ≥2，平均 1.83 次。按每次编辑同步跑一次 `PostToolUse`，检查命令要跑 3,054 次；按段跑是 1,647 次，差 1.85 倍，而且每次都让模型等它跑完。
+- 跨轮的段在同步 hook 里识别不出来：下一次调用是不是编辑，要等模型看过这次的结果之后才知道，所以"下一次工具调用不是编辑时才跑"做不成同步规则。
+- 本机编辑后紧接着自己跑 check 命令的有 755 段，其中 310 次是类型、借用或测试失败（语法错误只有 4 次）。这些自检轮就是 `PostToolUse` 要省掉的。
+
+选项：
+
+- (a) 照 Claude Code 缺省：每次编辑同步跑。最简单，导入的脚本语义不变，exit 2 的"拒绝/反馈"原样可用；代价是 1.85 倍的检查次数，以及每次编辑都等检查跑完。`cargo check` 增量一次的实际时长还没有量。
+- (b) 延后执行：编辑成功后在后台启动 hook，不阻塞这次工具调用；同一条 hook 还在跑时又来了新编辑，杀掉旧的、重启（新的覆盖旧的）；结束后按 ADR 0037 决定 5 的通知路径进上下文（模型忙 → `inject` 到下一步；空闲 → `followup` 唤醒，计入 `maxConsecutiveWakes`）。跨轮的段自然合并成一次检查，模型不等待；代价是结果晚一轮到、挂在通知里而不是编辑结果旁边，exit 2 不再能拒绝。这与 Claude Code 的 `async: true` 相近（它也是"下一轮送达"，但不取消旧进程，每次一个进程）；本条上面写了"不做 `async`"，选 (b) 要改这句。
+- (c) 两者都给：缺省同步；`matcher` 命中编辑工具的条目可标 `async`，映射到 (b)；`import-claude` 把 `async: true` 翻成它。
+
+建议：先落 (a)，同时量两个数——每次编辑的检查实际时长、hook 启用后那 755 次自检轮降了多少；数据说明等待过长时再加 (b)。不论选哪个，新 ADR 要写明 hook 输出进入上下文的位置与时机，验收按最终选项补（选 (b) 时：连续三次编辑只有最后一次的检查结果进上下文，前两次被取消）。
 
 ## 验收
 
