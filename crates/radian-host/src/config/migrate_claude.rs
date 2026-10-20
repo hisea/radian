@@ -729,12 +729,10 @@ fn map_user_dropped(home: &Path, draft: &mut Draft) {
     } else {
         draft.note("`rules/`: not present, nothing to import");
     }
-    for rel in ["CLAUDE.local.md"] {
-        if home.join(rel).exists() {
-            draft.note(format!("`{rel}`: local-only instructions are not imported"));
-        } else {
-            draft.note(format!("`{rel}`: not present, nothing to import"));
-        }
+    if home.join("CLAUDE.local.md").exists() {
+        draft.note("`CLAUDE.local.md`: local-only instructions are not imported");
+    } else {
+        draft.note("`CLAUDE.local.md`: not present, nothing to import");
     }
     // Memory and sessions are deliberately out of scope (ADR 0021, journal semantics).
     for rel in ["MEMORY.md", "projects", "todos", "history.jsonl"] {
@@ -957,12 +955,10 @@ fn map_project_dropped(dir: &Path, draft: &mut Draft) {
             draft.note(format!("`{rel}/`: not present, nothing to import"));
         }
     }
-    for rel in ["CLAUDE.local.md"] {
-        if dir.join(rel).exists() {
-            draft.note(format!("`{rel}`: local-only instructions are not imported"));
-        } else {
-            draft.note(format!("`{rel}`: not present, nothing to import"));
-        }
+    if dir.join("CLAUDE.local.md").exists() {
+        draft.note("`CLAUDE.local.md`: local-only instructions are not imported");
+    } else {
+        draft.note("`CLAUDE.local.md`: not present, nothing to import");
     }
     for rel in [
         "MEMORY.md",
@@ -1079,13 +1075,10 @@ fn split_frontmatter(text: &str) -> (BTreeMap<String, String>, String) {
                 if let Some((key, value)) = line.split_once(':') {
                     let key = key.trim().to_owned();
                     let mut value = value.trim().to_owned();
-                    if value.len() >= 2
-                        && value.starts_with('"')
-                        && value.ends_with('"')
-                        && value.len() >= 2
-                    {
-                        value = value[1..value.len() - 1].to_owned();
-                    } else if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
+                    let quoted = value.len() >= 2
+                        && ((value.starts_with('"') && value.ends_with('"'))
+                            || (value.starts_with('\'') && value.ends_with('\'')));
+                    if quoted {
                         value = value[1..value.len() - 1].to_owned();
                     }
                     if !key.is_empty() && !key.contains(' ') && !value.is_empty() {
@@ -1165,10 +1158,16 @@ fn validate_skill(name: &str, content: &str) -> Result<(), String> {
 
 // ---------- the config draft ----------
 
+/// One translated hook entry: the event, the optional Radian matcher, and the commands.
+type HookEntry = (HookEvent, Option<String>, Vec<HookCommandDraft>);
+
+/// One translated hook command with its optional timeout in seconds.
+type HookCommandDraft = (String, Option<u64>);
+
 #[derive(Default)]
 struct Draft {
     extra_paths: Vec<String>,
-    hooks: Vec<(HookEvent, Option<String>, Vec<(String, Option<u64>)>)>,
+    hooks: Vec<HookEntry>,
     user_agents_md: Option<String>,
     user_skills: Vec<ClaudeSkill>,
     project_skills: Vec<ClaudeSkill>,
