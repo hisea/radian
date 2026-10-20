@@ -134,8 +134,9 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
     ToolSpec {
         name: "shell".into(),
         description: format!(
-            "Run a shell command with `/bin/sh -c`. {confinement} Read files with `read` \
-             and `list`, and search with `grep` and `glob`, not with `cat`, `sed`, `ls` or \
+            "Run a shell command with `/bin/sh -c`. {confinement} Read files and list \
+             directories with `read`, and search with `grep` and `glob`, not with `cat`, `sed`, \
+             `ls` or \
              `find` through `shell`: they report truncation, use less context, and run in \
              parallel, while `shell` runs alone. Each stream is capped: past the \
              budget the start and the end are kept and the middle names the discarded \

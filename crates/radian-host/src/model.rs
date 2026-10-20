@@ -186,7 +186,7 @@ impl Model for HostModel {
 }
 
 /// Removes the one-version alias specs (ADR 0043 decision 3) from every request, so the model
-/// is never offered `git_status`, `job_output`, `job_list`, `job_kill` or
+/// is never offered `list`, `git_status`, `job_output`, `job_list`, `job_kill` or
 /// `shell_output`.
 ///
 /// The alias stays in the provider's `tool_specs()` because `agent_core`'s preflight refuses a

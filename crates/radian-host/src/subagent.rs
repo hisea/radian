@@ -1,7 +1,7 @@
 //! `subagent` (ADR 0043 decision 1a): a blocking, one-shot child `radian exec`.
 //!
-//! One tool, two built-in kinds: `explore` mounts only the four read-only tools
-//! (`read list glob grep`) and `general` mounts the child's ordinary headless set. The child is
+//! One tool, two built-in kinds: `explore` mounts only the three read-only tools
+//! (`read glob grep`) and `general` mounts the child's ordinary headless set. The child is
 //! a real `radian exec` process — the **current executable** (ADR 0032: one binary) — with its
 //! own journal, its own session id and `SessionCreated.parent { relation = "subagent" }`.
 //!
@@ -179,7 +179,7 @@ fn spec() -> ToolSpec {
     ToolSpec {
         name: "subagent".into(),
         description: "Run one task in a fresh blocking child session and return its last \
-                      assistant text. `explore` (read list glob grep only) is for reading and \
+                      assistant text. `explore` (read glob grep only) is for reading and \
                       searching; `general` (the default) has this session's tools minus \
                       `subagent` itself. The child starts blank — `task` is its first input — \
                       and inherits this session's permission tier, never a wider one. Several \
@@ -360,7 +360,7 @@ impl SubagentSession {
         }
         if kind == Kind::Explore {
             args.push("--tools".into());
-            args.push("read,list,glob,grep".into());
+            args.push("read,glob,grep".into());
         }
         let route = self.current_route();
         if !route.model.is_empty() {
@@ -387,7 +387,7 @@ impl SubagentSession {
             args.push("--thinking".into());
             args.push(thinking.clone());
         }
-        // `explore` mounts exactly the four read-only tools, and MCP specs are never
+        // `explore` mounts exactly the three read-only tools, and MCP specs are never
         // filtered by `--tools`: passing the parent's config would hand the child tools
         // that can write. A `general` child keeps it — it runs the parent's own set.
         if kind != Kind::Explore

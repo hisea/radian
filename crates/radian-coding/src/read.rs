@@ -67,7 +67,8 @@ pub(crate) fn spec() -> ToolSpec {
                       line and the result names the line range and the next_offset to pass; the \
                       only exception is a first line longer than the whole budget, which is \
                       returned as a prefix with line_truncated. Binary (non-UTF-8) content is \
-                      refused."
+                      refused. A directory path lists it (entries sorted with kind and size, \
+                      symlinks never followed; `limit` caps entries)."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
@@ -121,7 +122,7 @@ const MAX_SUGGESTIONS: usize = 3;
 
 /// A missing file is the one place a typo is likelier than a wrong path: keep the `not_found`
 /// code, but when the requested directory holds names close to the one asked for, append
-/// `Did you mean …?` so the model can retry without another `list`/`glob`. Every suggestion is
+/// `Did you mean …?` so the model can retry without another `read`/`glob`. Every suggestion is
 /// a workspace-relative name inside the requested directory (see
 /// [`WorkspaceRoot::suggest_similar`]).
 fn missing_file(root: &WorkspaceRoot, user: &str, failure: ToolFailure) -> ToolFailure {
@@ -145,20 +146,6 @@ pub(crate) async fn run(
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
     let args: ReadArgs = args::parse("read", &schema(), arguments)?;
-    let budget = match args.max_bytes {
-        Some(0) => return Err(fail("read_limit_exceeded", "max_bytes must be at least 1")),
-        Some(n) if n as usize > limits.max_read_bytes => {
-            return Err(fail(
-                "read_limit_exceeded",
-                format!(
-                    "max_bytes {n} exceeds the {} byte limit",
-                    limits.max_read_bytes
-                ),
-            ));
-        }
-        Some(n) => n as usize,
-        None => limits.default_read_bytes,
-    };
     let offset = args.offset.unwrap_or(1);
     if offset < 1 {
         return Err(args::invalid(
@@ -185,12 +172,39 @@ pub(crate) async fn run(
         Ok(opened) => opened,
         Err(failure) => return Err(missing_file(root, &args.path, failure)),
     };
+    // A directory path lists it (ADR 0043 decision 1): the old `list` output, with
+    // `limit` as the entry cap. `offset` and `max_bytes` are file arguments; for a
+    // directory they are ignored, said once in the result.
+    if opened.stat.kind == crate::safe_fs::EntryKind::Dir {
+        return crate::list::run_dir(
+            limits,
+            &args.path,
+            &opened.file,
+            limit,
+            args.offset.is_some(),
+            args.max_bytes.is_some(),
+        );
+    }
     if opened.stat.kind != crate::safe_fs::EntryKind::File {
         return Err(fail(
             "not_a_file",
             format!("`{}` is not a regular file", args.path),
         ));
     }
+    let budget = match args.max_bytes {
+        Some(0) => return Err(fail("read_limit_exceeded", "max_bytes must be at least 1")),
+        Some(n) if n as usize > limits.max_read_bytes => {
+            return Err(fail(
+                "read_limit_exceeded",
+                format!(
+                    "max_bytes {n} exceeds the {} byte limit",
+                    limits.max_read_bytes
+                ),
+            ));
+        }
+        Some(n) => n as usize,
+        None => limits.default_read_bytes,
+    };
     let total = opened.stat.size;
 
     let mut reader = BufReader::new(opened.file);

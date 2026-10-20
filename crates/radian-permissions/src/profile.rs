@@ -277,10 +277,10 @@ fn memory_rules() -> Vec<Rule> {
 
 /// The read-only built-ins, allowed regardless of path: `radian-coding` enforces the
 /// workspace boundary itself for these tools, so the permission layer does not need to.
-/// `git_status` is not here: it is a one-version alias judged as `git_diff` (ADR 0043
-/// decision 3).
+/// `git_status` and `list` are not here: they are one-version aliases judged as `git_diff`
+/// and `read` (ADR 0043 decision 3).
 fn read_only() -> Vec<Rule> {
-    ["read", "list", "glob", "grep", "git_diff"]
+    ["read", "glob", "grep", "git_diff"]
         .into_iter()
         .map(|name| {
             Rule::new(
