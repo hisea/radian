@@ -38,7 +38,7 @@ fn the_reader_matches_the_reference_checker() {
         ("skills-extra-paths.toml", "accept"),
         ("skills-builtin.toml", "accept"),
         ("shell-auto-background.toml", "accept"),
-        ("subagent-explore-model.toml", "accept"),
+        ("model-smol.toml", "accept"),
         ("memory-injection.toml", "accept"),
         ("integrations-herdr.toml", "accept"),
         ("control.toml", "accept"),
@@ -225,17 +225,15 @@ fn the_tui_theme_colors_fixture_is_carried_raw() {
     assert!(get("mdHeading").underline == Some(false));
 }
 
-/// `subagent-explore-model.toml` (ADR 0043 §1): `[subagent.explore]` carries the `explore`
-/// child's route, and nothing is reported as skipped.
+/// `model-smol.toml` (ADR 0008 §1, ADR 0043 §1): `[model.smol]` carries the cheap route
+/// slot, and nothing is reported as skipped.
 #[test]
-fn the_subagent_explore_fixture_carries_the_route() {
-    let (path, text) = fixture("subagent-explore-model.toml");
+fn the_model_smol_fixture_carries_the_route() {
+    let (path, text) = fixture("model-smol.toml");
     let config = config::parse(&path, &text).unwrap();
-    assert_eq!(
-        config.subagent.explore_provider.as_deref(),
-        Some("openai-compatible")
-    );
-    assert_eq!(config.subagent.explore_model.as_deref(), Some("m-cheap"));
+    let smol = config.model.smol.as_ref().expect("smol is set");
+    assert_eq!(smol.provider.as_str(), "openai-compatible");
+    assert_eq!(smol.model.as_str(), "m-cheap");
     assert!(config.skipped.is_empty(), "{:?}", config.skipped);
 }
 

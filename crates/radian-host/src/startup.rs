@@ -211,9 +211,9 @@ pub struct SessionSettings {
     /// `[shell] auto_background_secs` (ADR 0037): a **foreground** `shell` call still
     /// running after this is adopted by the job registry in place. `None` disables adoption.
     pub shell_auto_background: Option<Duration>,
-    /// `[subagent.explore]` (ADR 0043 §1): the model an `explore` child runs on. `None`
-    /// follows the parent, exactly as `general` always does.
-    pub explore_route: Option<ModelRoute>,
+    /// `[model.smol]` (ADR 0008 §1, ADR 0043 §1): the cheap route slot. `None` follows
+    /// the parent, exactly as `general` always does; today only `explore` reads it.
+    pub smol_route: Option<ModelRoute>,
     /// `[skills] extra_paths` (ADR 0025 slice 4), resolved against the config file's directory
     /// and the user's home.
     pub skills_extra_paths: Vec<PathBuf>,
@@ -266,14 +266,11 @@ impl SessionSettings {
             compaction_settings,
             compaction_settings_for: Some(compaction_settings_for),
             shell_auto_background: config.shell.auto_background_after(),
-            explore_route: match (
-                &config.subagent.explore_provider,
-                &config.subagent.explore_model,
-            ) {
-                (Some(provider), Some(model)) => Some(ModelRoute::new(provider, model)),
-                // Unset or half-set (the reader warns and ignores a half-set table).
-                _ => None,
-            },
+            smol_route: config
+                .model
+                .smol
+                .as_ref()
+                .map(|smol| ModelRoute::new(&smol.provider, &smol.model)),
             skills_extra_paths: resolve_extra_paths(
                 &config.skills.extra_paths,
                 config.source.as_deref().and_then(Path::parent),

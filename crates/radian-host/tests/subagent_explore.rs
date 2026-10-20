@@ -1,4 +1,4 @@
-//! ADR 0043 §1: `[subagent.explore]` gives the `explore` child its own model route.
+//! ADR 0043 §1: `[model.smol]` gives the `explore` child its own model route.
 //!
 //! Three sessions, one per case, each driven in process against a mock provider with a stub
 //! child that appends the argv the tool built (one argument per line, `---` between runs).
@@ -183,12 +183,12 @@ struct Case {
 }
 
 /// Opens a parent session whose stub child records its argv: `replies` are the mock's answers
-/// in order, `explore` is the `[subagent.explore]` route (`None` follows the parent), and
+/// in order, `smol` is the `[model.smol]` route (`None` follows the parent), and
 /// `switch` is a `/model` change queued before the first turn.
 async fn open_case(
     label: &str,
     replies: Vec<Reply>,
-    explore: Option<ModelRoute>,
+    smol: Option<ModelRoute>,
     switch: Option<ModelRoute>,
 ) -> Case {
     let home = isolated_home();
@@ -246,7 +246,7 @@ async fn open_case(
                 executable: Some(child),
                 provider: "openai-compatible".into(),
                 model: "old".into(),
-                explore,
+                smol,
                 base_url: Some(server.base_url.clone()),
                 ..radian_host::SubagentParts::default()
             }),
@@ -327,7 +327,7 @@ fn route_of(argv: &[String]) -> (Option<String>, Option<String>) {
     (flag_value(argv, "--provider"), flag_value(argv, "--model"))
 }
 
-/// With `[subagent.explore]` set, the `explore` child runs on it while `general` follows the
+/// With `[model.smol]` set, the `explore` child runs on it while `general` follows the
 /// parent's startup route. The mutations (ignoring the key; applying it to `general` too)
 /// fail one of the two assertions.
 #[tokio::test]

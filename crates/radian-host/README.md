@@ -95,7 +95,7 @@ current executable, so there is only one binary (ADR 0032) — and returns its l
 (its journal, cut at 4 000 characters with a visible marker), the child session id and the usage
 and denials its journal recorded. `explore` mounts only `read glob grep`;
 `general` (the default) mounts the child's ordinary headless set, which is this session's tools
-minus `subagent`. `explore` runs on the user-level `[subagent.explore]` route (`provider` and
+minus `subagent`. `explore` runs on the user-level `[model.smol]` route (`provider` and
 `model`, the same meaning as the `[model]` route keys) when it is set, and otherwise follows
 the parent exactly as `general` always does; a half-set table warns and is ignored, and a
 project config never sets it.
@@ -105,7 +105,7 @@ The child gets the parent's **resolved** tier (`--profile` read from the live sa
 is `auto`; otherwise the child has no terminal, so every `ask` is denied and the result names
 what was denied. A `general` child always gets the parent's **live** route (`--provider` and
 `--model` read from the same slot a `/model` switch lands in); an `explore` child gets the
-`[subagent.explore]` route when one is configured. The tool is `Shared`: several calls in one reply are the parallelism. The
+`[model.smol]` route when one is configured. The tool is `Shared`: several calls in one reply are the parallelism. The
 parent turn's cancellation kills the child's whole session through the same `kill_session` /
 `signal_session` path the job supervisor uses. The depth is 1: `open_session` drops the launch
 parts when the session's own `parent` relation is `"subagent"`, so a child never mounts

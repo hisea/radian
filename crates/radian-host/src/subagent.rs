@@ -19,7 +19,7 @@
 //!   configured route. Each call reads the parent's model route out of the same config slot
 //!   a `/model` switch lands in (ADR 0026 D5) and passes `--provider`/`--model`, so a child
 //!   started after a switch runs the new model; an `explore` child instead runs
-//!   `[subagent.explore]` when the user configured one (ADR 0043 §1).
+//!   `[model.smol]` when the user configured one (ADR 0043 §1).
 //! - **The parent's `--header` values.** They are secrets, so they reach the child through its
 //!   environment ([`crate::headers::CHILD_HEADERS_ENV`]), never its argv; the child's startup
 //!   adds them to its redaction list. Config headers already reach it through the config file.
@@ -80,10 +80,10 @@ pub struct SubagentParts {
     pub provider: String,
     /// The model the parent resolved (`--model`).
     pub model: String,
-    /// The `[subagent.explore]` route (ADR 0043 §1): an `explore` child runs on it, a
+    /// The `[model.smol]` route (ADR 0043 §1): an `explore` child runs on it, a
     /// `general` child always follows the parent. `None` means `explore` follows the parent
     /// too.
-    pub explore: Option<ModelRoute>,
+    pub smol: Option<ModelRoute>,
     /// The effective endpoint override (`--base-url`), only for a provider that takes one.
     pub base_url: Option<String>,
     /// An explicit `--config` the parent read; a default or `RADIAN_CONFIG` config is inherited
@@ -418,11 +418,11 @@ impl SubagentSession {
     }
 
     /// The route the child is told to use: `general` always runs the parent's live route
-    /// ([`current_route`]); `explore` runs `[subagent.explore]` when the user configured one
+    /// ([`current_route`]); `explore` runs `[model.smol]` when the user configured one
     /// (ADR 0043 §1), else the same live route.
     fn route_for(&self, kind: Kind) -> ModelRoute {
         if kind == Kind::Explore
-            && let Some(route) = &self.parts.explore
+            && let Some(route) = &self.parts.smol
         {
             return route.clone();
         }

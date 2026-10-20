@@ -206,7 +206,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         executable: std::env::current_exe().ok(),
         provider: setup.provider_id.clone(),
         model: setup.model_name.clone(),
-        explore: setup.settings.explore_route.clone(),
+        smol: setup.settings.smol_route.clone(),
         base_url: setup.base_url.clone(),
         config: cli.config.clone(),
         headers: setup.headers.clone(),

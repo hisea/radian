@@ -379,9 +379,9 @@ pub(super) fn open_session_and_refresh(
         route_price,
         ..
     } = route;
-    // ADR 0043 §1: `[subagent.explore]` rides the shared settings into the child's launch
+    // ADR 0043 §1: `[model.smol]` rides the shared settings into the child's launch
     // parameters; it is cloned here because `settings` moves into `LeadSetup` below.
-    let explore_route = settings.explore_route.clone();
+    let smol_route = settings.smol_route.clone();
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
     // first thing that creates durable state. ADR 0032 slice 5: `LeadSetup::setup` fills what
@@ -416,7 +416,7 @@ pub(super) fn open_session_and_refresh(
                     executable: std::env::current_exe().ok(),
                     provider: provider_name.to_owned(),
                     model: model_name.to_owned(),
-                    explore: explore_route,
+                    smol: smol_route,
                     base_url: provider_ref
                         .takes_base_url_override()
                         .then(|| route.base_url.clone()),

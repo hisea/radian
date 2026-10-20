@@ -231,14 +231,14 @@ mod tests {
         );
     }
 
-    /// A project config never sets the `explore` model (ADR 0031/0043 §1: it reads only
-    /// `permissions.profile`): `[subagent.explore]` is ignored with a warning, the same way
+    /// A project config never sets the cheap route slot (ADR 0031/0043 §1: it reads only
+    /// `permissions.profile`): `[model.smol]` is ignored with a warning, the same way
     /// other keys are. The mutation (reading it) fails the tier assertion.
     #[test]
-    fn subagent_explore_in_a_project_config_is_ignored_with_a_warning() {
-        let scratch = Scratch::new("subagent");
+    fn model_smol_in_a_project_config_is_ignored_with_a_warning() {
+        let scratch = Scratch::new("smol");
         scratch.write(
-            "[subagent.explore]\nprovider = \"cheap\"\nmodel = \"m-c\"\n\
+            "[model.smol]\nprovider = \"cheap\"\nmodel = \"m-c\"\n\
              [permissions]\nprofile = \"workspace\"\n",
         );
         let read = read(&scratch.root);
@@ -246,7 +246,7 @@ mod tests {
         assert!(
             read.warnings
                 .iter()
-                .any(|warning| warning.contains("ignoring subagent")),
+                .any(|warning| warning.contains("ignoring model")),
             "the key must be named: {:?}",
             read.warnings
         );
