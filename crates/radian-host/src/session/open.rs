@@ -48,6 +48,7 @@ pub async fn open_session(
         before_driver,
         memory_warning,
         hooks_warning,
+        wake_warning,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -271,6 +272,7 @@ pub async fn open_session(
         &inbox,
         &runtime,
         hooks_warning,
+        Arc::clone(&wake_warning),
     ));
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),
@@ -465,6 +467,7 @@ pub async fn open_session(
     // live runtime-event sink, which is how the TUI's footer `jobs` item reads them (never
     // by polling the journal file).
     let turn_running = driver.turn_running_handle();
+    let idle = driver.idle_signal();
     let job_notifier = jobs.as_ref().map(|jobs| {
         let notifier = crate::job_notify::JobNotifier::new(
             Arc::clone(jobs),
@@ -472,6 +475,7 @@ pub async fn open_session(
             Arc::clone(&journal),
             Arc::clone(&turn_running),
             Arc::clone(&runtime_events),
+            wake_warning,
         );
         notifier.spawn(&runtime);
         notifier
@@ -572,6 +576,7 @@ pub async fn open_session(
         sandbox_slot,
         access_builder,
         turn_running,
+        idle,
         projection,
         queue,
         memory,

@@ -79,6 +79,10 @@ pub(crate) struct Ui {
     /// The resolved per-turn model call limit (the CLI flag or its default), so a
     /// `BudgetExceeded` turn names the number it ran under.
     max_model_calls: u32,
+    /// Runs synchronously on every `TurnStarted`, before the turn can end. `exec -p`
+    /// sets this to count started-but-unresolved turns (see
+    /// `CommandHooks::note_turn_started`); `None` elsewhere.
+    on_turn_started: StdMutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Ui {
@@ -95,6 +99,11 @@ impl Ui {
     /// True while a turn is in flight.
     pub(crate) fn busy(&self) -> bool {
         self.busy.load(Ordering::Relaxed)
+    }
+
+    /// Sets the turn-start hook (see the field). Overwrites any previous one.
+    pub(crate) fn set_turn_started_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_turn_started.lock().unwrap() = Some(hook);
     }
 
     pub(crate) fn set_approval_may_read(&self, yes: bool) {
@@ -128,6 +137,9 @@ impl EventSink for Ui {
             AgentEvent::TurnStarted => {
                 self.busy.store(true, Ordering::Relaxed);
                 self.started.notify_one();
+                if let Some(hook) = self.on_turn_started.lock().unwrap().as_ref() {
+                    hook();
+                }
             }
             AgentEvent::ModelReasoningDelta { text } => {
                 if let Some(tx) = &self.jsonl {

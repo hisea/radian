@@ -85,6 +85,15 @@ impl App {
         let replace = self.session.startup_len.min(self.session.entries.len());
         self.session.entries.splice(0..replace, block);
         self.session.startup_len = block_len;
+        // The splice shifts every later entry: the wake-budget line moves with it (like a
+        // selection anchor in `shift_anchors`), or is gone when it sat inside the replaced
+        // startup block (it never does — the block is leading and the notice is pushed
+        // later — but the guard keeps the index honest).
+        if let Some(index) = self.session.wake_notice {
+            self.session.wake_notice = index
+                .checked_sub(replace)
+                .map(|shifted| shifted + block_len);
+        }
     }
 
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
@@ -153,6 +162,33 @@ impl App {
             .push(Entry::new(EntryKind::Notice, text));
     }
 
+    /// A wake-gate degrade fired: one visible notice line per burst. The first degrade of
+    /// a burst pushes the line; a later one rewrites it with the latest count, so two
+    /// degraded notices still show one line. The next turn start clears the burst (the
+    /// line stays as plain history) and herdr reports normal again.
+    pub fn wake_budget_notice(&mut self, text: impl Into<String>) -> UpdateResult {
+        let text = text.into();
+        match self.session.wake_notice {
+            Some(index)
+                if self
+                    .session
+                    .entries
+                    .get(index)
+                    .is_some_and(|entry| entry.wake_notice) =>
+            {
+                self.session.entries[index].text = text;
+            }
+            _ => {
+                let mut entry = Entry::new(EntryKind::Notice, text);
+                entry.wake_notice = true;
+                self.session.entries.push(entry);
+                self.session.wake_notice = Some(self.session.entries.len() - 1);
+            }
+        }
+        self.session.wake_waiting = true;
+        UpdateResult::dirty()
+    }
+
     /// Applies a live event. Deltas build `live` entries; the committed message
     /// (`TranscriptAppended`) replaces them, so a dropped delta can never leave a duplicate.
     /// Returns the effects the event implies (clearing an approval prompt abandons its reply
@@ -166,6 +202,10 @@ impl App {
             AgentEvent::TurnStarted => {
                 // The turn is being written now; a `/fork` must wait for its `TurnFinished`.
                 self.session.turn_committed = false;
+                // Back to normal: a new turn ends the wake-budget burst (the notice line
+                // stays as plain history) and herdr stops reporting `wake budget`.
+                self.session.wake_notice = None;
+                self.session.wake_waiting = false;
             }
             // ADR 0027: the local turn timer starts with the model request and
             // stops with its response. The token count is the model's reported output.
@@ -803,5 +843,45 @@ mod tests {
             status: agent_core::RunStatus::Completed,
         });
         assert!(app.session.entries.is_empty());
+    }
+
+    /// Two degraded notices show one line with the latest count, and the session reports
+    /// wake-waiting for herdr until the next turn starts.
+    #[test]
+    fn two_degraded_notices_show_one_line_with_the_latest_count() {
+        let mut app = App::new("m", "s");
+        app.wake_budget_notice(
+            "wake budget used up: 1 job notices are waiting — send any message to continue",
+        );
+        app.wake_budget_notice(
+            "wake budget used up: 2 job notices are waiting — send any message to continue",
+        );
+        assert_eq!(app.session.entries.len(), 1, "one line per burst");
+        assert_eq!(
+            app.session.entries[0].text,
+            "wake budget used up: 2 job notices are waiting — send any message to continue"
+        );
+        assert_eq!(app.session.entries[0].kind, EntryKind::Notice);
+        assert!(app.session.wake_waiting);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::WakeBudget)
+        );
+        assert!(app.herdr_state_inputs().3);
+
+        // The next turn start ends the burst but keeps the line as history; a later
+        // burst pushes a fresh line.
+        app.apply_event(&AgentEvent::TurnStarted);
+        assert!(!app.session.wake_waiting);
+        assert_eq!(app.session.wake_notice, None);
+        assert_eq!(
+            app.herdr_blocked(),
+            None,
+            "herdr is back to normal on the next turn start"
+        );
+        app.wake_budget_notice(
+            "wake budget used up: 1 job notices are waiting — send any message to continue",
+        );
+        assert_eq!(app.session.entries.len(), 2);
     }
 }

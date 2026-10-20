@@ -54,6 +54,9 @@ pub struct LocalSession {
     /// Whether a turn is running right now (the driver's own flag, `false` before the first
     /// turn).
     pub(super) turn_running: Arc<std::sync::atomic::AtomicBool>,
+    /// Fired whenever the driver stops running a turn or control request. Hosts that
+    /// decide on `turn_running` wait on this instead of polling.
+    pub(super) idle: Arc<tokio::sync::Notify>,
     pub(super) projection: Arc<SessionProjection>,
     /// The pending approvals and questions (ADR 0023 U7).
     pub(super) queue: Arc<SessionQueue>,
@@ -114,10 +117,30 @@ impl LocalSession {
         self.jobs.clone()
     }
 
+    /// The background-job notifier (ADR 0037 slices 3-4), for hosts that wait on job
+    /// completion (`radian exec -p` watches its handled/degraded counts). `None` for a
+    /// host with no coding tools.
+    pub fn job_notifier(&self) -> Option<Arc<crate::job_notify::JobNotifier>> {
+        self.job_notifier.clone()
+    }
+
+    /// The user-level command hooks (ADR 0045), for hosts that wait on degraded Stop
+    /// verdicts (`radian exec -p` ends the session on these with exit 3).
+    pub fn command_hooks(&self) -> Arc<crate::CommandHooks> {
+        Arc::clone(&self.command_hooks)
+    }
+
     /// Whether a turn is running right now (the driver's flag). `false` before the first turn and
     /// between turns.
     pub fn turn_running(&self) -> bool {
         self.turn_running.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Resolves whenever the driver stops running a turn or control request. Pair with
+    /// [`LocalSession::turn_running`]: subscribe first, then check, so a clear between
+    /// the check and the wait still resolves the wait.
+    pub fn idle_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.idle)
     }
 
     pub fn projection(&self) -> &Arc<SessionProjection> {

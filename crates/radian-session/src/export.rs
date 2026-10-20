@@ -346,13 +346,22 @@ fn event_data_value(
             lane,
             source,
             wake,
-        } => json!({
-            "message": serde_json::to_value(message)?,
-            "message_id": message_id,
-            "lane": lane,
-            "source": source,
-            "wake": wake,
-        }),
+            degraded,
+        } => {
+            let mut value = json!({
+                "message": serde_json::to_value(message)?,
+                "message_id": message_id,
+                "lane": lane,
+                "source": source,
+                "wake": wake,
+            });
+            // Written only when true, like the journal writer: an ordinary export line
+            // stays shaped like the journal line it came from.
+            if *degraded {
+                value["degraded"] = serde_json::Value::Bool(true);
+            }
+            value
+        }
         EventData::InputClaimed {
             message_ids,
             turn_id,

@@ -6,9 +6,10 @@
 //! ([`RuntimeEvent::BackgroundJobStarted`] / [`RuntimeEvent::BackgroundJobSettled`]); on a
 //! settle the model should hear about it sends **one System message**: while a turn is in
 //! flight it uses the `inject` lane (context for the next step, no wake), and while the driver
-//! is idle the `followup` lane (which wakes a turn). After [`MAX_CONSECUTIVE_WAKES`]
-//! wake-started turns with no user input in between it degrades to `inject` only, so a job
-//! that starts another job cannot wake the session forever (ADR 0037 decision 3).
+//! is idle the `followup` lane (which wakes a turn). At most `MAX_WAKES_PER_WINDOW` wakes fit
+//! in any `WAKE_WINDOW` (the [`WakeGate`] rate gate, ADR 0037 decision 5); past the gate a
+//! settle degrades to `inject` only, so a job that starts another job cannot wake the session
+//! forever, while a normal worker chain (wake gaps of minutes) never fills the budget.
 //!
 //! A settle is **not** notified when the model already has it: a `job` wait (`op: "wait"`)
 //! that returned the settle, a `job` kill (`op: "kill"`), or a session-exit cleanup (the
@@ -16,13 +17,17 @@
 //! but did not ask to kill the job, so it may be waiting on it.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use agent_core::{InputSource, Message};
 use radian_coding::{JobEvent, Jobs};
 use radian_runtime::{Inbox, RuntimeEvents};
 use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};
+use tokio::sync::Notify;
+
+use super::wake_gate::WakeGate;
+use crate::hooks::HooksWarning;
 
 /// The most output bytes a completion message inlines (ADR 0037 decision 5; omp's
 /// `ASYNC_INLINE_RESULT_MAX_CHARS` idea). 4 KiB is the tail of a failing build between two
@@ -30,9 +35,13 @@ use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};
 /// `job`, the model's only channel to a job's output (ADR 0039 decision 1).
 pub const NOTIFY_INLINE_BYTES: usize = 4 << 10;
 
-/// How many consecutive wake-started turns are allowed before settles are injected only
-/// (ADR 0037 decision 3).
-pub const MAX_CONSECUTIVE_WAKES: u32 = 3;
+/// The one TUI notice line a degraded wake shows: `N` is the notices degraded since the
+/// last wake. The Stop-hook degrade reuses it (ADR 0045 §2).
+pub fn wake_budget_line(degraded: u32) -> String {
+    format!(
+        "wake budget used up: {degraded} job notices are waiting — send any message to continue"
+    )
+}
 
 /// The per-session job notifier. One per session; the host holds it for `reset_wakes`.
 pub struct JobNotifier {
@@ -50,8 +59,22 @@ pub struct JobNotifier {
     /// `jobs` item reads the start/settle pair from here, not by polling the journal file.
     /// The record is journaled first, then forwarded, like the driver's own boundaries.
     events: Arc<dyn RuntimeEvents>,
-    /// Consecutive wake-started turns with no user input in between.
-    wakes: AtomicU32,
+    /// The sliding-window wake budget (ADR 0037 decision 5): at most a window's worth of
+    /// wakes, expiring on their own with no user message needed.
+    gate: WakeGate,
+    /// Notices degraded to inject-only since the last wake. A woken turn absorbs the
+    /// waiting injects (the driver drains `next_step` at turn start), so a wake ends
+    /// the burst; a user message resets it at once.
+    degraded: AtomicU32,
+    /// The wake-budget notice line (the TUI shows it as a transcript notice, the CLI
+    /// prints it). Fired on every degrade; the TUI shows one line per burst.
+    wake: HooksWarning,
+    /// How many settles this notifier has fully handled (journaled, then injected or
+    /// followed up). `exec -p` waits until this catches up with the registry's settle
+    /// total, so a settle recorded just before the check is never missed.
+    settled_handled: AtomicU64,
+    /// Bumped after every fully handled settle, so a waiter sees each delivery.
+    settled_signal: Arc<Notify>,
 }
 
 impl JobNotifier {
@@ -61,6 +84,7 @@ impl JobNotifier {
         journal: Arc<SessionJournal>,
         turn_running: Arc<AtomicBool>,
         events: Arc<dyn RuntimeEvents>,
+        wake: HooksWarning,
     ) -> Arc<Self> {
         Arc::new(Self {
             jobs: Arc::downgrade(&jobs),
@@ -68,7 +92,11 @@ impl JobNotifier {
             journal,
             turn_running,
             events,
-            wakes: AtomicU32::new(0),
+            gate: WakeGate::new(),
+            degraded: AtomicU32::new(0),
+            wake,
+            settled_handled: AtomicU64::new(0),
+            settled_signal: Arc::new(Notify::new()),
         })
     }
 
@@ -101,14 +129,48 @@ impl JobNotifier {
         });
     }
 
-    /// A user message resets the wake budget (ADR 0037 decision 3).
+    /// A user message resets the wake budget (ADR 0037 decision 3's reset survives the
+    /// rate gate: the window recovers on its own, and a user message clears it at once).
     pub fn reset_wakes(&self) {
-        self.wakes.store(0, Ordering::SeqCst);
+        self.gate.reset_wakes();
+        self.degraded.store(0, Ordering::SeqCst);
     }
 
-    /// How many wake-started turns are outstanding (tests).
+    /// Wakes inside the window right now (tests).
     pub fn wakes(&self) -> u32 {
-        self.wakes.load(Ordering::SeqCst)
+        self.gate.wakes()
+    }
+
+    /// How many notices were degraded since the last wake (tests). A woken turn absorbs
+    /// the waiting injects, so a wake resets this to zero; a user message does too.
+    pub fn degraded(&self) -> u32 {
+        self.degraded.load(Ordering::SeqCst)
+    }
+
+    /// How many settles have been fully handled (journaled, then injected or followed
+    /// up). Only moves forward.
+    pub fn settled_handled(&self) -> u64 {
+        self.settled_handled.load(Ordering::SeqCst)
+    }
+
+    /// Resolves after every fully handled settle. A waiter re-checks its exit condition
+    /// on each one.
+    pub fn settled_signal(&self) -> Arc<Notify> {
+        Arc::clone(&self.settled_signal)
+    }
+
+    /// How many idle settles the wake gate degraded to inject-only. Each one is a notice
+    /// no turn will ever start for. `exec -p` ends the session on these (exit 3) instead
+    /// of waiting.
+    pub fn degraded_pending(&self) -> u64 {
+        u64::from(self.degraded.load(Ordering::SeqCst))
+    }
+
+    /// Marks one settle fully handled: the journal write and the inject/followup have
+    /// both returned. Called for every settle, notified or not.
+    fn note_handled(&self) {
+        self.settled_handled.fetch_add(1, Ordering::SeqCst);
+        self.settled_signal.notify_one();
     }
 
     /// Handles one lifecycle event: write the durable record, forward it on the live
@@ -143,6 +205,7 @@ impl JobNotifier {
                 let _ = self.journal.append_runtime_event(record.clone()).await;
                 self.events.on_runtime_event(&record);
                 if !notify {
+                    self.note_handled();
                     return;
                 }
                 let text = self.completion_message(&id, &state, duration_ms);
@@ -150,15 +213,29 @@ impl JobNotifier {
                 if self.turn_running.load(Ordering::SeqCst) {
                     // Busy: context for the running turn, no wake (ADR 0037 decision 3).
                     let _ = self.inbox.inject(text, source).await;
-                } else if self.wakes.load(Ordering::SeqCst) < MAX_CONSECUTIVE_WAKES {
-                    // Idle: wake a turn, up to the cap.
+                } else if self.gate.wake_allowed() {
+                    // Idle: wake a turn, up to the rate gate. The woken turn absorbs the
+                    // waiting injects, so a wake also ends the degrade burst: the count
+                    // (and the herdr `wake budget` label, cleared at turn start) does not
+                    // wait for a user message.
                     if self.inbox.followup(text, source).await.is_ok() {
-                        self.wakes.fetch_add(1, Ordering::SeqCst);
+                        self.gate.note_wake();
+                        self.degraded.store(0, Ordering::SeqCst);
                     }
                 } else {
-                    // The cap is reached: inject only, no wake.
-                    let _ = self.inbox.inject(text, source).await;
+                    // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): the rate gate is
+                    // full, so this settle is injected only and wakes nothing. The durable
+                    // record says so (`degraded`), and the TUI/herdr legs hear it through
+                    // the wake notice. This `else` branch is the single degrade point:
+                    // keep its shape (gate check above, marked `inject` here). `exec -p`
+                    // ends the session on these (exit 3) instead of waiting for a turn
+                    // that cannot come.
+                    if self.inbox.inject_degraded(text, source).await.is_ok() {
+                        let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
+                        (self.wake)(&wake_budget_line(degraded));
+                    }
                 }
+                self.note_handled();
             }
         }
     }

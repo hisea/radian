@@ -60,11 +60,15 @@ impl SkillSource {
 }
 
 /// The built-in skills, compiled in (ADR 0025; the `diagrams` skill was deleted by
-/// ADR 0042's supplement, so `theme-import` is the only one). `(name, SKILL.md text)`.
-pub const BUILTIN: &[(&str, &str)] = &[(
-    "theme-import",
-    include_str!("../../skills/theme-import/SKILL.md"),
-)];
+/// ADR 0042's supplement). `(name, SKILL.md text)`.
+pub const BUILTIN: &[(&str, &str)] = &[
+    (
+        "theme-import",
+        include_str!("../../skills/theme-import/SKILL.md"),
+    ),
+    ("init", include_str!("../../skills/init/SKILL.md")),
+    ("review", include_str!("../../skills/review/SKILL.md")),
+];
 
 /// One discovered skill. `path` is the `SKILL.md` (absolute); `dir` is its directory, the base
 /// for relative paths in the body (ADR 0025 S3). For a built-in skill `body` is the embedded
@@ -1331,19 +1335,50 @@ mod tests {
         );
     }
 
-    /// `[skills] builtin = false` turns the built-in off; `disabled` turns it off by name.
+    /// A user-level `review` skill wins over the built-in `review`; the other built-ins
+    /// still load (catches: the built-in `review` cannot be overridden).
     #[test]
-    fn builtin_false_and_disabled_turn_the_builtin_off() {
+    fn a_user_review_skill_overrides_the_builtin_review() {
+        let scratch = Scratch::new("builtin-review-override");
+        scratch.skill("review", &frontmatter("review", "My own review."));
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[], true, &[]);
+        let review: Vec<&Skill> = discovery
+            .skills
+            .iter()
+            .filter(|skill| skill.name == "review")
+            .collect();
+        assert_eq!(review.len(), 1, "only one wins");
+        assert_eq!(review[0].source, SkillSource::User);
+        assert_eq!(review[0].description, "My own review.");
+        // The sibling built-ins are untouched.
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"init"), "{names:?}");
+        assert!(names.contains(&"theme-import"), "{names:?}");
+        assert!(
+            discovery.warnings.iter().any(|w| w.contains("shadows")),
+            "{:?}",
+            discovery.warnings
+        );
+    }
+
+    /// `[skills] builtin = false` turns every built-in off; `disabled` turns built-ins off
+    /// by name, leaving the rest (catches: `disabled` is ignored for built-ins, so a
+    /// disabled `review` still loads).
+    #[test]
+    fn builtin_false_and_disabled_turn_builtins_off() {
         assert!(
             discover_with_extras(None, &[], false, &[])
                 .skills
                 .is_empty()
         );
-        assert!(
-            discover_with_extras(None, &[], true, &["theme-import".to_owned()])
-                .skills
-                .is_empty()
-        );
+        // `disabled = ["review"]` hides only `review`.
+        let discovery = discover_with_extras(None, &[], true, &["review".to_owned()]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["theme-import", "init"], "{names:?}");
+        // `disabled = ["theme-import"]` hides only `theme-import`.
+        let discovery = discover_with_extras(None, &[], true, &["theme-import".to_owned()]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["init", "review"], "{names:?}");
     }
 
     /// ADR 0029: the compiled-in `theme-import` skill is discovered,
@@ -1370,6 +1405,64 @@ mod tests {
             "{:?}",
             notices(&discovery.skills)
         );
+    }
+
+    /// The built-in `init` and `review` skills are discovered as `[builtin]` with embedded
+    /// bodies, listed by `/skills`, and kept out of nothing: `builtin = false` hides them
+    /// (covered by `builtin_false_and_disabled_turn_builtins_off`). Dropping either name
+    /// from `BUILTIN` fails the `expect` below, so this catches that mutation.
+    #[test]
+    fn the_builtin_init_and_review_skills_are_discovered_listed_and_expandable() {
+        let discovery = discover_with_extras(None, &[], true, &[]);
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        for name in ["init", "review"] {
+            let skill = discovery
+                .skills
+                .iter()
+                .find(|skill| skill.name == name)
+                .unwrap_or_else(|| panic!("the built-in {name} skill"));
+            assert_eq!(skill.source, SkillSource::Builtin);
+            assert!(skill.body.is_some(), "the body is embedded");
+            assert!(!skill.description.is_empty(), "{name} has a description");
+            assert!(
+                notices(&discovery.skills)
+                    .iter()
+                    .any(|line| line.contains(name) && line.contains("[builtin]")),
+                "{name} is listed as [builtin]: {:?}",
+                notices(&discovery.skills)
+            );
+            // Expandable through `/skill:`: the body survives the frame.
+            let expanded = expand(skill, "").unwrap();
+            assert!(
+                expanded.contains(&format!("<skill name={name:?}")),
+                "{expanded}"
+            );
+            assert!(
+                !expanded.contains("description:"),
+                "frontmatter stripped: {expanded}"
+            );
+        }
+        // The bodies carry the decided behavior, not just a frame (catches: a gutted file).
+        let init = discovery
+            .skills
+            .iter()
+            .find(|skill| skill.name == "init")
+            .expect("the built-in init skill");
+        let body = expand(init, "").unwrap();
+        assert!(body.contains("64 KiB"), "the ADR 0036 limit: {body}");
+        assert!(body.contains("verified"), "verified vs unverified: {body}");
+        let review = discovery
+            .skills
+            .iter()
+            .find(|skill| skill.name == "review")
+            .expect("the built-in review skill");
+        let body = expand(review, "").unwrap();
+        assert!(
+            body.contains("`general`"),
+            "parallel general subagents: {body}"
+        );
+        assert!(body.contains("P0"), "P0–P3 grades: {body}");
+        assert!(body.contains("ship"), "the ship/no-ship verdict: {body}");
     }
 
     #[test]

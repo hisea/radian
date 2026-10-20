@@ -51,6 +51,19 @@ impl From<radian_host::PiMigrateError> for OutputError {
     }
 }
 
+impl From<radian_host::ClaudeMigrateError> for OutputError {
+    fn from(error: radian_host::ClaudeMigrateError) -> Self {
+        let code = match error {
+            radian_host::ClaudeMigrateError::MissingSource => 2,
+            _ => 1,
+        };
+        Self::Failed {
+            message: error.to_string(),
+            code,
+        }
+    }
+}
+
 impl From<radian_host::StdoutError> for OutputError {
     fn from(error: radian_host::StdoutError) -> Self {
         match error {
