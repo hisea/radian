@@ -333,6 +333,8 @@ mod tests {
         assert!(DEFAULT_ROLE.contains("/memory add"));
         assert!(DEFAULT_ROLE.contains("~/.agents/skills/"));
         assert!(DEFAULT_ROLE.contains("with `shell`"));
+        assert!(DEFAULT_ROLE.contains("`read` over `ls`"));
+        assert!(!DEFAULT_ROLE.contains("`list` over"));
     }
 
     /// Layer 1 is the built-in default role, and `--system` replaces it. The hook writes the
