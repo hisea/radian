@@ -166,35 +166,78 @@ pub(crate) async fn run(
         None => None,
     };
 
+    let scan = BlockingRead {
+        root: root.clone(),
+        limits: *limits,
+        path: args.path,
+        offset,
+        limit,
+        max_bytes: args.max_bytes,
+        offset_given: args.offset.is_some(),
+        max_bytes_given: args.max_bytes.is_some(),
+    };
+    // The opens, the read and the listing below are synchronous and never yield, so they
+    // run on the blocking pool: `read` calls batched in one Core task overlap instead of
+    // queueing behind each other. Cancellation drops this future; the blocking read then
+    // runs on to the end in the background (read-only, so nothing is written) and its
+    // result is never written back: Core's own `cancelled` wins the race.
+    match tokio::task::spawn_blocking(move || read_blocking(scan)).await {
+        Ok(result) => result,
+        Err(error) => match error.try_into_panic() {
+            Ok(payload) => std::panic::resume_unwind(payload),
+            Err(_) => Err(fail("internal", "the read did not finish")),
+        },
+    }
+}
+
+/// Everything `run` does after argument parsing: the opens, the bounded read or the
+/// directory listing, and the rendering. Synchronous by construction (see `run`); the body
+/// is the old `run` tail, order of checks, limits, outputs and errors unchanged.
+struct BlockingRead {
+    root: WorkspaceRoot,
+    limits: Limits,
+    path: String,
+    offset: i64,
+    limit: Option<usize>,
+    max_bytes: Option<u64>,
+    offset_given: bool,
+    max_bytes_given: bool,
+}
+
+fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
+    let BlockingRead {
+        root,
+        limits,
+        path,
+        offset,
+        limit,
+        max_bytes,
+        offset_given,
+        max_bytes_given,
+    } = scan;
+    let limits = &limits;
     // A directory path lists it (ADR 0043 decision 1): the old `list` output, with
     // `limit` as the entry cap. `offset` and `max_bytes` are file arguments; for a
     // directory they are ignored, said once in the result. The directory is opened
     // through the root's directory fd and listed through that fd (ADR 0039 decision 2).
     // `open_dir` is tried first because `open_read` cannot open the root itself (an
     // empty relative path is not a file name); a file falls through to the read below.
-    if let Ok(dir) = root.open_dir(&args.path) {
-        return crate::list::run_dir(
-            limits,
-            &args.path,
-            &dir,
-            limit,
-            args.offset.is_some(),
-            args.max_bytes.is_some(),
-        );
+    if let Ok(dir) = root.open_dir(&path) {
+        return crate::list::run_dir(limits, &path, &dir, limit, offset_given, max_bytes_given);
     }
     // ADR 0039 decision 2: the file is opened through the root's directory fd, one
     // `openat(O_NOFOLLOW)` per component; it is never re-opened by path after a check.
-    let opened = match root.open_read(&args.path) {
+    let opened = match root.open_read(&path) {
         Ok(opened) => opened,
-        Err(failure) => return Err(missing_file(root, &args.path, failure)),
+        Err(failure) => return Err(missing_file(&root, &path, failure)),
     };
     if opened.stat.kind != crate::safe_fs::EntryKind::File {
         return Err(fail(
             "not_a_file",
-            format!("`{}` is not a regular file", args.path),
+            format!("`{path}` is not a regular file"),
         ));
     }
-    let budget = match args.max_bytes {
+    let budget = match max_bytes {
         Some(0) => return Err(fail("read_limit_exceeded", "max_bytes must be at least 1")),
         Some(n) if n as usize > limits.max_read_bytes => {
             return Err(fail(
@@ -211,9 +254,9 @@ pub(crate) async fn run(
     let total = opened.stat.size;
 
     let mut reader = BufReader::new(opened.file);
-    let outcome = read_stream(&mut reader, &args.path, total, budget, offset, limit)?;
+    let outcome = read_stream(&mut reader, &path, total, budget, offset, limit)?;
 
-    let structured = outcome.structured(&args.path, total);
+    let structured = outcome.structured(&path, total);
     Ok(ToolOutput {
         content: vec![ContentPart::text(outcome.content)],
         structured: Some(structured),
