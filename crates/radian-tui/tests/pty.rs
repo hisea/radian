@@ -3461,6 +3461,10 @@ async fn pty_the_default_tier_is_full_with_no_sandbox() {
         summary.contains("no sandbox"),
         "the default must say there is no sandbox: {summary:?}"
     );
+    assert!(
+        summary.contains("no prompts"),
+        "the default must say nothing prompts: {summary:?}"
+    );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
@@ -11968,6 +11972,11 @@ async fn pty_access_full_requires_confirmation_and_esc_cancels() {
         pty.screen()
     );
     assert!(
+        pty.wait_for_screen("shows no prompts", wait_positive()),
+        "the confirmation must say nothing prompts:\n{}",
+        pty.screen()
+    );
+    assert!(
         !pty.screen().contains("access: full"),
         "the tier must not switch before confirmation:\n{}",
         pty.screen()
@@ -12033,7 +12042,7 @@ async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
         110,
     );
     assert!(
-        pty.wait_for_screen("full (project)", wait_positive()),
+        pty.wait_for_screen("full · no prompts (project)", wait_positive()),
         "the remembered tier must apply and be marked:\n{}",
         pty.screen()
     );

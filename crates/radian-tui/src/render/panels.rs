@@ -185,8 +185,9 @@ pub(super) fn trust_height(
 }
 
 /// The `/access full` confirmation (ADR 0038 slice 2, ADR 0035): the shared panel
-/// with a warning line, the three choices through [`crate::select_list`], and the hardcoded
-/// key hints. The default cursor is `cancel`, so Enter does not open the sandbox.
+/// with two warning lines — no sandbox, and no prompts — the three choices through
+/// [`crate::select_list`], and the hardcoded key hints. The default cursor is `cancel`, so
+/// Enter does not open the sandbox.
 pub fn access_panel(
     wizard: &AccessWizard,
     width: usize,
@@ -201,10 +202,15 @@ pub fn access_panel(
         .collect();
     let list =
         crate::select_list::view(theme, &items, "", wizard.cursor, items.len(), inner, ascii);
-    let mut panel = crate::panel::Panel::new("/access full").row(Line::from(Span::styled(
-        "full means no sandbox: commands run with your full access",
-        theme.text,
-    )));
+    let mut panel = crate::panel::Panel::new("/access full")
+        .row(Line::from(Span::styled(
+            "full means no sandbox: commands run with your full access",
+            theme.text,
+        )))
+        .row(Line::from(Span::styled(
+            "full shows no prompts: allowed calls run without asking",
+            theme.text,
+        )));
     for line in list.lines {
         panel = panel.row(line);
     }

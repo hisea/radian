@@ -2714,8 +2714,12 @@ async fn full_is_the_default_and_no_write_tools_without_a_workspace() {
 
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("done"), "{stdout}");
-    // The default is named on startup, and it is `full` with no sandbox.
+    // The default is named on startup, and it is `full` with no sandbox and no prompts.
     assert!(stderr.contains("[profile] full"), "{stderr}");
+    assert!(
+        stderr.contains("no prompts"),
+        "the default must say nothing prompts: {stderr}"
+    );
     assert!(
         stderr.contains("[sandbox] no sandbox:"),
         "the default must say there is no sandbox: {stderr}"
