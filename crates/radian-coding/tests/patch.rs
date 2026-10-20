@@ -779,3 +779,189 @@ async fn each_edit_reports_its_own_matching_layer() {
         ])
     );
 }
+
+// ---------- ambiguous positions ----------
+
+/// Three occurrences: every one is listed with its line number and its line's text, and the
+/// file is unchanged.
+#[tokio::test]
+async fn ambiguous_patch_lists_each_occurrence_line() {
+    let dir = TempDir::new("patch-ambiguous-list");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("f.txt"), "x one\nkeep\nx two\nkeep\nx three\n").unwrap();
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({"path": "f.txt", "old": "x", "new": "y"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "patch_ambiguous", "{failure:?}");
+    assert!(failure.message.contains("3 times"), "{failure:?}");
+    assert!(
+        failure.message.contains("the file is unchanged"),
+        "the guarantee is kept: {}",
+        failure.message
+    );
+    for (lineno, preview) in [(1, "x one"), (3, "x two"), (5, "x three")] {
+        assert!(
+            failure.message.contains(&format!("{lineno}: {preview}")),
+            "occurrence at line {lineno} is listed: {}",
+            failure.message
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "x one\nkeep\nx two\nkeep\nx three\n"
+    );
+}
+
+/// Seven occurrences: only the first five are listed, then an "and 2 more" line.
+#[tokio::test]
+async fn ambiguous_patch_lists_five_and_names_the_rest() {
+    let dir = TempDir::new("patch-ambiguous-five");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let content = (1..=7)
+        .map(|i| format!("dup line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(root.join("f.txt"), &content).unwrap();
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({"path": "f.txt", "old": "dup", "new": "DUP"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "patch_ambiguous", "{failure:?}");
+    assert!(failure.message.contains("7 times"), "{failure:?}");
+    for lineno in 1..=5 {
+        assert!(
+            failure
+                .message
+                .contains(&format!("{lineno}: dup line {lineno}")),
+            "occurrence {lineno} is listed: {}",
+            failure.message
+        );
+    }
+    assert!(
+        !failure.message.contains("6: dup line 6"),
+        "the sixth occurrence is not listed in full: {}",
+        failure.message
+    );
+    assert!(
+        failure.message.contains("and 2 more"),
+        "the rest are counted: {}",
+        failure.message
+    );
+}
+
+/// A multi-edit ambiguous error still names its edit and now lists the positions too.
+#[tokio::test]
+async fn ambiguous_multi_edit_names_the_edit_and_lists_lines() {
+    let dir = TempDir::new("patch-ambiguous-multi");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("f.txt"), "keep x x\n").unwrap();
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "keep", "new": "KEEP"},
+                {"old": "x", "new": "y"}
+            ]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "patch_ambiguous", "{failure:?}");
+    assert!(
+        failure.message.starts_with("edit 2:"),
+        "the second edit is named: {}",
+        failure.message
+    );
+    assert!(failure.message.contains("2 times"), "{failure:?}");
+    assert!(
+        failure.message.contains("1: keep x x"),
+        "the occurrence line is listed: {}",
+        failure.message
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "keep x x\n"
+    );
+}
+
+/// A CRLF file with three far-apart occurrences: the ambiguous error lists the content's
+/// line numbers (20, 40, 60 — `locate` maps every layer back to content offsets, so the
+/// LF-view/content drift never leaks in) and no preview carries a `\r`. Fails if
+/// `ambiguous` is passed the LF view text instead of the original `content` (it then
+/// reports 21, 43, 61 with the wrong lines' text).
+#[tokio::test]
+async fn ambiguous_crlf_reports_content_lines_without_cr() {
+    let dir = TempDir::new("patch-ambiguous-crlf");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut content = String::new();
+    for i in 1..=60 {
+        if i == 20 || i == 40 || i == 60 {
+            content.push_str(&format!("line {i} needle\r\n"));
+        } else {
+            content.push_str(&format!("line {i} filler\r\n"));
+        }
+    }
+    std::fs::write(root.join("f.txt"), &content).unwrap();
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({"path": "f.txt", "old": "needle", "new": "NEEDLE"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "patch_ambiguous", "{failure:?}");
+    assert!(
+        failure.message.contains("3 times"),
+        "three occurrences: {}",
+        failure.message
+    );
+    let listed: Vec<&str> = failure
+        .message
+        .lines()
+        .skip_while(|line| *line != "Occurrences:")
+        .skip(1)
+        .take_while(|line| !line.starts_with("..."))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            "20: line 20 needle",
+            "40: line 40 needle",
+            "60: line 60 needle"
+        ],
+        "exactly lines 20, 40 and 60: {}",
+        failure.message
+    );
+    assert!(
+        !failure.message.contains('\r'),
+        "no preview carries a CR: {:?}",
+        failure.message
+    );
+    assert_eq!(
+        std::fs::read(root.join("f.txt")).unwrap(),
+        content.as_bytes(),
+        "an ambiguous match changes nothing"
+    );
+}

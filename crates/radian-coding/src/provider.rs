@@ -39,6 +39,11 @@ pub struct Limits {
     pub default_grep_matches_per_file: usize,
     /// Hard cap on a model-supplied `grep` `context` line count.
     pub max_grep_context: usize,
+    /// Hard cap on `grep`'s total output bytes (match and context lines plus the
+    /// truncation notes). Past it the tool stops adding whole lines and ends with one
+    /// note naming the byte limit and how to narrow the search. Aligned with
+    /// `default_read_bytes`: one tool result should not dominate the context.
+    pub max_grep_output_bytes: usize,
     /// Output cap for `git_diff`.
     pub max_git_output_bytes: usize,
     /// How long a git invocation may run.
@@ -86,7 +91,8 @@ impl Default for Limits {
             default_grep_matches: 200,
             default_grep_matches_per_file: 50,
             max_grep_context: 30,
-            max_git_output_bytes: 1 << 20, // 1 MiB
+            max_grep_output_bytes: 64 << 10, // 64 KiB, aligned with `read`'s default
+            max_git_output_bytes: 1 << 20,   // 1 MiB
             git_timeout: Duration::from_secs(10),
             // Per stream, and aligned with `read`'s default budget: 64 KiB is enough for the
             // interesting part of a build or test log, and a truncated run can be repeated

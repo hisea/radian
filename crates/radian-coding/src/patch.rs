@@ -40,6 +40,13 @@ struct PatchEdit {
 /// How many lines of the closest region a not-found result shows.
 const CLOSEST_REGION_LINES: usize = 8;
 
+/// How many ambiguous occurrences are listed with line numbers before the "and N more" line.
+const MAX_AMBIGUOUS_LISTED: usize = 5;
+
+/// How wide an ambiguous occurrence's line preview may be, in characters (an over-long line
+/// carries a trailing ellipsis instead of growing the error without bound).
+const AMBIGUOUS_PREVIEW_WIDTH: usize = 120;
+
 pub(crate) fn schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -149,7 +156,7 @@ pub(crate) async fn run(
     let mut resolved = Vec::with_capacity(specs.len());
     for (index, spec) in specs.iter().enumerate() {
         resolved.push(resolve_edit(
-            &view, &args.path, spec, index, multiple, crlf,
+            &view, &content, &args.path, spec, index, multiple, crlf,
         )?);
     }
     check_conflicts(&args.path, &resolved)?;
@@ -284,6 +291,7 @@ struct ResolvedEdit {
 /// by its 1-based number when the call carries more than one.
 fn resolve_edit(
     view: &LfView,
+    content: &str,
     path: &str,
     spec: &PatchEdit,
     index: usize,
@@ -303,16 +311,7 @@ fn resolve_edit(
     };
     if ranges.len() > 1 && !spec.replace_all {
         return Err(number_edit(
-            fail(
-                "patch_ambiguous",
-                format!(
-                    "`old` appears {} times in `{}` (matched by {}); refusing to guess which \
-                     one; the file is unchanged",
-                    ranges.len(),
-                    path,
-                    layer.name()
-                ),
-            ),
+            ambiguous(content, path, layer, &ranges),
             index,
             multiple,
         ));
@@ -336,6 +335,50 @@ fn number_edit(mut failure: ToolFailure, index: usize, multiple: bool) -> ToolFa
 
 fn edit_message(index: usize, message: &str) -> String {
     format!("edit {}: {message}", index + 1)
+}
+
+/// The refusal for text every layer located more than once: the existing first sentence and
+/// the file-is-unchanged guarantee, plus up to [`MAX_AMBIGUOUS_LISTED`] occurrence line
+/// numbers with each line's own text, then an "and N more" line when more remain.
+fn ambiguous(content: &str, path: &str, layer: Layer, ranges: &[Range<usize>]) -> ToolFailure {
+    let mut message = format!(
+        "`old` appears {} times in `{path}` (matched by {}); refusing to guess which one; \
+         the file is unchanged",
+        ranges.len(),
+        layer.name()
+    );
+    message.push_str("\nOccurrences:");
+    let shown = ranges.len().min(MAX_AMBIGUOUS_LISTED);
+    for range in &ranges[..shown] {
+        let (lineno, preview) = occurrence_preview(content, range.start);
+        message.push_str(&format!("\n{lineno}: {preview}"));
+    }
+    if ranges.len() > shown {
+        message.push_str(&format!("\n... and {} more", ranges.len() - shown));
+    }
+    fail("patch_ambiguous", message)
+}
+
+/// The 1-based line number holding `offset` and that line's own text, trimmed to
+/// [`AMBIGUOUS_PREVIEW_WIDTH`] characters with a trailing ellipsis when longer.
+fn occurrence_preview(content: &str, offset: usize) -> (usize, String) {
+    let clamped = offset.min(content.len());
+    let lineno = line_of_offset(content, clamped);
+    let start = content[..clamped].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let end = content[clamped..]
+        .find('\n')
+        .map(|i| clamped + i)
+        .unwrap_or(content.len());
+    let mut line = content[start..end].to_owned();
+    if line.ends_with('\r') {
+        line.pop();
+    }
+    if line.chars().count() <= AMBIGUOUS_PREVIEW_WIDTH {
+        return (lineno, line);
+    }
+    let mut preview: String = line.chars().take(AMBIGUOUS_PREVIEW_WIDTH).collect();
+    preview.push('\u{2026}');
+    (lineno, preview)
 }
 
 /// Rejects any two edits whose selected ranges overlap, including an identical range chosen by
