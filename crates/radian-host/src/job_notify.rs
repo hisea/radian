@@ -16,13 +16,14 @@
 //! but did not ask to kill the job, so it may be waiting on it.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use agent_core::{InputSource, Message};
 use radian_coding::{JobEvent, Jobs};
 use radian_runtime::{Inbox, RuntimeEvents};
 use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};
+use tokio::sync::Notify;
 
 /// The most output bytes a completion message inlines (ADR 0037 decision 5; omp's
 /// `ASYNC_INLINE_RESULT_MAX_CHARS` idea). 4 KiB is the tail of a failing build between two
@@ -52,6 +53,15 @@ pub struct JobNotifier {
     events: Arc<dyn RuntimeEvents>,
     /// Consecutive wake-started turns with no user input in between.
     wakes: AtomicU32,
+    /// How many settles this notifier has fully handled (journaled, then injected or
+    /// followed up). `exec -p` waits until this catches up with the registry's settle
+    /// total, so a settle recorded just before the check is never missed.
+    settled_handled: AtomicU64,
+    /// Bumped after every fully handled settle, so a waiter sees each delivery.
+    settled_signal: Arc<Notify>,
+    /// Idle settles the wake gate turned into inject-only notices: no turn will ever
+    /// start for them. `exec -p` ends the session on these (exit 3) instead of waiting.
+    degraded: AtomicU64,
 }
 
 impl JobNotifier {
@@ -69,6 +79,9 @@ impl JobNotifier {
             turn_running,
             events,
             wakes: AtomicU32::new(0),
+            settled_handled: AtomicU64::new(0),
+            settled_signal: Arc::new(Notify::new()),
+            degraded: AtomicU64::new(0),
         })
     }
 
@@ -111,6 +124,31 @@ impl JobNotifier {
         self.wakes.load(Ordering::SeqCst)
     }
 
+    /// How many settles have been fully handled (journaled, then injected or followed
+    /// up). Only moves forward.
+    pub fn settled_handled(&self) -> u64 {
+        self.settled_handled.load(Ordering::SeqCst)
+    }
+
+    /// Resolves after every fully handled settle. A waiter re-checks its exit condition
+    /// on each one.
+    pub fn settled_signal(&self) -> Arc<Notify> {
+        Arc::clone(&self.settled_signal)
+    }
+
+    /// How many idle settles the wake gate degraded to inject-only. Each one is a notice
+    /// no turn will ever start for.
+    pub fn degraded_pending(&self) -> u64 {
+        self.degraded.load(Ordering::SeqCst)
+    }
+
+    /// Marks one settle fully handled: the journal write and the inject/followup have
+    /// both returned. Called for every settle, notified or not.
+    fn note_handled(&self) {
+        self.settled_handled.fetch_add(1, Ordering::SeqCst);
+        self.settled_signal.notify_one();
+    }
+
     /// Handles one lifecycle event: write the durable record, forward it on the live
     /// runtime-event sink (the TUI's footer `jobs` item), then (for a notifiable settle)
     /// deliver the System message on the busy/idle lane.
@@ -143,6 +181,7 @@ impl JobNotifier {
                 let _ = self.journal.append_runtime_event(record.clone()).await;
                 self.events.on_runtime_event(&record);
                 if !notify {
+                    self.note_handled();
                     return;
                 }
                 let text = self.completion_message(&id, &state, duration_ms);
@@ -158,7 +197,9 @@ impl JobNotifier {
                 } else {
                     // The cap is reached: inject only, no wake.
                     let _ = self.inbox.inject(text, source).await;
+                    self.degraded.fetch_add(1, Ordering::SeqCst);
                 }
+                self.note_handled();
             }
         }
     }
