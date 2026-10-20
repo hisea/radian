@@ -42,7 +42,7 @@ pub(super) struct LoopContext<'a> {
     /// The herdr reporter (ADR 0034), when running inside a herdr pane.
     pub(super) herdr: Option<HerdrReporter>,
     /// The sandbox the user's `!`/`!!` commands run in (ADR 0033): the coding tools' own,
-    /// cloned. `None` on the `safe` tier (no shell).
+    /// cloned. `None` when the session mounts no `shell`.
     pub(super) bash_sandbox: Option<radian_sandbox::Sandbox>,
     /// The running `!` command's cancellation token (Esc, ADR 0033).
     pub(super) bash_cancel: Option<agent_core::CancellationToken>,
@@ -202,7 +202,7 @@ impl LoopContext<'_> {
                             radian_coding::run_user_bash(&workspace, &sandbox, &command, &cancel)
                                 .await
                         }
-                        None => Err("the `safe` tier has no shell (ADR 0012); `!` needs a \
+                        None => Err("this session has no shell; `!` needs a \
                                      shell-capable tier"
                             .to_owned()),
                     };

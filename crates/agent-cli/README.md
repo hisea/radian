@@ -293,16 +293,15 @@ radian config import-pi --from ~/.pi/agent --write              # save it (refus
 
 ## Profiles, the sandbox, and permissions
 
-`--profile` picks the three layers of ADR 0012 at once:
+`--profile` picks the two layers of ADR 0012 at once:
 
 | Profile | Sandbox | Shell | MCP | Built-in files |
 |---|---|---|---|---|
-| `safe` | not needed (nothing executes) | not offered | denied | read/list/git allowed; write/patch denied |
 | `workspace` | enforced (macOS seatbelt / Linux bubblewrap) | offered, sandboxed | asks | write/patch allowed under the workspace; network on |
 | `full` (default) | none (ADR 0043) | offered, **not sandboxed** | allowed | write/patch allowed under the workspace |
 
 - **`full` is the default** (ADR 0043). `--profile workspace` turns the sandbox on; a project's
-  `<workspace>/.radian/config.toml` (`[permissions] profile = "workspace" | "safe"`) can turn it
+  `<workspace>/.radian/config.toml` (`[permissions] profile = "workspace"`) can turn it
   on for itself, and that declaration can only narrow, never widen.
 - **The old names `workspace-write` and `full-access` are still accepted as aliases** (ADR
   0016); they are not listed in `--help`.

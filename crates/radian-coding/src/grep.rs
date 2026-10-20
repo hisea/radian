@@ -221,10 +221,69 @@ pub(crate) async fn run(
         Some(n) => n as usize,
         None => limits.default_grep_matches,
     };
+    let scan = BlockingScan {
+        root: root.clone(),
+        limits: *limits,
+        regex,
+        file_filter,
+        pattern: args.pattern,
+        path: args.path.unwrap_or_else(|| ".".to_owned()),
+        output: args.output,
+        arguments: arguments.clone(),
+        context,
+        context_cut,
+        cap,
+    };
+    // The walk and every file read below are synchronous and never yield, so the scan runs
+    // on the blocking pool: `grep` calls batched in one Core task overlap instead of
+    // queueing behind each other. Cancellation drops this future; the blocking scan then
+    // runs on to the end in the background (read-only, so nothing is written) and its
+    // result is never written back: Core's own `cancelled` wins the race.
+    match tokio::task::spawn_blocking(move || scan_blocking(scan)).await {
+        Ok(result) => result,
+        Err(error) => match error.try_into_panic() {
+            Ok(payload) => std::panic::resume_unwind(payload),
+            Err(_) => Err(fail("internal", "the grep scan did not finish")),
+        },
+    }
+}
 
-    // `resolve_existing` canonicalizes, so a symlinked `path` that escapes is refused and the
-    // base is always inside the workspace.
-    let requested = args.path.as_deref().unwrap_or(".");
+/// Everything `run` does after argument parsing: the fd walk, the per-file scans and the
+/// rendering. Synchronous by construction (see `run`); the body is the old `run` tail,
+/// limits, outputs and errors unchanged.
+struct BlockingScan {
+    root: WorkspaceRoot,
+    limits: Limits,
+    regex: Regex,
+    file_filter: Option<globset::GlobMatcher>,
+    pattern: String,
+    path: String,
+    output: Option<String>,
+    /// The raw arguments, for the `output`-mode error after the walk (same order as before:
+    /// a bad path fails before a bad `output`).
+    arguments: serde_json::Value,
+    context: usize,
+    context_cut: bool,
+    cap: usize,
+}
+
+fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
+    let BlockingScan {
+        root,
+        limits,
+        regex,
+        file_filter,
+        pattern,
+        path,
+        output,
+        arguments,
+        context,
+        context_cut,
+        cap,
+    } = scan;
+    // `resolve_existing` canonicalizes, so a symlinked `path` that escapes is refused and
+    // the base is always inside the workspace.
+    let requested: &str = &path;
 
     // ADR 0039 decision 2 and revision 1: the base and every file are opened through the
     // root's directory fd; the walk hands back open fds, never paths to re-open. An absolute
@@ -266,14 +325,14 @@ pub(crate) async fn run(
         Err(failure) => return Err(failure),
     }
 
-    let mode = match args.output.as_deref() {
+    let mode = match output.as_deref() {
         None | Some("content") => OutputMode::Content,
         Some("files") => OutputMode::Files,
         Some("count") => OutputMode::Count,
         Some(other) => {
             return Err(args::invalid(
                 "grep",
-                arguments,
+                &arguments,
                 [format!(
                     "`output` must be one of \"content\", \"files\" or \"count\", got \"{other}\""
                 )],
@@ -544,7 +603,7 @@ pub(crate) async fn run(
         }
     }
     if total == 0 && !byte_truncated && mode != OutputMode::Count {
-        suffix.push_str(&format!("[no matches for `{}`]\n", args.pattern));
+        suffix.push_str(&format!("[no matches for `{pattern}`]\n"));
     }
     debug_assert!(
         suffix.len() <= BYTE_NOTE_RESERVE,
@@ -567,7 +626,7 @@ pub(crate) async fn run(
     Ok(ToolOutput {
         content: vec![ContentPart::text(out)],
         structured: Some(json!({
-            "pattern": args.pattern,
+            "pattern": pattern,
             "path": requested,
             "matches": total,
             "files": files_matched,

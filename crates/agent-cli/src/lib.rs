@@ -102,16 +102,14 @@ pub struct Cli {
     mcp_config: Option<String>,
 
     /// Expose the built-in file tools rooted at this directory (read/write/patch/list,
-    /// glob/grep, git_diff). The `shell` tool is exposed as well unless the profile is `safe`
-    /// (which builds no sandbox): `workspace` confines it, `full` (the default) is
-    /// unsandboxed.
+    /// glob/grep, git_diff). The `shell` tool is exposed as well: `workspace` confines it,
+    /// `full` (the default) is unsandboxed.
     #[arg(long)]
     workspace: Option<String>,
 
-    /// Permission profile: `safe` (read-only, no shell, no MCP), `workspace` (sandboxed:
-    /// writes confined to the workspace, `shell` sandboxed, network on), or `full` (the
-    /// default since ADR 0043: explicitly unsandboxed). A project's `.radian/config.toml`
-    /// can narrow the result but never widen it.
+    /// Permission profile: `workspace` (sandboxed: writes confined to the workspace,
+    /// `shell` sandboxed, network on), or `full` (the default since ADR 0043: explicitly
+    /// unsandboxed). A project's `.radian/config.toml` can narrow the result but never widen it.
     #[arg(long, value_name = "PROFILE")]
     profile: Option<profile::ProfileArg>,
 

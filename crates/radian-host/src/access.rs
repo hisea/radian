@@ -6,7 +6,7 @@
 //! repository: otherwise a cloned repository could ship a line that opens the sandbox.
 //!
 //! The store is `~/.radian/access/access.json` (`$RADIAN_HOME/access/access.json`), a JSON
-//! object `{ "<identity key>": "safe" | "workspace" | "full" }`, sorted keys, written
+//! object `{ "<identity key>": "workspace" | "full" }`, sorted keys, written
 //! atomically `0600` in a `0700` directory — the same shape and error handling as the trust
 //! store (ADR 0031 T2), which this module mirrors:
 //!
@@ -32,7 +32,7 @@ pub type Store = BTreeMap<String, String>;
 /// The file name inside `access/`.
 pub const FILE_NAME: &str = "access.json";
 
-/// The tier name a [`Preset`] is stored under (the user-visible `safe`/`workspace`/`full`).
+/// The tier name a [`Preset`] is stored under (the user-visible `workspace`/`full`).
 pub fn tier_name(tier: Preset) -> &'static str {
     tier.as_str()
 }
@@ -41,7 +41,6 @@ pub fn tier_name(tier: Preset) -> &'static str {
 /// rejects the whole file (fail-closed), so a typo cannot silently change the tier.
 pub fn parse_tier(name: &str) -> Option<Preset> {
     match name {
-        "safe" => Some(Preset::Safe),
         "workspace" => Some(Preset::WorkspaceWrite),
         "full" => Some(Preset::FullAccess),
         _ => None,
@@ -91,13 +90,13 @@ pub fn read_at(path: &Path) -> Result<Store, String> {
     for (key, value) in map {
         let Some(name) = value.as_str() else {
             return Err(format!(
-                "{}: the value for {key:?} must be one of safe, workspace, full",
+                "{}: the value for {key:?} must be one of workspace, full",
                 path.display()
             ));
         };
         if parse_tier(name).is_none() {
             return Err(format!(
-                "{}: the value for {key:?} must be one of safe, workspace, full, not {name:?}",
+                "{}: the value for {key:?} must be one of workspace, full, not {name:?}",
                 path.display()
             ));
         }
@@ -204,7 +203,8 @@ mod tests {
             "not json",
             "[1, 2]",
             r#"{"a": 1}"#,
-            r#"{"a": "safe", "b": "yolo"}"#,
+            r#"{"a": "workspace", "b": "yolo"}"#,
+            r#"{"a": "safe"}"#,
             r#"{"a": "workspace-write"}"#,
         ] {
             std::fs::write(&path, bad).unwrap();
@@ -223,7 +223,7 @@ mod tests {
         let path = parent.join("access.json");
         let mut store = Store::new();
         store.insert("/z".to_owned(), "full".to_owned());
-        store.insert("/a".to_owned(), "safe".to_owned());
+        store.insert("/a".to_owned(), "workspace".to_owned());
         write_at(&path, &store).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let a = text.find("/a").unwrap();
@@ -292,10 +292,10 @@ mod tests {
             get_at(&path, &key_for(&workspace)).unwrap(),
             Some(Preset::FullAccess)
         );
-        set_at(&path, &workspace, Preset::Safe).unwrap();
+        set_at(&path, &workspace, Preset::WorkspaceWrite).unwrap();
         assert_eq!(
             get_at(&path, &key_for(&workspace)).unwrap(),
-            Some(Preset::Safe)
+            Some(Preset::WorkspaceWrite)
         );
         forget_at(&path, &workspace).unwrap();
         assert_eq!(get_at(&path, &key_for(&workspace)).unwrap(), None);

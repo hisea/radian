@@ -210,13 +210,12 @@ async fn an_unavailable_backend_never_yields_a_sandbox_or_a_shell() {
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
 
-    for mode in [SandboxMode::WorkspaceWrite, SandboxMode::Safe] {
-        let error = Sandbox::from_backend(&FAILING, mode, &root).unwrap_err();
-        assert!(
-            matches!(error, SandboxError::ProbeFailed { .. }),
-            "{mode:?}: {error}"
-        );
-    }
+    let mode = SandboxMode::WorkspaceWrite;
+    let error = Sandbox::from_backend(&FAILING, mode, &root).unwrap_err();
+    assert!(
+        matches!(error, SandboxError::ProbeFailed { .. }),
+        "{mode:?}: {error}"
+    );
     // The only thing a failing backend can produce is a refusal; there is no value to hand
     // to `CodingTools::with_sandbox`, so no shell can exist.
     let tools = common::tools(&root);
@@ -296,7 +295,7 @@ async fn workspace_write_confines_the_shell() {
     );
 
     // (d) connecting to a local port succeeds in both (ADR 0016: the `workspace` tier opens
-    // the network). `safe` is the one that keeps it off; the harness covers that contrast.
+    // the network).
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
     let port = listener.local_addr().unwrap().port();
     let script = format!(
@@ -751,8 +750,9 @@ async fn an_unsandboxed_shell_requires_an_explicit_sandbox() {
 /// Dogfooding D10: the model used `shell` (`cat -n`, `sed -n`) for 101 of 111 calls and `read`
 /// 3 times, filling the context with uncapped dumps. A later session (2026-10-15) sent 38 reads
 /// and searches through `shell` although `read`/`grep`/`glob` exist. The description steers
-/// file reading to `read`/`list` and searching to `grep`/`glob`, and says why (`shell` runs
-/// alone; the read-only tools run in parallel), in the enforced mode and in the unsandboxed one.
+/// file reading and directory listing to `read` and searching to `grep`/`glob`, and says why
+/// (`shell` runs alone; the read-only tools run in parallel), in the enforced mode and in the
+/// unsandboxed one.
 #[tokio::test]
 async fn the_shell_description_points_file_reading_and_searching_at_the_read_only_tools() {
     let dir = TempDir::new("shell-spec-d10");
@@ -773,7 +773,7 @@ async fn the_shell_description_points_file_reading_and_searching_at_the_read_onl
             .find(|spec| spec.name == "shell")
             .expect("shell is advertised with a sandbox");
         for wanted in [
-            "Read files with `read` and `list`",
+            "Read and list with `read`",
             "search with `grep` and `glob`",
             "run in parallel, while `shell` runs alone",
         ] {

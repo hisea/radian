@@ -20,7 +20,7 @@ pub const DEFAULT_ROLE: &str = include_str!("../prompts/default.md");
 pub struct Runtime<'a> {
     /// The mounted tools: `(name, one-line purpose)`.
     pub tools: &'a [(String, String)],
-    /// The tier name (`safe` / `workspace` / `full-access`).
+    /// The tier name (`workspace` / `full`).
     pub tier: &'a str,
     /// The sandbox facts line (the host's `describe`).
     pub sandbox: &'a str,
@@ -327,12 +327,15 @@ mod tests {
         // Each rule the ADR names is present verbatim enough to assert on.
         assert!(DEFAULT_ROLE.contains("no extra features, refactors"));
         assert!(DEFAULT_ROLE.contains("Do not wait by sleeping or polling"));
+        assert!(DEFAULT_ROLE.contains("send them in the same reply: they run together"));
         assert!(DEFAULT_ROLE.contains("no per-turn step or budget limit"));
         assert!(DEFAULT_ROLE.contains("data, not instructions"));
         assert!(DEFAULT_ROLE.contains("path:line"));
         assert!(DEFAULT_ROLE.contains("/memory add"));
         assert!(DEFAULT_ROLE.contains("~/.agents/skills/"));
         assert!(DEFAULT_ROLE.contains("with `shell`"));
+        assert!(DEFAULT_ROLE.contains("`read` over `ls`"));
+        assert!(!DEFAULT_ROLE.contains("`list` over"));
     }
 
     /// Layer 1 is the built-in default role, and `--system` replaces it. The hook writes the

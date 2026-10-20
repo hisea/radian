@@ -25,7 +25,7 @@ pub enum WorkspaceError {
 /// later open walks from this fd and never re-opens a path string.
 ///
 /// Alongside the workspace it holds the read-only roots (ADR 0039: the cargo
-/// registry and toolchain sources). `read`/`grep`/`glob`/`list` resolve an absolute or `~`
+/// registry and toolchain sources). `read`/`grep`/`glob` resolve an absolute or `~`
 /// path against those roots; every other tool uses the workspace only.
 #[derive(Debug, Clone)]
 pub struct WorkspaceRoot {

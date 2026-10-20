@@ -23,9 +23,9 @@ pub struct Limits {
     pub max_write_bytes: usize,
     /// Largest file `patch` will edit in memory.
     pub max_patch_bytes: usize,
-    /// Hard cap for `list`.
+    /// Hard cap for a directory `read` (the old `list`).
     pub max_list_entries: usize,
-    /// `list`'s default entry cap.
+    /// A directory `read`'s default entry cap.
     pub default_list_entries: usize,
     /// Hard cap for one `glob` result set.
     pub max_glob_results: usize,
@@ -190,7 +190,7 @@ impl CodingTools {
     /// The same tools over a **shared** sandbox slot (ADR 0038 slice 2): the host keeps a
     /// clone and swaps it on `/access`, so `shell`/jobs read the current tier. `shell` is
     /// advertised whenever the slot currently holds a sandbox; the tool set is fixed at
-    /// `open_session`, so a session that starts in `safe` does not gain `shell` mid-session
+    /// `open_session`, so a session that starts without `shell` does not gain it mid-session
     /// (switching to a *narrower* tier still denies it through the permission rules).
     pub fn with_sandbox_slot(
         root: impl AsRef<std::path::Path>,
@@ -330,7 +330,7 @@ fn specs(shell: Option<(SandboxMode, bool)>, foreground: bool) -> Vec<ToolSpec> 
         read::spec(),
         write::spec(),
         patch::spec(),
-        list::spec(),
+        list::alias_spec(),
         glob::spec(),
         grep::spec(),
         git::diff_spec(),
@@ -368,7 +368,7 @@ impl ToolSession for CodingSession {
             "read" => read::run(&self.root, &self.limits, &call.arguments).await,
             "write" => write::run(&self.root, &self.limits, &call.arguments).await,
             "patch" => patch::run(&self.root, &self.limits, &call.arguments).await,
-            "list" => list::run(&self.root, &self.limits, &call.arguments).await,
+            "list" => list::run_alias(&self.root, &self.limits, &call.arguments).await,
             "glob" => glob::run(&self.root, &self.limits, &call.arguments).await,
             "grep" => grep::run(&self.root, &self.limits, &call.arguments).await,
             "git_status" => git::status(&self.root, &self.limits, &call.arguments).await,

@@ -8,7 +8,7 @@
 //!
 //! What is enforced, and what is not (stated, not papered over):
 //!
-//! - `Safe` / `WorkspaceWrite` confine the child (filesystem, network, sensitive reads) to
+//! - `WorkspaceWrite` confines the child (filesystem, sensitive reads) to
 //!   what [`radian_sandbox`] proves. `FullAccess` is the caller's explicit "no confinement"
 //!   choice: the command really is unsandboxed. The tool description says so in those words.
 //! - Environment filtering happens on the spawn path. For enforced modes the backend clears
@@ -121,10 +121,6 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
              confined to the workspace, the repository's `.git` is read-only (so is \
              `git commit`, by design), `~/.ssh` is not readable, and the network is **on**."
         }
-        SandboxMode::Safe => {
-            "The command runs under the OS sandbox in `safe` mode: the workspace is \
-             read-only and the network is off."
-        }
         SandboxMode::FullAccess => {
             "**The command is NOT sandboxed** (`full`): it can read and write \
              anywhere the user can, including the network. No OS sandbox wraps it; that is \
@@ -134,8 +130,9 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
     ToolSpec {
         name: "shell".into(),
         description: format!(
-            "Run a shell command with `/bin/sh -c`. {confinement} Read files with `read` \
-             and `list`, and search with `grep` and `glob`, not with `cat`, `sed`, `ls` or \
+            "Run a shell command with `/bin/sh -c`. {confinement} Read and list \
+             with `read`, and search with `grep` and `glob`, not with `cat`, `sed`, \
+             `ls` or \
              `find` through `shell`: they report truncation, use less context, and run in \
              parallel, while `shell` runs alone. Each stream is capped: past the \
              budget the start and the end are kept and the middle names the discarded \
@@ -168,8 +165,8 @@ pub struct UserBash {
 /// Runs a user's `!`/`!!` command through the **same sandboxed executor** as the `shell` tool
 /// (ADR 0033): the workspace root as cwd, the default timeout and per-stream output caps, the
 /// same process-group supervision, the same cancellation. It never builds a naked `Command`:
-/// the caller passes the sandbox it already built, and a `safe` tier (no sandbox) cannot reach
-/// here (the caller refuses it before). The child gets no controlling terminal (`setsid`), so
+/// the caller passes the sandbox it already built; a session with no sandbox (no `shell`)
+/// cannot reach here (the caller refuses it before). The child gets no controlling terminal (`setsid`), so
 /// ADR 0016's `TIOCSTI` rule is unchanged.
 pub async fn run_user_bash(
     root: &Path,
@@ -1638,7 +1635,7 @@ mod tests {
     #[test]
     fn the_shell_and_job_specs_fit_the_prefix_budget() {
         // ADR 0037 decision 4: the two definitions stay small enough for the cached prefix.
-        // Compact `{"name","description","input_schema"}` JSON, UTF-8 bytes. All three
+        // Compact `{"name","description","input_schema"}` JSON, UTF-8 bytes. Both
         // sandbox modes (the longest confinement text wins) and the one `job` tool.
         let size = |spec: &agent_core::ToolSpec| {
             serde_json::to_string(&serde_json::json!({
@@ -1653,7 +1650,6 @@ mod tests {
             (SandboxMode::FullAccess, false),
             (SandboxMode::WorkspaceWrite, true),
             (SandboxMode::WorkspaceWrite, false),
-            (SandboxMode::Safe, false),
         ] {
             let bytes = size(&spec(mode, git_writable));
             assert!(

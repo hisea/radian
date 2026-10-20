@@ -1,4 +1,4 @@
-//! The read-only roots outside the workspace that `read`, `grep`, `glob` and `list` may also
+//! The read-only roots outside the workspace that `read`, `grep` and `glob` may also
 //! open (ADR 0039): the cargo registry sources, `$CARGO_HOME/registry/src`, and the
 //! sources of every installed toolchain, `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`.
 //!

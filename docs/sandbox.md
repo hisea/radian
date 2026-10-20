@@ -14,13 +14,12 @@
 末尾）、边读边丢，沙箱不参与。
 
 **ADR 0016（2026-10-13）：** `workspace` 档位改为**开网**（出站与本机回环 connect/bind/listen），
-并放开 **pty**（`/dev/ptmx` 与 `/dev/ttys[0-9]+` 的写与 `file-ioctl`，后者**只**对这两类路径）；
-`safe` 仍关网、无设备。shell 工具用 `setsid` 让受约束命令没有控制终端，配合内核的
+并放开 **pty**（`/dev/ptmx` 与 `/dev/ttys[0-9]+` 的写与 `file-ioctl`，后者**只**对这两类路径）。shell 工具用 `setsid` 让受约束命令没有控制终端，配合内核的
 controlling-terminal 检查堵住 `TIOCSTI`（矩阵新增 `tiocsti_outside_terminal`）。
 
 ## 硬规则：请求沙箱但后端不可用 = 明确失败
 
-`Sandbox::new(mode, workspace)` 与 `Sandbox::from_policy` 对 `Safe` / `WorkspaceWrite` **先探测
+`Sandbox::new(mode, workspace)` 与 `Sandbox::from_policy` 对 `WorkspaceWrite` **先探测
 后端**（跑一个真子进程，证明 deny 与 workspace allow 都生效），探测失败就返回 `SandboxError`。
 **没有任何路径**把受约束档位变成无沙箱运行；`FullAccess` 只有调用方点名才会用到，且不探测。
 （ADR 0012，决定第 2 条。）测试：`an_unavailable_backend_is_an_error_and_never_a_downgrade`、
@@ -67,7 +66,7 @@ Linux VM 验证恢复时一并做。
 
 ## 运行中切换档位（ADR 0038 切片 ②，2026-10-15）
 
-档位不再固定：`/access safe|workspace|full` 可以在会话里切换，从**下一次工具调用**起生效。
+档位不再固定：`/access workspace|full` 可以在会话里切换，从**下一次工具调用**起生效。
 
 - `radian-sandbox` 的 `SandboxSlot` 是共享的 `Arc<RwLock<Option<Arc<Sandbox>>>>`。`shell` 与后台
   任务工具在每次调用开始时取出 `Arc<Sandbox>` 并持有整次调用，所以切换只影响**下一次**调用；
@@ -80,7 +79,7 @@ Linux VM 验证恢复时一并做。
 
 ## 后端与策略
 
-- `SandboxMode::{Safe, WorkspaceWrite, FullAccess}` 是产品概念；SBPL / bwrap 的参数只是实现。
+- `SandboxMode::{WorkspaceWrite, FullAccess}` 是产品概念；SBPL / bwrap 的参数只是实现。
 - `SandboxPolicy`：canonical workspace、`network`、`read_only`（git 元数据自动发现：`.git` 目录、
   worktree 指针文件及其共享 common dir）、`git_access`（ADR 0038：这些 git 元数据是整块只读，
   还是只留执行入口只读；见下）、`deny_read`（默认 `~/.ssh`、`~/.aws`、`~/.gnupg`、
@@ -303,8 +302,8 @@ bwrap 都不过滤环境。
 seatbelt 追加 `(deny network-outbound (remote unix-socket))`，只放行固定的 mDNSResponder（DNS 需要）
 和用户级配置 `[sandbox] allow_unix_sockets` 里写明的路径（canonicalize；失败只警告并跳过）。
 `mach-lookup` **仍是全放**（另一类本机 IPC，未收紧，单独评估）。Linux（bwrap）的同类问题已在
-Linux 上实测：路径 socket 经共享的只读根挂载可达（`safe` 与 `workspace` 都是），抽象 socket 在
-`workspace` 共享主机网络命名空间下可达（只有 `safe` 的 `--unshare-all` 把它隔开）。`[sandbox]
+Linux 上实测：路径 socket 经共享的只读根挂载可达，抽象 socket 在
+`workspace` 共享主机网络命名空间下可达。`[sandbox]
 allow_unix_sockets` 在 Linux 上没有效果（只有 macOS 的 seatbelt 读它；macOS only, no effect on
 Linux）。测量表见“未验证 / 已知边界”。
 
@@ -411,14 +410,13 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
   逃生未系统测试（`already-open fd` 不受限，spawner 不向子进程传可写 fd，但没有专门用例）。
 - **Unix socket（Linux：已实测、接受为已知限制，决定 4）**：bwrap 在任何
   档位都不限制 Unix socket。macOS 的修复照旧有逃逸矩阵的 `unix_socket` 组（workspace 拒、白名单
-  放行、DNS 通、safe 拒）；Linux 上 `workspace_denied` 与 `safe_denied` 两例按已知限制报
+  放行、DNS 通）；Linux 上 `workspace_denied` 一例按已知限制报
   `KNOWN-LIMIT`（不是 PASS 也不是 FAIL，macOS 侧保持严格）。`[sandbox] allow_unix_sockets`
   在 Linux 上没有效果（macOS only; no effect on Linux）。实测（路径 listener 在 `/tmp` 下由沙箱外
   持有；抽象 listener 同理）：
 
   | tier（Linux bwrap） | 路径 socket | 抽象 socket |
   |---|---|---|
-  | `safe`（`--unshare-all`） | 可连（rc=0） | 拒绝（`ConnectionRefused`，errno 111） |
   | `workspace`（共享主机网络命名空间） | 可连（rc=0） | 可连（rc=0） |
 
   原因：路径 socket 是共享只读根（`--ro-bind / /`）上的普通文件系统项，`connect()` 不受只读挂载
@@ -457,7 +455,7 @@ clippy::uninlined_format_args`。1.88 的 clippy 在 Linux 上报了一处 macOS
 **3. 逃逸矩阵**：`cargo test -p radian-sandbox` → 10 passed；`linux_escape_matrix` **34 cases, 0
 failed**，矩阵前后 `ps` 无 `bwrap`/`mcp_echo.py`/`sandbox-exec` 孤儿。关键行：
 `network_workspace connect_local_port / bind_local_port / connect_external` 全 `ok`；
-`network_safe connect_local_port` `denied`；`devices openpty` `ok`；
+`devices openpty` `ok`；
 `devices tiocsti_outside_terminal` `denied`。
 
 **4. shell 工具**：`cargo test -p radian-coding --test shell` → **13/13**；跑完无 `sleep 600`
@@ -508,7 +506,7 @@ deps/pty-… --exact pty_end_to_end_conversation_and_clean_exit → ok (EXIT=0) 
 `No space left on device`）。所以改为在宿主上按同一组 profile 参数预编译，沙箱内**直接运行
 测试二进制**——测的还是同一段代码（mock server 的 bind 与 pty 的 openpty），且绕开了重建。
 
-**未验证**：`cargo test` 整体在沙箱内运行（上述原因）；`network_safe` 之外的细粒度网络；
+**未验证**：`cargo test` 整体在沙箱内运行（上述原因）；细粒度网络；
 x86_64 与其它发行版。
 
 **评审补充（合并时，2026-10-13）**：第 6 条的 pty harness 修复与 main 上已有的修复重叠（目录缓存

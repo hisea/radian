@@ -564,14 +564,6 @@ mod tests {
     }
 
     #[test]
-    fn safe_mode_does_not_allow_any_workspace_write() {
-        let mut p = policy();
-        p.mode = SandboxMode::Safe;
-        let profile = profile_text(&p);
-        assert!(!profile.contains("(allow file-write* (subpath"));
-    }
-
-    #[test]
     fn paths_with_quotes_are_escaped() {
         assert_eq!(sbpl_string("a\"b"), "\"a\\\"b\"");
     }

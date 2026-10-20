@@ -202,7 +202,7 @@ pub struct Sandbox {
 impl Sandbox {
     /// Builds a sandbox for `mode` and `workspace`.
     ///
-    /// `Safe`/`WorkspaceWrite` require a working backend: if the tool is missing or the probe
+    /// `WorkspaceWrite` requires a working backend: if the tool is missing or the probe
     /// fails, this returns an error and the caller must refuse to run. `FullAccess` returns a
     /// transparent sandbox without probing, because nothing is being enforced.
     pub fn new(

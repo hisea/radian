@@ -23,7 +23,7 @@ pub const HELP: &str = "\
 /usage                show the current provider's usage, one line per window (ADR 0027)
 /auto on|off          auto-approve tool asks for this session (ADR 0026 D9)
 /yolo                 alias of /auto
-/access [safe|workspace|full]
+/access [workspace|full]
                       show or switch the permission tier (ADR 0038); the switch takes effect
                       at the next tool call, and `full` asks for confirmation
 /export [md|json] [path] [--force]
@@ -101,7 +101,7 @@ pub enum Outcome {
     /// `/auto on|off` (and `/yolo`, its alias): the in-session auto-approval switch
     /// (ADR 0026 D9). `true` = on.
     AutoToggle(bool),
-    /// `/access [safe|workspace|full]` (ADR 0038 slice 2): show the current tier and where it
+    /// `/access [workspace|full]` (ADR 0038 slice 2): show the current tier and where it
     /// came from (`None`), or switch to a named tier (`Some`).
     Access(Option<String>),
     /// `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and sends
@@ -493,14 +493,9 @@ fn auto_level(_typed: &[&str], _partial: &str) -> Level {
     ])
 }
 
-/// `/access`: the three tier names (ADR 0038 slice 2).
+/// `/access`: the two tier names (ADR 0038 slice 2).
 fn access_level(_typed: &[&str], _partial: &str) -> Level {
     Level::Ready(vec![
-        Candidate {
-            insert: "safe".to_owned(),
-            description: "read-only; no shell, no network".to_owned(),
-            current: false,
-        },
         Candidate {
             insert: "workspace".to_owned(),
             description: "write the workspace; sandboxed shell".to_owned(),
@@ -1071,13 +1066,13 @@ fn auto_toggle(args: &[String]) -> Outcome {
     }
 }
 
-/// `/access [safe|workspace|full]` (ADR 0038 slice 2). No argument is the query; one name is
+/// `/access [workspace|full]` (ADR 0038 slice 2). No argument is the query; one name is
 /// the switch; anything else is a usage notice.
 fn access_request(args: &[String]) -> Outcome {
     match (args.first(), args.get(1)) {
         (None, _) => Outcome::Access(None),
         (Some(name), None) => Outcome::Access(Some(name.clone())),
-        _ => Outcome::Notices(vec!["usage: /access [safe|workspace|full]".to_owned()]),
+        _ => Outcome::Notices(vec!["usage: /access [workspace|full]".to_owned()]),
     }
 }
 

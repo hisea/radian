@@ -1795,11 +1795,12 @@ async fn the_workspace_system_prompt_unix_socket_sentence_follows_the_backend() 
     }
 }
 
-/// ADR 0036: the `safe` tier mounts no `shell`, so layer 0a does not advertise one.
+/// The removed tier name is unknown: `--profile safe` fails like any typo (fail closed),
+/// and never runs the model.
 #[tokio::test]
-async fn the_safe_tier_runtime_layer_has_no_shell() {
+async fn profile_safe_is_rejected_as_an_unknown_tier() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
-    let (code, _, _) = feed_and_wait(
+    let (code, _, stderr) = feed_and_wait(
         spawn_radian(
             &[
                 "--model",
@@ -1816,14 +1817,14 @@ async fn the_safe_tier_runtime_layer_has_no_shell() {
         "",
     )
     .await;
-    assert_eq!(code, 0);
-    let messages = messages_of(&server, 0);
-    let system = &messages.as_array().expect("messages")[0];
-    let content = system["content"].as_str().unwrap_or_default();
-    let runtime = content.split("</runtime>").next().unwrap_or(content);
+    assert_ne!(code, 0, "an unknown tier must fail: {stderr}");
     assert!(
-        !runtime.contains("- shell:"),
-        "the safe tier has no shell tool:\n{runtime}"
+        stderr.contains("'safe'"),
+        "the refusal must name the problem: {stderr}"
+    );
+    assert!(
+        server.requests().is_empty(),
+        "the model must never run for an unknown tier"
     );
 }
 
@@ -2826,7 +2827,7 @@ async fn a_remembered_tier_is_narrowed_by_the_project() {
     let dir = scratch("project-narrows");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    write_project_config(&ws, "[permissions]\nprofile = \"safe\"\n");
+    write_project_config(&ws, "[permissions]\nprofile = \"workspace\"\n");
     let rh = dir.join("rh");
     let access = rh.join("access");
     std::fs::create_dir_all(&access).unwrap();
@@ -2834,7 +2835,7 @@ async fn a_remembered_tier_is_narrowed_by_the_project() {
     write_file(
         &access,
         "access.json",
-        &format!("{{\"{}\": \"workspace\"}}\n", key.display()),
+        &format!("{{\"{}\": \"full\"}}\n", key.display()),
     );
     let server = MockServer::start(vec![text_reply("done")]).await;
 
@@ -2858,10 +2859,10 @@ async fn a_remembered_tier_is_narrowed_by_the_project() {
 
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stderr.contains("[access] safe (from project config)"),
+        stderr.contains("[access] workspace (from project config)"),
         "{stderr}"
     );
-    assert!(stderr.contains("[profile] safe"), "{stderr}");
+    assert!(stderr.contains("[profile] workspace"), "{stderr}");
 }
 
 /// ADR 0043 decision 2: an explicit `--profile` wins, and the startup line still names what
@@ -3318,14 +3319,14 @@ async fn a_composite_shell_command_always_asks() {
     );
 }
 
-/// 6: `--yes` removes the question; it does not override a `deny` rule.
+/// 6: `--approval never` turns an `ask` into a denial: the command never runs.
 #[tokio::test]
-async fn yes_does_not_bypass_a_deny_rule() {
-    let dir = scratch("deny");
+async fn never_turns_ask_into_a_denial() {
+    let dir = scratch("never-deny");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![
-        tool_reply("c1", "write", r#"{"path":"new.txt","content":"x"}"#),
+        tool_reply("c1", "shell", r#"{"command":"echo hi"}"#),
         text_reply("done"),
     ])
     .await;
@@ -3340,8 +3341,9 @@ async fn yes_does_not_bypass_a_deny_rule() {
                 "--workspace",
                 ws.to_str().unwrap(),
                 "--profile",
-                "safe",
-                "--yes",
+                "workspace",
+                "--approval",
+                "never",
                 "-p",
                 "go",
             ],
@@ -3353,14 +3355,7 @@ async fn yes_does_not_bypass_a_deny_rule() {
 
     assert_eq!(code, 0, "{stderr}");
     let result = tool_result_content(&server, 1);
-    assert!(
-        result.contains("denied") || result.contains("safe mode does not modify files"),
-        "{result}"
-    );
-    assert!(
-        !ws.join("new.txt").exists(),
-        "--yes must not write when a rule denies"
-    );
+    assert!(result.contains("denied"), "{result}");
 }
 
 /// 7: Ctrl-C while waiting for a shell approval cancels the turn; the process does not hang.
@@ -5250,15 +5245,18 @@ fn scratch_directories_are_removed_when_the_guard_drops() {
     );
 }
 
-/// ADR 0016: the tier names are `safe`/`workspace`/`full`; the old names stay accepted as
-/// aliases but are not advertised in `--help`.
+/// ADR 0016: the tier names are `workspace`/`full`; the old names stay accepted as
+/// aliases but are not advertised in `--help`. The removed `safe` tier is rejected.
 #[tokio::test]
 async fn tier_names_and_aliases_are_accepted_but_help_lists_only_new_names() {
     let (code, stdout, stderr) = feed_and_wait(spawn_radian(&["--help"], &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("workspace"), "{stdout}");
     assert!(stdout.contains("full"), "{stdout}");
-    assert!(stdout.contains("safe"), "{stdout}");
+    assert!(
+        !stdout.contains("safe"),
+        "the removed tier must not be advertised: {stdout}"
+    );
     assert!(
         !stdout.contains("workspace-write"),
         "the old name must not be advertised: {stdout}"
@@ -5268,13 +5266,7 @@ async fn tier_names_and_aliases_are_accepted_but_help_lists_only_new_names() {
         "the old name must not be advertised: {stdout}"
     );
 
-    for profile in [
-        "safe",
-        "workspace",
-        "full",
-        "workspace-write",
-        "full-access",
-    ] {
+    for profile in ["workspace", "full", "workspace-write", "full-access"] {
         let dir = scratch(&format!("alias-{profile}"));
         let sessions = dir.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();

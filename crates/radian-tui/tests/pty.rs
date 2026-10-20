@@ -852,8 +852,8 @@ async fn pty_mounts_only_the_builtin_tools() {
         );
     }
     // The built-ins a workspace session mounts are exactly these, and nothing else. ADR 0043
-    // decision 3: `git_status` is renamed; its old name is registered for one version but
-    // never advertised. ADR 0037 decision 4: the four job readers are one
+    // decision 3: `git_status` and `list` are renamed; their old names are registered for one
+    // version but never advertised. ADR 0037 decision 4: the four job readers are one
     // `job` tool; `job_output`, `job_list`, `job_kill` and `shell_output` are never advertised.
     // `memory_search` mounts only past the injection budget (ADR 0021 D7),
     // so this workspace — with an empty memory — does not list it.
@@ -862,12 +862,13 @@ async fn pty_mounts_only_the_builtin_tools() {
     assert_eq!(
         got,
         [
-            "ask_user", "git_diff", "glob", "grep", "job", "list", "patch", "read", "shell",
-            "skill", "subagent", "write"
+            "ask_user", "git_diff", "glob", "grep", "job", "patch", "read", "shell", "skill",
+            "subagent", "write"
         ],
         "the exact tool set of a fresh TUI session: {names:?}"
     );
     for gone in [
+        "list",
         "git_status",
         "job_output",
         "job_list",
@@ -3400,19 +3401,19 @@ async fn pty_the_default_tier_is_full_with_no_sandbox() {
 
 /// ADR 0043 decision 2: the project declaration `<workspace>/.radian/config.toml` can only
 /// narrow. `--trust` skips the startup modal (a project config is a project resource), and the
-/// summary then shows `safe`.
+/// summary then shows `workspace`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_a_project_config_narrows_the_tier() {
     skip_inside_sandbox!("pty_a_project_config_narrows_the_tier");
     let _serial = pty_guard();
-    let dir = TempDir::new("project-safe");
+    let dir = TempDir::new("project-workspace");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(ws.join(".radian")).unwrap();
     std::fs::write(
         ws.join(".radian/config.toml"),
-        "[permissions]\nprofile = \"safe\"\n",
+        "[permissions]\nprofile = \"workspace\"\n",
     )
     .unwrap();
     let server = MockServer::start(vec![text_reply("never")]).await;
@@ -3425,7 +3426,7 @@ async fn pty_a_project_config_narrows_the_tier() {
             "--session-dir",
             sessions.to_str().unwrap(),
             "--session-id",
-            "project-safe",
+            "project-workspace",
             "--workspace",
             ws.to_str().unwrap(),
             "--trust",
@@ -3444,12 +3445,12 @@ async fn pty_a_project_config_narrows_the_tier() {
         .find(|line| line.contains("context ") && line.contains("ask_user"))
         .unwrap_or_else(|| panic!("no summary line:\n{screen}"));
     assert!(
-        summary.contains("safe"),
-        "the project must narrow the default to `safe`: {summary:?}"
+        summary.contains("workspace"),
+        "the project must narrow the default to `workspace`: {summary:?}"
     );
     assert!(
-        summary.contains("no exec"),
-        "`safe` has no command execution: {summary:?}"
+        summary.contains("sandbox"),
+        "the summary must show the sandbox: {summary:?}"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));

@@ -49,7 +49,6 @@ impl ApprovalPolicy {
 /// cannot be swapped for a different execution boundary by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
-    Safe,
     WorkspaceWrite,
     FullAccess,
 }
@@ -59,7 +58,6 @@ impl Preset {
     /// aliases, but this is the name the hosts print and the status bar shows (ADR 0016).
     pub fn as_str(self) -> &'static str {
         match self {
-            Preset::Safe => "safe",
             Preset::WorkspaceWrite => "workspace",
             Preset::FullAccess => "full",
         }
@@ -67,7 +65,6 @@ impl Preset {
 
     pub fn sandbox_mode(self) -> SandboxMode {
         match self {
-            Preset::Safe => SandboxMode::Safe,
             Preset::WorkspaceWrite => SandboxMode::WorkspaceWrite,
             Preset::FullAccess => SandboxMode::FullAccess,
         }
@@ -97,44 +94,6 @@ pub struct Profile {
 }
 
 impl Profile {
-    pub fn safe(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
-        Self::build(Preset::Safe, workspace, |_ws| {
-            let mut rules = read_only();
-            rules.extend(memory_rules());
-            rules.extend(always_allowed());
-            rules.extend([
-                Rule::new(
-                    ToolMatcher::Name("write".into()),
-                    ResourceMatcher::Any,
-                    Action::Deny,
-                )
-                .with_reason("safe mode does not modify files"),
-                Rule::new(
-                    ToolMatcher::Name("patch".into()),
-                    ResourceMatcher::Any,
-                    Action::Deny,
-                )
-                .with_reason("safe mode does not modify files"),
-                Rule::new(
-                    ToolMatcher::Name("shell".into()),
-                    ResourceMatcher::Any,
-                    Action::Deny,
-                )
-                .with_reason("safe mode has no shell"),
-                // A legacy deny for the removed `git_commit` tool name; safe does not write.
-                Rule::new(
-                    ToolMatcher::Name("git_commit".into()),
-                    ResourceMatcher::Any,
-                    Action::Deny,
-                )
-                .with_reason("safe mode does not write the repository"),
-                Rule::new(ToolMatcher::Mcp, ResourceMatcher::Any, Action::Deny)
-                    .with_reason("safe mode does not start MCP tools"),
-            ]);
-            rules
-        })
-    }
-
     pub fn workspace_write(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
         Self::build(Preset::WorkspaceWrite, workspace, |ws| {
             let mut rules = read_only();
@@ -277,10 +236,10 @@ fn memory_rules() -> Vec<Rule> {
 
 /// The read-only built-ins, allowed regardless of path: `radian-coding` enforces the
 /// workspace boundary itself for these tools, so the permission layer does not need to.
-/// `git_status` is not here: it is a one-version alias judged as `git_diff` (ADR 0043
-/// decision 3).
+/// `git_status` and `list` are not here: they are one-version aliases judged as `git_diff`
+/// and `read` (ADR 0043 decision 3).
 fn read_only() -> Vec<Rule> {
-    ["read", "list", "glob", "grep", "git_diff"]
+    ["read", "glob", "grep", "git_diff"]
         .into_iter()
         .map(|name| {
             Rule::new(
@@ -344,12 +303,11 @@ mod tests {
         crate::rule::evaluate(profile.rules(), &profile.workspace, &call(name)).action
     }
 
-    /// ADR 0021 D5/D7: `memory_search` is allowed in all three tiers; no memory tool asks.
+    /// ADR 0021 D5/D7: `memory_search` is allowed in both tiers; no memory tool asks.
     #[test]
     fn memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks() {
         let ws = std::env::temp_dir();
         for profile in [
-            Profile::safe(&ws).unwrap(),
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
         ] {
@@ -377,7 +335,6 @@ mod tests {
     fn ask_user_is_allowed_in_every_tier() {
         let ws = std::env::temp_dir();
         for profile in [
-            Profile::safe(&ws).unwrap(),
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
         ] {
@@ -394,7 +351,6 @@ mod tests {
     fn subagent_is_allowed_in_every_tier() {
         let ws = std::env::temp_dir();
         for profile in [
-            Profile::safe(&ws).unwrap(),
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
         ] {
@@ -409,7 +365,6 @@ mod tests {
     fn the_search_tools_are_allowed_in_every_tier() {
         let ws = std::env::temp_dir();
         for profile in [
-            Profile::safe(&ws).unwrap(),
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
         ] {
@@ -425,7 +380,6 @@ mod tests {
     fn skill_is_allowed_in_every_tier() {
         let ws = std::env::temp_dir();
         for profile in [
-            Profile::safe(&ws).unwrap(),
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
         ] {

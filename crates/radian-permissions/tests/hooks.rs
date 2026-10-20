@@ -537,7 +537,7 @@ fn runtime_event_threads_the_optional_policy_name() {
 }
 
 /// ADR 0038 slice 2: `/access` swaps the profile in place. A `write` under the workspace is
-/// allowed in `workspace`, denied in `safe`, and allowed again when swapped back — from the
+/// allowed, denied through a deny-only gate, and allowed again when swapped back — from the
 /// very next call, with no new hooks instance.
 #[tokio::test]
 async fn switching_the_profile_changes_the_next_decision() {
@@ -557,7 +557,11 @@ async fn switching_the_profile_changes_the_next_decision() {
         ToolDecision::Allow
     ));
 
-    hooks.set_profile(Profile::safe(workspace).unwrap());
+    hooks.set_profile(
+        Profile::workspace_write(workspace)
+            .unwrap()
+            .with_denied_tools(["write"]),
+    );
     assert!(matches!(
         decide(&hooks, &cx, &write).await.unwrap(),
         ToolDecision::Deny { .. }
@@ -673,4 +677,48 @@ async fn a_renamed_tool_is_judged_under_its_new_name() {
     let events = audit.events();
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0].decision, ResolvedDecision::Deny);
+}
+
+/// ADR 0043 decision 3: `list` is judged as `read` — an `allow` on the new name allows the
+/// alias, a `deny` on it denies the alias without reaching the approver.
+#[tokio::test]
+async fn the_list_alias_is_judged_as_read() {
+    let dir = TempDir::new("list-alias");
+    let profile = Profile::custom(
+        Preset::FullAccess,
+        ApprovalPolicy::OnAsk,
+        dir.path(),
+        vec![
+            Rule::new(
+                ToolMatcher::Name("read".into()),
+                ResourceMatcher::Any,
+                Action::Allow,
+            ),
+            Rule::new(
+                ToolMatcher::Name("list".into()),
+                ResourceMatcher::Any,
+                Action::Deny,
+            )
+            .with_reason("stale rule on the old name"),
+        ],
+    )
+    .unwrap();
+    let approver = ScriptedApprover::scripted(Vec::new());
+    let audit = Arc::new(RecordingAudit::default());
+    let hooks = make_hooks(profile, Arc::clone(&approver), Arc::clone(&audit));
+    hooks.set_turn_source(Some(InputSource::User));
+    let cx = ctx();
+
+    let decision = decide(&hooks, &cx, &call("list", json!({"path": "."})))
+        .await
+        .unwrap();
+    assert!(
+        matches!(decision, ToolDecision::Allow),
+        "`list` must be allowed by its new name's rule, got {decision:?}"
+    );
+    assert_eq!(
+        approver.calls(),
+        0,
+        "an allow on the new name must not reach the approver"
+    );
 }

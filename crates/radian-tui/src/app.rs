@@ -522,7 +522,7 @@ pub struct SessionView {
     pub bash_running: Option<String>,
     /// A `!`/`!!` command submitted while a turn was running: it starts when the turn ends.
     pub queued_bash: Option<(String, bool)>,
-    /// Whether this session has a shell (`!`) at all: false on the `safe` tier (ADR 0012).
+    /// Whether this session has a shell (`!`) at all: false when no `shell` is mounted.
     pub bash_available: bool,
     /// The exact `Ran \`cmd\`` text we displayed live as a [`EntryKind::Bash`] block for a `!`
     /// command. When that message is admitted to the transcript, `push_message` skips it so
