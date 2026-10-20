@@ -477,7 +477,8 @@ impl App {
                     // The call-time head is the tool name and the renderer's title (ADR 0028
                     // revision 5 decision 1); the meta and the status glyph are the block
                     // layer's, drawn from the card and the entry's state. The pairing refreshes
-                    // the title once the result is in (a `git_diff` title is terse until then).
+                    // the title once the result is in (a title that parses the result text
+                    // is terse until then).
                     let mut entry =
                         Entry::new(EntryKind::ToolCall, crate::tools::call_text(&card, ""));
                     entry.tool = Some(Box::new(card));
@@ -511,11 +512,11 @@ impl App {
                         entry.result = Some(result.is_error);
                         if let Some(card) = entry.tool.as_mut() {
                             card.structured = result.structured.clone();
-                            // The head's title can only be final now (a `git_diff`'s counts
-                            // come from the result text), so the entry's text - what renders
-                            // and copies - is regenerated from the same function the layout
-                            // uses. The result's own row count is part of the head's collapsed
-                            // meta (`· N lines`), and only this entry can see the result text.
+                            // The head's title can only be final now, so the entry's text -
+                            // what renders and copies - is regenerated from the same function
+                            // the layout uses. The result's own row count is part of the head's
+                            // collapsed meta (`· N lines`), and only this entry can see the
+                            // result text.
                             let display = crate::tools::result_display_text(card, &result.text());
                             card.result_lines = Some(crate::tools::body_line_count(&display));
                             // ADR 0024: the call entry draws the whole ask block

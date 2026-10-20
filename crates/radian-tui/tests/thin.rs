@@ -277,8 +277,12 @@ fn diff_frame() -> App {
                 "write",
                 json!({"path": "b.txt", "content": "three\nfour\n"}),
             ),
-            call("c4", "git_diff", json!({})),
-            call("c5", "git_diff", json!({})),
+            call(
+                "c4",
+                "patch",
+                json!({"path": "src/main.rs"}),
+            ),
+            call("c5", "patch", json!({"path": "notes.txt"})),
         ],
     ));
     result(
@@ -351,7 +355,7 @@ const DIFF_GOLDEN: &[&str] = &[
     "│    1 + three",
     "│    2 + four",
     "",
-    "◻ git_diff 1 files +3 −2 ✓",
+    "◻ patch src/main.rs · +0 −0 ✓",
     "│ diff --git a/src/main.rs b/src/main.rs",
     "│ --- a/src/main.rs",
     "│ +++ b/src/main.rs",
@@ -364,14 +368,14 @@ const DIFF_GOLDEN: &[&str] = &[
     "│   20 + let c = 5;",
     "│   21 + let d = 6;",
     "",
-    "◻ git_diff 0 files +1 −1 ✓",
+    "◻ patch notes.txt · +0 −0 ✓",
     "│ -gone",
     "│ +added",
     "│ same",
 ];
 
 /// `patch` (two replaced ranges, the second's `new_start` moved by the first), `write` new and
-/// overwrite, `git_diff` multi-hunk and the no-start-line fallback, at both widths and both
+/// overwrite, unified-diff text multi-hunk and the no-start-line fallback, at both widths and both
 /// palettes.
 #[test]
 fn the_diff_blocks_snapshot_at_80_120_dark_light() {
@@ -585,7 +589,7 @@ fn mixed_frame() -> App {
         content: vec![ContentPart::text("the answer")],
         tool_calls: vec![
             call("c1", "shell", json!({"command": "make test"})),
-            call("c2", "git_diff", json!({})),
+            call("c2", "patch", json!({"path": "a.txt"})),
         ],
         provider_payload: None,
         interrupted: false,
@@ -680,13 +684,13 @@ fn a_three_hunk_diff_numbers_each_row_by_its_own_file() {
                 +let c = 3;\n\
                 +let c2 = 4;\n\
                 +let c3 = 5;\n";
-    card(&mut a, "git_diff", json!({}), diff, json!(null));
+    card(&mut a, "patch", json!({"path": "x.rs"}), diff, json!(null));
     expect_transcript(
         &mut a,
         80,
         24,
         &[
-            "◻ git_diff 1 files +6 −4 ✓",
+            "◻ patch x.rs · +0 −0 ✓",
             "│ diff --git a/x.rs b/x.rs",
             "│ --- a/x.rs",
             "│ +++ b/x.rs",
@@ -722,7 +726,7 @@ fn a_copy_of_a_diff_block_has_no_marker_or_line_number() {
                 @@ -10,1 +10,1 @@\n\
                 -let a = 1;\n\
                 +let a = 2;\n";
-    card(&mut a, "git_diff", json!({}), diff, json!(null));
+    card(&mut a, "patch", json!({"path": "x.rs"}), diff, json!(null));
     let width = 80usize;
     let modes = a.display_modes();
     let entries = &a.session.entries;

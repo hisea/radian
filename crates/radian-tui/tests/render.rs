@@ -1751,11 +1751,11 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     assert_eq!(app.tool_display.fold, ToolFold::Errors);
 }
 
-/// The `git_diff` body colors its rows with the theme's own roles (ADR 0028 decision
+/// A unified diff body colors its rows with the theme's own roles (ADR 0028 decision
 /// 5 + ADR 0029): added, removed, context, and the hunk/file-header structure — whose rows now
 /// carry a line number and a synthesized space after the sign.
 #[test]
-fn a_git_diff_body_colors_its_line_kinds() {
+fn a_patch_body_colors_its_line_kinds() {
     let mut app = App::new("m", "s");
     app.push_message(&assistant_with(
         "",
@@ -1763,8 +1763,8 @@ fn a_git_diff_body_colors_its_line_kinds() {
         false,
         vec![ToolCall {
             id: "c1".into(),
-            name: "git_diff".into(),
-            arguments: serde_json::json!({}),
+            name: "patch".into(),
+            arguments: serde_json::json!({"path": "x.rs"}),
         }],
     ));
     let diff = "diff --git a/x.rs b/x.rs\nindex 1..2 100644\n--- a/x.rs\n+++ b/x.rs\n@@ -1,2 +1,2 @@\n context\n-old line\n+new line";
@@ -1799,9 +1799,9 @@ fn a_git_diff_body_colors_its_line_kinds() {
         theme.notice_label.fg,
         "@@ is not the accent"
     );
-    // The head's counts come from the same text.
+    // The head names the tool and the call's path.
     let text = screen(&terminal);
-    assert!(text.contains("◻ git_diff 1 files +1 −1 ✓"), "{text}");
+    assert!(text.contains("◻ patch x.rs"), "{text}");
 }
 
 /// A `patch` card shows the replacement: the head's +N/-M and the `-old`/`+new` body, whose
@@ -1929,7 +1929,7 @@ fn the_block_layout_snapshot() {
                 },
                 ToolCall {
                     id: "c2".into(),
-                    name: "list".into(),
+                    name: "read".into(),
                     arguments: serde_json::json!({"path": "src"}),
                 },
             ],
@@ -2010,10 +2010,10 @@ fn the_block_layout_snapshot() {
         "│ --- stdout ---".to_string(),
         "│ boom".to_string(),
         "".to_string(), // the gap
-        // The `list` block: a compact tool, so its head is the `•` one-liner whatever its result
-        // hides (ADR 0035's 2026-10-16 note, option A; its two-entry table is not laid out under
-        // `errors`).
-        format!("• list src (2 entries) {}", status[1]),
+        // The `read` block on a directory: a compact tool, so its head is the `•` one-liner
+        // whatever its result hides (ADR 0035's 2026-10-16 note, option A; the listing text
+        // is not laid out under `errors`).
+        format!("• read src {}", status[1]),
         "".to_string(), // the gap
         "* profile: workspace · sandbox macos-seatbelt".to_string(),
         "".to_string(), // the gap above the rule line
@@ -2054,67 +2054,10 @@ fn a_tab_wraps_as_four_columns() {
     assert_eq!(radian_tui::render::wrap_line_count("abcdef\t", 9), 2);
 }
 
-/// A `list` card shows an aligned table, not the tool's tab-separated text (owner hand test:
-/// `dir512crates` ran together because a tab occupies no column).
+/// The ask and memory renderers' heads.
 #[test]
-fn a_list_card_shows_an_aligned_table() {
-    let mut app = App::new("m", "s");
-    app.push_message(&assistant_with(
-        "",
-        "",
-        false,
-        vec![ToolCall {
-            id: "c1".into(),
-            name: "list".into(),
-            arguments: serde_json::json!({"path": "src"}),
-        }],
-    ));
-    app.push_message(&Message::Tool {
-        result: ToolResult {
-            call_id: "c1".into(),
-            content: vec![ContentPart::text(
-                "file\t512\tb.md\ndir\t4096\tsrc\nfile\t1693\tCargo.toml\n",
-            )],
-            structured: Some(serde_json::json!({
-                "path": "src", "entries": 3, "total_entries": 3, "truncated": false
-            })),
-            is_error: false,
-            error_code: None,
-        },
-        meta: Default::default(),
-    });
-    app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
-    let text = screen(&render(&mut app, 70, 14));
-    assert!(text.contains("◻ list src (3 entries) ✓"), "{text}");
-    assert!(text.contains("d ") && text.contains("src"), "{text}");
-    assert!(text.contains("4.0K"), "a human-readable size: {text}");
-    assert!(
-        !text.contains("dir\t4096"),
-        "no raw tab-separated text: {text}"
-    );
-    assert!(!text.contains('\t'), "no tab reaches the screen: {text}");
-    // Directories first.
-    let dir_row = text.find("d ").expect("a dir row");
-    let file_row = text.find("f ").expect("a file row");
-    assert!(dir_row < file_row, "the directory sorts first: {text}");
-}
-
-/// The list-like and memory renderers' heads.
-#[test]
-fn the_list_and_memory_cards_have_their_own_heads() {
+fn the_ask_and_memory_cards_have_their_own_heads() {
     for (name, arguments, structured, expected) in [
-        (
-            "git_status",
-            serde_json::json!({}),
-            serde_json::json!({"entries": 2}),
-            "◻ git_status 2 entries ✓",
-        ),
-        (
-            "list",
-            serde_json::json!({"path": "src"}),
-            serde_json::json!({"path": "src", "entries": 3, "total_entries": 3}),
-            "• list src (3 entries) ✓",
-        ),
         (
             "ask_user",
             serde_json::json!({"questions": [{"id": "q1"}, {"id": "q2"}]}),

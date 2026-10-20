@@ -77,7 +77,7 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Expose the built-in file tools rooted at this directory (read/write/patch,
-    /// glob/grep, git_diff). The `shell` and `job` tools are exposed as well: under `workspace` they run
+    /// glob/grep). The `shell` and `job` tools are exposed as well: under `workspace` they run
     /// confined, under `full` (the default) unsandboxed. Omitted, the current directory is
     /// the workspace.
     #[arg(help_heading = "TUI", long, short = 'w', value_name = "DIR")]
