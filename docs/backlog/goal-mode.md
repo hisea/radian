@@ -1,7 +1,7 @@
 # `/goal`：续跑引擎第三步，持久目标 + `goal` 工具 + 预算
 
 - 状态：decided＼�在 `/loop` 的重投路径上加目标；完成判定走工具）
-- 涉及 ADR：新 ADR（续跑引擎：loop 与 goal）；0018（压缩不摘要目标，确定性补注）、0036（系统提示的上下文区）、0011、0005（meta）、0043 §4（工具数 +1）、0037 与 `wake-cap-unattended.md` 决定 2（到顶可见）、0034（herdr `blocked`）、0006/0008（新 journal 记录与 schema fixture）、0022（fork）
+- 涉及 ADR：新 ADR（续跑引擎：loop 与 goal）；0018（压缩不摘要目标，确定性补注）、0036（系统提示的上下文区）、0011、0005（meta）、0043 §4（工具数 +1）、0037 决定 5（唤醒速率闸门与到顶可见）、0034（herdr `blocked`）、0006/0008（新 journal 记录与 schema fixture）、0022（fork）
 - 来源：`docs/research/2026-10-20-peer-slash-commands.md` §2.2；总报告第 19 条；依赖 `tui-loop-continuation.md` 先落地
 
 ## 背景
@@ -18,11 +18,11 @@ Codex 官方 `/goal`（set/edit/pause/resume/view/clear，4 000 字符）与 omp
 
 **`goal` 工具**（0043 §4 工具数 +1，和 `job {id,op}` 同风格）：`goal { op: "progress" | "done" | "wait", note?, secs? }`。`progress` 记一条进度（durable，替换「最近进度」）；`done` 把目标置为 done，续跑停止，TUI 通知；`wait secs` 把下一次续跑延后，取用户 `--every` 与 `secs` 的较大者，上限 1 小时。这是 Claude Code 自驻 `/loop` 与 pi-loop `NEXT:` 在 radian 里的对应物：延迟由模型通过工具给，不是另一种模式。工具在非目标模式下调用返回「no active goal」的工具结果错误。
 
-**何时停**：`done`；预算到顶（轮数、时长、token 三选任意组合，缺省轮数与时长上限落地时按 dogfood 量，候选 30 轮 / 2 小时）；`pause`/`drop`；模型错误（暂停并通知）。到顶时按 `wake-cap-unattended.md` 决定 2 的方式可见：TUI 通知、herdr 报 `blocked`、journal 标明。
+**何时停**：`done`；预算到顶（轮数、时长、token 三选任意组合，缺省轮数与时长上限落地时按 dogfood 量，候选 30 轮 / 2 小时）；`pause`/`drop`；模型错误（暂停并通知）。到顶时按 ADR 0037 决定 5 唤醒闸门到顶的方式可见：TUI 通知、herdr 报 `blocked`、journal 标明。
 
 **resume 与 fork**：`--resume` 后 active 目标显示为 paused 并在启动行提示 `/goal resume`，不自动续跑（第 19 条的「一键续跑」）。`/fork` 的子会话带目标记录但状态为 paused。
 
-**待决（不阻塞 TUI 部分）**：`radian exec -p --goal <objective>` 是否允许，以及与 `exec-waits-for-jobs.md` (a) 的退出链如何合并。owner 另定。
+**待决（不阻塞 TUI 部分）**：`radian exec -p --goal <objective>` 是否允许，以及与 ADR 0044 里 `-p` 等后台 job 的退出链如何合并。owner 另定。
 
 ## 验收
 
