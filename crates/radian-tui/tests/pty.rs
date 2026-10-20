@@ -3400,19 +3400,19 @@ async fn pty_the_default_tier_is_full_with_no_sandbox() {
 
 /// ADR 0043 decision 2: the project declaration `<workspace>/.radian/config.toml` can only
 /// narrow. `--trust` skips the startup modal (a project config is a project resource), and the
-/// summary then shows `safe`.
+/// summary then shows `workspace`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_a_project_config_narrows_the_tier() {
     skip_inside_sandbox!("pty_a_project_config_narrows_the_tier");
     let _serial = pty_guard();
-    let dir = TempDir::new("project-safe");
+    let dir = TempDir::new("project-workspace");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(ws.join(".radian")).unwrap();
     std::fs::write(
         ws.join(".radian/config.toml"),
-        "[permissions]\nprofile = \"safe\"\n",
+        "[permissions]\nprofile = \"workspace\"\n",
     )
     .unwrap();
     let server = MockServer::start(vec![text_reply("never")]).await;
@@ -3425,7 +3425,7 @@ async fn pty_a_project_config_narrows_the_tier() {
             "--session-dir",
             sessions.to_str().unwrap(),
             "--session-id",
-            "project-safe",
+            "project-workspace",
             "--workspace",
             ws.to_str().unwrap(),
             "--trust",
@@ -3444,12 +3444,12 @@ async fn pty_a_project_config_narrows_the_tier() {
         .find(|line| line.contains("context ") && line.contains("ask_user"))
         .unwrap_or_else(|| panic!("no summary line:\n{screen}"));
     assert!(
-        summary.contains("safe"),
-        "the project must narrow the default to `safe`: {summary:?}"
+        summary.contains("workspace"),
+        "the project must narrow the default to `workspace`: {summary:?}"
     );
     assert!(
-        summary.contains("no exec"),
-        "`safe` has no command execution: {summary:?}"
+        summary.contains("sandbox on"),
+        "the summary must show the sandbox: {summary:?}"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));

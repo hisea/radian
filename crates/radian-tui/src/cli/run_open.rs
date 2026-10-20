@@ -116,7 +116,7 @@ pub(super) fn build_session_inputs(
     };
     // ADR 0033: the user's `!`/`!!` commands run in the **same** sandbox the coding tools use
     // (including ADR 0016's Unix-socket rules). `Sandbox` is cheap to clone; `None`
-    // (the `safe` tier) means `!` is unavailable.
+    // (no `shell` mounted) means `!` is unavailable.
     let bash_sandbox = sandbox.clone();
     // The MCP config file is read and validated here: before any server process starts and
     // before a session file exists, so a bad file leaves nothing behind (dogfooding D2). The

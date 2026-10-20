@@ -49,22 +49,20 @@ fn access_with_no_argument_reports_the_tier_and_source() {
     );
 }
 
-/// A switch to a sandboxed tier needs no confirmation: it is an effect the loop applies.
+/// A switch to the sandboxed tier needs no confirmation: it is an effect the loop applies.
 #[test]
 fn access_to_a_sandboxed_tier_switches_without_confirmation() {
-    for command in ["/access safe", "/access workspace"] {
-        let app = submit(command);
-        assert!(app.top_modal().is_none(), "{command} must not open a panel");
-    }
+    let app = submit("/access workspace");
+    assert!(app.top_modal().is_none(), "/access workspace must not open a panel");
     // The effect itself, checked directly (the helper above consumed it).
     let mut app = App::new("m", "s");
     app.set_tier("full");
-    app.input = "/access safe".into();
+    app.input = "/access workspace".into();
     let effects = app.on_key(key(KeyCode::Enter)).effects;
     assert_eq!(
         effects,
         vec![Effect::SetAccess {
-            tier: Tier::Safe,
+            tier: Tier::WorkspaceWrite,
             remember: false,
         }],
         "{effects:?}"
@@ -141,22 +139,25 @@ fn access_full_choices_switch_with_the_right_remember_flag() {
     );
 }
 
-/// An applied switch moves the footer's tier (with the session/project marker) and the `!`/`!!`
-/// availability (`safe` has no shell).
+/// An applied switch moves the footer's tier (with the session/project marker) and keeps
+/// the `!`/`!!` availability (both remaining tiers have a shell).
 #[test]
 fn an_applied_switch_updates_the_footer_and_the_shell_flag() {
     let mut app = App::new("m", "s");
-    app.set_tier("workspace");
+    app.set_tier("full");
     app.set_bash_available(true);
 
     let result = app.update(Input::AccessApplied {
-        tier: Tier::Safe,
+        tier: Tier::WorkspaceWrite,
         remember: false,
         result: Ok(()),
     });
     assert!(result.effects.is_empty());
-    assert_eq!(app.session.projection.read().tier(), Some("safe (session)"));
-    assert!(!app.session.bash_available, "safe has no shell");
+    assert_eq!(
+        app.session.projection.read().tier(),
+        Some("workspace (session)")
+    );
+    assert!(app.session.bash_available, "workspace has a shell");
     // ADR 0036: the tool list (and the shell description) is fixed when
     // the session opens, so the switch says so instead of leaving the text stale.
     assert!(
@@ -203,7 +204,7 @@ fn a_refused_switch_is_a_notice_and_changes_nothing() {
 /// A wrong argument is a usage notice; more than one name is too.
 #[test]
 fn a_wrong_access_argument_is_a_usage_notice() {
-    for command in ["/access maybe", "/access safe extra"] {
+    for command in ["/access maybe", "/access safe", "/access safe extra"] {
         let mut app = App::new("m", "s");
         app.set_tier("workspace");
         app.input = command.into();
@@ -211,7 +212,7 @@ fn a_wrong_access_argument_is_a_usage_notice() {
         assert!(effects.is_empty(), "{command}: {effects:?}");
         assert!(
             notices(&app).iter().any(|notice| {
-                notice.contains("usage: /access") || notice.contains("not one of safe")
+                notice.contains("usage: /access") || notice.contains("not one of workspace")
             }),
             "{command}: {:?}",
             notices(&app)
@@ -219,9 +220,9 @@ fn a_wrong_access_argument_is_a_usage_notice() {
     }
 }
 
-/// `/access` is on the command tree, and its one argument level offers the three tiers.
+/// `/access` is on the command tree, and its one argument level offers the two tiers.
 #[test]
-fn access_completes_the_three_tiers() {
+fn access_completes_the_two_tiers() {
     use radian_tui::command;
     let entry = command::tree()
         .iter()
@@ -234,7 +235,7 @@ fn access_completes_the_three_tiers() {
         .iter()
         .map(|candidate| candidate.insert.as_str())
         .collect();
-    assert_eq!(words, vec!["safe", "workspace", "full"]);
+    assert_eq!(words, vec!["workspace", "full"]);
 }
 
 /// The confirmation's choices are exactly the three the ADR names, and the default is `cancel`.

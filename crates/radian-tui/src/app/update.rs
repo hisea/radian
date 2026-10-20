@@ -220,9 +220,9 @@ impl App {
                             tier.as_str(),
                             self.session.access_source.suffix()
                         ));
-                        // `!`/`!!` exist whenever the new tier has a sandbox (`full` and
-                        // `workspace`; not `safe`).
-                        self.set_bash_available(tier != crate::profile::Tier::Safe);
+                        // `!`/`!!` run under the new tier's sandbox; a successful switch
+                        // always has one (a failed probe refuses in `SetAccess`).
+                        self.set_bash_available(true);
                         if remember {
                             self.push_notice(format!(
                                 "access: {} for this session, and remembered for this project",

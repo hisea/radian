@@ -100,7 +100,7 @@ class RadianOptions(InstalledAgentOptions):
         description="Container path the CA bundle is uploaded to. Defaults to "
         "the remote binary's directory.",
     )
-    profile: Literal["full", "workspace", "safe"] = Field(
+    profile: Literal["full", "workspace"] = Field(
         default="full",
         description="Radian permission profile inside the task container.",
     )
