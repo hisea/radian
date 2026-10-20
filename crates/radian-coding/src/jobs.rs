@@ -45,6 +45,7 @@ use serde_json::json;
 
 use crate::args;
 use crate::fail;
+pub use crate::output::SweepSummary;
 use crate::provider::Limits;
 use crate::shell::{
     Supervised, lock_bool, own_session, sandboxed_command, signal_session,
@@ -737,6 +738,30 @@ impl Jobs {
         let mut registry = self.lock_state();
         registry.order.push(id.clone());
         registry.jobs.insert(id, cell);
+    }
+
+    /// Clears the session's jobs directory on resume (ADR 0037 §6): every regular file and
+    /// every symlink present is unlinked (the link itself, never its target); subdirectories
+    /// are left in place and counted as skipped. Refuses to run when the registry already
+    /// holds any entry — a resumed registry is built empty, so at resume time no file in the
+    /// directory can belong to it — which keeps this from ever deleting a live file even if
+    /// a later caller calls it at the wrong time. The host calls this once on the resume
+    /// path; a refused sweep removes nothing and reports no error.
+    pub fn sweep_unregistered(&self) -> SweepSummary {
+        {
+            let state = self.lock_state();
+            if !state.jobs.is_empty() {
+                return SweepSummary::default();
+            }
+        }
+        match crate::output::PrivateDir::open(&self.inner.dir) {
+            Ok(root) => root.sweep(),
+            Err(error) => SweepSummary {
+                removed: 0,
+                skipped: 0,
+                first_error: Some(error.to_string()),
+            },
+        }
     }
 
     /// Drops a retained foreground entry, so its id reads as unknown (ADR 0037 decision 3a:
@@ -1632,6 +1657,124 @@ mod tests {
             reaped: Arc::new(Mutex::new(false)),
             settled,
         }))
+    }
+
+    /// A unique scratch directory per sweep test, so parallel tests never share one.
+    fn sweep_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "radian-jobs-sweep-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// A leftover regular file is removed (ADR 0037 §6): at resume time no registry entry
+    /// owns any file, so every regular file goes.
+    #[test]
+    fn sweep_removes_a_leftover_regular_file() {
+        let dir = sweep_dir("regular");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("job-1-1.out"), b"leftover\n").unwrap();
+        let jobs = Jobs::new(dir.clone());
+
+        let summary = jobs.sweep_unregistered();
+
+        assert_eq!(summary.removed, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.first_error.is_none(), "{:?}", summary.first_error);
+        assert!(!dir.join("job-1-1.out").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A symlink is removed as a link: the entry goes, the file outside still exists with
+    /// its content. An implementation that followed the link would empty or delete it.
+    #[cfg(unix)]
+    #[test]
+    fn sweep_removes_the_link_not_its_target() {
+        let dir = sweep_dir("link");
+        std::fs::create_dir_all(&dir).unwrap();
+        let outside = std::env::temp_dir().join(format!(
+            "radian-jobs-sweep-target-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&outside, b"UNCHANGED\n").unwrap();
+        let link = dir.join("job-1-2.out");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let jobs = Jobs::new(dir.clone());
+
+        let summary = jobs.sweep_unregistered();
+
+        assert_eq!(summary.removed, 1);
+        assert!(summary.first_error.is_none(), "{:?}", summary.first_error);
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "the link itself must be gone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "UNCHANGED\n",
+            "the link's target must be untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    /// A subdirectory is left in place (no recursion) and counted as skipped, with its
+    /// contents untouched.
+    #[test]
+    fn sweep_leaves_a_subdirectory_in_place_and_counts_it_skipped() {
+        let dir = sweep_dir("subdir");
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("nested").join("inner.out"), b"x\n").unwrap();
+        let jobs = Jobs::new(dir.clone());
+
+        let summary = jobs.sweep_unregistered();
+
+        assert_eq!(summary.removed, 0);
+        assert_eq!(summary.skipped, 1);
+        assert!(summary.first_error.is_none(), "{:?}", summary.first_error);
+        assert!(dir.join("nested").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("nested").join("inner.out")).unwrap(),
+            "x\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The registry-not-empty guard: with one entry registered the sweep refuses to run, so
+    /// the entry's file still exists. Without the guard this removes the live file.
+    #[test]
+    fn sweep_refuses_to_run_when_the_registry_holds_an_entry() {
+        let dir = sweep_dir("guard");
+        std::fs::create_dir_all(&dir).unwrap();
+        let jobs = Jobs::new(dir.clone());
+        let id = "job-1-99".to_owned();
+        let output = jobs.output_path(&id);
+        std::fs::write(&output, b"live\n").unwrap();
+        jobs.insert_settled(
+            id,
+            "echo hi".into(),
+            JobState::Exited(0),
+            output.clone(),
+            Ring::default(),
+        );
+
+        let summary = jobs.sweep_unregistered();
+
+        assert_eq!(summary.removed, 0);
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            "live\n",
+            "a registered entry's file must survive the sweep"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The root cause of a wait on a settled job sleeping to its timeout: tokio's `send` returns

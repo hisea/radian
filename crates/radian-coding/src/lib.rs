@@ -81,6 +81,7 @@ pub use ask::{
 };
 pub use jobs::{
     JOB_RING_BYTES, JobEvent, JobState, JobSummary, Jobs, MAX_RUNNING_JOBS, OUTPUT_HINT,
+    SweepSummary,
 };
 pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits};
 pub use read_roots::ReadRoots;
