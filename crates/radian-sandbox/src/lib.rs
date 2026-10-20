@@ -20,6 +20,7 @@
 #[cfg(target_os = "linux")]
 mod bwrap;
 mod error;
+mod git_exec;
 mod inherited;
 mod policy;
 #[cfg(target_os = "macos")]
@@ -36,7 +37,14 @@ use std::ops::{Deref, DerefMut};
 use std::process::Command;
 
 pub use error::{ProbeReport, SandboxError};
-pub use policy::{DEFAULT_ALLOW_ENV, DEFAULT_DENY_READ, GitAccess, SandboxMode, SandboxPolicy};
+pub use git_exec::{
+    GIT_EXEC_DIRS, GIT_EXEC_FILES, GIT_MODULE_DIRS, GIT_MODULE_FILES, GIT_WORKTREE_FILES,
+    is_git_exec_entry,
+};
+pub use policy::{
+    DEFAULT_ALLOW_ENV, DEFAULT_DENY_READ, GitAccess, SandboxMode, SandboxPolicy,
+    discover_git_metadata,
+};
 pub use slot::SandboxSlot;
 
 /// A concrete sandbox mechanism. `command` returns a launcher `Command` that runs `program`
