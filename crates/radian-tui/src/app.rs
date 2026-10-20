@@ -488,6 +488,10 @@ pub struct SessionView {
     /// `NextStep` and its admission carries an untracked id — so the count only moves on a
     /// followup's own enqueue and admission.
     pub(crate) queued: HashSet<MessageId>,
+    /// Whether the last turn ended in a model or hook error (`TurnFailed` seen, no new turn
+    /// started since): `/retry` resends the last user message only then. A normal end, a
+    /// cancel or a fresh session leaves it false.
+    pub(crate) last_turn_failed: bool,
     /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
     /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
     /// reason is readable; the user quits with the ordinary keys.

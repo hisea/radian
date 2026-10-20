@@ -13306,3 +13306,76 @@ async fn pty_queue_while_idle_starts_a_turn_at_once() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+/// `/retry` after a model-error turn resends the same text: the second request's last user
+/// message matches the first one's, and the transcript gains a second user message without
+/// rewriting anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_retry_after_a_model_error_resends_the_same_text() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        Reply::status(
+            400,
+            r#"{"error": {"message": "bad request", "type": "invalid_request_error"}}"#,
+        ),
+        text_reply("RETRY-REPLY-OK"),
+    ])
+    .await;
+    let dir = TempDir::new("retry");
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "retry",
+        ],
+        &[],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"say it again\r");
+    assert!(
+        pty.wait_for_screen("turn failed", wait_positive()),
+        "the failure was not shown:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("/retry to resend", wait_positive()),
+        "the retry hint was not shown:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/retry\r");
+    assert!(
+        pty.wait_for_screen("RETRY-REPLY-OK", wait_positive()),
+        "the retried turn did not answer:\n{}",
+        pty.screen()
+    );
+    // The same text twice: the retry resent the failed turn's input verbatim.
+    assert_eq!(
+        last_user_text(&server, 0),
+        last_user_text(&server, 1),
+        "both requests carry the same user text"
+    );
+    assert!(
+        last_user_text(&server, 0).contains("say it again"),
+        "the text is the typed message"
+    );
+    // The transcript gained a second user message; nothing was rewritten.
+    assert!(
+        pty.screen().matches("say it again").count() >= 2,
+        "two user messages on screen:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

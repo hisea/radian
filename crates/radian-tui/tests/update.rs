@@ -161,7 +161,9 @@ fn a_failed_turn_is_a_notice_and_an_overflow_adds_the_help() {
         message: "boom".into(),
     }));
     assert!(
-        notices(&app).iter().any(|note| note == "turn failed: boom"),
+        notices(&app)
+            .iter()
+            .any(|note| note.contains("turn failed: boom") && note.contains("/retry to resend")),
         "{:?}",
         notices(&app)
     );

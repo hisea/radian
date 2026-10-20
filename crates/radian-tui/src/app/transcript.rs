@@ -116,6 +116,11 @@ impl App {
                 return UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork));
             }
         }
+        // A new turn started: the previous turn's failure (if any) is no longer retryable —
+        // `/retry` is only for the turn that just failed.
+        if let RuntimeEvent::TurnStarted { .. } = event {
+            self.session.last_turn_failed = false;
+        }
         if let RuntimeEvent::ConfigChanged { change, .. } = event {
             // The driver applied the queued change: the status bar's `next:` promise is done.
             self.session.next_model = None;
@@ -150,8 +155,11 @@ impl App {
         if let RuntimeEvent::TurnFailed { message, .. } = event {
             self.session.entries.push(Entry::new(
                 EntryKind::Notice,
-                format!("turn failed: {message}"),
+                format!("turn failed: {message}\n/retry to resend"),
             ));
+            // `/retry` resends the last user message, but only while this flag stands: the
+            // next turn's start clears it.
+            self.session.last_turn_failed = true;
             // ADR 0018's fallback: a recognizable context overflow gets one extra line, since
             // automatic compaction did not keep the request inside the window. The host only
             // has the text, so the prefix is what identifies it.

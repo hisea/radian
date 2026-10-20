@@ -73,6 +73,40 @@ impl App {
         UpdateResult::effect(Effect::ExpandMentions { text })
     }
 
+    /// Runs `/retry`: resend the last user message after a model-error turn. Only when idle
+    /// and the previous turn failed (the `last_turn_failed` flag `TurnFailed` sets); a normal
+    /// end, a cancel or no turn at all is a "nothing to retry" notice. The text goes as-is —
+    /// the transcript's folded form, with no `@` expansion, so an attachment is not re-read.
+    pub(super) fn retry(&mut self) -> UpdateResult {
+        if self.turn() == TurnState::Running || !self.session.last_turn_failed {
+            self.push_notice("nothing to retry");
+            return UpdateResult::dirty();
+        }
+        let Some(text) = self
+            .session
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == EntryKind::User)
+            .map(|entry| entry.text.clone())
+        else {
+            self.push_notice("nothing to retry");
+            return UpdateResult::dirty();
+        };
+        if let Some(refused) = self.refuse_if_session_ended() {
+            return refused;
+        }
+        // ADR 0008 §2: like a send, a retry without a model sends nothing.
+        if !self.session.has_model {
+            self.push_notice(
+                "no model is set; choose one with /model (and /login if the provider needs a key) — the message was not sent",
+            );
+            return UpdateResult::dirty();
+        }
+        self.session.last_turn_failed = false;
+        UpdateResult::effect(Effect::SendFollowup(Message::user(text)))
+    }
+
     /// The hardcoded answer to a `/memory` confirmation: `y` runs the command (through the
     /// loop), `n`/`Esc` cancels it.
     pub(super) fn confirm_command(&mut self, confirmed: bool) -> UpdateResult {

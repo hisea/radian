@@ -14,6 +14,7 @@ use radian_host::memory::commands::{self, CommandOutput, MemoryCommand};
 pub const HELP: &str = "\
 /help                 list the commands
 /queue <text>          queue a message for the next turn, even while one runs
+/retry                resend the last message after a model error
 /compact [note]       summarize the history now and keep the recent part (ADR 0018)
 /sessions [query]     list this workspace's recent sessions, or search their text
 /fork                 fork this session at its last turn boundary (ADR 0022)
@@ -74,6 +75,9 @@ pub enum Outcome {
     /// `/queue <text>`: like a send, but always a followup — even while a turn runs
     /// (Enter steers then). The loop expands the `@` references first, like a send.
     Queue(String),
+    /// `/retry`: resend the last user message after a model-error turn. The app decides
+    /// (idle and the last turn failed); the text goes as-is, with no `@` expansion.
+    Retry,
     /// A `/memory` command to run through the shared executor.
     Memory(MemoryCommand),
     /// A manual `/compact` (ADR 0018): the host runs it on the runtime, between turns, and
@@ -217,6 +221,11 @@ pub fn tree() -> &'static [Command] {
             name: "queue",
             description: "queue a message for the next turn, even while one runs",
             levels: &[free_level],
+        },
+        Command {
+            name: "retry",
+            description: "resend the last message after a model error",
+            levels: &[],
         },
         Command {
             name: "compact",
@@ -923,6 +932,8 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
     match tokens.first().map(String::as_str) {
         Some("/help") => Outcome::Notices(vec![HELP.to_owned()]),
         Some("/queue") => queue_text(&tokens[1..]),
+        Some("/retry") if tokens.len() == 1 => Outcome::Retry,
+        Some("/retry") => Outcome::Notices(vec!["usage: /retry (no arguments)".to_owned()]),
         Some("/memory") => memory_command(&tokens[1..], memory_enabled),
         Some("/compact") => Outcome::Compact(compact_instructions(&tokens[1..])),
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
@@ -1307,6 +1318,21 @@ mod tests {
         }
         assert!(HELP.contains("/queue"), "{HELP}");
         assert!(tree().iter().any(|command| command.name == "queue"));
+    }
+
+    /// `/retry` takes no argument; anything after it is a usage notice. It is a command,
+    /// and it is in `/help`.
+    #[test]
+    fn retry_takes_no_arguments() {
+        assert!(matches!(parse("/retry", false), Outcome::Retry));
+        match parse("/retry now", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /retry"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/retry"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "retry"));
     }
 
     /// The completion table and the clap grammar must name the same subcommands, in both
