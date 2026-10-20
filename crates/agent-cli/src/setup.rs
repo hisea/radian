@@ -496,10 +496,14 @@ pub(crate) async fn setup(
             }) as radian_host::cost::RoutePrice,
         )
     };
-    let servers = match &cli.mcp_config {
+    let loaded = match &cli.mcp_config {
         Some(path) => load_mcp_config(path).map_err(SetupError)?,
-        None => Vec::new(),
+        None => radian_host::McpLoad::default(),
     };
+    for warning in &loaded.warnings {
+        eprintln!("[mcp] {warning}");
+    }
+    let servers = loaded.servers;
     // The key and every header value are secrets: no error this program prints may contain
     // any of them, and they are never written to the session file. "The key" is **every**
     // login in `auth.json`, not only this route's (ADR 0013 T4, ): a provider
