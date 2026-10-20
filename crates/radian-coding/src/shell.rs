@@ -112,18 +112,14 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
         SandboxMode::WorkspaceWrite if git_writable => {
             "The command runs under the OS sandbox in `workspace` mode: writes are \
              confined to the workspace, the repository's `.git` is writable so native \
-             `git commit`, `git branch` and `git stash` work in the sandbox (only the \
-             entries git can execute — `.git/config`, `.git/config.worktree` and \
-             `.git/hooks/` — stay read-only), sensitive directories such as `~/.ssh` are \
-             not readable, and the network is **on** (outbound and local-loopback connect, \
-             bind and listen are allowed)."
+             `git commit` works (only `.git/config`, `.git/config.worktree` and \
+             `.git/hooks/` stay read-only), `~/.ssh` is not readable, and the network is \
+             **on**."
         }
         SandboxMode::WorkspaceWrite => {
             "The command runs under the OS sandbox in `workspace` mode: writes are \
-             confined to the workspace, the repository's `.git` is read-only, sensitive \
-             directories such as `~/.ssh` are not readable, and the network is **on** \
-             (outbound and local-loopback connect, bind and listen are allowed). \
-             `git commit` fails by design (the sandbox keeps `.git` read-only)."
+             confined to the workspace, the repository's `.git` is read-only (so is \
+             `git commit`, by design), `~/.ssh` is not readable, and the network is **on**."
         }
         SandboxMode::Safe => {
             "The command runs under the OS sandbox in `safe` mode: the workspace is \
@@ -140,11 +136,11 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
         description: format!(
             "Run a shell command with `/bin/sh -c`. {confinement} Read files with `read` \
              and `list`, and search with `grep` and `glob`, not with `cat`, `sed`, `ls` or \
-             `find` through `shell`: they report truncation and totals, use less context, \
-             and run in parallel, while `shell` runs alone. Each stream is capped: past the \
+             `find` through `shell`: they report truncation, use less context, and run in \
+             parallel, while `shell` runs alone. Each stream is capped: past the \
              budget the start and the end are kept and the middle names the discarded \
-             bytes. A truncated foreground result keeps its full output under a job id; \
-             read it with `job`. The whole session is killed on timeout or cancellation. A \
+             bytes. A truncated foreground result keeps its full output under a job id for \
+             `job`. Timeout or cancellation kills the whole session. A \
              foreground command still running after the auto-background threshold is moved \
              to the background in place — never restarted — and returns at once with a job \
              id. `background: true` starts it there at once. Background results end: `You \
@@ -1541,6 +1537,36 @@ mod tests {
         // The retained bytes are bounded by the cap, not by the output size: this is the
         // property that keeps a 50 MiB build log out of this process's memory.
         assert!(capped.head.len() + capped.tail.len() <= cap);
+    }
+
+    #[test]
+    fn the_shell_and_job_specs_fit_the_prefix_budget() {
+        // ADR 0037 decision 4: the two definitions stay small enough for the cached prefix.
+        // Compact `{"name","description","input_schema"}` JSON, UTF-8 bytes. All three
+        // sandbox modes (the longest confinement text wins) and the one `job` tool.
+        let size = |spec: &agent_core::ToolSpec| {
+            serde_json::to_string(&serde_json::json!({
+                "name": spec.name,
+                "description": spec.description,
+                "input_schema": spec.input_schema,
+            }))
+            .unwrap()
+            .len()
+        };
+        for (mode, git_writable) in [
+            (SandboxMode::FullAccess, false),
+            (SandboxMode::WorkspaceWrite, true),
+            (SandboxMode::WorkspaceWrite, false),
+            (SandboxMode::Safe, false),
+        ] {
+            let bytes = size(&spec(mode, git_writable));
+            assert!(
+                bytes <= 2200,
+                "shell ({mode:?}, git {git_writable}) is {bytes} B, over the 2,200 B cap"
+            );
+        }
+        let bytes = size(&crate::jobs::job_spec());
+        assert!(bytes <= 1800, "job is {bytes} B, over the 1,800 B cap");
     }
 
     #[test]

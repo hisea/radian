@@ -193,7 +193,7 @@ async fn the_wake_cap_degrades_to_inject_and_a_user_message_resets_it() {
     );
 }
 
-/// A settle the model already has (`notify: false`: a `job_output wait`, a `job_kill`, a
+/// A settle the model already has (`notify: false`: a `job` wait, a `job` kill, a
 /// session-exit cleanup) sends nothing.
 #[tokio::test]
 async fn a_non_notifiable_settle_is_silent() {

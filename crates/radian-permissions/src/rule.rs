@@ -101,8 +101,8 @@ impl Resource {
     }
 }
 
-/// The name a call is judged under. Two built-in tools were renamed in ADR 0043 decision 3 and
-/// their old names are accepted as aliases for one version; the alias is decided by the **new**
+/// The name a call is judged under. Built-in tools renamed in ADR 0043 decision 3 keep
+/// their old names as aliases for one version; the alias is decided by the **new**
 /// tool's rule (no bypass), so a rule, a session grant or the approver can never single out the
 /// old name. A config rule written against an old name therefore no longer matches: the alias is
 /// checked under the new name only.
@@ -110,6 +110,7 @@ pub fn canonical_tool_name(name: &str) -> &str {
     match name {
         "git_status" => "git_diff",
         "memory_get" => "memory_search",
+        "job_output" | "job_list" | "job_kill" | "shell_output" => "job",
         other => other,
     }
 }

@@ -853,7 +853,8 @@ async fn pty_mounts_only_the_builtin_tools() {
     }
     // The built-ins a workspace session mounts are exactly these, and nothing else. ADR 0043
     // decision 3: `git_status` and `memory_get` are renamed; their old names are registered for
-    // one version but never advertised.
+    // one version but never advertised. ADR 0037 decision 4: the four job readers are one
+    // `job` tool; `job_output`, `job_list`, `job_kill` and `shell_output` are never advertised.
     let mut got = names.clone();
     got.sort();
     assert_eq!(
@@ -863,9 +864,7 @@ async fn pty_mounts_only_the_builtin_tools() {
             "git_diff",
             "glob",
             "grep",
-            "job_kill",
-            "job_list",
-            "job_output",
+            "job",
             "list",
             "memory_revise",
             "memory_save",
@@ -873,14 +872,20 @@ async fn pty_mounts_only_the_builtin_tools() {
             "patch",
             "read",
             "shell",
-            "shell_output",
             "skill",
             "subagent",
             "write"
         ],
         "the exact tool set of a fresh TUI session: {names:?}"
     );
-    for gone in ["git_status", "memory_get"] {
+    for gone in [
+        "git_status",
+        "memory_get",
+        "job_output",
+        "job_list",
+        "job_kill",
+        "shell_output",
+    ] {
         assert!(
             !names.iter().any(|name| name == gone),
             "the renamed `{gone}` must not be advertised: {names:?}"
