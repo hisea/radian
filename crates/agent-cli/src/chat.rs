@@ -211,7 +211,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         .parent
         .as_ref()
         .map(|id| radian_session::ForkParent::subagent(id.clone(), cli.parent_seq));
-    // The hidden `--tools` list is a physical unmount (the `explore` child's four read tools).
+    // The hidden `--tools` list is a physical unmount (the `explore` child's three read tools).
     let tools_allow = cli.tools.as_deref().map(|raw| {
         raw.split(',')
             .map(str::trim)

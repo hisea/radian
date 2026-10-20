@@ -102,8 +102,8 @@ pub struct Cli {
     #[arg(long)]
     mcp_config: Option<String>,
 
-    /// Expose the built-in file tools rooted at this directory (read/write/patch/list,
-    /// glob/grep, git_diff). The `shell` tool is exposed as well: `workspace` confines it,
+    /// Expose the built-in file tools rooted at this directory (read/write/patch,
+    /// glob/grep, git_diff). The `shell` and `job` tools are exposed as well: `workspace` confines them,
     /// `full` (the default) is unsandboxed.
     #[arg(long)]
     workspace: Option<String>,
@@ -115,8 +115,9 @@ pub struct Cli {
     profile: Option<profile::ProfileArg>,
 
     /// Allow a simple shell command prefix without asking (repeatable), e.g.
-    /// `--allow-shell-command "git status"`. Only a simple command matches; in the `workspace`
-    /// tier a composite (`git status; rm -x`) still asks. The `workspace` tier has no allow
+    /// `--allow-shell-command "git status"`. Only a simple command matches; a compound
+    /// command is allowed only when every segment is allowed, otherwise it still asks
+    /// (`git status; rm -x` asks). The `workspace` tier has no allow
     /// rule for shell by default; the `full` tier allows shell without asking.
     #[arg(long = "allow-shell-command", value_name = "PREFIX")]
     allow_shell_command: Vec<String>,
@@ -238,8 +239,9 @@ pub struct Cli {
     include_usage: Option<bool>,
 
     /// Allow a simple shell command prefix without asking (repeatable), e.g.
-    /// `--allow-shell-command "git status"`. Only a simple command matches; in the `workspace`
-    /// tier a composite (`git status; rm -x`) still asks. The `workspace` tier has no allow
+    /// `--allow-shell-command "git status"`. Only a simple command matches; a compound
+    /// command is allowed only when every segment is allowed, otherwise it still asks
+    /// (`git status; rm -x` asks). The `workspace` tier has no allow
     /// rule for shell by default; the `full` tier allows shell without asking.
 
     /// The per-turn model call limit. The default is shared with the TUI and named in
@@ -292,7 +294,7 @@ pub struct Cli {
     parent_seq: u64,
 
     /// Hidden: mount only these built-in tools, comma-separated. The `explore` subagent child
-    /// is started with `read,list,glob,grep`; a name not listed is not mounted at all.
+    /// is started with `read,glob,grep`; a name not listed is not mounted at all.
     #[arg(long = "tools", value_name = "NAME,...", hide = true)]
     tools: Option<String>,
 }
