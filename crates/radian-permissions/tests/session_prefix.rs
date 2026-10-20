@@ -10,6 +10,7 @@ use std::sync::Arc;
 use agent_core::{Hooks, InputSource, ToolCall, ToolDecision};
 use common::{ScriptedApprover, TempDir, call, ctx};
 use radian_permissions::*;
+use radian_sandbox::{Sandbox, SandboxMode};
 use serde_json::json;
 
 fn hooks_with(
@@ -42,6 +43,13 @@ async fn decide_shell(
     command: &str,
 ) -> Result<ToolDecision, agent_core::HookError> {
     Hooks::before_tool_call(hooks, &ctx(), &call("shell", json!({ "command": command }))).await
+}
+
+/// An enforced sandbox without probing: `Sandbox::inherited` has mode
+/// `WorkspaceWrite`, so it is proof a sandbox confines the session (no probe,
+/// deterministic on macOS and Linux).
+fn enforced(dir: &TempDir) -> Sandbox {
+    Sandbox::inherited(dir.path())
 }
 
 /// After "allow for this session" on `cargo test -p a`, `cargo test -p b` does not ask —
@@ -329,7 +337,7 @@ async fn a_non_human_turn_cannot_borrow_a_prefix_grant() {
 async fn a_prefix_grant_never_crosses_the_sandbox_boundary() {
     let dir = TempDir::new("prefix-outside");
     let (hooks, approver) = hooks_with(
-        Profile::workspace_write_sandboxed(dir.path()).unwrap(),
+        Profile::workspace_write_sandboxed(dir.path(), &enforced(&dir)).unwrap(),
         vec![ApprovalOutcome::AllowForSession, ApprovalOutcome::AllowOnce],
     );
     let outside = |command: &str| ToolCall {

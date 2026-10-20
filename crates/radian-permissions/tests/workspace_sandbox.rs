@@ -9,6 +9,7 @@ use std::sync::Arc;
 use agent_core::{Hooks, InputSource, ToolDecision};
 use common::{ScriptedApprover, TempDir, call, ctx};
 use radian_permissions::*;
+use radian_sandbox::{Sandbox, SandboxMode};
 use serde_json::json;
 
 fn hooks_with(
@@ -33,6 +34,13 @@ async fn decide_shell(
     Hooks::before_tool_call(hooks, &ctx(), &call("shell", arguments)).await
 }
 
+/// An enforced sandbox without probing: `Sandbox::inherited` has mode
+/// `WorkspaceWrite`, so it is proof a sandbox confines the session (no probe,
+/// deterministic on macOS and Linux).
+fn enforced(dir: &TempDir) -> Sandbox {
+    Sandbox::inherited(dir.path())
+}
+
 /// A sandboxed `workspace` shell runs without a prompt: a `cargo test`-like simple
 /// command comes back `Allow` with `approver = policy` and never reaches the approver.
 /// Dropping the tier's blanket `allow` makes one of these ask, so this test is that
@@ -42,7 +50,7 @@ async fn sandboxed_workspace_allows_a_simple_shell_without_a_prompt() {
     let dir = TempDir::new("sandboxed-allow");
     let audit = Arc::new(RecordingAudit::default());
     let (hooks, approver) = hooks_with(
-        Profile::workspace_write_sandboxed(dir.path()).unwrap(),
+        Profile::workspace_write_sandboxed(dir.path(), &enforced(&dir)).unwrap(),
         vec![],
         &audit,
     );
@@ -93,7 +101,8 @@ async fn workspace_without_a_sandbox_still_asks() {
 #[tokio::test]
 async fn sandboxed_workspace_deny_still_denies_first() {
     let dir = TempDir::new("sandboxed-deny");
-    let mut rules = Profile::workspace_write_sandboxed(dir.path())
+    let sandbox = enforced(&dir);
+    let mut rules = Profile::workspace_write_sandboxed(dir.path(), &sandbox)
         .unwrap()
         .rules()
         .to_vec();
@@ -112,7 +121,7 @@ async fn sandboxed_workspace_deny_still_denies_first() {
         rules,
     )
     .unwrap()
-    .with_sandboxed(true);
+    .with_sandbox(Some(&sandbox));
     let audit = Arc::new(RecordingAudit::default());
     let (hooks, approver) = hooks_with(profile, vec![], &audit);
     for command in ["rm -rf x", "cargo test && rm -rf x"] {
@@ -133,7 +142,8 @@ async fn sandboxed_workspace_deny_still_denies_first() {
 #[tokio::test]
 async fn sandboxed_workspace_user_ask_still_asks() {
     let dir = TempDir::new("sandboxed-ask");
-    let mut rules = Profile::workspace_write_sandboxed(dir.path())
+    let sandbox = enforced(&dir);
+    let mut rules = Profile::workspace_write_sandboxed(dir.path(), &sandbox)
         .unwrap()
         .rules()
         .to_vec();
@@ -152,7 +162,7 @@ async fn sandboxed_workspace_user_ask_still_asks() {
         rules,
     )
     .unwrap()
-    .with_sandboxed(true);
+    .with_sandbox(Some(&sandbox));
     let audit = Arc::new(RecordingAudit::default());
     let (hooks, approver) = hooks_with(
         profile,
@@ -181,7 +191,7 @@ async fn sandboxed_workspace_blanket_covers_compound_cd_and_wrapper() {
     std::fs::create_dir_all(dir.path().join("sub")).unwrap();
     let audit = Arc::new(RecordingAudit::default());
     let (hooks, approver) = hooks_with(
-        Profile::workspace_write_sandboxed(dir.path()).unwrap(),
+        Profile::workspace_write_sandboxed(dir.path(), &enforced(&dir)).unwrap(),
         vec![],
         &audit,
     );
@@ -251,7 +261,7 @@ async fn sandboxed_workspace_table_covered_compound_stays_silent() {
     let dir = TempDir::new("sandboxed-compound-table");
     let audit = Arc::new(RecordingAudit::default());
     let (hooks, approver) = hooks_with(
-        Profile::workspace_write_sandboxed(dir.path()).unwrap(),
+        Profile::workspace_write_sandboxed(dir.path(), &enforced(&dir)).unwrap(),
         vec![],
         &audit,
     );
@@ -274,7 +284,7 @@ async fn outside_sandbox_goes_to_ask() {
     let dir = TempDir::new("outside-ask");
     let audit = Arc::new(RecordingAudit::default());
     let (hooks, approver) = hooks_with(
-        Profile::workspace_write_sandboxed(dir.path()).unwrap(),
+        Profile::workspace_write_sandboxed(dir.path(), &enforced(&dir)).unwrap(),
         vec![ApprovalOutcome::AllowOnce],
         &audit,
     );
@@ -303,7 +313,7 @@ async fn outside_sandbox_without_a_reason_is_denied() {
     let dir = TempDir::new("outside-no-reason");
     let audit = Arc::new(RecordingAudit::default());
     let (hooks, approver) = hooks_with(
-        Profile::workspace_write_sandboxed(dir.path()).unwrap(),
+        Profile::workspace_write_sandboxed(dir.path(), &enforced(&dir)).unwrap(),
         vec![],
         &audit,
     );
@@ -330,7 +340,8 @@ async fn outside_sandbox_without_a_reason_is_denied() {
 #[tokio::test]
 async fn outside_sandbox_deny_still_denies_first() {
     let dir = TempDir::new("outside-deny");
-    let mut rules = Profile::workspace_write_sandboxed(dir.path())
+    let sandbox = enforced(&dir);
+    let mut rules = Profile::workspace_write_sandboxed(dir.path(), &sandbox)
         .unwrap()
         .rules()
         .to_vec();
@@ -349,7 +360,7 @@ async fn outside_sandbox_deny_still_denies_first() {
         rules,
     )
     .unwrap()
-    .with_sandboxed(true);
+    .with_sandbox(Some(&sandbox));
     let audit = Arc::new(RecordingAudit::default());
     let (hooks, approver) = hooks_with(profile, vec![], &audit);
     let decision = decide_shell(
@@ -377,7 +388,7 @@ async fn a_grant_never_crosses_the_sandbox_boundary() {
     let dir = TempDir::new("outside-grant");
     let audit = Arc::new(RecordingAudit::default());
     let (hooks, approver) = hooks_with(
-        Profile::workspace_write_sandboxed(dir.path()).unwrap(),
+        Profile::workspace_write_sandboxed(dir.path(), &enforced(&dir)).unwrap(),
         vec![ApprovalOutcome::AllowForSession, ApprovalOutcome::AllowOnce],
         &audit,
     );
@@ -412,4 +423,45 @@ async fn a_grant_never_crosses_the_sandbox_boundary() {
         2,
         "the outside grant must not cover the same command inside"
     );
+}
+
+/// A transparent sandbox is not proof: `workspace_write_sandboxed` refuses it instead
+/// of building the allow-shell profile, and `with_sandbox` leaves the profile
+/// unsandboxed. Dropping the `is_enforced()` check in either place lets a `FullAccess`
+/// backend through, so this test is that mutation's catcher.
+#[tokio::test]
+async fn a_transparent_sandbox_never_builds_the_allow_shell_profile() {
+    let dir = TempDir::new("transparent-refused");
+    let transparent = Sandbox::new(SandboxMode::FullAccess, dir.path()).unwrap();
+    assert!(
+        !transparent.mode().is_enforced(),
+        "the FullAccess backend must stay non-enforcing"
+    );
+    let error = Profile::workspace_write_sandboxed(dir.path(), &transparent).unwrap_err();
+    assert!(
+        matches!(error, ProfileError::SandboxNotEnforced),
+        "a transparent sandbox must be refused, got {error:?}"
+    );
+    let profile = Profile::workspace_write(dir.path())
+        .unwrap()
+        .with_sandbox(Some(&transparent));
+    assert!(
+        !profile.is_sandboxed(),
+        "a transparent sandbox must leave the profile unsandboxed"
+    );
+    let profile = Profile::workspace_write(dir.path())
+        .unwrap()
+        .with_sandbox(None);
+    assert!(
+        !profile.is_sandboxed(),
+        "no sandbox must leave the profile unsandboxed"
+    );
+    // The enforced counterpart still builds the allow-shell profile and marks it.
+    let sandbox = enforced(&dir);
+    let profile = Profile::workspace_write_sandboxed(dir.path(), &sandbox).unwrap();
+    assert!(profile.is_sandboxed());
+    let profile = Profile::workspace_write(dir.path())
+        .unwrap()
+        .with_sandbox(Some(&sandbox));
+    assert!(profile.is_sandboxed());
 }
