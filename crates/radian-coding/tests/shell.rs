@@ -21,7 +21,8 @@ use agent_core::{
 use common::{TempDir, sentinel_outside};
 use radian_coding::{CodingTools, CodingToolsError, Limits};
 use radian_sandbox::{
-    ProbeReport, Sandbox, SandboxBackend, SandboxError, SandboxMode, SandboxPolicy, SandboxSlot,
+    ProbeReport, Sandbox, SandboxBackend, SandboxCommand, SandboxError, SandboxMode, SandboxPolicy,
+    SandboxSlot,
 };
 use serde_json::{Value, json};
 
@@ -196,7 +197,7 @@ impl SandboxBackend for FailingBackend {
         _policy: &SandboxPolicy,
         _program: &OsStr,
         _args: &[OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         Err(SandboxError::BackendUnavailable {
             backend: "failing",
             detail: "not available".into(),
@@ -1000,10 +1001,10 @@ impl SandboxBackend for GitBackend {
         policy: &SandboxPolicy,
         program: &OsStr,
         args: &[OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         let mut command = Command::new(program);
         command.args(args).current_dir(&policy.workspace);
-        Ok(command)
+        Ok(SandboxCommand::new(command))
     }
 
     fn git_writable_except_exec(&self, _policy: &SandboxPolicy) -> bool {

@@ -102,7 +102,7 @@ pub use config::{
     CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ControlConfig, ModelConfig,
     PermissionsConfig, RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
     parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
-    resolved_path as resolved_config_path,
+    resolved_path as resolved_config_path, unix_sockets_ignored_warning,
 };
 pub use context::{ContextFiles, ImportedFile, LoadedFile, load as load_context_files};
 pub use contrib::{

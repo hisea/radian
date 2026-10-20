@@ -7,7 +7,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use radian_sandbox::{
-    NoSandbox, ProbeReport, Sandbox, SandboxBackend, SandboxError, SandboxMode, SandboxPolicy,
+    NoSandbox, ProbeReport, Sandbox, SandboxBackend, SandboxCommand, SandboxError, SandboxMode,
+    SandboxPolicy,
 };
 
 struct TempDir(std::path::PathBuf);
@@ -55,7 +56,7 @@ impl SandboxBackend for Unavailable {
         _policy: &SandboxPolicy,
         _program: &OsStr,
         _args: &[std::ffi::OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         unreachable!("an unavailable backend is never asked for a command")
     }
 }
@@ -80,7 +81,7 @@ impl SandboxBackend for ProbeFails {
         _policy: &SandboxPolicy,
         _program: &OsStr,
         _args: &[std::ffi::OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         unreachable!("a failing probe is never followed by a command")
     }
 }

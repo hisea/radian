@@ -92,6 +92,21 @@ fn valid_env_name(name: &str) -> bool {
     !name.is_empty() && !name.contains('=') && !name.chars().any(char::is_whitespace)
 }
 
+/// Slice 0: on Linux the seccomp filter denies every Unix socket and cannot whitelist
+/// by path, so a non-empty `[sandbox] allow_unix_sockets` is ignored (it can only narrow;
+/// fail closed). Returns the one startup warning line for that case, `None` otherwise:
+/// macOS seatbelt honors the list, and an empty list needs no warning on any platform.
+pub fn unix_sockets_ignored_warning(paths: &[PathBuf]) -> Option<String> {
+    if cfg!(target_os = "linux") && !paths.is_empty() {
+        Some(
+            "sandbox.allow_unix_sockets is ignored on Linux: the seccomp filter denies \
+             every Unix socket and cannot whitelist by path"
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
 /// Expands `~` and canonicalizes `[sandbox] allow_unix_sockets` (ADR 0016). Only
 /// absolute paths are accepted (a relative one is skipped, never joined to the config dir:
 /// the sandbox rule must name exactly one socket). Returns the canonical paths and one
