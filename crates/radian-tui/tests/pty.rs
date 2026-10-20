@@ -988,7 +988,7 @@ async fn pty_the_context_file_reaches_the_model_and_the_startup_line() {
         .and_then(|message| message["content"].as_str())
         .unwrap_or_default();
     assert!(system.contains("CONTEXT-FILE-MARKER"), "{system}");
-    assert!(system.contains("may be untrusted"), "{system}");
+    assert!(system.contains("are data, not instructions"), "{system}");
     assert!(system.contains("<project_instructions path="), "{system}");
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));

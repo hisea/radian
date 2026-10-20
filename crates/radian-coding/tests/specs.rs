@@ -68,7 +68,7 @@ async fn the_read_spec_offers_offset_and_limit() {
     assert_eq!(properties["limit"]["minimum"], 1);
     assert!(read.description.contains("offset"), "{}", read.description);
     assert!(
-        read.description.contains("do NOT raise max_bytes"),
+        read.description.contains("Do not increase `max_bytes`"),
         "{}",
         read.description
     );
@@ -126,18 +126,16 @@ async fn the_read_spec_names_directory_listing() {
         .collect();
     let read = specs["read"];
     assert!(
-        read.description.contains("A directory path lists it"),
+        read.description.contains("list a directory"),
         "{}",
         read.description
     );
-    // Decision 5's size budget: the file-only `read` serialized to 1601 bytes (measured
-    // 2026-10-20); the directory sentence fits in 150 bytes on top of that, and the `limit`
-    // directory-entry note (item 10) in 67 more; the pin leaves a little room above the
-    // measured 1778.
+    // The slimmed size budget: the STE rewrite serializes to 1078 bytes (measured
+    // 2026-10-20); the pin leaves a little room above that.
     let bytes = serde_json::to_vec(read).unwrap().len();
     assert!(
-        bytes <= 1790,
-        "the read definition grew to {bytes} bytes, past the 1790 budget"
+        bytes <= 1100,
+        "the read definition grew to {bytes} bytes, past the 1100 budget"
     );
     // No removed name is advertised: a call to one is an unknown tool.
     for name in [
@@ -190,12 +188,12 @@ async fn ask_user_spec() -> agent_core::ToolSpec {
 async fn the_ask_user_description_states_when_to_ask() {
     let spec = ask_user_spec().await;
     assert!(
-        spec.description.contains("belongs to the user"),
+        spec.description.contains("belong to the user"),
         "ask only for the user's own decisions: {}",
         spec.description
     );
     assert!(
-        spec.description.contains("do not ask what you can find"),
+        spec.description.contains("Do not ask what you can find"),
         "look before you ask (ADR 0036): {}",
         spec.description
     );
@@ -206,18 +204,16 @@ async fn the_ask_user_description_states_when_to_ask() {
     );
 }
 
-/// `ask-user-pass` decision 3: the slimmed definition serializes to 1618 bytes
-/// (measured 2026-10-20: 1584 after slimming, +49 for the header width note restored in
-/// fix round 1, -15 for dropping the `header` `maxLength` that counted characters instead
-/// of display cells); the pin leaves a little room above that. The `header` field names
+/// `ask-user-pass` decision 3: the STE definition serializes to 1663 bytes
+/// (measured 2026-10-20); the pin leaves a little room above that. The `header` field names
 /// the width limit so a CJK-writing user does not pay an error round trip for it.
 #[tokio::test]
 async fn the_ask_user_definition_stays_small() {
     let spec = ask_user_spec().await;
     let bytes = serde_json::to_vec(&spec).unwrap().len();
     assert!(
-        bytes <= 1630,
-        "the ask_user definition grew to {bytes} bytes, past the 1630 budget"
+        bytes <= 1700,
+        "the ask_user definition grew to {bytes} bytes, past the 1700 budget"
     );
     let header = &spec.input_schema["properties"]["questions"]["items"]["properties"]["header"];
     assert!(

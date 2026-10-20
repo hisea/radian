@@ -25,26 +25,26 @@ pub(crate) fn schema() -> serde_json::Value {
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Workspace-relative file path, or — read-only — an absolute or \
-                                `~` path under the cargo registry sources or a toolchain's \
-                                `lib/rustlib/src`."
+                "description": "File or directory to read. Use a workspace-relative path. For \
+                                cargo registry or Rust toolchain sources, use an absolute path or \
+                                a `~` path."
             },
             "max_bytes": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 1048576,
-                "description": "Byte budget for this read; defaults to 65536."
+                "description": "Maximum bytes to read. Default: 65536."
             },
             "offset": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "1-based line to start reading at; defaults to 1."
+                "description": "First line to read (1-based). Default: 1."
             },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Maximum number of lines to read; no line limit if omitted. \
-                                For a directory, caps entries instead (default 500, at most 5000)."
+                "description": "Maximum lines to read. For a directory, it caps entries \
+                                instead. Default: 500. Maximum: 5000."
             }
         },
         "required": ["path"],
@@ -55,21 +55,12 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "read".into(),
-        description: "Read a UTF-8 text file from the workspace. Read-only Rust sources \
-                      (cargo registry, toolchain `lib/rustlib/src`) are also readable when \
-                      named as an absolute or `~` path. Every returned line is \
-                      prefixed with its file line number as `N: `. That prefix is NOT part of \
-                      the file: remove it before using the text anywhere else, in particular \
-                      before passing it as the `old` text of `patch`. For a large file, read it \
-                      in sections with offset (the 1-based first line) and limit (how many \
-                      lines): do NOT raise max_bytes to reach a later part, that rereads the \
-                      prefix every time. max_bytes (default 65536, hard cap 1048576) bounds the \
-                      file bytes read. A byte budget that runs out mid-line drops the incomplete \
-                      line and the result names the line range and the next_offset to pass; the \
-                      only exception is a first line longer than the whole budget, which is \
-                      returned as a prefix with line_truncated. Binary (non-UTF-8) content is \
-                      refused. A directory path lists it (entries sorted with kind and size, \
-                      symlinks never followed; `limit` caps entries)."
+        description: "Read a UTF-8 text file or list a directory. Each line starts with \
+                      its line number and `\": \"`. This prefix is not part of the file. \
+                      Remove it before you use the text in `patch`. For a large file, read one \
+                      part at a time with `offset` and `limit`. Do not increase `max_bytes` \
+                      to get a later part. To read cargo registry or Rust toolchain sources, \
+                      use an absolute path or a `~` path."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,

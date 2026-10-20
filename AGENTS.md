@@ -86,6 +86,7 @@ Use this section when the owner asks you to hand work to pi in herdr. pi is a se
 - Do a mutation check of pi's new tests in that worktree: break the code, see that a test fails, restore the code. A test that stays green is a hole. Tell pi about it.
 - Read the diff. Read each comment that claims a guarantee, such as "race-free", and check the claim. Look for a test that is named for one thing and checks another.
 - Send the problems back in a new brief on the same branch, as a new commit. Do not amend.
+- After the review passes, squash the branch to two commits before the gate: one code commit, and one docs-only commit with the ADR change and the backlog deletion (one commit when no ADR changes). Check that the squashed tree equals the reviewed tip. The gate merges each item with one merge commit and takes as many verified items as it can.
 
 ### Shell hygiene
 

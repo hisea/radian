@@ -124,6 +124,27 @@ pub async fn open_session(
     let unix_sockets_restricted = sandbox
         .as_ref()
         .is_some_and(|sandbox| sandbox.restricts_unix_sockets());
+    // The prompt's own tier facts (layer 0a): STE sentences built from the tier and the
+    // backend's effective answers — never the TUI's `describe` string. `inherited`
+    // claims no local rules at all (ADR 0016 decision 4).
+    let tier_facts = match (tier.sandbox_mode(), sandbox.as_ref()) {
+        (radian_sandbox::SandboxMode::FullAccess, _) => crate::prompt::SandboxFacts::None,
+        (radian_sandbox::SandboxMode::WorkspaceWrite, Some(sandbox))
+            if sandbox.backend_name() == "inherited" =>
+        {
+            crate::prompt::SandboxFacts::Inherited
+        }
+        (radian_sandbox::SandboxMode::WorkspaceWrite, Some(sandbox)) => {
+            crate::prompt::SandboxFacts::Workspace {
+                git_writable: sandbox.git_writable_except_exec(),
+            }
+        }
+        (radian_sandbox::SandboxMode::WorkspaceWrite, None) => {
+            crate::prompt::SandboxFacts::Workspace {
+                git_writable: false,
+            }
+        }
+    };
     let sandbox_word = sandbox_word(
         tier.sandbox_mode(),
         sandbox.as_ref().map(Sandbox::backend_name),
@@ -355,8 +376,8 @@ pub async fn open_session(
             Arc::clone(&hooks),
         ));
     }
-    // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> lists
-    // the tools this host actually mounted and the tier/sandbox facts; 1 <role> is the role
+    // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> carries
+    // the tier/sandbox facts; 1 <role> is the role
     // prompt (or `--system`); 2 is the context files; 3 is appended by the skills/memory hooks;
     // 0b <session> is appended last by its own hook, so the static prefix stays cacheable.
     let model_name = config_snapshot
@@ -364,13 +385,14 @@ pub async fn open_session(
         .and_then(|value| value.as_str())
         .unwrap_or("unknown")
         .to_owned();
-    let mounted = tools.builtin_tools();
-    let workspace_mode = tier.sandbox_mode() == radian_sandbox::SandboxMode::WorkspaceWrite;
     let runtime_layer = crate::prompt::runtime_layer(&crate::prompt::Runtime {
-        tools: &mounted,
         tier: tier.as_str(),
-        sandbox: &sandbox_facts,
-        network: workspace_mode,
+        sandbox: tier_facts,
+        // Both tiers leave the network on: `workspace` allows outbound and loopback
+        // TCP/UDP (ADR 0016 decision 1), and `full` has no sandbox at all (ADR 0043
+        // decision 5). Deriving this from the tier printed `Network: off.` for
+        // `full`, against the sandbox facts beside it.
+        network: true,
         unix_sockets_restricted,
     });
     let role_override = system_prompt.clone();

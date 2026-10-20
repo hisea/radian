@@ -322,11 +322,10 @@ pub trait Prompter: Send + Sync {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "ask_user".into(),
-        description: "Ask the user a question and wait for the answer. Only ask for a \
-                      decision that belongs to the user, or a real ambiguity you cannot \
-                      resolve by looking: do not ask what you can find yourself in the \
-                      code, config, docs, or history. Mark the option you recommend \
-                      (`recommended`)."
+        description: "Ask the user a question. Wait for the answer. Ask only for decisions \
+                      that belong to the user. Ask about a real ambiguity only when you cannot \
+                      resolve it by looking. Do not ask what you can find in the code, \
+                      config, docs, or history. Mark the option that you recommend."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -341,7 +340,7 @@ pub(crate) fn spec() -> ToolSpec {
                             "id": {
                                 "type": "string",
                                 "pattern": "^[a-z0-9_-]{1,32}$",
-                                "description": "Answer key; unique in this request."
+                                "description": "Answer key. It must be unique in this request."
                             },
                             // No `maxLength` here: the limit is display width (a CJK
                             // character is 2), counted in characters it would wrongly
@@ -349,7 +348,7 @@ pub(crate) fn spec() -> ToolSpec {
                             // enforces the width and the description states it.
                             "header": {
                                 "type": "string",
-                                "description": "Tab label, two or three words, at most 16 display cells (a CJK character is 2); the `id` when absent."
+                                "description": "Tab label of two or three words. Maximum: 16 display cells. One CJK character is 2 cells. Default: the `id`."
                             },
                             "prompt": {
                                 "type": "string",
@@ -363,7 +362,7 @@ pub(crate) fn spec() -> ToolSpec {
                             "options": {
                                 "type": "array",
                                 "maxItems": MAX_OPTIONS,
-                                "description": "For `single`/`multi`; never for `text`.",
+                                "description": "For `single` and `multi`. Never for `text`.",
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -372,7 +371,7 @@ pub(crate) fn spec() -> ToolSpec {
                                         "description": { "type": "string", "maxLength": MAX_DESCRIPTION_CHARS },
                                         "recommended": {
                                             "type": "boolean",
-                                            "description": "The option you recommend; at most one for `single`."
+                                            "description": "The option that you recommend. At most one for `single`."
                                         }
                                     },
                                     "required": ["id", "label"],
@@ -381,11 +380,11 @@ pub(crate) fn spec() -> ToolSpec {
                             },
                             "allow_other": {
                                 "type": "boolean",
-                                "description": "Also offer a free-text `Other` answer."
+                                "description": "Also offer a free-text `Other` answer. Default: false."
                             },
                             "required": {
                                 "type": "boolean",
-                                "description": "The user must answer before submitting."
+                                "description": "The user must answer before submitting. Default: false."
                             }
                         },
                         "required": ["id", "prompt", "kind"],

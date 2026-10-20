@@ -272,31 +272,31 @@ fn specs() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "memory_search".into(),
         description: format!(
-            "{LOW_TRUST_NOTE} Read durable memory. Pass exactly one of `query` (search: \
-             every word must match, case-insensitively) or `ids` (read those records in \
-             full). Results carry their scope, source and verification. A search returns \
-             records ordered by scope (project before global), then trust (user/confirmed \
-             before agent-unverified), then match score, then newest first, then id; at most \
-             `limit` (default {DEFAULT_SEARCH_LIMIT}, max {MAX_SEARCH_LIMIT})."
+            "{LOW_TRUST_NOTE} Read durable memory. To search, pass `query`. To read records \
+             in full, pass `ids`. A search matches every word. The tool matches words \
+             case-insensitively. A search returns at most `limit` records. Default: \
+             {DEFAULT_SEARCH_LIMIT}. Maximum: {MAX_SEARCH_LIMIT}. Scope orders the results \
+             first. Project scope comes before global scope. Trust orders them next. User \
+             trust and confirmed trust come before agent-unverified trust. Match score comes \
+             after trust. Newest comes after match score. The id comes last. Results carry \
+             their scope, source, and verification."
         ),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Keywords; every word must appear in the content or key."
+                    "description": "Keywords to search for. Every word must appear in the content or the key."
                 },
                 "ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Record ids to read in full (as returned by a search). \
-                                    Pass exactly one of `query` or `ids`."
+                    "description": "Ids of records to read in full. Pass `query` or `ids`, not both."
                 },
                 "scope": {
                     "type": "string",
                     "enum": ["project", "global", "all"],
-                    "description": "Which scopes to search; `all` (the default) is \
-                                    project then global."
+                    "description": "Scopes to search. `all` searches project scope first and global scope second. Default: `all`."
                 },
                 "limit": {
                     "type": "integer",
@@ -398,11 +398,11 @@ mod tests {
             .expect("the memory_search spec");
         for phrase in [
             "case-insensitively",
-            "project before global",
-            "user/confirmed before agent-unverified",
-            "then match score",
-            "then newest first",
-            "then id",
+            "Project scope comes before global scope",
+            "come before agent-unverified trust",
+            "Match score comes after trust",
+            "Newest comes after match score",
+            "The id comes last",
         ] {
             assert!(
                 spec.description.contains(phrase),

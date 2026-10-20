@@ -184,13 +184,14 @@ impl Kind {
 fn spec() -> ToolSpec {
     ToolSpec {
         name: "subagent".into(),
-        description: "Run one task in a fresh blocking child session and return its last \
-                      assistant text. `explore` (read glob grep only) is for reading and \
-                      searching; `general` (the default) has this session's tools minus \
-                      `subagent` itself. The child starts blank — `task` is its first input — \
-                      and inherits this session's permission tier, never a wider one. Several \
-                      `subagent` calls in one reply run at the same time; a call blocks until \
-                      its child finishes, and this turn's cancellation kills the child."
+        description: "Run one task in a fresh child session. The call blocks until the \
+                      child finishes. The tool returns the last assistant text of the child. \
+                      `explore` (read glob grep only) is for reading and searching. \
+                      `general` (the default) has this session's tools minus `subagent` \
+                      itself. The child starts blank. `task` is its first input. The child \
+                      inherits this session's permission tier. It never gets a wider tier. \
+                      Several `subagent` calls in one reply run at the same time. This turn's \
+                      cancellation kills the child."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -198,11 +199,11 @@ fn spec() -> ToolSpec {
                 "agent": {
                     "type": "string",
                     "enum": ["explore", "general"],
-                    "description": "Which subagent to run: `explore` or `general` (the default)."
+                    "description": "Subagent to run. Use `explore` or `general`. Default: `general`."
                 },
                 "task": {
                     "type": "string",
-                    "description": "The child's first input: what to do, and what to report."
+                    "description": "First input of the child. Tell it what to do and what to report."
                 }
             },
             "required": ["task"],
