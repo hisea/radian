@@ -136,7 +136,7 @@ pub use hooks::{CommandHooks, HooksWarning, REASON_CHAR_LIMIT, STOP_MAX_CONTINUA
 pub use job_notify::{
     JobNotifier, MAX_CONSECUTIVE_WAKES, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message,
 };
-pub use mcp::load_mcp_config;
+pub use mcp::{McpLoad, load_mcp_config};
 pub use model::{
     COMPACTION_THINKING_CURRENT, ChatGptModel, DEFAULT_MAX_MODEL_CALLS, DEFAULT_MAX_TOKENS,
     HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext, SwitchableModel, Thinking,

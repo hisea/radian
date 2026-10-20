@@ -24,6 +24,17 @@ use crate::process::ServerProcess;
 /// How long to wait for a killed server to be reaped.
 const REAP_LIMIT: Duration = Duration::from_secs(2);
 
+/// The most `Text`-part bytes one MCP tool result may carry into the context.
+///
+/// The same budget as `read`'s default (`Limits::default_read_bytes` in `radian-coding`,
+/// named here so `agent-extensions` does not depend on the coding tools): an unbounded
+/// server reply would otherwise compress or overflow the context. Text past the budget is
+/// dropped on a UTF-8 boundary and a final line names the original size, so a result
+/// under the cap is byte-identical to today's. Image, audio and other parts are untouched.
+/// Applied here, where the server's response becomes the tool result, so the journal
+/// records the cut result and replay matches. No configuration key.
+const MAX_RESULT_TEXT_BYTES: usize = 64 << 10;
+
 /// Opens one set of MCP server processes per `AgentSession`.
 #[derive(Debug, Clone)]
 pub struct McpToolProvider {
@@ -571,12 +582,89 @@ fn map_result(result: ServerResult) -> Result<ToolOutput, ToolFailure> {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let message = if message.len() > MAX_RESULT_TEXT_BYTES {
+            truncate_text(&message, message.len())
+        } else {
+            message
+        };
         return Err(ToolFailure::new("tool_error", message));
     }
+    let mut content: Vec<ContentPart> = content;
+    cap_text_parts(&mut content);
     Ok(ToolOutput {
         content,
         structured: value.get("structuredContent").cloned(),
     })
+}
+
+/// Cuts the `Text` parts of a tool result to [`MAX_RESULT_TEXT_BYTES`], counted across
+/// all of them together. The overflowing part is cut on a UTF-8 boundary and carries the
+/// marker as its final line; later `Text` parts are dropped, other parts stay in place.
+/// A result under the cap is left alone (byte-identical); with no `Text` part at all
+/// there is nothing to count and nothing changes.
+fn cap_text_parts(content: &mut Vec<ContentPart>) {
+    let total: usize = content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text, .. } => Some(text.len()),
+            _ => None,
+        })
+        .sum();
+    if total <= MAX_RESULT_TEXT_BYTES {
+        return;
+    }
+    let kept = budget_for(total);
+    let marker = marker_for(kept, total);
+    let mut remaining = kept;
+    let mut cut = false;
+    for part in content.iter_mut() {
+        let ContentPart::Text { text, .. } = part else {
+            continue;
+        };
+        if cut {
+            text.clear();
+            continue;
+        }
+        if text.len() <= remaining {
+            remaining -= text.len();
+        } else {
+            text.truncate(floor_boundary(text, remaining));
+            text.push_str(&marker);
+            cut = true;
+        }
+    }
+    content.retain(|part| !matches!(part, ContentPart::Text { text, .. } if text.is_empty()));
+}
+
+/// `text` cut to the budget with the marker as its final line. `total_bytes` is the whole
+/// result's text size, which the marker names; it equals `text.len()` for one string.
+fn truncate_text(text: &str, total_bytes: usize) -> String {
+    let kept = budget_for(total_bytes);
+    let marker = marker_for(kept, total_bytes);
+    format!("{}{marker}", &text[..floor_boundary(text, kept)])
+}
+
+/// How many text bytes survive when the whole result carries `total_bytes`: the marker
+/// counts against the cap, so the cut result including its final line fits in it.
+fn budget_for(total_bytes: usize) -> usize {
+    let mut kept = MAX_RESULT_TEXT_BYTES.saturating_sub(64);
+    for _ in 0..3 {
+        kept = MAX_RESULT_TEXT_BYTES.saturating_sub(marker_for(kept, total_bytes).len());
+    }
+    kept
+}
+
+fn marker_for(kept: usize, total_bytes: usize) -> String {
+    format!("\n[truncated: showing the first {kept} of {total_bytes} bytes]")
+}
+
+/// `len` rounded down to a UTF-8 boundary of `text` (never below zero).
+fn floor_boundary(text: &str, len: usize) -> usize {
+    let mut end = len.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 fn content_part(block: &Value) -> ContentPart {
@@ -656,6 +744,60 @@ mod tests {
             .map(|n| n.progress)
             .collect();
         assert_eq!(admitted, [1.0, 3.0, 4.0]);
+    }
+
+    fn text_part(text: &str) -> ContentPart {
+        ContentPart::Text {
+            text: text.to_owned(),
+            annotations: None,
+            meta: None,
+        }
+    }
+
+    #[test]
+    fn text_parts_share_one_budget_and_other_parts_survive_the_cut() {
+        let mut content = vec![
+            text_part(&"a".repeat(40 << 10)),
+            ContentPart::Image {
+                mime_type: "image/png".into(),
+                data: "AAAA".into(),
+                annotations: None,
+                meta: None,
+            },
+            text_part(&"b".repeat(40 << 10)),
+        ];
+        cap_text_parts(&mut content);
+        // The image stays where it was; the first text part is untouched, and the
+        // overflowing last part is cut with the marker as its final line.
+        assert_eq!(content.len(), 3);
+        assert!(matches!(&content[1], ContentPart::Image { .. }));
+        let (first, last) = match (&content[0], &content[2]) {
+            (ContentPart::Text { text: first, .. }, ContentPart::Text { text: last, .. }) => {
+                (first.clone(), last.clone())
+            }
+            _ => panic!("text parts stay text"),
+        };
+        assert_eq!(first, "a".repeat(40 << 10));
+        let total = (80 << 10).to_string();
+        assert!(last.contains(&format!("of {total} bytes")));
+        assert!(last.starts_with(&"b".repeat(100)));
+        assert!(first.len() + last.len() <= MAX_RESULT_TEXT_BYTES);
+    }
+
+    #[test]
+    fn the_cut_lands_on_a_utf8_boundary() {
+        // `é` is two bytes: a cap landing mid-character must round down, never panic.
+        let text = "é".repeat(MAX_RESULT_TEXT_BYTES);
+        let cut = truncate_text(&text, text.len());
+        assert!(cut.len() <= MAX_RESULT_TEXT_BYTES);
+        assert!(cut.contains("[truncated:"));
+        let head = &cut[..cut.find("\n[truncated:").unwrap()];
+        assert!(
+            head.len().is_multiple_of(2),
+            "no split rune: {}",
+            head.len()
+        );
+        assert!(head.chars().all(|c| c == 'é'));
     }
 
     #[test]

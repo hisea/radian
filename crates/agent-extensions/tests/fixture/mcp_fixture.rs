@@ -75,6 +75,7 @@ impl Server {
         json!([
             {"name": "echo", "description": "Returns its arguments.", "inputSchema": object},
             {"name": "fail", "description": "Always fails.", "inputSchema": object},
+            {"name": "bigfail", "description": "Fails with a 1 MiB message.", "inputSchema": object},
             {"name": "sleep", "description": "Sleeps `ms` milliseconds, ignoring cancellation.",
              "inputSchema": {"type": "object", "properties": {"ms": {"type": "integer"}}, "required": ["ms"]}},
             {"name": "counter", "description": "Counts calls in this process.", "inputSchema": object},
@@ -114,6 +115,9 @@ impl Server {
             "echo" | "read_only" | "Bad Name!" => text(args.to_string()),
             "fail" => {
                 json!({"content": [{"type": "text", "text": "fixture failure"}], "isError": true})
+            }
+            "bigfail" => {
+                json!({"content": [{"type": "text", "text": "E".repeat(1 << 20)}], "isError": true})
             }
             "sleep" => {
                 thread::sleep(Duration::from_millis(args["ms"].as_u64().unwrap_or(0)));

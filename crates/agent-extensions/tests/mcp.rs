@@ -354,6 +354,59 @@ async fn tool_errors_and_rich_content() {
 }
 
 #[tokio::test]
+async fn a_result_under_the_cap_is_byte_identical() {
+    let session = open(vec![fixture("fx")]).await;
+    let args = json!({"hello": "mcp", "n": 42});
+    let out = call(&session, "fx__echo", args.clone()).await.unwrap();
+    assert_eq!(text(&out), args.to_string());
+    assert!(!text(&out).contains("[truncated:"));
+}
+
+#[tokio::test]
+async fn a_1mib_text_result_is_cut_to_the_cap_with_a_marker() {
+    let session = open(vec![fixture("fx")]).await;
+    let args = json!({"data": "x".repeat(1 << 20)});
+    let full = args.to_string();
+    assert!(
+        full.len() > (64 << 10),
+        "the fixture must reply over the cap"
+    );
+    let out = call(&session, "fx__echo", args).await.unwrap();
+    let body = text(&out);
+    assert!(
+        body.len() <= (64 << 10),
+        "cut result is {} bytes",
+        body.len()
+    );
+    let marker = body.find("\n[truncated:").expect("a truncation marker");
+    assert!(
+        full.starts_with(&body[..marker]),
+        "the cut is a prefix of the reply"
+    );
+    assert!(
+        body.contains(&format!("of {} bytes", full.len())),
+        "the marker names the original size: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_1mib_error_result_is_cut_with_a_marker() {
+    let session = open(vec![fixture("fx")]).await;
+    let failure = call(&session, "fx__bigfail", json!({})).await.unwrap_err();
+    assert_eq!(failure.code, "tool_error");
+    assert!(
+        failure.message.len() <= (64 << 10),
+        "cut error is {} bytes",
+        failure.message.len()
+    );
+    assert!(failure.message.contains("[truncated:"));
+    assert!(
+        failure.message.contains(&format!("of {} bytes", 1 << 20)),
+        "the marker names the original size"
+    );
+}
+
+#[tokio::test]
 async fn environment_is_allowlisted() {
     // SAFETY: these variable names are used by no other test.
     unsafe {

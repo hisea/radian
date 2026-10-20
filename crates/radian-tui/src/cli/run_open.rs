@@ -123,10 +123,14 @@ pub(super) fn build_session_inputs(
     // before a session file exists, so a bad file leaves nothing behind (dogfooding D2). The
     // MCP provider itself, the memory service and the coding tools are built by
     // `radian_host::open_session` (ADR 0023 U5).
-    let servers = match &cli.mcp_config {
+    let loaded = match &cli.mcp_config {
         Some(path) => load_mcp_config(path)?,
-        None => Vec::new(),
+        None => radian_host::McpLoad::default(),
     };
+    for warning in &loaded.warnings {
+        startup_log.line(format!("[mcp] {warning}"));
+    }
+    let servers = loaded.servers;
     // ADR 0026 D9: `--approval` and `--yes` (its shorthand) are the command line's choice.
     // When they are silent, the config's `[permissions] approval` and the journal's last
     // in-session switch decide; `radian_host::resolve_startup` owns that precedence, the
