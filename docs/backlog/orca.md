@@ -1,11 +1,11 @@
 # orca：替代 herdr 的派发与闸门（v0）
 
 - 状态：idea＼�设计定为 v0，记录在案，**不开工**；先仓库外原型，不进二进制）。
-  2026-10-20 两轮外部审核的 P0 已全部采纳进设计稿；第一轮三处分歧 owner 保留原决定；第二轮无分歧。
+  2026-10-20 两轮外部审核的 P0 已全部采纳进设计稿；第一轮三处分歧 owner 保留原决定；第二轮 owner 保留一处：单机 v0 用 linked worktree 共享 clone，不做独立 clone。
 - 涉及 ADR：0032（保留子命令；落地时要加 `orca`/`work`）、0043（远期 `radian orca`；`subagent` 是子进程
   的先例；缺省 `full`，无人值守必须显式 `--profile workspace`）、0044（`--output jsonl` 的 `Result` 与退
   出码是 worker 回传契约；`completed` 不等于任务完成；`cost` 为会话累计）、0038（`workspace` 沙箱内 git 可写 refs/index/objects、只有 config/hooks 只读；linked worktree 共享
-  common dir，所以 worker 用独立 clone）、0020（push 凭据的禁读清单，同一 OS 用户下是否遮住待验证）、0024（`human` 闸门是结构化交互的宿主外映射）、0013
+  common dir；单机 v0 仍用 worktree，靠包装器检测并安全失败）、0020（push 凭据的禁读清单，同一 OS 用户下是否遮住待验证）、0024（`human` 闸门是结构化交互的宿主外映射）、0013
   （`orca serve` 只在 loopback/ssh 转发）、0037（stall 超时按无输出计）、0022（返工 `--resume`，不 fork）
 - 设计全文：`docs/research/2026-10-20-orca-v0-design.md`（修订版）
 - 外部审核：`docs/research/2026-10-20-orca-v0-review-and-competitor-analysis.md`（第一轮）；第二轮复审由 owner 转达，结论记在设计稿"修订记录"
@@ -22,7 +22,9 @@
 - 三个身份：`item_id`；`session_id = item_id`（**一个 work item 一个 session**，返工 `--resume` 回原
   host，不可恢复进 `failed`，人重新 add）；`attempt_id` 每次执行一个，旧 attempt 的结果被拒。
 - worker 是一次性 `radian exec -p --profile workspace --yes --output jsonl`，工作区可写、无交互入口，工
-  作区是**每 item 独立 clone**（objects 经 `--reference` 共享，refs 隔离），不是 linked worktree；host 侧的
+  作区是 `.radian-worktrees/<item>` 的 linked worktree，单机 v0 共享一个 clone＼�跨 item 改 ref 的
+  风险由包装器在 push 前检测：head 是 base 后代、branch 与 HEAD 一致、无 dirty，不成立即 failed 不 push，
+  远端 ref 为真相）；host 侧的
   `radian work` 包装器在模型退出后核 commit/dirty/sha，**只在 `completed` 且产物有效时** push（git 置空
   hooksPath），写独立的 `AttemptFinished`；模型不持有 push 凭据。
 - 交付核验由 orca 机器做（base/head sha、dirty、远端 ref、有效改动），不信 `Result.outcome`。
@@ -43,15 +45,15 @@
 - 原型语言与位置（仓库外的脚本目录，还是独立 crate）。
 - brief 里 `mutations:` 的声明格式。
 - host-local attempt record 的字段冻结。
-- **第一个 Spike**：独立 clone 与 linked worktree 在 `workspace` 沙箱下的隔离对比；同一 OS 用户下沙箱是否遮住
+- **第一个 Spike**：linked worktree 在 `workspace` 沙箱下跨 item 改 ref 的可行性与包装器检测覆盖（独立 clone 作对照）；同一 OS 用户下沙箱是否遮住
   push 凭据。jsonl 流在模型长思考时是否持续有行。
 - 落地时用保留的 `serve` 还是新名 `orca`（改 ADR 0032）。
 
 ## 验收（落地时）
 
-- 一个真实需求从 Claude 拆分到 `done/`，全程没有 herdr；每个 item 恰好一个 session 文件和一个 clone；返工后
+- 一个真实需求从 Claude 拆分到 `done/`，全程没有 herdr；每个 item 恰好一个 session 文件和一个 worktree；返工后
   `Result.turns` 递增而 session id 不变，attempt 目录递增；失败后新建的 item 带 `supersedes`。
-- 一个 worker 在沙箱里改不到另一个 item 的 refs；非 `completed` 的 attempt 没有 push；第二个 `orca run` 拿不到
+- 一个 worker 在沙箱里改坏另一 item 的 ref 时，该 item 的 attempt 被包装器判 failed 且不 push；非 `completed` 的 attempt 没有 push；第二个 `orca run` 拿不到
   `runner.lock` 立刻退出；预算耗尽的 item 不能被 `pass`；同 sha 重审后旧 pass 无效；A 合入后 B 在 A+B 候选上复验，
   合并时 base 变了不合。
 - `commands` 与 `mutation` 从不同树、**不同时**；`human` 停下后 `pass <item> <sha>`/`fail` 推进状态，

@@ -10,7 +10,8 @@ P1 与文档矛盾按本文"修订记录"一节处理。替代 herdr；不是 da
   diff，决定返工（提交新的 rework brief）；**不能**替 owner 批准。
 - **orca（控制面）**：backlog 目录状态变更的**唯一写者**。接收 item、按依赖和容量派发、对账
   attempt、核验交付产物、起 gate、记录预算。确定性程序，不是模型。
-- **worker**：一次性 `radian exec -p`，一个 item 一个 session、一个**独立 clone**；跑完退出；工作区可写、
+- **worker**：一次性 `radian exec -p`，一个 item 一个 session、一个 worktree（单机 v0 共享一个 clone，owner
+  决定，见派发）；跑完退出；工作区可写、
   **无交互入口**（headless 无 prompter，`ask_user` 不挂载，ADR 0043 §4）；显式 `--profile workspace`。
 - **gate**：可配置的阶段序列（commands / mutation / review / ci / human），每个阶段一次性运行、绑定
   一个 `verified_sha`，写判定。机械部分归它，判断归 Claude，批准与 merge 归 owner。
@@ -25,7 +26,7 @@ P1 与文档矛盾按本文"修订记录"一节处理。替代 herdr；不是 da
 |---|---|
 | `item_id` | backlog 文件名，永不变 |
 | `session_id` | **= `item_id`**＼�一个 item 一个 session）。返工 `--resume` 回同一 host。`Result.outcome = poisoned` 等不可恢复时 item 进 `failed/irrecoverable`，人重新 `add`，新 item 的 frontmatter 写 `supersedes: <旧 item>`；原 session 不可变、不 fork |
-| `attempt_id` | `<item_id>-<n>`，每次执行一个。记 host、随机 attempt token、远端进程身份（pid + 启动时间）、clone 目录、branch、`base_sha`、`head_sha`、起止时间、session_id。旧 attempt 回来的结果因 token 不匹配被拒 |
+| `attempt_id` | `<item_id>-<n>`，每次执行一个。记 host、随机 attempt token、远端进程身份（pid + 启动时间）、worktree 目录、branch、`base_sha`、`head_sha`、起止时间、session_id。旧 attempt 回来的结果因 token 不匹配被拒 |
 
 ## backlog：目录加 phase，单写者事务
 
@@ -86,13 +87,22 @@ v0 推（ssh + stdin），v1 拉（`radian work --pull`，需要 `orca serve`）
 
 ### `radian work`（host 侧可信包装器，先是脚本）
 
-1. 建或复用 **独立 clone** `<host-run-dir>/<item>/repo`（`git clone --reference <共享 bare mirror>` 共享 objects，
-   refs 各自独立）与分支 `work/<item>`（首轮自 `origin/main`，记 `base_sha`）。**不用 linked worktree**：
-   ADR 0038 让 `workspace` 沙箱可写 refs、index、objects，只有 `config`/`hooks` 只读，而 linked worktree 共
-   享 common dir，worker A 能改 `refs/heads/work/item-B`。独立 clone 的 refs 天然隔离，不改 Core 和沙箱规
-   则。clone 目录上一把 flock 做同一 item 多个 attempt 的工作区互斥（身份记录不是锁）。
+1. 建或复用 linked worktree `.radian-worktrees/<item>` 与分支 `work/<item>`（首轮自 `origin/main`，记
+   `base_sha`）。**决定：单机 v0 用 worktree 共享一个 clone**，不做每 item 独立 clone，不改
+   Core 和沙箱规则；这是对第二轮审核 P0-1 的保留决定。已知风险（ADR 0038）：`workspace` 沙箱可写 refs、
+   index、objects，linked worktree 共享 common dir，所以 worker A 在沙箱里能改 `refs/heads/work/item-B`。
+   v0 的态度是**检测并安全失败，不预防**：
+   - 远端 `origin/work/<item>` 是 push 之后的唯一真相；本地 ref 只是工作副本。
+   - 包装器在 push 前核：`work/<item>` 存在、`head_sha` 是 `base_sha` 的后代、worktree 的 HEAD 指向这个
+     branch、无 dirty。任一不成立 → attempt `failed`，不 push，保留现场；该 item 的返工从远端 ref 重建 worktree。
+   - 包装器在 push 后核 `ls-remote` == `head_sha`；orca 再核一次。
+   - 被别的 worker 改坏的 ref 在它自己的 attempt 结束时按上面被发现，损失是一次 attempt，不是静默交付错
+     误；`git reflog` 可追溯（ADR 0038 §38 的同一前提）。
+   - 多 host 或出现实际篡改案例时再评估独立 clone（objects 经 `--reference` 共享，refs 隔离），作为 Spike 0
+     的对照项保留。
+   worktree 目录上一把 flock 做同一 item 多个 attempt 的互斥（身份记录不是锁）。
    同时写 host-local attempt record `<host-run-dir>/<item>/attempts/<attempt-id>/{identity.json,status.json}`：
-   随机 token、pid + 启动时间、session id、clone 路径、预期 branch；结束时写终止结果。orca 重连后 ssh 读它
+   随机 token、pid + 启动时间、session id、worktree 路径、预期 branch；结束时写终止结果。orca 重连后 ssh 读它
    并核进程身份。
 2. 跑模型：
    ```
@@ -100,7 +110,7 @@ v0 推（ssh + stdin），v1 拉（`radian work --pull`，需要 `orca serve`）
      --profile workspace --yes --output jsonl
    ```
    返工时加 `--resume <item>`。
-3. 模型退出后，**包装器而不是模型**按顺序做：收 Result 与退出码 → 核 clone 属于本 item、读 `head_sha`、
+3. 模型退出后，**包装器而不是模型**按顺序做：收 Result 与退出码 → 核 worktree 属于本 item、读 `head_sha`、
    列未提交和未跟踪文件、判断有无有效改动 → 分类：**只有 `outcome = completed` 且产物有效**才
    `git push origin work/<item>`，之后 `ls-remote` 核远端 ref；其余（`failed`、`incomplete`、
    `budget_exceeded`、`cancelled`、dirty、无产物）保留本地证据不 push。包装器的每条 git 命令带
@@ -205,7 +215,7 @@ ssh 参数分字段，argv 安全构造，不拼单段 shell 字符串。
 - worker 写 backlog、读 backlog 路径、持有 push 凭据。
 - 跨机器 resume：返工固定原 host；失联保守等人。
 - 多个调度器同时运行：`runner.lock` 只放一个 `orca run`。
-- linked worktree 做 worker 工作区：独立 clone（见派发）。
+- 每 item 独立 clone：单机 v0 用 linked worktree 共享 clone＼�；独立 clone 留作多 host 时的备选。
 - 模型自动生成并执行下一轮 rework：失败报给 lead，lead 提交新 brief。
 - 通用 gate DSL：固定 profile + 开关。
 - 负载预测调度：静态 slots。
@@ -224,10 +234,10 @@ ssh 参数分字段，argv 安全构造，不拼单段 shell 字符串。
 
 ## 未验证 / Spike 要碰的
 
-- 独立 clone（`--reference` 共享 objects）在 `workspace` 沙箱下的行为，与 linked worktree 的对比：这是**第一个 Spike**，结果决定工作区模型。
+- linked worktree 在 `workspace` 沙箱下跨 item 改 ref 的实际可行性与包装器检测是否全覆盖：这是**第一个 Spike**；独立 clone（`--reference` 共享 objects）作对照项。
 - 包装器与模型同一 OS 用户时，沙箱是否真的遮住 push 凭据（ADR 0020）。
 - jsonl 流在模型长思考时是否持续有行可用来判 stall。
-- host-local attempt record 的字段冻结（token、pid + 启动时间、session、clone 路径、branch、终止结果）。
+- host-local attempt record 的字段冻结（token、pid + 启动时间、session、worktree 路径、branch、终止结果）。
 - brief 里 `mutations:` 的声明格式。
 - 原型语言与位置。
 
@@ -240,7 +250,7 @@ ssh 参数分字段，argv 安全构造，不拼单段 shell 字符串。
 （或定时器）→ 想看就 `ssh <host> radian attach <item> --follow` → 进 `awaiting_human` 时 orca 打印
 item、sha、verdict 路径 → 你 `orca pass <item> <sha>` 或 `fail` → fail 后 Claude 写 rework → pass 后下次
 `run` 跑 Integration Gate → `ready_to_merge` 时你按今天的 ff-only 流程合并 → orca 看到 main 含 sha 就进
-`done`，删 clone。预算耗尽时 item 停在 `paused_budget`，你 `orca reset-budget <item>` 才继续。
+`done`，删 worktree。预算耗尽时 item 停在 `paused_budget`，你 `orca reset-budget <item>` 才继续。
 
 日常五条：`orca run`、`orca list`、`orca pass/fail`、`orca reset-budget`、`radian attach`。
 
@@ -248,7 +258,7 @@ item、sha、verdict 路径 → 你 `orca pass <item> <sha>` 或 `fail` → fail
 
 | 阶段 | 范围 | 必过 |
 |---|---|---|
-| Spike 0 | 单 host：独立 clone vs linked worktree 在 `workspace` 沙箱下的隔离对比；固定 session id；包装器收 jsonl、分类、受控 push；对固定 sha 的独立 checkout 验证 | 另一个 clone 的 refs 改不到；无 Result 的崩溃判 terminated 不判 unknown；非 completed 不 push；push 时 hooksPath 置空生效 |
+| Spike 0 | 单 host：linked worktree 在 `workspace` 沙箱下的跨 item ref 风险与包装器检测（独立 clone 作对照）；固定 session id；包装器收 jsonl、分类、受控 push；对固定 sha 的独立 checkout 验证 | 改坏另一 item 的 ref 在该 item 结束时被包装器发现并 failed、不 push；无 Result 的崩溃判 terminated 不判 unknown；非 completed 不 push；push 时 hooksPath 置空生效 |
 | Spike 1 | backlog 事务 + 两把锁 | 并发 `add/run/cancel` 不丢状态、不重复 claim；第二个 `run` 拿不到 `runner.lock` 即退；可重启 |
 | Spike 2 | ssh + attempt + reconcile | ssh 断而远端仍跑时不重派；旧 attempt 结果不污染新状态 |
 | Spike 3 | host 侧 push + 固定 sha 的 commands gate | 远端 ref 核验；gate 只认当前 sha |
@@ -276,8 +286,12 @@ owner 保留：mutation 在 radian profile 里 required；不做 Sortie A/B；�
 
 第二轮审核＼�同日）采纳：P0-1 独立 clone 代替 linked worktree（ADR 0038 坐实）；P0-2
 owner-only 在 v0 是流程保证不是安全边界；P0-3 只在 `completed` 且产物有效时 push，包装器 git 置空
-hooksPath；P0-4 host-local attempt record（token、pid + 启动时间）作对账证据，clone 上的 flock 作互斥；
+hooksPath；P0-4 host-local attempt record（token、pid + 启动时间）作对账证据，worktree 上的 flock 作互斥；
 P0-5 Integration Gate 对合并候选验证，合并时核 base；P1-1 预算耗尽进 `paused_budget` 不进
 `awaiting_human`；P1-2 审批绑 `verdict_set_digest`；P1-3 `runner.lock` 与 `state.lock` 分开；收紧三条：包装
 器确认退出即 `terminated` 不进 `reconciling`、独立 `AttemptFinished`、gate 只有固定 profile；P2：`supersedes`、
 "只读"改"工作区可写、无交互入口"。owner 保持 idea 不开工，Spike 0 未启动。
+
+对第二轮 P0-1 的保留决定：单机 v0 用 linked worktree 共享一个 clone，不做独立 clone；
+风险改为包装器检测（head 是 base 后代、branch 与 HEAD 一致、push 后 ls-remote 核对）并安全失败，远端 ref
+为真相；独立 clone 留作多 host 备选与 Spike 0 对照项。
