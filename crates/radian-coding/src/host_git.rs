@@ -239,7 +239,9 @@ fn section_key_entries(
             && let Some((name, kind)) = rest.rsplit_once('.')
             && keys.contains(&kind)
             && !name.is_empty()
-            && !entries.iter().any(|known| known == &(name.to_owned(), kind.to_owned()))
+            && !entries
+                .iter()
+                .any(|known| known == &(name.to_owned(), kind.to_owned()))
         {
             entries.push((name.to_owned(), kind.to_owned()));
         }

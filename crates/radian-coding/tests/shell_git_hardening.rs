@@ -271,7 +271,10 @@ async fn untrusted_shell_neutralises_repo_diff_textconv() {
     let marker = dir.file("marker-textconv");
     let conv = ws.join("textconv-hook.sh");
     marker_script(&conv, &marker, true);
-    git(&ws, &["config", "diff.tc.textconv", &conv.to_string_lossy()]);
+    git(
+        &ws,
+        &["config", "diff.tc.textconv", &conv.to_string_lossy()],
+    );
     std::fs::write(ws.join(".gitattributes"), "*.bin diff=tc\n").unwrap();
     std::fs::write(ws.join("f.bin"), "AAA\n").unwrap();
     git(&ws, &["add", ".gitattributes", "f.bin"]);
@@ -317,7 +320,10 @@ async fn untrusted_shell_disables_repo_diff_external() {
     let marker = dir.file("marker-external");
     let external = ws.join("external-hook.sh");
     marker_script(&external, &marker, false);
-    git(&ws, &["config", "diff.external", &external.to_string_lossy()]);
+    git(
+        &ws,
+        &["config", "diff.external", &external.to_string_lossy()],
+    );
     std::fs::write(ws.join("a.txt"), "hello\nchange\n").unwrap();
 
     // Control: without hardening the external diff fires.
@@ -354,7 +360,10 @@ async fn untrusted_shell_disables_repo_diff_command() {
     let marker = dir.file("marker-command");
     let driver = ws.join("driver-hook.sh");
     marker_script(&driver, &marker, false);
-    git(&ws, &["config", "diff.dc.command", &driver.to_string_lossy()]);
+    git(
+        &ws,
+        &["config", "diff.dc.command", &driver.to_string_lossy()],
+    );
     std::fs::write(ws.join(".gitattributes"), "*.dcf diff=dc\n").unwrap();
     std::fs::write(ws.join("g.dcf"), "data\n").unwrap();
     git(&ws, &["add", ".gitattributes", "g.dcf"]);
@@ -384,7 +393,10 @@ async fn untrusted_shell_disables_repo_diff_command() {
     .unwrap();
     let text = output_text(&out);
     assert!(text.contains("exit code: 0"), "{out:?}");
-    assert!(!marker.exists(), "hardened git must not run diff.<name>.command");
+    assert!(
+        !marker.exists(),
+        "hardened git must not run diff.<name>.command"
+    );
 }
 
 /// An approved `outside_sandbox` call in an untrusted project carries the same hardening:
