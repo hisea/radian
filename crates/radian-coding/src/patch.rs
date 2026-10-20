@@ -311,7 +311,7 @@ fn resolve_edit(
     };
     if ranges.len() > 1 && !spec.replace_all {
         return Err(number_edit(
-            ambiguous(&content, path, layer, &ranges),
+            ambiguous(content, path, layer, &ranges),
             index,
             multiple,
         ));
