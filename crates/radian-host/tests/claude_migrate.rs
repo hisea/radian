@@ -287,7 +287,7 @@ fn the_typical_fixtures_map_commands_hooks_and_agents_md() {
 }
 
 /// The report names every non-portable item: dropped hook keys, unknown events, agents,
-/// plugins, LSP, rules, local files, memory/sessions, and the two slice-B waits.
+/// plugins, LSP, rules, local files, memory/sessions, and the two not-imported notices.
 #[test]
 fn the_drop_report_names_every_non_portable_item() {
     let home = Temp::new("drops-home");
@@ -310,8 +310,8 @@ fn the_drop_report_names_every_non_portable_item() {
         "CLAUDE.local.md",
         "memory",
         "sessions",
-        "waits for the `[mcp]` section",
-        "project hooks wait for slice B",
+        "reads MCP servers from `--mcp-config` only",
+        "does not load project hooks",
         "`.mcp.json`",
     ] {
         assert!(
@@ -491,6 +491,182 @@ fn a_second_import_adds_nothing() {
     assert_eq!(after.matches("echo pre").count(), 1, "{after}");
     let imported_path = home.path().join("skills").display().to_string();
     assert_eq!(after.matches(&imported_path).count(), 1, "{after}");
+    readable(home.path());
+}
+
+/// An inline `skills = { extra_paths = [...] }` table merges: the comment and the existing
+/// entry stay byte-identical, the new path is appended inline, and a second run adds
+/// nothing. Against the old table-only code this fails with an internal error.
+#[test]
+fn an_inline_skills_table_merges() {
+    let home = Temp::new("inline-skills-home");
+    user_home(home.path());
+    let draft = import_claude(Some(home.path()), None).unwrap();
+
+    let scratch = Temp::new("inline-skills-scratch");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: None,
+    };
+    let original = "schema_version = 1\n# keep me\nskills = { extra_paths = [\"/a\"] }\n";
+    std::fs::write(&targets.config_path, original).unwrap();
+
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(report.skipped.is_empty(), "{report:?}");
+    let after = std::fs::read_to_string(&targets.config_path).unwrap();
+    assert!(after.contains("# keep me"), "{after}");
+    assert!(
+        after.contains("skills = {"),
+        "the inline form stays inline: {after}"
+    );
+    let imported = home.path().join("skills").display().to_string();
+    assert!(after.contains(&imported), "{after}");
+    let config = radian_host::parse_config(&targets.config_path, &after).unwrap();
+    assert!(config.skipped.is_empty(), "{config:?}");
+    assert_eq!(config.skills.extra_paths.len(), 2);
+    assert!(config.skills.extra_paths.contains(&"/a".to_owned()));
+    assert!(config.skills.extra_paths.contains(&imported));
+
+    // A second run appends nothing.
+    let second = write_claude_draft(&draft, &targets).unwrap();
+    assert!(second.written.is_empty(), "{second:?}");
+    let again = std::fs::read_to_string(&targets.config_path).unwrap();
+    assert_eq!(again.matches(&imported).count(), 1, "{again}");
+    assert_eq!(again.matches("\"/a\"").count(), 1, "{again}");
+    readable(home.path());
+}
+
+/// An inline hooks event list (`PreToolUse = [{ ... }]` inside `[hooks]`) merges: the
+/// existing entry stays, the imported one is appended in the same inline form, and a
+/// second run adds nothing. Against the old table-only code this fails with an internal
+/// error.
+#[test]
+fn an_inline_hooks_list_merges() {
+    let home = Temp::new("inline-hooks-home");
+    user_home(home.path());
+    let draft = import_claude(Some(home.path()), None).unwrap();
+
+    let scratch = Temp::new("inline-hooks-scratch");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: None,
+    };
+    let original = "schema_version = 1\n[hooks]\n\
+        PreToolUse = [{ matcher = \"shell\", hooks = [{ type = \"command\", \
+        command = \"existing\" }] }]\n";
+    std::fs::write(&targets.config_path, original).unwrap();
+
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(report.skipped.is_empty(), "{report:?}");
+    let after = std::fs::read_to_string(&targets.config_path).unwrap();
+    assert!(after.contains("command = \"existing\""), "{after}");
+    assert!(after.contains("command = \"echo pre\""), "{after}");
+    let config = radian_host::parse_config(&targets.config_path, &after).unwrap();
+    assert!(
+        config
+            .hooks
+            .pre_tool_use
+            .iter()
+            .any(|entry| entry.hooks.iter().any(|hook| hook.command == "existing"))
+    );
+    assert!(
+        config
+            .hooks
+            .pre_tool_use
+            .iter()
+            .any(|entry| entry.hooks.iter().any(|hook| hook.command == "echo pre"))
+    );
+
+    let second = write_claude_draft(&draft, &targets).unwrap();
+    assert!(second.written.is_empty(), "{second:?}");
+    let again = std::fs::read_to_string(&targets.config_path).unwrap();
+    assert_eq!(again.matches("echo pre").count(), 1, "{again}");
+    readable(home.path());
+}
+
+/// A top-level inline `hooks = { ... }` table merges like a `[hooks]` table (the reader
+/// loads both the same way): the existing entries stay, the imported ones are appended
+/// inline, and a second run adds nothing.
+#[test]
+fn a_top_level_inline_hooks_table_merges() {
+    let home = Temp::new("inline-top-home");
+    user_home(home.path());
+    let draft = import_claude(Some(home.path()), None).unwrap();
+
+    let scratch = Temp::new("inline-top-scratch");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: None,
+    };
+    let original = "schema_version = 1\nhooks = { PreToolUse = [] }\n";
+    std::fs::write(&targets.config_path, original).unwrap();
+
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(report.skipped.is_empty(), "{report:?}");
+    let after = std::fs::read_to_string(&targets.config_path).unwrap();
+    assert!(
+        after.contains("hooks = {"),
+        "the inline form stays inline: {after}"
+    );
+    assert!(after.contains("command = \"echo pre\""), "{after}");
+    let config = radian_host::parse_config(&targets.config_path, &after).unwrap();
+    assert!(
+        config
+            .hooks
+            .pre_tool_use
+            .iter()
+            .any(|entry| entry.hooks.iter().any(|hook| hook.command == "echo pre"))
+    );
+    assert!(
+        config
+            .hooks
+            .stop
+            .iter()
+            .any(|entry| entry.hooks.iter().any(|hook| hook.command == "make check"))
+    );
+
+    let second = write_claude_draft(&draft, &targets).unwrap();
+    assert!(second.written.is_empty(), "{second:?}");
+    let again = std::fs::read_to_string(&targets.config_path).unwrap();
+    assert_eq!(again.matches("echo pre").count(), 1, "{again}");
+    readable(home.path());
+}
+
+/// A non-table `hooks` value is not a shape the merge can extend, so it is left alone
+/// with one conflict line naming the key — never an internal error — while the rest of
+/// the import still lands.
+#[test]
+fn a_non_table_hooks_value_is_a_conflict_not_an_error() {
+    let home = Temp::new("inline-top-home");
+    user_home(home.path());
+    let draft = import_claude(Some(home.path()), None).unwrap();
+
+    let scratch = Temp::new("inline-top-scratch");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: None,
+    };
+    let original = "schema_version = 1\nhooks = \"not-a-table\"\n";
+    std::fs::write(&targets.config_path, original).unwrap();
+
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(
+        report.skipped.iter().any(|line| line.contains("`hooks`")),
+        "{report:?}"
+    );
+    // The rest still landed: the extra_paths entry is there and skills were written.
+    let after = std::fs::read_to_string(&targets.config_path).unwrap();
+    let imported = home.path().join("skills").display().to_string();
+    assert!(after.contains(&imported), "{after}");
+    assert!(targets.user_agents_path.exists());
     readable(home.path());
 }
 

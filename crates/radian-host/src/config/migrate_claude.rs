@@ -29,7 +29,7 @@
 //!   yet); reported per server.
 //! - `<project>/.claude/settings.json` `hooks`: not imported (project hooks are not loaded
 //!   yet); reported per item.
-//! - `<project>/.mcp.json`: never translated; reported as handled by the trust gate.
+//! - `<project>/.mcp.json`: never translated; reported as not read by the runtime.
 //!
 //! Every other dropped item (`if`, `async`, http hooks, `context: fork`, agents, plugins,
 //! LSP, `.claude/rules`, `CLAUDE.local.md`, memory, sessions) gets one report line each.
@@ -417,10 +417,12 @@ fn merge_config(
         |doc| {
             if !plan.add_paths.is_empty() {
                 let skills = doc.entry("skills").or_insert(Item::Table(Table::new()));
-                let table = skills.as_table_mut().ok_or_else(|| PreserveError::Verify {
-                    path: path.to_path_buf(),
-                    keys: MERGE_KEYS,
-                })?;
+                let table = skills
+                    .as_table_like_mut()
+                    .ok_or_else(|| PreserveError::Verify {
+                        path: path.to_path_buf(),
+                        keys: MERGE_KEYS,
+                    })?;
                 let array = table
                     .entry("extra_paths")
                     .or_insert(Item::Value(toml_edit::Value::Array(Array::new())));
@@ -436,37 +438,43 @@ fn merge_config(
                 if event.entries.is_empty() {
                     continue;
                 }
+                // A missing event starts as an inline array under an inline `hooks`
+                // parent (so the parent stays inline), `[[...]]` sections otherwise.
+                let inline_parent = matches!(
+                    doc.get("hooks"),
+                    Some(Item::Value(toml_edit::Value::InlineTable(_)))
+                );
                 let root = doc.entry("hooks").or_insert(Item::Table(Table::new()));
-                let table = root.as_table_mut().ok_or_else(|| PreserveError::Verify {
-                    path: path.to_path_buf(),
-                    keys: MERGE_KEYS,
-                })?;
-                let list = table
-                    .entry(event.event)
-                    .or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
-                let tables =
-                    list.as_array_of_tables_mut()
-                        .ok_or_else(|| PreserveError::Verify {
-                            path: path.to_path_buf(),
-                            keys: MERGE_KEYS,
-                        })?;
-                for (matcher, commands) in &event.entries {
-                    let mut entry = Table::new();
-                    if let Some(matcher) = matcher {
-                        entry["matcher"] = value(matcher.as_str());
+                let table = root
+                    .as_table_like_mut()
+                    .ok_or_else(|| PreserveError::Verify {
+                        path: path.to_path_buf(),
+                        keys: MERGE_KEYS,
+                    })?;
+                let list = table.entry(event.event).or_insert_with(|| {
+                    if inline_parent {
+                        Item::Value(toml_edit::Value::Array(Array::new()))
+                    } else {
+                        Item::ArrayOfTables(ArrayOfTables::new())
                     }
-                    let mut hooks = ArrayOfTables::new();
-                    for (command, timeout) in commands {
-                        let mut hook = Table::new();
-                        hook["type"] = value("command");
-                        hook["command"] = value(command.as_str());
-                        if let Some(secs) = timeout {
-                            hook["timeout"] = value(*secs as i64);
-                        }
-                        hooks.push(hook);
+                });
+                // The event list keeps its form: tables append to `[[...]]`, inline tables
+                // to `[...]`. Anything else was already a conflict in the plan.
+                if let Some(tables) = list.as_array_of_tables_mut() {
+                    for (matcher, commands) in &event.entries {
+                        tables.push(hook_table(matcher, commands));
                     }
-                    entry["hooks"] = Item::ArrayOfTables(hooks);
-                    tables.push(entry);
+                } else if let Some(array) = list.as_array_mut() {
+                    for (matcher, commands) in &event.entries {
+                        array.push(toml_edit::Value::InlineTable(inline_hook_table(
+                            matcher, commands,
+                        )));
+                    }
+                } else {
+                    return Err(PreserveError::Verify {
+                        path: path.to_path_buf(),
+                        keys: MERGE_KEYS,
+                    });
                 }
             }
             Ok(())
@@ -522,7 +530,7 @@ fn plan_merge(
             })?;
     let present_paths: Vec<String> = doc
         .get("skills")
-        .and_then(|skills| skills.as_table())
+        .and_then(|skills| skills.as_table_like())
         .and_then(|skills| skills.get("extra_paths"))
         .and_then(|paths| paths.as_array())
         .map(|array| {
@@ -543,7 +551,7 @@ fn plan_merge(
         plan.add_hooks = planned_hooks(add_hooks);
         return Ok(plan);
     }
-    let Some(table) = hooks.and_then(|hooks| hooks.as_table()) else {
+    let Some(table) = hooks.and_then(|hooks| hooks.as_table_like()) else {
         plan.conflicts
             .push("`hooks`: is not a table, hooks left unchanged".to_owned());
         return Ok(plan);
@@ -637,6 +645,50 @@ fn existing_hook_entries(list: &Item) -> Option<Vec<PlannedEntry>> {
         return Some(entries);
     }
     None
+}
+
+/// One matcher entry as a `[[hooks.<Event>]]` table.
+fn hook_table(matcher: &Option<String>, commands: &[(String, Option<u64>)]) -> Table {
+    let mut entry = Table::new();
+    if let Some(matcher) = matcher {
+        entry["matcher"] = value(matcher.as_str());
+    }
+    let mut hooks = ArrayOfTables::new();
+    for (command, timeout) in commands {
+        let mut hook = Table::new();
+        hook["type"] = value("command");
+        hook["command"] = value(command.as_str());
+        if let Some(secs) = timeout {
+            hook["timeout"] = value(*secs as i64);
+        }
+        hooks.push(hook);
+    }
+    entry["hooks"] = Item::ArrayOfTables(hooks);
+    entry
+}
+
+/// One matcher entry as an inline table (for `hooks.<Event> = [{ ... }]` lists: the event
+/// list keeps its form).
+fn inline_hook_table(
+    matcher: &Option<String>,
+    commands: &[(String, Option<u64>)],
+) -> toml_edit::InlineTable {
+    let mut entry = toml_edit::InlineTable::new();
+    if let Some(matcher) = matcher {
+        entry.insert("matcher", toml_edit::Value::from(matcher.as_str()));
+    }
+    let mut hooks = Array::new();
+    for (command, timeout) in commands {
+        let mut hook = toml_edit::InlineTable::new();
+        hook.insert("type", toml_edit::Value::from("command"));
+        hook.insert("command", toml_edit::Value::from(command.as_str()));
+        if let Some(secs) = timeout {
+            hook.insert("timeout", toml_edit::Value::from(*secs as i64));
+        }
+        hooks.push(toml_edit::Value::InlineTable(hook));
+    }
+    entry.insert("hooks", toml_edit::Value::Array(hooks));
+    entry
 }
 
 /// The canonical shape of one existing matcher entry: the matcher and every hook's
@@ -876,8 +928,8 @@ fn map_user_skills_ref(home: &Path, draft: &mut Draft) {
     }
 }
 
-/// `<claude-home>/.claude.json` `mcpServers`: not imported yet (waits for `[mcp]`, slice B).
-/// Literal secrets become env references with suggested names; values are never shown.
+/// `<claude-home>/.claude.json` `mcpServers`: not imported. Literal secrets become env
+/// references with suggested names; values are never shown.
 fn map_user_claude_json(home: &Path, draft: &mut Draft) -> Result<(), ClaudeMigrateError> {
     let Some(json) = read_json(home, ".claude.json", draft)? else {
         return Ok(());
@@ -894,8 +946,8 @@ fn map_user_claude_json(home: &Path, draft: &mut Draft) -> Result<(), ClaudeMigr
     names.sort();
     for name in &names {
         draft.note(format!(
-            "`.claude.json` server `{name}`: not imported (waits for the `[mcp]` section, \
-             slice B); copy it to `--mcp-config` `mcpServers` form yourself"
+            "`.claude.json` server `{name}`: not imported: Radian reads MCP servers from \
+             `--mcp-config` only; copy it to a `mcpServers` file yourself"
         ));
         if let Some(Json::Object(entry)) = servers.get(name)
             && let Some(Json::Object(env)) = entry.get("env")
@@ -1300,17 +1352,15 @@ fn map_project_skills(dir: &Path, draft: &mut Draft) -> Result<(), ClaudeMigrate
     Ok(())
 }
 
-/// `<project>/.mcp.json`: never translated. The runtime will read it once slice B lands;
-///
-/// until then the report says who handles it.
+/// `<project>/.mcp.json`: never translated. The runtime does not read it; MCP servers
+/// come from `--mcp-config` only.
 fn map_project_mcp_json(dir: &Path, draft: &mut Draft) {
     let path = dir.join(".mcp.json");
     match std::fs::metadata(&path) {
         Ok(_) => {
             draft.note(
-                "`.mcp.json`: not translated (the runtime will read it once the `[mcp]` \
-                 slice lands); it is a trust-gate resource and will be asked about on the \
-                 next start",
+                "`.mcp.json`: not translated: the runtime does not read `.mcp.json`; MCP \
+                 servers come from `--mcp-config` only",
             );
             // The file is deliberately not opened: its env values may hold secrets, and
             // there is no target to translate them to yet.
@@ -1319,8 +1369,7 @@ fn map_project_mcp_json(dir: &Path, draft: &mut Draft) {
     }
 }
 
-/// `<project>/.claude/settings.json` hooks: read for the drop report, never translated
-/// (waits for project hooks, slice B).
+/// `<project>/.claude/settings.json` hooks: read for the drop report, never translated.
 fn map_project_settings(dir: &Path, draft: &mut Draft) -> Result<(), ClaudeMigrateError> {
     let rel = ".claude/settings.json";
     let Some(json) = read_json(dir, rel, draft)? else {
@@ -1342,7 +1391,8 @@ fn map_project_settings(dir: &Path, draft: &mut Draft) -> Result<(), ClaudeMigra
                 .as_object()
                 .and_then(|entry| entry_drop_reason(entry, "entry"))
                 .unwrap_or_else(|| {
-                    "project hooks wait for slice B (`.radian/hooks.json` is not loaded yet)"
+                    "not imported: Radian does not load project hooks \
+                     (`.radian/hooks.json`)"
                         .to_owned()
                 });
             draft.note(format!("{what}: not imported ({reason})"));

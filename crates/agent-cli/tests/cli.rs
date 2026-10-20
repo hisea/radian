@@ -8241,11 +8241,11 @@ async fn config_import_claude_drafts_and_writes() {
     assert!(!stdout.contains("sk-test-please-ignore"), "{stdout}");
     assert!(stderr.contains("[import-claude]"), "{stderr}");
     assert!(stderr.contains("`async`"), "{stderr}");
-    assert!(stderr.contains("waits for the `[mcp]` section"), "{stderr}");
     assert!(
-        stderr.contains("project hooks wait for slice B"),
+        stderr.contains("reads MCP servers from `--mcp-config` only"),
         "{stderr}"
     );
+    assert!(stderr.contains("does not load project hooks"), "{stderr}");
     assert!(stderr.contains("nothing was written"), "{stderr}");
 
     // `--write`: the config is merged (a comment and an unrelated key survive), the
