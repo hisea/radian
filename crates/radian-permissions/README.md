@@ -9,6 +9,11 @@ here — approval cannot turn a sandbox refusal into a run.
 `--profile` / `--approval` / `--allow-shell-command` flags build one of its `Profile`s and
 write every decision to the session journal. The `radian-runtime` driver is not itself a host.
 
+The sandboxed `workspace` profile is built only from an enforced `Sandbox` instance:
+`workspace_write_sandboxed` takes `&Sandbox` and refuses a transparent backend, and
+`with_sandbox` marks the flag only for an enforced one — the instance is the proof, not
+the host's build order, and no bare `bool` can mark a profile sandboxed.
+
 ## Rules
 
 A rule is `(tool matcher, resource matcher) -> allow | ask | deny`.
