@@ -178,18 +178,28 @@ mod tests {
             .expect("a 200 verifies");
 
         let base = one_shot_server("401 Unauthorized");
-        let error = verify("openai", Protocol::OpenAiCompatible, &base, "sk-SUPER-SECRET")
-            .await
-            .expect_err("401 fails");
+        let error = verify(
+            "openai",
+            Protocol::OpenAiCompatible,
+            &base,
+            "sk-SUPER-SECRET",
+        )
+        .await
+        .expect_err("401 fails");
         assert!(error.contains("rejected the key"), "{error}");
         assert!(!error.contains("sk-SUPER-SECRET"), "{error}");
 
         // Any other status: the endpoint may not serve `/models`; still no key, no URL
         // credentials.
         let base = one_shot_server("500 Internal Server Error");
-        let error = verify("openai", Protocol::OpenAiCompatible, &base, "sk-SUPER-SECRET")
-            .await
-            .expect_err("500 fails");
+        let error = verify(
+            "openai",
+            Protocol::OpenAiCompatible,
+            &base,
+            "sk-SUPER-SECRET",
+        )
+        .await
+        .expect_err("500 fails");
         assert!(error.contains("HTTP 500"), "{error}");
         assert!(error.contains("/models"), "{error}");
         assert!(!error.contains("sk-SUPER-SECRET"), "{error}");
@@ -246,16 +256,18 @@ mod tests {
         );
         // An unknown (custom) provider verifies against what it was given.
         assert_eq!(
-            verification_url("corp", Protocol::OpenAiCompatible, "https://corp.example/v1/"),
+            verification_url(
+                "corp",
+                Protocol::OpenAiCompatible,
+                "https://corp.example/v1/"
+            ),
             "https://corp.example/v1/models",
         );
     }
 
     /// A one-shot server that records the request head, then answers `status_line`: the mock
     /// stands in for a descriptor-named verification endpoint (no network in tests).
-    fn capturing_server(
-        status_line: &'static str,
-    ) -> (String, std::sync::mpsc::Receiver<String>) {
+    fn capturing_server(status_line: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

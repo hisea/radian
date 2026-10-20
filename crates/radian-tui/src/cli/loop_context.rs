@@ -678,8 +678,7 @@ impl LoopContext<'_> {
                     .unwrap_or(radian_host::Protocol::OpenAiCompatible);
                 let tx = self.tx.clone();
                 self.runtime.spawn(async move {
-                    let result =
-                        radian_host::login::verify(&name, protocol, &base_url, &key).await;
+                    let result = radian_host::login::verify(&name, protocol, &base_url, &key).await;
                     let _ = tx.send(UiEvent::Command(AppInput::LoginVerified { name, result }));
                 });
                 Ok(())

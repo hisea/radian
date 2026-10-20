@@ -258,7 +258,9 @@ mod tests {
         let _home = EnvHome::with_entries(&[("opencode-go", "k-opencode-go")]);
         let candidates = model_route_candidates(None, &empty_config());
         assert!(
-            candidates.iter().any(|c| c.insert.starts_with("opencode-go/")),
+            candidates
+                .iter()
+                .any(|c| c.insert.starts_with("opencode-go/")),
             "the logged-in provider is listed: {:?}",
             candidates.iter().map(|c| &c.insert).collect::<Vec<_>>()
         );
@@ -280,7 +282,9 @@ mod tests {
         ]);
         let candidates = model_route_candidates(None, &empty_config());
         assert!(
-            candidates.iter().any(|c| c.insert.starts_with("anthropic/")),
+            candidates
+                .iter()
+                .any(|c| c.insert.starts_with("anthropic/")),
             "the newly logged-in provider is listed: {:?}",
             candidates.iter().map(|c| &c.insert).collect::<Vec<_>>()
         );
@@ -295,10 +299,7 @@ mod tests {
     /// is listed too — the filter must not drop what the switch would accept.
     #[test]
     fn a_logged_in_custom_provider_is_listed() {
-        let _home = EnvHome::with_entries(&[
-            ("opencode-go", "k-opencode-go"),
-            ("corp", "k-corp"),
-        ]);
+        let _home = EnvHome::with_entries(&[("opencode-go", "k-opencode-go"), ("corp", "k-corp")]);
         radian_host::write_provider_models("corp", "k-corp", vec!["m-corp".to_owned()])
             .expect("the cache is writable");
         let mut config = empty_config();
