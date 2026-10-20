@@ -281,8 +281,8 @@ impl Jobs {
                 "too_many_jobs",
                 format!(
                     "this session already has {running} background jobs running (the limit is \
-                     {MAX_RUNNING_JOBS}). Wait for one to finish with job_output wait=true, or \
-                     stop one with job_kill, or list them with job_list."
+                     {MAX_RUNNING_JOBS}). Read one with `job` (`op: \"wait\"`) or stop one \
+                     with `job` (`op: \"kill\"`)."
                 ),
             ));
         }
@@ -414,9 +414,8 @@ impl Jobs {
                 format!(
                     "this session already has {running} background jobs running (the limit is \
                      {MAX_RUNNING_JOBS}), so this foreground command was not moved to the \
-                     background; it runs to its foreground timeout. Wait for one with \
-                     job_output wait=true, or stop one with job_kill, or list them with \
-                     job_list."
+                     background; it runs to its foreground timeout. Read one with `job` \
+                     (`op: \"wait\"`) or stop one with `job` (`op: \"kill\"`)."
                 ),
             ));
         }
@@ -1452,7 +1451,9 @@ pub(crate) fn run_kill_alias(
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
     let args: JobIdArgs = args::parse("job_kill", &kill_schema(), arguments)?;
-    run_kill(jobs, &kill_args(&args.job_id)).map(|output| renamed(JOB_KILL_RENAME, output))
+    run_kill(jobs, &kill_args(&args.job_id))
+        .map(|output| renamed(JOB_KILL_RENAME, output))
+        .map_err(|failure| rename_failure(JOB_KILL_RENAME, failure))
 }
 
 // ---------- reading the full output file ----------

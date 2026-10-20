@@ -1,5 +1,5 @@
 //! Background jobs (ADR 0037 slices 1-2): the `shell` tool's `background: true` and the
-//! `job_output` / `job_list` / `job_kill` tools.
+//! `job { op: read | wait | kill }`, the one background tool (ADR 0037 decision 4).
 //!
 //! These use a `FullAccess` sandbox (no backend needed), the same workhorse the shell tests
 //! use for the tool's own behaviour. The registry is per session, so each test opens **one**
@@ -73,7 +73,7 @@ fn structured(output: &ToolOutput) -> Value {
 /// Starts a background job and returns `(job_id, the output hint)`. `timeout_secs` is written
 /// into the arguments verbatim: the tool still **accepts** the field, but a background job has
 /// no deadline (ADR 0037), so the value is passed through to be ignored. Callers that
-/// want a deadline assert on `job_output`'s state instead.
+/// want a deadline assert on `job`'s state instead.
 async fn start(
     session: &CodingSession,
     command: &str,
@@ -181,9 +181,9 @@ const TWO_SLEEPS: &str = "echo $$ > leader.pid; sleep 600 & echo $! > bg.pid; wa
 // ---------- 1. start, output, increments ----------
 
 /// `background: true` returns at once while the command is still blocked on a fifo the test
-/// holds; the output file fills; `job_output` returns only the increment since the last read.
+/// holds; the output file fills; `job` returns only the increment since the last read.
 #[tokio::test]
-async fn a_background_job_returns_at_once_and_job_output_returns_increments() {
+async fn a_background_job_returns_at_once_and_job_returns_increments() {
     let dir = TempDir::new("jobs-start");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -208,7 +208,7 @@ async fn a_background_job_returns_at_once_and_job_output_returns_increments() {
     // The command is blocked on the fifo; "first" is already in the file and the ring.
     wait_for_file(&output_path, "first").await;
     let first = output_text(
-        &exec(&session, "job_output", json!({"job_id": id}))
+        &exec(&session, "job", json!({"id": id, "op": "read"}))
             .await
             .unwrap(),
     );
@@ -218,7 +218,7 @@ async fn a_background_job_returns_at_once_and_job_output_returns_increments() {
 
     // A second read with nothing new says so: the cursor advanced.
     let again = output_text(
-        &exec(&session, "job_output", json!({"job_id": id}))
+        &exec(&session, "job", json!({"id": id, "op": "read"}))
             .await
             .unwrap(),
     );
@@ -233,8 +233,7 @@ async fn a_background_job_returns_at_once_and_job_output_returns_increments() {
     let done = output_text(
         &exec(
             &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 10_000}),
+            "job", json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
         )
         .await
         .unwrap(),
@@ -248,7 +247,7 @@ async fn a_background_job_returns_at_once_and_job_output_returns_increments() {
 
 // ---------- 2b. a waited settle is not notified ----------
 
-/// A settle a `job_output wait=true` is blocked on is the model's already, so the registry
+/// A settle a `job` wait is blocked on is the model's already, so the registry
 /// marks it `notify: false` (ADR 0037 decision 4). The waiter count is what carries that.
 #[tokio::test]
 async fn a_waited_settle_is_not_notified() {
@@ -263,8 +262,7 @@ async fn a_waited_settle_is_not_notified() {
     let (id, _) = start(&session, "sleep 0.3; echo done", None).await;
     let wait = exec(
         &session,
-        "job_output",
-        json!({"job_id": id, "wait": true, "timeout_ms": 60_000}),
+        "job", json!({"id": id, "op": "wait", "timeout_ms": 60_000}),
     );
     let settle = async {
         loop {
@@ -302,7 +300,7 @@ async fn next_settle_state(events: &mut tokio::sync::broadcast::Receiver<JobEven
 
 /// A job that settles with **no** waiter leaves the watched value `true` as well
 /// (`send_replace`; `send` would return `Err` without storing it), so a later
-/// `job_output wait=true` returns at once with the exited state, and never the contradictory
+/// `job` wait returns at once with the exited state, and never the contradictory
 /// "[still running …]" line. On the old code it slept the whole 30 s and printed both lines.
 #[tokio::test]
 async fn a_wait_on_a_settled_job_returns_at_once() {
@@ -326,8 +324,7 @@ async fn a_wait_on_a_settled_job_returns_at_once() {
     let text = output_text(
         &exec(
             &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 30_000}),
+            "job", json!({"id": id, "op": "wait", "timeout_ms": 30_000}),
         )
         .await
         .unwrap(),
@@ -345,7 +342,7 @@ async fn a_wait_on_a_settled_job_returns_at_once() {
 }
 
 /// The same for an adopted job: a foreground command moved to the background that finishes with
-/// nobody waiting is settled at once on the next `job_output wait=true` (the adopt path shares
+/// nobody waiting is settled at once on the next `job` wait (the adopt path shares
 /// `settle`).
 #[tokio::test]
 async fn a_wait_on_a_settled_adopted_job_returns_at_once() {
@@ -379,8 +376,7 @@ async fn a_wait_on_a_settled_adopted_job_returns_at_once() {
     let text = output_text(
         &exec(
             &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 30_000}),
+            "job", json!({"id": id, "op": "wait", "timeout_ms": 30_000}),
         )
         .await
         .unwrap(),
@@ -429,16 +425,16 @@ async fn the_notify_flag_follows_the_settle_kind() {
         "a natural exit notifies"
     );
 
-    // `job_kill` does not.
+    // a `job` kill does not.
     let mut events = session.jobs().subscribe();
     let (id, _) = start(&session, "echo $$ > k.pid; sleep 600", None).await;
     wait_for_pid(&root, "k.pid").await;
-    exec(&session, "job_kill", json!({"job_id": id}))
+    exec(&session, "job", json!({"id": id, "op": "kill"}))
         .await
         .unwrap();
     assert!(
         !next_settle_notify(&mut events).await,
-        "job_kill must not notify"
+        "a kill must not notify"
     );
 
     // A timeout notifies: the model set the deadline itself but did not ask to kill the job, so
@@ -509,8 +505,7 @@ async fn a_wait_timeout_returns_running_and_leaves_the_job_alive() {
     let text = output_text(
         &exec(
             &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 300}),
+            "job", json!({"id": id, "op": "wait", "timeout_ms": 300}),
         )
         .await
         .unwrap(),
@@ -561,7 +556,10 @@ async fn a_background_timeout_secs_is_ignored() {
         text.contains("is ignored for background jobs"),
         "the acknowledgement must say the field is ignored: {text}"
     );
-    assert!(text.contains("job_kill"), "{text}");
+    assert!(
+        text.contains("notified when it finishes"),
+        "the acknowledgement ends with the notice line: {text}"
+    );
 
     let leader = wait_for_pid(&root, "leader.pid").await;
     let background = wait_for_pid(&root, "bg.pid").await;
@@ -572,8 +570,7 @@ async fn a_background_timeout_secs_is_ignored() {
     let status = output_text(
         &exec(
             &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 2000}),
+            "job", json!({"id": id, "op": "wait", "timeout_ms": 2000}),
         )
         .await
         .unwrap(),
@@ -591,15 +588,14 @@ async fn a_background_timeout_secs_is_ignored() {
     );
     assert!(group_alive(leader), "group {leader} lost members");
 
-    // `job_kill` is the way to stop it.
-    exec(&session, "job_kill", json!({"job_id": id}))
+    // a `job` kill is the way to stop it.
+    exec(&session, "job", json!({"id": id, "op": "kill"}))
         .await
         .unwrap();
     let killed = output_text(
         &exec(
             &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 10_000}),
+            "job", json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
         )
         .await
         .unwrap(),
@@ -643,10 +639,10 @@ async fn a_foreground_timeout_secs_still_kills_the_command() {
 
 // ---------- 3b. kill kills the whole group ----------
 
-/// `job_kill` SIGTERMs the whole group (then SIGKILLs): neither the shell nor its background
+/// `job` kill SIGTERMs the whole group (then SIGKILLs): neither the shell nor its background
 /// child survives, and the group is empty.
 #[tokio::test]
-async fn job_kill_kills_the_whole_process_group() {
+async fn job_kill_op_kills_the_whole_process_group() {
     let dir = TempDir::new("jobs-kill");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -659,7 +655,7 @@ async fn job_kill_kills_the_whole_process_group() {
     assert_ne!(leader, background, "a separate child pid");
 
     let killed = output_text(
-        &exec(&session, "job_kill", json!({"job_id": id}))
+        &exec(&session, "job", json!({"id": id, "op": "kill"}))
             .await
             .unwrap(),
     );
@@ -667,11 +663,11 @@ async fn job_kill_kills_the_whole_process_group() {
 
     assert!(
         gone_within(leader, Duration::from_secs(10)).await,
-        "the shell (pid {leader}) survived job_kill"
+        "the shell (pid {leader}) survived the kill"
     );
     assert!(
         gone_within(background, Duration::from_secs(10)).await,
-        "the child (pid {background}) survived job_kill"
+        "the child (pid {background}) survived the kill"
     );
     assert!(!group_alive(leader), "group {leader} still has members");
 
@@ -679,15 +675,14 @@ async fn job_kill_kills_the_whole_process_group() {
     let done = output_text(
         &exec(
             &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 10_000}),
+            "job", json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
         )
         .await
         .unwrap(),
     );
     assert!(done.contains("[status: killed]"), "{done}");
     let again = output_text(
-        &exec(&session, "job_kill", json!({"job_id": id}))
+        &exec(&session, "job", json!({"id": id, "op": "kill"}))
             .await
             .unwrap(),
     );
@@ -698,7 +693,7 @@ async fn job_kill_kills_the_whole_process_group() {
 
 /// A command that exits on its own but leaves a background grandchild: the supervisor kills
 /// the whole process group when the leader exits, so the grandchild does not outlive it. This
-/// is the group-cleanup path that `job_kill` and the timeout do **not** exercise (they signal
+/// is the group-cleanup path that a `job` kill and the timeout do **not** exercise (they signal
 /// the group themselves).
 #[tokio::test]
 async fn a_natural_exit_kills_a_background_grandchild() {
@@ -718,8 +713,7 @@ async fn a_natural_exit_kills_a_background_grandchild() {
     let text = output_text(
         &exec(
             &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 15_000}),
+            "job", json!({"id": id, "op": "wait", "timeout_ms": 15_000}),
         )
         .await
         .unwrap(),
@@ -759,21 +753,20 @@ async fn the_fifth_running_job_is_refused() {
     .expect_err("the fifth job must be refused");
     assert_eq!(failure.code, "too_many_jobs");
     assert!(
-        failure.message.contains("job_output"),
+        failure.message.contains("`op: \"wait\"`"),
         "{}",
         failure.message
     );
-    assert!(failure.message.contains("job_kill"), "{}", failure.message);
-    assert!(failure.message.contains("job_list"), "{}", failure.message);
+    assert!(failure.message.contains("`op: \"kill\"`"), "{}", failure.message);
+    assert!(!failure.message.contains("job_list"), "{}", failure.message);
 
     // Settle one, then the next start succeeds.
-    exec(&session, "job_kill", json!({"job_id": ids[0]}))
+    exec(&session, "job", json!({"id": ids[0], "op": "kill"}))
         .await
         .unwrap();
     exec(
         &session,
-        "job_output",
-        json!({"job_id": ids[0], "wait": true, "timeout_ms": 10_000}),
+        "job", json!({"id": ids[0], "op": "wait", "timeout_ms": 10_000}),
     )
     .await
     .unwrap();
@@ -785,7 +778,7 @@ async fn the_fifth_running_job_is_refused() {
 
 // ---------- 5. turn cancellation does not kill jobs ----------
 
-/// Cancelling the turn ends a `job_output` wait but leaves the job running (ADR 0037
+/// Cancelling the turn ends a `job` wait but leaves the job running (ADR 0037
 /// decision 6).
 #[tokio::test]
 async fn a_cancelled_turn_leaves_the_job_running() {
@@ -801,8 +794,7 @@ async fn a_cancelled_turn_leaves_the_job_running() {
     let token = CancellationToken::new();
     let wait = exec_cancel(
         &session,
-        "job_output",
-        json!({"job_id": id, "wait": true, "timeout_ms": 60_000}),
+        "job", json!({"id": id, "op": "wait", "timeout_ms": 60_000}),
         token.clone(),
     );
     let cancel = async {
@@ -871,11 +863,12 @@ async fn dropping_the_registry_kills_every_running_group() {
     assert!(!group_alive(pid), "group {pid} still has members");
 }
 
-// ---------- 7. job_list ----------
+// ---------- 7. the job_list alias ----------
 
-/// `job_list` reports each job's id, state, command and output path.
+/// The `job_list` alias reports each job's id, state, command and output path, prefixed
+/// with the rename line.
 #[tokio::test]
-async fn job_list_reports_the_states() {
+async fn the_job_list_alias_reports_the_states() {
     let dir = TempDir::new("jobs-list");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -886,8 +879,7 @@ async fn job_list_reports_the_states() {
     let done = output_text(
         &exec(
             &session,
-            "job_output",
-            json!({"job_id": done_id, "wait": true, "timeout_ms": 10_000}),
+            "job", json!({"id": done_id, "op": "wait", "timeout_ms": 10_000}),
         )
         .await
         .unwrap(),
@@ -896,11 +888,15 @@ async fn job_list_reports_the_states() {
     let (run_id, run_output) = start(&session, "sleep 600", None).await;
 
     let list = output_text(&exec(&session, "job_list", json!({})).await.unwrap());
+    assert!(
+        list.starts_with("`job_list` was renamed"),
+        "the alias names the rename first: {list}"
+    );
     assert!(list.contains(&done_id), "{list}");
     assert!(list.contains("exited 0"), "{list}");
     assert!(list.contains(&run_id), "{list}");
     assert!(list.contains("running"), "{list}");
-    // The list names `job_output` where the output path used to be (ADR 0039 decision 1).
+    // The list names `job` where the output path used to be (ADR 0039 decision 1).
     assert_eq!(done_output, radian_coding::OUTPUT_HINT, "{done_output}");
     assert_eq!(run_output, radian_coding::OUTPUT_HINT, "{run_output}");
     assert!(list.contains(radian_coding::OUTPUT_HINT), "{list}");
@@ -921,14 +917,35 @@ async fn an_unknown_job_is_refused() {
     let tools = transparent_tools(&root);
     let session = tools.open_session().await.expect("session");
 
+    let failure = exec(&session, "job", json!({"id": "job-0-0", "op": "read"}))
+        .await
+        .expect_err("unknown job");
+    assert_eq!(failure.code, "unknown_job");
+    let failure = exec(&session, "job", json!({"id": "job-0-0", "op": "kill"}))
+        .await
+        .expect_err("unknown job");
+    assert_eq!(failure.code, "unknown_job");
+    assert!(
+        failure.message.contains("no job `job-0-0`"),
+        "one error name for both kinds: {failure:?}"
+    );
+    // The old names are still accepted and answer with the rename line (ADR 0043 decision 3).
     let failure = exec(&session, "job_output", json!({"job_id": "job-0-0"}))
         .await
         .expect_err("unknown job");
     assert_eq!(failure.code, "unknown_job");
+    assert!(
+        failure.message.starts_with("`job_output` was renamed"),
+        "{failure:?}"
+    );
     let failure = exec(&session, "job_kill", json!({"job_id": "job-0-0"}))
         .await
         .expect_err("unknown job");
     assert_eq!(failure.code, "unknown_job");
+    assert!(
+        failure.message.starts_with("`job_kill` was renamed"),
+        "{failure:?}"
+    );
 }
 
 // ---------- 9. a background job keeps the sandbox it started with (ADR 0038 slice 2) ----------
@@ -1009,7 +1026,7 @@ fn adopted(output: &ToolOutput) -> (String, String) {
 
 /// The acceptance case: a foreground call still running at the threshold is moved to the
 /// background **in place** — the same process (its pid does not change), its pre-adoption
-/// output lands in the job's file, and `job_output` starts after the adoption point. Fails on
+/// output lands in the job's file, and `job` starts after the adoption point. Fails on
 /// the pre-revision code, where the call would run on to the foreground timeout (and, without
 /// one, for the default 60 s).
 #[tokio::test]
@@ -1062,15 +1079,14 @@ async fn a_long_foreground_command_is_adopted_in_place() {
     let done = output_text(
         &exec(
             &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 10_000}),
+            "job", json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
         )
         .await
         .unwrap(),
     );
     assert!(done.contains("after"), "{done}");
     assert!(done.contains("[status: exited 0]"), "{done}");
-    // `job_output` starts at the adoption point: the tail already in the result is not
+    // `job` starts at the adoption point: the tail already in the result is not
     // repeated.
     assert!(!done.contains("before"), "the increment only: {done}");
 
@@ -1140,8 +1156,7 @@ async fn an_adopted_job_is_killed_by_the_original_timeout() {
     let settled = output_text(
         &exec(
             &session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 15_000}),
+            "job", json!({"id": id, "op": "wait", "timeout_ms": 15_000}),
         )
         .await
         .unwrap(),

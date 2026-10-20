@@ -116,7 +116,7 @@ fn child_leaves_the_group() -> String {
 }
 
 /// The leader starts the escaping child, then blocks on the test's fifo and exits 0: on this path
-/// the supervisor's **own** kill is what has to reach the child (no `job_kill` and no timeout
+/// the supervisor's **own** kill is what has to reach the child (no `job` kill and no timeout
 /// fires). The fifo is what makes the shape observable: the leader is still alive when the test
 /// reads the pids, and the kill runs only once the test lets it exit.
 fn leader_exits_with_a_child() -> String {
@@ -336,13 +336,13 @@ async fn start_background(session: &CodingSession, root: &Path) -> (String, i32,
     (id, leader, child, Leftovers(vec![leader, child]))
 }
 
-/// Waits for the job's settle through `job_output` and returns the wait's text.
+/// Waits for the job's settle through `job` wait and returns the wait's text.
 async fn settle(session: &CodingSession, id: &str) -> String {
     output_text(
         &exec(
             session,
-            "job_output",
-            json!({"job_id": id, "wait": true, "timeout_ms": 20_000}),
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 20_000}),
             CancellationToken::new(),
         )
         .await
@@ -350,12 +350,12 @@ async fn settle(session: &CodingSession, id: &str) -> String {
     )
 }
 
-// ---------- 1. job_kill ----------
+// ---------- 1. the kill op ----------
 
-/// `job_kill` must kill the whole **session**: the child that left the process group is gone
+/// `job` kill must kill the whole **session**: the child that left the process group is gone
 /// after the job settles, and nothing is left in the session.
 #[tokio::test]
-async fn job_kill_reaches_a_child_that_left_the_process_group() {
+async fn job_kill_op_reaches_a_child_that_left_the_process_group() {
     let dir = TempDir::new("session-kill-kill");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -370,8 +370,8 @@ async fn job_kill_reaches_a_child_that_left_the_process_group() {
 
     exec(
         &session,
-        "job_kill",
-        json!({"job_id": id}),
+        "job",
+        json!({"id": id, "op": "kill"}),
         CancellationToken::new(),
     )
     .await
@@ -381,11 +381,11 @@ async fn job_kill_reaches_a_child_that_left_the_process_group() {
 
     assert!(
         gone_within(child, Duration::from_secs(10)).await,
-        "the child (pid {child}) survived job_kill"
+        "the child (pid {child}) survived the kill"
     );
     assert!(
         session_empties(leader, Duration::from_secs(10)).await,
-        "session {leader} still has members after job_kill"
+        "session {leader} still has members after the kill"
     );
 }
 
@@ -458,7 +458,7 @@ async fn a_session_end_cleanup_reaches_a_child_that_left_the_process_group() {
 
 // ---------- 4. the leader exits on its own ----------
 
-/// The supervisor's own kill (the path `job_kill` and the timeout do not take) must reach the
+/// The supervisor's own kill (the path a `job` kill and the timeout do not take) must reach the
 /// child that left the process group: the job still prints `exited 0`, and the child is gone.
 #[tokio::test]
 async fn a_natural_exit_reaches_a_child_that_left_the_process_group() {

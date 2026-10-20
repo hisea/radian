@@ -473,7 +473,7 @@ fn jobs_shows_the_running_count_and_the_oldest_age() {
         Input::Runtime(RuntimeEvent::BackgroundJobStarted {
             job_id: id.to_string(),
             command: "make test".to_string(),
-            output: "available through job_output".to_string(),
+            output: "available through job".to_string(),
         })
     }
     fn settled(id: &str) -> Input {

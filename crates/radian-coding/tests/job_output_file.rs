@@ -1,4 +1,4 @@
-//! `job_output`'s file arguments (ADR 0039 decision 1 review fix): the incremental ring is
+//! `job`'s file arguments (ADR 0039 decision 1 review fix): the incremental ring is
 //! bounded, so the model pages the **full** output file by line with `tail_lines`,
 //! `from_line`/`max_lines` or `pattern`.
 //!
@@ -76,8 +76,8 @@ async fn run_to_end(session: &CodingSession, command: &str) -> String {
         .to_owned();
     let settled = exec(
         session,
-        "job_output",
-        json!({"job_id": job_id, "wait": true, "timeout_ms": 60_000}),
+        "job",
+        json!({"id": job_id, "op": "wait", "timeout_ms": 60_000}),
     )
     .await
     .expect("wait for the job");
@@ -101,8 +101,8 @@ async fn the_file_arguments_read_the_full_output_not_the_ring() {
     // The last five lines, numbered.
     let tail = exec(
         &session,
-        "job_output",
-        json!({"job_id": id, "tail_lines": 5}),
+        "job",
+        json!({"id": id, "op": "read", "tail_lines": 5}),
     )
     .await
     .expect("tail");
@@ -123,8 +123,8 @@ async fn the_file_arguments_read_the_full_output_not_the_ring() {
     // The first three lines, which the ring dropped.
     let head = exec(
         &session,
-        "job_output",
-        json!({"job_id": id, "from_line": 1, "max_lines": 3}),
+        "job",
+        json!({"id": id, "op": "read", "from_line": 1, "max_lines": 3}),
     )
     .await
     .expect("head");
@@ -136,8 +136,8 @@ async fn the_file_arguments_read_the_full_output_not_the_ring() {
     // A line that only exists in the dropped part.
     let found = exec(
         &session,
-        "job_output",
-        json!({"job_id": id, "pattern": "^1234$"}),
+        "job",
+        json!({"id": id, "op": "read", "pattern": "^1234$"}),
     )
     .await
     .expect("pattern");
@@ -148,8 +148,8 @@ async fn the_file_arguments_read_the_full_output_not_the_ring() {
     // A tail larger than the ring's window still starts at the file's own line number.
     let wide = exec(
         &session,
-        "job_output",
-        json!({"job_id": id, "tail_lines": 100_000}),
+        "job",
+        json!({"id": id, "op": "read", "tail_lines": 100_000}),
     )
     .await
     .expect("wide tail");
@@ -174,8 +174,8 @@ async fn a_job_id_with_path_characters_is_refused() {
     for bad in ["../job-1.out", "job-1/../../x", ".."] {
         let failure = exec(
             &session,
-            "job_output",
-            json!({"job_id": bad, "from_line": 1}),
+            "job",
+            json!({"id": bad, "op": "read", "from_line": 1}),
         )
         .await
         .expect_err("a path-like id must be refused");
@@ -196,8 +196,8 @@ async fn the_file_arguments_are_validated() {
 
     let failure = exec(
         &session,
-        "job_output",
-        json!({"job_id": id, "tail_lines": 2, "pattern": "hi"}),
+        "job",
+        json!({"id": id, "op": "read", "tail_lines": 2, "pattern": "hi"}),
     )
     .await
     .expect_err("two modes");
@@ -205,8 +205,8 @@ async fn the_file_arguments_are_validated() {
 
     let failure = exec(
         &session,
-        "job_output",
-        json!({"job_id": id, "from_line": 0}),
+        "job",
+        json!({"id": id, "op": "read", "from_line": 0}),
     )
     .await
     .expect_err("from_line 0");
@@ -214,8 +214,8 @@ async fn the_file_arguments_are_validated() {
 
     let failure = exec(
         &session,
-        "job_output",
-        json!({"job_id": id, "pattern": "("}),
+        "job",
+        json!({"id": id, "op": "read", "pattern": "("}),
     )
     .await
     .expect_err("bad regex");
@@ -225,64 +225,48 @@ async fn the_file_arguments_are_validated() {
 }
 
 /// GPT fills every optional field (seen 2026-10-17: `pattern: ""`, `tail_lines: 1`,
-/// `from_line: 1`, `max_lines: 300`, refused six times). `mode` names the read and the other
-/// reads' fields are ignored; a blank `pattern` is no pattern.
+/// `from_line: 1`, `max_lines: 300`). `op: "read"` with the range fields reads the file;
+/// a blank `pattern` is no pattern; two real range forms at once is `invalid_arguments`.
 #[tokio::test]
-async fn mode_names_the_read_and_ignores_the_other_fields() {
+async fn filled_optional_fields_still_read() {
     let dir = TempDir::new("job-mode");
     let ws = dir.file("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let tools = transparent_tools(&ws);
     let session = tools.open_session().await.expect("session");
     let id = run_to_end(&session, "printf 'one\\ntwo\\nthree\\n'").await;
-    let every = |mode: &str| {
-        json!({"job_id": id, "mode": mode, "wait": true, "timeout_ms": 1000,
-               "pattern": "", "tail_lines": 1, "from_line": 1, "max_lines": 300})
-    };
 
-    // `new`: the incremental read (already drained by run_to_end), not a file read.
-    let new = exec(&session, "job_output", every("new"))
+    // Plain read: the incremental read (already drained by run_to_end), not a file read.
+    let new = exec(&session, "job", json!({"id": id, "op": "read"}))
         .await
-        .expect("mode new");
+        .expect("plain read");
     let text = output_text(&new);
     assert!(text.contains("[no new output]"), "{text}");
     assert!(text.contains("[status: exited 0]"), "{text}");
 
-    // `tail` uses `tail_lines: 1` and ignores the range and the blank pattern.
-    let tail = exec(&session, "job_output", every("tail"))
-        .await
-        .expect("mode tail");
+    // `tail_lines: 1` with a blank pattern and a range: the blank pattern is dropped
+    // (`args::parse` drops an optional `""`), so this is a tail read.
+    let tail = exec(
+        &session,
+        "job",
+        json!({"id": id, "op": "read", "tail_lines": 1, "pattern": ""}),
+    )
+    .await
+    .expect("tail");
     let text = output_text(&tail);
     assert!(text.contains("three"), "{text}");
     assert!(!text.contains("one"), "only the last line: {text}");
 
-    // `range` uses `from_line`/`max_lines` and ignores `tail_lines`.
-    let range = exec(&session, "job_output", every("range"))
-        .await
-        .expect("mode range");
-    let text = output_text(&range);
-    assert!(text.contains("one") && text.contains("three"), "{text}");
-
-    // `pattern` needs a real pattern.
-    let failure = exec(&session, "job_output", every("pattern"))
-        .await
-        .expect_err("a blank pattern");
-    assert_eq!(failure.code, "invalid_arguments", "{failure:?}");
-
-    // Without `mode`, a blank pattern does not count as a second read (`args::parse` drops an
-    // optional `""`; pinned here because GPT's calls depend on it).
-    let blank = exec(
+    // `from_line`/`max_lines` reads the range.
+    let range = exec(
         &session,
-        "job_output",
-        json!({"job_id": id, "pattern": "", "tail_lines": 1}),
+        "job",
+        json!({"id": id, "op": "read", "from_line": 1, "max_lines": 300}),
     )
     .await
-    .expect("a blank pattern is no pattern");
-    assert!(
-        output_text(&blank).contains("three"),
-        "{}",
-        output_text(&blank)
-    );
+    .expect("range");
+    let text = output_text(&range);
+    assert!(text.contains("one") && text.contains("three"), "{text}");
 
     session.shutdown_jobs();
 }

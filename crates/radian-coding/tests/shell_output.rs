@@ -1,11 +1,12 @@
-//! `shell_output`: a truncated **foreground** `shell` result carries an opaque, session-scoped
-//! handle through which the retained output can be read. The handle is never a path, a path-like
-//! or cross-session handle is `unknown_output`, and retention is explicitly bounded.
+//! A truncated **foreground** `shell` result registers as a settled entry in the same job
+//! registry under a normal job id (ADR 0037 decision 3a): `job { op: read }` reads it, the id
+//! is never a path, a path-like or cross-session id is `unknown_job`, and retention is
+//! explicitly bounded.
 //!
 //! Retention needs a **caller-supplied private directory** (the host passes the session's jobs
 //! directory). A provider built with `with_sandbox` but no `with_jobs` has no safe place for it:
-//! a workspace directory would be readable by the model's `read`, so the tool is absent and no
-//! file is written. The tests below pin both the enabled and the disabled path.
+//! a workspace directory would be readable by the model's `read`, so no entry is registered and
+//! no file is written. The tests below pin both the enabled and the disabled path.
 
 mod common;
 
@@ -115,10 +116,10 @@ fn small_view() -> Limits {
     }
 }
 
-/// A capped foreground command exposes a non-path handle, and the retrieval tool reaches output
+/// A capped foreground command exposes a job id, and `job` reaches output
 /// the head+tail view dropped.
 #[tokio::test]
-async fn a_truncated_command_exposes_a_retrievable_handle() {
+async fn a_truncated_command_exposes_a_retrievable_job_id() {
     let dir = TempDir::new("shell-output-handle");
     let ws = dir.file("ws");
     let jobs = dir.file("sessions/sid.jobs");
@@ -126,26 +127,26 @@ async fn a_truncated_command_exposes_a_retrievable_handle() {
     let tools = host_tools(&ws, &jobs, small_view());
     let session = tools.open_session().await.expect("session");
 
-    // The tool is advertised only with `shell` and a private output root.
+    // The old name stays registered as a one-version alias (ADR 0043 decision 3).
     assert!(
         session
             .tool_specs()
             .iter()
             .any(|spec| spec.name == "shell_output"),
-        "shell_output is advertised with shell and a private root"
+        "the shell_output alias is registered with shell and a private root"
     );
 
     let output = exec(&session, "shell", json!({"command": "seq 1 5000"}))
         .await
         .unwrap();
     let value = structured(&output);
-    let handle = value["output_handle"]
+    let id = value["job_id"]
         .as_str()
-        .expect("a handle for a truncated result")
+        .expect("a job id for a truncated result")
         .to_owned();
     assert!(
-        !handle.contains('/') && !handle.contains('\\'),
-        "the handle is opaque, not a path: {handle}"
+        !id.contains('/') && !id.contains('\\'),
+        "the id is opaque, not a path: {id}"
     );
     assert_eq!(value["output_retained_cut"], json!(false), "{value}");
     assert!(
@@ -153,14 +154,14 @@ async fn a_truncated_command_exposes_a_retrievable_handle() {
         "the whole output is retained: {value}"
     );
     let text = output_text(&output);
-    assert!(text.contains("shell_output"), "{text}");
-    assert!(text.contains(&handle), "{text}");
+    assert!(text.contains("`job read`"), "{text}");
+    assert!(text.contains(&id), "{text}");
 
     // A line the head+tail view discarded (the tail starts around line 4850).
     let found = exec(
         &session,
-        "shell_output",
-        json!({"handle": handle, "pattern": "^2500$"}),
+        "job",
+        json!({"id": id, "op": "read", "pattern": "^2500$"}),
     )
     .await
     .unwrap();
@@ -173,8 +174,8 @@ async fn a_truncated_command_exposes_a_retrievable_handle() {
     // Tail and line-range views.
     let tail = exec(
         &session,
-        "shell_output",
-        json!({"handle": handle, "tail_lines": 3}),
+        "job",
+        json!({"id": id, "op": "read", "tail_lines": 3}),
     )
     .await
     .unwrap();
@@ -185,8 +186,8 @@ async fn a_truncated_command_exposes_a_retrievable_handle() {
     );
     let range = exec(
         &session,
-        "shell_output",
-        json!({"handle": handle, "from_line": 1, "max_lines": 2}),
+        "job",
+        json!({"id": id, "op": "read", "from_line": 1, "max_lines": 2}),
     )
     .await
     .unwrap();
@@ -197,38 +198,39 @@ async fn a_truncated_command_exposes_a_retrievable_handle() {
     );
 }
 
-/// A handle is scoped to the session that produced it; another session's call is `unknown_output`.
+/// An id is scoped to the session that produced it; another session's call is `unknown_job`.
 #[tokio::test]
-async fn a_handle_from_another_session_is_unknown() {
+async fn an_id_from_another_session_is_unknown() {
     let dir = TempDir::new("shell-output-cross");
     let ws = dir.file("ws");
-    let jobs = dir.file("sessions/sid.jobs");
     std::fs::create_dir_all(&ws).unwrap();
-    let tools = host_tools(&ws, &jobs, small_view());
+    let tools = host_tools(&ws, &dir.file("sessions/sid.jobs"), small_view());
     let first = tools.open_session().await.expect("first session");
     let output = exec(&first, "shell", json!({"command": "seq 1 5000"}))
         .await
         .unwrap();
-    let handle = structured(&output)["output_handle"]
+    let id = structured(&output)["job_id"]
         .as_str()
-        .expect("a handle")
+        .expect("a job id")
         .to_owned();
 
-    let second = tools.open_session().await.expect("second session");
+    // Another session (its own registry, like the host builds per session) does not know it.
+    let other = host_tools(&ws, &dir.file("sessions/other.jobs"), small_view());
+    let second = other.open_session().await.expect("second session");
     let failure = exec(
         &second,
         "shell_output",
-        json!({"handle": handle, "tail_lines": 1}),
+        json!({"handle": id, "tail_lines": 1}),
     )
     .await
-    .expect_err("another session's handle must be refused");
-    assert_eq!(failure.code, "unknown_output", "{failure:?}");
+    .expect_err("another session's id must be refused");
+    assert_eq!(failure.code, "unknown_job", "{failure:?}");
 }
 
-/// A path-like input is a filesystem path attempt, never a file open: it is `unknown_output`, and
+/// A path-like input is a filesystem path attempt, never a file open: it is `unknown_job`, and
 /// the file's contents never come back.
 #[tokio::test]
-async fn a_path_like_handle_cannot_open_a_file() {
+async fn a_path_like_id_cannot_open_a_file() {
     let dir = TempDir::new("shell-output-path");
     let ws = dir.file("ws");
     let jobs = dir.file("sessions/sid.jobs");
@@ -239,15 +241,15 @@ async fn a_path_like_handle_cannot_open_a_file() {
     let outside = dir.file("outside.txt");
     std::fs::write(&outside, "SECRET-CONTENT\n").unwrap();
     let absolute = outside.to_string_lossy().into_owned();
-    for bad in [absolute.as_str(), "../outside.txt", "out-1.out"] {
+    for bad in [absolute.as_str(), "../outside.txt", "out-1.out", "job-1-1"] {
         let failure = exec(
             &session,
             "shell_output",
             json!({"handle": bad, "tail_lines": 1}),
         )
         .await
-        .expect_err("a path is not a handle");
-        assert_eq!(failure.code, "unknown_output", "{bad}: {failure:?}");
+        .expect_err("a path is not an id");
+        assert_eq!(failure.code, "unknown_job", "{bad}: {failure:?}");
         assert!(
             !failure.message.contains("SECRET-CONTENT"),
             "{bad}: {failure:?}"
@@ -270,9 +272,9 @@ async fn the_retained_path_is_never_revealed() {
         .await
         .unwrap();
     let value = structured(&output);
-    let handle = value["output_handle"]
+    let id = value["job_id"]
         .as_str()
-        .expect("a handle")
+        .expect("a job id")
         .to_owned();
 
     let private = jobs.to_string_lossy().into_owned();
@@ -281,8 +283,8 @@ async fn the_retained_path_is_never_revealed() {
 
     let read = exec(
         &session,
-        "shell_output",
-        json!({"handle": handle, "tail_lines": 2}),
+        "job",
+        json!({"id": id, "op": "read", "tail_lines": 2}),
     )
     .await
     .unwrap();
@@ -290,12 +292,12 @@ async fn the_retained_path_is_never_revealed() {
     assert!(!output_text(&read).contains(&private));
 
     // The retained file is outside the workspace, so the model's `read` cannot reach it by any
-    // workspace-relative path derived from the handle.
+    // workspace-relative path derived from the id.
     assert!(
         out_files_under(&ws).is_empty(),
         "no retained output file may live under the workspace"
     );
-    let derived = format!(".radian/jobs/foreground/{handle}.out");
+    let derived = format!(".radian/jobs/{id}.out");
     let failure = exec(&session, "read", json!({"path": derived}))
         .await
         .expect_err("a workspace path must not reach the retained file");
@@ -340,11 +342,11 @@ async fn the_retained_file_is_capped_and_says_so() {
         output_text(&output)
     );
 
-    let handle = value["output_handle"].as_str().expect("a handle");
+    let id = value["job_id"].as_str().expect("a job id");
     let read = exec(
         &session,
-        "shell_output",
-        json!({"handle": handle, "from_line": 1}),
+        "job",
+        json!({"id": id, "op": "read", "from_line": 1}),
     )
     .await
     .unwrap();
@@ -354,9 +356,9 @@ async fn the_retained_file_is_capped_and_says_so() {
     );
 }
 
-/// The session byte cap evicts the oldest item, whose handle then reads as unknown.
+/// The session byte cap evicts the oldest entry, whose id then reads as unknown.
 #[tokio::test]
-async fn the_session_cap_evicts_the_oldest_handle() {
+async fn the_session_cap_evicts_the_oldest_entry() {
     let dir = TempDir::new("shell-output-evict");
     let ws = dir.file("ws");
     let jobs = dir.file("sessions/sid.jobs");
@@ -375,41 +377,41 @@ async fn the_session_cap_evicts_the_oldest_handle() {
     );
     let session = tools.open_session().await.expect("session");
 
-    let mut handles = Vec::new();
+    let mut ids = Vec::new();
     for _ in 0..3 {
         let output = exec(&session, "shell", json!({"command": "seq 1 5000"}))
             .await
             .unwrap();
-        handles.push(
-            structured(&output)["output_handle"]
+        ids.push(
+            structured(&output)["job_id"]
                 .as_str()
-                .expect("a handle")
+                .expect("a job id")
                 .to_owned(),
         );
     }
 
     let failure = exec(
         &session,
-        "shell_output",
-        json!({"handle": handles[0], "tail_lines": 1}),
+        "job",
+        json!({"id": ids[0], "op": "read", "tail_lines": 1}),
     )
     .await
-    .expect_err("the oldest item was evicted");
-    assert_eq!(failure.code, "unknown_output", "{failure:?}");
+    .expect_err("the oldest entry was evicted");
+    assert_eq!(failure.code, "unknown_job", "{failure:?}");
 
     let ok = exec(
         &session,
-        "shell_output",
-        json!({"handle": handles[2], "tail_lines": 1}),
+        "job",
+        json!({"id": ids[2], "op": "read", "tail_lines": 1}),
     )
     .await
     .expect("the newest item is still there");
     assert!(!output_text(&ok).is_empty());
 }
 
-/// A command whose output fits the view creates no handle and leaves no file behind.
+/// A command whose output fits the view registers no entry and leaves no file behind.
 #[tokio::test]
-async fn a_non_truncated_command_leaves_no_handle_or_file() {
+async fn a_non_truncated_command_leaves_no_entry_or_file() {
     let dir = TempDir::new("shell-output-none");
     let ws = dir.file("ws");
     let jobs = dir.file("sessions/sid.jobs");
@@ -421,8 +423,8 @@ async fn a_non_truncated_command_leaves_no_handle_or_file() {
         .await
         .unwrap();
     let value = structured(&output);
-    assert_eq!(value["output_handle"], json!(null), "{value}");
-    assert!(!output_text(&output).contains("shell_output"));
+    assert_eq!(value["job_id"], json!(null), "{value}");
+    assert!(!output_text(&output).contains("`job read`"));
     assert_eq!(
         out_files_under(&jobs).len(),
         0,
@@ -430,7 +432,8 @@ async fn a_non_truncated_command_leaves_no_handle_or_file() {
     );
 }
 
-/// `shell_output` needs a read; without one it is an argument error, not an empty read.
+/// `job` read needs no range (it reads the increment); `shell_output` without one is still
+/// an argument error, not an empty read.
 #[tokio::test]
 async fn a_read_is_required() {
     let dir = TempDir::new("shell-output-no-read");
@@ -442,12 +445,12 @@ async fn a_read_is_required() {
     let output = exec(&session, "shell", json!({"command": "seq 1 5000"}))
         .await
         .unwrap();
-    let handle = structured(&output)["output_handle"]
+    let id = structured(&output)["job_id"]
         .as_str()
-        .expect("a handle")
+        .expect("a job id")
         .to_owned();
 
-    let failure = exec(&session, "shell_output", json!({"handle": handle}))
+    let failure = exec(&session, "shell_output", json!({"handle": id}))
         .await
         .expect_err("no read");
     assert_eq!(failure.code, "invalid_arguments", "{failure:?}");
@@ -503,7 +506,7 @@ async fn the_no_host_provider_retains_nothing_in_the_workspace() {
         .await
         .unwrap();
     let value = structured(&output);
-    assert_eq!(value["output_handle"], json!(null), "{value}");
+    assert_eq!(value["job_id"], json!(null), "{value}");
     assert!(
         value["stdout_truncated_bytes"].as_u64().unwrap() > 0,
         "the view is still truncated and says so: {value}"
@@ -513,21 +516,26 @@ async fn the_no_host_provider_retains_nothing_in_the_workspace() {
         "a no-host provider must not leave a readable output file under the workspace"
     );
 
-    // A hand-built call cannot reach a handle either.
+    // A hand-built call resolves in the job registry instead: an unknown id with the
+    // rename line, never a path open.
     let failure = exec(
         &session,
         "shell_output",
         json!({"handle": "out-0-1", "tail_lines": 1}),
     )
     .await
-    .expect_err("the tool is not mounted");
-    assert_eq!(failure.code, "unknown_tool", "{failure:?}");
+    .expect_err("an old handle resolves to nothing");
+    assert_eq!(failure.code, "unknown_job", "{failure:?}");
+    assert!(
+        failure.message.starts_with("`shell_output` was renamed"),
+        "{failure:?}"
+    );
 }
 
 // ---------- the private root is symlink-proof ----------
 
 /// A pre-planted symlink at the private root cannot redirect the retained output: the registry
-/// refuses the root, so no handle exists and nothing is written through the link.
+/// refuses the root, so no entry exists and nothing is written through the link.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_planted_root_symlink_cannot_redirect_output() {
@@ -549,7 +557,7 @@ async fn a_planted_root_symlink_cannot_redirect_output() {
         .await
         .unwrap();
 
-    assert_eq!(structured(&output)["output_handle"], json!(null));
+    assert_eq!(structured(&output)["job_id"], json!(null));
     let entries: Vec<String> = std::fs::read_dir(&outside)
         .unwrap()
         .flatten()
