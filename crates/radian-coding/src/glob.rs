@@ -83,12 +83,51 @@ pub(crate) async fn run(
         Some(n) => n as usize,
         None => limits.default_glob_results,
     };
+    let scan = BlockingScan {
+        root: root.clone(),
+        matcher,
+        pattern: args.pattern,
+        path: args.path.unwrap_or_else(|| ".".to_owned()),
+        cap,
+    };
+    // The walk below is synchronous and never yields, so it runs on the blocking pool:
+    // `glob` calls batched in one Core task overlap instead of queueing behind each
+    // other. Cancellation drops this future; the blocking walk then runs on to the end
+    // in the background (read-only, so nothing is written) and its result is never
+    // written back: Core's own `cancelled` wins the race.
+    match tokio::task::spawn_blocking(move || scan_blocking(scan)).await {
+        Ok(result) => result,
+        Err(error) => match error.try_into_panic() {
+            Ok(payload) => std::panic::resume_unwind(payload),
+            Err(_) => Err(fail("internal", "the glob scan did not finish")),
+        },
+    }
+}
 
+/// Everything `run` does after argument parsing: the fd walk and the rendering.
+/// Synchronous by construction (see `run`); the body is the old `run` tail, limits,
+/// output and errors unchanged.
+struct BlockingScan {
+    root: WorkspaceRoot,
+    matcher: globset::GlobMatcher,
+    pattern: String,
+    path: String,
+    cap: usize,
+}
+
+fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
+    let BlockingScan {
+        root,
+        matcher,
+        pattern,
+        path,
+        cap,
+    } = scan;
     // ADR 0039 decision 2 and revision 1: the base is opened through the root's directory fd
     // (no symlink in any component) and the walk descends by fd; only regular files can match.
     // An absolute or `~` base must be under a read-only root, and its results are rendered
     // with that root's prefix so they can be passed to `read` again.
-    let requested = args.path.as_deref().unwrap_or(".");
+    let requested: &str = &path;
     let mut matches: Vec<String> = Vec::new();
     match root.read_base(requested) {
         Ok(base) => {
@@ -131,13 +170,13 @@ pub(crate) async fn run(
         ));
     }
     if matches.is_empty() {
-        text.push_str(&format!("[no files matched `{}`]\n", args.pattern));
+        text.push_str(&format!("[no files matched `{pattern}`]\n"));
     }
 
     Ok(ToolOutput {
         content: vec![ContentPart::text(text)],
         structured: Some(json!({
-            "pattern": args.pattern,
+            "pattern": pattern,
             "path": requested,
             "matches": matches.len(),
             "total_matches": total,

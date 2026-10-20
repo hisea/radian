@@ -35,7 +35,7 @@
 | `remove-safe-tier.md` | decided | 0016 主，另 11 个提及 | 档位只剩 `workspace`/`full`；`safe` 从不执行命令，沙箱侧只有测试在用；旧名不留别名，按未知档位 fail closed |
 | `sandbox-auto-allow-shell.md` | decided | 0012、0016、0043 | 片 0 Linux seccomp 堵 Unix socket；片 1 workspace 沙箱内 shell `allow`、越界显式请求再 `ask`；片 2 会话授权按前缀 |
 | `exec-jsonl-output.md` | decided | 0032、0010、0006，新 ADR | `--output jsonl`：journal 记录原样 + live 行 + `Result` 行；退出码 0/1/2/3/4/130 按结局；`-p -` 读 stdin |
-| `file-tools-spawn-blocking.md` | decided | 无 | 提示词一句 → 基准 → `spawn_blocking`，让同一批 grep 真正并行 |
+| `file-tools-spawn-blocking.md` | decided（`grep`/`glob` 已落地；剩 `read`） | 无 | 提示词一句 → 基准（串 3.1×→并 ~1×）→ `spawn_blocking`，`grep`/`glob` 已并行，`read` 待做 |
 | `full-tier-unrestricted.md` | decided | 0012 主、0043、0016、0038、0031 | `full` 档像 pi：shell `allow`，不弹内建提示，`--yes` 在 `full` 下无作用；启动行写 `no prompts`；用户 deny 仍生效、陌生项目信任门缺省高亮 workspace + 启动画面字标下提示 `/trust`、`always` 保留＼� |
 | `shell-readonly-allow.md` | decided | 0012 修订、0039 | 内建一组只读命令免问（`git status`、`ls`、`rg`…），路径限工作区、不带可执行或写文件选项；`full` 全放行后实际作用在 `workspace` 与 `approval = always` |
 | `shell-compound-allow.md` | decided | 0012 不变，改 `radian-permissions/README.md` | 未加引号的 `&& \|\| ; \|` 切段，每段都命中 allow 才 allow，`xargs`/`env`/`sh` 等执行其参数的程序不放行 |
