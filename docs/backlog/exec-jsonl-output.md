@@ -15,3 +15,8 @@
 ## 验收
 
 五种结局（未完成、拒答、超预算、取消、失败）有区分的退出码与结果行；`-p -` 能从 stdin 读。
+
+## 补充Ｐ）
+
+- Terminal-Bench 适配器已合并（`benchmarks/terminal-bench/radian_agent.py`），它只拿得到 `-p` 的文本和退出码，所以这条的优先级高于研究报告里的位置。
+- 无头 exec 的另一半问题（没有审批人、shell 的 `ask` 一律拒）由 `sandbox-auto-allow-shell.md` 解决，这里只管输出和退出码。

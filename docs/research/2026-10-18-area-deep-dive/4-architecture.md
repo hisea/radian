@@ -111,3 +111,22 @@ Radian 的骨架本身就快：单个 Rust 二进制，单进程，不需要 dae
 - 按**代码量**看，没有超出。Radian 的产品代码（9.3 万行 Rust）和 pi 核心（12.5 万行 TS）同一量级，pi 自己也在往 durable、MCP、codemode 方向长。Radian 离 omp（50 万行）和 Codex（100 万行以上）的复杂度还很远。
 - 按**缺省行为**看，超出了。pi 缺省不问、不沙箱、不分档位；Radian 缺省是 `full`，但仍然要问 shell，还有三个档位、信任门、"只降不升"的来源规则和凭据脱敏。安全上这些大多值得保留，但它们的**交互成本**应该靠 ① 降下来，而不是继续删机制。
 - 按**流程**看，超出了，而且这是最值得处理的一块。43 个 ADR 加上一次 6–7 分钟的 Verify，让每一个小改动都很重。AGENTS.md 已经规定 ADR 到第三次修订就要重写；建议再加一条"按主题合并已经搁置或被取代的 ADR"，并按 ⑤ 把 Verify 压到 3 分钟以内。这些是流程上的改动，不需要动代码。
+
+## 7. 2026-10-20 状态Ｐ后补记，代码 `5545b15b`）
+
+报告的四个核心判断（骨架快、慢在权限与沙箱的组合、exec 没有机器可读输出、没有用户 hook）仍然成立。以下事实已变：
+
+- **ADR 规模**：pi/compact-adrs 合并后是 41 个文件、3099 行，0006 是 242 行；0030 和 0041 已并掉。§5.5 "流程复杂度主要在 ADR"只剩 Verify 这一半。
+- **`memory_save` 每次都问**：模型已没有记忆写工具，只剩 `memory_search` 且永远 allow。
+- **`explore` 子进程带父的 `--mcp-config`**：已修，只有 `general` 还带，重起 MCP 的开销仍未测。
+- **`radian-tui` build script 40.9 s**：已改成校验提交的 `syntaxes.packdump`，这项没有了。
+- **`[profile.release]`**：仍然没有；决定先不做。
+
+方案的修正：
+
+- ① 的前提是先用 seccomp 堵上 Linux bwrap 的 Unix socket（`docs/sandbox.md`，决定 4），前缀授权受 shell 匹配器看不见复合命令的限制；成本中高。它同时解决无头 `radian exec` 不带 `--yes` 跑不了 shell 的问题。
+- ② 不只是修订 0043 1a.7：缺 durable 的 `PermissionRequested`，`control` 还拒绝审批答复；成本中高，依赖 ①。
+- ④ 由 `docs/backlog/post-edit-diagnostics.md` 的两层方案替代。
+- ⑤ 的测试二进制合并要单独立 ADR（`set_var` 与全局状态已实测），release 调优先不做。
+
+对应的 backlog：`sandbox-auto-allow-shell.md`、`subagent-ask-forwarding.md`、`subagent-explore-model.md`、`exec-jsonl-output.md`、`post-edit-diagnostics.md`、`verify-test-binaries.md`。
