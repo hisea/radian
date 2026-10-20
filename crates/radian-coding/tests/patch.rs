@@ -902,3 +902,66 @@ async fn ambiguous_multi_edit_names_the_edit_and_lists_lines() {
         "keep x x\n"
     );
 }
+
+/// A CRLF file with three far-apart occurrences: the ambiguous error lists the content's
+/// line numbers (20, 40, 60 — `locate` maps every layer back to content offsets, so the
+/// LF-view/content drift never leaks in) and no preview carries a `\r`. Fails if
+/// `ambiguous` is passed the LF view text instead of the original `content` (it then
+/// reports 21, 43, 61 with the wrong lines' text).
+#[tokio::test]
+async fn ambiguous_crlf_reports_content_lines_without_cr() {
+    let dir = TempDir::new("patch-ambiguous-crlf");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut content = String::new();
+    for i in 1..=60 {
+        if i == 20 || i == 40 || i == 60 {
+            content.push_str(&format!("line {i} needle\r\n"));
+        } else {
+            content.push_str(&format!("line {i} filler\r\n"));
+        }
+    }
+    std::fs::write(root.join("f.txt"), &content).unwrap();
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({"path": "f.txt", "old": "needle", "new": "NEEDLE"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "patch_ambiguous", "{failure:?}");
+    assert!(
+        failure.message.contains("3 times"),
+        "three occurrences: {}",
+        failure.message
+    );
+    let listed: Vec<&str> = failure
+        .message
+        .lines()
+        .skip_while(|line| *line != "Occurrences:")
+        .skip(1)
+        .take_while(|line| !line.starts_with("..."))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            "20: line 20 needle",
+            "40: line 40 needle",
+            "60: line 60 needle"
+        ],
+        "exactly lines 20, 40 and 60: {}",
+        failure.message
+    );
+    assert!(
+        !failure.message.contains('\r'),
+        "no preview carries a CR: {:?}",
+        failure.message
+    );
+    assert_eq!(
+        std::fs::read(root.join("f.txt")).unwrap(),
+        content.as_bytes(),
+        "an ambiguous match changes nothing"
+    );
+}
