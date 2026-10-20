@@ -69,10 +69,12 @@ pub(crate) fn schema() -> serde_json::Value {
             "timeout_secs": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "How long a foreground command may run before its whole \
-                                session is killed. Clamped to the configured maximum. Ignored \
-                                for `background: true` (no deadline: bound the command itself \
-                                or stop it with `job`)."
+                "description": "How long a foreground command may run, in seconds, before \
+                                its whole process group is killed (by default 60, at most 600). \
+                                Without it the command is moved to the background at the \
+                                auto-background threshold (by default 120 s) instead of being \
+                                killed for time. Ignored for `background: true` (no deadline: \
+                                bound the command itself or stop it with `job`)."
             },
             "cwd": {
                 "type": "string",
@@ -83,9 +85,9 @@ pub(crate) fn schema() -> serde_json::Value {
             "max_output_bytes": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Output budget per stream. Past it the start and the end \
-                                are kept and the middle is replaced by a marker naming the \
-                                discarded bytes. Clamped to the configured maximum."
+                "description": "Output budget per stream, in bytes (by default 24 KiB, at \
+                                most 1 MiB). Past it the start and the end are kept and the \
+                                middle is replaced by a marker naming the discarded bytes."
             },
             "background": {
                 "type": "boolean",
@@ -124,7 +126,7 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
         SandboxMode::FullAccess => {
             "**The command is NOT sandboxed** (`full`): it can read and write \
              anywhere the user can, including the network. No OS sandbox wraps it; that is \
-             the built-in default (ADR 0043) and `--profile workspace` turns one on."
+             the built-in default."
         }
     };
     ToolSpec {
@@ -133,16 +135,21 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
             "Run a shell command with `/bin/sh -c`. {confinement} Read and list \
              with `read`, and search with `grep` and `glob`, not with `cat`, `sed`, \
              `ls` or \
-             `find` through `shell`: they report truncation, use less context, and run in \
-             parallel, while `shell` runs alone. Each stream is capped: past the \
-             budget the start and the end are kept and the middle names the discarded \
-             bytes. A truncated foreground result keeps its full output under a job id for \
-             `job`. Timeout or cancellation kills the whole session. A \
-             foreground command still running after the auto-background threshold is moved \
-             to the background in place — never restarted — and returns at once with a job \
-             id. `background: true` starts it there at once. Background results end: `You \
-             will be notified when it finishes. Do not sleep or poll. If you have nothing \
-             else to do, end your reply.`"
+             `find` through `shell`: `grep` and `glob` report truncation, use less \
+             context, and run in parallel, while `shell` runs alone. Each output stream \
+             is capped separately (by default 24 KiB): past the budget the start and the \
+             end are kept and the middle names the discarded bytes. A truncated \
+             foreground result keeps its full output under a job id for `job`. Without \
+             `timeout_secs`, a foreground command still running after the auto-background \
+             threshold (by default 120 s) is moved to the background in place — never \
+             restarted, never killed for time — and returns at once with a job id. With \
+             `timeout_secs` (by default 60 s, at most 600 s), the deadline counts from the \
+             command's start and the whole process group is killed at the deadline; the \
+             move to the background only happens when the threshold falls before it. \
+             Timeout or cancellation kills the whole process group. `background: true` \
+             starts the command there at once and ignores `timeout_secs` (no deadline). \
+             Background results end: `You will be notified when it finishes. Do not sleep \
+             or poll. If you have nothing else to do, end your reply.`"
         ),
         input_schema: schema(),
         // A shell command has side effects and is not safe to overlap with other calls.
@@ -1391,13 +1398,13 @@ fn report(
     text.push_str(&format!("$ {command}\n"));
     if outcome.timed_out {
         text.push_str(&format!(
-            "[timed out after {timeout:?}; the whole session was killed. For a command that \
+            "[timed out after {timeout:?}; the whole process group was killed. For a command that \
              needs longer, use `background: true` (no default timeout) and `job` with \
              `op: \"wait\"`.\n"
         ));
     }
     if outcome.cancelled {
-        text.push_str("[cancelled; the whole session was killed]\n");
+        text.push_str("[cancelled; the whole process group was killed]\n");
     }
     if outcome.slots_full {
         text.push_str(
