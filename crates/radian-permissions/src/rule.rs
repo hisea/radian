@@ -145,7 +145,9 @@ impl Evaluated {
 
 /// Combines every matching rule by priority: `Deny` > `Ask` > `Allow`; no match is `Ask`.
 ///
-/// `allow`/`ask` command rules only match a simple command (see [`crate::shell`]); `deny`
+/// `allow`/`ask` command rules only match a simple command (see [`crate::shell`]);
+/// an `allow` rule additionally never matches a command that starts with a
+/// runs-its-arguments program ([`crate::shell::WRAPPER_PROGRAMS`]); `deny`
 /// command rules are matched conservatively over every segment. Path rules match the
 /// **resolved** path, so `..` and symlinks cannot change which rule they hit.
 pub fn evaluate(rules: &[Rule], workspace: &Path, call: &ToolCall) -> Evaluated {
@@ -163,6 +165,11 @@ pub fn evaluate(rules: &[Rule], workspace: &Path, call: &ToolCall) -> Evaluated 
             (ResourceMatcher::CommandPrefix(prefix), Resource::Command(command)) => {
                 if rule.action == Action::Deny {
                     shell::deny_matches(command, prefix)
+                } else if rule.action == Action::Allow && shell::starts_with_wrapper(command) {
+                    // A runs-its-arguments program (`xargs rm`, `sh -c …`) only shows the
+                    // wrapper's own tokens; a prefix rule cannot see what it will run, so
+                    // it never allows it. `deny` still runs first, above.
+                    false
                 } else {
                     shell::simple_prefix_matches(command, prefix)
                 }
