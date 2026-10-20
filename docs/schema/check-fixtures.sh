@@ -201,6 +201,19 @@ EXPECT = {
         usage_present=True,
         repair={"call-9": "outcome_unknown_after_crash"},
     ),
+    "context-files-imports.jsonl": dict(
+        outcome="accept",
+        events=1,
+        skips=[],
+        # (文件路径, [(导入路径, 字节数)]) —— ADR 0036 C2：快照列出每份文件的导入。
+        context_imports=[
+            (
+                "/work/example/CLAUDE.md",
+                [("/work/example/docs/conventions.md", 3481)],
+            ),
+        ],
+        repair={},
+    ),
 }
 
 
@@ -537,6 +550,33 @@ def check_fixture(name, exp):
         sid, seq = exp["forked"]
         if forked.get("child_session_id") != sid or forked.get("parent_seq") != seq:
             raise Corruption(f"{name}: SessionForked {forked!r} != 期望")
+    if "context_imports" in exp:
+        # ADR 0036 C2：`config_snapshot.context.files[]` 的导入是可选的加法字段——
+        # 有导入的文件带 `imports: [{path, bytes}]`，没有的文件没有该键。
+        created = next(e["data"] for e in events if e["event"] == "SessionCreated")
+        files = created["config_snapshot"]["context"]["files"]
+        for f in files:
+            if not isinstance(f.get("path"), str) or not f["path"]:
+                raise Corruption(f"{name}: context file 的 path 必须是非空字符串")
+            if not isinstance(f.get("bytes"), int) or isinstance(f.get("bytes"), bool):
+                raise Corruption(f"{name}: context file 的 bytes 不是整数")
+            if not isinstance(f.get("truncated"), bool):
+                raise Corruption(f"{name}: context file 的 truncated 不是布尔值")
+            for imp in f.get("imports", []):
+                if set(imp) != {"path", "bytes"}:
+                    raise Corruption(f"{name}: imports 条目字段必须是 path/bytes：{imp!r}")
+                if not isinstance(imp["path"], str) or not imp["path"]:
+                    raise Corruption(f"{name}: imports.path 必须是非空字符串")
+                if not isinstance(imp["bytes"], int) or isinstance(imp["bytes"], bool):
+                    raise Corruption(f"{name}: imports.bytes 不是整数")
+        got = [
+            (f["path"], [(imp["path"], imp["bytes"]) for imp in f.get("imports", [])])
+            for f in files
+        ]
+        if got != [tuple(x) for x in exp["context_imports"]]:
+            raise Corruption(f"{name}: context_imports {got} != 期望 {exp['context_imports']}")
+        if not any(imports for _, imports in got):
+            raise Corruption(f"{name}: 期望至少一份文件带 imports")
     repair = simulate_repair(events)
     if repair != exp.get("repair", {}):
         raise Corruption(f"{name}: repair {repair} != 期望 {exp.get('repair', {})}")
