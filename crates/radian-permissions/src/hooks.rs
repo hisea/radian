@@ -15,8 +15,25 @@ use crate::readonly::{self, ReadOnlyHit};
 use crate::rule::{Action, Evaluated, Resource, evaluate, resolve, resource_of};
 use crate::shell;
 
-/// The grant key: one tool plus one exact resource. Paths are keyed by their resolved form,
-/// so a grant for `a/../b` also covers `b`.
+/// A session grant: one tool plus one resource scope. Paths are keyed by their resolved
+/// form, so a grant for `a/../b` also covers `b`; a shell prefix grant covers every
+/// simple command with those leading tokens (`cargo test` covers `cargo test -p b`).
+/// Grants are real-time state (ADR 0004): they live only in this instance, die with it,
+/// and are never written into a profile, the journal, or any config file — an allow can
+/// never come from the project (ADR 0012).
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum SessionGrant {
+    /// One exact resource: the full command line, the resolved path, or the tool name.
+    Exact(GrantKey),
+    /// A shell prefix (slice 2 of `sandbox-auto-allow-shell`): only ever a simple,
+    /// single-segment, non-wrapper command outside the never-prefix list
+    /// ([`shell::session_grant_prefix`]), plus whether it was earned leaving the
+    /// sandbox — a grant never crosses that boundary.
+    ShellPrefix { prefix: Vec<String>, outside: bool },
+}
+
+/// The exact-grant key: one tool plus one exact resource. Paths are keyed by their
+/// resolved form, so a grant for `a/../b` also covers `b`.
 type GrantKey = (String, String);
 
 /// A host-installed gate on tool **names**, consulted before the rules. It returns `Some(reason)`
@@ -52,7 +69,7 @@ pub struct PermissionHooks {
     tool_gate: RwLock<Option<ToolGate>>,
     audit: Arc<dyn AuditSink>,
     /// "Allow for this session", consulted on every call (ADR 0004: real-time state).
-    grants: Mutex<HashSet<GrantKey>>,
+    grants: Mutex<HashSet<SessionGrant>>,
     /// The current turn's source, set by the host before each turn. `HookContext` has no
     /// source field, so the host supplies it; `None` is treated as non-human (fail safe).
     source: Mutex<Option<InputSource>>,
@@ -161,11 +178,22 @@ impl PermissionHooks {
 
     /// Grants "allow for this session" for one tool and resource. The next matching call is
     /// allowed without asking; the grant is in memory only and dies with this instance.
+    /// A `shell` grant for a prefix-shaped command widens to its prefix
+    /// ([`shell::session_grant_prefix`]); anything else stays exact, as before.
     pub fn grant_for_session(&self, tool: impl Into<String>, resource: impl Into<String>) {
-        self.grants
-            .lock()
-            .unwrap()
-            .insert((tool.into(), resource.into()));
+        let (tool, resource): (String, String) = (tool.into(), resource.into());
+        let grant = if tool == "shell" {
+            match shell::session_grant_prefix(&resource) {
+                Some(prefix) => SessionGrant::ShellPrefix {
+                    prefix,
+                    outside: false,
+                },
+                None => SessionGrant::Exact((tool, resource)),
+            }
+        } else {
+            SessionGrant::Exact((tool, resource))
+        };
+        self.grants.lock().unwrap().insert(grant);
     }
 
     /// Every decision: the host's name gate first, then rules, then a session grant or the
@@ -406,10 +434,18 @@ impl PermissionHooks {
         // `ask`: a human-answered grant can satisfy it, but only for a human turn. A
         // grant for a sandboxed command never covers leaving the sandbox (and vice
         // versa): the key carries the kind, so borrowing a narrower grant to leave is
-        // impossible.
+        // impossible. A shell prefix grant covers a later command with the same prefix
+        // ([`shell::session_grant_prefix`]) — never a compound, a wrapper, or a
+        // never-prefix command, which stay exact.
         let human = self.turn_source() == Some(InputSource::User);
-        let key = grant_key(call, &resource, &workspace, leaving_sandbox.is_some());
-        let granted = human && self.grants.lock().unwrap().contains(&key);
+        let granted = human
+            && session_grant_covers(
+                &self.grants.lock().unwrap(),
+                call,
+                &resource,
+                &workspace,
+                leaving_sandbox.is_some(),
+            );
         if granted {
             self.record(
                 &request_id,
@@ -494,7 +530,12 @@ impl PermissionHooks {
                 Ok(ToolDecision::Allow)
             }
             ApprovalOutcome::AllowForSession => {
-                self.grants.lock().unwrap().insert(key);
+                self.grants.lock().unwrap().insert(session_grant_for(
+                    call,
+                    &resource,
+                    &workspace,
+                    leaving_sandbox.is_some(),
+                ));
                 self.record(
                     &request_id,
                     &call_id,
@@ -781,6 +822,61 @@ fn outside_sandbox(call: &ToolCall) -> Option<String> {
             .unwrap_or("")
             .to_owned(),
     )
+}
+
+/// The session grant one `AllowForSession` answer earns: a shell prefix grant when the
+/// granted command is prefix-shaped ([`shell::session_grant_prefix`]), otherwise the
+/// exact key, as before.
+fn session_grant_for(
+    call: &ToolCall,
+    resource: &Resource,
+    workspace: &std::path::Path,
+    leaving_sandbox: bool,
+) -> SessionGrant {
+    if call.name == "shell"
+        && let Resource::Command(command) = resource
+        && let Some(prefix) = shell::session_grant_prefix(command)
+    {
+        return SessionGrant::ShellPrefix {
+            prefix,
+            outside: leaving_sandbox,
+        };
+    }
+    SessionGrant::Exact(grant_key(call, resource, workspace, leaving_sandbox))
+}
+
+/// Whether a session grant covers this call: the exact key, as before, or — for a
+/// `shell` call — a stored prefix the current command re-derives. The current command
+/// must itself be prefix-shaped, so a compound or wrapper never borrows a prefix, and
+/// a grant earned leaving the sandbox never covers an inside call (or vice versa).
+fn session_grant_covers(
+    grants: &HashSet<SessionGrant>,
+    call: &ToolCall,
+    resource: &Resource,
+    workspace: &std::path::Path,
+    leaving_sandbox: bool,
+) -> bool {
+    if grants.contains(&SessionGrant::Exact(grant_key(
+        call,
+        resource,
+        workspace,
+        leaving_sandbox,
+    ))) {
+        return true;
+    }
+    if call.name != "shell" {
+        return false;
+    }
+    let Resource::Command(command) = resource else {
+        return false;
+    };
+    let Some(prefix) = shell::session_grant_prefix(command) else {
+        return false;
+    };
+    grants.contains(&SessionGrant::ShellPrefix {
+        prefix,
+        outside: leaving_sandbox,
+    })
 }
 
 /// The grant key for one call: [`resource_key`], plus the sandbox kind, so a grant for a
