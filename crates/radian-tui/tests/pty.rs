@@ -7551,9 +7551,10 @@ async fn pty_a_memory_warning_is_a_transcript_notice_not_stderr() {
         100,
     );
     // Before the terminal is entered the old line went to stderr, which the alternate screen
-    // then covered: the notice is what makes it visible at all.
+    // then covered: the notice is what makes it visible at all. The `allowed-tools`
+    // declarations of every skill arrive as one merged line per session.
     assert!(
-        pty.wait_for_screen("radian: [memory] skill", wait_positive()),
+        pty.wait_for_screen("radian: [memory] 1 skill declares", wait_positive()),
         "the memory warning is not in the transcript:\n{}",
         pty.screen()
     );
