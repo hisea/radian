@@ -435,12 +435,14 @@ fn runtime_event_json(event: &RuntimeEvent) -> Value {
             lane,
             source,
             wake,
+            degraded,
         } => json!({
             "message": message,
             "message_id": message_id,
             "lane": lane,
             "source": source,
             "wake": wake,
+            "degraded": degraded,
         }),
         RuntimeEvent::InputClaimed {
             message_ids,

@@ -238,7 +238,7 @@ impl Inbox {
         input: impl Into<Message>,
         source: InputSource,
     ) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextTurn, input.into(), source, true)
+        self.enqueue(Lane::NextTurn, input.into(), source, true, false)
             .await
     }
 
@@ -249,7 +249,7 @@ impl Inbox {
         input: impl Into<Message>,
         source: InputSource,
     ) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextStep, input.into(), source, true)
+        self.enqueue(Lane::NextStep, input.into(), source, true, false)
             .await
     }
 
@@ -260,7 +260,19 @@ impl Inbox {
         input: impl Into<Message>,
         source: InputSource,
     ) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextStep, input.into(), source, false)
+        self.enqueue(Lane::NextStep, input.into(), source, false, false)
+            .await
+    }
+
+    /// `next_step` like [`Inbox::inject`], marked as a wake-gate degrade: the wake budget
+    /// was used up, so this input waits for a turn without ever opening one itself. The
+    /// durable `InboxEnqueued` record says so (`degraded: true`, ADR 0006 §5.5).
+    pub async fn inject_degraded(
+        &self,
+        input: impl Into<Message>,
+        source: InputSource,
+    ) -> Result<MessageId, InboxError> {
+        self.enqueue(Lane::NextStep, input.into(), source, false, true)
             .await
     }
 
@@ -270,6 +282,7 @@ impl Inbox {
         mut message: Message,
         source: InputSource,
         wake: bool,
+        degraded: bool,
     ) -> Result<MessageId, InboxError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(InboxError::Closed { message });
@@ -311,6 +324,9 @@ impl Inbox {
                     // ADR 0011: the entry's waking flag is durable, so a resume
                     // knows which `next_step` entries may open a turn themselves.
                     wake,
+                    // A wake-gate degrade (ADR 0006 §5.5): written only when true, so an
+                    // ordinary line is byte-identical to before.
+                    degraded,
                 })
                 .await
                 .map_err(|error| InboxError::Journal {

@@ -88,6 +88,8 @@ impl App {
                 selecting: None,
                 last_click: None,
                 pending_compaction: None,
+                wake_notice: None,
+                wake_waiting: false,
             },
         }
     }
@@ -270,20 +272,28 @@ impl App {
     /// Replaces the read handle with the host's projection, so the renderer reads the same
     /// facts the facade owns.
     /// The inputs to the herdr state function (ADR 0034 H2): the turn state, the pending
-    /// queue's length, and whether the startup trust prompt is waiting.
-    pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool) {
+    /// queue's length, whether the startup trust prompt is waiting, and whether degraded
+    /// wake notices wait while idle.
+    pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool, bool) {
         let trust = matches!(self.top_modal(), Some(Modal::Trust(_)));
-        (self.session.projection.read().turn(), self.pending, trust)
+        (
+            self.session.projection.read().turn(),
+            self.pending,
+            trust,
+            self.session.wake_waiting,
+        )
     }
 
     /// What is blocking, for herdr's category-only message (ADR 0034 H2). The approval's tool
-    /// name only - never the command, path or question body.
+    /// name only - never the command, path or question body. A used-up wake budget reports
+    /// only while no modal claims the block.
     pub fn herdr_blocked(&self) -> Option<radian_host::herdr::Blocked> {
         match self.top_modal() {
             Some(Modal::Approval(prompt)) => Some(radian_host::herdr::Blocked::Approval(
                 prompt.request.tool.clone(),
             )),
             Some(Modal::Question(_)) => Some(radian_host::herdr::Blocked::Question),
+            _ if self.session.wake_waiting => Some(radian_host::herdr::Blocked::WakeBudget),
             _ => None,
         }
     }

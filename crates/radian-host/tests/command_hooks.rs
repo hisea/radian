@@ -92,6 +92,7 @@ fn command_hooks(
         &radian_runtime::Inbox::new(64),
         &tokio::runtime::Handle::current(),
         Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
     ))
 }
 

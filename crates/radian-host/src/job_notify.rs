@@ -17,7 +17,7 @@
 //! but did not ask to kill the job, so it may be waiting on it.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 
 use agent_core::{InputSource, Message};
@@ -26,12 +26,21 @@ use radian_runtime::{Inbox, RuntimeEvents};
 use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};
 
 use super::wake_gate::WakeGate;
+use crate::hooks::HooksWarning;
 
 /// The most output bytes a completion message inlines (ADR 0037 decision 5; omp's
 /// `ASYNC_INLINE_RESULT_MAX_CHARS` idea). 4 KiB is the tail of a failing build between two
 /// tool calls without letting a chatty job flood the context; the rest is read with
 /// `job`, the model's only channel to a job's output (ADR 0039 decision 1).
 pub const NOTIFY_INLINE_BYTES: usize = 4 << 10;
+
+/// The one TUI notice line a degraded wake shows: `N` is the notices degraded since the
+/// last wake. The Stop-hook degrade reuses it (ADR 0045 §2).
+pub fn wake_budget_line(degraded: u32) -> String {
+    format!(
+        "wake budget used up: {degraded} job notices are waiting — send any message to continue"
+    )
+}
 
 /// The per-session job notifier. One per session; the host holds it for `reset_wakes`.
 pub struct JobNotifier {
@@ -52,6 +61,12 @@ pub struct JobNotifier {
     /// The sliding-window wake budget (ADR 0037 decision 5): at most a window's worth of
     /// wakes, expiring on their own with no user message needed.
     gate: WakeGate,
+    /// Notices degraded to inject-only since the last wake reset. The TUI notice line
+    /// carries the count, so one line per burst still names every waiting notice.
+    degraded: AtomicU32,
+    /// The wake-budget notice line (the TUI shows it as a transcript notice, the CLI
+    /// prints it). Fired on every degrade; the TUI shows one line per burst.
+    wake: HooksWarning,
 }
 
 impl JobNotifier {
@@ -61,6 +76,7 @@ impl JobNotifier {
         journal: Arc<SessionJournal>,
         turn_running: Arc<AtomicBool>,
         events: Arc<dyn RuntimeEvents>,
+        wake: HooksWarning,
     ) -> Arc<Self> {
         Arc::new(Self {
             jobs: Arc::downgrade(&jobs),
@@ -69,6 +85,8 @@ impl JobNotifier {
             turn_running,
             events,
             gate: WakeGate::new(),
+            degraded: AtomicU32::new(0),
+            wake,
         })
     }
 
@@ -105,11 +123,17 @@ impl JobNotifier {
     /// rate gate: the window recovers on its own, and a user message clears it at once).
     pub fn reset_wakes(&self) {
         self.gate.reset_wakes();
+        self.degraded.store(0, Ordering::SeqCst);
     }
 
     /// Wakes inside the window right now (tests).
     pub fn wakes(&self) -> u32 {
         self.gate.wakes()
+    }
+
+    /// How many notices were degraded since the last wake reset (tests).
+    pub fn degraded(&self) -> u32 {
+        self.degraded.load(Ordering::SeqCst)
     }
 
     /// Handles one lifecycle event: write the durable record, forward it on the live
@@ -158,10 +182,14 @@ impl JobNotifier {
                     }
                 } else {
                     // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): the rate gate is
-                    // full, so this settle is injected only and wakes nothing. This
-                    // `else { inject }` branch is the single degrade point: keep its shape
-                    // (gate check above, plain `inject` here).
-                    let _ = self.inbox.inject(text, source).await;
+                    // full, so this settle is injected only and wakes nothing. The durable
+                    // record says so (`degraded`), and the TUI/herdr legs hear it through
+                    // the wake notice. This `else` branch is the single degrade point:
+                    // keep its shape (gate check above, marked `inject` here).
+                    if self.inbox.inject_degraded(text, source).await.is_ok() {
+                        let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
+                        (self.wake)(&wake_budget_line(degraded));
+                    }
                 }
             }
         }

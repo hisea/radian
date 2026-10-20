@@ -100,6 +100,10 @@ pub enum Input {
     },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
+    /// A wake-gate degrade fired (one per degrade): the wake-budget notice line. `update`
+    /// shows a single line per burst (rewriting it with the latest count) and marks the
+    /// session as wake-waiting for herdr until the next turn starts.
+    WakeBudgetNotice(String),
     /// A `/skill:<name> [args]` expansion finished (ADR 0025 S3): the message text to send, or
     /// a notice (an unknown skill or a file that can no longer be read). `steer` mirrors the
     /// turn state when the command was submitted.

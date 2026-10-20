@@ -53,6 +53,8 @@ fn notifier(dir: &Path) -> (Arc<JobNotifier>, Arc<Jobs>, Arc<Inbox>, Arc<AtomicB
         Arc::clone(&turn_running),
         // The live runtime-event sink: these tests do not read it.
         Arc::new(|_: &RuntimeEvent| {}),
+        // The wake-budget notice: most tests below do not read it.
+        Arc::new(|_: &str| {}),
     );
     (notifier, jobs, inbox, turn_running)
 }
@@ -94,6 +96,7 @@ async fn start_and_settle_reach_the_live_runtime_sink() {
                 .unwrap_or_else(|e| e.into_inner())
                 .push((event.name().to_string(), job_id_of(event)));
         }),
+        Arc::new(|_: &str| {}),
     );
     notifier
         .deliver(JobEvent::Started {
@@ -512,6 +515,7 @@ async fn an_ended_session_releases_its_journal() {
         Arc::new(AtomicBool::new(false)),
         // The live runtime-event sink: this test only watches the registry drop.
         Arc::new(|_: &RuntimeEvent| {}),
+        Arc::new(|_: &str| {}),
     );
     notifier.spawn(&tokio::runtime::Handle::current());
     // The session ends: the host drops its notifier and its registry.
@@ -528,4 +532,71 @@ async fn an_ended_session_releases_its_journal() {
         "the subscriber task still holds the journal: {} references",
         Arc::strong_count(&journal)
     );
+}
+
+/// A settle past the cap is injected with the degrade mark, counted, and announced: the
+/// durable `InboxEnqueued` says `degraded`, and the wake notice carries the count since
+/// the last wake.
+#[tokio::test]
+async fn a_degraded_notice_writes_the_marked_record_and_announces_it() {
+    use std::sync::Mutex;
+    let dir = scratch("degraded");
+    let journal = journal(&dir);
+    let inbox = Inbox::durable(64, Arc::clone(&journal));
+    let notices: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let notices_in = Arc::clone(&notices);
+    let notifier = JobNotifier::new(
+        Arc::new(Jobs::new(dir.join("jobs"))),
+        Arc::clone(&inbox),
+        journal,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(|_: &RuntimeEvent| {}),
+        Arc::new(move |line: &str| {
+            notices_in
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(line.to_owned());
+        }),
+    );
+
+    tokio::time::pause();
+    for _ in 0..MAX_WAKES_PER_WINDOW {
+        notifier.deliver(settled("job-fill", true)).await;
+        // Each woken turn absorbs the queue; the test drains it like the driver would.
+        assert!(inbox.claim_next_turn().await.is_some());
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    notifier.deliver(settled("job-d1", true)).await;
+    notifier.deliver(settled("job-d2", true)).await;
+    assert_eq!(notifier.degraded(), 2);
+
+    // The waking followups record no degrade; the two degraded injects do.
+    let session = Session::open(dir.join("s.jsonl")).unwrap();
+    let degraded: Vec<bool> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::InboxEnqueued { degraded, .. } => Some(*degraded),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        degraded,
+        [vec![false; MAX_WAKES_PER_WINDOW as usize], vec![true, true]].concat()
+    );
+
+    // Every degrade fires the wake notice with the count since the last wake.
+    assert_eq!(
+        *notices.lock().unwrap_or_else(|e| e.into_inner()),
+        vec![
+            "wake budget used up: 1 job notices are waiting — send any message to continue"
+                .to_owned(),
+            "wake budget used up: 2 job notices are waiting — send any message to continue"
+                .to_owned(),
+        ]
+    );
+
+    // A user message restarts the count with the budget.
+    notifier.reset_wakes();
+    assert_eq!(notifier.degraded(), 0);
 }

@@ -550,3 +550,34 @@ fn the_fork_fixtures_agree_with_the_reference_checker() {
     assert_eq!(parent.seq, 4);
     assert_eq!(parent.relation(), "fork");
 }
+
+/// The wake-budget fixture: a degraded inject reads back `degraded: true`, an old record
+/// without the field reads back `false`. Rust half of the differential check with
+/// `docs/schema/check-fixtures.sh`.
+#[test]
+fn the_degraded_fixture_reads_back_the_degrade_mark() {
+    let session = Session::open(fixture("inbox-degraded.jsonl")).unwrap();
+    assert!(session.skipped().is_empty());
+    assert_eq!(session.events().len(), 3);
+
+    let degraded: Vec<(bool, bool)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::InboxEnqueued { wake, degraded, .. } => Some((*wake, *degraded)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        degraded,
+        vec![(false, true), (false, false)],
+        "the degraded inject is marked; the old record reads as not degraded"
+    );
+
+    // Audit only: nothing enters the transcript.
+    assert!(session.history().unwrap().is_empty());
+    assert_eq!(
+        session.history().unwrap(),
+        recover(&session.journal_records()).unwrap()
+    );
+}

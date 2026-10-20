@@ -353,6 +353,7 @@ fn a_genuinely_half_written_line_is_treated_as_a_torn_tail() {
                 lane: radian_session::InboxLane::NextTurn,
                 source: InputSource::User,
                 wake: true,
+                degraded: false,
             })
             .await
             .unwrap();
