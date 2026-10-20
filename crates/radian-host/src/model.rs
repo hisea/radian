@@ -207,10 +207,12 @@ fn strip_renamed_tool_aliases(request: &mut ModelRequest) {
 /// per ADR 0026: it is never stored), and only then builds the
 /// short-lived [`OpenAiResponses`] adapter that actually sends the request.
 ///
-/// Building that adapter is cheap (URL parsing and a `reqwest::Client::builder()`, no I/O —
-/// see `OpenAiResponses::new`), so doing it per call costs nothing a long-lived instance
-/// would have saved; the alternative (mutating a cached adapter's headers in place) is not
-/// available, since the adapter stores them in an already-built, immutable `HeaderMap`.
+/// Only the per-call headers are rebuilt: the HTTP client underneath is built once (at
+/// construction, with [`agent_provider_openai_responses::build_client`]) and cloned into
+/// every adapter — a `reqwest::Client` clone shares the connection pool, so consecutive
+/// calls reuse the one TCP/TLS connection instead of handshaking again. The alternative
+/// (mutating a cached adapter's headers in place) is not available, since the adapter
+/// stores them in an already-built, immutable `HeaderMap`.
 pub struct ChatGptModel {
     /// Everything before `/responses` (the same convention [`OpenAiResponsesConfig::base_url`]
     /// documents). Overridable so a test points it at a local mock; production always uses
@@ -221,6 +223,9 @@ pub struct ChatGptModel {
     /// `chatgpt_headers` in `provider.rs`), **not** `Authorization`/`chatgpt-account-id`.
     pub static_headers: Vec<(String, String)>,
     pub reasoning_effort: Option<String>,
+    /// The HTTP client every call sends through, built once at construction (a cheap `Arc`
+    /// clone per call shares its connection pool).
+    pub client: reqwest::Client,
     /// Where the OAuth refresh/token calls go; a test points this at a local fake server too
     /// (production always uses [`oauth_chatgpt::Endpoints::default`]).
     pub endpoints: oauth_chatgpt::Endpoints,
@@ -245,7 +250,7 @@ impl Model for ChatGptModel {
             .with_header("Authorization", format!("Bearer {access}"))
             .with_header("chatgpt-account-id", account_id);
         config.reasoning_effort = self.reasoning_effort.clone();
-        let model = OpenAiResponses::new(config).map_err(|error| {
+        let model = OpenAiResponses::with_client(config, self.client.clone()).map_err(|error| {
             ModelError::Protocol(format!("could not build the ChatGPT request: {error}"))
         })?;
         model.complete(request, cx).await
@@ -571,15 +576,19 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
                     .map(HostModel::Responses)
                     .map_err(|e| format!("--base-url {shown_url}: {e}"));
             }
-            // No network or file I/O here (ADR 0026): the access token
-            // and account id are resolved fresh on every `complete()` call, never at build
-            // time — see `ChatGptModel`'s doc comment for why that is the right place and
-            // costs nothing extra.
+            // No network or file I/O here (ADR 0026): the token and
+            // account id resolve fresh on every `complete()` call; only the HTTP client is
+            // built once and shared (see `ChatGptModel`).
+            let client = agent_provider_openai_responses::build_client(
+                agent_provider_openai_responses::DEFAULT_CONNECT_TIMEOUT,
+            )
+            .map_err(|e| format!("--base-url {shown_url}: {e}"))?;
             Ok(HostModel::ChatGpt(ChatGptModel {
                 base_url: args.base_url,
                 model: args.model,
                 static_headers: args.headers,
                 reasoning_effort: args.reasoning_effort,
+                client,
                 endpoints: oauth_chatgpt::Endpoints::default(),
             }))
         }

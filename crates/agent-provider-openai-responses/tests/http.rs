@@ -13,7 +13,7 @@ use agent_provider_openai_responses::testing::{
     function_call_arguments_done, message_item, output_item_done, reasoning_item,
     reasoning_summary_delta, text_delta,
 };
-use agent_provider_openai_responses::{OpenAiResponses, OpenAiResponsesConfig};
+use agent_provider_openai_responses::{OpenAiResponses, OpenAiResponsesConfig, build_client};
 use serde_json::{Value, json};
 
 const SECRET: &str = "sk-contract-secret-token";
@@ -472,4 +472,31 @@ async fn a_foreign_provider_payload_does_not_leak_into_the_request() {
     let body = server.requests()[0].body.clone();
     assert!(!body.contains("thinking"), "{body}");
     assert!(!body.contains("foreign reasoning"), "{body}");
+}
+
+#[tokio::test]
+async fn a_supplied_client_does_not_follow_redirects() {
+    // A redirect would resend the request, and the access token with it, elsewhere: a
+    // caller-supplied client must carry the same no-redirect policy `new` builds.
+    let server = MockServer::start(vec![
+        Reply::status_with_headers(
+            307,
+            "go elsewhere",
+            vec![("Location".into(), "/elsewhere".into())],
+        ),
+        Reply::sse(&[completed(None)]),
+    ])
+    .await;
+    let config = OpenAiResponsesConfig::new(server.base_url.clone(), "gpt-5.2-codex")
+        .with_header("Authorization", format!("Bearer {SECRET}"));
+    let client = build_client(config.connect_timeout).unwrap();
+    let model = OpenAiResponses::with_client(config, client).unwrap();
+    let error = complete(&model, request(vec![Message::user("hi")]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, ModelError::Protocol(message) if message.contains("HTTP 307")),
+        "{error}"
+    );
+    assert_eq!(server.requests().len(), 1, "the redirect is not followed");
 }

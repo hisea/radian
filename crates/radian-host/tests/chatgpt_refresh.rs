@@ -9,6 +9,7 @@ use agent_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, 
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, message_item, output_item_done,
 };
+use agent_provider_openai_responses::{OpenAiResponsesConfig, build_client};
 use radian_host::oauth_chatgpt::Endpoints;
 use radian_host::{AuthStore, ChatGptModel, OAuthEntry};
 use serde_json::Value;
@@ -72,6 +73,7 @@ fn model(base_url: &str, endpoints: Endpoints) -> ChatGptModel {
         model: "gpt-5.4".to_owned(),
         static_headers: vec![("originator".to_owned(), "radian".to_owned())],
         reasoning_effort: None,
+        client: build_client(OpenAiResponsesConfig::new("", "").connect_timeout).unwrap(),
         endpoints,
     }
 }
