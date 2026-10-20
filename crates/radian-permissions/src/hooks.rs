@@ -6,11 +6,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use agent_core::{HookContext, HookError, Hooks, InputSource, ToolCall, ToolDecision};
+use serde_json::Value;
 
 use crate::approval::{ApprovalOutcome, ApprovalRequest, Approver};
 use crate::audit::{Approver as AuditApprover, AuditSink, PermissionResolved, ResolvedDecision};
-use crate::profile::{ApprovalPolicy, Profile};
-use crate::rule::{Action, Resource, evaluate, resolve, resource_of};
+use crate::profile::{ApprovalPolicy, Preset, Profile};
+use crate::readonly::{self, ReadOnlyHit};
+use crate::rule::{Action, Evaluated, Resource, evaluate, resolve, resource_of};
+use crate::shell;
 
 /// The grant key: one tool plus one exact resource. Paths are keyed by their resolved form,
 /// so a grant for `a/../b` also covers `b`.
@@ -196,15 +199,136 @@ impl PermissionHooks {
         // approver call (a `std` read guard is not `Send`, and the hook's future is). A
         // `/access` swap between this read and the approver is not visible to this call,
         // which is exactly the "next call takes effect" rule.
-        let (evaluated, workspace) = {
+        let (evaluated, workspace, preset, rules) = {
             let profile = self.profile.read().unwrap_or_else(|e| e.into_inner());
             (
                 evaluate(profile.rules(), &profile.workspace, call),
                 profile.workspace.clone(),
+                profile.preset,
+                profile.rules().to_vec(),
             )
         };
-        let action = self.apply_policy(evaluated.action);
+        let mut evaluated = evaluated;
+        let mut action = self.apply_policy(evaluated.action);
 
+        // A rule denial wins before everything else (deny outranks ask and allow
+        // under every approval policy).
+        if evaluated.action == Action::Deny {
+            let reason = evaluated
+                .reason
+                .clone()
+                .unwrap_or_else(|| "denied by policy".into());
+            self.record(
+                &request_id,
+                &call_id,
+                ResolvedDecision::Deny,
+                AuditApprover::Policy,
+                Some(reason.clone()),
+            );
+            return Ok(ToolDecision::Deny { reason });
+        }
+        // A compound shell command (`a && b`, `cd x && cargo test`) is allowed only
+        // when **every** segment is allowed — by a user `allow` rule or by the
+        // read-only table. A rule denial already won above and still runs first.
+        // `split_compound` is `None` for anything outside the four separators
+        // (`;` aside) or with a non-simple segment, which falls through to the
+        // ordinary path below (`ask`). A simple command is one segment, so it
+        // takes the same path, plus the wrapper and `cd` restrictions.
+        if call.name == "shell"
+            && let Some(command) = call.arguments.get("command").and_then(|v| v.as_str())
+            && let Some((segments, separators)) = shell::split_compound(command)
+        {
+            match self.decide_segments(&rules, &workspace, preset, &segments, &separators) {
+                SegmentsOutcome::Allow { reason } => {
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Allow,
+                        AuditApprover::Policy,
+                        Some(reason),
+                    );
+                    return Ok(ToolDecision::Allow);
+                }
+                SegmentsOutcome::Rewrite { command } => {
+                    let mut arguments = call.arguments.clone();
+                    arguments["command"] = Value::String(command);
+                    self.record(
+                                &request_id,
+                                &call_id,
+                                ResolvedDecision::Rewrite,
+                                AuditApprover::Policy,
+                                Some(
+                                    "read-only git command (built-in table): added --no-ext-diff --no-textconv"
+                                        .into(),
+                                )
+                            );
+                    return Ok(ToolDecision::Rewrite { arguments });
+                }
+                SegmentsOutcome::Deny { reason } => {
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Deny,
+                        AuditApprover::Policy,
+                        Some(reason.clone()),
+                    );
+                    return Ok(ToolDecision::Deny { reason });
+                }
+                // A segment needs a question: continue below as an `ask` for
+                // the whole command (policy, session grants and the approver
+                // all see the full command line, as before).
+                SegmentsOutcome::Ask { reason } => {
+                    evaluated = Evaluated {
+                        action: Action::Ask,
+                        reason,
+                    };
+                    action = self.apply_policy(evaluated.action);
+                }
+            }
+        }
+        // The built-in read-only shell table: allow rules placed after the user's
+        // rules and before the tier's blanket shell rule. A hit bypasses the
+        // approval policy (`always`/`never`/`auto` never turn it into a question:
+        // read-only commands are not worth reviewing, and a headless turn must
+        // not lose them) and is audited as a policy decision. A named `ask` rule
+        // is an explicit user rule and outranks the table; the tier's blanket
+        // shell `ask` and the no-match default carry no reason, so they still
+        // fall through to it.
+        let table_hit = (evaluated.action != Action::Ask || evaluated.reason.is_none())
+            .then(|| readonly::match_command(&workspace, call))
+            .flatten();
+        if let Some(hit) = table_hit {
+            match hit {
+                ReadOnlyHit::Allow => {
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Allow,
+                        AuditApprover::Policy,
+                        Some("read-only shell command (built-in table)".into()),
+                    );
+                    return Ok(ToolDecision::Allow);
+                }
+                ReadOnlyHit::Rewrite { command } => {
+                    let mut arguments = call.arguments.clone();
+                    arguments["command"] = Value::String(command);
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Rewrite,
+                        AuditApprover::Policy,
+                        Some(
+                            "read-only git command (built-in table): added --no-ext-diff --no-textconv"
+                                .into(),
+                        ),
+                    );
+                    return Ok(ToolDecision::Rewrite { arguments });
+                }
+            }
+        }
+
+        // A policy denial (`never` turned an `ask` into one) denies here, after
+        // the table had its chance to allow.
         if action == Action::Deny {
             let reason = evaluated
                 .reason
@@ -219,6 +343,7 @@ impl PermissionHooks {
             );
             return Ok(ToolDecision::Deny { reason });
         }
+
         if action == Action::Allow {
             self.record(
                 &request_id,
@@ -342,6 +467,145 @@ impl PermissionHooks {
         }
     }
 
+    /// One compound shell command, segment by segment. The command is allowed only
+    /// when **every** segment is allowed — by a user `allow` rule or by the
+    /// read-only table — and carries the effective directory through the segments:
+    /// a `cd` target the earlier segments moved to is where every later path
+    /// argument (the table's path checks) resolves. A rule denial for any segment
+    /// denies the whole command (the whole-command check above normally wins first).
+    /// Anything a segment cannot cover is one `Ask` for the whole command.
+    fn decide_segments(
+        &self,
+        rules: &[crate::rule::Rule],
+        workspace: &std::path::Path,
+        preset: Preset,
+        segments: &[String],
+        separators: &[String],
+    ) -> SegmentsOutcome {
+        let mut effective = workspace.to_path_buf();
+        let mut rewritten: Vec<Option<String>> = vec![None; segments.len()];
+        let mut any_rule_allow = false;
+        let mut rule_reason: Option<String> = None;
+        let mut blocked = false;
+        let mut blocked_reason: Option<String> = None;
+        let mut denied: Option<String> = None;
+        for (n, segment) in segments.iter().enumerate() {
+            if blocked || denied.is_some() {
+                break;
+            }
+            // A runs-its-arguments program only shows the wrapper's own tokens; no
+            // prefix rule and no table entry can see what it will run — outside
+            // `full`, where the blanket allow trusts the environment and judges
+            // the segment like any other.
+            if preset != Preset::FullAccess && shell::starts_with_wrapper(segment) {
+                blocked = true;
+                continue;
+            }
+            let segment_call = ToolCall {
+                id: "segment".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({ "command": segment }),
+            };
+            let judged = evaluate(rules, workspace, &segment_call);
+            // `cd <target>` moves the effective directory the later segments
+            // resolve against. It is allow-able only in the `workspace` tier, only
+            // with a user `allow` rule, and only when the target stays inside the
+            // workspace (in `full` git would run the target directory's hooks, and
+            // there is no sandbox wall around that — which `full` accepts: its
+            // blanket allow trusts the environment, so the segment is judged like
+            // any other there).
+            if preset != Preset::FullAccess
+                && let Some(target) = shell::cd_target(segment)
+            {
+                match cd_dir(workspace, &effective, preset, target) {
+                    Some(dir) if judged.action == Action::Allow => {
+                        effective = dir;
+                        any_rule_allow = true;
+                        if rule_reason.is_none() {
+                            rule_reason = judged.reason.clone();
+                        }
+                    }
+                    // A `cd` out of the workspace, with no allow rule, or in the
+                    // wrong tier: the whole command needs a question, with the
+                    // default (empty) reason, exactly as before.
+                    _ => {
+                        blocked = true;
+                    }
+                }
+                continue;
+            }
+            // A rule denial for any segment denies the whole command.
+            if judged.action == Action::Deny {
+                denied = Some(
+                    judged
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "denied by policy".into()),
+                );
+                continue;
+            }
+            // A user `allow` rule covers the segment. Its reason is kept for the
+            // `always` review below, the way a single allowed command shows the
+            // rule's reason when it is turned into a question.
+            if judged.action == Action::Allow {
+                any_rule_allow = true;
+                if rule_reason.is_none() {
+                    rule_reason = judged.reason.clone();
+                }
+                continue;
+            }
+            // A named `ask` rule is an explicit user rule and outranks the table;
+            // the tier's blanket `ask` and the no-match default carry no reason,
+            // so they still fall through to it. The named reason reaches the
+            // approver; a default block asks with the default (empty) reason.
+            if judged.reason.is_some() {
+                blocked = true;
+                if blocked_reason.is_none() {
+                    blocked_reason = judged.reason.clone();
+                }
+                continue;
+            }
+            match readonly::match_segment(workspace, &effective, segment) {
+                Some(ReadOnlyHit::Allow) => {}
+                Some(ReadOnlyHit::Rewrite { command }) => {
+                    rewritten[n] = Some(command);
+                }
+                None => {
+                    blocked = true;
+                }
+            }
+        }
+        if let Some(reason) = denied {
+            return SegmentsOutcome::Deny { reason };
+        }
+        if blocked {
+            return SegmentsOutcome::Ask {
+                reason: blocked_reason,
+            };
+        }
+        // A user-allowed segment is still reviewed under `approval = always`, the
+        // way a single allowed command is; a purely read-only command (table
+        // hits only) bypasses review, the way a single table hit does.
+        if any_rule_allow && self.approval() == ApprovalPolicy::Always {
+            return SegmentsOutcome::Ask {
+                reason: rule_reason,
+            };
+        }
+        if rewritten.iter().any(Option::is_some) {
+            let mut command = String::new();
+            for (n, segment) in segments.iter().enumerate() {
+                if n > 0 {
+                    command.push_str(&separators[n - 1]);
+                }
+                command.push_str(rewritten[n].as_deref().unwrap_or(segment));
+            }
+            return SegmentsOutcome::Rewrite { command };
+        }
+        SegmentsOutcome::Allow {
+            reason: "every segment is allowed by an allow rule or the read-only table".into(),
+        }
+    }
+
     fn apply_policy(&self, action: Action) -> Action {
         match (self.approval(), action) {
             (ApprovalPolicy::Never, Action::Ask) => Action::Deny,
@@ -372,6 +636,48 @@ impl PermissionHooks {
             policy: None,
         });
     }
+}
+
+/// What one compound shell command's segments decide.
+enum SegmentsOutcome {
+    /// Every segment is allowed by an allow rule or the read-only table.
+    Allow { reason: String },
+    /// Every segment is allowed and at least one table hit rewrote its segment;
+    /// `command` is the whole command with each rewritten segment substituted
+    /// and every separator as it was.
+    Rewrite { command: String },
+    /// A rule denial hit a segment.
+    Deny { reason: String },
+    /// A segment needs a question: the caller continues as an `ask` for the
+    /// whole command. `None` for a default block (the approver and the `never`
+    /// denial then see exactly what they saw before compounds existed), or the
+    /// named rule's reason.
+    Ask { reason: Option<String> },
+}
+
+/// Where a plain `cd <target>` segment moves the effective directory: the target
+/// resolved against the current effective directory, when it stays inside the
+/// workspace and is an existing directory. `None` in the `workspace` tier means
+/// the shell would leave the workspace (or nowhere predictable: `cd -`, options,
+/// a missing directory), and in any other tier `cd` never moves anything — a `cd`
+/// segment there always needs a question.
+fn cd_dir(
+    workspace: &std::path::Path,
+    effective: &std::path::Path,
+    preset: Preset,
+    target: &str,
+) -> Option<std::path::PathBuf> {
+    if preset != Preset::WorkspaceWrite {
+        return None;
+    }
+    if target.starts_with('-') {
+        return None;
+    }
+    let resolved = resolve(effective, target);
+    if !resolved.starts_with(workspace) || !resolved.is_dir() {
+        return None;
+    }
+    Some(resolved)
 }
 
 impl Hooks for PermissionHooks {

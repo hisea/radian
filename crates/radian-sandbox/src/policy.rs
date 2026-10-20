@@ -44,12 +44,13 @@ pub enum GitAccess {
     /// is the narrower grant: a caller must name `WritableExceptExec` to widen it.
     #[default]
     ReadOnly,
-    /// The git metadata is writable except the entries git can execute. In a git directory that
-    /// is `config`, `config.worktree` and `hooks/` (and, under `modules/<name>/`, each
-    /// submodule's `config` and `hooks/`). A worktree's per-worktree git dir and its shared
-    /// common dir are discovered separately and get the same treatment. Everything else — the
-    /// object store, refs, the index, `logs/`, `info/` — stays writable, so `git commit`,
-    /// `checkout`, `stash`, `branch` and friends run natively in the sandbox (ADR 0038).
+    /// The git metadata is writable except the entries git can execute. The exact list lives
+    /// in [`crate::git_exec`]: `config`, `config.worktree` and `hooks/` in a git directory
+    /// (and, under `modules/<name>/`, each submodule's `config` and `hooks/`). A worktree's
+    /// per-worktree git dir and its shared common dir are discovered separately and get the
+    /// same treatment. Everything else — the object store, refs, the index, `logs/`, `info/` —
+    /// stays writable, so `git commit`, `checkout`, `stash`, `branch` and friends run natively
+    /// in the sandbox (ADR 0038).
     WritableExceptExec,
 }
 
@@ -313,8 +314,9 @@ fn default_deny_read() -> Vec<PathBuf> {
 
 /// Finds `.git` entries under the workspace (bounded depth) and returns the paths that must
 /// stay read-only: the git directory itself, and for a worktree pointer file also the
-/// shared common directory it names.
-pub(crate) fn discover_git_metadata(workspace: &Path) -> Vec<PathBuf> {
+/// shared common directory it names. The permission layer builds its `.git` deny rules from
+/// the same list (ADR 0038 decision 3).
+pub fn discover_git_metadata(workspace: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_git(workspace, 0, &mut out, &mut |_| {});
     out.sort();

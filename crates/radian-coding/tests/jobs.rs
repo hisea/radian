@@ -531,6 +531,49 @@ async fn a_wait_timeout_returns_running_and_leaves_the_job_alive() {
     );
 }
 
+// ---------- 2e. the `job` description (items 6, 13) ----------
+
+/// Item 6: `kill` stops the whole *process group* (never "the whole session", which reads
+/// as the agent session). Item 13: the `timeout_ms` default and maximum live in the schema
+/// only (the constraint), not in the description (the usage); the description keeps the
+/// sentence without the numbers.
+#[tokio::test]
+async fn the_job_description_names_the_process_group_and_leaves_numbers_to_the_schema() {
+    let dir = TempDir::new("jobs-desc");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+    let spec = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "job")
+        .expect("job is advertised with a sandbox");
+    assert!(
+        spec.description
+            .contains("stops the job's whole process group"),
+        "`kill` must name the process group: {}",
+        spec.description
+    );
+    assert!(
+        !spec.description.contains("whole session"),
+        "the 'whole session' wording must be gone: {}",
+        spec.description
+    );
+    assert!(
+        !spec.description.contains("30000") && !spec.description.contains("600000"),
+        "the numbers stay in the schema, not the description: {}",
+        spec.description
+    );
+    let field = &spec.input_schema["properties"]["timeout_ms"]["description"];
+    assert!(
+        field
+            .as_str()
+            .is_some_and(|text| text.contains("30000") && text.contains("600000")),
+        "the schema keeps the `timeout_ms` default and maximum: {field}"
+    );
+}
+
 // ---------- 3. an explicit background `timeout_secs` is ignored (ADR 0037) ----------
 
 /// ADR 0037: `background: true` ignores `timeout_secs`. The job is still

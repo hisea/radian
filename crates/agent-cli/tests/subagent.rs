@@ -477,8 +477,10 @@ async fn a_long_conclusion_is_cut_and_marked() {
 }
 
 /// ADR 0043 1a point 7: a non-auto parent gives the child no `--yes`, so the child's `ask` is
-/// denied (it has no terminal) and the result says what was denied. The mutation (passing
-/// `--yes` always) lets the shell run and the result has no `denied` line.
+/// denied (it has no terminal) and the result says what was denied. Runs under
+/// `--profile workspace`, the tier that still asks (`full` has nothing left to deny).
+/// The mutation (passing `--yes` always) lets the shell run and the result has no
+/// `denied` line.
 #[tokio::test]
 async fn a_non_auto_parent_denies_the_childs_ask_and_says_so() {
     let server = MockServer::start(vec![
@@ -499,6 +501,8 @@ async fn a_non_auto_parent_denies_the_childs_ask_and_says_so() {
             &server.base_url,
             "--workspace",
             &workspace,
+            "--profile",
+            "workspace",
             "-p",
             "go",
         ],

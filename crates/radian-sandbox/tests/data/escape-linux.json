@@ -9,8 +9,11 @@
       "name": "outside_absolute",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: /tmp/radian-sandbox-escape-344689-0/outside/absolute.txt: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/outside/absolute.txt: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -20,8 +23,11 @@
       "name": "outside_dotdot",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: ../outside/dotdot.txt: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create ../outside/dotdot.txt: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -31,8 +37,11 @@
       "name": "outside_via_symlink",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: /tmp/radian-sandbox-escape-344689-0/ws/leak/via_symlink.txt: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/ws/leak/via_symlink.txt: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -42,8 +51,11 @@
       "name": "outside_tmp",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: /tmp/radian-sandbox-escape-344689-0/outside/tmp.txt: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/outside/tmp.txt: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -53,8 +65,11 @@
       "name": "symlinked_parent_dir",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: /tmp/radian-sandbox-escape-344689-0/ws/leak/new.txt: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/ws/leak/new.txt: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -64,19 +79,11 @@
       "name": "write_through_workspace_symlink",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: /tmp/radian-sandbox-escape-344689-0/ws/leak/again.txt: Read-only file system",
-      "sandbox_succeeded": false
-    },
-    {
-      "control_detail": "",
-      "control_succeeded": true,
-      "expect": "must_fail",
-      "group": "network_safe",
-      "name": "connect_local_port",
-      "note": "safe has no network; the control connects to a listener this test owns",
-      "passed": true,
-      "sandbox_detail": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import socket,sys; s=socket.create_connection((\"127.0.0.1\",39347),2); s.close(); sys.exit(0)\n                         ~~~~…",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/ws/leak/again.txt: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -87,7 +94,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -98,7 +108,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -109,7 +122,66 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
+    },
+    {
+      "control_detail": "",
+      "control_succeeded": true,
+      "expect": "must_fail",
+      "group": "unix_socket",
+      "name": "workspace_denied",
+      "note": "",
+      "passed": true,
+      "sandbox_detail": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(\"/tmp/radian-esc-712981-0.sock\"); s.close(); sys.exit(0)\n   …",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
+    },
+    {
+      "control_detail": "",
+      "control_succeeded": true,
+      "expect": "must_fail",
+      "group": "unix_socket",
+      "name": "abstract_denied",
+      "note": "",
+      "passed": true,
+      "sandbox_detail": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(\"\\0radian-esc-712981-1\"); s.close(); sys.exit(0)\n           …",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
+    },
+    {
+      "control_detail": "",
+      "control_succeeded": true,
+      "expect": "must_fail",
+      "group": "unix_socket",
+      "name": "whitelisted_denied",
+      "note": "Linux ignores allow_unix_sockets: seccomp cannot whitelist by path",
+      "passed": true,
+      "sandbox_detail": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(\"/tmp/radian-esc-712981-0.sock\"); s.close(); sys.exit(0)\n   …",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
+    },
+    {
+      "control_detail": "",
+      "control_succeeded": true,
+      "expect": "must_succeed",
+      "group": "unix_socket",
+      "name": "dns_resolves",
+      "note": "",
+      "passed": true,
+      "sandbox_detail": "",
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -120,21 +192,27 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
-      "control_detail": "master_bytes=1 injector=",
-      "control_succeeded": true,
+      "control_detail": "master_bytes=0 injector=Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import os,fcntl,termios,sys; os.setsid(); fd=os.open(sys.argv[1], os.O_RDWR|os.O_NOCTTY); fcntl.ioctl(fd, termios.TIOCSCTT…",
+      "control_succeeded": false,
       "expect": "must_fail",
       "group": "devices",
       "name": "tiocsti_outside_terminal",
       "note": "the sandbox cannot inject into an outside terminal; the control (same slave as its controlling terminal) can",
       "passed": true,
       "sandbox_detail": "master_bytes=0 injector=Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import os,fcntl,termios,sys; fd=os.open(sys.argv[1], os.O_RDWR|os.O_NOCTTY); fcntl.ioctl(fd, termios.TIOCSTI, b\"X\")\n      …",
-      "sandbox_succeeded": false
+      "sandbox_succeeded": false,
+      "skip": "the control could not TIOCSTI either, so the case proves nothing: the kernel refuses TIOCSTI for every process (dev.tty.legacy_tiocsti = 0)",
+      "skipped": true,
+      "verdict": "SKIP"
     },
     {
-      "control_detail": "unix:path=/run/user/1000/bus",
+      "control_detail": "probe-value",
       "control_succeeded": true,
       "expect": "must_fail",
       "group": "environment",
@@ -142,18 +220,24 @@
       "note": "the sandbox clears the environment; the control inherits it",
       "passed": true,
       "sandbox_detail": "<unset>",
-      "sandbox_succeeded": false
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
-      "control_detail": "/usr/local/sbin:/usr/local/bin:/usr/bin",
+      "control_detail": "<home>/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
       "control_succeeded": true,
       "expect": "must_succeed",
       "group": "environment",
       "name": "whitelisted_path_visible",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/usr/local/sbin:/usr/local/bin:/usr/bin",
-      "sandbox_succeeded": true
+      "sandbox_detail": "<home>/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -163,8 +247,11 @@
       "name": "nested_sh_confined",
       "note": "",
       "passed": true,
-      "sandbox_detail": "sh: line 1: /tmp/radian-sandbox-escape-344689-0/outside/nested.txt: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/outside/nested.txt: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -175,7 +262,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -186,7 +276,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -197,7 +290,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -207,8 +303,11 @@
       "name": "write_hook",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: /tmp/radian-sandbox-escape-344689-0/ws/proj/.git/hooks/pre-commit: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/ws/proj/.git/hooks/pre-commit: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -218,8 +317,11 @@
       "name": "write_config",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: /tmp/radian-sandbox-escape-344689-0/ws/proj/.git/config: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/ws/proj/.git/config: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -229,8 +331,11 @@
       "name": "write_info",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: /tmp/radian-sandbox-escape-344689-0/ws/proj/.git/info/exclude: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/ws/proj/.git/info/exclude: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "error: key does not contain a section: x",
@@ -241,7 +346,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "error: key does not contain a section: x\nerror: could not lock config file .git/config: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "error: key does not contain a section: x",
@@ -251,8 +359,11 @@
       "name": "git_add",
       "note": "",
       "passed": true,
-      "sandbox_detail": "error: key does not contain a section: x\nfatal: Unable to create '/tmp/radian-sandbox-escape-344689-0/ws/proj/.git/index.lock': Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "error: key does not contain a section: x\nfatal: Unable to create '/tmp/radian-sandbox-escape-712981-0/ws/proj/.git/index.lock': Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -262,8 +373,11 @@
       "name": "worktree_pointer",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: /tmp/radian-sandbox-escape-344689-0/ws/wt/.git: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/ws/wt/.git: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -273,8 +387,11 @@
       "name": "shared_gitdir",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: /tmp/radian-sandbox-escape-344689-0/main/.git/worktrees/wt/gitdir: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/main/.git/worktrees/wt/gitdir: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -284,8 +401,11 @@
       "name": "shared_git_via_symlink",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: /tmp/radian-sandbox-escape-344689-0/ws/wt/leakgit/hooks/x: Read-only file system",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: cannot create /tmp/radian-sandbox-escape-712981-0/ws/wt/leakgit/hooks/x: Read-only file system",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "A  new.txt | error: key does not contain a section: x",
@@ -296,18 +416,24 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "A  new.txt | error: key does not contain a section: x",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
-      "control_detail": "34af7f9 init | error: key does not contain a section: x",
+      "control_detail": "bd480e2 init | error: key does not contain a section: x",
       "control_succeeded": true,
       "expect": "must_succeed",
       "group": "git_readonly",
       "name": "git_log_ok",
       "note": "",
       "passed": true,
-      "sandbox_detail": "34af7f9 init | error: key does not contain a section: x",
-      "sandbox_succeeded": true
+      "sandbox_detail": "bd480e2 init | error: key does not contain a section: x",
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -317,8 +443,11 @@
       "name": "fake_ssh_key_unreadable",
       "note": "",
       "passed": true,
-      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-344689-0/home/.ssh/id_ed25519: No such file or directory",
-      "sandbox_succeeded": false
+      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-712981-0/home/.ssh/id_ed25519: No such file or directory",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -329,7 +458,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -339,8 +471,11 @@
       "name": "sessions_unreadable",
       "note": "",
       "passed": true,
-      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-344689-0/home/.radian/sessions/s.jsonl: No such file or directory",
-      "sandbox_succeeded": false
+      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-712981-0/home/.radian/sessions/s.jsonl: No such file or directory",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -350,8 +485,11 @@
       "name": "memory_unreadable",
       "note": "",
       "passed": true,
-      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-344689-0/home/.radian/memory/m.txt: No such file or directory",
-      "sandbox_succeeded": false
+      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-712981-0/home/.radian/memory/m.txt: No such file or directory",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -359,10 +497,41 @@
       "expect": "must_fail",
       "group": "radian_home",
       "name": "credentials_unreadable",
-      "note": "not run: the Linux VM is paused; expected to match the macOS case",
+      "note": "",
       "passed": true,
-      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-344689-0/home/.radian/credentials/auth.json: No such file or directory",
-      "sandbox_succeeded": false
+      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-712981-0/home/.radian/credentials/auth.json: No such file or directory",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
+    },
+    {
+      "control_detail": "",
+      "control_succeeded": true,
+      "expect": "must_fail",
+      "group": "radian_home",
+      "name": "trust_unreadable",
+      "note": "",
+      "passed": true,
+      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-712981-0/home/.radian/trust/trust.json: No such file or directory",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
+    },
+    {
+      "control_detail": "",
+      "control_succeeded": true,
+      "expect": "must_succeed",
+      "group": "radian_home",
+      "name": "skills_readable",
+      "note": "",
+      "passed": true,
+      "sandbox_detail": "",
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -373,7 +542,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -384,7 +556,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -394,8 +569,11 @@
       "name": "moved_sessions_unreadable",
       "note": "",
       "passed": true,
-      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-344689-0/custom-sessions/x.jsonl: No such file or directory",
-      "sandbox_succeeded": false
+      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-712981-0/custom-sessions/x.jsonl: No such file or directory",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -405,8 +583,11 @@
       "name": "nested_sessions_unreadable",
       "note": "",
       "passed": true,
-      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-344689-0/ws/inside-sessions/s.jsonl: No such file or directory",
-      "sandbox_succeeded": false
+      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-712981-0/ws/inside-sessions/s.jsonl: No such file or directory",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -417,7 +598,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -428,7 +612,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "server=sandbox-echo tools=1 echo=hello-mcp",
@@ -439,7 +626,10 @@
       "note": "minimal stdio MCP server under the sandbox",
       "passed": true,
       "sandbox_detail": "server=sandbox-echo tools=1 echo=hello-mcp",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -450,7 +640,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -461,7 +654,10 @@
       "note": "",
       "passed": true,
       "sandbox_detail": "",
-      "sandbox_succeeded": true
+      "sandbox_succeeded": true,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     },
     {
       "control_detail": "",
@@ -471,8 +667,11 @@
       "name": "signal_outside_process",
       "note": "a same-user process outside the sandbox, started by this test",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 1: kill: (344950) - No such process",
-      "sandbox_succeeded": false
+      "sandbox_detail": "/bin/sh: 1: kill: No such process",
+      "sandbox_succeeded": false,
+      "skip": null,
+      "skipped": false,
+      "verdict": "PASS"
     }
   ],
   "orphans": "(no orphan processes)",

@@ -53,6 +53,15 @@ pub enum ResourceMatcher {
     Any,
     /// A file path, matched after resolution against the canonical prefix.
     PathUnder(PathBuf),
+    /// A `.git` executable entry under one discovered git directory (ADR 0038 decision 3):
+    /// matches when the resolved path is `config`, `config.worktree`, `hooks/...`, a
+    /// submodule's `config` or `hooks/...`, or a linked worktree's `gitdir`/`commondir`/
+    /// `config.worktree` under the directory (the shared list in `radian_sandbox::git_exec`).
+    /// The whole git directory is **not** matched — `.git/info/exclude` stays writable — and
+    /// a worktree pointer **file** is not matched either (deny it with [`ResourceMatcher::PathUnder`]
+    /// on the file itself). Matching is by path components, so `config` never spills onto
+    /// `config-other`.
+    GitExec(PathBuf),
     /// A simple shell command whose tokens start with this prefix.
     CommandPrefix(Vec<String>),
     /// An exact MCP tool alias (or any tool name when the call has no path/command).
@@ -145,7 +154,9 @@ impl Evaluated {
 
 /// Combines every matching rule by priority: `Deny` > `Ask` > `Allow`; no match is `Ask`.
 ///
-/// `allow`/`ask` command rules only match a simple command (see [`crate::shell`]); `deny`
+/// `allow`/`ask` command rules only match a simple command (see [`crate::shell`]);
+/// an `allow` rule additionally never matches a command that starts with a
+/// runs-its-arguments program ([`crate::shell::WRAPPER_PROGRAMS`]); `deny`
 /// command rules are matched conservatively over every segment. Path rules match the
 /// **resolved** path, so `..` and symlinks cannot change which rule they hit.
 pub fn evaluate(rules: &[Rule], workspace: &Path, call: &ToolCall) -> Evaluated {
@@ -160,9 +171,17 @@ pub fn evaluate(rules: &[Rule], workspace: &Path, call: &ToolCall) -> Evaluated 
             (ResourceMatcher::PathUnder(prefix), Resource::Path(raw)) => {
                 resolve(workspace, raw).starts_with(prefix)
             }
+            (ResourceMatcher::GitExec(git_dir), Resource::Path(raw)) => {
+                radian_sandbox::is_git_exec_entry(git_dir, &resolve(workspace, raw))
+            }
             (ResourceMatcher::CommandPrefix(prefix), Resource::Command(command)) => {
                 if rule.action == Action::Deny {
                     shell::deny_matches(command, prefix)
+                } else if rule.action == Action::Allow && shell::starts_with_wrapper(command) {
+                    // A runs-its-arguments program (`xargs rm`, `sh -c …`) only shows the
+                    // wrapper's own tokens; a prefix rule cannot see what it will run, so
+                    // it never allows it. `deny` still runs first, above.
+                    false
                 } else {
                     shell::simple_prefix_matches(command, prefix)
                 }

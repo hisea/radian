@@ -100,6 +100,7 @@ impl Profile {
             rules.extend(memory_rules());
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
+            rules.extend(git_exec_denies(ws));
             rules.extend([
                 Rule::new(
                     ToolMatcher::Name("shell".into()),
@@ -119,11 +120,12 @@ impl Profile {
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
             rules.extend([
-                // Still ask: full-access is not "run anything silently".
+                // `full` trusts the environment (like pi): no built-in prompt.
+                // A user's own `deny`/`ask` rules still win (deny > ask > allow).
                 Rule::new(
                     ToolMatcher::Name("shell".into()),
                     ResourceMatcher::Any,
-                    Action::Ask,
+                    Action::Allow,
                 ),
                 Rule::new(ToolMatcher::Mcp, ResourceMatcher::Any, Action::Allow),
             ]);
@@ -271,6 +273,31 @@ fn always_allowed() -> Vec<Rule> {
         .collect()
 }
 
+/// ADR 0038 decision 3: in the `workspace` tier the file tools deny the `.git` entries git
+/// can execute — the same shared list the sandbox enforces (`radian_sandbox::git_exec`).
+/// `write`/`patch` never enter the sandbox, so without these rules the model could write
+/// `.git/hooks/pre-commit` and have it run at the next commit. `full` has no such rules by
+/// design (it allows everything). A worktree pointer file is denied whole: rewriting it
+/// repoints git at a gitdir the model controls.
+fn git_exec_denies(workspace: &Path) -> Vec<Rule> {
+    const REASON: &str = "denied by ADR 0038: .git entries git can execute (config, hooks) are read-only in the workspace tier; writing them would run code outside the sandbox";
+    let mut rules = Vec::new();
+    for git_path in radian_sandbox::discover_git_metadata(workspace) {
+        for tool in ["write", "patch"] {
+            let resource = if git_path.is_dir() {
+                ResourceMatcher::GitExec(git_path.clone())
+            } else {
+                ResourceMatcher::PathUnder(git_path.clone())
+            };
+            rules.push(
+                Rule::new(ToolMatcher::Name(tool.into()), resource, Action::Deny)
+                    .with_reason(REASON),
+            );
+        }
+    }
+    rules
+}
+
 /// File modification allowed only when the resolved path stays under the workspace.
 fn write_under(workspace: &Path) -> Vec<Rule> {
     ["write", "patch"]
@@ -303,10 +330,41 @@ mod tests {
         crate::rule::evaluate(profile.rules(), &profile.workspace, &call(name)).action
     }
 
+    /// A fresh empty directory, removed on drop. `workspace_write` discovers git metadata
+    /// under the workspace, so these tests use an isolated dir rather than the shared temp
+    /// dir itself (which can hold near a million entries on a lived-in machine and make
+    /// each profile build walk all of them).
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "radian-profile-test-{}-{label}-{n}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(std::fs::canonicalize(&dir).unwrap())
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
     /// ADR 0021 D5/D7: `memory_search` is allowed in both tiers; no memory tool asks.
     #[test]
     fn memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("memory");
         for profile in [
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
@@ -333,7 +391,7 @@ mod tests {
     /// never prompts. Removing the rule would make it fall through to the default `ask`.
     #[test]
     fn ask_user_is_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("ask-user");
         for profile in [
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
@@ -349,7 +407,7 @@ mod tests {
     /// make it fall through to the default `ask` and be denied without a terminal.
     #[test]
     fn subagent_is_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("subagent");
         for profile in [
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
@@ -363,7 +421,7 @@ mod tests {
     /// them and they never prompt (they enforce the workspace boundary in `radian-coding`).
     #[test]
     fn the_search_tools_are_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("search");
         for profile in [
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
@@ -378,7 +436,7 @@ mod tests {
     /// Removing the rule would make it fall through to the default `ask`.
     #[test]
     fn skill_is_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("skill");
         for profile in [
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),

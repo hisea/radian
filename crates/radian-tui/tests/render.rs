@@ -2797,8 +2797,8 @@ fn the_login_wizard_uses_the_text_hierarchy() {
 }
 
 /// The startup trust modal (ADR 0031 T3, ADR 0035): the shared panel with the
-/// choices through the shared list, at 80/120 columns and in the ascii tier. The cursor's
-/// default is the fail-safe `UntrustHere`.
+/// choices through the shared list, at 80/120 columns and in the ascii tier. The sandbox
+/// choice comes first and the cursor's default is on it.
 #[test]
 fn the_trust_panel_snapshot_at_80_120_and_ascii() {
     let mut app = App::new("m", "s");
@@ -2812,8 +2812,8 @@ fn the_trust_panel_snapshot_at_80_120_and_ascii() {
         "{text}"
     );
     assert!(
-        text.contains("❯ Do not trust this directory (/work/example)"),
-        "the fail-safe default: {text}"
+        text.contains("❯ Trust this directory, and use the sandbox for this project"),
+        "the sandbox choice is first and pre-selected: {text}"
     );
     assert!(
         text.contains("↑/↓ choose · ⏎ select · esc do not trust"),
@@ -2835,7 +2835,10 @@ fn the_trust_panel_snapshot_at_80_120_and_ascii() {
     let terminal = render(&mut app, 80, 24);
     let text = screen(&terminal);
     assert!(text.contains("+- project trust "), "{text}");
-    assert!(text.contains("> Do not trust this directory"), "{text}");
+    assert!(
+        text.contains("> Trust this directory, and use the sandbox"),
+        "{text}"
+    );
     assert!(!text.contains('╭'), "{text}");
 }
 

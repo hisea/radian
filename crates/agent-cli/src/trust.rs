@@ -10,8 +10,9 @@ use radian_host::memory::commands::CommandError;
 use super::ui::LineHub;
 
 /// The startup trust question (ADR 0031 T3), the same one-line terminal shape as the
-/// approval: a numbered list, Enter takes the default (do not trust this directory). An
-/// unreadable or unrecognized answer is the default, never a trust.
+/// approval: a numbered list, Enter takes the default (trust this directory and use the
+/// sandbox for this project). A non-empty unrecognized answer is the fail-safe
+/// `UntrustHere`, never a trust.
 pub(crate) async fn trust_prompt(
     lines: &LineHub,
     workspace: &std::path::Path,
@@ -25,7 +26,7 @@ pub(crate) async fn trust_prompt(
         let label = choice
             .label(workspace)
             .unwrap_or_else(|| "Trust the parent directory".to_owned());
-        let marker = if *choice == Choice::UntrustHere {
+        let marker = if *choice == Choice::TrustHereSandbox {
             " (default)"
         } else {
             ""
@@ -34,7 +35,7 @@ pub(crate) async fn trust_prompt(
     }
     let choice_default = Choice::ALL
         .iter()
-        .position(|choice| *choice == Choice::UntrustHere)
+        .position(|choice| *choice == Choice::TrustHereSandbox)
         .map(|index| index + 1)
         .unwrap_or(1);
     eprint!("choice [{choice_default}]: ");
@@ -44,13 +45,15 @@ pub(crate) async fn trust_prompt(
     Some(trust_choice_from_answer(answer.trim()))
 }
 
-/// The answer to the trust question, as a choice. Anything unrecognized (including an empty
-/// line) is the fail-safe default, never a trust. The numbers follow [`Choice::ALL`].
+/// The answer to the trust question, as a choice. An empty line takes the default (the
+/// sandbox choice); any other unrecognized answer is the fail-safe `UntrustHere`, never a
+/// trust. The numbers follow [`Choice::ALL`].
 pub(crate) fn trust_choice_from_answer(answer: &str) -> radian_host::trust::Choice {
     use radian_host::trust::Choice;
     match answer.trim() {
-        "1" => Choice::TrustHere,
-        "2" => Choice::TrustHereSandbox,
+        "" => Choice::TrustHereSandbox,
+        "1" => Choice::TrustHereSandbox,
+        "2" => Choice::TrustHere,
         "3" => Choice::TrustParent,
         "4" => Choice::TrustSession,
         "6" => Choice::UntrustSession,
@@ -83,17 +86,20 @@ pub(crate) fn confirm_or_refuse(message: &str) -> Result<(), CommandError> {
 mod tests {
     use super::*;
 
-    /// ADR 0031 T3 / ADR 0043 decision 2: only the six numbered answers are choices; anything
-    /// else (an empty line, `5`, a stray `y`) is the fail-safe default.
+    /// ADR 0031 T3 / ADR 0043 decision 2 (revised 2026-10-20): the numbers follow
+    /// [`Choice::ALL`] with the sandbox choice first; an empty line takes the default
+    /// (the sandbox choice), and any other unrecognized answer is the fail-safe
+    /// `UntrustHere`, never a trust.
     #[test]
-    fn the_trust_answer_defaults_to_untrust() {
+    fn the_trust_answer_follows_the_new_order_and_fails_safe() {
         use radian_host::trust::Choice;
-        assert_eq!(trust_choice_from_answer("1"), Choice::TrustHere);
-        assert_eq!(trust_choice_from_answer(" 2 "), Choice::TrustHereSandbox);
-        assert_eq!(trust_choice_from_answer("3"), Choice::TrustParent);
+        assert_eq!(trust_choice_from_answer(""), Choice::TrustHereSandbox);
+        assert_eq!(trust_choice_from_answer("1"), Choice::TrustHereSandbox);
+        assert_eq!(trust_choice_from_answer("2"), Choice::TrustHere);
+        assert_eq!(trust_choice_from_answer(" 3 "), Choice::TrustParent);
         assert_eq!(trust_choice_from_answer("4"), Choice::TrustSession);
         assert_eq!(trust_choice_from_answer("6"), Choice::UntrustSession);
-        for other in ["", "5", "y", "yes", "99", "trust"] {
+        for other in ["5", "y", "yes", "99", "trust"] {
             assert_eq!(
                 trust_choice_from_answer(other),
                 Choice::UntrustHere,

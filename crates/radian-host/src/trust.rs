@@ -98,13 +98,14 @@ impl Setup {
 }
 
 /// The six choices the startup prompt offers (ADR 0031 T3 revision by ADR 0043 decision 2;
-/// owner ruling 6). The order is the display order; `UntrustHere` is the default highlight.
+/// owner ruling 6, revised 2026-10-20: for a project with no trusted decision the sandbox
+/// choice comes first and is the default highlight). The order is the display order.
 /// `TrustHereSandbox` trusts this directory **and** remembers `workspace` for it in
 /// `~/.radian/access/access.json`, the same record `/access` writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
-    TrustHere,
     TrustHereSandbox,
+    TrustHere,
     TrustParent,
     TrustSession,
     UntrustHere,
@@ -113,8 +114,8 @@ pub enum Choice {
 
 impl Choice {
     pub const ALL: [Choice; 6] = [
-        Choice::TrustHere,
         Choice::TrustHereSandbox,
+        Choice::TrustHere,
         Choice::TrustParent,
         Choice::TrustSession,
         Choice::UntrustHere,

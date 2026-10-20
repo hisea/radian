@@ -8,10 +8,13 @@
 //!
 //! - Rules are `(tool matcher, resource matcher) -> allow | ask | deny`. Priority is
 //!   `deny` > `ask` > `allow`; **no rule matching means `ask`**.
-//! - A command `allow` rule only matches a **simple command** — no `; & | \` $ ( ) > <`,
-//!   quotes, globs or newline. Any of those keeps the call at `ask`. A command `deny` rule is
-//!   matched conservatively over every separator-split segment, so any segment hit denies the
-//!   whole command. See [`shell`] for the exact, deliberately narrow rules and their limits.
+//! - A command `allow` rule only matches a **simple command** — no `; & |` `` ` `` `$ ( ) > <`,
+//!   quotes, globs or newline; a wrapper first token (`xargs`, `sh`, …) never matches
+//!   either. Any of those keeps the call at `ask`, unless the command splits into
+//!   `&&`/`||`/`;`/`|`-separated simple segments that are **all** allowed (a user rule
+//!   or the read-only table per segment, with `cd` and wrapper restrictions). A command
+//!   `deny` rule is matched conservatively over every separator-split segment, so any
+//!   segment hit denies the whole command. See [`shell`] for the exact, deliberately narrow rules and their limits.
 //! - Path rules match the **resolved** path (symlinks and `..` removed), so they cannot be
 //!   escaped by either.
 //! - **This is not a shell parser and does not claim to be one.** Aliases, `eval`, a called
@@ -28,6 +31,7 @@
 pub mod approval;
 pub mod audit;
 pub mod profile;
+pub mod readonly;
 pub mod rule;
 pub mod shell;
 

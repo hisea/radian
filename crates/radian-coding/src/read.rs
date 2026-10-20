@@ -43,7 +43,8 @@ pub(crate) fn schema() -> serde_json::Value {
             "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Maximum number of lines to read; no line limit if omitted."
+                "description": "Maximum number of lines to read; no line limit if omitted. \
+                                For a directory, caps entries instead (default 500, at most 5000)."
             }
         },
         "required": ["path"],

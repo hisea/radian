@@ -215,10 +215,9 @@ impl App {
                         } else {
                             crate::profile::AccessSource::Session
                         };
-                        self.set_tier(format!(
-                            "{}{}",
-                            tier.as_str(),
-                            self.session.access_source.suffix()
+                        self.set_tier(crate::profile::footer_tier(
+                            tier,
+                            self.session.access_source,
                         ));
                         // `!`/`!!` run under the new tier's sandbox; a successful switch
                         // always has one (a failed probe refuses in `SetAccess`).

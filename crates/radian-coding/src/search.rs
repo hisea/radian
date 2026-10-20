@@ -13,11 +13,14 @@
 //! became fd-relative (its `WalkBuilder` opens directories by path, which is the window this
 //! closes); the ignore **matching** still uses `ignore::gitignore`:
 //!
-//! - `.gitignore` and `.ignore` files **inside** the walked tree are respected, with or
-//!   without a git repository, so a plain directory is searched the same way a checkout is;
-//!   a directory that holds a `.git` directory also contributes its `.git/info/exclude`;
-//! - no ignore file **above** the base is read and the user's global gitignore is not
-//!   consulted, so the same tree gives the same result on every machine;
+//! - `.gitignore` and `.ignore` files are respected with or without a git repository, so a
+//!   plain directory is searched the same way a checkout is; the files **above** the base —
+//!   every directory from the workspace root down to the base's parent, outermost first —
+//!   apply too (a nearer directory's rules win, as in git), so a repository-root ignore
+//!   keeps working when the search starts in a subdirectory; a directory that holds a `.git`
+//!   directory also contributes its `.git/info/exclude`;
+//! - the user's global gitignore is not consulted, so the same tree gives the same result
+//!   on every machine;
 //! - the `.git` directory is pruned, not merely hidden;
 //! - `.radian-worktrees/` is pruned too: it can hold one git worktree per checkout, each a
 //!   full tree, so descending into it would return every file once per worktree (and search
@@ -56,11 +59,47 @@ pub(crate) struct Found {
     pub file: File,
 }
 
+/// The ignore matchers for every directory from the filesystem root down to (but not
+/// including) the search base, outermost first. `root_fd` is the open fd of the root
+/// `base_rel` is relative to (the workspace root, or a read-only root); each level is opened
+/// fd-relative from it exactly as the walk does (ADR 0039 decision 2: no path re-open,
+/// `O_NOFOLLOW | O_DIRECTORY`), so the matchers the walk starts with are the ones git itself
+/// would apply above the base. A level that cannot be opened or listed is skipped, like an
+/// unreadable directory inside the walk.
+pub(crate) fn ancestor_matchers(root_fd: &File, base_rel: &Path) -> Vec<Gitignore> {
+    let parts = safe_fs::components(base_rel).unwrap_or_default();
+    let mut matchers = Vec::with_capacity(parts.len());
+    // Every strict parent of the base, outermost first: the root, then each prefix.
+    for index in 0..parts.len() {
+        let prefix: PathBuf = parts[..index].iter().collect();
+        let dir: Option<File> = if index == 0 {
+            None
+        } else {
+            safe_fs::walk_dirs(root_fd, Path::new(""), &parts[..index]).ok()
+        };
+        let dir_ref = dir.as_ref().unwrap_or(root_fd);
+        let Ok(entries) = safe_fs::read_dir(dir_ref) else {
+            continue;
+        };
+        if let Some(matcher) = ignore_rules(dir_ref, &prefix, &entries) {
+            matchers.push(matcher);
+        }
+    }
+    matchers
+}
+
 /// Walks `base_dir` (an open directory fd whose workspace-relative path is `base_rel`) and
 /// calls `visit` for every regular file that the ignore rules keep, in sorted order per
-/// directory. `visit` returns `false` to stop early.
-pub(crate) fn walk(base_dir: &File, base_rel: &Path, visit: &mut dyn FnMut(Found) -> bool) -> bool {
-    let mut matchers: Vec<Gitignore> = Vec::new();
+/// directory. `visit` returns `false` to stop early. `ancestors` are the matchers for the
+/// directories above the base ([`ancestor_matchers`]), outermost first, so a repository-root
+/// ignore keeps working when the search starts in a subdirectory.
+pub(crate) fn walk(
+    base_dir: &File,
+    base_rel: &Path,
+    ancestors: Vec<Gitignore>,
+    visit: &mut dyn FnMut(Found) -> bool,
+) -> bool {
+    let mut matchers: Vec<Gitignore> = ancestors;
     walk_dir(base_dir, base_rel, &mut matchers, visit)
 }
 

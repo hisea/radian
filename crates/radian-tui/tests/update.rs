@@ -526,16 +526,17 @@ fn escaping_the_trust_modal_untrusts_this_session_only() {
         "Esc writes no trust.json: the next start asks again"
     );
 
-    // Enter takes the highlighted default: the **persistent** "do not trust this directory".
+    // Enter takes the highlighted default: the sandbox choice (trust this directory and
+    // remember `workspace` for the project). It is persistent, unlike Esc.
     let mut app = App::new("m", "s");
     app.push_trust_modal(std::path::PathBuf::from("/work/example"));
     assert_eq!(
         app.on_key(key(KeyCode::Enter)).effects,
         vec![Effect::SetTrust {
-            choice: radian_host::trust::Choice::UntrustHere
+            choice: radian_host::trust::Choice::TrustHereSandbox
         }]
     );
-    assert!(radian_host::trust::Choice::UntrustHere.persistent());
+    assert!(radian_host::trust::Choice::TrustHereSandbox.persistent());
 }
 
 /// Esc with an empty input and a running turn cancels it (README): the app-level effect.

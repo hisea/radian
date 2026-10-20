@@ -965,3 +965,42 @@ async fn ambiguous_crlf_reports_content_lines_without_cr() {
         "an ambiguous match changes nothing"
     );
 }
+
+/// Item 11: the multi-edit atomicity rule lives in the `edits` schema field only (the
+/// constraint), not in the description (the usage); and no field still calls `old`/`new`
+/// the "legacy form" while the description treats it as the main usage.
+#[tokio::test]
+async fn the_multi_edit_rule_lives_in_the_schema_only_and_nothing_is_legacy() {
+    use agent_core::{ToolProvider, ToolSession};
+    let dir = TempDir::new("patch-desc");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let session = tools(&root).open_session().await.unwrap();
+    let spec = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "patch")
+        .expect("the patch spec");
+    assert!(
+        spec.description.contains("instead of `old`/`new`"),
+        "the description keeps the usage: {}",
+        spec.description
+    );
+    assert!(
+        !spec.description.contains("must be disjoint"),
+        "the atomicity rule must appear only in the schema: {}",
+        spec.description
+    );
+    let edits = &spec.input_schema["properties"]["edits"]["description"];
+    assert!(
+        edits
+            .as_str()
+            .is_some_and(|text| text.contains("must be disjoint")),
+        "the schema keeps the atomicity rule: {edits}"
+    );
+    let new = &spec.input_schema["properties"]["new"]["description"];
+    assert!(
+        new.as_str().is_some_and(|text| !text.contains("legacy")),
+        "no field still calls `old`/`new` legacy: {new}"
+    );
+}

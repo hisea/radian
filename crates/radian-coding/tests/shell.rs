@@ -21,7 +21,8 @@ use agent_core::{
 use common::{TempDir, sentinel_outside};
 use radian_coding::{CodingTools, CodingToolsError, Limits};
 use radian_sandbox::{
-    ProbeReport, Sandbox, SandboxBackend, SandboxError, SandboxMode, SandboxPolicy, SandboxSlot,
+    ProbeReport, Sandbox, SandboxBackend, SandboxCommand, SandboxError, SandboxMode, SandboxPolicy,
+    SandboxSlot,
 };
 use serde_json::{Value, json};
 
@@ -196,7 +197,7 @@ impl SandboxBackend for FailingBackend {
         _policy: &SandboxPolicy,
         _program: &OsStr,
         _args: &[OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         Err(SandboxError::BackendUnavailable {
             backend: "failing",
             detail: "not available".into(),
@@ -788,6 +789,68 @@ async fn the_shell_description_points_file_reading_and_searching_at_the_read_onl
     assert!(checked >= 1, "no shell was built to check");
 }
 
+/// Items 6-9: the `shell` description kills the whole *process group* (never "the whole
+/// session", which reads as the agent session); it states the timing numbers the model
+/// otherwise cannot see (no `timeout_secs` → moved to the background at the threshold
+/// and never killed for time; with it → killed at the deadline counted from the start;
+/// `background: true` ignores it; each stream is capped); the `full` tier names no ADR
+/// number and no `--profile` flag; and only `grep`/`glob` are said to run in parallel
+/// (`read` has no blocking pool yet).
+#[tokio::test]
+async fn the_shell_description_states_the_timing_numbers_and_the_process_group() {
+    let dir = TempDir::new("shell-spec-numbers");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.unwrap();
+    let spec = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "shell")
+        .expect("shell is advertised with a sandbox");
+    for wanted in [
+        "kills the whole process group",
+        "never killed for time",
+        "by default 120 s",
+        "by default 60 s, at most 600 s",
+        "counts from the command's start",
+        "by default 24 KiB",
+        "ignores `timeout_secs`",
+        "`grep` and `glob` report truncation, use less context, and run in parallel",
+    ] {
+        assert!(
+            spec.description.contains(wanted),
+            "{wanted:?} is missing from {}",
+            spec.description
+        );
+    }
+    for gone in [
+        "kills the whole session",
+        "they report truncation",
+        "(ADR 0043)",
+        "--profile workspace",
+    ] {
+        assert!(
+            !spec.description.contains(gone),
+            "{gone:?} must be gone from {}",
+            spec.description
+        );
+    }
+    // The schema fields carry the same numbers (the model reads them too).
+    let timeout = &spec.input_schema["properties"]["timeout_secs"]["description"];
+    assert!(
+        timeout.as_str().is_some_and(
+            |text| text.contains("by default 60") && text.contains("whole process group")
+        ),
+        "the `timeout_secs` field must name the default and the process group: {timeout}"
+    );
+    let budget = &spec.input_schema["properties"]["max_output_bytes"]["description"];
+    assert!(
+        budget.as_str().is_some_and(|text| text.contains("24 KiB")),
+        "the `max_output_bytes` field must name the budget: {budget}"
+    );
+}
+
 /// ADR 0020 decision 4: the sandbox's in-workspace temp directory is `.radian-sandbox/`, not
 /// `.radian/`, so it cannot collide with `~/.radian/` when the workspace is `$HOME`.
 #[tokio::test]
@@ -938,10 +1001,10 @@ impl SandboxBackend for GitBackend {
         policy: &SandboxPolicy,
         program: &OsStr,
         args: &[OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         let mut command = Command::new(program);
         command.args(args).current_dir(&policy.workspace);
-        Ok(command)
+        Ok(SandboxCommand::new(command))
     }
 
     fn git_writable_except_exec(&self, _policy: &SandboxPolicy) -> bool {

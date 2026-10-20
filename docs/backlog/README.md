@@ -33,17 +33,11 @@
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
 | `sandbox-auto-allow-shell.md` | decided | 0012、0016、0043 | 片 0 Linux seccomp 堵 Unix socket；片 1 workspace 沙箱内 shell `allow`、越界显式请求再 `ask`；片 2 会话授权按前缀 |
-| `exec-jsonl-output.md` | decided | 0032、0010、0006，新 ADR | `--output jsonl`：journal 记录原样 + live 行 + `Result` 行；退出码 0/1/2/3/4/130 按结局；`-p -` 读 stdin |
-| `tool-description-audit.md` | decided（pi B，remove-safe-tier 之后、full-tier-unrestricted 之前） | 0039、0021、0024、0025、0037 | 工具描述 10 处与代码不符（`grep`/`glob` 子目录不读上层 `.gitignore` 连行为一起改，`shell` 写明超时/转后台/输出预算，`ask_user` 去掉按字符数的 `maxLength`…）+ 4 处重复删掉；`<runtime>` 清单保留，不做整体压缩 |
-| `full-tier-unrestricted.md` | decided | 0012 主、0043、0016、0038、0031 | `full` 档像 pi：shell `allow`，不弹内建提示，`--yes` 在 `full` 下无作用；启动行写 `no prompts`；用户 deny 仍生效、陌生项目信任门缺省高亮 workspace + 启动画面字标下提示 `/trust`、`always` 保留＼� |
-| `shell-readonly-allow.md` | decided | 0012 修订、0039 | 内建一组只读命令免问（`git status`、`ls`、`rg`…），路径限工作区、不带可执行或写文件选项；`full` 全放行后实际作用在 `workspace` 与 `approval = always` |
-| `shell-compound-allow.md` | decided | 0012 不变，改 `radian-permissions/README.md` | 未加引号的 `&& \|\| ; \|` 切段，每段都命中 allow 才 allow，`xargs`/`env`/`sh` 等执行其参数的程序不放行 |
 | `remove-git-diff.md` | decided（`shell-readonly-allow` 之后） | 0043、0039、0028、0012 | 删 `git_diff`（模型 12:1 走 shell），留一个版本的别名；shell 里的 git 要不要注入加固配置待决 |
-| `context-at-imports.md` | decided（生态 1/4） | 0036 | 三个候选文件都展开 `@path` 导入：4 层、跳过代码块、只展开仓库内、计入 128 KiB，启动行列出 |
+| `exec-waits-for-jobs.md` | idea | 0037、0044、0032 | `radian exec -p` 一轮结束就退出，后台 job 随之被杀（夜间 LXC worker 的 Verify 因此中断）；候选：等 job 并按 0037 唤醒、`-p` 禁后台、只改提示 |
 | `mcp-servers-json.md` | decided（生态 2/4） | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门、按内容哈希确认，确认即批准其 server（一道门）；缺省 `inherit_env=["HOME"]`；环境白名单不变；MCP 文本结果套 `read` 的 64 KiB 上限并带截断标记 |
 | `command-hooks-claude-subset.md` | decided（生态 3/4） | 新 ADR；0012、0031、0011、0017、0016 | 外部命令 hook 只做 `PreToolUse`/`PostToolUse`/`Stop`，配置与 stdin 用 Claude/Codex 的子集，`allow`/`ask` 拒收，用户级 `[hooks]`、项目级 `.radian/hooks.json` 进信任门，工具名只在导入时翻译；吸收总报告第 17 条；编辑后检查是项目级 `PostToolUse`：配了才跑、同步每次、不批处理不延后、不内置不自动启用（本机数据：92% 的编辑消息只有一次编辑、跨轮段平均 1.83） |
 | `import-claude.md` | decided（生态 4/4） | 新 ADR；0029、0008、0025、0031 | `radian config import-claude` 一次性翻译，来源哪一级产物落哪一级， commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话与 memory；依赖前两条与 project-skills |
-| `workspace-git-exec-entries-file-tools.md` | idea（bug 待验证） | 0038、0039 | `write`/`patch` 不经沙箱，`workspace` 档能写 `.git/hooks/`，绕过 0038 的只读清单；修法倾向规则层 deny + 与沙箱共用一张清单 |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `subagent-ask-forwarding.md` | idea | 0043、0010、0024 | 子会话仍要问的 ask 转回父会话；缺 durable `PermissionRequested` 与 control 收审批；依赖沙箱内放行 |

@@ -16,6 +16,7 @@ mod command;
 mod error;
 mod events;
 mod inspect;
+mod jsonl;
 /// `radian login` / `radian logout` (ADR 0026 D3).
 mod login;
 mod profile;
@@ -114,8 +115,9 @@ pub struct Cli {
     profile: Option<profile::ProfileArg>,
 
     /// Allow a simple shell command prefix without asking (repeatable), e.g.
-    /// `--allow-shell-command "git status"`. Only a simple command matches; a composite
-    /// (`git status; rm -x`) still asks. There is no allow rule for shell by default.
+    /// `--allow-shell-command "git status"`. Only a simple command matches; in the `workspace`
+    /// tier a composite (`git status; rm -x`) still asks. The `workspace` tier has no allow
+    /// rule for shell by default; the `full` tier allows shell without asking.
     #[arg(long = "allow-shell-command", value_name = "PREFIX")]
     allow_shell_command: Vec<String>,
 
@@ -131,9 +133,16 @@ pub struct Cli {
     #[arg(long)]
     yes: bool,
 
-    /// One-shot mode: run this prompt, then exit.
+    /// One-shot mode: run this prompt, then exit. `-p -` reads the prompt from stdin to
+    /// EOF; a literal `-` prompt is not possible.
     #[arg(short, long, conflicts_with = "list")]
     prompt: Option<String>,
+
+    /// Machine-readable output: `--output jsonl` prints every durable journal line, the
+    /// live-only delta lines and a closing `Result` record to stdout, one JSON object per
+    /// line. Omitted, stdout carries only the model text.
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    output: Option<jsonl::OutputMode>,
 
     /// Extra request headers, repeatable: `--header NAME=VALUE`. The value is never
     /// printed; `Authorization` is refused because the key comes only from
@@ -229,8 +238,9 @@ pub struct Cli {
     include_usage: Option<bool>,
 
     /// Allow a simple shell command prefix without asking (repeatable), e.g.
-    /// `--allow-shell-command "git status"`. Only a simple command matches; a composite
-    /// (`git status; rm -x`) still asks. There is no allow rule for shell by default.
+    /// `--allow-shell-command "git status"`. Only a simple command matches; in the `workspace`
+    /// tier a composite (`git status; rm -x`) still asks. The `workspace` tier has no allow
+    /// rule for shell by default; the `full` tier allows shell without asking.
 
     /// The per-turn model call limit. The default is shared with the TUI and named in
     /// `--help`; agent-core's own default is a lower fuse for a host that sets no limit.

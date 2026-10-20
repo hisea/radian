@@ -4,10 +4,12 @@
 `bubblewrap`。它只提供一件事——**受约束地启动一个子进程**；审批（`ApprovalPolicy`）与规则集
 （`ToolRuleSet`）不在本 crate，也**没有**接进 `agent-cli`。
 
+**`full` 的安全声明＼�：** `full` 信任你的环境，不弹任何内建审批，也不防陌生仓库里的提示注入——恶意的 skill、配置与上下文文件里的指令在 `full` 下畅通无阻。想要边界就用 `workspace`、容器或专用 OS 用户。
+
 **消费者（2026-10-12，Phase 3 shell 切片）：** `radian-coding` 的 `shell` 工具是第一个消费者
 （`CodingTools::with_sandbox`）；没有 `Sandbox` 时它根本不注册。三点值得记在这里：① `FullAccess`
 下后端是透明的（不探测、不包裹），但 shell 工具仍自己按 `allow_env` 清环境——**full 是
-"文件系统/网络不设限"，不是"把宿主环境交给模型控制的 shell"**；**full 不放开环境变量白名单**
+“文件系统/网络不设限”，不是“把宿主环境交给模型控制的 shell”**；**full 不放开环境变量白名单**
 ＼�。② 进程组清理：shell 工具用 `setsid` 让子进程自成会话与进程组
 （没有控制终端），超时/取消/leader 退出都杀整组（ADR 0016 取代了原先的 `process_group(0)`）。
 ③ 输出截断也是 shell 工具自己的策略：每流独立预算、保留头尾（尾部更大，因为失败命令的错误在
@@ -127,7 +129,19 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
   都整块只读）；敏感目录 `--tmpfs`（目录）或 `/dev/null`（文件）；
   `--clearenv` + 白名单；`HOME`/`TMPDIR` 在工作区内 `.radian-sandbox/{home,tmp}`。
 
-## 逃逸清单（两平台各 39 例，全部带"关掉沙箱后成功"的对照）
+## Linux seccomp 过滤器（片 0，2026-10-20）
+
+`workspace` 档在 Linux 上给 bwrap 传 `--seccomp FD`：FD 里是一个手写的 classic-BPF 程序（`crates/radian-sandbox/src/seccomp.rs`，只用 `libc` 常量，无新依赖），bwrap 在 exec 命令前以 `PR_SET_NO_NEW_PRIVS` 装上。规则按顺序：
+
+1. `seccomp_data.arch` 必须是本机（x86_64 取 `AUDIT_ARCH_X86_64`，aarch64 取 `AUDIT_ARCH_AARCH64`，编译期定），否则 `EPERM`：x86_64 上 32 位进程可能经 `int 0x80` 走 `socketcall`。**代价：32 位二进制在沙箱里跑不了。**
+2. x86_64 上 `seccomp_data.nr & 0x40000000`（x32 ABI 位）置位则 `EPERM`。
+3. `nr == SYS_socket` 且 `args[0]` 低 32 位等于 `AF_UNIX`（1）则 `EPERM`：路径与抽象 socket 一并堵上（两者都要先建 socket），seccomp 看不见路径所以没有按路径放行。
+4. `nr == SYS_io_uring_setup` 则 `EPERM`（`IORING_OP_SOCKET` 可以不经过 `socket` 建 socket）。
+5. 其余一律放行。`socketpair` 保持可用（无名连接对到不了外面）。
+
+只在 `workspace` 档装过滤器，`full` 不传 `--seccomp`。过滤器 fd 的生命期绑在返回的 `SandboxCommand` 上（每条命令一条新 pipe，drop 即关）：不用 `pre_exec`（shell 工具随后为 `setsid` 注册自己的 `pre_exec`，会整体替换掉）；也不在进程间共享 pipe（读偏移共享，第二条命令会读到 EOF 而 `EINVAL`，已实测）。macOS 的 seatbelt 路径白名单不变。
+
+## 逃逸清单（两平台各 48 例，全部带"关掉沙箱后成功"的对照）
 
 `radian-sandbox` 的 `harness`（`testing` feature）跑同一套矩阵：每条"应当失败"的用例都在
 `WorkspaceWrite` 下跑一次、在 `FullAccess` 对照下跑同一命令。`Case::passed()` 要求
@@ -297,15 +311,11 @@ macOS 后端**全开 `mach-lookup`**，`mach-lookup` 最小化排到 Phase 7。�
 另注：环境变量过滤属于**启动层**（本 crate 的 `command`），不是沙箱机制本身；`sandbox-exec` 与
 bwrap 都不过滤环境。
 
-**Unix socket（ADR 0016，2026-10-14）**：`(allow network*)` 同时放行了连接本机**任何同用户
+**Unix socket（ADR 0016，2026-10-14；Linux 片 0，2026-10-20）**：`(allow network*)` 同时放行了连接本机**任何同用户
 的 Unix socket**（herdr、ssh-agent、`docker.sock` 等），本修订之前的版本存在这个口子。现在开网时
 seatbelt 追加 `(deny network-outbound (remote unix-socket))`，只放行固定的 mDNSResponder（DNS 需要）
 和用户级配置 `[sandbox] allow_unix_sockets` 里写明的路径（canonicalize；失败只警告并跳过）。
-`mach-lookup` **仍是全放**（另一类本机 IPC，未收紧，单独评估）。Linux（bwrap）的同类问题已在
-Linux 上实测：路径 socket 经共享的只读根挂载可达，抽象 socket 在
-`workspace` 共享主机网络命名空间下可达。`[sandbox]
-allow_unix_sockets` 在 Linux 上没有效果（只有 macOS 的 seatbelt 读它；macOS only, no effect on
-Linux）。测量表见“未验证 / 已知边界”。
+`mach-lookup` **仍是全放**（另一类本机 IPC，未收紧，单独评估）。Linux（bwrap）的同类问题在片 0（2026-10-20）用 seccomp 堵上，见下“Linux seccomp 过滤器”：`workspace` 档拒绝一切 `AF_UNIX`，`allow_unix_sockets` 在 Linux 上被忽略并在启动输出里警告一次。测量表见“未验证 / 已知边界”（该节的 Linux 已知限制行随片 0 删除）。
 
 ## 复现 Linux 运行（VM）
 
@@ -403,24 +413,12 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 
 ## 未验证 / 已知边界
 
-- **只在 macOS 27.0.1（arm64）与一台 aarch64 Arch ARM VM（内核 7.2.6、bwrap 0.12.0、git 2.55.0）
-  上跑过**；
-  其他 macOS 版本、发行版、x86_64、容器内、setuid bwrap、无特权 userns 被禁用的发行版均未验证。
+- **只在 macOS 27.0.1（arm64）、一台 aarch64 Arch ARM VM（内核 7.2.6、bwrap 0.12.0、git 2.55.0）
+  与一片 x86_64 Linux 机（内核 6.8.12-1-pve，bwrap 0.11.1，片 0 在此跑过逃逸矩阵与 seccomp 单测）上跑过**；
+  其他 macOS 版本、发行版、容器内、setuid bwrap、无特权 userns 被禁用的发行版均未验证。
 - **没有测** `network = true` 的细粒度（只做全开/全关）；`mach-lookup` 最小化未做；时间注入类
   逃生未系统测试（`already-open fd` 不受限，spawner 不向子进程传可写 fd，但没有专门用例）。
-- **Unix socket（Linux：已实测、接受为已知限制，决定 4）**：bwrap 在任何
-  档位都不限制 Unix socket。macOS 的修复照旧有逃逸矩阵的 `unix_socket` 组（workspace 拒、白名单
-  放行、DNS 通）；Linux 上 `workspace_denied` 一例按已知限制报
-  `KNOWN-LIMIT`（不是 PASS 也不是 FAIL，macOS 侧保持严格）。`[sandbox] allow_unix_sockets`
-  在 Linux 上没有效果（macOS only; no effect on Linux）。实测（路径 listener 在 `/tmp` 下由沙箱外
-  持有；抽象 listener 同理）：
-
-  | tier（Linux bwrap） | 路径 socket | 抽象 socket |
-  |---|---|---|
-  | `workspace`（共享主机网络命名空间） | 可连（rc=0） | 可连（rc=0） |
-
-  原因：路径 socket 是共享只读根（`--ro-bind / /`）上的普通文件系统项，`connect()` 不受只读挂载
-  阻止；抽象 socket 的隔离靠网络命名空间，而 `workspace` 为保住出站 TCP/UDP 有意不建新的。
+- **Unix socket（Linux：片 0 已堵上，不再是已知限制，决定 4 重开）**：`workspace` 档 seccomp 拒绝一切 `AF_UNIX`（路径与抽象 socket 一并堵上），逃逸矩阵的 `unix_socket` 组在 Linux 上为 `workspace_denied` / `abstract_denied` / `whitelisted_denied`（白名单同样被拒）与 `dns_resolves` 全部 PASS；macOS 侧保持严格（拒、白名单放行、DNS 通）。`[sandbox] allow_unix_sockets` 在 Linux 上被忽略并在启动输出里警告一次（macOS 的 seatbelt 照旧读它）。旧实测结论（只读挂载挡不住 `connect()`、抽象 socket 随共享网络命名空间可达）被 seccomp 否决 `socket` 调用本身取代，不再成立。
 - `Safe` 档位在 Linux 上 `HOME`/`TMPDIR` 位于工作区但工作区只读，需要临时目录的命令会失败——
   这是 `Safe` 的诚实语义，未专门验证。
 - 兼容性轮次只覆盖列出的命令；任意第三方构建系统可能还需要别的放行。

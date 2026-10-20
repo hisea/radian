@@ -1227,8 +1227,9 @@ async fn pty_skills_extra_paths_are_read_from_the_config() {
 }
 
 /// ADR 0031 T3: a workspace with project resources and no saved decision shows the startup
-/// trust modal; Enter takes the default ("do not trust this directory"), writes `trust.json`
-/// and journals `ProjectTrustChanged`.
+/// trust modal. The default highlight is the sandbox choice,
+/// so this test moves down to "do not trust this directory", writes `trust.json` with
+/// Enter, and journals `ProjectTrustChanged`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_trust_modal_asks_and_enter_untrusts() {
@@ -1265,14 +1266,9 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
         "the trust modal is missing:\n{}",
         pty.screen()
     );
-    // All six options, and the default highlight is the fail-safe one.
+    // All six options, sandbox first; the default highlight is the sandbox choice.
     assert!(
-        pty.wait_for_screen("Trust this directory", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    assert!(
-        pty.wait_for_screen("use the sandbox for this project", wait_positive()),
+        pty.wait_for_screen("Trust this directory, and use the sandbox", wait_positive()),
         "the sandbox choice is missing:\n{}",
         pty.screen()
     );
@@ -1297,7 +1293,10 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
         pty.screen()
     );
 
-    // Enter = the highlighted default = do not trust this directory.
+    // Down four rows from the sandbox default to "do not trust this directory", then Enter.
+    for _ in 0..4 {
+        pty.send(b"\x1b[B"); // Down
+    }
     pty.send(b"\r");
     pty.expand_startup();
     assert!(
@@ -1321,8 +1320,9 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
     assert!(journal.contains("ProjectTrustChanged"), "{journal}");
 }
 
-/// ADR 0043 decision 2: the trust prompt's sandbox choice trusts the directory **and**
-/// remembers `workspace` for it in `access.json`, the same record `/access` writes.
+/// ADR 0043 decision 2 (revised 2026-10-20): the trust prompt's sandbox choice is first
+/// and pre-selected, so Enter trusts the directory **and** remembers `workspace` for it
+/// in `access.json`, the same record `/access` writes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_trust_sandbox_choice_writes_the_access_record() {
@@ -1364,11 +1364,7 @@ async fn pty_trust_sandbox_choice_writes_the_access_record() {
         "{}",
         pty.screen()
     );
-    // The default highlight is "do not trust this directory" (index 4); the sandbox choice is
-    // index 1, three rows up through the list.
-    for _ in 0..3 {
-        pty.send(b"\x1b[B"); // Down
-    }
+    // The sandbox choice is first and pre-selected: Enter takes it directly.
     pty.send(b"\r");
     pty.expand_startup();
     assert!(
@@ -1511,6 +1507,76 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
     );
     assert!(!pty.screen().contains("project trust"), "{}", pty.screen());
     pty.quit();
+}
+
+/// decision 2026-10-20: a project with no trusted decision shows
+/// `untrusted project · /trust to trust it` under the wordmark (no modal when there
+/// are no project resources); a trusted project shows no hint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_startup_shows_the_trust_hint_until_trusted() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("HINT-OK")]).await;
+    let dir = TempDir::new("trust-hint-session");
+    let home = TempDir::new("trust-hint-home");
+    let ws = TempDir::new("trust-hint-ws");
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust-hint",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("/trust to trust it", wait_positive()),
+        "the trust hint is missing:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    // `--trust` trusts for this process: the expanded block loads, and the hint is gone.
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust-hint-trusted",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--trust",
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        120,
+    );
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: loaded", wait_positive()),
+        "the session did not start:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("/trust to trust it"),
+        "a trusted project shows no hint:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
 }
 
 /// The diagnostics directory the app will use when `HOME` is `home` (ADR 0020):
@@ -2551,7 +2617,7 @@ fn wait_for_bang_file(pty: &mut Pty, path: &Path) -> bool {
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// The shell approval shows the whole command, and a capped result keeps the truncation
-/// marker visible.
+/// marker visible. Runs under `--profile workspace`, the tier that still asks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
 #[allow(clippy::await_holding_lock)]
@@ -2583,6 +2649,8 @@ async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
             "shell",
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         30,
         110,
@@ -2622,7 +2690,8 @@ async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// A compound command is never matched by an allow rule, so it always asks.
+/// A compound command is never matched by an allow rule, so it always asks. Runs under
+/// `--profile workspace`, the tier that still asks (`full` allows every segment).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
 #[allow(clippy::await_holding_lock)]
@@ -2656,6 +2725,8 @@ async fn pty_a_compound_shell_command_always_asks() {
             "shell-compound",
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
             "--allow-shell-command",
             &allowed,
         ],
@@ -3394,6 +3465,10 @@ async fn pty_the_default_tier_is_full_with_no_sandbox() {
     assert!(
         summary.contains("no sandbox"),
         "the default must say there is no sandbox: {summary:?}"
+    );
+    assert!(
+        summary.contains("no prompts"),
+        "the default must say nothing prompts: {summary:?}"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -10431,6 +10506,8 @@ async fn pty_herdr_reports_metadata_changes() {
             "herdr-meta",
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &env_refs,
         30,
@@ -10716,6 +10793,8 @@ async fn pty_herdr_reports_blocked_without_the_command_text() {
             "herdr-approval",
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &env_refs,
         30,
@@ -11902,6 +11981,11 @@ async fn pty_access_full_requires_confirmation_and_esc_cancels() {
         pty.screen()
     );
     assert!(
+        pty.wait_for_screen("shows no prompts", wait_positive()),
+        "the confirmation must say nothing prompts:\n{}",
+        pty.screen()
+    );
+    assert!(
         !pty.screen().contains("access: full"),
         "the tier must not switch before confirmation:\n{}",
         pty.screen()
@@ -11967,7 +12051,7 @@ async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
         110,
     );
     assert!(
-        pty.wait_for_screen("full (project)", wait_positive()),
+        pty.wait_for_screen("full · no prompts (project)", wait_positive()),
         "the remembered tier must apply and be marked:\n{}",
         pty.screen()
     );

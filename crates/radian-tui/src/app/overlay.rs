@@ -166,8 +166,11 @@ impl Default for AccessWizard {
 }
 
 /// The startup trust modal's state (ADR 0031 T3): the workspace and the highlighted option.
-/// The default highlight is "do not trust this directory", so Enter is the
-/// fail-safe answer.
+/// The default highlight is "trust this directory, and use the sandbox for this project"
+/// (decision 2026-10-20: for a project with no trusted decision the sandbox choice
+/// comes first and is pre-selected, so Enter trusts with the sandbox). This keeps the
+/// owner rule below the access wizard: opening the sandbox's absence is never the
+/// pre-selected answer.
 pub struct TrustWizard {
     pub workspace: PathBuf,
     pub cursor: usize,
@@ -185,7 +188,7 @@ impl TrustWizard {
             .collect();
         let cursor = choices
             .iter()
-            .position(|choice| *choice == radian_host::trust::Choice::UntrustHere)
+            .position(|choice| *choice == radian_host::trust::Choice::TrustHereSandbox)
             .unwrap_or(0);
         Self {
             workspace,
