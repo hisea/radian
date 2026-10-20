@@ -122,18 +122,21 @@ pub(super) fn build_session_inputs(
     // (including ADR 0016's Unix-socket rules). `Sandbox` is cheap to clone; `None`
     // (no `shell` mounted) means `!` is unavailable.
     let bash_sandbox = sandbox.clone();
-    // The MCP config file is read and validated here: before any server process starts and
-    // before a session file exists, so a bad file leaves nothing behind (dogfooding D2). The
-    // MCP provider itself, the memory service and the coding tools are built by
-    // `radian_host::open_session` (ADR 0023 U5).
-    let loaded = match &cli.mcp_config {
+    // The MCP servers come from the user's `[mcp]` section and from `--mcp-config`
+    // together (ADR 0008 §8): the file is read and validated here, before any server
+    // process starts and before a session file exists, so a bad file leaves nothing
+    // behind (dogfooding D2). A collision keeps the file's entry with one warning
+    // naming the id. The MCP provider itself, the memory service and the coding tools
+    // are built by `radian_host::open_session` (ADR 0023 U5).
+    let file_loaded = match &cli.mcp_config {
         Some(path) => load_mcp_config(path)?,
         None => radian_host::McpLoad::default(),
     };
-    for warning in &loaded.warnings {
+    let merged = radian_host::merge_mcp(config.mcp.clone(), file_loaded);
+    for warning in &merged.warnings {
         startup_log.line(format!("[mcp] {warning}"));
     }
-    let servers = loaded.servers;
+    let servers = merged.servers;
     // ADR 0026 D9: `--approval` and `--yes` (its shorthand) are the command line's choice.
     // When they are silent, the config's `[permissions] approval` and the journal's last
     // in-session switch decide; `radian_host::resolve_startup` owns that precedence, the

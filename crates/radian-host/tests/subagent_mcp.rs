@@ -106,13 +106,19 @@ async fn run_child(arguments: Value, coding_root: Option<PathBuf>) -> Vec<String
 }
 
 /// An `explore` child starts without `--mcp-config` even when the parent has one: it mounts
-/// exactly the three read-only tools, and MCP tools are never filtered by `--tools`.
+/// exactly the three read-only tools, and MCP tools are never filtered by `--tools`. It
+/// also ignores the config file's `[mcp]` (`--no-config-mcp`), so it starts no MCP
+/// server from either source.
 #[tokio::test]
 async fn the_explore_child_gets_no_mcp_config() {
     let argv = run_child(json!({"agent": "explore", "task": "MCP-TASK"}), None).await;
     assert!(
         !argv.iter().any(|arg| arg == "--mcp-config"),
         "an explore child must not receive --mcp-config: {argv:?}"
+    );
+    assert!(
+        argv.iter().any(|arg| arg == "--no-config-mcp"),
+        "an explore child must ignore the config [mcp]: {argv:?}"
     );
     // The read-only allow-list is still there.
     assert_eq!(
@@ -123,6 +129,8 @@ async fn the_explore_child_gets_no_mcp_config() {
 }
 
 /// A `general` child keeps the parent's `--mcp-config`: it runs the parent session's tools.
+/// It reads the same config file and merges it the same way (no `--no-config-mcp`), so
+/// it ends up with the parent's own server set.
 #[tokio::test]
 async fn the_general_child_keeps_mcp_config() {
     let argv = run_child(json!({"agent": "general", "task": "MCP-TASK"}), None).await;
@@ -130,5 +138,9 @@ async fn the_general_child_keeps_mcp_config() {
         flag_value(&argv, "--mcp-config").as_deref(),
         Some("parent-mcp.json"),
         "a general child must keep the parent's --mcp-config: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|arg| arg == "--no-config-mcp"),
+        "a general child must still read the config [mcp]: {argv:?}"
     );
 }

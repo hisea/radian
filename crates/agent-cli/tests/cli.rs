@@ -4302,6 +4302,197 @@ async fn a_bad_mcp_config_leaves_no_session() {
     assert_session_dir_empty(&session_dir);
 }
 
+// ---------- user [mcp] (ADR 0008 §8) ----------
+
+/// Writes a user `config.toml` whose `[mcp]` points one `fx` server at the fixture,
+/// logging to `log`. `form` is `"servers"` (`[[mcp.servers]]`) or `"mcpServers"`
+/// (`[mcp.mcpServers.fx]`).
+fn mcp_user_config(dir: &Path, form: &str, log: &Path) -> PathBuf {
+    let fixture = fixture_bin();
+    let body = match form {
+        "servers" => format!(
+            "schema_version = 1\n[[mcp.servers]]\nid = \"fx\"\ncommand = \"{}\"\n\
+             [mcp.servers.env]\nFIXTURE_LOG = \"{}\"\n",
+            fixture.display(),
+            log.display()
+        ),
+        _ => format!(
+            "schema_version = 1\n[mcp.mcpServers.fx]\ncommand = \"{}\"\n\
+             [mcp.mcpServers.fx.env]\nFIXTURE_LOG = \"{}\"\n",
+            fixture.display(),
+            log.display()
+        ),
+    };
+    write_file(dir, "user-config.toml", &body)
+}
+
+/// `[mcp]` with `[[mcp.servers]]` reaches the session: the fixture echo runs with no
+/// `--mcp-config` on the command line.
+#[tokio::test]
+async fn mcp_servers_from_the_user_config_run() {
+    let dir = scratch("mcp-user-servers");
+    let log = dir.join("fixture.log");
+    let config = mcp_user_config(&dir, "servers", &log);
+    let server = MockServer::start(echo_then("done")).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "go",
+                "--yes",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(tool_result_content(&server, 1), r#"{"hello":"mcp"}"#);
+}
+
+/// `[mcp]` with `[mcp.mcpServers.fx]` reaches the session the same way.
+#[tokio::test]
+async fn mcp_mcp_servers_from_the_user_config_run() {
+    let dir = scratch("mcp-user-shared");
+    let log = dir.join("fixture.log");
+    let config = mcp_user_config(&dir, "mcpServers", &log);
+    let server = MockServer::start(echo_then("done")).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "go",
+                "--yes",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(tool_result_content(&server, 1), r#"{"hello":"mcp"}"#);
+}
+
+/// On an id collision the `--mcp-config` file wins: only its server process ever starts
+/// (the config's `FIXTURE_LOG` stays empty), and one `[mcp]` warning names the id.
+#[tokio::test]
+async fn an_mcp_id_collision_uses_the_command_line_with_one_warning() {
+    let dir = scratch("mcp-collision");
+    let config_log = dir.join("config-fixture.log");
+    let config_path = mcp_user_config(&dir, "servers", &config_log);
+    let file_log = dir.join("file-fixture.log");
+    let mut file_env = serde_json::Map::new();
+    file_env.insert(
+        "FIXTURE_LOG".to_owned(),
+        serde_json::Value::String(file_log.to_string_lossy().into_owned()),
+    );
+    let file = write_file(
+        &dir,
+        "mcp.json",
+        &json!({"servers": [{
+            "id": "fx",
+            "command": fixture_bin(),
+            "env": file_env,
+        }]})
+        .to_string(),
+    );
+    let server = MockServer::start(echo_then("done")).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config_path.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--mcp-config",
+                file.to_str().unwrap(),
+                "-p",
+                "go",
+                "--yes",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(tool_result_content(&server, 1), r#"{"hello":"mcp"}"#);
+    // The file's server ran; the config's never started.
+    assert!(
+        !log_lines(&file_log).is_empty(),
+        "the winning server must log its methods"
+    );
+    assert!(
+        std::fs::read_to_string(&config_log).unwrap_or_default().is_empty(),
+        "the config's colliding server must never start"
+    );
+    let collisions: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("[mcp]") && line.contains("--mcp-config"))
+        .collect();
+    assert_eq!(collisions.len(), 1, "{stderr}");
+    assert!(collisions[0].contains("`fx`"), "{stderr}");
+}
+
+/// Both `[mcp]` forms at once is a config error: startup refuses before any session file
+/// exists, like a malformed `--mcp-config`.
+#[tokio::test]
+async fn both_mcp_config_forms_are_refused_before_any_session() {
+    let dir = scratch("mcp-both-forms");
+    let session_dir = dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let config = write_file(
+        &dir,
+        "user-config.toml",
+        "schema_version = 1\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n[mcp.mcpServers]\n",
+    );
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_in(
+            &session_dir,
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9/v1",
+                "--session-dir",
+                session_dir.to_str().unwrap(),
+                "--session-id",
+                "mcp-both-forms",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("cannot be combined"), "{stderr}");
+    assert_session_dir_empty(&session_dir);
+}
+
 // ---------- provider selection: anthropic (Phase 7 / anthost) ----------
 
 /// One Anthropic text reply: the minimal end_turn event stream (wire notes §4).
