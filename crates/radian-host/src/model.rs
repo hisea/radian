@@ -576,15 +576,11 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
                     .map(HostModel::Responses)
                     .map_err(|e| format!("--base-url {shown_url}: {e}"));
             }
-            // No network or file I/O here (ADR 0026): the access token
-            // and account id are resolved fresh on every `complete()` call, never at build
-            // time — see `ChatGptModel`'s doc comment for why that is the right place and
-            // costs nothing extra.
-            // The client is built once here and reused by every `complete()` call; the
-            // per-call adapter still resolves the token and account id fresh (see
-            // `ChatGptModel`).
+            // No network or file I/O here (ADR 0026): the token and
+            // account id resolve fresh on every `complete()` call; only the HTTP client is
+            // built once and shared (see `ChatGptModel`).
             let client = agent_provider_openai_responses::build_client(
-                OpenAiResponsesConfig::new("", "").connect_timeout,
+                agent_provider_openai_responses::DEFAULT_CONNECT_TIMEOUT,
             )
             .map_err(|e| format!("--base-url {shown_url}: {e}"))?;
             Ok(HostModel::ChatGpt(ChatGptModel {

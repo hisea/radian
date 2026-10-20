@@ -55,6 +55,10 @@ impl fmt::Debug for OpenAiResponsesConfig {
     }
 }
 
+/// The default TCP/TLS connect timeout for [`OpenAiResponsesConfig::connect_timeout`].
+/// Named so a host that builds its own client for per-call adapters reuses the same value.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl OpenAiResponsesConfig {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
@@ -62,7 +66,7 @@ impl OpenAiResponsesConfig {
             model: model.into(),
             headers: Vec::new(),
             extra_body: Map::new(),
-            connect_timeout: Duration::from_secs(30),
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             idle_timeout: Duration::from_secs(120),
             max_response_bytes: 32 * 1024 * 1024,
             reasoning_effort: None,
