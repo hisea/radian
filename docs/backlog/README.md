@@ -37,6 +37,7 @@
 | `first-launch.md` | decided | 0008 | 首次启动建默认配置、无模型时进 `/model` 选择器并写回 |
 | `project-skills.md` | decided | 0025、0031 | 接上项目级 skill，并支持 `$ARGUMENTS` |
 | `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 工具报告 P6/P5 的小修 + 前台 shell 默认输出上限下调；第 4 层容忍缩进待定 |
+| `read-absorbs-list.md` | decided | 0043、0039 | `read` 读目录即列目录，`list` 退为一个版本的别名，`explore` 变三个工具；基于 shell/job 合并后的 main 开分支 |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `post-edit-diagnostics.md` | idea | 新 ADR | 编辑后诊断：tree-sitter 语法层 + 配置的检查命令；先数 dogfood 里 patch→check 序列 |
 | `sandbox-auto-allow-shell.md` | idea | 0012、0016、0043 | workspace 档沙箱内 shell 自动放行，越界再问；前提是重开 Unix socket 限制 |
@@ -45,7 +46,6 @@
 | `eval-metrics.md` | idea | 无 | journal 指标提取器 + 固定任务集；Terminal-Bench 适配器在 Linux 盒子上做 |
 | `cache-efficiency.md` | idea | 0018、0026 | OpenAI/Responses 路发 `prompt_cache_key`、缓存 TTL、摘要请求复用对话前缀读缓存 |
 | `herdr-prompt-radian.md` | idea | 0034 | `herdr agent prompt` 拒认运行中的 radian TUI，原因未查明 |
-| `read-absorbs-list.md` | idea | 0043、0039 | `read` 读目录即列目录，`list` 退为一个版本的别名；等 shell/job 合并后做 |
 | `shell-auto-background-60s.md` | idea | 0037、0036、0011 | 转后台阈值 120 s → 60 s，提示词要求独立调用放同一条回复 |
 | `file-tools-spawn-blocking.md` | idea | 无 | 文件工具同步 IO 可能串行；先基准，再 `spawn_blocking` |
 | `remember-routing-sandbox.md` | idea | 0021、0036、0039、0016 | 文件工具写不到 `~/.radian/skills/`；全局 skill 路由要定沙箱下的收口（round 1 输入） |
