@@ -34,4 +34,4 @@ mod usage_limit;
 pub mod testing;
 
 pub use config::{ConfigError, OpenAiResponsesConfig, redact_url};
-pub use model::OpenAiResponses;
+pub use model::{OpenAiResponses, build_client};
