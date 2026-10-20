@@ -329,10 +329,41 @@ mod tests {
         crate::rule::evaluate(profile.rules(), &profile.workspace, &call(name)).action
     }
 
+    /// A fresh empty directory, removed on drop. `workspace_write` discovers git metadata
+    /// under the workspace, so these tests use an isolated dir rather than the shared temp
+    /// dir itself (which can hold near a million entries on a lived-in machine and make
+    /// each profile build walk all of them).
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "radian-profile-test-{}-{label}-{n}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(std::fs::canonicalize(&dir).unwrap())
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
     /// ADR 0021 D5/D7: `memory_search` is allowed in both tiers; no memory tool asks.
     #[test]
     fn memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("memory");
         for profile in [
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
@@ -359,7 +390,7 @@ mod tests {
     /// never prompts. Removing the rule would make it fall through to the default `ask`.
     #[test]
     fn ask_user_is_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("ask-user");
         for profile in [
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
@@ -375,7 +406,7 @@ mod tests {
     /// make it fall through to the default `ask` and be denied without a terminal.
     #[test]
     fn subagent_is_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("subagent");
         for profile in [
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
@@ -389,7 +420,7 @@ mod tests {
     /// them and they never prompt (they enforce the workspace boundary in `radian-coding`).
     #[test]
     fn the_search_tools_are_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("search");
         for profile in [
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
@@ -404,7 +435,7 @@ mod tests {
     /// Removing the rule would make it fall through to the default `ask`.
     #[test]
     fn skill_is_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("skill");
         for profile in [
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
