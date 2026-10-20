@@ -47,8 +47,7 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn alias_spec() -> ToolSpec {
     ToolSpec {
         name: "list".into(),
-        description: "Deprecated alias for `read` on a directory; kept for one version."
-            .into(),
+        description: "Deprecated alias for `read` on a directory; kept for one version.".into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
     }

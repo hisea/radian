@@ -256,4 +256,3 @@ fn rules_match_resolved_paths_so_dotdot_and_symlinks_cannot_bypass() {
         );
     }
 }
-

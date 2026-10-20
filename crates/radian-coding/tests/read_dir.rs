@@ -138,9 +138,7 @@ async fn offset_and_max_bytes_are_ignored_for_a_directory_and_said_once() {
     std::fs::write(root.join("a.txt"), "a").unwrap();
     let tools = common::tools(&root);
 
-    let plain = text(
-        &call(&tools, "read", json!({"path": "."})).await.unwrap(),
-    );
+    let plain = text(&call(&tools, "read", json!({"path": "."})).await.unwrap());
     assert!(!plain.contains("ignored"), "{plain}");
 
     for arguments in [
@@ -169,12 +167,8 @@ async fn the_list_alias_answers_with_the_rename_line_on_the_same_listing() {
     std::fs::write(root.join("a.txt"), "a").unwrap();
     let tools = common::tools(&root);
 
-    let listed = text(
-        &call(&tools, "list", json!({"path": "."})).await.unwrap(),
-    );
-    let read = text(
-        &call(&tools, "read", json!({"path": "."})).await.unwrap(),
-    );
+    let listed = text(&call(&tools, "list", json!({"path": "."})).await.unwrap());
+    let read = text(&call(&tools, "read", json!({"path": "."})).await.unwrap());
     assert!(
         listed.starts_with("`list` was renamed: use `read` to list a directory.\n"),
         "{listed}"
