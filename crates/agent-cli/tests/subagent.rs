@@ -255,7 +255,7 @@ fn sigint(child: &Child) {
 /// tool rather than a permission decision. The mutation (mounting the general set for
 /// `explore`, e.g. by dropping the hidden `--tools`) fails the exact-list assertion.
 #[tokio::test]
-async fn an_explore_child_has_only_the_four_read_tools_and_write_is_refused() {
+async fn an_explore_child_has_only_the_three_read_tools_and_write_is_refused() {
     let server = MockServer::start(vec![
         tool_reply(
             "p1",
@@ -289,7 +289,7 @@ async fn an_explore_child_has_only_the_four_read_tools_and_write_is_refused() {
     let index = child_request(&server, "EXPLORE-TASK");
     assert_eq!(
         advertised(&server, index),
-        ["glob", "grep", "list", "read"],
+        ["glob", "grep", "read"],
         "an explore child's tool list is exactly the read tools"
     );
     assert!(

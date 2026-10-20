@@ -166,25 +166,28 @@ pub(crate) async fn run(
         None => None,
     };
 
+    // A directory path lists it (ADR 0043 decision 1): the old `list` output, with
+    // `limit` as the entry cap. `offset` and `max_bytes` are file arguments; for a
+    // directory they are ignored, said once in the result. The directory is opened
+    // through the root's directory fd and listed through that fd (ADR 0039 decision 2).
+    // `open_dir` is tried first because `open_read` cannot open the root itself (an
+    // empty relative path is not a file name); a file falls through to the read below.
+    if let Ok(dir) = root.open_dir(&args.path) {
+        return crate::list::run_dir(
+            limits,
+            &args.path,
+            &dir,
+            limit,
+            args.offset.is_some(),
+            args.max_bytes.is_some(),
+        );
+    }
     // ADR 0039 decision 2: the file is opened through the root's directory fd, one
     // `openat(O_NOFOLLOW)` per component; it is never re-opened by path after a check.
     let opened = match root.open_read(&args.path) {
         Ok(opened) => opened,
         Err(failure) => return Err(missing_file(root, &args.path, failure)),
     };
-    // A directory path lists it (ADR 0043 decision 1): the old `list` output, with
-    // `limit` as the entry cap. `offset` and `max_bytes` are file arguments; for a
-    // directory they are ignored, said once in the result.
-    if opened.stat.kind == crate::safe_fs::EntryKind::Dir {
-        return crate::list::run_dir(
-            limits,
-            &args.path,
-            &opened.file,
-            limit,
-            args.offset.is_some(),
-            args.max_bytes.is_some(),
-        );
-    }
     if opened.stat.kind != crate::safe_fs::EntryKind::File {
         return Err(fail(
             "not_a_file",

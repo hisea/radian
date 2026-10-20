@@ -751,8 +751,9 @@ async fn an_unsandboxed_shell_requires_an_explicit_sandbox() {
 /// Dogfooding D10: the model used `shell` (`cat -n`, `sed -n`) for 101 of 111 calls and `read`
 /// 3 times, filling the context with uncapped dumps. A later session (2026-10-15) sent 38 reads
 /// and searches through `shell` although `read`/`grep`/`glob` exist. The description steers
-/// file reading to `read`/`list` and searching to `grep`/`glob`, and says why (`shell` runs
-/// alone; the read-only tools run in parallel), in the enforced mode and in the unsandboxed one.
+/// file reading and directory listing to `read` and searching to `grep`/`glob`, and says why
+/// (`shell` runs alone; the read-only tools run in parallel), in the enforced mode and in the
+/// unsandboxed one.
 #[tokio::test]
 async fn the_shell_description_points_file_reading_and_searching_at_the_read_only_tools() {
     let dir = TempDir::new("shell-spec-d10");
@@ -773,7 +774,7 @@ async fn the_shell_description_points_file_reading_and_searching_at_the_read_onl
             .find(|spec| spec.name == "shell")
             .expect("shell is advertised with a sandbox");
         for wanted in [
-            "Read files with `read` and `list`",
+            "Read and list with `read`",
             "search with `grep` and `glob`",
             "run in parallel, while `shell` runs alone",
         ] {
