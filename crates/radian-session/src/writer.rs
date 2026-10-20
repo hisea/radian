@@ -1306,10 +1306,7 @@ mod tests {
     use crate::runtime::{RuntimeEvent, TurnOutcome};
 
     fn tee_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "radian-tee-{name}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("radian-tee-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1337,7 +1334,10 @@ mod tests {
         )
         .unwrap();
         // Lines before the install: `SessionCreated` plus two runtime events.
-        journal.append_runtime_event(config_changed(1)).await.unwrap();
+        journal
+            .append_runtime_event(config_changed(1))
+            .await
+            .unwrap();
         journal
             .append_runtime_event(RuntimeEvent::TurnStarted {
                 turn_id: "t1".into(),
@@ -1356,7 +1356,10 @@ mod tests {
             })
             .await
             .unwrap();
-        journal.append_runtime_event(config_changed(2)).await.unwrap();
+        journal
+            .append_runtime_event(config_changed(2))
+            .await
+            .unwrap();
         drop(journal);
         let mut teed = Vec::new();
         while let Some(bytes) = rx.recv().await {
@@ -1366,7 +1369,10 @@ mod tests {
         let (prefix, suffix) = file.split_at(prefix_len);
         // The prefix is whole lines: it ends on a line boundary and holds the three lines
         // written before the install.
-        assert!(prefix.ends_with(b"\n"), "the prefix must end on a line boundary");
+        assert!(
+            prefix.ends_with(b"\n"),
+            "the prefix must end on a line boundary"
+        );
         assert_eq!(prefix.iter().filter(|b| **b == b'\n').count(), 3);
         // The tee carries the suffix exactly: the two lines written after the install.
         assert_eq!(suffix, teed.as_slice());
@@ -1389,7 +1395,12 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         journal.set_tee(tx);
         journal.crash_at_write(1);
-        assert!(journal.append_runtime_event(config_changed(1)).await.is_err());
+        assert!(
+            journal
+                .append_runtime_event(config_changed(1))
+                .await
+                .is_err()
+        );
         drop(journal);
         assert!(
             rx.recv().await.is_none(),
