@@ -35,6 +35,11 @@ pub struct HostTools {
     /// `deny` the registry still installs is defence in depth beneath that). MCP tools are not
     /// in this universe; they stay governed by the session's configured MCP servers/provider.
     tool_allow: Option<Vec<String>>,
+    /// Where the opened session's tool specs are reported. Set by `open_session` when
+    /// present, so a host that needs the model-visible set (the inspector's tools page)
+    /// can read it without a Core API change: the driver owns the `AgentSession`, but the
+    /// provider runs inside it and can publish the specs it just opened.
+    spec_sink: Option<std::sync::Arc<std::sync::Mutex<Option<Vec<ToolSpec>>>>>,
 }
 
 impl HostTools {
@@ -51,7 +56,19 @@ impl HostTools {
             subagent: None,
             mcp,
             tool_allow: None,
+            spec_sink: None,
         }
+    }
+
+    /// Publish the opened session's tool specs into `sink` (the inspector's tools page).
+    /// The sink is filled by `open_session` with the same `specs` the `HostSession`
+    /// carries, so the snapshot is the provider's own list, not a reconstruction.
+    pub fn with_spec_sink(
+        mut self,
+        sink: std::sync::Arc<std::sync::Mutex<Option<Vec<ToolSpec>>>>,
+    ) -> Self {
+        self.spec_sink = Some(sink);
+        self
     }
 
     /// Mount only the built-in tools this allow-list names. `None` mounts every built-in the
@@ -185,6 +202,9 @@ impl ToolProvider for HostTools {
             built_in_specs.retain(|spec| self.allows(&spec.name));
         }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
+        if let Some(sink) = &self.spec_sink {
+            *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(specs.clone());
+        }
 
         Ok(HostSession {
             coding,

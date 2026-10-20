@@ -258,6 +258,12 @@ impl App {
                 UpdateResult::dirty()
             }
             Input::PickerOpened(data) => self.picker_opened(data),
+            Input::InspectorKey(key) => self.inspector_key(key),
+            Input::InspectorOpened {
+                requested,
+                snapshot,
+            } => self.inspector_opened(requested, snapshot),
+            Input::InspectorRefreshed(snapshot) => self.inspector_refreshed(snapshot),
             // The `/login` wizard's keys, its verification result, and the save/removal
             // results (ADR 0026 D3).
             Input::LoginKey(key) => {
@@ -474,6 +480,10 @@ impl App {
                     }
                 }
                 Layer::Overlay(Overlay::Completion(_)) => Step::Pass,
+                // The inspector owns its keys (tabs, selection, detail, `k`): every key
+                // goes to it, and `Esc` closes it. Typing never falls through to the
+                // composer while it is open.
+                Layer::Overlay(Overlay::Inspector(_)) => Step::Input(Input::InspectorKey(*key)),
                 Layer::Surface => {
                     if let Some(found) = action {
                         Step::Input(Input::Action(found))

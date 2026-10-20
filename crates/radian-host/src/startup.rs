@@ -310,6 +310,9 @@ pub struct LeadSetup {
     /// Resolves a route's catalog prices from the warm local cache (ADR 0027).
     pub price_for: Option<RoutePrice>,
     pub servers: Vec<McpServerConfig>,
+    /// Where the MCP servers came from (`--mcp-config <FILE>`), for the inspector's mcp
+    /// page. `None` when no file was given.
+    pub mcp_config_path: Option<String>,
     /// `--system`/`--system-file`, already read: the fixed layer 1 (ADR 0036).
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
@@ -357,6 +360,7 @@ impl LeadSetup {
             price_for: self.price_for,
             shell_auto_background: settings.shell_auto_background,
             servers: self.servers,
+            mcp_config_path: self.mcp_config_path,
             system_prompt: self.system_prompt,
             context_budget: self.context_budget,
             auto_compact: settings.auto_compact,

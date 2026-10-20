@@ -22,6 +22,7 @@ pub mod events;
 pub mod find;
 pub mod footer;
 pub mod highlight;
+pub mod inspector;
 pub mod keys;
 pub mod login;
 pub mod markdown;

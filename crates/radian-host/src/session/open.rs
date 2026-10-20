@@ -58,6 +58,7 @@ pub async fn open_session(
         coding_root,
         model,
         servers,
+        mcp_config_path,
         system_prompt,
         context_budget,
         auto_compact,
@@ -193,6 +194,7 @@ pub async fn open_session(
         );
     let memory_notice = memory_notice(&memory, &injection_config);
     radian_session::trace::took("open/memory", t0);
+    let mcp_server_configs = servers.clone();
     let mcp = McpToolProvider::new(servers);
     let mcp_configured = mcp.configured();
 
@@ -350,7 +352,11 @@ pub async fn open_session(
     );
     let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
-    let mut tools = HostTools::new(coding, memory_tools, mcp.clone()).with_tool_allow(tools_allow);
+    let spec_sink: std::sync::Arc<std::sync::Mutex<Option<Vec<agent_core::ToolSpec>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut tools = HostTools::new(coding, memory_tools, mcp.clone())
+        .with_tool_allow(tools_allow)
+        .with_spec_sink(std::sync::Arc::clone(&spec_sink));
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
         tools = tools.with_ask(ask);
@@ -584,6 +590,11 @@ pub async fn open_session(
     });
 
     radian_session::trace::took("open/driver-task", t0);
+    let tool_specs = spec_sink
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default();
     let facts = SessionFacts {
         profile_line,
         sandbox_facts,
@@ -619,6 +630,10 @@ pub async fn open_session(
         skills: shared_skills,
         job_notifier,
         jobs,
+        tool_specs,
+        mcp_servers: mcp_server_configs,
+        mcp_config_path,
+        hooks_config,
         trust: Mutex::new(trust),
         runtime,
         driver: DriverTask {

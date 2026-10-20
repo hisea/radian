@@ -36,7 +36,9 @@ mod tui;
 use std::path::{Path, PathBuf};
 
 pub use error::ConfigError;
-pub use hooks::{DEFAULT_HOOK_TIMEOUT_SECS, HookCommand, HookMatcher, HooksConfig};
+pub use hooks::{
+    DEFAULT_HOOK_TIMEOUT_SECS, HookCommand, HookMatcher, HooksConfig, matcher_effective,
+};
 pub use model::{ModelConfig, SmolConfig};
 pub use sandbox::{SandboxConfig, resolve_allow_unix_sockets, unix_sockets_ignored_warning};
 pub use tui::{

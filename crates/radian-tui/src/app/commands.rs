@@ -267,6 +267,12 @@ impl App {
             // `/skills`: the host lists the discovered skills as notices.
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
             command::Outcome::Jobs(request) => UpdateResult::effect(Effect::Jobs(request)),
+            // The inspector (`/jobs`, `/tools`, `/mcp`, `/hooks`, `/panel`): the loop
+            // gathers the snapshot; `update` stays pure. A bare `/jobs` opens the jobs
+            // page; `kill` forms stay text (the `Jobs` arm above).
+            command::Outcome::Inspector(page) => {
+                UpdateResult::effect(Effect::OpenInspector { page })
+            }
             command::Outcome::Copy { code_only } => self.copy(code_only),
             command::Outcome::Message => UpdateResult::none(),
         }

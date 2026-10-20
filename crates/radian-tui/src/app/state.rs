@@ -321,6 +321,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::Form(_)
         | Input::PickerKey(_)
         | Input::PickerClose
+        | Input::InspectorKey(_)
         | Input::LoginKey(_)
         | Input::ConfirmLogout(_)
         | Input::TrustMove(_)
@@ -352,6 +353,8 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::AccessApplied { .. }
         | Input::CommandRefused(_)
         | Input::PickerOpened(_)
+        | Input::InspectorOpened { .. }
+        | Input::InspectorRefreshed(_)
         | Input::LoginVerified { .. }
         | Input::LoginSaved { .. }
         | Input::LoginOAuthUrlReady { .. }

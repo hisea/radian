@@ -248,6 +248,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
             budget_for: Some(setup.budget_for),
             price_for: setup.price_for,
             servers: setup.servers,
+            mcp_config_path: setup.mcp_config.clone(),
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
             sandbox,

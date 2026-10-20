@@ -74,6 +74,20 @@ pub struct LocalSession {
     pub(super) command_hooks: Arc<crate::CommandHooks>,
     /// The background-job registry, for `/jobs` (ADR 0037 decision 4).
     pub(super) jobs: Option<Arc<radian_coding::Jobs>>,
+    /// The model-visible tool specs at open time (the inspector's tools page). Published by
+    /// `HostTools::open_session` through the spec sink, so the snapshot is the provider's
+    /// own list, not a reconstruction. Old alias names are still registered here; the
+    /// model request strips them (ADR 0043 decision 3), and the inspector applies the same
+    /// strip so its list matches the request's set exactly.
+    pub(super) tool_specs: Vec<agent_core::ToolSpec>,
+    /// The MCP server configs this session was opened with (the inspector's mcp page).
+    pub(super) mcp_servers: Vec<agent_extensions::McpServerConfig>,
+    /// Where the MCP servers came from (`--mcp-config <FILE>`). `None` when no file was
+    /// given.
+    pub(super) mcp_config_path: Option<String>,
+    /// The resolved `[hooks]` section (the inspector's hooks page, ADR 0045 slice A).
+    /// User level only today; project hooks are not loaded.
+    pub(super) hooks_config: crate::config::HooksConfig,
     /// The project-trust state (ADR 0031 T3). Interior mutability: the startup prompt resolves
     /// it after `open_session` and the startup line reads it.
     pub(super) trust: Mutex<trust::Setup>,
@@ -465,6 +479,27 @@ impl SessionFacade for LocalSession {
         if let Some(jobs) = &self.jobs {
             jobs.kill_all();
         }
+    }
+
+    fn tool_specs(&self) -> Vec<agent_core::ToolSpec> {
+        self.tool_specs.clone()
+    }
+
+    fn mcp_servers(&self) -> Vec<agent_extensions::McpServerConfig> {
+        self.mcp_servers.clone()
+    }
+
+    fn mcp_config_path(&self) -> Option<String> {
+        self.mcp_config_path.clone()
+    }
+
+    fn hooks_config(&self) -> crate::config::HooksConfig {
+        self.hooks_config.clone()
+    }
+
+    fn job_tail(&self, id: &str, max: usize) -> Option<(radian_coding::JobState, String)> {
+        let jobs = self.jobs.as_ref()?;
+        jobs.tail(id, max).map(|(state, _, tail)| (state, tail))
     }
 
     /// Re-validates the capability, then runs the command. The check is here as well as in the

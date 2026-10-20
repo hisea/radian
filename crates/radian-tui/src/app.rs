@@ -53,6 +53,7 @@ mod find;
 mod footer;
 mod history;
 mod input;
+mod inspector;
 mod layers;
 mod mouse;
 mod overlay;
@@ -198,6 +199,16 @@ pub enum Effect {
     /// `/jobs` (ADR 0037 decision 4): list the running background jobs, or stop one/all. The
     /// loop runs it (the registry lives in the host) and answers with [`Input::SessionDone`].
     Jobs(command::JobsRequest),
+    /// Open the inspector overlay (`/jobs`, `/tools`, `/mcp`, `/hooks`, `/panel`). The loop
+    /// gathers the snapshot (jobs, tools, mcp, hooks) and answers with
+    /// [`Input::InspectorOpened`]. `None` opens the last page (`/panel`).
+    OpenInspector {
+        page: Option<command::InspectorPage>,
+    },
+    /// Reload the open inspector's snapshot after an event (a job settle, a turn
+    /// boundary). The loop answers with [`Input::InspectorRefreshed`]. No polling: the
+    /// refresh is requested by `update` when it sees the event, never by a timer.
+    RefreshInspector,
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
@@ -332,6 +343,8 @@ impl PartialEq for Effect {
             ) => an == bn && aa == ba && as_ == bs,
             (ListSkills, ListSkills) => true,
             (Jobs(a), Jobs(b)) => a == b,
+            (OpenInspector { page: a }, OpenInspector { page: b }) => a == b,
+            (RefreshInspector, RefreshInspector) => true,
             (Theme { name: a }, Theme { name: b }) => a == b,
             (Inject(a), Inject(b)) => a == b,
             (CancelBash, CancelBash) => true,
@@ -684,6 +697,9 @@ pub struct App {
     /// The one session view this process holds today (the per-session view). A later slice
     /// (a later session-view slice) keeps several and switches between them.
     pub session: SessionView,
+    /// The inspector's last page (`/panel` reopens it). Survives the overlay's close, so
+    /// `/panel` after an `Esc` returns where the user was.
+    pub inspector_last: Option<command::InspectorPage>,
 }
 
 impl SessionView {

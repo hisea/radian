@@ -116,6 +116,7 @@ async fn open_with_leftover(
             price_for: None,
             shell_auto_background: None,
             servers: Vec::new(),
+            mcp_config_path: None,
             system_prompt: None,
             context_budget: None,
             auto_compact: false,

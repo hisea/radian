@@ -168,15 +168,30 @@ impl App {
                 id: job_id.clone(),
                 started: self.now,
             });
+            if self.inspector().is_some() {
+                return UpdateResult::effect(Effect::RefreshInspector);
+            }
             return UpdateResult::dirty();
         }
         if let RuntimeEvent::BackgroundJobSettled { job_id, .. } = event {
             self.session.running_jobs.retain(|job| job.id != *job_id);
-            // The job's completion notice arrived: `all` rings for it, `attention` does not.
-            if self.bell.rings_for_job_settle() {
-                return UpdateResult::effect(Effect::Bell);
+            // The inspector shows the job list, so refresh it while it is open. The job's
+            // completion notice also arrived: `all` rings for it, `attention` does not.
+            // Both can be true at once, so one result carries every effect that applies.
+            let mut effects = Vec::new();
+            if self.inspector().is_some() {
+                effects.push(Effect::RefreshInspector);
             }
-            return UpdateResult::dirty();
+            if self.bell.rings_for_job_settle() {
+                effects.push(Effect::Bell);
+            }
+            if effects.is_empty() {
+                return UpdateResult::dirty();
+            }
+            return UpdateResult {
+                dirty: true,
+                effects,
+            };
         }
         if let RuntimeEvent::TurnFailed { message, .. } = event {
             self.session.entries.push(Entry::new(

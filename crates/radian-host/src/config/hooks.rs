@@ -67,6 +67,17 @@ impl HooksConfig {
     }
 }
 
+/// Whether one matcher runs: `*`/empty/missing always does; otherwise the pattern must
+/// compile as `^(?:<matcher>)$` (the runtime's anchoring — `sh` does not match `shell`).
+/// The inspector's hooks page reads this, so the flag follows the same compile the
+/// runtime uses without a second regex dependency in the TUI.
+pub fn matcher_effective(matcher: Option<&str>) -> bool {
+    match matcher {
+        None | Some("") | Some("*") => true,
+        Some(pattern) => regex::Regex::new(&format!("^(?:{pattern})$")).is_ok(),
+    }
+}
+
 /// Handler keys this slice does not implement (ADR 0045): an entry carrying any of them is
 /// skipped, never run.
 const NON_COMMAND_HANDLER_KEYS: [&str; 5] = ["async", "if", "http", "prompt", "agent"];

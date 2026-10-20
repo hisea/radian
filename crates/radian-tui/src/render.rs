@@ -221,6 +221,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(picker) = app.picker() {
         crate::picker::draw(frame, chunks[0], picker, &app.theme, app.footer_glyphs());
     }
+    // The inspector overlay draws over the transcript the same way: one tabbed panel,
+    // never above a modal (the layer stack guarantees the tier).
+    if let Some(inspector) = app.inspector() {
+        crate::inspector::draw(frame, chunks[0], inspector, &app.theme, app.footer_glyphs());
+    }
 
     if !completion.is_empty() {
         frame.render_widget(Paragraph::new(completion), chunks[1]);
