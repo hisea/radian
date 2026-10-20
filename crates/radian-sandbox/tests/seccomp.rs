@@ -40,8 +40,7 @@ fn rig(label: &str) -> Option<(TempDir, Sandbox, Sandbox)> {
         return None;
     }
     let dir = TempDir::new(label);
-    let sandbox =
-        Sandbox::from_policy(SandboxPolicy::workspace_write(&dir.0).unwrap()).unwrap();
+    let sandbox = Sandbox::from_policy(SandboxPolicy::workspace_write(&dir.0).unwrap()).unwrap();
     let control = Sandbox::new(SandboxMode::FullAccess, &dir.0).unwrap();
     Some((dir, sandbox, control))
 }
@@ -86,9 +85,8 @@ fn tcp_socket_still_works_in_workspace() {
     };
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
     let port = listener.local_addr().unwrap().port();
-    let script = format!(
-        "import socket; s = socket.create_connection(('127.0.0.1', {port}), 5); s.close()"
-    );
+    let script =
+        format!("import socket; s = socket.create_connection(('127.0.0.1', {port}), 5); s.close()");
     let (ok, text) = python(&sandbox, &script);
     assert!(ok, "workspace TCP connect must succeed: {text}");
     let (ok, text) = python(&control, &script);
@@ -102,7 +100,8 @@ fn socketpair_still_works_in_workspace() {
     let Some((_dir, sandbox, control)) = rig("socketpair") else {
         return;
     };
-    let script = "import socket; a, b = socket.socketpair(); a.send(b'x'); assert b.recv(1) == b'x'";
+    let script =
+        "import socket; a, b = socket.socketpair(); a.send(b'x'); assert b.recv(1) == b'x'";
     let (ok, text) = python(&sandbox, script);
     assert!(ok, "workspace socketpair must succeed: {text}");
     let (ok, text) = python(&control, script);
@@ -214,8 +213,8 @@ int main(void) {
             .expect("the probe runs")
     };
     let out = run(&sandbox);
-    let text = String::from_utf8_lossy(&out.stdout).into_owned()
-        + &String::from_utf8_lossy(&out.stderr);
+    let text =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
         "workspace foreign-arch syscalls must fail with EPERM: {text}"

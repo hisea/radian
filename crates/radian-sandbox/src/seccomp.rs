@@ -81,7 +81,7 @@ pub(crate) fn program() -> Vec<libc::sock_filter> {
 
     // The arch prefix is shared; x86_64 inserts the x32-bit check after it.
     let mut prog = vec![
-        stmt(LD_W_ABS, OFF_ARCH), // 0: A = arch
+        stmt(LD_W_ABS, OFF_ARCH),             // 0: A = arch
         jump(JEQ_K, AUDIT_ARCH_NATIVE, 0, 0), // 1: patched below
     ];
     #[cfg(target_arch = "x86_64")]
@@ -95,7 +95,7 @@ pub(crate) fn program() -> Vec<libc::sock_filter> {
         jump(JEQ_K, socket_nr, 2, 0), // socket -> check AF_UNIX
         jump(JEQ_K, uring_nr, 0, 0),  // patched below; else ALLOW
         stmt(RET_K, ALLOW),           // ALLOW
-        stmt(LD_W_ABS, OFF_ARG0),    // A = args[0] (low 32 bits)
+        stmt(LD_W_ABS, OFF_ARG0),     // A = args[0] (low 32 bits)
         jump(JEQ_K, unix, 1, 0),      // AF_UNIX -> DENY, else ALLOW
         stmt(RET_K, ALLOW),           // ALLOW
         stmt(RET_K, DENY),            // DENY
@@ -121,8 +121,7 @@ fn program_bytes() -> Vec<u8> {
     let prog = program();
     // SAFETY: `sock_filter` is `#[repr(C)]` (`u16, u8, u8, u32`, 8 bytes, no padding on
     // either target); the byte view is alive as long as `bytes`, which is returned.
-    let raw =
-        unsafe { std::slice::from_raw_parts(prog.as_ptr().cast::<u8>(), prog.len() * 8) };
+    let raw = unsafe { std::slice::from_raw_parts(prog.as_ptr().cast::<u8>(), prog.len() * 8) };
     let bytes = raw.to_vec();
     std::mem::forget(prog);
     bytes
@@ -216,33 +215,26 @@ mod tests {
         data[0..4].copy_from_slice(&nr.to_le_bytes());
         data[4..8].copy_from_slice(&arch.to_le_bytes());
         data[16..20].copy_from_slice(&arg0.to_le_bytes());
-        let load = |off: u32| {
-            u32::from_le_bytes(data[off as usize..off as usize + 4].try_into().unwrap())
-        };
+        let load =
+            |off: u32| u32::from_le_bytes(data[off as usize..off as usize + 4].try_into().unwrap());
         let mut acc = 0u32;
         let mut pc = 0usize;
         loop {
             assert!(pc < prog.len(), "jumped past the program end");
             let ins = &prog[pc];
             match (ins.code as u32, ins.jt, ins.jf) {
-                (code, 0, 0)
-                    if code == libc::BPF_LD | libc::BPF_W | libc::BPF_ABS =>
-                {
+                (code, 0, 0) if code == libc::BPF_LD | libc::BPF_W | libc::BPF_ABS => {
                     acc = load(ins.k);
                     pc += 1;
                 }
-                (code, _, _)
-                    if code == libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K =>
-                {
+                (code, _, _) if code == libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K => {
                     pc += if acc == ins.k {
                         ins.jt as usize + 1
                     } else {
                         ins.jf as usize + 1
                     };
                 }
-                (code, 0, 0)
-                    if code == libc::BPF_ALU | libc::BPF_AND | libc::BPF_K =>
-                {
+                (code, 0, 0) if code == libc::BPF_ALU | libc::BPF_AND | libc::BPF_K => {
                     acc &= ins.k;
                     pc += 1;
                 }
@@ -283,7 +275,12 @@ mod tests {
     fn socket_af_unix_is_denied() {
         let prog = program();
         assert_eq!(
-            emulate(&prog, native(), libc::SYS_socket as u32, libc::AF_UNIX as u32),
+            emulate(
+                &prog,
+                native(),
+                libc::SYS_socket as u32,
+                libc::AF_UNIX as u32
+            ),
             DENY
         );
     }

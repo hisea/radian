@@ -22,10 +22,10 @@ mod bwrap;
 mod error;
 mod inherited;
 mod policy;
-#[cfg(target_os = "linux")]
-mod seccomp;
 #[cfg(target_os = "macos")]
 mod seatbelt;
+#[cfg(target_os = "linux")]
+mod seccomp;
 mod slot;
 
 #[cfg(feature = "testing")]
@@ -387,7 +387,11 @@ impl Sandbox {
     }
 
     /// Convenience over [`Sandbox::command`] for string arguments.
-    pub fn command_str(&self, program: &str, args: &[&str]) -> Result<SandboxCommand, SandboxError> {
+    pub fn command_str(
+        &self,
+        program: &str,
+        args: &[&str],
+    ) -> Result<SandboxCommand, SandboxError> {
         self.command(program, args.iter().copied())
     }
 }

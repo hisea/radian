@@ -108,7 +108,10 @@ impl Matrix {
     }
 
     pub fn failures(&self) -> Vec<&Case> {
-        self.cases.iter().filter(|c| c.verdict() == Verdict::Fail).collect()
+        self.cases
+            .iter()
+            .filter(|c| c.verdict() == Verdict::Fail)
+            .collect()
     }
 
     /// Cases skipped on this machine (no working control). Never a failure and never a pass.
@@ -297,13 +300,8 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     #[cfg(target_os = "linux")]
     let (abstract_name, _abstract_listener) = {
         use std::os::linux::net::SocketAddrExt;
-        let name = format!(
-            "radian-esc-{}-{}",
-            std::process::id(),
-            unix_socket_seq()
-        );
-        let addr =
-            std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())?;
+        let name = format!("radian-esc-{}-{}", std::process::id(), unix_socket_seq());
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())?;
         let listener = std::os::unix::net::UnixListener::bind_addr(&addr)?;
         (name, listener)
     };

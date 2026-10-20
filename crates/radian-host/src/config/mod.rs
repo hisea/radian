@@ -877,8 +877,7 @@ mod tests {
             None,
             "an empty list needs no warning"
         );
-        let warning =
-            unix_sockets_ignored_warning(&[PathBuf::from("/run/herdr.sock")]);
+        let warning = unix_sockets_ignored_warning(&[PathBuf::from("/run/herdr.sock")]);
         if cfg!(target_os = "linux") {
             let warning = warning.expect("a non-empty list warns on Linux");
             assert!(

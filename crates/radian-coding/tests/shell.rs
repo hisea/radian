@@ -21,8 +21,8 @@ use agent_core::{
 use common::{TempDir, sentinel_outside};
 use radian_coding::{CodingTools, CodingToolsError, Limits};
 use radian_sandbox::{
-    ProbeReport, Sandbox, SandboxBackend, SandboxCommand, SandboxError, SandboxMode,
-    SandboxPolicy, SandboxSlot,
+    ProbeReport, Sandbox, SandboxBackend, SandboxCommand, SandboxError, SandboxMode, SandboxPolicy,
+    SandboxSlot,
 };
 use serde_json::{Value, json};
 

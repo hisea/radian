@@ -250,10 +250,7 @@ mod tests {
             let policy = SandboxPolicy::new(SandboxMode::WorkspaceWrite, &ws)
                 .unwrap()
                 .network(network);
-            assert!(
-                BWRAP.restricts_unix_sockets(&policy),
-                "network = {network}"
-            );
+            assert!(BWRAP.restricts_unix_sockets(&policy), "network = {network}");
             // The deny is installed for the tier regardless of the network flag: with the
             // network off, pathname sockets would otherwise stay reachable through the
             // shared read-only root.

@@ -20,10 +20,7 @@ fn commands_do_not_leak_filter_fds() {
     }
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::SeqCst);
-    let ws = std::env::temp_dir().join(format!(
-        "radian-seccomp-fd-{}-{n}",
-        std::process::id()
-    ));
+    let ws = std::env::temp_dir().join(format!("radian-seccomp-fd-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&ws).unwrap();
     let ws: PathBuf = std::fs::canonicalize(&ws).unwrap();
     let sandbox = Sandbox::from_policy(SandboxPolicy::workspace_write(&ws).unwrap()).unwrap();
