@@ -327,6 +327,7 @@ find_next = ["ctrl-g", "shift-enter"]
 | `speed` | `{speed}` | `42.1 tok/s`, the last finished generation's reported output over its measured time |
 | `elapsed` | `{elapsed}` | `16.2s`, live while a generation runs, the last one when idle, empty after a resume |
 | `pending` | `{count}` | shown only when a request waits |
+| `queued` | `{count}` | the `next_turn` inputs this session sent that the runtime has not admitted yet (`/queue` and an idle Enter while its turn has not started); shown only while something waits. In the default `deck` preset's second row, right group |
 | `mcp` | `{mcp}` | the configured/connected servers |
 | `scroll` | `{position}`, `{mode}` | `{position} {mode}` |
 
@@ -499,6 +500,12 @@ with `[tui.colors]`.
   report failure honestly; configured anywhere else it is a startup warning and OSC 52.
   Selections over 1 MiB are refused with the reason. `off` keeps the selection visual and
   copies nothing.
+- `bell` (default `off`): when the terminal bell rings — one `\x07` per event class.
+  `attention` rings when an approval or `ask_user` prompt opens and when a turn ends
+  (completed or failed; a cancel needs no ring), `all` additionally rings when a
+  background job settles. Events that share a frame merge into one ring; nothing rings
+  while a turn streams. An unknown value warns and falls back to `off`. `NO_COLOR` does
+  not affect it.
 - `keybindings` maps an **action** to one or more key strings; a listed action's keys
   **replace** its defaults. Key strings are `[ctrl-][alt-][shift-]key` (`enter`, `ctrl-j`,
   `alt-enter`, `shift-up`, `pageup`, `space`, a single character, …). An unknown action or key
@@ -558,8 +565,8 @@ openai-compatible).
 
 The levels are data (`command.rs`): the command names from their `/help` lines, `/memory`'s
 subcommands, the record ids of `show`/`edit`/`archive`/`restore`/`forget`/`confirm` (listed by
-the host — `update` never does I/O), `/export`'s `md|json` and `--force`, and free text for
-`/sessions` and `/compact`. A future `/model` (provider → model, ADR 0026) or `/login` is one
+the host — `update` never does I/O), `/export`'s `md|json` and `--force`, `/copy`'s `code`
+selector, and free text for `/sessions`, `/compact` and `/queue`. A future `/model` (provider → model, ADR 0026) or `/login` is one
 more entry in the same tree.
 
 
@@ -578,6 +585,9 @@ the rest is sent as an ordinary message.
 | `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
 | `/jobs [kill <id\|all>]` | list this session's running background `shell` jobs (id, state, elapsed, command) as notices, or stop one/all (ADR 0037 decision 4). `kill` sends SIGTERM to the process group, then SIGKILL after 2 s; the model gets a completion message on the busy/idle lane |
 | `/usage` | print the current provider's usage snapshot, **every** window, as notices (ADR 0027). The footer's `usage` line is the short form of the same snapshot; no usage source, or no snapshot yet, is one line saying so |
+| `/queue <text>` | queue a message for the next turn as an `Inbox::followup`, even while a turn runs (Enter steers then; idle it opens a turn at once). The footer's `queued` item shows the waiting count |
+| `/retry` | resend the last user message, but only when idle and the previous turn ended in a model error; anything else is a `nothing to retry` notice. The `turn failed` notice ends with `/retry to resend` |
+| `/copy [code]` | copy the last committed assistant message's markdown source (a streaming entry never counts), or with `code` only its last fenced block without the fence lines, through `tui.clipboard` |
 
 - Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
   Unbalanced quotes are an error notice.
