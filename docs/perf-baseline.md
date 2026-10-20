@@ -1075,3 +1075,29 @@ bash benchmarks/edit-check-timing.sh [/tmp/edit-check-timing]
 TUI 改动最小，workspace 与 `-p` 都是约 0.6 s，因为它是没有下游的顶层），
 clippy 约 0.3–0.8 s。冷缓存或高负载尖峰下同一次检查可到 6–10 s（本轮量到的最大）。
 本节只给数字，不做 (a)/(b) 取舍的推荐。
+
+## 文件工具 `spawn_blocking`（read，本项改前改后）
+
+方法：`crates/radian-coding/tests/perf_file_tools.rs::perf_read_single_vs_batch_big_file`
+（`#[ignore]`，debug 构建）。workspace 里一个 100 万行的大文件（`big.txt`，约 46 MB）：
+单次 `read`（深 `offset` + `limit: 50`，墙钟主要是跳到 `offset` 的字节扫描）与同一任务
+里 `tokio::join!` 的三个 `read`（三个不同的深 `offset`，Core 批量的形状）。改前数字是把
+`read.rs` 临时 revert 到 `spawn_blocking` 之前跑出来的，跑完即恢复（`git diff` 确认）。
+各 1 次 warmup，5 次取中位。
+
+```sh
+cargo test -p radian-coding --test perf_file_tools -- --ignored --nocapture perf_read_single_vs_batch_big_file
+```
+
+**负载**：`uptime` 1 分钟负载约 18（同一台机器上还有别的编译）。
+
+| | 单次 read 中位 | 同一批三个 read 中位 | 比值 |
+|---|---|---|---|
+| 改前 | 186.4 ms | 516.0 ms | **2.77×** |
+| 改后 | 183.5 ms | 205.9 ms | **1.12×** |
+
+**结论：并行**。改前三个并发 read 的墙钟 ≈ 单次的 2.8 倍（串行），改后 ≈ 单次
+（1.12×）。`read`（含目录列举，同一条路）至此与 `grep`/`glob` 一致；`shell` 描述里的
+"run in parallel"对 `read`、`grep`、`glob` 三者都成立，无需改字。重叠的确定性证明见
+`crates/radian-coding/tests/file_tools_parallel.rs` 的 `two_reads_in_one_batch_overlap`
+与 `two_directory_reads_in_one_batch_overlap`（`resolve_hook` 会合，不依赖墙钟）。

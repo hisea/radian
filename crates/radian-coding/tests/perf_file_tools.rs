@@ -4,6 +4,12 @@
 //! `docs/perf-baseline.md`. The batch polls three `session.execute` futures in **one**
 //! task (`tokio::join!`), the same shape as Core's `FuturesUnordered` batch: a scan
 //! that never yields runs the three one after another.
+//!
+//! The `read` bench at the bottom is the same shape for one large-file `read` vs three
+//! `read`s in one batch (the skip-to-`offset` phase scans bytes, so a deep offset makes
+//! one read tens of milliseconds and the serial shape visible).
+
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -124,6 +130,78 @@ fn report(tree: &str, single: Duration, batch: Duration) {
          (batch/single {ratio:.2}x)",
         ratio = batch.as_secs_f64() / single.as_secs_f64().max(f64::MIN_POSITIVE),
     );
+}
+
+/// A workspace holding one large numbered file (`big.txt`, ~55 MB): a `read` with a deep
+/// `offset` scans tens of megabytes in the skip phase, so one read is tens of
+/// milliseconds and the serial-vs-parallel shape shows above the noise. The batch reads
+/// three different deep offsets in one task, like Core's batch.
+fn big_workspace() -> (common::TempDir, CodingTools) {
+    let dir = common::TempDir::new("perf-read-big");
+    let mut body = String::with_capacity(60 << 20);
+    for n in 1..=1_000_000 {
+        body.push_str(&format!("line {n:07} with some payload to fill bytes\n"));
+    }
+    dir.write("ws/big.txt", &body);
+    let root = dir.file("ws");
+    let tools = common::tools(&root);
+    (dir, tools)
+}
+
+async fn read_call(
+    session: &radian_coding::CodingSession,
+    path: &str,
+    offset: i64,
+) -> agent_core::ToolOutput {
+    let call = ToolCall {
+        id: "bench".into(),
+        name: "read".into(),
+        arguments: json!({"path": path, "offset": offset, "limit": 50}),
+    };
+    let sink = NoopSink;
+    let cx = ToolContext {
+        cancellation: agent_core::CancellationToken::new(),
+        events: &sink,
+        index: 0,
+    };
+    session
+        .execute(&call, cx)
+        .await
+        .expect("a bounded read never fails")
+}
+
+fn report_read(single: Duration, batch: Duration) {
+    println!(
+        "[perf] read big-file: single {single:?}, batch-of-3 {batch:?} \
+         (batch/single {ratio:.2}x)",
+        ratio = batch.as_secs_f64() / single.as_secs_f64().max(f64::MIN_POSITIVE),
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn perf_read_single_vs_batch_big_file() {
+    let (_dir, tools) = big_workspace();
+    let session = tools.open_session().await.expect("open session");
+    // Warmup: page the file in before the timed samples.
+    read_call(&session, "big.txt", 900_000).await;
+
+    let mut singles = Vec::new();
+    let mut batches = Vec::new();
+    for round in 0..5 {
+        let start = Instant::now();
+        read_call(&session, "big.txt", 900_000).await;
+        singles.push(start.elapsed());
+        let start = Instant::now();
+        // One task polls all three, like Core's batch: a blocking read serializes them.
+        let _ = tokio::join!(
+            read_call(&session, "big.txt", 800_000 + round),
+            read_call(&session, "big.txt", 850_000 + round),
+            read_call(&session, "big.txt", 900_000 + round),
+        );
+        batches.push(start.elapsed());
+    }
+    report_read(median(singles), median(batches));
 }
 
 #[tokio::test]
