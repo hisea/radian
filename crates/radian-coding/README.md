@@ -222,8 +222,9 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 
 ## Mounting
 
-- In `agent-cli`: `--workspace <dir>` exposes the eight file/git/search tools, plus `shell` when
-  the profile built a sandbox (`workspace`/`full`). Without the flag nothing changes.
+- In `agent-cli`: `--workspace <dir>` exposes the file/git/search tools (`read`, `write`,
+  `patch`, `glob`, `grep`, `git_diff`, plus the `list` and `git_status` one-version aliases),
+  plus `shell` and `job` when the profile built a sandbox (`workspace`/`full`). Without the flag nothing changes.
 - Directly: `CodingTools::new(root)` returns a `ToolProvider` (no shell); pass it to
   `Agent::new(model, tools)`.
 - With a sandbox: build one with `radian_sandbox::Sandbox::new(mode, root)` (an enforced mode

@@ -185,7 +185,9 @@ Ctrl-C once cancels the turn; a second Ctrl-C while it is winding down exits 130
 
 stdout carries only the model's visible answer (so `-p` can be piped). Status, tool lines
 and **reasoning** go to stderr; reasoning is prefixed `[reasoning]` and kept on its own
-lines, never mixed with the answer (ADR 0014).
+lines, never mixed with the answer (ADR 0014). With `--output jsonl`, stdout instead carries
+the machine-readable stream: every durable journal line, the live-only delta lines and a
+closing `Result` record, one JSON object per line (ADR 0044).
 
 ## Context budget (ADR 0018) and the model catalog
 
