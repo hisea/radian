@@ -166,3 +166,74 @@ async fn the_read_spec_names_directory_listing() {
         list.input_schema
     );
 }
+
+/// Opens an `AskTools` session (no workspace needed, ADR 0024 Q5) and returns the
+/// advertised `ask_user` spec. Small helper for the description pins below.
+async fn ask_user_spec() -> agent_core::ToolSpec {
+    use futures_util::future::BoxFuture;
+    use radian_coding::{PromptError, Prompter, QuestionAnswer, QuestionRequest};
+
+    struct SilentPrompter;
+
+    impl Prompter for SilentPrompter {
+        fn ask(
+            &self,
+            _request: QuestionRequest,
+        ) -> BoxFuture<'_, Result<QuestionAnswer, PromptError>> {
+            Box::pin(async { Err(PromptError::Gone) })
+        }
+    }
+
+    let ask = radian_coding::AskTools::new(Arc::new(SilentPrompter));
+    let session = ask.open_session().await.unwrap();
+    session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "ask_user")
+        .expect("ask_user is advertised when a prompter is set")
+        .clone()
+}
+
+/// ADR 0024 decision 2 (`ask-user-pass`): the description itself states when to ask —
+/// only a decision that belongs to the user, or a real ambiguity looking cannot
+/// resolve — and tells the model to mark its recommendation.
+#[tokio::test]
+async fn the_ask_user_description_states_when_to_ask() {
+    let spec = ask_user_spec().await;
+    assert!(
+        spec.description.contains("belongs to the user"),
+        "ask only for the user's own decisions: {}",
+        spec.description
+    );
+    assert!(
+        spec.description.contains("do not ask what you can find"),
+        "look before you ask (ADR 0036): {}",
+        spec.description
+    );
+    assert!(
+        spec.description.contains("recommend"),
+        "give a recommendation when asking: {}",
+        spec.description
+    );
+}
+
+/// `ask-user-pass` decision 3: the slimmed definition serializes to 1633 bytes
+/// (measured 2026-10-20: 1584 after slimming, +49 for the header width note restored in
+/// fix round 1); the pin leaves a little room above that. The `header` field names the
+/// width limit so a CJK-writing user does not pay an error round trip for it.
+#[tokio::test]
+async fn the_ask_user_definition_stays_small() {
+    let spec = ask_user_spec().await;
+    let bytes = serde_json::to_vec(&spec).unwrap().len();
+    assert!(
+        bytes <= 1650,
+        "the ask_user definition grew to {bytes} bytes, past the 1650 budget"
+    );
+    let header = &spec.input_schema["properties"]["questions"]["items"]["properties"]["header"];
+    assert!(
+        header["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("16 display cells")),
+        "the header description must name the width limit: {header}"
+    );
+}
