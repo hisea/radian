@@ -1227,8 +1227,9 @@ async fn pty_skills_extra_paths_are_read_from_the_config() {
 }
 
 /// ADR 0031 T3: a workspace with project resources and no saved decision shows the startup
-/// trust modal; Enter takes the default ("do not trust this directory"), writes `trust.json`
-/// and journals `ProjectTrustChanged`.
+/// trust modal. The default highlight is the sandbox choice,
+/// so this test moves down to "do not trust this directory", writes `trust.json` with
+/// Enter, and journals `ProjectTrustChanged`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_trust_modal_asks_and_enter_untrusts() {
@@ -1265,14 +1266,9 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
         "the trust modal is missing:\n{}",
         pty.screen()
     );
-    // All six options, and the default highlight is the fail-safe one.
+    // All six options, sandbox first; the default highlight is the sandbox choice.
     assert!(
-        pty.wait_for_screen("Trust this directory", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    assert!(
-        pty.wait_for_screen("use the sandbox for this project", wait_positive()),
+        pty.wait_for_screen("Trust this directory, and use the sandbox", wait_positive()),
         "the sandbox choice is missing:\n{}",
         pty.screen()
     );
@@ -1297,7 +1293,10 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
         pty.screen()
     );
 
-    // Enter = the highlighted default = do not trust this directory.
+    // Down four rows from the sandbox default to "do not trust this directory", then Enter.
+    for _ in 0..4 {
+        pty.send(b"\x1b[B"); // Down
+    }
     pty.send(b"\r");
     pty.expand_startup();
     assert!(
@@ -1321,8 +1320,9 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
     assert!(journal.contains("ProjectTrustChanged"), "{journal}");
 }
 
-/// ADR 0043 decision 2: the trust prompt's sandbox choice trusts the directory **and**
-/// remembers `workspace` for it in `access.json`, the same record `/access` writes.
+/// ADR 0043 decision 2 (revised 2026-10-20): the trust prompt's sandbox choice is first
+/// and pre-selected, so Enter trusts the directory **and** remembers `workspace` for it
+/// in `access.json`, the same record `/access` writes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_trust_sandbox_choice_writes_the_access_record() {
@@ -1364,11 +1364,7 @@ async fn pty_trust_sandbox_choice_writes_the_access_record() {
         "{}",
         pty.screen()
     );
-    // The default highlight is "do not trust this directory" (index 4); the sandbox choice is
-    // index 1, three rows up through the list.
-    for _ in 0..3 {
-        pty.send(b"\x1b[B"); // Down
-    }
+    // The sandbox choice is first and pre-selected: Enter takes it directly.
     pty.send(b"\r");
     pty.expand_startup();
     assert!(

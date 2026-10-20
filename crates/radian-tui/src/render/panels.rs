@@ -143,7 +143,8 @@ pub(super) fn login_height(
 
 /// The startup project-trust panel (ADR 0031 T3, ADR 0035): the shared panel with
 /// the workspace line, the choices through [`crate::select_list`], and the hardcoded key
-/// hints. The cursor's default is the fail-safe `UntrustHere`.
+/// hints. The cursor's default is `TrustHereSandbox` (decision 2026-10-20: for a
+/// project with no trusted decision the sandbox choice comes first and is pre-selected).
 pub fn trust_panel(
     wizard: &TrustWizard,
     width: usize,
