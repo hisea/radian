@@ -21,20 +21,20 @@ pub(crate) fn schema() -> serde_json::Value {
         "properties": {
             "pattern": {
                 "type": "string",
-                "description": "Glob matched against each workspace-relative path, e.g. `src/**/*.rs`."
+                "description": "Glob to match against each workspace-relative path. Example: `src/**/*.rs`."
             },
             "path": {
                 "type": "string",
-                "description": "Workspace-relative directory (or file) to search under; a \
-                                read-only absolute or `~` directory under the cargo registry \
-                                sources or a toolchain's `lib/rustlib/src` is also accepted (its \
-                                results are absolute). Defaults to the workspace root."
+                "description": "Directory or file to search under. Default: the workspace \
+                                root. A read-only absolute directory or `~` directory under the \
+                                cargo registry sources or a toolchain `lib/rustlib/src` is also \
+                                accepted. Its results are absolute."
             },
             "max_results": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 5000,
-                "description": "Maximum paths to return; defaults to 500."
+                "description": "Maximum paths to return. Default: 500."
             }
         },
         "required": ["pattern"],
@@ -45,14 +45,10 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "glob".into(),
-        description: "Find files under the workspace whose workspace-relative path matches a \
-                      glob, such as `src/**/*.rs`, `**/Cargo.toml` or `tests/*.rs`. `*` does \
-                      not cross a `/`; `**` does. Results are sorted. `.gitignore` and \
-                      `.ignore` files are respected, from the workspace root down through the \
-                      search directory (a nearer directory's rules win, as in git); the global \
-                      gitignore is not read. `.git` is skipped, and a symlink is never \
-                      followed (a symlinked file is not a match). Truncated past max_results \
-                      with a line naming what was cut."
+        description: "Find files with a glob. `*` stops at `/`. `**` crosses `/`. \
+                      Results are sorted. `.gitignore` and `.ignore` files apply from the \
+                      workspace root down to the search directory. The global gitignore is \
+                      not read. `.git` is skipped. A symlink is never followed."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,

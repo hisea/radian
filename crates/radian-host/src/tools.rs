@@ -92,64 +92,6 @@ impl HostTools {
         self.subagent = Some(subagent);
         self
     }
-
-    /// The mounted built-in tools as `(name, one-line purpose)`, for the system prompt's
-    /// `<runtime>` layer (ADR 0036 D1's 0a). The MCP tools are dynamic (they depend on the
-    /// server), so they are named by server in the same layer, not listed here.
-    pub fn builtin_tools(&self) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> = Vec::new();
-        let mut push = |name: &str, purpose: &str| {
-            out.push((name.to_owned(), purpose.to_owned()));
-        };
-        if self.coding.is_some() {
-            push(
-                "read",
-                "read a file or list a directory; lines are numbered, with offset and limit",
-            );
-            push(
-                "patch",
-                "replace text in a file (layered match; replace_all for many)",
-            );
-            push("write", "create or overwrite a file");
-            push("glob", "find files whose path matches a glob");
-            push("grep", "search file contents with a regex");
-            push(
-                "shell",
-                "run a command in the workspace; one that runs past the auto-background \
-                 threshold is moved to the background automatically (`background: true` starts \
-                 it there at once)",
-            );
-            push(
-                "job",
-                "read, wait for, or stop a background shell job by id",
-            );
-        }
-        if self.memory.is_some() {
-            push(
-                "memory_search",
-                "search durable memory, or read records in full by id",
-            );
-        }
-        if self.ask.is_some() {
-            push("ask_user", "ask the user a structured question");
-        }
-        if self.skills.is_some() {
-            push("skill", "read one of the discovered skills");
-        }
-        if self.subagent.is_some() {
-            push(
-                "subagent",
-                "run one task in a fresh blocking child session (`explore` is read-only) and \
-                 return its last assistant text",
-            );
-        }
-        // The session allow-list narrows what is even listed in layer 0a; a built-in it
-        // does not name is not mounted and must not appear here.
-        if self.tool_allow.is_some() {
-            out.retain(|(name, _)| self.allows(name));
-        }
-        out
-    }
 }
 
 pub struct HostSession {

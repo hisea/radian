@@ -15,7 +15,7 @@ use agent_core::{
 };
 use serde_json::Value;
 
-use super::{SKILL_FILE_NAME, Skill, read_skill_body};
+use super::{Skill, read_skill_body};
 
 /// The largest body the tool returns. A skill bigger than this is a tool-result error rather
 /// than a truncation: half a skill is worse than a clear failure (ADR 0025 S3). The repo has no
@@ -179,21 +179,21 @@ fn specs() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "skill".into(),
         description: format!(
-            "Read the full body of one of the skills listed in the system prompt. Pass the \
-             skill's `name`; its body is returned with its directory noted as the base for \
-             relative paths. Optional `args` fill the body's `$ARGUMENTS` placeholder when it \
-             has one, and are appended verbatim otherwise. The body is limited to {SKILL_BODY_LIMIT_BYTES} bytes."
+            "Read the full body of one skill. Pass the skill name that the system prompt \
+             lists. The body comes back with its directory. That directory is the base for \
+             relative paths. Optional `args` fill the `$ARGUMENTS` placeholder in the body. \
+             Without the placeholder, the tool appends them verbatim. The body is limited to {SKILL_BODY_LIMIT_BYTES} bytes."
         ),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": format!("The skill's name, exactly as listed (its `{SKILL_FILE_NAME}` frontmatter `name`, or the directory name when the frontmatter has no `name`).")
+                    "description": "Skill name as listed. Without a frontmatter `name`, use the directory name.",
                 },
                 "args": {
                     "type": "string",
-                    "description": "Optional arguments: fill the body's `$ARGUMENTS` placeholder, or are appended verbatim when it has none."
+                    "description": "Arguments for the skill. They fill the `$ARGUMENTS` placeholder in the body. Without the placeholder, the tool appends them verbatim."
                 }
             },
             "required": ["name"],

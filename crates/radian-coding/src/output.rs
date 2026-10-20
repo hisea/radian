@@ -347,13 +347,13 @@ pub(crate) fn file_properties() -> serde_json::Value {
         "from_line": {
             "type": "integer",
             "minimum": 1,
-            "description": "1-based line of the output file to start at. Use with \
-                            max_lines to page."
+            "description": "First output-file line to return (1-based). Use it with \
+                            `max_lines` to page."
         },
         "max_lines": {
             "type": "integer",
             "minimum": 1,
-            "description": "Maximum full-file lines to return from from_line."
+            "description": "Maximum full-file lines to return from `from_line`."
         },
         "tail_lines": {
             "type": "integer",
@@ -362,8 +362,8 @@ pub(crate) fn file_properties() -> serde_json::Value {
         },
         "pattern": {
             "type": "string",
-            "description": "Return only output-file lines matching this Rust regex (same \
-                            convention as `grep`), numbered and capped."
+            "description": "Return only output-file lines that match this Rust regex. \
+                            Lines are numbered and capped."
         }
     })
 }

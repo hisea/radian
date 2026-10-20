@@ -124,36 +124,35 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "path": {
                 "type": "string",
-                "description": "Workspace-relative directory (or file) to search; a read-only \
-                                absolute or `~` directory under the cargo registry sources or a \
-                                toolchain's `lib/rustlib/src` is also accepted (its results are \
-                                absolute). Defaults to the workspace root."
+                "description": "Directory or file to search. Default: the workspace root. \
+                                A read-only absolute directory or `~` directory under the cargo \
+                                registry sources or a toolchain `lib/rustlib/src` is also \
+                                accepted. Its results are absolute."
             },
             "glob": {
                 "type": "string",
-                "description": "Only search files whose workspace-relative path matches this glob, e.g. `**/*.rs`."
+                "description": "Search only files with a workspace-relative path that matches this glob. Example: `**/*.rs`."
             },
             "case_insensitive": {
                 "type": "boolean",
-                "description": "Match without regard to case; defaults to false."
+                "description": "Ignore case. Default: false."
             },
             "context": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Lines of context to show before and after each match; defaults to 0. A larger value than the limit (30) is cut to it, not refused."
+                "description": "Lines to show before and after each match. Default: 0. Values above 30 are cut to 30."
             },
             "max_matches": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 5000,
-                "description": "Maximum total matches to return; defaults to 200."
+                "description": "Maximum matches to return. Default: 200."
             },
             "output": {
                 "type": "string",
                 "enum": ["content", "files", "count"],
-                "description": "`content` (default) prints each match as `path:line:text`; \
-                                `files` prints one line per matching file with its match count; \
-                                `count` prints only the totals."
+                "description": "`content` (default) prints each match. `files` prints each \
+                                matching file. `count` prints only the totals."
             }
         },
         "required": ["pattern"],
@@ -164,18 +163,12 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "grep".into(),
-        description: "Search file contents under the workspace (or under path) with a regex. \
-                      Each match is reported as `path:line:text`; with `context` the lines \
-                      around it are reported too, as `path-line-text`, and groups are separated \
-                      by `--`. `.gitignore` and `.ignore` files are respected, from the \
-                      workspace root down through the search directory (a nearer directory's \
-                      rules win, as in git); the global gitignore is not read. `.git` and \
-                      symlinks are skipped, and binary files are skipped. `glob` limits the \
-                      files searched, `case_insensitive` ignores case. Matches are capped per \
-                      file and in total, total output is bounded by bytes, each cut named in \
-                      the text. Use `output: \"files\"` for which files contain a pattern \
-                      and `output: \"count\"` for how many matches there are. An invalid \
-                      regex is an error."
+        description: "Search file contents with a Rust regex. Each match is reported as \
+                      `path:line:text`. `.gitignore` and `.ignore` files apply from the \
+                      workspace root down to the search directory. The global gitignore is \
+                      not read. `.git`, symlinks, and binary files are skipped. Use \
+                      `output: \"files\"` for which files contain a pattern. Use `output: \
+                      \"count\"` for how many matches there are."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,

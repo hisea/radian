@@ -722,7 +722,7 @@ async fn an_unsandboxed_shell_requires_an_explicit_sandbox() {
         .find(|spec| spec.name == "shell")
         .expect("the full-access shell is advertised");
     assert!(
-        spec.description.contains("NOT sandboxed"),
+        spec.description.contains("runs with no sandbox"),
         "the description must not hide the lack of confinement: {}",
         spec.description
     );
@@ -774,9 +774,10 @@ async fn the_shell_description_points_file_reading_and_searching_at_the_read_onl
             .find(|spec| spec.name == "shell")
             .expect("shell is advertised with a sandbox");
         for wanted in [
-            "Read and list with `read`",
-            "search with `grep` and `glob`",
-            "run in parallel, while `shell` runs alone",
+            "Use `read` to read and list files",
+            "Use `grep` and `glob` to search files",
+            "They run in parallel",
+            "`shell` runs alone",
         ] {
             assert!(
                 spec.description.contains(wanted),
@@ -811,12 +812,15 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
     for wanted in [
         "kills the whole process group",
         "never killed for time",
-        "by default 60 s",
-        "by default 60 s, at most 600 s",
+        "default threshold is 60 s",
+        "The default is 60 s",
+        "The maximum is 600 s",
         "counts from the command's start",
-        "by default 24 KiB",
+        "default cap is 24 KiB",
         "ignores `timeout_secs`",
-        "`grep` and `glob` report truncation, use less context, and run in parallel",
+        "`grep` and `glob` report truncation",
+        "They use less context",
+        "They run in parallel",
     ] {
         assert!(
             spec.description.contains(wanted),
@@ -840,7 +844,7 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
     let timeout = &spec.input_schema["properties"]["timeout_secs"]["description"];
     assert!(
         timeout.as_str().is_some_and(
-            |text| text.contains("by default 60") && text.contains("whole process group")
+            |text| text.contains("Default: 60") && text.contains("whole process group")
         ),
         "the `timeout_secs` field must name the default and the process group: {timeout}"
     );
@@ -1044,13 +1048,13 @@ async fn the_shell_description_follows_the_effective_git_access() {
     std::fs::create_dir_all(&root).unwrap();
 
     let writable = shell_description(&GIT_WRITABLE, &root).await;
-    assert!(writable.contains("native `git commit` works"), "{writable}");
+    assert!(writable.contains("`git commit` works"), "{writable}");
     assert!(writable.contains("stay read-only"), "{writable}");
     assert!(!writable.contains("(so is"), "{writable}");
 
     let read_only = shell_description(&GIT_READ_ONLY, &root).await;
     assert!(
-        read_only.contains("the repository's `.git` is read-only"),
+        read_only.contains("repository's `.git` is read-only"),
         "{read_only}"
     );
     assert!(read_only.contains("`git commit`, by design"), "{read_only}");
@@ -1581,22 +1585,21 @@ async fn the_shell_description_names_outside_sandbox() {
             .iter()
             .find(|spec| spec.name == "shell")
             .expect("shell is advertised with a sandbox");
-        if spec.description.contains("NOT sandboxed") {
+        if spec.description.contains("runs with no sandbox") {
             assert!(
-                !spec.description.contains("outside_sandbox: true"),
+                !spec.description.contains("outside_sandbox"),
                 "full has no sandbox to leave: {}",
                 spec.description
             );
         } else {
             assert!(
                 spec.description
-                    .contains("`outside_sandbox: true` with `outside_sandbox_reason`"),
+                    .contains("set `outside_sandbox` and give `outside_sandbox_reason`"),
                 "the workspace wording must name outside_sandbox: {}",
                 spec.description
             );
             assert!(
-                spec.description
-                    .contains("ask approval for one unsandboxed call"),
+                spec.description.contains("The call needs approval"),
                 "the wording must say the call needs approval: {}",
                 spec.description
             );
@@ -1615,11 +1618,9 @@ async fn the_shell_description_names_outside_sandbox() {
     assert!(checked >= 1, "no shell was built to check");
 }
 
-/// Slice 1 size budget (re-measured 2026-10-20): the `outside_sandbox` sentence and the
-/// two schema fields join the `shell` definition. The serialized `workspace` definition
-/// is 2532 bytes with the read-only `.git` wording and 2606 with the writable carve-out
-/// wording, so the pin covers the larger of the two with a little room, the way the
-/// `read` (1790) and `ask_user` (1630) pins do.
+/// Size budget (re-measured 2026-10-20, the fix1 STE rewrite): the serialized `workspace`
+/// definition is about 2.73 KB with the writable carve-out wording, so the pin covers it
+/// with a little room, the way the `read` (1100) and `ask_user` (1700) pins do.
 #[tokio::test]
 async fn the_shell_definition_stays_small() {
     let dir = TempDir::new("shell-size");
@@ -1640,8 +1641,8 @@ async fn the_shell_definition_stays_small() {
             .clone();
         let bytes = serde_json::to_vec(&spec).unwrap().len();
         assert!(
-            bytes <= 2630,
-            "the {} shell definition grew to {bytes} bytes, past the 2630 budget",
+            bytes <= 2760,
+            "the {} shell definition grew to {bytes} bytes, past the 2760 budget",
             backend.name(),
         );
     }

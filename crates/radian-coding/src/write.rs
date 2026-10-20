@@ -22,11 +22,11 @@ pub(crate) fn schema() -> serde_json::Value {
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Workspace-relative file path."
+                "description": "File to write. Use a workspace-relative path."
             },
             "content": {
                 "type": "string",
-                "description": "Exact bytes to write (UTF-8)."
+                "description": "Bytes to write (UTF-8). The tool writes them exactly."
             }
         },
         "required": ["path", "content"],
@@ -37,9 +37,10 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "write".into(),
-        description: "Create or overwrite a workspace file with exactly `content` (no trailing \
-                      newline is added). The parent directory must exist. The destination is \
-                      opened without following a symlink and is refused if it is hard-linked."
+        description: "Write `content` to a file. The call creates the file or overwrites \
+                      it. The call adds no trailing newline. The parent directory must exist. \
+                      The call does not follow symlinks. The call refuses a hard-linked \
+                      destination."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Exclusive,

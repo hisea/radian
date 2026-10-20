@@ -1715,7 +1715,7 @@ async fn system_prompt_is_sent() {
 #[tokio::test]
 async fn the_default_role_layers_are_sent() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
-    // A private home: the runtime tool list must not depend on the machine's real memory.
+    // A private home: the mounted tools must not depend on the machine's real memory.
     let home = scratch("default-role");
     let (code, _, _) = feed_and_wait(
         spawn_radian(
@@ -1738,11 +1738,11 @@ async fn the_default_role_layers_are_sent() {
         content.contains("You are radian, a coding agent"),
         "the default role: {content}"
     );
-    // ADR 0021 D7: an empty memory mounts no search, so the runtime tool list names no
+    // ADR 0021 D7: an empty memory mounts no search, so the tool definitions name no
     // memory tool at all.
     assert!(
         !content.contains("memory_search"),
-        "the runtime tool list: {content}"
+        "the mounted tools: {content}"
     );
     assert!(content.trim_end().ends_with("</session>"), "{content}");
     assert!(content.contains("model: m"), "{content}");
@@ -1793,6 +1793,52 @@ async fn the_workspace_system_prompt_unix_socket_sentence_follows_the_backend() 
             "seatbelt restricts Unix sockets, so the sentence stays: {content}"
         );
     }
+}
+
+/// The `full` tier has no sandbox and a reachable network (ADR 0016 decision 1, ADR
+/// 0043 decision 5), so its `<runtime>` facts say so in plain sentences.
+#[tokio::test]
+async fn the_full_system_prompt_states_network_on() {
+    let dir = scratch("full-network-on");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "full",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let messages = messages_of(&server, 0);
+    let system = &messages.as_array().expect("messages")[0];
+    let content = system["content"].as_str().unwrap_or_default();
+    assert!(
+        content.contains("There is no sandbox."),
+        "full has no sandbox: {content}"
+    );
+    assert!(
+        content.contains("The network is on."),
+        "full has a reachable network: {content}"
+    );
+    assert!(
+        !content.contains("Network: off."),
+        "no stale off flag beside the no-sandbox facts: {content}"
+    );
 }
 
 /// The removed tier name is unknown: `--profile safe` fails like any typo (fail closed),

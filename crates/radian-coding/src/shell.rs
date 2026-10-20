@@ -64,41 +64,39 @@ pub(crate) fn schema() -> serde_json::Value {
         "properties": {
             "command": {
                 "type": "string",
-                "description": "The shell command; it is passed to `/bin/sh -c`."
+                "description": "Command to run. The tool passes it to `/bin/sh -c`."
             },
             "timeout_secs": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Seconds a foreground command may run before its whole \
-                                process group is killed (by default 60, at most 600); ignored \
-                                for `background: true`."
+                "description": "Seconds a foreground command may run. Default: 60. Maximum: \
+                                600. At the deadline, the tool kills the whole process group. \
+                                `background: true` ignores this field."
             },
             "cwd": {
                 "type": "string",
-                "description": "Workspace-relative directory to run in (default: the \
-                                workspace root). Absolute paths, `..` and symlinks out \
-                                of the workspace are refused."
+                "description": "Directory to run in. Use a workspace-relative path. Default: \
+                                the workspace root. The tool refuses absolute paths, `..`, and \
+                                symlinks out of the workspace."
             },
             "max_output_bytes": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Per-stream output budget in bytes (by default 24 KiB, at \
-                                most 1 MiB)."
+                "description": "Output cap per stream in bytes. Default: 24 KiB. Maximum: 1 MiB."
             },
             "background": {
                 "type": "boolean",
-                "description": "Run in the background and return at once with a job id \
-                                (default false). Read it with `job`."
+                "description": "Run in the background and return at once with a job id. \
+                                Default: false. Read the job with `job`."
             },
             "outside_sandbox": {
                 "type": "boolean",
-                "description": "One call outside the sandbox (default false): needs a \
-                                reason and approval; never automatic, never in the background."
+                "description": "Run one call outside the sandbox. Default: false. The call \
+                                needs a reason and approval. Never automatic. Never in the background."
             },
             "outside_sandbox_reason": {
                 "type": "string",
-                "description": "Why the call leaves the sandbox; required with \
-                                `outside_sandbox`."
+                "description": "Reason to leave the sandbox. Required with `outside_sandbox`."
             }
         },
         "required": ["command"],
@@ -118,44 +116,43 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
     let confinement = match mode {
         SandboxMode::WorkspaceWrite if git_writable => {
-            "The command runs under the OS sandbox in `workspace` mode: writes are \
-             confined to the workspace, the repository's `.git` is writable so native \
-             `git commit` works (only `.git/config`, `.git/config.worktree` and \
-             `.git/hooks/` stay read-only), `~/.ssh` is not readable, and the network is \
-             **on**. Set `outside_sandbox: true` with `outside_sandbox_reason` to ask \
-             approval for one unsandboxed call."
+            "The command runs under the OS sandbox (`workspace`). Writes stay in the \
+             workspace. The network is on. `~/.ssh` is not readable. The repository's \
+             `.git` is writable. Native `git commit` works there. Only `.git/config`, \
+             `.git/config.worktree`, and `.git/hooks/` stay read-only. To leave the \
+             sandbox for one call, set `outside_sandbox` and give \
+             `outside_sandbox_reason`. The call needs approval."
         }
         SandboxMode::WorkspaceWrite => {
-            "The command runs under the OS sandbox in `workspace` mode: writes are \
-             confined to the workspace, the repository's `.git` is read-only (so is \
-             `git commit`, by design), `~/.ssh` is not readable, and the network is **on**. \
-             Set `outside_sandbox: true` with `outside_sandbox_reason` to ask approval \
-             for one unsandboxed call."
+            "The command runs under the OS sandbox (`workspace`). Writes stay in the \
+             workspace. The network is on. `~/.ssh` is not readable. The repository's \
+             `.git` is read-only (so is `git commit`, by design). To leave the sandbox \
+             for one call, set `outside_sandbox` and give `outside_sandbox_reason`. \
+             The call needs approval."
         }
         SandboxMode::FullAccess => {
-            "**The command is NOT sandboxed** (`full`): it can read and write \
-             anywhere the user can, including the network. No OS sandbox wraps it; that is \
-             the built-in default."
+            "The command runs with no sandbox (`full`). It can read and write all \
+             files that you can. The network is on. This is the built-in default."
         }
     };
     ToolSpec {
         name: "shell".into(),
         description: format!(
-            "Run a shell command with `/bin/sh -c`. {confinement} Read and list \
-             with `read`, and search with `grep` and `glob` — not \
-             `cat`/`sed`/`ls`/`find` through `shell`: `grep` and `glob` report truncation, \
-             use less context, and run in parallel, while `shell` runs alone. Each stream \
-             is capped separately (by default 24 KiB): the start and end are kept, the \
-             middle names the discarded bytes. No `timeout_secs`: a command still \
-             running after the auto-background threshold (by default 60 s) moves to the \
-             background in place — never restarted, never killed for time — returning at \
-             once with a job id. `timeout_secs` (by default 60 s, at most 600 s) counts \
-             from the command's start and kills the whole process group at the deadline; \
-             it moves only when the threshold falls first. Timeout or \
-             cancellation kills the whole process group. `background: true` starts it \
-             there at once and ignores `timeout_secs` (no deadline). `You will be notified \
-             when it finishes. Do not sleep or poll. If you have nothing else to do, end \
-             your reply.`"
+            "Run a shell command with `/bin/sh -c`. {confinement} Use `read` to read \
+             and list files. Use `grep` and `glob` to search files. Do not use `cat`, \
+             `sed`, `ls`, or `find` through `shell`. `grep` and `glob` report \
+             truncation. They use less context. They run in parallel. `shell` runs \
+             alone. Each stream has its own cap. The default cap is 24 KiB. A timeout \
+             or a cancellation kills the whole process group. Without `timeout_secs`, \
+             a command that still runs after the threshold moves to the background. \
+             The default threshold is 60 s. The move keeps the same process. After the \
+             move, the command is never killed for time. The call returns at once with \
+             a job id. `timeout_secs` sets a deadline. The default is 60 s. The \
+             maximum is 600 s. The timeout counts from the command's start. At the \
+             deadline, the tool kills the whole process group. `background: true` \
+             starts the command in the background. `background: true` ignores \
+             `timeout_secs`. A background command has no deadline. You will be notified when the command finishes. Do not sleep or \
+             poll. If you have nothing else to do, end your reply."
         ),
         input_schema: schema(),
         // A shell command has side effects and is not safe to overlap with other calls.
@@ -1836,11 +1833,9 @@ mod tests {
         // ADR 0037 decision 4: the two definitions stay small enough for the cached prefix.
         // Compact `{"name","description","input_schema"}` JSON, UTF-8 bytes. Both
         // sandbox modes (the longest confinement text wins) and the one `job` tool.
-        // Re-measured 2026-10-20 (slice 1 of `sandbox-auto-allow-shell`): the
-        // `outside_sandbox`/`outside_sandbox_reason` fields and the one sentence naming
-        // them joined the `shell` definition — FullAccess 2351 B, workspace 2580 B at
-        // most — so the cap moves from 2,200 B with a little room, the way the `read`
-        // and `ask_user` pins were re-measured when they grew.
+        // Re-measured 2026-10-20 (fix1 STE rewrite): `shell` is about 2.70 KB at most
+        // (the writable carve-out wording), `job` 1621 B — so the caps sit a little
+        // above those sizes.
         let size = |spec: &agent_core::ToolSpec| {
             serde_json::to_string(&serde_json::json!({
                 "name": spec.name,
@@ -1857,12 +1852,12 @@ mod tests {
         ] {
             let bytes = size(&spec(mode, git_writable));
             assert!(
-                bytes <= 2600,
-                "shell ({mode:?}, git {git_writable}) is {bytes} B, over the 2,600 B cap"
+                bytes <= 2730,
+                "shell ({mode:?}, git {git_writable}) is {bytes} B, over the 2,730 B cap"
             );
         }
         let bytes = size(&crate::jobs::job_spec());
-        assert!(bytes <= 1800, "job is {bytes} B, over the 1,800 B cap");
+        assert!(bytes <= 1660, "job is {bytes} B, over the 1,660 B cap");
     }
 
     #[test]
