@@ -352,6 +352,35 @@ fn edge_cases() -> Vec<(String, String)> {
             "memory.injection.addition_budget.wrong_type",
             "schema_version = 1\n[memory.injection]\naddition_budget = \"x\"\n",
         ),
+        // ---- hooks (ADR 0045 slice A) ----
+        (
+            "hooks.section_not_a_table",
+            "schema_version = 1\nhooks = 3\n",
+        ),
+        (
+            "hooks.event_not_a_list",
+            "schema_version = 1\n[hooks]\nPreToolUse = 3\n",
+        ),
+        (
+            "hooks.unknown_event",
+            "schema_version = 1\n[[hooks.SessionStart]]\nmatcher = \"read\"\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\n",
+        ),
+        (
+            "hooks.ok",
+            "schema_version = 1\n[[hooks.PreToolUse]]\nmatcher = \"shell\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\ntimeout = 5\n",
+        ),
+        (
+            "hooks.non_command_type",
+            "schema_version = 1\n[[hooks.PreToolUse]]\nmatcher = \"read\"\n[[hooks.PreToolUse.hooks]]\ntype = \"http\"\ncommand = \"https://example.com\"\n",
+        ),
+        (
+            "hooks.async_handler",
+            "schema_version = 1\n[[hooks.PostToolUse]]\nmatcher = \"read\"\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\nasync = true\n",
+        ),
+        (
+            "hooks.bad_timeout",
+            "schema_version = 1\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\ntimeout = \"x\"\n",
+        ),
         // ---- shell: a bad value is skipped, a non-table is ignored ----
         (
             "shell.desktop",

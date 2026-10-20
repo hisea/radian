@@ -1,6 +1,6 @@
 # 外部命令 hook：与 Claude Code / Codex 同构的子集
 
-- 状态：decided＼�编辑后 hook 的批处理方式也已定，见末节）
+- 状态：decided＼�编辑后 hook 的批处理方式也已定，见末节）/ 切片 A 已落地（pi/command-hooks-user，用户级 `[hooks]`，ADR 0045；本文件保留，见末节）
 - 顺序：生态兼容四件事的第 3/4＼�按 `context-at-imports` → `mcp-servers-json` → `command-hooks-claude-subset` → `import-claude` 做；ACP 暂定不做）
 - 涉及 ADR：新 ADR（命令 hook）；0012（hook 不能放宽权限）、0031（项目级 hook 进信任门）、0011（`stop` 钩子续跑走 inbox）、0017（hook 出错结束回合）、0016（`workspace` 档下 hook 进沙箱）
 - 来源：总报告 `docs/research/2026-10-18-area-deep-dive/README.md` 第 17 条（两个外部命令 hook）；`11-ecosystem-compat.md` §5.5、§6 ③（字段对齐）；批处理一节来自 `8-extensibility.md` §6 ⑥ 与 的要求（数据已说明要一并考虑）
@@ -59,3 +59,21 @@
 - 未配置项目级 `PostToolUse` 的项目：编辑后不启动任何子进程；配置了的项目：每次编辑同步跑一次、输出紧跟该次编辑的结果。
 - 变异检查：放开 `allow`，"allow 被拒收"的测试必须失败；去掉续跑上限，"第 4 次不续"的测试必须失败。
 - 落地时同分支写新 ADR、改 0012/0031（docs-only commit）并删掉本文件。
+
+## 切片 A 落地记（2026-10-20，pi/command-hooks-user；本文件保留，见下）
+
+- 落地：用户级 `[hooks]`（`PreToolUse`/`PostToolUse`/`Stop`，ADR 0045），链序权限之后，
+  `Stop` 续跑走 `on_turn_end` + inbox `followup`（上限 3 次），`workspace` 档进 `shell` 同款沙箱。
+  新 ADR 0045、ADR 0008 加 `[hooks]` 节，均在 docs-only commit 里。
+- 本文件**不删除**：切片 B 还在里面。AGENTS.md 的惯例（事项落地即删 backlog 文件）本次不适用，
+  因为同一事项的 slice B 未落地；删了就没人记得它。
+
+## 切片 B 还剩什么（未定，不在本任务）
+
+- 项目级 `<workspace>/.radian/hooks.json`：文件形状（与用户级 `[hooks]` 同构的 JSON）、加载时机、
+  未受信任时不运行、内容哈希确认（文件变了重新问）的完整规则。prompt 设计未定：它要与项目级
+  `.mcp.json` 共用一套设计，见 `mcp-servers-json.md`。
+- ADR 0031 T1 的触发清单加 `.radian/hooks.json`；项目级"编辑后检查"的用法（本文件末节"编辑后检查是
+  **项目级设置**"整段、「未配置项目级 `PostToolUse`」与「未受信任的项目」两条验收）；`trust.rs` 不碰。
+- 用户级 `[hooks]` 与项目级 `hooks.json` 的叠加规则（都命中时跑两次还是合并？顺序？一方 exit 2 另一方
+  是否还跑？）：slice B 设计时再定，ADR 0045 修订时写明。

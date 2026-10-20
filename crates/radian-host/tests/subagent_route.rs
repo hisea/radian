@@ -222,6 +222,7 @@ async fn the_child_runs_the_parents_live_model_route() {
             tools_allow: None,
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
+            hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: false,
             config_snapshot: json!({"provider": "openai-compatible", "model": "old"}),
@@ -243,6 +244,7 @@ async fn the_child_runs_the_parents_live_model_route() {
             driver_stopped: Arc::new(|_| {}),
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
+            hooks_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await

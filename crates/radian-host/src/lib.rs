@@ -27,6 +27,7 @@ mod headers;
 pub mod headers_usage;
 pub mod herdr;
 mod home;
+pub mod hooks;
 pub mod job_notify;
 pub mod login;
 mod mcp;
@@ -131,6 +132,7 @@ pub use home::{
     memory_dir_for, radian_home, radian_home_for, run_dir_for, sessions_dir, sessions_dir_for,
     skills_dir, skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
 };
+pub use hooks::{CommandHooks, HooksWarning, REASON_CHAR_LIMIT, STOP_MAX_CONTINUATIONS};
 pub use job_notify::{
     JobNotifier, MAX_CONSECUTIVE_WAKES, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message,
 };

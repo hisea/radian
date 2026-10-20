@@ -41,6 +41,7 @@ fn the_reader_matches_the_reference_checker() {
         ("memory-injection.toml", "accept"),
         ("integrations-herdr.toml", "accept"),
         ("control.toml", "accept"),
+        ("hooks.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),
         ("schema-version-lower.toml", "reject"),
@@ -125,6 +126,35 @@ fn the_unknown_fields_are_ignored_but_reported() {
     assert!(config.skipped.contains(&"future_top_level".to_string()));
     assert!(config.skipped.contains(&"model.future_option".to_string()));
     assert!(config.skipped.contains(&"tui.theme".to_string()));
+}
+
+/// `hooks.toml` (ADR 0045 slice A): the three events parse with matchers and commands;
+/// the non-subset entries (`http`, `async`, unknown event) are skipped, never refused.
+#[test]
+fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
+    let (path, text) = fixture("hooks.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.hooks.pre_tool_use.len(), 1);
+    assert_eq!(
+        config.hooks.pre_tool_use[0].matcher.as_deref(),
+        Some("shell|write")
+    );
+    assert_eq!(config.hooks.pre_tool_use[0].hooks.len(), 1);
+    assert_eq!(config.hooks.pre_tool_use[0].hooks[0].timeout_secs, Some(10));
+    assert_eq!(config.hooks.post_tool_use.len(), 1);
+    assert_eq!(config.hooks.stop.len(), 1);
+    assert_eq!(config.hooks.stop[0].hooks[0].timeout_secs, Some(30));
+    for key in [
+        "hooks.PostToolUse[1]",
+        "hooks.PreToolUse[1]",
+        "hooks.SessionStart",
+    ] {
+        assert!(
+            config.skipped.contains(&key.to_string()),
+            "{key}: {:?}",
+            config.skipped
+        );
+    }
 }
 
 /// `control.toml` (ADR 0043): `[control] enabled` is carried, defaulting to true.

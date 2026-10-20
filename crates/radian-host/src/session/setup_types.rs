@@ -123,6 +123,10 @@ pub struct SessionSetup {
     /// The memory injection configuration (ADR 0021). The host builds it
     /// from `[memory.injection]`; `InjectionConfig::default()` is the documented D6 table.
     pub memory_injection: InjectionConfig,
+    /// The resolved `[hooks]` section (ADR 0045 slice A): user-level external command hooks.
+    /// The host copies it from the config; `open_session` builds the [`crate::CommandHooks`]
+    /// from it and chains it after the permissions.
+    pub hooks: crate::config::HooksConfig,
     /// `true` to resume
     /// The project-trust state this session starts with (ADR 0031 T3). The host resolves it
     /// before `open_session`; `needs_ask` means an interactive host must ask before the first
@@ -181,6 +185,9 @@ pub struct HostBindings {
     pub before_driver: Option<Arc<dyn Fn() + Send + Sync>>,
     /// A memory hook's warning line (the two hosts prefix it differently).
     pub memory_warning: Arc<dyn Fn(&str) + Send + Sync>,
+    /// A command hook's warning line (ADR 0045: refused `allow`/`ask`, unparsable stdout,
+    /// hook errors outside a turn). Routed like `memory_warning`, with the `[hooks]` prefix.
+    pub hooks_warning: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).

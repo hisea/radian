@@ -22,22 +22,26 @@ use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, ProjectState};
 use crate::skills::SkillsHooks;
 use crate::trust;
 
-/// The agent's hook chain (ADR 0025 S6): the role hook writes layers 0a, 1
-/// and 2 first, then the permission rules run, then the memory section is appended, then the
-/// skills section. The order is a promise — the role layer comes first, and the sections must be
-/// deterministic with memory before skills — so it lives in this one function, which
-/// `open_session` calls; `tests/skills_order.rs` builds the real hooks and asserts the order on
-/// the composed chain. Swapping `memory` and `skills` here is the mutation that test catches.
+/// The agent's hook chain (ADR 0025 S6, ADR 0045): the role hook writes layers 0a, 1
+/// and 2 first, then the permission rules run, then the user-level command hooks (which can
+/// only narrow what permissions already allowed), then the memory section is appended, then
+/// the skills section. The order is a promise — the role layer comes first, and the sections
+/// must be deterministic with memory before skills — so it lives in this one function, which
+/// `open_session` calls; `tests/skills_order.rs` pins it and `tests/command_hooks.rs` pins the
+/// command hooks after permissions. Swapping `memory` and `skills` here is the mutation that
+/// `skills_order` catches; moving `commands` before `permissions` is the one `command_hooks`
+/// catches.
 pub fn session_hooks(
     role: Arc<crate::prompt::RoleHooks>,
     permissions: Arc<PermissionHooks>,
+    commands: Arc<crate::CommandHooks>,
     memory: Arc<MemoryHooks>,
     skills: Arc<SkillsHooks>,
     facts: Arc<crate::prompt::SessionFactsHooks>,
 ) -> impl Hooks {
-    // The order is the promise: the role layers, permissions, memory, skills, then the volatile
-    // <session> facts (ADR 0025 S6, ADR 0036 D1).
-    ((((role, permissions), memory), skills), facts)
+    // The order is the promise: the role layers, permissions, commands, memory, skills, then
+    // the volatile <session> facts (ADR 0025 S6, ADR 0036 D1, ADR 0045).
+    (((((role, permissions), commands), memory), skills), facts)
 }
 
 /// The durable audit event for one trust write (ADR 0031 T2).
