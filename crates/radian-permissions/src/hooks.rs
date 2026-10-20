@@ -234,24 +234,25 @@ impl PermissionHooks {
         // (`;` aside) or with a non-simple segment, which falls through to the
         // ordinary path below (`ask`). A simple command is one segment, so it
         // takes the same path, plus the wrapper and `cd` restrictions.
-        if call.name == "shell" {
-            if let Some(command) = call.arguments.get("command").and_then(|v| v.as_str()) {
-                if let Some((segments, separators)) = shell::split_compound(command) {
-                    match self.decide_segments(&rules, &workspace, preset, &segments, &separators) {
-                        SegmentsOutcome::Allow { reason } => {
-                            self.record(
-                                &request_id,
-                                &call_id,
-                                ResolvedDecision::Allow,
-                                AuditApprover::Policy,
-                                Some(reason),
-                            );
-                            return Ok(ToolDecision::Allow);
-                        }
-                        SegmentsOutcome::Rewrite { command } => {
-                            let mut arguments = call.arguments.clone();
-                            arguments["command"] = Value::String(command);
-                            self.record(
+        if call.name == "shell"
+            && let Some(command) = call.arguments.get("command").and_then(|v| v.as_str())
+            && let Some((segments, separators)) = shell::split_compound(command)
+        {
+            match self.decide_segments(&rules, &workspace, preset, &segments, &separators) {
+                SegmentsOutcome::Allow { reason } => {
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Allow,
+                        AuditApprover::Policy,
+                        Some(reason),
+                    );
+                    return Ok(ToolDecision::Allow);
+                }
+                SegmentsOutcome::Rewrite { command } => {
+                    let mut arguments = call.arguments.clone();
+                    arguments["command"] = Value::String(command);
+                    self.record(
                                 &request_id,
                                 &call_id,
                                 ResolvedDecision::Rewrite,
@@ -261,29 +262,27 @@ impl PermissionHooks {
                                         .into(),
                                 )
                             );
-                            return Ok(ToolDecision::Rewrite { arguments });
-                        }
-                        SegmentsOutcome::Deny { reason } => {
-                            self.record(
-                                &request_id,
-                                &call_id,
-                                ResolvedDecision::Deny,
-                                AuditApprover::Policy,
-                                Some(reason.clone()),
-                            );
-                            return Ok(ToolDecision::Deny { reason });
-                        }
-                        // A segment needs a question: continue below as an `ask` for
-                        // the whole command (policy, session grants and the approver
-                        // all see the full command line, as before).
-                        SegmentsOutcome::Ask { reason } => {
-                            evaluated = Evaluated {
-                                action: Action::Ask,
-                                reason: Some(reason),
-                            };
-                            action = self.apply_policy(evaluated.action);
-                        }
-                    }
+                    return Ok(ToolDecision::Rewrite { arguments });
+                }
+                SegmentsOutcome::Deny { reason } => {
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Deny,
+                        AuditApprover::Policy,
+                        Some(reason.clone()),
+                    );
+                    return Ok(ToolDecision::Deny { reason });
+                }
+                // A segment needs a question: continue below as an `ask` for
+                // the whole command (policy, session grants and the approver
+                // all see the full command line, as before).
+                SegmentsOutcome::Ask { reason } => {
+                    evaluated = Evaluated {
+                        action: Action::Ask,
+                        reason,
+                    };
+                    action = self.apply_policy(evaluated.action);
                 }
             }
         }
@@ -486,20 +485,18 @@ impl PermissionHooks {
         let mut effective = workspace.to_path_buf();
         let mut rewritten: Vec<Option<String>> = vec![None; segments.len()];
         let mut any_rule_allow = false;
-        let mut blocked: Option<String> = None;
+        let mut rule_reason: Option<String> = None;
+        let mut blocked = false;
+        let mut blocked_reason: Option<String> = None;
         let mut denied: Option<String> = None;
         for (n, segment) in segments.iter().enumerate() {
-            if blocked.is_some() || denied.is_some() {
+            if blocked || denied.is_some() {
                 break;
             }
             // A runs-its-arguments program only shows the wrapper's own tokens; no
             // prefix rule and no table entry can see what it will run.
             if shell::starts_with_wrapper(segment) {
-                let wrapper = shell::tokens(segment).remove(0);
-                blocked = Some(format!(
-                    "`{segment}` starts with `{wrapper}`, which runs its arguments, \
-                     so no allow rule covers it"
-                ));
+                blocked = true;
                 continue;
             }
             let segment_call = ToolCall {
@@ -518,12 +515,15 @@ impl PermissionHooks {
                     Some(dir) if judged.action == Action::Allow => {
                         effective = dir;
                         any_rule_allow = true;
+                        if rule_reason.is_none() {
+                            rule_reason = judged.reason.clone();
+                        }
                     }
+                    // A `cd` out of the workspace, with no allow rule, or in the
+                    // wrong tier: the whole command needs a question, with the
+                    // default (empty) reason, exactly as before.
                     _ => {
-                        blocked = Some(format!(
-                            "`{segment}` leaves the workspace or has no allow rule, \
-                             so the command needs a question"
-                        ));
+                        blocked = true;
                     }
                 }
                 continue;
@@ -538,16 +538,25 @@ impl PermissionHooks {
                 );
                 continue;
             }
-            // A user `allow` rule covers the segment.
+            // A user `allow` rule covers the segment. Its reason is kept for the
+            // `always` review below, the way a single allowed command shows the
+            // rule's reason when it is turned into a question.
             if judged.action == Action::Allow {
                 any_rule_allow = true;
+                if rule_reason.is_none() {
+                    rule_reason = judged.reason.clone();
+                }
                 continue;
             }
             // A named `ask` rule is an explicit user rule and outranks the table;
             // the tier's blanket `ask` and the no-match default carry no reason,
-            // so they still fall through to it.
+            // so they still fall through to it. The named reason reaches the
+            // approver; a default block asks with the default (empty) reason.
             if judged.reason.is_some() {
-                blocked = judged.reason.clone();
+                blocked = true;
+                if blocked_reason.is_none() {
+                    blocked_reason = judged.reason.clone();
+                }
                 continue;
             }
             match readonly::match_segment(workspace, &effective, segment) {
@@ -556,24 +565,24 @@ impl PermissionHooks {
                     rewritten[n] = Some(command);
                 }
                 None => {
-                    blocked = Some(format!(
-                        "no allow rule or read-only table entry covers `{segment}`"
-                    ));
+                    blocked = true;
                 }
             }
         }
         if let Some(reason) = denied {
             return SegmentsOutcome::Deny { reason };
         }
-        if let Some(reason) = blocked {
-            return SegmentsOutcome::Ask { reason };
+        if blocked {
+            return SegmentsOutcome::Ask {
+                reason: blocked_reason,
+            };
         }
         // A user-allowed segment is still reviewed under `approval = always`, the
         // way a single allowed command is; a purely read-only command (table
         // hits only) bypasses review, the way a single table hit does.
         if any_rule_allow && self.approval() == ApprovalPolicy::Always {
             return SegmentsOutcome::Ask {
-                reason: "approval policy `always` reviews every non-read-only command".into(),
+                reason: rule_reason,
             };
         }
         if rewritten.iter().any(Option::is_some) {
@@ -634,8 +643,10 @@ enum SegmentsOutcome {
     /// A rule denial hit a segment.
     Deny { reason: String },
     /// A segment needs a question: the caller continues as an `ask` for the
-    /// whole command.
-    Ask { reason: String },
+    /// whole command. `None` for a default block (the approver and the `never`
+    /// denial then see exactly what they saw before compounds existed), or the
+    /// named rule's reason.
+    Ask { reason: Option<String> },
 }
 
 /// Where a plain `cd <target>` segment moves the effective directory: the target

@@ -151,9 +151,9 @@ fn separator_spans(command: &str) -> Vec<(usize, usize)> {
             i += 1;
         } else if !in_single && !in_double {
             let two = i + 1 < bytes.len();
-            let len = if two && c == b'&' && bytes[i + 1] == b'&' {
-                2
-            } else if two && c == b'|' && bytes[i + 1] == b'|' {
+            let len = if two && c == b'&' && bytes[i + 1] == b'&'
+                || two && c == b'|' && bytes[i + 1] == b'|'
+            {
                 2
             } else if c == b';' || c == b'|' {
                 1
