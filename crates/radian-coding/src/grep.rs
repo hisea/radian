@@ -173,10 +173,9 @@ pub(crate) fn spec() -> ToolSpec {
                       symlinks are skipped, and binary files are skipped. `glob` limits the \
                       files searched, `case_insensitive` ignores case. Matches are capped per \
                       file and in total, total output is bounded by bytes, each cut named in \
-                      the text; `output` selects `content` (default), `files` (one line per \
-                      matching file) or `count` (totals only). Use `output: \"files\"` for \
-                      which files contain a pattern and `output: \"count\"` for how many \
-                      matches there are. An invalid regex is an error."
+                      the text. Use `output: \"files\"` for which files contain a pattern \
+                      and `output: \"count\"` for how many matches there are. An invalid \
+                      regex is an error."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,

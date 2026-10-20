@@ -61,7 +61,7 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "new": {
                 "type": "string",
-                "description": "Replacement text for the legacy `old`/`new` form."
+                "description": "Replacement text for the `old`/`new` form."
             },
             "replace_all": {
                 "type": "boolean",
@@ -98,12 +98,10 @@ pub(crate) fn spec() -> ToolSpec {
                       whitespace. A match at any layer must be unique, or the edit is refused \
                       and the file is unchanged; set replace_all: true to replace every \
                       located occurrence instead. For several edits to the one file, pass \
-                      `edits` (an array of `{old, new, replace_all?}`) instead of `old`/`new`: \
-                      every edit is located in the original file, all ranges must be disjoint, \
-                      and if any edit fails nothing is written. A CRLF file is matched on an LF \
-                      view, the offsets are mapped back, and the file stays CRLF. When nothing \
-                      matches, the error names the closest region of the file, with line \
-                      numbers, so you do not need another read."
+                      `edits` (an array of `{old, new, replace_all?}`) instead of `old`/`new`. \
+                      A CRLF file is matched on an LF view, the offsets are mapped back, and \
+                      the file stays CRLF. When nothing matches, the error names the closest \
+                      region of the file, with line numbers, so you do not need another read."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Exclusive,

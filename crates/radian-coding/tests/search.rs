@@ -567,6 +567,41 @@ async fn the_search_descriptions_name_above_base_ignores() {
     }
 }
 
+// ---------- the `output` wording (item 12) ----------
+
+/// Item 12: the three `output` values are defined in the schema field only (the
+/// constraint); the description keeps the usage (which value answers which question) and no
+/// longer defines them a second time.
+#[tokio::test]
+async fn the_output_values_are_defined_in_the_schema_only() {
+    let dir = TempDir::new("grep-output-desc");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let session = tools(&root).open_session().await.unwrap();
+    let spec = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "grep")
+        .expect("the grep spec");
+    assert!(
+        !spec.description.contains("selects `content`"),
+        "the description must not define the values again: {}",
+        spec.description
+    );
+    assert!(
+        spec.description.contains("for which files contain a pattern"),
+        "the description keeps the usage: {}",
+        spec.description
+    );
+    let field = &spec.input_schema["properties"]["output"]["description"];
+    assert!(
+        field.as_str().is_some_and(|text| text.contains("`content` (default)")
+            && text.contains("`files`")
+            && text.contains("`count`")),
+        "the schema still defines all three values: {field}"
+    );
+}
+
 // ---------- the total byte cap and the output modes ----------
 
 /// Many long matching lines: the output stays within the byte cap, ends with the one
