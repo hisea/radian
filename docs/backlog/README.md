@@ -38,7 +38,6 @@
 | `read-absorbs-list.md` | decided | 0043、0039 | `read` 读目录即列目录，`list` 退为一个版本的别名，`explore` 变三个工具；基于 shell/job 合并后的 main 开分支 |
 | `file-tools-spawn-blocking.md` | decided | 无 | 提示词一句 → 基准 → `spawn_blocking`，让同一批 grep 真正并行 |
 | `ask-user-pass.md` | decided | 0024、0036 | 保留 `ask_user`：描述写明只问用户拥有的取舍、能查到的不问；定义瘦身到约 1 KB |
-| `bench-adapter-followups.md` | decided | 无 | Terminal-Bench 适配器：usage 回报 Harbor、`auth.json` chown、传 `--turn-timeout-secs` |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `post-edit-diagnostics.md` | idea | 新 ADR | 编辑后诊断：tree-sitter 语法层 + 配置的检查命令；先数 dogfood 里 patch→check 序列 |
