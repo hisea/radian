@@ -10,7 +10,7 @@ use std::sync::Arc;
 use agent_core::{Hooks, InputSource, ToolCall, ToolDecision};
 use common::{ScriptedApprover, TempDir, call, ctx};
 use radian_permissions::*;
-use radian_sandbox::{Sandbox, SandboxMode};
+use radian_sandbox::Sandbox;
 use serde_json::json;
 
 fn hooks_with(
