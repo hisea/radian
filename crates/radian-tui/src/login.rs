@@ -386,7 +386,7 @@ impl LoginWizard {
 pub enum LoginOutcome {
     /// The wizard handled the key and stays up.
     Stay,
-    /// Run the verification request (D3): one `GET <base>/models`.
+    /// Run the verification request (D3): one `GET` of the descriptor's verification URL.
     Verify {
         name: String,
         protocol: &'static str,

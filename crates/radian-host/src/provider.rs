@@ -164,6 +164,12 @@ pub struct ProviderDescriptor {
     /// `anthropic`/`openai`/`openai-compatible`; `opencode-go` defaults to openai-compatible
     /// (its Anthropic models are all listed).
     pub default_protocol: Protocol,
+    /// The verification request `/login` sends for this provider (ADR 0026 D3): when `Some`,
+    /// one `GET` of this absolute URL with `Authorization: Bearer <key>` — the usage footer's
+    /// own auth — instead of the protocol's `GET <base>/models`. `opencode-go` names its usage
+    /// endpoint: its chat base serves no `/models` path. `None` keeps
+    /// `<base>/models`.
+    pub verification_url: Option<&'static str>,
     /// The built-in model list (the full list is later merged with the cache and `/v1/models`,
     /// ADR 0026 D0).
     pub models: &'static [DescriptorModel],
@@ -1042,6 +1048,9 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         login: LoginMethod::ApiKey { extra_fields: &[] },
         thinking: &[],
         default_protocol: Protocol::OpenAiCompatible,
+        // D3: the chat base serves no `/models`, so `/login`
+        // verifies against the usage endpoint with the footer's own Bearer auth.
+        verification_url: Some(crate::opencode_go::USAGE_URL),
         models: OPENCODE_GO_MODELS,
         headers: opencode_go_headers,
         // ADR 0027: the endpoint source `opencode_go.rs` used to be, now
@@ -1064,6 +1073,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         login: LoginMethod::OAuthBrowser,
         thinking: &[],
         default_protocol: Protocol::Responses,
+        verification_url: None,
         models: CODEX_MODELS,
         headers: chatgpt_headers,
         // ADR 0026 + ADR 0027: `/wham/usage`,
@@ -1081,6 +1091,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         login: LoginMethod::ApiKey { extra_fields: &[] },
         thinking: ANTHROPIC_THINKING,
         default_protocol: Protocol::Anthropic,
+        verification_url: None,
         models: ANTHROPIC_MODELS,
         headers: no_headers,
         // ADR 0027 slice ④: the `anthropic-ratelimit-*` response
@@ -1096,6 +1107,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         login: LoginMethod::ApiKey { extra_fields: &[] },
         thinking: &[],
         default_protocol: Protocol::OpenAiCompatible,
+        verification_url: None,
         models: OPENAI_MODELS,
         headers: no_headers,
         // ADR 0027 slice ④: the `x-ratelimit-*` response headers,
@@ -1113,6 +1125,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         },
         thinking: &[],
         default_protocol: Protocol::OpenAiCompatible,
+        verification_url: None,
         // The user supplies the model id; there is no built-in list.
         models: &[],
         headers: no_headers,

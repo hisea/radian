@@ -140,7 +140,8 @@ pub enum Effect {
     /// Load this workspace's sessions and open the picker overlay (`/sessions`). The result is
     /// [`Input::PickerOpened`]; loading is I/O, so it is the loop's job (ADR 0023 U3).
     OpenPicker { query: Option<String> },
-    /// Run the `/login` verification request (ADR 0026 D3): one `GET <base>/models`. The
+    /// Run the `/login` verification request (ADR 0026 D3): one `GET` of the descriptor's
+    /// verification URL (`<base>/models`, or the descriptor's own when it names one). The
     /// answer is [`Input::LoginVerified`].
     LoginVerify {
         name: String,
