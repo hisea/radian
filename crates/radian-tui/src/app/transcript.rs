@@ -42,8 +42,9 @@ impl App {
     }
 
     /// The leading startup block, rebuilt from [`StartupScreen`]: the wordmark (the wide form
-    /// when it fits the current width), the collapsed line or the full lines, the safety
-    /// lines (always shown), and the Tip.
+    /// when it fits the current width), the trust hint under it (only while the project is
+    /// untrusted), the collapsed line or the full lines, the safety lines (always shown),
+    /// and the Tip.
     fn rebuild_startup_entries(&mut self) {
         let Some(startup) = self.session.startup_screen.clone() else {
             self.session
@@ -57,6 +58,9 @@ impl App {
             .into_iter()
             .map(|line| Entry::new(EntryKind::Banner, line))
             .collect();
+        if let Some(hint) = &startup.trust_hint {
+            block.push(Entry::new(EntryKind::Startup, hint.clone()));
+        }
         if startup.expanded {
             block.push(Entry::new(
                 EntryKind::Startup,

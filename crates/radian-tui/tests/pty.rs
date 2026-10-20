@@ -1509,6 +1509,76 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
     pty.quit();
 }
 
+/// decision 2026-10-20: a project with no trusted decision shows
+/// `untrusted project · /trust to trust it` under the wordmark (no modal when there
+/// are no project resources); a trusted project shows no hint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_startup_shows_the_trust_hint_until_trusted() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("HINT-OK")]).await;
+    let dir = TempDir::new("trust-hint-session");
+    let home = TempDir::new("trust-hint-home");
+    let ws = TempDir::new("trust-hint-ws");
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust-hint",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("/trust to trust it", wait_positive()),
+        "the trust hint is missing:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    // `--trust` trusts for this process: the expanded block loads, and the hint is gone.
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust-hint-trusted",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--trust",
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        120,
+    );
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: loaded", wait_positive()),
+        "the session did not start:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("/trust to trust it"),
+        "a trusted project shows no hint:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// The diagnostics directory the app will use when `HOME` is `home` (ADR 0020):
 /// `<home>/.radian/cache/diagnostics`.
 fn diagnostics_dir(home: &Path) -> PathBuf {

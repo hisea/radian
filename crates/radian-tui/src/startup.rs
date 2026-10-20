@@ -35,6 +35,13 @@ pub const TIPS: &[&str] = &[
     "!<command> runs a shell command in the sandbox",
 ];
 
+/// The line under the wordmark for a project with no trusted decision (decision
+/// 2026-10-20): it points at `/trust` and disappears once the project is trusted — no
+/// popup, no per-repository interrogation.
+pub fn trust_hint(trust: &radian_host::trust::Setup) -> Option<String> {
+    (!trust.resolved.decision.as_bool())
+        .then(|| "untrusted project · /trust to trust it".to_string())
+}
 /// The tip for a session: a stable hash of the session id picks one, so the same session
 /// shows the same tip on resume. No randomness.
 pub fn tip_for(session_id: &str) -> &'static str {
@@ -54,6 +61,9 @@ pub struct StartupScreen {
     pub banner: Vec<String>,
     /// The one-line fallback the wordmark drops to when the terminal is too narrow.
     pub banner_narrow: String,
+    /// The trust line under the wordmark ([`trust_hint`]): `Some` while the current
+    /// project has no trusted decision, `None` once it is trusted.
+    pub trust_hint: Option<String>,
     /// The collapsed summary (`workspace · macOS sandbox · context …`).
     pub summary: String,
     /// The full lines, shown when expanded.
