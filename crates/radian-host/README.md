@@ -83,8 +83,8 @@ records and sends **one System message** per notifiable settle: while a turn is 
 `inject`s (`next_step`, no wake), and while the driver is idle it `followup`s (`next_turn`,
 which wakes a turn). After `MAX_CONSECUTIVE_WAKES` (3) wake-started turns with no user input it
 degrades to `inject` only; a user message (`SessionCommand::SendFollowup`/`Steer`/`Inject`)
-resets the budget. A settle is not notified when the model already has it (a `job_output
-wait`, a `job_kill`, a session-exit cleanup); a timeout is notified. On resume, a
+resets the budget. A settle is not notified when the model already has it (a `job` wait, a
+`job` kill, a session-exit cleanup); a timeout is notified. On resume, a
 `BackgroundJobStarted` with no settle is injected once as unknown and never re-run. The registry
 also kills every running group on `close()` and on drop (the panic path, `killpg` only).
 

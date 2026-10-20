@@ -32,7 +32,6 @@
 
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
-| `tool-definitions-trim.md` | in-progress（pi/shell-job） | 0037、0043、0039、0006 | 一个 `job { id, op }` 替掉 `job_output`/`job_list`/`job_kill`/`shell_output`，前台留存输出进同一注册表 |
 | `overflow-three-stage.md` | decided | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `first-launch.md` | decided | 0008 | 首次启动建默认配置、无模型时进 `/model` 选择器并写回 |
 | `project-skills.md` | decided | 0025、0031 | 接上项目级 skill，并支持 `$ARGUMENTS` |
