@@ -1126,8 +1126,8 @@ pub(crate) fn job_spec() -> ToolSpec {
                       range, page with the `more` hint) or `pattern` (matching lines, Rust \
                       regex) it reads the full file by line instead and names the file's \
                       total line count. `wait` blocks until the job ends or `timeout_ms` \
-                      elapses (default 30000, max 600000) and never kills it. `kill` stops \
-                      the job's whole session (SIGTERM, then SIGKILL after 2 s); a finished \
+                      elapses and never kills it. `kill` stops \
+                      the job's whole process group (SIGTERM, then SIGKILL after 2 s); a finished \
                       job is a no-op. The output file is outside the workspace, so this \
                       tool is the only way to read it. A completion notice tells you when a \
                       running job ends — prefer it over `wait`; never sleep or poll."

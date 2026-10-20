@@ -192,7 +192,7 @@ fn spec() -> ToolSpec {
                 "agent": {
                     "type": "string",
                     "enum": ["explore", "general"],
-                    "description": "`explore` is read-only; `general` (the default) has this session's tools minus `subagent`."
+                    "description": "Which subagent to run: `explore` or `general` (the default)."
                 },
                 "task": {
                     "type": "string",
@@ -713,6 +713,39 @@ mod tests {
             vec![("shell".to_owned(), Some("no terminal".to_owned()))]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Item 14: `explore`/`general` differ in the description only (the usage); the `agent`
+    /// field names the two values and the default (the constraint) and no longer repeats it.
+    #[test]
+    fn the_agent_field_does_not_repeat_the_explore_general_difference() {
+        let spec = spec();
+        assert!(
+            spec.description
+                .contains("`explore` (read glob grep only) is for reading and searching"),
+            "the description keeps what `explore` is: {}",
+            spec.description
+        );
+        assert!(
+            spec.description
+                .contains("`general` (the default) has this session's tools minus `subagent`"),
+            "the description keeps what `general` is: {}",
+            spec.description
+        );
+        let field = &spec.input_schema["properties"]["agent"]["description"];
+        assert!(
+            field
+                .as_str()
+                .is_some_and(|text| text.contains("`explore`") && text.contains("`general`")),
+            "the field still names the values and the default: {field}"
+        );
+        assert!(
+            field
+                .as_str()
+                .is_some_and(|text| !text.contains("minus `subagent`"))
+                && !spec.description.contains("Which subagent to run"),
+            "the difference lives in one place only: {field}"
+        );
     }
 
     /// The cut is at the character bound and the marker names the rest.

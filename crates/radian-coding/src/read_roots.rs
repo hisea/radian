@@ -153,6 +153,12 @@ impl ReadRoot {
     pub(crate) fn canonical(&self) -> &Path {
         &self.canonical
     }
+
+    /// The root's directory fd, for opening levels below it fd-relative (the search tools
+    /// load the ignore files above their base through this fd, ADR 0039 decision 2).
+    pub(crate) fn root_dir(&self) -> &RootDir {
+        &self.dir
+    }
 }
 
 /// `$CARGO_HOME/registry/src` (default `~/.cargo/registry/src`).

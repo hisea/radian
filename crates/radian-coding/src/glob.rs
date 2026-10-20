@@ -47,10 +47,12 @@ pub(crate) fn spec() -> ToolSpec {
         name: "glob".into(),
         description: "Find files under the workspace whose workspace-relative path matches a \
                       glob, such as `src/**/*.rs`, `**/Cargo.toml` or `tests/*.rs`. `*` does \
-                      not cross a `/`; `**` does. Results are sorted. `.gitignore` is \
-                      respected, `.git` is skipped, and a symlink is never followed (a \
-                      symlinked file is not a match). Truncated past max_results with a line \
-                      naming what was cut."
+                      not cross a `/`; `**` does. Results are sorted. `.gitignore` and \
+                      `.ignore` files are respected, from the workspace root down through the \
+                      search directory (a nearer directory's rules win, as in git); the global \
+                      gitignore is not read. `.git` is skipped, and a symlink is never \
+                      followed (a symlinked file is not a match). Truncated past max_results \
+                      with a line naming what was cut."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
@@ -132,7 +134,7 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
     match root.read_base(requested) {
         Ok(base) => {
             let prefix = base.prefix.clone();
-            search::walk(&base.dir, &base.relative, &mut |found| {
+            search::walk(&base.dir, &base.relative, base.ancestors, &mut |found| {
                 let rel = found.relative;
                 if matcher.is_match(&rel) {
                     matches.push(display_path(prefix.as_deref(), &rel));

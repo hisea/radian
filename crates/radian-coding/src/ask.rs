@@ -343,9 +343,12 @@ pub(crate) fn spec() -> ToolSpec {
                                 "pattern": "^[a-z0-9_-]{1,32}$",
                                 "description": "Answer key; unique in this request."
                             },
+                            // No `maxLength` here: the limit is display width (a CJK
+                            // character is 2), counted in characters it would wrongly
+                            // refuse a 9-CJK-character header; `QuestionRequest::validate`
+                            // enforces the width and the description states it.
                             "header": {
                                 "type": "string",
-                                "maxLength": MAX_HEADER_WIDTH,
                                 "description": "Tab label, two or three words, at most 16 display cells (a CJK character is 2); the `id` when absent."
                             },
                             "prompt": {

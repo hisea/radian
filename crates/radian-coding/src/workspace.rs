@@ -50,6 +50,10 @@ pub(crate) struct ReadBase {
     pub dir: File,
     pub relative: PathBuf,
     pub prefix: Option<PathBuf>,
+    /// The ignore matchers for every directory from the root down to (but not including) the
+    /// base ([`crate::search::ancestor_matchers`]), outermost first. The walk starts with
+    /// these, so a repository-root ignore keeps working when the search starts below it.
+    pub ancestors: Vec<ignore::gitignore::Gitignore>,
 }
 
 /// Where a read tool's `path` resolved to.
@@ -169,15 +173,19 @@ impl WorkspaceRoot {
     }
 
     /// Opens the base directory a search tool walks, with the path relative to its root and,
-    /// for a read-only root, the prefix to render result paths with.
+    /// for a read-only root, the prefix to render result paths with. The ignore matchers for
+    /// the directories above the base are loaded here too (outermost first), from the same
+    /// root fd the walk descends from, so no path is re-opened (ADR 0039 decision 2).
     pub(crate) fn read_base(&self, user: &str) -> Result<ReadBase, ToolFailure> {
         match self.resolve_read(user)? {
             Resolved::Workspace(relative) => {
                 let dir = self.open_workspace_dir(user, &relative)?;
+                let ancestors = crate::search::ancestor_matchers(self.dir.fd(), &relative);
                 Ok(ReadBase {
                     dir,
                     relative,
                     prefix: None,
+                    ancestors,
                 })
             }
             Resolved::Root {
@@ -186,10 +194,13 @@ impl WorkspaceRoot {
                 prefix,
             } => {
                 let dir = self.open_root_dir(user, index, &relative)?;
+                let root_fd = self.read_roots.roots()[index].root_dir().fd();
+                let ancestors = crate::search::ancestor_matchers(root_fd, &relative);
                 Ok(ReadBase {
                     dir,
                     relative,
                     prefix: Some(prefix),
+                    ancestors,
                 })
             }
         }
