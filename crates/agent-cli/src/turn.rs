@@ -283,17 +283,15 @@ fn may_exit(
 /// still counts as running, and this waits for it). (2) The notifier bumps `handled`
 /// only after the inject/followup returns, so `handled >= settled` means every recorded
 /// settle reached the inbox; each bump also resolves `settled_signal`, so a settle that
-/// lands after the snapshot wakes the wait below instead of being missed. (3) The inbox
-/// version brackets the whole check: the driver's claim pops silently, with no
-/// notification, but it bumps the version inside the same critical section — a claim
-/// between the two version reads makes them differ and this re-checks instead of
-/// exiting. A claimed entry the driver has not started yet is covered by the `close` in
-/// `close_and_join`, which never cancels it (see `active` below). A wake entry the
-/// driver has not claimed yet is still queued (`wake_pending`); inject-only leftovers
-/// never open a turn (ADR 0011 L5), so they do not block the exit. (4) A spawned Stop
-/// run counts in `pending` synchronously inside `on_turn_end`, before the driver's
-/// turn-end bookkeeping notifies — so a check that sees the turn end also sees the
-/// pending run, and the `stops` signal below wakes the wait when it finishes.
+/// lands after the snapshot wakes the wait below instead of being missed. (3) A
+/// turn-opening claim and the in-flight count share the queue lock, so `active`
+/// already sees a claimed-but-unstarted turn — no gap between the pop and the check
+/// can hide it. The version brackets the whole check as well: pops that open no turn
+/// (mid-turn `next_step` claims) and requeues bump it silently, and a bump between the
+/// two reads re-checks instead of exiting. (4) A started-but-unresolved turn counts in
+/// `pending` from the turn-start event, strictly before the turn can end — so a check
+/// that sees the turn end also sees the pending Stop run; `on_turn_end` resolves it
+/// (a spawn keeps the count until the run ends) and the `stops` signal wakes the wait.
 ///
 /// Residual: `Lagged` broadcast losses (the channel holds 16 with at most 4 jobs in
 /// flight) would stall `handled` below `settled`; the existing deadline/SIGTERM handling
@@ -313,14 +311,17 @@ async fn jobs_quiescent(run: &Run) -> bool {
     let wake_pending = run.inbox.snapshot().await.iter().any(|entry| entry.wake);
     // A core turn in flight: only a turn can start a job or absorb a notice. Both the
     // UI's `busy` (set at `TurnStarted`, cleared at the turn's end event) and the
-    // driver's `turn_running` (set synchronously right after the claim, cleared after
-    // finalizing) count: `busy` alone misses the claim-to-`TurnStarted` gap (journal
-    // appends run in between, and a check landing in it would exit while the claimed
-    // turn still starts its jobs); `turn_running` alone has no waker for its clear —
-    // so the wait below also watches the driver's idle signal. A claimed turn still
-    // runs to completion and the join waits for it; only a job it newly starts would
-    // outlive the exit, as on today's `-p`.
-    let active = run.ui.busy() || run.session.turn_running();
+    // inbox in-flight count count: `busy` alone misses the claim-to-`TurnStarted` gap
+    // (journal appends run in between, and a check landing in it would exit while the
+    // claimed turn still starts its jobs). The pop and the count share the inbox lock,
+    // so a claimed-but-unstarted turn is already visible here; the count clears when
+    // the turn ends, next to `turn_running`, with the idle signal waking the wait.
+    // (The driver's `turn_running` flag spans the same claimed-to-ended interval but
+    // is set just after the pop, leaving the same gap `busy` has — the inbox count,
+    // set under the pop's lock, is what closes it.) A claimed turn still runs to
+    // completion and the join waits for it; only a job it newly starts would outlive
+    // the exit, as on today's `-p`.
+    let active = run.ui.busy() || run.inbox.inflight_turns() > 0;
     let stops = run.session.command_hooks().pending_stops();
     let after = run.inbox.version();
     after == before && may_exit(running, settled, handled, wake_pending, active, stops)

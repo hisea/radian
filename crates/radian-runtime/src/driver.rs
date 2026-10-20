@@ -462,6 +462,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             self.turn_running.store(true, Ordering::SeqCst);
             let result = self.run_turn(entry).await;
             self.turn_running.store(false, Ordering::SeqCst);
+            self.inbox.turn_ended();
             self.idle.notify_one();
             result?;
         }

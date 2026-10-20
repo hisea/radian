@@ -337,3 +337,49 @@ async fn a_degraded_inject_marks_its_durable_record() {
     assert!(!degraded[0].1, "a plain inject is not a degrade");
     assert!(degraded[1].1, "a degraded inject is marked");
 }
+
+/// A turn-opening claim is already visible in the in-flight count when the claim
+/// returns: the pop and the count share the queue lock, so a host checking between
+/// the pop and the turn's start still sees the claimed turn (exec -p's exit check).
+/// Mutation: move the count out of `claim_next_turn` (let the caller set it
+/// afterwards) → the first `inflight_turns` assertion fails.
+#[tokio::test]
+async fn a_claimed_turn_is_inflight_before_the_claim_returns() {
+    let inbox = Inbox::new(8);
+    assert_eq!(inbox.inflight_turns(), 0, "nothing claimed yet");
+    inbox.followup("turn", InputSource::User).await.unwrap();
+    assert_eq!(inbox.inflight_turns(), 0, "queued, not yet claimed");
+    let entry = inbox
+        .claim_next_turn()
+        .await
+        .expect("the followup opens a turn");
+    assert_eq!(entry.lane, Lane::NextTurn);
+    assert_eq!(
+        inbox.inflight_turns(),
+        1,
+        "claimed: visible before any driver step runs"
+    );
+    // An empty claim changes nothing.
+    assert!(inbox.claim_next_turn().await.is_none());
+    assert_eq!(inbox.inflight_turns(), 1);
+    // The turn ends: back to zero.
+    inbox.turn_ended();
+    assert_eq!(inbox.inflight_turns(), 0);
+
+    // A waking `next_step` entry claimed through the turn lane counts the same way;
+    // a plain `inject` never opens a turn and never counts.
+    inbox.steer("steer", InputSource::User).await.unwrap();
+    inbox.inject("plain", InputSource::User).await.unwrap();
+    inbox
+        .claim_next_turn()
+        .await
+        .expect("the waking steer opens a turn");
+    assert_eq!(inbox.inflight_turns(), 1);
+    inbox.turn_ended();
+    assert!(inbox.claim_next_turn().await.is_none());
+    assert_eq!(
+        inbox.inflight_turns(),
+        0,
+        "a plain inject is not a turn-opening claim"
+    );
+}

@@ -166,6 +166,15 @@ pub struct Inbox {
     /// particular the driver's claim (which pops silently, with no notification) cannot
     /// slip between the two reads unnoticed.
     version: AtomicU64,
+    /// Turn-opening claims outstanding: incremented by [`Inbox::claim_next_turn`] in the
+    /// same critical section as the pop, decremented when the turn ends (or the entry
+    /// is handed back). A host that decides "may I exit" reads this next to the queue:
+    /// a claimed-but-unstarted turn is already visible here, before the driver's
+    /// `turn_running` flag is set and before `TurnStarted` reaches any listener — the
+    /// window between the pop and those later signals cannot hide a turn from the
+    /// check. Only turn-opening claims count (`claim_next_step` runs mid-turn, when the
+    /// count is already nonzero).
+    inflight: AtomicU64,
     next_seq: AtomicU64,
     next_id: AtomicU64,
     /// A per-process prefix so ids never collide across a restart: the numeric counter
@@ -227,6 +236,7 @@ impl Inbox {
             wake: Notify::new(),
             next_seq: AtomicU64::new(0),
             version: AtomicU64::new(0),
+            inflight: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
             id_prefix: format!("inbox-{}-", id_nonce()),
             cancel_calls: AtomicU64::new(0),
@@ -455,6 +465,14 @@ impl Inbox {
 
     /// Resolves the next time `followup`/`steer`/`cancel` wakes the driver. `inject` never
     /// resolves it.
+    ///
+    /// Single waiter: the driver. Its `Notify` hands one permit to one waiter, so a
+    /// second waiter could steal the wake meant for the driver (or vice versa) and
+    /// deadlock the other side: the permit is consumed, the entry stays queued, and no
+    /// further signal ever comes. Hosts learn about wakes through `started`, the
+    /// settled/stops/idle signals and the queue itself — never by waiting here.
+    /// (`radian-runtime`'s and `radian-host`'s integration tests also call this to
+    /// observe a wake; that is why it stays `pub`.)
     pub fn wake_signal(&self) -> Notified<'_> {
         self.wake.notified()
     }
@@ -470,15 +488,35 @@ impl Inbox {
     /// stays and is absorbed by a turn's first safe point. Every older entry keeps its
     /// relative order: an `inject` pushed before the chosen steer stays in `next_step` in
     /// front of the later entries.
+    ///
+    /// The pop and the in-flight count move together, under the queue lock: when this
+    /// returns an entry, [`Inbox::inflight_turns`] already counts it. A host checking
+    /// "may I exit" between the pop and the turn's start still sees the claimed turn.
     pub async fn claim_next_turn(&self) -> Option<InboxEntry> {
         let mut state = self.state.lock().await;
         if let Some(entry) = state.next_turn.pop_front() {
             self.version.fetch_add(1, Ordering::SeqCst);
+            self.inflight.fetch_add(1, Ordering::SeqCst);
             return Some(entry);
         }
         let index = state.next_step.iter().position(|entry| entry.wake)?;
         self.version.fetch_add(1, Ordering::SeqCst);
+        self.inflight.fetch_add(1, Ordering::SeqCst);
         state.next_step.remove(index)
+    }
+
+    /// How many turn-opening claims are outstanding (claimed, turn not yet ended).
+    /// The driver decrements it when the turn ends, next to clearing `turn_running`.
+    pub fn inflight_turns(&self) -> u64 {
+        self.inflight.load(Ordering::SeqCst)
+    }
+
+    /// Marks one claimed turn finished. The driver calls it when the turn ends, next to
+    /// clearing `turn_running`, so a host watching [`Inbox::inflight_turns`] sees the
+    /// whole claimed-to-ended span as busy. Every [`Inbox::claim_next_turn`] pop pairs
+    /// with exactly one of these (a requeued entry is re-popped, which counts again).
+    pub fn turn_ended(&self) {
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// Removes the oldest `next_step` entry, if any. Used by the driver at a safe point.
