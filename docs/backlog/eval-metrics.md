@@ -6,6 +6,8 @@
 
 ## 背景
 
+2026-10-20：这一项是 `compaction-threshold.md` 和 `context-pruning.md` 的前提，两项的收益都是每次调用的延迟，只能在固定任务集上改前改后比。指标至少要有：每次调用延迟 p50/p90（按 prompt 大小分桶）、任务总墙钟、压缩次数、压缩后前 5 轮重复 `read` 次数、缓存命中率、成功率。本机 journal 已能算出前几项（见 `context-pruning.md` 与 `compaction-threshold.md` 的数据）。
+
 Radian 完全没有评测，改进收益量不出来。journal 已有时间戳、工具起止、每次调用的 usage 和费用，可直接算指标。
 
 ## 待决方向
