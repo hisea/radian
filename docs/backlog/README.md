@@ -45,6 +45,7 @@
 | `mcp-servers-json.md` | decided（生态 2/4） | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门、按内容哈希确认，确认即批准其 server（一道门）；缺省 `inherit_env=["HOME"]`；环境白名单不变；MCP 文本结果套 `read` 的 64 KiB 上限并带截断标记 |
 | `command-hooks-claude-subset.md` | decided（生态 3/4） | 新 ADR；0012、0031、0011、0017、0016 | 外部命令 hook 只做 `PreToolUse`/`PostToolUse`/`Stop`，配置与 stdin 用 Claude/Codex 的子集，`allow`/`ask` 拒收，用户级 `[hooks]`、项目级 `.radian/hooks.json` 进信任门，工具名只在导入时翻译；吸收总报告第 17 条；编辑后检查是项目级 `PostToolUse`：配了才跑、同步每次、不批处理不延后、不内置不自动启用（本机数据：92% 的编辑消息只有一次编辑、跨轮段平均 1.83） |
 | `import-claude.md` | decided（生态 4/4） | 新 ADR；0029、0008、0025、0031 | `radian config import-claude` 一次性翻译，来源哪一级产物落哪一级， commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话与 memory；依赖前两条与 project-skills |
+| `bundled-user-docs.md` | decided | 0039 §4、0036、0032、0013 | 一套英文用户文档（`docs/user/`）编进二进制，`read`/`list` 认 `radian://docs/<page>.md` 虚拟只读根、不落盘，`<runtime>` 给索引，用户直接问 radian 自己的功能；`radian docs [topic]` 在终端打印同一份＼� |
 | `workspace-git-exec-entries-file-tools.md` | idea（bug 待验证） | 0038、0039 | `write`/`patch` 不经沙箱，`workspace` 档能写 `.git/hooks/`，绕过 0038 的只读清单；修法倾向规则层 deny + 与沙箱共用一张清单 |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
@@ -60,7 +61,6 @@
 | `shell-auto-background-60s.md` | idea | 0037、0036、0011 | 转后台阈值 120 s → 60 s，提示词要求独立调用放同一条回复 |
 | `prompt-deliver-first.md` | idea | 0036 | 提示词：先交付能跑的版本再迭代、用参照物差分；cobol smoke 是现成复现 |
 | `runtime-resource-limits.md` | idea | 0036 | `<runtime>` 写实际可用 CPU/内存（cgroup），避免 `make -j16` 跑在 2 核容器 |
-| `bundled-user-docs.md` | idea | 0039 §4、0036、0013 | 用户文档（`docs/user/`）编进二进制，`read`/`list` 认 `radian://docs/<page>.md` 虚拟只读根、不落盘，`<runtime>` 给索引，用户直接问 radian 自己的功能（照 pi 的索引；owner 否决落盘；语言、`radian docs` 子命令待定） |
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
 | `acp-server.md` | idea（暂定不做） | 新 ADR；0032、0009、0024、0011、0010、0043 | ACP 服务端：先做外部适配器验证需求；审批→`request_permission`、inbox→`session/prompt`、live→`session/update`；在 exec jsonl 与控制口客户端之后 |
 
