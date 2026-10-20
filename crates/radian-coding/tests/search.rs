@@ -844,3 +844,96 @@ async fn grep_description_points_files_and_count_at_their_questions() {
         spec.description
     );
 }
+
+/// The memory bound without measuring memory: a fixture whose full body (matches plus
+/// `context: 30` over long filler lines) is many times the byte cap still returns within
+/// the cap with exact counts. No retained-size counter is asserted: exposing one would
+/// need test-only plumbing in production code (an allocation tracker for the two
+/// buffers), which is not natural here — the bound follows from construction (at most
+/// two cap-bounded buffers plus one file's scan), and the test pins the observable
+/// half (output size plus exact dropped/match counts).
+#[tokio::test]
+async fn grep_byte_cap_stays_bounded_when_full_body_is_many_times_the_cap() {
+    let dir = TempDir::new("grep-bounded-memory");
+    let root = dir.file("ws");
+    // 8 files x 10 matches; each match followed by 60 ~950B filler lines so
+    // `context: 30` shows every filler (30 after + 30 before the next match, plus 30
+    // after each file's last match). Full body is several MB against an 8 KiB cap,
+    // while the 80 short match lines alone fit comfortably.
+    let filler = |file_no: usize, block: usize, idx: usize| {
+        format!("pad-{file_no}-{block}-{idx}-{}\n", "x".repeat(900))
+    };
+    for file_no in 0..8 {
+        let mut content = String::new();
+        for block in 0..10 {
+            content.push_str("needle\n");
+            for idx in 0..60 {
+                content.push_str(&filler(file_no, block, idx));
+            }
+        }
+        dir.write(&format!("ws/f{file_no}.txt"), &content);
+    }
+    let uncapped = tools_with(
+        &root,
+        Limits {
+            max_grep_output_bytes: 16 << 20,
+            ..Limits::default()
+        },
+    );
+    let full = call(
+        &uncapped,
+        "grep",
+        json!({"pattern": "needle", "context": 30}),
+    )
+    .await
+    .unwrap();
+    let full_body = text(&full);
+    assert!(
+        !full_body.contains("byte limit"),
+        "the uncapped run fits everything"
+    );
+    let full_matches: Vec<&str> = full_body
+        .lines()
+        .filter(|line| line.contains(".txt:"))
+        .collect();
+    assert_eq!(full_matches.len(), 80, "all 80 matches fit uncapped");
+    let full_context = full_body
+        .lines()
+        .filter(|line| line.contains(".txt-"))
+        .count();
+    assert!(
+        full_body.len() > 10 * 8192,
+        "the full body {}B is many times the 8192B cap",
+        full_body.len()
+    );
+
+    let capped = tools_with(
+        &root,
+        Limits {
+            max_grep_output_bytes: 8192,
+            ..Limits::default()
+        },
+    );
+    let out = call(&capped, "grep", json!({"pattern": "needle", "context": 30}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    assert!(
+        body.len() <= 8192,
+        "output {}B passes the 8192B cap",
+        body.len()
+    );
+    for line in &full_matches {
+        assert!(body.contains(*line), "every match line survives: {line}");
+    }
+    assert!(
+        !body.lines().any(|line| line.contains(".txt-")),
+        "context lines were dropped first"
+    );
+    assert!(
+        body.contains(&format!("dropped {full_context} context lines")),
+        "the note names the exact dropped context count: {body}"
+    );
+    assert_eq!(structured(&out)["matches"], json!(80));
+    assert_eq!(structured(&out)["files"], json!(8));
+}

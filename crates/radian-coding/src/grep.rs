@@ -297,17 +297,24 @@ pub(crate) async fn run(
     let mut dropped_context = 0usize;
     let mut dropped_matches = 0usize;
     if mode == OutputMode::Content {
-        // Phase 1: scan every file up to the match caps with no byte checks, so the
-        // dropped counts below are exact. `budget` and `truncated` match the old
-        // in-order emit: at most `per_file_cap` matches per file, `cap` in total.
-        struct ScannedFile {
-            rel: String,
-            lines: Vec<(bool, String)>,
-            matches: usize,
-            cut: bool,
-        }
-        let mut scanned: Vec<ScannedFile> = Vec::new();
+        // Stream file by file with at most two bounded buffers, so peak memory is one
+        // file's `scan_file` result plus at most twice the byte cap. `full` is the
+        // complete body (match + context lines) while it still fits; the moment the
+        // next file's lines would pass the cap it is discarded and only `matches_body`
+        // (match lines + `--` separators + per-file notes) is kept, bounded by the cap.
+        // Context lines are counted in `total_context` as they are scanned and never
+        // stored once `full` is gone. When `full` never overflows the output is
+        // byte-identical to building it all first; otherwise the matches-only body plus
+        // the exact dropped counts is emitted. `available`/`truncated` match the old
+        // in-order scan: at most `per_file_cap` matches per file, `cap` in total.
+        let mut full: Option<String> = Some(String::new());
+        let mut matches_body = String::new();
+        let mut matches_accepting = true;
         let mut available = 0usize;
+        let mut total_context = 0usize;
+        let mut full_files = 0usize;
+        let mut shown_total = 0usize;
+        let mut shown_files = 0usize;
         for (file, rel) in files {
             let budget = per_file_cap.min(cap.saturating_sub(available));
             if budget == 0 {
@@ -325,112 +332,114 @@ pub(crate) async fn run(
             if matches == 0 {
                 continue;
             }
-            available += matches;
-            if cut || available >= cap {
+            let new_available = available + matches;
+            if cut || new_available >= cap {
                 truncated = true;
             }
-            scanned.push(ScannedFile {
-                rel,
-                lines,
-                matches,
-                cut,
-            });
-            if available >= cap {
-                break;
-            }
-        }
-        let total_context: usize = scanned
-            .iter()
-            .flat_map(|file| file.lines.iter())
-            .filter(|(is_match, line)| !*is_match && line.as_str() != "--\n")
-            .count();
-        // The full body the old in-order emit would have built (match and context lines
-        // plus the per-file notes in the same positions). When it fits with room for
-        // the notes, emit it untouched so output under the cap is byte-identical.
-        let mut full_len = 0usize;
-        let mut running = 0usize;
-        for file in &scanned {
-            for (_, line) in &file.lines {
-                full_len += line.len();
-            }
-            running += file.matches;
-            if file.cut && running < cap {
-                full_len += format!(
-                    "[{}: more than {} matches in one file]\n",
-                    file.rel, per_file_cap
-                )
-                .len();
-            }
-        }
-        if full_len
-            .checked_add(BYTE_NOTE_RESERVE)
-            .is_some_and(|n| n <= byte_cap)
-        {
-            for file in &scanned {
-                for (_, line) in &file.lines {
-                    body.push_str(line);
+            total_context += lines
+                .iter()
+                .filter(|(is_match, line)| !*is_match && line.as_str() != "--\n")
+                .count();
+            if let Some(fb) = full.as_mut() {
+                let mut add = 0usize;
+                for (_, line) in &lines {
+                    add += line.len();
                 }
-                total += file.matches;
-                files_matched += 1;
-                if file.cut && total < cap {
-                    body.push_str(&format!(
+                if cut && new_available < cap {
+                    add += format!(
                         "[{}: more than {} matches in one file]\n",
-                        file.rel, per_file_cap
-                    ));
+                        rel, per_file_cap
+                    )
+                    .len();
+                }
+                if fb
+                    .len()
+                    .checked_add(add)
+                    .and_then(|n| n.checked_add(BYTE_NOTE_RESERVE))
+                    .is_some_and(|n| n <= byte_cap)
+                {
+                    for (_, line) in &lines {
+                        fb.push_str(line);
+                    }
+                    if cut && new_available < cap {
+                        fb.push_str(&format!(
+                            "[{}: more than {} matches in one file]\n",
+                            rel, per_file_cap
+                        ));
+                    }
+                    full_files += 1;
+                } else {
+                    // The next file's lines would pass the cap: discard the full body
+                    // and keep only the bounded matches-only body from here on.
+                    full = None;
                 }
             }
-        } else {
-            // Over the cap: drop every context line first and keep all match lines with
-            // their `--` group separators; only cut matches when they alone do not fit.
-            byte_truncated = true;
-            dropped_context = total_context;
-            for file in &scanned {
+            if matches_accepting {
                 let mut shown_here = 0usize;
                 let mut complete = true;
-                for (is_match, line) in &file.lines {
+                for (is_match, line) in &lines {
                     if !*is_match && line.as_str() != "--\n" {
                         continue;
                     }
-                    // A separator kept while the body is still empty has no group above
-                    // it; the first match starts the output instead.
-                    if !*is_match && body.is_empty() {
+                    // A separator kept while the body is still empty has no group
+                    // above it; the first match starts the output instead.
+                    if !*is_match && matches_body.is_empty() {
                         continue;
                     }
-                    if !fits(body.len(), line.len(), byte_cap) {
+                    if !fits(matches_body.len(), line.len(), byte_cap) {
                         complete = false;
                         break;
                     }
-                    body.push_str(line);
+                    matches_body.push_str(line);
                     if *is_match {
                         shown_here += 1;
                     }
                 }
                 if shown_here == 0 {
-                    // The first match already misses the cap: nothing to keep from here.
-                    break;
-                }
-                total += shown_here;
-                files_matched += 1;
-                if !complete {
-                    // The byte note below covers the cut; no per-file note. Drop a
-                    // dangling group separator at the very end.
-                    if body.ends_with("--\n") {
-                        body.truncate(body.len() - "--\n".len());
+                    // The first match already misses the cap: nothing to keep from
+                    // here; further matches are only counted.
+                    matches_accepting = false;
+                } else {
+                    shown_total += shown_here;
+                    shown_files += 1;
+                    if !complete {
+                        // The byte note below covers the cut; no per-file note. Drop
+                        // a dangling group separator at the very end.
+                        if matches_body.ends_with("--\n") {
+                            matches_body.truncate(matches_body.len() - "--\n".len());
+                        }
+                        matches_accepting = false;
+                    } else if cut && shown_total < cap {
+                        let note = format!(
+                            "[{}: more than {} matches in one file]\n",
+                            rel, per_file_cap
+                        );
+                        if !fits(matches_body.len(), note.len(), byte_cap) {
+                            matches_accepting = false;
+                        } else {
+                            matches_body.push_str(&note);
+                        }
                     }
-                    break;
-                }
-                if file.cut && total < cap {
-                    let note = format!(
-                        "[{}: more than {} matches in one file]\n",
-                        file.rel, per_file_cap
-                    );
-                    if !fits(body.len(), note.len(), byte_cap) {
-                        break;
-                    }
-                    body.push_str(&note);
                 }
             }
-            dropped_matches = available.saturating_sub(total);
+            available = new_available;
+            if available >= cap {
+                break;
+            }
+        }
+        if let Some(fb) = full {
+            body = fb;
+            total = available;
+            files_matched = full_files;
+        } else {
+            // Over the cap: every context line was dropped first and only whole match
+            // lines in order were kept; cut matches only when they alone did not fit.
+            byte_truncated = true;
+            dropped_context = total_context;
+            body = matches_body;
+            total = shown_total;
+            files_matched = shown_files;
+            dropped_matches = available.saturating_sub(shown_total);
         }
     } else {
         for (file, rel) in files {
