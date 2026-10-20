@@ -109,11 +109,24 @@ impl App {
                 return UpdateResult::dirty();
             }
         }
-        if let RuntimeEvent::TurnFinished { .. } = event {
+        if let RuntimeEvent::TurnFinished { outcome, .. } = event {
             // The turn boundary is on disk: a `/fork` that was waiting for it can run now.
             self.session.turn_committed = true;
-            if self.session.pending_fork.take().is_some() {
-                return UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork));
+            let mut result = match self.session.pending_fork.take() {
+                Some(_) => UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork)),
+                None => UpdateResult::none(),
+            };
+            // A completed or failed turn rings the bell in every mode but `off`: the user
+            // may be looking at another window. A cancel needs no ring — the user pressed
+            // the key themselves.
+            if matches!(outcome, TurnOutcome::Completed | TurnOutcome::Failed)
+                && self.bell != BellMode::Off
+            {
+                result.effects.push(Effect::Bell);
+                result.dirty = true;
+            }
+            if result.dirty || !result.effects.is_empty() {
+                return result;
             }
         }
         // A new turn started: the previous turn's failure (if any) is no longer retryable —
@@ -150,6 +163,10 @@ impl App {
         }
         if let RuntimeEvent::BackgroundJobSettled { job_id, .. } = event {
             self.session.running_jobs.retain(|job| job.id != *job_id);
+            // The job's completion notice arrived: `all` rings for it, `attention` does not.
+            if self.bell.rings_for_job_settle() {
+                return UpdateResult::effect(Effect::Bell);
+            }
             return UpdateResult::dirty();
         }
         if let RuntimeEvent::TurnFailed { message, .. } = event {

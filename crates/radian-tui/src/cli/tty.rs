@@ -383,6 +383,16 @@ pub(super) fn write_osc52(text: &str) -> std::io::Result<()> {
     out.flush()
 }
 
+/// Rings the terminal bell: one `\x07` on stdout (`tui.bell`). Fire-and-forget like
+/// OSC 52 — a terminal that cannot ring ignores it — so a failed write is swallowed, never
+/// a session failure.
+pub(super) fn write_bel() {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(b"\x07");
+    let _ = out.flush();
+}
+
 /// Feeds `text` to macOS's `pbcopy` and reports whether it accepted it. Only reachable when
 /// `tui.clipboard = "pbcopy"` on macOS (anywhere else the config warns and falls back to
 /// OSC 52 before the loop ever sees the mode). The pipe write happens on a thread so a large

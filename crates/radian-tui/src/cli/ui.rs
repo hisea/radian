@@ -190,6 +190,7 @@ pub(super) fn ui_loop(
             queue: session.pending(),
             signal: None,
             clipboard: app.clipboard,
+            bell_rang: false,
             bash_sandbox: bash_sandbox.clone(),
             bash_cancel: None,
             usage_gate,
@@ -219,6 +220,10 @@ pub(super) fn ui_loop(
     // The pre-session phase ends when the picker resolves; otherwise only `quit` leaves.
     while !app.quit && !app.picking_resolved() {
         let mut dirty = false;
+        // A new frame: bell-class events in it merge into one ring.
+        if let Some(ctx) = ctx.as_mut() {
+            ctx.bell_rang = false;
+        }
         // A carried batch runs first, without a blocking wait: the effects must not wait for a
         // new event. Otherwise block until there is something to do. No display in this build
         // changes with time (the

@@ -23,8 +23,10 @@ use radian_host::memory::commands::MemoryCommand;
 use radian_host::{PendingRequest, PendingResponse, PendingView};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_session::RuntimeEvent;
+use radian_session::TurnOutcome;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::bell::BellMode;
 use crate::blocks::{Block, ReasoningMode};
 use crate::clip::ClipboardMode;
 use crate::clip::MAX_CLIPBOARD_BYTES;
@@ -199,6 +201,9 @@ pub enum Effect {
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
     Copy { text: String },
+    /// Ring the terminal bell: one `\x07` on stdout (`tui.bell`). The loop runs it at most
+    /// once per frame — bell-class events that share a frame merge into one ring.
+    Bell,
     /// `/theme <name>` (ADR 0008 revision): load the theme and write `tui.theme` back to the
     /// config file. Both are I/O, so the loop runs them and answers with
     /// [`Input::ThemeReady`].
@@ -310,6 +315,7 @@ impl PartialEq for Effect {
             (LoginOAuthBrowser, LoginOAuthBrowser) | (LoginOAuthDevice, LoginOAuthDevice) => true,
             (Logout { provider: a }, Logout { provider: b }) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
+            (Bell, Bell) => true,
             (SetTrust { choice: a }, SetTrust { choice: b }) => a == b,
             (
                 ExpandSkill {
@@ -648,6 +654,10 @@ pub struct App {
     mouse_enabled: bool,
     /// How a copy reaches the system clipboard (config `tui.clipboard`, default OSC 52).
     pub clipboard: ClipboardMode,
+    /// When the terminal bell rings (config `tui.bell`, default off): a newly shown
+    /// approval/question and a completed or failed turn end (`attention`), plus a
+    /// background job's settle (`all`).
+    pub bell: BellMode,
     /// How the reasoning channel displays (ADR 0028 R3, `tui.display.reasoning`). Part of
     /// the block/layout cache keys: toggling re-lays the reasoning entries out.
     pub reasoning_mode: ReasoningMode,

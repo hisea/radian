@@ -116,6 +116,10 @@ pub struct TuiConfig {
     /// `"osc52"` (the default), `"pbcopy"` (macOS only; elsewhere a warning and OSC 52) or
     /// `"off"`. `None` means the default; an unknown value is ignored with a warning.
     pub clipboard: Option<String>,
+    /// `tui.bell`: `"off"` (the default: never ring), `"attention"` (a newly shown
+    /// approval/question and a completed or failed turn end) or `"all"` (plus a background
+    /// job's settle). `None` means the default; an unknown value is ignored with a warning.
+    pub bell: Option<String>,
     /// `tui.tips`: whether the startup screen shows one Tip line. `None`
     /// means the default, on.
     pub tips: Option<bool>,
@@ -328,6 +332,14 @@ pub(super) fn parse_tui(
             // An unknown clipboard transport is a display preference too: skip it with the
             // same warning, and the TUI keeps its default.
             ("clipboard", _) => config.skipped.push("tui.clipboard".into()),
+            ("bell", Value::String(mode))
+                if matches!(mode.as_str(), "off" | "attention" | "all") =>
+            {
+                config.tui.bell = Some(mode.clone());
+            }
+            // An unknown bell mode is a display preference too: skip it with the same
+            // warning, and the TUI keeps its default (`off`).
+            ("bell", _) => config.skipped.push("tui.bell".into()),
             // A non-boolean mouse is a display preference: ignore it (and say so), never
             // refuse the file.
             ("mouse", _) => config.skipped.push("tui.mouse".into()),

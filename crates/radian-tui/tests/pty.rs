@@ -13367,6 +13367,221 @@ async fn pty_copy_copies_the_last_message_and_its_code_block() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+/// BELs in the raw pty bytes. The bell tests set `clipboard = "off"`, so no OSC 52 sequence
+/// (which also ends in `\x07`) can confound the count: every BEL here is a bell ring.
+fn bel_count(pty: &Pty) -> usize {
+    String::from_utf8_lossy(&pty.raw()).matches('\x07').count()
+}
+
+/// `tui.bell = "attention"`: an approval prompt rings exactly once — no second ring for the
+/// same prompt, and no ring for anything before it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bell_attention_rings_once_for_an_approval() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("bell-approval");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "write",
+            r#"{"path":"out.txt","content":"approved"}"#,
+        ),
+        text_reply("WROTE-IT"),
+    ])
+    .await;
+    let config =
+        "schema_version = 1\n[tui]\nbell = \"attention\"\nclipboard = \"off\"\n".to_string();
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "bell-approval",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        &[],
+        &config,
+        30,
+        140,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"please write\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", wait_positive()),
+        "no approval prompt:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        bel_count(&pty),
+        1,
+        "one prompt rings exactly once:\n{}",
+        pty.screen()
+    );
+    // Answering and quitting rings nothing more (a cancel needs no ring).
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("WROTE-IT", wait_positive()),
+        "the approved call did not complete:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_eq!(
+        bel_count(&pty),
+        2,
+        "the prompt and the completed turn each rang once, nothing more"
+    );
+}
+
+/// `tui.bell = "off"`: the same approval prompt stays silent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bell_off_stays_silent() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("bell-off");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "write",
+            r#"{"path":"out.txt","content":"approved"}"#,
+        ),
+        text_reply("WROTE-IT"),
+    ])
+    .await;
+    let config = "schema_version = 1\n[tui]\nbell = \"off\"\nclipboard = \"off\"\n".to_string();
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "bell-off",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        &[],
+        &config,
+        30,
+        140,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"please write\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", wait_positive()),
+        "no approval prompt:\n{}",
+        pty.screen()
+    );
+    // The prompt is the positive sync; a ring would have fired with it. One beat for
+    // scheduling slop, then silence.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(bel_count(&pty), 0, "off rings nothing");
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("WROTE-IT", wait_positive()),
+        "the approved call did not complete:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_eq!(bel_count(&pty), 0, "the turn end rang nothing either");
+}
+
+/// `tui.bell = "all"`: a background job's settle rings — on top of the turn-end ring, so
+/// at least two BELs have fired once the settle's followup turn answers. The job sleeps
+/// first, so its settle lands in a later frame than the turn end: the two rings can never
+/// merge into one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bell_all_rings_for_a_background_job_settle() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("bell-job");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            r#"{"command":"sleep 5","background":true}"#,
+        ),
+        text_reply("TURN1-OK"),
+        text_reply("JOB-DONE-OK"),
+    ])
+    .await;
+    let config = "schema_version = 1\n[tui]\nbell = \"all\"\nclipboard = \"off\"\n".to_string();
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "bell-job",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "auto",
+        ],
+        &[],
+        &config,
+        30,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"run it in the background\r");
+    assert!(
+        pty.wait_for_screen("TURN1-OK", wait_positive()),
+        "the first turn did not answer:\n{}",
+        pty.screen()
+    );
+    // The first turn ended (one ring) while the job still sleeps; the settle follows in a
+    // later frame (the second ring), then its followup turn answers.
+    assert!(
+        pty.wait_for_screen("JOB-DONE-OK", wait_positive()),
+        "the settle never cycled through a turn:\n{}",
+        pty.screen()
+    );
+    assert!(
+        bel_count(&pty) >= 2,
+        "the turn end and the settle both rang:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
 /// message matches the first one's, and the transcript gains a second user message without
 /// rewriting anything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

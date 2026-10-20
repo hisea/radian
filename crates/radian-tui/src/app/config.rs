@@ -35,6 +35,7 @@ impl App {
             picker_outcome: None,
             mouse_enabled: true,
             clipboard: ClipboardMode::Osc52,
+            bell: BellMode::Off,
             // ADR 0028 R3's default: thinking collapsed to one line.
             reasoning_mode: ReasoningMode::Collapsed,
             tool_display: crate::tools::ToolDisplay::default(),
@@ -246,6 +247,16 @@ impl App {
             self.clipboard = ClipboardMode::Osc52;
             warnings.push("tui.clipboard = \"pbcopy\" is macOS-only; using osc52".into());
         }
+        // `tui.bell` (default off). An unknown spelling never reaches here (the host
+        // config reader skips it with a warning, the way `tui.clipboard` does); a direct
+        // construction falls back to off all the same. `NO_COLOR` does not affect it: the
+        // bell is a control character, not a color.
+        self.bell = config
+            .tui
+            .bell
+            .as_deref()
+            .and_then(BellMode::parse)
+            .unwrap_or_default();
         // `[tui.footer]` (ADR 0027 C2); the legacy `[tui.widgets]` (C3) folds into rows
         // positioned above/below the input (ADR 0027), with one warning.
         let mut footer = config.tui.footer.clone();

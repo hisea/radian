@@ -52,6 +52,11 @@ impl App {
                 QuestionForm::new(view.request_id, view.origin, request.questions),
             ))),
         }
+        // A newly shown approval or question rings the bell in every mode but `off`. Showing
+        // the same head again (the early return above) never re-rings: one prompt, one ring.
+        if self.bell != BellMode::Off {
+            return UpdateResult::effect(Effect::Bell);
+        }
         UpdateResult::dirty()
     }
 
