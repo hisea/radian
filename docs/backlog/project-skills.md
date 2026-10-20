@@ -10,7 +10,10 @@
 
 ## 决定（已定，按 ADR 0025 S1–S4 的机制接上）
 
-- 受信任项目的 `<workspace>/.radian/skills/` 进入发现：系统提示节、`/skills`、`skill` 工具、`/skill:` 都与用户级 skill 一样可用；沿用 S1 的名字冲突保留先发现者、缺 `description` 不加载、校验失败只警告等规则。
+- 受信任项目的 `<project>/.agents/skills/<name>/SKILL.md` 进入发现：从工作区目录往上搜到仓库根（与 pi 相同）；系统提示节、`/skills`、`skill` 工具、`/skill:` 都与用户级 skill 一样可用；沿用 S1 的名字冲突保留先发现者、缺 `description` 不加载、校验失败只警告等规则。
+- `.radian/skills` 不再是项目级位置：它从未被加载、也没有用户，发现与信任触发里一起删掉。
+- 信任触发（ADR 0031 T1，`trust.rs` 的 `has_skill_file`）改为检查 `.agents/skills`。
+- 一并采纳 `docs/research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` ① 的两条：`name` 缺失时缺省为目录名（与 Claude Code 相同，再过现有的 `valid_name` 校验）；`allowed-tools` 未实现警告合并为每会话一条，不再每个 skill 一条。
 - 未受信任时仍不加载（T1 现状不变）；信任触发、询问、记录流程不动。
 - 支持 `$ARGUMENTS`（总报告第 18 条）：`/skill:` 后的参数与 `skill` 工具的 `args` 填进正文占位符，便于复用 Claude Code 格式的现成 skill。
 

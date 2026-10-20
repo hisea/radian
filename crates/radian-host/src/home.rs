@@ -64,6 +64,13 @@ pub fn themes_dir_for(root: &Path) -> PathBuf {
 pub fn skills_dir_for(root: &Path) -> PathBuf {
     root.join("skills")
 }
+/// The Agent Skills standard user-level directory (`$HOME/.agents/skills`, read by pi,
+/// Codex, opencode and omp; ADR 0025 S1). It is outside `$RADIAN_HOME`; only the name is
+/// computed here — discovery skips it silently when missing, so the host never creates it.
+pub fn agents_skills_dir_for(home: Option<&Path>) -> Option<PathBuf> {
+    home.filter(|path| path.is_absolute())
+        .map(|home| home.join(".agents/skills"))
+}
 pub fn trust_dir_for(root: &Path) -> PathBuf {
     root.join("trust")
 }
@@ -129,6 +136,13 @@ pub fn themes_dir() -> Option<PathBuf> {
 /// by shell inside the sandbox, so the directory is not on the deny-read list.
 pub fn skills_dir() -> Option<PathBuf> {
     Some(private(skills_dir_for(&radian_home()?)))
+}
+
+/// The Agent Skills standard directory for this process, named but never created here (see
+/// [`agents_skills_dir_for`]). **Sandbox-readable** (ADR 0020): it is outside `$RADIAN_HOME`
+/// and not on the deny-read list.
+pub fn agents_skills_dir() -> Option<PathBuf> {
+    agents_skills_dir_for(env_path("HOME").as_deref())
 }
 
 /// The trust directory for this process, created 0700. **Sandbox-denied** (ADR 0031 T2): it
@@ -281,6 +295,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_agents_standard_dir_is_outside_the_radian_home() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            agents_skills_dir_for(Some(home)),
+            Some(PathBuf::from("/home/u/.agents/skills"))
+        );
+        assert_eq!(agents_skills_dir_for(None), None);
+        // A relative HOME is ignored, like `radian_home_for` does.
+        assert_eq!(agents_skills_dir_for(Some(Path::new("relative"))), None);
     }
 
     #[test]

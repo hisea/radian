@@ -190,8 +190,8 @@ pub use sessions::{
 };
 pub use skills::{
     BUILTIN, Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillSource, SkillsHooks,
-    completion_candidates, discover, discover_with_extras, expand, has_skill_file, notices,
-    prompt_section,
+    completion_candidates, discover, discover_with_extras, discover_with_user_roots, expand,
+    has_skill_file, notices, prompt_section,
 };
 pub use startup::{
     LeadSetup, ListError, SessionSettings, is_local_base_url, list_sessions,

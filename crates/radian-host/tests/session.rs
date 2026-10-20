@@ -189,7 +189,6 @@ async fn open_with_records(
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
-            memory_notice_line: Arc::new(|_line: &str| {}),
         },
     )
     .await
@@ -319,7 +318,6 @@ async fn a_local_session_accepts_a_declared_command() {
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
-            memory_notice_line: Arc::new(|_line: &str| {}),
         },
     )
     .await
