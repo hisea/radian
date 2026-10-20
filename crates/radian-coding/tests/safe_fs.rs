@@ -30,7 +30,6 @@ fn tool_calls(path: &str) -> Vec<(&'static str, Value)> {
         ),
         ("glob", json!({"pattern": "**/*", "path": path})),
         ("grep", json!({"pattern": "SENTINEL", "path": path})),
-        ("git_diff", json!({"path": path})),
     ]
 }
 

@@ -198,8 +198,7 @@ pub async fn run_user_bash(
         cancel,
         // ADR 0037: `!`/`!!` never turn into a background job.
         None,
-        // A user `!` command's output is shown and forgotten; nothing is retained for
-        // `shell_output`.
+        // A user `!` command's output is shown and forgotten; nothing is retained for it.
         None,
     )
     .await
