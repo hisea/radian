@@ -496,14 +496,22 @@ pub(crate) async fn setup(
             }) as radian_host::cost::RoutePrice,
         )
     };
-    let loaded = match &cli.mcp_config {
+    let file_loaded = match &cli.mcp_config {
         Some(path) => load_mcp_config(path).map_err(SetupError)?,
         None => radian_host::McpLoad::default(),
     };
-    for warning in &loaded.warnings {
+    // ADR 0008 §8: the user's `[mcp]` section and `--mcp-config` merge, the command
+    // line winning a collision. The `explore` subagent child passes `--no-config-mcp`
+    // (with no `--mcp-config` either), so it starts no MCP server at all.
+    let merged = if cli.no_config_mcp {
+        file_loaded
+    } else {
+        radian_host::merge_mcp(config.mcp.clone(), file_loaded)
+    };
+    for warning in &merged.warnings {
         eprintln!("[mcp] {warning}");
     }
-    let servers = loaded.servers;
+    let servers = merged.servers;
     // The key and every header value are secrets: no error this program prints may contain
     // any of them, and they are never written to the session file. "The key" is **every**
     // login in `auth.json`, not only this route's (ADR 0013 T4, ): a provider

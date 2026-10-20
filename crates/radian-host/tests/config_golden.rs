@@ -581,6 +581,25 @@ fn edge_cases() -> Vec<(String, String)> {
             "providers.reasoning_replay.empty",
             "schema_version = 1\n[providers.corp]\nkind = \"anthropic\"\nbase_url = \"https://x\"\nreasoning_replay = \"\"\n",
         ),
+        // ---- mcp (ADR 0008 §8) ----
+        (
+            "mcp.servers_form",
+            "schema_version = 1\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n",
+        ),
+        (
+            "mcp.mcp_servers_form",
+            "schema_version = 1\n[mcp.mcpServers.a]\ncommand = \"true\"\n",
+        ),
+        (
+            "mcp.both_forms",
+            "schema_version = 1\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n[mcp.mcpServers]\n",
+        ),
+        // `unknown.mcp` above already covers the neither case (`[mcp]` with no form).
+        (
+            "mcp.remote_skipped",
+            "schema_version = 1\n[mcp.mcpServers.web]\ntype = \"http\"\nurl = \"https://example.com/mcp\"\n[mcp.mcpServers.files]\ncommand = \"/work/example/mcp-files\"\n",
+        ),
+        ("mcp.not_a_table", "schema_version = 1\nmcp = 3\n"),
         // ---- secrets (§4.2 / §4.1) ----
         (
             "secret.lookalike",

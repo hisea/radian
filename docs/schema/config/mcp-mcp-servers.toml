@@ -1,0 +1,12 @@
+# ADR 0008 §8：`[mcp]` 用共享形式——`[mcp.mcpServers.<name>]` 表，与 `--mcp-config`
+# 文件的 `{"mcpServers": {...}}` 同形。`web` 是远端条目：只报一行警告，不启动；
+# `files` 照常启动（`mcpServers` 条目缺省 `inherit_env = ["HOME"]`）。
+schema_version = 1
+
+[mcp.mcpServers.files]
+command = "/work/example/mcp-files"
+args = ["--root", "/work/example"]
+
+[mcp.mcpServers.web]
+type = "http"
+url = "https://example.com/mcp"

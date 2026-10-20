@@ -27,6 +27,8 @@
 | `model-retries.toml` | ADR 0017:`[model] retries = 3` 是暂时性模型错误在一次模型调用内部(提交前)的重试上限;默认 3,`0` 关闭。非负整数,负数/非整数拒绝。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0017 |
 | `shell-auto-background.toml` | ADR 0037:`[shell] auto_background_secs` 是前台 `shell` 调用转后台的阈值(缺省 60,`0` 关闭)。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0037 |
 | `model-smol.toml` | ADR 0043 §1:`[model.smol]` 的 `provider`/`model` 是便宜模型槽(与 `[model]` 路由键同义;今天只有 `explore` 子会话读它,未设置时跟父,`general` 永远跟父;半设警告并忽略)。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0043 §1 |
+| `mcp-servers.toml` | ADR 0008 §8:`[mcp]` 用自有形式(`[[mcp.servers]]`,与 `--mcp-config` 的 `{"servers": [...]}` 同形);与 `--mcp-config` 合并,同 id 时命令行胜出并警告一行。 | **接受**,0 拒绝;无明文密钥样字符串。 | §8 |
+| `mcp-mcp-servers.toml` | ADR 0008 §8:`[mcp]` 用共享形式(`[mcp.mcpServers.<name>]`,与 `--mcp-config` 的 `{"mcpServers": {...}}` 同形);远端条目只警告不启动;`mcpServers` 条目缺省 `inherit_env = ["HOME"]`。 | **接受**,0 拒绝;无明文密钥样字符串。 | §8 |
 | `permissions-approval.toml` | ADR 0026 D9:`[permissions] approval = "auto"`(四个已知名字之一)。`full` 档位下这个值被忽略并警告;命令行 `--approval`/`--yes` 永远优先。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0026 D9 |
 | `compaction-thinking.toml` | ADR 0018:`[compaction] thinking` 是摘要调用的推理档位(ADR 0026 D11 的七档之一,或 `"current"` 沿用对话档位;缺省 `low`)。宿主按与 `/thinking` 相同的映射夹到最近的支持档并换算成线上取值(`reasoning_effort` 或 `thinking`),作为请求级设置只发给摘要与缩短重试请求。未知档位名是配置错误。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0018 |
 | `skills-builtin.toml` | ADR 0025:`[skills] builtin = false` 关掉全部内建 skill,`disabled = ["<name>"]` 关掉单个(用户级/extra_paths 不受影响)。 | **接受**,0 拒绝;未知值/未知键是警告。 | §2 / ADR 0025 |

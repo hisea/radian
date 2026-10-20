@@ -212,6 +212,12 @@ pub struct Config {
     /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
     /// resolve them through `radian_host::provider::resolve_provider`.
     pub providers: std::collections::BTreeMap<String, crate::provider::ProviderDecl>,
+    /// `[mcp]` (ADR 0008 §8): the user's MCP servers, in the same two forms as
+    /// `--mcp-config` (`[mcp.mcpServers.<name>]` tables or `[[mcp.servers]]` entries).
+    /// Parsed by the same loader the file uses, so the rules cannot drift; the hosts
+    /// merge these with the `--mcp-config` file's servers (the command line wins).
+    /// Warnings print as `[mcp] …` like the file's.
+    pub mcp: crate::mcp::McpLoad,
     /// Known-but-unwired and unknown keys, as dotted paths, for the startup line. Never a
     /// value.
     pub skipped: Vec<String>,
@@ -319,9 +325,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "shell" => parse_shell(value, &mut config)?,
             "tui" => tui::parse_tui(value, path, &mut config)?,
             "providers" => model::parse_providers(value, path, &mut config)?,
-            // Known by the ADR, not wired in this slice: the hosts take MCP servers from
-            // `--mcp-config`. Ignored, and named on the startup line.
-            "mcp" => config.skipped.push("mcp".into()),
+            "mcp" => parse_mcp(value, path, &mut config)?,
             other => config.skipped.push(other.to_owned()),
         }
     }
@@ -636,6 +640,29 @@ fn resolve_extra_path(entry: &str, config_dir: Option<&Path>, home: Option<&Path
         dir.join(expanded)
     } else {
         expanded
+    }
+}
+
+/// Parses `[mcp]` (ADR 0008 §8): the same two forms as `--mcp-config`, spelled in TOML
+/// (`[mcp.mcpServers.<name>]` tables or `[[mcp.servers]]` entries). One normaliser: the
+/// TOML value is converted to JSON and the file's loader runs on it, so the rules (both
+/// forms or neither is an error, duplicate ids are refused, remote entries are skipped
+/// with a warning, `${VAR}` is expanded) cannot drift. A structural problem is a config
+/// error; the warnings ride in [`Config::mcp`] and the hosts print them as `[mcp] …`.
+fn parse_mcp(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    if value.as_table().is_none() {
+        return Err(wrong_type(path, "mcp", "a table"));
+    }
+    let origin = format!("{} [mcp]", path.display());
+    match crate::mcp::load_mcp_from_toml(value, &origin) {
+        Ok(load) => {
+            config.mcp = load;
+            Ok(())
+        }
+        Err(message) => Err(ConfigError::Parse {
+            path: path.to_path_buf(),
+            message,
+        }),
     }
 }
 
@@ -1581,14 +1608,111 @@ future_top = 1
 [model]
 include_usage = true
 future_option = "alpha"
-[mcp.servers]
 "#,
         )
         .unwrap();
         assert!(config.skipped.contains(&"future_top".to_string()));
         assert!(config.skipped.contains(&"model.include_usage".to_string()));
         assert!(config.skipped.contains(&"model.future_option".to_string()));
-        assert!(config.skipped.contains(&"mcp".to_string()));
+        assert!(
+            !config.skipped.iter().any(|key| key == "mcp"),
+            "mcp is wired now, never skipped: {:?}",
+            config.skipped
+        );
+    }
+
+    /// `[mcp]` (ADR 0008 §8): both TOML forms reach the server list through the same
+    /// loader the `--mcp-config` file uses; `mcp` is never a skipped key.
+    #[test]
+    fn the_mcp_servers_form_is_carried_and_never_skipped() {
+        let config = parse_str(
+            "schema_version = 1\n[[mcp.servers]]\nid = \"files\"\ncommand = \"/work/example/mcp-files\"\nargs = [\"--root\", \"/work/example\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.mcp.servers.len(), 1);
+        assert_eq!(config.mcp.servers[0].id, "files");
+        assert!(config.mcp.warnings.is_empty(), "{:?}", config.mcp.warnings);
+        assert!(
+            !config.skipped.iter().any(|key| key == "mcp"),
+            "{:?}",
+            config.skipped
+        );
+    }
+
+    /// `[mcp.mcpServers.<name>]` (ADR 0008 §8): the shared form normalises the same way,
+    /// with the same `HOME` default the file form has.
+    #[test]
+    fn the_mcp_mcp_servers_form_is_carried_with_the_home_default() {
+        let config = parse_str(
+            "schema_version = 1\n[mcp.mcpServers.files]\ncommand = \"/work/example/mcp-files\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.mcp.servers.len(), 1);
+        assert_eq!(config.mcp.servers[0].id, "files");
+        assert_eq!(
+            config.mcp.servers[0].inherit_env,
+            vec![std::ffi::OsString::from("HOME")],
+            "{:?}",
+            config.mcp.servers[0].inherit_env
+        );
+        assert!(config.mcp.warnings.is_empty(), "{:?}", config.mcp.warnings);
+    }
+
+    /// A remote `[mcp.mcpServers]` entry is skipped with a warning and starts nothing;
+    /// the stdio entry still lands.
+    #[test]
+    fn a_remote_mcp_entry_is_skipped_and_starts_nothing() {
+        let config = parse_str(
+            "schema_version = 1\n[mcp.mcpServers.web]\ntype = \"http\"\nurl = \"https://example.com/mcp\"\n[mcp.mcpServers.files]\ncommand = \"/work/example/mcp-files\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.mcp.servers.len(), 1);
+        assert_eq!(config.mcp.servers[0].id, "files");
+        assert_eq!(config.mcp.warnings.len(), 1, "{:?}", config.mcp.warnings);
+        assert!(
+            config.mcp.warnings[0].contains("skipped `web`"),
+            "{:?}",
+            config.mcp.warnings
+        );
+    }
+
+    /// Both `[mcp]` forms at once, or neither, is a config error like it is for the file.
+    #[test]
+    fn both_mcp_forms_or_neither_is_a_config_error() {
+        let error = parse_str(
+            "schema_version = 1\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n[mcp.mcpServers]\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot be combined"), "{error}");
+        let error = parse_str("schema_version = 1\n[mcp]\nfuture = 1\n").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("expected `servers` or `mcpServers`"),
+            "{error}"
+        );
+        let error = parse_str("schema_version = 1\n[mcp]\n").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("expected `servers` or `mcpServers`"),
+            "{error}"
+        );
+    }
+
+    /// `[mcp]` must be a table, and duplicate ids are refused before any process starts.
+    #[test]
+    fn a_non_table_mcp_and_a_duplicate_mcp_id_are_refused() {
+        let error = parse_str("schema_version = 1\nmcp = 3\n").unwrap_err();
+        assert!(
+            error.to_string().contains("`mcp` must be a table"),
+            "{error}"
+        );
+        let error = parse_str(
+            "schema_version = 1\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate server id"), "{error}");
     }
 
     #[test]

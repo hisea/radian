@@ -34,7 +34,7 @@ use serde::Deserialize;
 /// lines the host prints once at startup (`[mcp] …` on the CLI, the startup log in the
 /// TUI). A bad file is still an error, never a warning: it fails before any process
 /// starts.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct McpLoad {
     pub servers: Vec<McpServerConfig>,
     pub warnings: Vec<String>,
@@ -103,25 +103,70 @@ pub fn load_mcp_config(path: &str) -> Result<McpLoad, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("--mcp-config {path}: {e}"))?;
     let parsed: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("--mcp-config {path}: not valid MCP config JSON: {e}"))?;
+    load_json_value(&parsed, &format!("--mcp-config {path}"))
+}
+
+/// Loads the `[mcp]` section of the user's `config.toml`: the same two forms as
+/// `--mcp-config`, spelled in TOML (`[mcp.mcpServers.<name>]` tables or `[[mcp.servers]]`
+/// entries). One normaliser: the TOML value is converted to JSON and runs through the
+/// same loader the file uses, so the rules (both/neither is an error, duplicate ids are
+/// refused, remote entries are skipped with a warning, `${VAR}` is expanded) cannot
+/// drift. `origin` names the section in errors (the config path, with ` [mcp]`).
+pub fn load_mcp_from_toml(mcp: &toml::Value, origin: &str) -> Result<McpLoad, String> {
+    let json = serde_json::to_value(mcp)
+        .map_err(|e| format!("{origin}: [mcp] is not valid MCP config: {e}"))?;
+    load_json_value(&json, origin)
+}
+
+/// Merges the `[mcp]` servers with the `--mcp-config` file's: the command line wins. A
+/// colliding id keeps the config's position with the file's entry, plus one warning
+/// naming the id (printed as `[mcp] …` like every other MCP warning).
+pub fn merge_mcp(config: McpLoad, file: McpLoad) -> McpLoad {
+    let mut warnings = config.warnings;
+    warnings.extend(file.warnings);
+    let mut servers = config.servers;
+    let mut index: BTreeMap<String, usize> = BTreeMap::new();
+    for (pos, server) in servers.iter().enumerate() {
+        index.insert(server.id.clone(), pos);
+    }
+    for server in file.servers {
+        if let Some(&pos) = index.get(server.id.as_str()) {
+            warnings.push(format!(
+                "server `{}` is set in both [mcp] and --mcp-config; using --mcp-config",
+                server.id
+            ));
+            servers[pos] = server;
+        } else {
+            index.insert(server.id.clone(), servers.len());
+            servers.push(server);
+        }
+    }
+    McpLoad { servers, warnings }
+}
+
+/// The shared normaliser behind [`load_mcp_config`] and [`load_mcp_from_toml`]: `origin`
+/// is `--mcp-config <path>` for a file, `<path> [mcp]` for the config section, so both
+/// spellings fail with the same words.
+fn load_json_value(parsed: &serde_json::Value, origin: &str) -> Result<McpLoad, String> {
     let top = parsed
         .as_object()
-        .ok_or_else(|| format!("--mcp-config {path}: expected an object at the top level"))?;
+        .ok_or_else(|| format!("{origin}: expected an object at the top level"))?;
     let has_servers = top.contains_key("servers");
     let has_mcp_servers = top.contains_key("mcpServers");
     if has_servers && has_mcp_servers {
         return Err(format!(
-            "--mcp-config {path}: `servers` and `mcpServers` cannot be combined; use one form"
+            "{origin}: `servers` and `mcpServers` cannot be combined; use one form"
         ));
     }
     if has_servers {
-        let parsed: ConfigFile = serde_json::from_value(parsed)
-            .map_err(|e| format!("--mcp-config {path}: not valid MCP config JSON: {e}"))?;
+        let parsed: ConfigFile = serde_json::from_value(parsed.clone())
+            .map_err(|e| format!("{origin}: not valid MCP config JSON: {e}"))?;
         let mut load = McpLoad::default();
         let mut seen = std::collections::BTreeSet::new();
         for entry in parsed.servers {
             if !seen.insert(entry.id.clone()) {
                 return Err(format!(
-                    "--mcp-config {path}: duplicate server id `{}`; ids prefix tool names \
+                    "{origin}: duplicate server id `{}`; ids prefix tool names \
                      and must be unique",
                     entry.id
                 ));
@@ -145,22 +190,22 @@ pub fn load_mcp_config(path: &str) -> Result<McpLoad, String> {
         let mut seen = std::collections::BTreeSet::new();
         let entries = top["mcpServers"]
             .as_object()
-            .ok_or_else(|| format!("--mcp-config {path}: `mcpServers` must be an object"))?;
+            .ok_or_else(|| format!("{origin}: `mcpServers` must be an object"))?;
         for (name, raw) in entries {
             if !seen.insert(name.clone()) {
                 return Err(format!(
-                    "--mcp-config {path}: duplicate server id `{name}`; ids prefix tool names \
+                    "{origin}: duplicate server id `{name}`; ids prefix tool names \
                      and must be unique"
                 ));
             }
-            if let Some(config) = build_foreign(path, name, raw, &mut load.warnings)? {
+            if let Some(config) = build_foreign(origin, name, raw, &mut load.warnings)? {
                 load.servers.push(config);
             }
         }
         return Ok(load);
     }
     Err(format!(
-        "--mcp-config {path}: expected `servers` or `mcpServers` at the top level"
+        "{origin}: expected `servers` or `mcpServers` at the top level"
     ))
 }
 
@@ -207,13 +252,13 @@ fn build_config(
 /// A `mcpServers` entry: `None` when it is a remote server that is skipped with a
 /// warning, an error when a stdio entry is malformed.
 fn build_foreign(
-    path: &str,
+    origin: &str,
     name: &str,
     raw: &serde_json::Value,
     warnings: &mut Vec<String>,
 ) -> Result<Option<McpServerConfig>, String> {
     let entry: ForeignEntry = serde_json::from_value(raw.clone())
-        .map_err(|e| format!("--mcp-config {path}: server `{name}` is not a valid entry: {e}"))?;
+        .map_err(|e| format!("{origin}: server `{name}` is not a valid entry: {e}"))?;
     let is_remote = !matches!(entry.r#type.as_deref(), None | Some("stdio")) || entry.url.is_some();
     if is_remote {
         let detail = match (&entry.r#type, &entry.url) {
@@ -235,7 +280,7 @@ fn build_foreign(
     }
     let Some(command) = entry.command else {
         return Err(format!(
-            "--mcp-config {path}: server `{name}` has no `command`; only stdio entries can run"
+            "{origin}: server `{name}` has no `command`; only stdio entries can run"
         ));
     };
     // `mcpServers` entries default to `inherit_env = ["HOME"]`; an explicit list is kept
@@ -594,5 +639,88 @@ mod tests {
         assert_eq!(load.servers[0].call_timeout, Duration::from_secs(9));
         assert_eq!(load.servers[0].shutdown_timeout, Duration::from_secs(10));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn server(id: &str, command: &str) -> McpServerConfig {
+        McpServerConfig::new(id, command)
+    }
+
+    /// The merge the hosts run: both sources together, the `--mcp-config` file winning a
+    /// collision with one warning that names the id. The winner keeps the config's
+    /// position, so the order is stable no matter which side is read first.
+    #[test]
+    fn on_a_collision_the_command_line_wins_with_one_warning_naming_the_id() {
+        let config = McpLoad {
+            servers: vec![
+                server("shared", "from-config"),
+                server("only-config", "true"),
+            ],
+            warnings: vec!["config warning".to_owned()],
+        };
+        let file = McpLoad {
+            servers: vec![server("shared", "from-file"), server("only-file", "true")],
+            warnings: vec!["file warning".to_owned()],
+        };
+        let merged = merge_mcp(config, file);
+        let ids: Vec<&str> = merged.servers.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["shared", "only-config", "only-file"]);
+        let shared = &merged.servers[0];
+        assert_eq!(
+            shared.command,
+            std::path::PathBuf::from("from-file"),
+            "the file's entry must win"
+        );
+        assert_eq!(
+            merged.warnings.len(),
+            3,
+            "both sources' warnings plus the one collision line: {:?}",
+            merged.warnings
+        );
+        assert!(merged.warnings.contains(&"config warning".to_owned()));
+        assert!(merged.warnings.contains(&"file warning".to_owned()));
+        let collisions: Vec<&String> = merged
+            .warnings
+            .iter()
+            .filter(|w| w.contains("--mcp-config"))
+            .collect();
+        assert_eq!(collisions.len(), 1, "{:?}", merged.warnings);
+        assert!(collisions[0].contains("`shared`"), "{:?}", merged.warnings);
+    }
+
+    /// Without a collision the merge only concatenates, config first.
+    #[test]
+    fn without_a_collision_the_merge_concatenates_config_first() {
+        let config = McpLoad {
+            servers: vec![server("a", "true")],
+            warnings: Vec::new(),
+        };
+        let file = McpLoad {
+            servers: vec![server("b", "true")],
+            warnings: Vec::new(),
+        };
+        let merged = merge_mcp(config, file);
+        let ids: Vec<&str> = merged.servers.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+        assert!(merged.warnings.is_empty());
+    }
+
+    /// `[mcp]` in TOML runs through the same loader as the file: a `mcpServers` table
+    /// normalises with the `HOME` default, and both forms at once is an error.
+    #[test]
+    fn the_toml_section_runs_through_the_same_loader_as_the_file() {
+        let value: toml::Value =
+            toml::from_str("[mcpServers.files]\ncommand = \"/work/example/mcp-files\"\n").unwrap();
+        let load = load_mcp_from_toml(&value, "test-config [mcp]").unwrap();
+        assert_eq!(load.servers.len(), 1);
+        assert_eq!(load.servers[0].id, "files");
+        assert_eq!(
+            load.servers[0].inherit_env,
+            vec![std::ffi::OsString::from("HOME")]
+        );
+        let both: toml::Value =
+            toml::from_str("[[servers]]\nid = \"a\"\ncommand = \"true\"\n[mcpServers]\n").unwrap();
+        let error = load_mcp_from_toml(&both, "test-config [mcp]").unwrap_err();
+        assert!(error.contains("cannot be combined"), "{error}");
+        assert!(error.starts_with("test-config [mcp]:"), "{error}");
     }
 }

@@ -281,6 +281,27 @@ mod tests {
         }
     }
 
+    /// A project `[mcp]` starts nothing: user MCP servers come only from the user's
+    /// `config.toml` `[mcp]` and `--mcp-config`, never from the project file. The keys
+    /// are still named (the generic project rule), in both TOML spellings.
+    #[test]
+    fn a_project_mcp_section_starts_nothing() {
+        let scratch = Scratch::new("mcp");
+        scratch.write(
+            "[[mcp.servers]]\nid = \"evil\"\ncommand = \"/tmp/evil\"\n\
+              [mcp.mcpServers.other]\ncommand = \"/tmp/other\"\n",
+        );
+        let read = read(&scratch.root);
+        assert_eq!(read.tier, None, "no tier was asked for: {read:?}");
+        assert!(
+            read.warnings
+                .iter()
+                .any(|warning| warning.contains("ignoring mcp")),
+            "the project [mcp] must be named and ignored: {:?}",
+            read.warnings
+        );
+    }
+
     /// A malformed file cannot widen and cannot break startup.
     #[test]
     fn a_malformed_file_warns_and_asks_for_nothing() {

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// How to start one MCP stdio server and how to treat its tools.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerConfig {
     /// Stable id. It prefixes every tool alias, so changing it renames the tools.
     pub id: String,

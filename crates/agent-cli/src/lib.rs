@@ -102,6 +102,12 @@ pub struct Cli {
     #[arg(long)]
     mcp_config: Option<String>,
 
+    /// Hidden: ignore the config file's `[mcp]` servers. The `explore` subagent child
+    /// mounts exactly the three read-only tools, so it starts no MCP server from either
+    /// source (it also gets no `--mcp-config`).
+    #[arg(long = "no-config-mcp", hide = true)]
+    no_config_mcp: bool,
+
     /// Expose the built-in file tools rooted at this directory (read/write/patch,
     /// glob/grep). The `shell` and `job` tools are exposed as well: `workspace` confines them,
     /// `full` (the default) is unsandboxed.
