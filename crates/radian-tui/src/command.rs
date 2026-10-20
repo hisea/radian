@@ -32,7 +32,7 @@ pub const HELP: &str = "\
                       forget, purge, confirm, export, import, project, relink, split, merge
 /skill:<name> [args]  run a skill: read its body into the message (ADR 0025)
 /skills               list the discovered skills
-/jobs [kill <id|all>] list this session's background jobs, or stop one/all (ADR 0037)
+/jobs [kill <id|all>] list the running background jobs, or stop one/all (ADR 0037)
 /login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
@@ -56,7 +56,7 @@ pub struct PendingCommand {
 /// What `/jobs` asked for (ADR 0037 decision 4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobsRequest {
-    /// `/jobs`: list the session's background jobs.
+    /// `/jobs`: list the running background jobs.
     List,
     /// `/jobs kill <id>`: stop one job's process group.
     Kill(String),
@@ -110,7 +110,7 @@ pub enum Outcome {
     Skill { name: String, args: String },
     /// `/skills`: list the discovered skills (name + description) as notices.
     Skills,
-    /// `/jobs`: list the session's background jobs, or stop one/all (ADR 0037 decision 4).
+    /// `/jobs`: list the running background jobs, or stop one/all (ADR 0037 decision 4).
     Jobs(JobsRequest),
     /// A user's `!`/`!!` shell command (ADR 0033). The command string runs in the sandbox
     /// (the tier's shell); `exclude_from_context` (`!!`) keeps its output out of the model's
@@ -944,6 +944,33 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some(other) if other.starts_with("/skill:") => skill_command(other, line),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
+    }
+}
+
+/// `/jobs` with no arguments (ADR 0037 decision 4): one notice line per **running**
+/// background job, in registry order; `no running background jobs` when none is running.
+/// Finished background jobs and settled foreground retentions (decision 3a) stay out of the
+/// list but remain readable through the `job` tool. The loop calls this with the facade's
+/// `jobs()`; `Jobs::list` itself still returns every entry for its other caller.
+pub fn jobs_list_notices(jobs: &[radian_coding::JobSummary]) -> Vec<String> {
+    let lines: Vec<String> = jobs
+        .iter()
+        .filter(|job| job.state.is_running())
+        .map(|job| {
+            format!(
+                "{}  {}  {}s  {}  {}",
+                job.id,
+                job.state.label(),
+                job.elapsed.as_secs(),
+                job.command,
+                job.output
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        vec!["no running background jobs".to_owned()]
+    } else {
+        lines
     }
 }
 

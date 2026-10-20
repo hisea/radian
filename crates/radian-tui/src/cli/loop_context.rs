@@ -472,28 +472,14 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
-            // ADR 0037 decision 4: `/jobs` lists or stops the session's background jobs. The
-            // registry lives in the host, so the loop reads it here and shows notices.
+            // ADR 0037 decision 4: `/jobs` lists the running background jobs, or stops
+            // one/all. The registry lives in the host, so the loop reads it here and shows
+            // notices.
             Effect::Jobs(request) => {
                 let notices = match request {
                     radian_tui::command::JobsRequest::List => {
                         let jobs = self.session.jobs();
-                        if jobs.is_empty() {
-                            vec!["no background jobs in this session".to_owned()]
-                        } else {
-                            jobs.iter()
-                                .map(|job| {
-                                    format!(
-                                        "{}  {}  {}s  {}  {}",
-                                        job.id,
-                                        job.state.label(),
-                                        job.elapsed.as_secs(),
-                                        job.command,
-                                        job.output
-                                    )
-                                })
-                                .collect()
-                        }
+                        radian_tui::command::jobs_list_notices(&jobs)
                     }
                     radian_tui::command::JobsRequest::Kill(id) => {
                         match self.session.kill_job(&id) {

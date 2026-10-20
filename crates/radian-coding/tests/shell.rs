@@ -991,3 +991,234 @@ async fn the_shell_description_follows_the_effective_git_access() {
     assert!(read_only.contains("`git commit`, by design"), "{read_only}");
     assert!(!read_only.contains("is writable"), "{read_only}");
 }
+
+// ---------- 7. default budget and failure tail (tool-small-fixes decision 2) ----------
+
+/// 37-byte lines, so head/tail byte lengths land mid-line and the asserts below check exact
+/// byte counts rather than line counts.
+fn numbered_lines(count: usize, tail_command: &str) -> String {
+    format!(
+        "i=0; while [ $i -lt {count} ]; do printf 'out-%05d-abcdefghijklmnopqrstuvwxyz\\n' $i; \
+         i=$((i+1)); done; {tail_command}"
+    )
+}
+
+/// Splits the stdout section of a shell result into its (head, tail): the two sides of the
+/// discarded-middle marker when truncated. Returns the whole section as the head when not
+/// truncated.
+fn stdout_view(text: &str) -> (String, String, bool) {
+    let section = text
+        .split("--- stdout ---\n")
+        .nth(1)
+        .expect("a stdout section")
+        .split("--- stderr ---")
+        .next()
+        .expect("a stderr section");
+    match section.split_once("\n[... ") {
+        Some((head, rest)) => {
+            let tail = rest
+                .split_once("...]\n")
+                .map(|(_, tail)| tail)
+                .unwrap_or("");
+            (head.to_owned(), tail.to_owned(), true)
+        }
+        None => (section.to_owned(), String::new(), false),
+    }
+}
+
+#[tokio::test]
+async fn default_output_budget_is_24kib_per_stream() {
+    // No `with_limits`: the model's default budget. A command printing far more than the
+    // budget is cut to exactly the new default, and the result names the discarded bytes.
+    // On the old 64 KiB default `stdout_bytes` would be 65536, not 24576.
+    let dir = TempDir::new("shell-default-cap");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+
+    let output = call(
+        &tools,
+        "shell",
+        json!({"command": numbered_lines(20_000, "exit 0")}),
+    )
+    .await
+    .unwrap();
+
+    let structured = structured(&output);
+    assert_eq!(
+        structured["output_bytes_per_stream"],
+        json!(24 << 10),
+        "{structured}"
+    );
+    assert_eq!(structured["stdout_bytes"], json!(24 << 10), "{structured}");
+    let truncated = structured["stdout_truncated_bytes"].as_u64().unwrap();
+    assert!(
+        truncated > 100_000,
+        "most of the output is cut: {structured}"
+    );
+    let text = output_text(&output);
+    assert!(
+        text.contains("bytes discarded") && text.contains(&truncated.to_string()),
+        "the result names the discarded bytes: {text}"
+    );
+}
+
+#[tokio::test]
+async fn success_keeps_quarter_head_and_three_quarter_tail() {
+    let dir = TempDir::new("shell-success-split");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root).with_limits(Limits {
+        default_shell_output_bytes: 4096,
+        max_shell_output_bytes: 4096,
+        ..Limits::default()
+    });
+
+    let output = call(
+        &tools,
+        "shell",
+        json!({"command": numbered_lines(2000, "exit 0")}),
+    )
+    .await
+    .unwrap();
+
+    let structured = structured(&output);
+    assert_eq!(structured["exit_code"], json!(0), "{structured}");
+    assert_eq!(structured["stdout_bytes"], json!(4096), "{structured}");
+    let text = output_text(&output);
+    let (head, tail, truncated) = stdout_view(&text);
+    assert!(
+        truncated,
+        "74_000 bytes through a 4096 budget must truncate"
+    );
+    assert_eq!(head.len(), 1024, "success keeps a 1/4 head");
+    assert_eq!(tail.len(), 3072, "success keeps a 3/4 tail");
+    assert!(head.starts_with("out-00000-"), "the start survives: {head}");
+    assert!(
+        tail.ends_with("out-01999-abcdefghijklmnopqrstuvwxyz\n"),
+        "the end survives"
+    );
+}
+
+#[tokio::test]
+async fn failure_keeps_eighth_head_and_seven_eighth_tail() {
+    // The same output as the success test, but a non-zero exit: the view keeps less start
+    // (1/8) and more end (7/8) of the same budget. Rendered with the success split the head
+    // would be 1024 bytes, not 512.
+    let dir = TempDir::new("shell-failure-split");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root).with_limits(Limits {
+        default_shell_output_bytes: 4096,
+        max_shell_output_bytes: 4096,
+        ..Limits::default()
+    });
+
+    let output = call(
+        &tools,
+        "shell",
+        json!({"command": numbered_lines(2000, "echo THIS-FAILED-AT-THE-END 1>&2; exit 1")}),
+    )
+    .await
+    .unwrap();
+
+    let structured = structured(&output);
+    assert_eq!(structured["exit_code"], json!(1), "{structured}");
+    assert_eq!(structured["stdout_bytes"], json!(4096), "{structured}");
+    let text = output_text(&output);
+    assert!(text.contains("exit code: 1"), "{text}");
+    let (head, tail, truncated) = stdout_view(&text);
+    assert!(
+        truncated,
+        "74_000 bytes through a 4096 budget must truncate"
+    );
+    assert_eq!(head.len(), 512, "failure keeps a 1/8 head");
+    assert_eq!(tail.len(), 3584, "failure keeps a 7/8 tail");
+    assert!(
+        head.starts_with("out-00000-"),
+        "some start survives: {head}"
+    );
+    assert!(
+        tail.ends_with("out-01999-abcdefghijklmnopqrstuvwxyz\n"),
+        "the very last line survives"
+    );
+    assert!(
+        text.contains("THIS-FAILED-AT-THE-END"),
+        "the stderr error line survives on its own budget: {text}"
+    );
+}
+
+#[tokio::test]
+async fn uneven_budgets_stay_within_cap_on_both_outcomes() {
+    // A budget no split divides evenly: both views still show exactly the budget, never
+    // more. If the failure render forgot to trim to its split, `stdout_bytes` would exceed
+    // the cap here.
+    let dir = TempDir::new("shell-uneven-cap");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root).with_limits(Limits {
+        default_shell_output_bytes: 1000,
+        max_shell_output_bytes: 1000,
+        ..Limits::default()
+    });
+
+    let success = call(
+        &tools,
+        "shell",
+        json!({"command": numbered_lines(2000, "exit 0")}),
+    )
+    .await
+    .unwrap();
+    let (head, tail, _) = stdout_view(&output_text(&success));
+    assert_eq!(head.len(), 250, "1/4 of 1000");
+    assert_eq!(tail.len(), 750, "3/4 of 1000");
+    assert_eq!(structured(&success)["stdout_bytes"], json!(1000));
+
+    let failure = call(
+        &tools,
+        "shell",
+        json!({"command": numbered_lines(2000, "exit 1")}),
+    )
+    .await
+    .unwrap();
+    let (head, tail, _) = stdout_view(&output_text(&failure));
+    assert_eq!(head.len(), 125, "1/8 of 1000");
+    assert_eq!(tail.len(), 875, "7/8 of 1000");
+    assert_eq!(structured(&failure)["stdout_bytes"], json!(1000));
+}
+
+#[tokio::test]
+async fn failing_commands_last_line_is_always_present() {
+    // The failure tail exists so the error at the end is never the part that is cut: even
+    // at the smallest usable budget the last line is present.
+    let dir = TempDir::new("shell-failure-last");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root).with_limits(Limits {
+        default_shell_output_bytes: 256,
+        max_shell_output_bytes: 256,
+        ..Limits::default()
+    });
+
+    let output = call(
+        &tools,
+        "shell",
+        json!({"command": numbered_lines(2000, "echo FINAL-MARKER-LAST-LINE; exit 3")}),
+    )
+    .await
+    .unwrap();
+
+    let structured = structured(&output);
+    assert_eq!(structured["exit_code"], json!(3), "{structured}");
+    let text = output_text(&output);
+    assert!(
+        text.contains("FINAL-MARKER-LAST-LINE"),
+        "the last line survives at a 256-byte budget: {text}"
+    );
+    let (head, tail, _) = stdout_view(&text);
+    assert_eq!(
+        head.len() + tail.len(),
+        256,
+        "the view is still exactly the budget"
+    );
+}
