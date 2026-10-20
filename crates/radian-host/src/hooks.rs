@@ -16,7 +16,7 @@
 //! - `Stop` runs once per completed turn (see [`Hooks::on_turn_end`]: only
 //!   [`RunStatus::Completed`] runs the hook; any other terminal status runs nothing).
 //!   Exit 2 starts another turn with the hook's stderr as a `System` `followup` through
-//!   the inbox, at most [`STOP_MAX_CONTINUATIONS`] consecutive continuations.
+//!   the inbox, at most a [`WakeGate`] window's worth of consecutive continuations.
 //!
 //! The matcher is Claude's case-sensitive pattern over **Radian** tool names: `*` or a
 //! missing/empty matcher matches every tool, otherwise the pattern is a regular
@@ -32,7 +32,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use agent_core::{
     ContentPart, HookContext, HookError, Hooks, InputSource, Message, RunOutcome, RunStatus,
@@ -43,11 +42,7 @@ use radian_sandbox::SandboxSlot;
 use serde::Deserialize;
 
 use crate::config::{HookCommand, HookMatcher, HooksConfig};
-
-/// How many consecutive `Stop`-hook continuations may open a new turn before the hook is
-/// skipped until the next user message (ADR 0045; the same shape as ADR 0037's
-/// `MAX_CONSECUTIVE_WAKES`). Fixed, no config key.
-pub const STOP_MAX_CONTINUATIONS: u32 = 3;
+use crate::wake_gate::WakeGate;
 
 /// How many characters of a hook's stderr enter the transcript (deny reasons, PostToolUse
 /// feedback, Stop continuations). Hooks are the user's own commands, but their output is
@@ -87,8 +82,10 @@ pub struct CommandHooks {
     sandbox: SandboxSlot,
     inbox: Arc<Inbox>,
     runtime: tokio::runtime::Handle,
-    /// Consecutive `Stop` continuations with no user message in between.
-    stop_wakes: Arc<AtomicU32>,
+    /// The sliding-window wake budget (ADR 0037 decision 5's rate gate, shared with the
+    /// background-job notifier): Stop continuations inside one window, expiring on their
+    /// own with no user message needed.
+    gate: Arc<WakeGate>,
     warn: HooksWarning,
 }
 
@@ -113,7 +110,7 @@ impl CommandHooks {
             sandbox,
             inbox: Arc::clone(inbox),
             runtime: runtime.clone(),
-            stop_wakes: Arc::new(AtomicU32::new(0)),
+            gate: Arc::new(WakeGate::new()),
             warn,
         }
     }
@@ -126,12 +123,12 @@ impl CommandHooks {
     /// A user message arrived: the `Stop` continuation budget starts over (the same reset
     /// the background-job notifier gets, ADR 0037 decision 3).
     pub fn reset_wakes(&self) {
-        self.stop_wakes.store(0, Ordering::SeqCst);
+        self.gate.reset_wakes();
     }
 
-    /// Consecutive `Stop`-hook continuations so far (tests).
+    /// `Stop` continuations inside the window right now (tests).
     pub fn stop_wakes(&self) -> u32 {
-        self.stop_wakes.load(Ordering::SeqCst)
+        self.gate.wakes()
     }
 
     /// Whether a compiled matcher matches a Radian tool name.
@@ -157,10 +154,11 @@ impl CommandHooks {
         if self.stop.is_empty() {
             return;
         }
-        if self.stop_wakes.load(Ordering::SeqCst) >= STOP_MAX_CONTINUATIONS {
-            // The cap is reached: skip the run entirely until the next user message.
-            // Running a validation whose verdict cannot continue the turn would only
-            // spend the model wait for nothing.
+        if !self.gate.wake_allowed() {
+            // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): the rate gate is full, so
+            // the run is skipped entirely until the window passes or a user message
+            // resets it. Running a validation whose verdict cannot continue the turn would
+            // only spend the model wait for nothing.
             return;
         }
         let stdin = serde_json::json!({
@@ -186,7 +184,7 @@ impl CommandHooks {
                             .await
                             .is_ok()
                         {
-                            self.stop_wakes.fetch_add(1, Ordering::SeqCst);
+                            self.gate.note_wake();
                         }
                         return;
                     }
@@ -655,6 +653,9 @@ mod tests {
     use super::*;
     use agent_core::{CancelReason, CancellationToken};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::wake_gate::{MAX_WAKES_PER_WINDOW, WAKE_WINDOW};
 
     static N: AtomicU32 = AtomicU32::new(0);
 
@@ -1076,10 +1077,12 @@ mod tests {
         assert!(ws.join("marker.txt").exists());
     }
 
-    /// `Stop` exit 2 opens another turn with the stderr as a `System` followup — at most
-    /// three consecutive continuations, then the hook is skipped until a user message.
+    /// `Stop` exit 2 opens another turn with the stderr as a `System` followup. Continuations
+    /// minutes apart never fill the rate gate: six in a row all open a turn. (The old
+    /// per-message count of 3 would stop this chain at the fourth.)
     #[tokio::test]
-    async fn stop_exit_2_continues_at_most_three_times() {
+    async fn stop_continuations_minutes_apart_are_never_gated() {
+        tokio::time::pause();
         let config = HooksConfig {
             stop: vec![HookMatcher {
                 matcher: None,
@@ -1088,33 +1091,82 @@ mod tests {
             ..HooksConfig::default()
         };
         let fixture = plain(&config);
-        for _ in 0..5 {
+        for i in 0..6 {
             fixture.hooks.run_stop_once(&RunStatus::Completed).await;
-        }
-        assert_eq!(fixture.hooks.stop_wakes(), 3);
-        // `claim_next_turn` is non-blocking: three followups are there to take.
-        for _ in 0..3 {
             let entry = fixture
                 .inbox
                 .claim_next_turn()
                 .await
-                .expect("three followups are enqueued");
+                .unwrap_or_else(|| panic!("round {i}: the continuation opens a turn"));
             assert!(
                 entry.message.text().contains("keep-going"),
                 "the stderr is the input: {}",
                 entry.message.text()
             );
             assert_eq!(entry.source, InputSource::System);
+            tokio::time::advance(std::time::Duration::from_secs(180)).await;
         }
-        // The 4th (and 5th) continuation never happens: no followup, no inject either.
+    }
+
+    /// A fast `Stop` loop (every continuation ~1 s apart) fills the window: the 11th run is
+    /// skipped entirely — no followup, no inject either — and the window passing reopens it
+    /// with no user message.
+    #[tokio::test]
+    async fn stop_fast_loop_is_gated_after_n_and_recovers_after_the_window() {
+        tokio::time::pause();
+        let config = HooksConfig {
+            stop: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![hook("echo keep-going >&2; exit 2")],
+            }],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        for i in 0..MAX_WAKES_PER_WINDOW {
+            fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+            assert!(
+                fixture.inbox.claim_next_turn().await.is_some(),
+                "continuation {i}: still inside the budget"
+            );
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        }
+        assert_eq!(fixture.hooks.stop_wakes(), MAX_WAKES_PER_WINDOW);
+        // The 11th continuation never happens: no followup, no inject either.
+        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
         assert!(
             fixture.inbox.claim_next_turn().await.is_none(),
-            "the 4th continuation must not open a turn"
+            "the gated continuation must not open a turn"
         );
         assert!(
             fixture.inbox.claim_next_step().await.is_none(),
-            "the capped hook must not inject either"
+            "the gated hook must not inject either"
         );
+        // The window passing alone reopens the gate: no user message needed.
+        tokio::time::advance(WAKE_WINDOW + std::time::Duration::from_secs(1)).await;
+        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+        assert_eq!(fixture.hooks.stop_wakes(), 1);
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_some(),
+            "after the window: the continuation opens a turn again"
+        );
+    }
+
+    /// A user message restarts the `Stop` budget at once.
+    #[tokio::test]
+    async fn stop_user_message_resets_the_budget() {
+        tokio::time::pause();
+        let config = HooksConfig {
+            stop: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![hook("echo keep-going >&2; exit 2")],
+            }],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        for _ in 0..3 {
+            fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+        }
+        assert_eq!(fixture.hooks.stop_wakes(), 3);
         // A user message restarts the budget.
         fixture.hooks.reset_wakes();
         fixture.hooks.run_stop_once(&RunStatus::Completed).await;
