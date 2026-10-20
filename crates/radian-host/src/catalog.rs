@@ -1653,11 +1653,32 @@ pub fn write_provider_models_at(
     write_cache(&path, &serde_json::to_string(&cache).unwrap_or_default())
 }
 
-/// One model-list refresh (ADR 0026 D0): `GET <base>/models` with the key, the OpenAI shape
-/// (`{"data":[{"id":…}]}`). **The opencode `/v1/models` response shape is unverified** — this
-/// implements the OpenAI shape and ignores anything it cannot read.
-pub async fn fetch_provider_models(base_url: &str, key: &str) -> Option<Vec<String>> {
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+/// The URL one model-list refresh GETs (ADR 0026 D0): the descriptor's own model-list URL
+/// when it names one (`opencode-go`'s discovery endpoint), else `<base>/models`. Pure, so the
+/// refresh and its tests name the same endpoint.
+fn provider_models_url(provider_id: &str, base_url: &str) -> String {
+    if let Some(descriptor) = crate::descriptor(provider_id)
+        && let Some(url) = descriptor.models_url
+    {
+        return url.to_owned();
+    }
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
+/// One model-list refresh (ADR 0026 D0): `GET` of [`provider_models_url`] with the key, the
+/// OpenAI shape (`{"data":[{"id":…}]}`). The zen discovery endpoint answers this shape (lead
+/// 2026-10-20); anything unreadable is ignored. `None` on any failure (silent, per D0).
+pub async fn fetch_provider_models(
+    provider_id: &str,
+    base_url: &str,
+    key: &str,
+) -> Option<Vec<String>> {
+    fetch_models_url(&provider_models_url(provider_id, base_url), key).await
+}
+
+/// One model-list `GET` of `url` with the key. A mock server stands in for the endpoint in
+/// tests, so the request and the OpenAI shape are covered without network.
+async fn fetch_models_url(url: &str, key: &str) -> Option<Vec<String>> {
     let client = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
         .build()
@@ -1720,6 +1741,111 @@ mod provider_models_tests {
         assert!(provider_models_stale(Some(PROVIDER_MODELS_RETRY), 0));
     }
 
+    /// `opencode-go` refreshes from its discovery endpoint, not `<base>/models` (that path
+    /// 404s); every other provider keeps `<base>/models`. Pointing it back fails this test.
+    #[test]
+    fn opencode_go_refresh_uses_the_discovery_endpoint_not_models() {
+        assert_eq!(
+            provider_models_url("opencode-go", "https://opencode.ai/inference/go/openai/v1"),
+            "https://opencode.ai/zen/go/v1/models",
+        );
+        assert_eq!(
+            provider_models_url("openai", "https://api.openai.com/v1"),
+            "https://api.openai.com/v1/models",
+        );
+        assert_eq!(
+            provider_models_url("anthropic", "https://api.anthropic.com"),
+            "https://api.anthropic.com/models",
+        );
+        assert_eq!(
+            provider_models_url("corp", "https://corp.example/v1/"),
+            "https://corp.example/v1/models",
+        );
+    }
+
+    /// A one-shot server that records the request head, then answers `status_line` with `body`:
+    /// the mock stands in for a model-list endpoint (no network in tests).
+    fn capturing_server(
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// The refresh GETs the discovery path with Bearer auth and reads the OpenAI list shape
+    /// (`{"object":"list","data":[{"id":…}]}`), while another provider keeps `<base>/models`.
+    /// A failure is a silent `None` (D0). The failure messages never carry the request, so the
+    /// key cannot reach test output.
+    #[tokio::test]
+    async fn the_refresh_gets_the_discovery_path_and_reads_the_list_shape() {
+        let body = r#"{"object":"list","data":[{"id":"b"},{"id":"a"},{"id":"a"}]}"#;
+        let (base, request) = capturing_server("200 OK", body);
+        let models = fetch_models_url(&format!("{base}/zen/go/v1/models"), "sk-test")
+            .await
+            .expect("ids");
+        assert_eq!(models, vec!["a".to_owned(), "b".to_owned()]);
+        let head = request
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the request");
+        assert!(
+            head.starts_with("GET /zen/go/v1/models "),
+            "the discovery path is hit"
+        );
+        assert!(
+            head.to_lowercase()
+                .contains("authorization: bearer sk-test"),
+            "the key rides as Bearer auth"
+        );
+
+        // Another provider keeps `<base>/models`: the same fetch, the default path.
+        let (base, request) = capturing_server("200 OK", body);
+        let models = fetch_provider_models("openai", &format!("{base}/v1"), "sk-test")
+            .await
+            .expect("ids");
+        assert_eq!(models, vec!["a".to_owned(), "b".to_owned()]);
+        let head = request
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the request");
+        assert!(
+            head.starts_with("GET /v1/models "),
+            "the default path is kept"
+        );
+
+        // A failure is silent: a non-200, a non-list body, and an empty list are all `None`.
+        let (base, _) = capturing_server("404 Not Found", "{}");
+        assert!(
+            fetch_models_url(&format!("{base}/zen/go/v1/models"), "sk-test")
+                .await
+                .is_none()
+        );
+        let (base, _) = capturing_server("200 OK", r#"{"nope":[]}"#);
+        assert!(
+            fetch_models_url(&format!("{base}/zen/go/v1/models"), "sk-test")
+                .await
+                .is_none()
+        );
+        let (base, _) = capturing_server("200 OK", r#"{"object":"list","data":[]}"#);
+        assert!(
+            fetch_models_url(&format!("{base}/zen/go/v1/models"), "sk-test")
+                .await
+                .is_none()
+        );
+    }
     /// The fingerprint changes with the key and never contains it (D0: the cache stores no key).
     #[test]
     fn the_fingerprint_tracks_the_key_without_leaking_it() {

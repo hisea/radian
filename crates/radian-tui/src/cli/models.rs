@@ -12,21 +12,27 @@ pub(super) fn model_route_candidates(
     current_provider: Option<&str>,
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
 ) -> Vec<radian_tui::command::Candidate> {
-    // Every provider a switch could name (ADR 0026 D5/D10): the built-in descriptors, the
-    // config's `[providers.<name>]` declarations, and the usable `auth.json` entries. Each is
-    // resolved with `resolve_provider` so the list matches what a switch would accept, then its
-    // models are flattened into one list (ADR 0035): the label is the model, the
-    // description the provider.
+    // Only providers a switch could accept (ADR 0026 D5/D6): one with a usable `auth.json`
+    // entry — a built-in descriptor, a config `[providers.<name>]` declaration, or a custom
+    // name stored by `/login custom` (D10) — plus the current route's provider, whose `✓` row
+    // is never missing even without a credential. Each is resolved with `resolve_provider` so
+    // the list matches what a switch would accept, then its models are flattened into one
+    // list (ADR 0035): the label is the model, the description the provider.
     let auth_entries = radian_host::auth::list().unwrap_or_default();
+    let logged_in = |name: &str| {
+        auth_entries
+            .iter()
+            .any(|entry| entry.provider_id == name && entry.usable)
+    };
     let mut names: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for descriptor in radian_host::descriptors() {
-        if seen.insert(descriptor.id.to_owned()) {
+        if logged_in(descriptor.id) && seen.insert(descriptor.id.to_owned()) {
             names.push(descriptor.id.to_owned());
         }
     }
     for name in config_providers.keys() {
-        if seen.insert(name.clone()) {
+        if logged_in(name) && seen.insert(name.clone()) {
             names.push(name.clone());
         }
     }
@@ -34,6 +40,13 @@ pub(super) fn model_route_candidates(
         if entry.usable && seen.insert(entry.provider_id.clone()) {
             names.push(entry.provider_id.clone());
         }
+    }
+    // The current route's provider stays listed even without a credential, so its `✓` row is
+    // never missing (D5); switching to it still refuses without one (D6).
+    if let Some(current) = current_provider
+        && seen.insert(current.to_owned())
+    {
+        names.push(current.to_owned());
     }
     let mut candidates = Vec::new();
     for name in &names {
@@ -55,6 +68,26 @@ pub(super) fn model_route_candidates(
     }
     sort_model_candidates(&mut candidates, current_provider);
     candidates
+}
+
+/// Marks the row in effect in a `/model` candidate list: the `provider/model` row (or the
+/// `provider/` row). The pure part of the `Fetch::ModelRoute` answer; the loop owns the I/O.
+pub(super) fn mark_current_route(
+    candidates: Vec<radian_tui::command::Candidate>,
+    provider: &str,
+    model: &str,
+) -> Vec<radian_tui::command::Candidate> {
+    candidates
+        .into_iter()
+        .map(|mut candidate| {
+            if candidate.insert == format!("{provider}/{model}")
+                || candidate.insert == format!("{provider}/")
+            {
+                candidate.current = true;
+            }
+            candidate
+        })
+        .collect()
 }
 
 /// The flat `/model` list's order (ADR 0035): the current provider's models first,
@@ -163,6 +196,152 @@ fn record_snippet(content: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A temp `RADIAN_HOME` for one test (the redact.rs pattern): `auth.json` holds `entries`,
+    /// the previous value is restored on drop, and a process-wide lock serializes these tests
+    /// against each other — the variable is process-global, and the real `~/.radian` is never
+    /// touched.
+    struct EnvHome {
+        previous: Option<std::ffi::OsString>,
+        root: std::path::PathBuf,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl EnvHome {
+        fn with_entries(entries: &[(&str, &str)]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+            let root = std::env::temp_dir().join(format!(
+                "radian-model-filter-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |time| time.as_nanos())
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let previous = std::env::var_os("RADIAN_HOME");
+            // SAFETY: serialized by `ENV_LOCK`, restored on drop.
+            unsafe { std::env::set_var("RADIAN_HOME", &root) };
+            let mut store = radian_host::AuthStore::open().expect("a fresh store");
+            for &(provider, key) in entries {
+                store
+                    .upsert_api_key(provider, key, &std::collections::BTreeMap::new())
+                    .expect("the entry is stored");
+            }
+            Self {
+                previous,
+                root,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for EnvHome {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var("RADIAN_HOME", value) },
+                None => unsafe { std::env::remove_var("RADIAN_HOME") },
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn empty_config() -> std::collections::BTreeMap<String, radian_host::ProviderDecl> {
+        std::collections::BTreeMap::new()
+    }
+
+    /// ADR 0026 D5: with only `opencode-go` logged in, the list holds its models and no
+    /// `anthropic/` or `chatgpt/` row. Removing the login filter fails this test.
+    #[test]
+    fn the_model_list_hides_providers_without_a_usable_credential() {
+        let _home = EnvHome::with_entries(&[("opencode-go", "k-opencode-go")]);
+        let candidates = model_route_candidates(None, &empty_config());
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.insert.starts_with("opencode-go/")),
+            "the logged-in provider is listed: {:?}",
+            candidates.iter().map(|c| &c.insert).collect::<Vec<_>>()
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|c| !c.insert.starts_with("anthropic/") && !c.insert.starts_with("chatgpt/")),
+            "no logged-out provider is listed: {:?}",
+            candidates.iter().map(|c| &c.insert).collect::<Vec<_>>()
+        );
+    }
+
+    /// Adding an `anthropic` entry adds its models to the list.
+    #[test]
+    fn adding_a_login_adds_that_providers_models() {
+        let _home = EnvHome::with_entries(&[
+            ("opencode-go", "k-opencode-go"),
+            ("anthropic", "k-anthropic"),
+        ]);
+        let candidates = model_route_candidates(None, &empty_config());
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.insert.starts_with("anthropic/")),
+            "the newly logged-in provider is listed: {:?}",
+            candidates.iter().map(|c| &c.insert).collect::<Vec<_>>()
+        );
+        assert!(
+            !candidates.iter().any(|c| c.insert.starts_with("chatgpt/")),
+            "chatgpt stays out without a credential: {:?}",
+            candidates.iter().map(|c| &c.insert).collect::<Vec<_>>()
+        );
+    }
+
+    /// A custom provider declared in config, with its key in `auth.json` under its name (D10),
+    /// is listed too — the filter must not drop what the switch would accept.
+    #[test]
+    fn a_logged_in_custom_provider_is_listed() {
+        let _home = EnvHome::with_entries(&[("opencode-go", "k-opencode-go"), ("corp", "k-corp")]);
+        radian_host::write_provider_models("corp", "k-corp", vec!["m-corp".to_owned()])
+            .expect("the cache is writable");
+        let mut config = empty_config();
+        config.insert(
+            "corp".to_owned(),
+            radian_host::ProviderDecl {
+                kind: "openai-compatible".to_owned(),
+                base_url: "http://127.0.0.1:9/v1".to_owned(),
+                reasoning_replay: None,
+            },
+        );
+        let candidates = model_route_candidates(None, &config);
+        assert!(
+            candidates.iter().any(|c| c.insert == "corp/m-corp"),
+            "the custom provider is listed: {:?}",
+            candidates.iter().map(|c| &c.insert).collect::<Vec<_>>()
+        );
+    }
+
+    /// The current route's provider stays listed even without a credential, so its `✓` row is
+    /// never missing — and `mark_current_route` marks exactly that row.
+    #[test]
+    fn the_current_provider_is_listed_and_marked_without_a_credential() {
+        let _home = EnvHome::with_entries(&[("opencode-go", "k-opencode-go")]);
+        let candidates = model_route_candidates(Some("anthropic"), &empty_config());
+        let current_model = candidates
+            .iter()
+            .find(|c| c.description == "anthropic")
+            .map(|c| c.insert.clone())
+            .expect("the current provider is listed without a credential");
+        let (provider, model) = current_model.split_once('/').expect("a route");
+        assert_eq!(provider, "anthropic");
+        let marked = mark_current_route(candidates, provider, model);
+        for candidate in &marked {
+            assert_eq!(
+                candidate.current,
+                candidate.insert == current_model,
+                "only the route in effect is marked: {:?}",
+                marked.iter().map(|c| &c.insert).collect::<Vec<_>>()
+            );
+        }
+    }
     /// ADR 0035: the current provider's models come first in the flat `/model`
     /// list, then the rest by provider and model name.
     #[test]

@@ -367,21 +367,14 @@ impl LoopContext<'_> {
                             .session
                             .model_route()
                             .unwrap_or_else(|| self.startup_route.clone());
-                        model_route_candidates(
-                            Some(current_provider.as_str()),
-                            &self.config_providers,
+                        mark_current_route(
+                            model_route_candidates(
+                                Some(current_provider.as_str()),
+                                &self.config_providers,
+                            ),
+                            &current_provider,
+                            &current_model,
                         )
-                        .into_iter()
-                        .map(|mut candidate| {
-                            let is_current = candidate.insert
-                                == format!("{current_provider}/{current_model}")
-                                || candidate.insert == format!("{current_provider}/");
-                            if is_current {
-                                candidate.current = true;
-                            }
-                            candidate
-                        })
-                        .collect()
                     }
                     radian_tui::command::Fetch::ThinkingLevels { .. } => {
                         // D11: only the levels the current model supports. Each row names the
@@ -694,7 +687,7 @@ impl LoopContext<'_> {
                     .unwrap_or(radian_host::Protocol::OpenAiCompatible);
                 let tx = self.tx.clone();
                 self.runtime.spawn(async move {
-                    let result = radian_host::login::verify(protocol, &base_url, &key).await;
+                    let result = radian_host::login::verify(&name, protocol, &base_url, &key).await;
                     let _ = tx.send(UiEvent::Command(AppInput::LoginVerified { name, result }));
                 });
                 Ok(())

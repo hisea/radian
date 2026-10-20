@@ -484,8 +484,9 @@ pub(super) fn open_session_and_refresh(
     // The providers worth refreshing now: the one this run started with. `/model`'s other
     // targets refresh on their next use (the fetch itself is on the loop's runtime).
     let refresh_targets = vec![key_id.to_owned()];
-    // ADR 0026 D0: refresh the switched-to providers' `/v1/models` in the background. It never
-    // blocks startup and its failures are silent (the next `/model` just sees the old cache).
+    // ADR 0026 D0: refresh the switched-to providers' model list in the background (their
+    // descriptor's own URL when named, else `/v1/models`). It never blocks startup and its
+    // failures are silent (the next `/model` just sees the old cache).
     runtime.spawn(async move {
         for provider_id in refresh_targets {
             let Some(key) = radian_host::auth::resolve_key(&provider_id)
@@ -517,7 +518,7 @@ pub(super) fn open_session_and_refresh(
             let base_url = radian_host::descriptor(&provider_id)
                 .map(|descriptor| descriptor.default_base_url.to_owned())
                 .unwrap_or_default();
-            match radian_host::fetch_provider_models(&base_url, &key).await {
+            match radian_host::fetch_provider_models(&provider_id, &base_url, &key).await {
                 Some(models) => {
                     let _ = radian_host::write_provider_models(&provider_id, &key, models);
                 }

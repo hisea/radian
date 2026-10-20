@@ -328,12 +328,14 @@ pub async fn run_login(provider: Option<String>) -> i32 {
         return aborted("empty key; nothing was saved".to_owned());
     }
 
-    // The verification request (D3): one GET <base>/models before anything is saved.
+    // The verification request (D3): one GET of the descriptor's verification URL
+    // (`<base>/models` unless the descriptor names its own) before anything is saved.
     let protocol =
         radian_host::Protocol::from_kind(&kind).unwrap_or(radian_host::Protocol::OpenAiCompatible);
-    print!("verifying against {base_url} … ");
+    let verify_url = radian_host::login::verification_url(&name, protocol, &base_url);
+    print!("verifying against {verify_url} … ");
     let _ = std::io::stdout().flush();
-    match radian_host::login::verify(protocol, &base_url, &key).await {
+    match radian_host::login::verify(&name, protocol, &base_url, &key).await {
         Ok(()) => println!("ok"),
         Err(reason) => {
             println!("failed");
