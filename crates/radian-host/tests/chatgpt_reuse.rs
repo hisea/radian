@@ -8,9 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink};
-use agent_provider_openai_responses::testing::{
-    completed, message_item, output_item_done,
-};
+use agent_provider_openai_responses::testing::{completed, message_item, output_item_done};
 use agent_provider_openai_responses::{OpenAiResponsesConfig, build_client};
 use radian_host::oauth_chatgpt::Endpoints;
 use radian_host::{AuthStore, ChatGptModel, OAuthEntry};
@@ -20,10 +18,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 fn isolated_home() -> std::path::PathBuf {
     static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "radian-chatgpt-reuse-home-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("radian-chatgpt-reuse-home-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
@@ -105,8 +101,11 @@ impl KeepAliveServer {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let replies = Arc::new(Mutex::new(VecDeque::from(bodies)));
         let task = {
-            let (connections, requests, replies) =
-                (Arc::clone(&connections), Arc::clone(&requests), Arc::clone(&replies));
+            let (connections, requests, replies) = (
+                Arc::clone(&connections),
+                Arc::clone(&requests),
+                Arc::clone(&replies),
+            );
             tokio::spawn(async move {
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
@@ -296,6 +295,10 @@ async fn two_completes_reuse_one_tcp_connection() {
 
     assert_eq!(server.requests().len(), 2, "both requests arrived");
     for recorded in server.requests() {
+        assert!(
+            recorded.body.contains("gpt-5.4"),
+            "each call still sends the model request"
+        );
         assert_eq!(
             recorded.header("authorization"),
             Some(format!("Bearer {access}")).as_deref(),

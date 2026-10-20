@@ -72,10 +72,7 @@ impl OpenAiResponses {
     /// [`Self::new`], but over a caller-supplied client built by [`build_client`]. Every
     /// other guarantee is the same: the base URL is validated, plain http refuses to carry
     /// headers off-box, and header values are masked in errors.
-    pub fn with_client(
-        config: OpenAiResponsesConfig,
-        client: Client,
-    ) -> Result<Self, ConfigError> {
+    pub fn with_client(config: OpenAiResponsesConfig, client: Client) -> Result<Self, ConfigError> {
         let (endpoint, headers) = validated_endpoint_and_headers(&config)?;
         let secrets = secrets(&config.headers);
         Ok(Self {
