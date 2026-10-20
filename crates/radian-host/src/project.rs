@@ -232,7 +232,8 @@ mod tests {
     }
 
     /// Other keys are skipped and named, never adopted; `[sandbox]` is refused by name
-    /// (ADR 0034).    #[test]
+    /// (ADR 0034).
+    #[test]
     fn other_keys_are_named_and_not_used() {
         let scratch = Scratch::new("keys");
         scratch.write(
