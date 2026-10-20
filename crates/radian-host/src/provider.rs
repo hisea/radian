@@ -170,6 +170,10 @@ pub struct ProviderDescriptor {
     /// endpoint: its chat base serves no `/models` path. `None` keeps
     /// `<base>/models`.
     pub verification_url: Option<&'static str>,
+    /// The model-list URL the background refresh GETs (ADR 0026 D0): when `Some`, this absolute
+    /// URL instead of `<base>/models`. `opencode-go` names its discovery endpoint: its chat
+    /// base serves no `/models`. `None` keeps `<base>/models`.
+    pub models_url: Option<&'static str>,
     /// The built-in model list (the full list is later merged with the cache and `/v1/models`,
     /// ADR 0026 D0).
     pub models: &'static [DescriptorModel],
@@ -600,6 +604,10 @@ const OPENCODE_GO_OPENAI_BASE: &str = "https://opencode.ai/inference/go/openai/v
 /// models.dev's `…/anthropic/v1` value is **not** used verbatim — the adapter's own convention
 /// would double the `/v1`. Verified by reading that file; not by a live request.
 const OPENCODE_GO_ANTHROPIC_BASE: &str = "https://opencode.ai/inference/go/anthropic";
+/// The URL `opencode-go` lists its models on (ADR 0026 D0): the chat base serves no `/models`
+///; the zen endpoint answers the OpenAI list shape
+/// (`{"object":"list","data":[{"id":…}]}`, lead 2026-10-20).
+const OPENCODE_GO_MODELS_URL: &str = "https://opencode.ai/zen/go/v1/models";
 const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 
@@ -1051,6 +1059,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         // D3: the chat base serves no `/models`, so `/login`
         // verifies against the usage endpoint with the footer's own Bearer auth.
         verification_url: Some(crate::opencode_go::USAGE_URL),
+        models_url: Some(OPENCODE_GO_MODELS_URL),
         models: OPENCODE_GO_MODELS,
         headers: opencode_go_headers,
         // ADR 0027: the endpoint source `opencode_go.rs` used to be, now
@@ -1074,6 +1083,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         thinking: &[],
         default_protocol: Protocol::Responses,
         verification_url: None,
+        models_url: None,
         models: CODEX_MODELS,
         headers: chatgpt_headers,
         // ADR 0026 + ADR 0027: `/wham/usage`,
@@ -1092,6 +1102,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         thinking: ANTHROPIC_THINKING,
         default_protocol: Protocol::Anthropic,
         verification_url: None,
+        models_url: None,
         models: ANTHROPIC_MODELS,
         headers: no_headers,
         // ADR 0027 slice ④: the `anthropic-ratelimit-*` response
@@ -1108,6 +1119,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         thinking: &[],
         default_protocol: Protocol::OpenAiCompatible,
         verification_url: None,
+        models_url: None,
         models: OPENAI_MODELS,
         headers: no_headers,
         // ADR 0027 slice ④: the `x-ratelimit-*` response headers,
@@ -1126,6 +1138,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         thinking: &[],
         default_protocol: Protocol::OpenAiCompatible,
         verification_url: None,
+        models_url: None,
         // The user supplies the model id; there is no built-in list.
         models: &[],
         headers: no_headers,
