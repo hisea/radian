@@ -59,6 +59,7 @@
 
 - 桌面管理器那一类不做：和"worker 只读、人只观察"相反。
 - 任务运行器那一类有现成的：若 backlog 用 GitHub Issues，sortie 或一个 Symphony 实现加一个 `radian exec --output jsonl` 的 stdio 适配器，今天就能跑，代价是长驻、需要 tracker、没有固定 sha 的独立 gate。外部审核建议与 Sortie 做双路径实验；决定不做整轮 A/B，只读其 adapter 接口做参照。
+- 第二轮审核（同日）对竞品没有新纠正；它建议参考 Sortie 的 adapter、Stage Chains 与 CI feedback 实现，避免重复踩已解决的问题，owner 接受。
 - 建议：自己做小的 orca，**抄 Symphony 的状态机和超时/退避语义**（其 SSH 附录只要求区分主机失联与任务失败，没有定义远端进程身份与 push，这两处要自己做），保留差异点：文件单写者、不长驻、固定 sha 的独立 gate 与 verdict 失效规则。先做仓库外原型。
 
 ## 来源
