@@ -6,10 +6,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use agent_core::{HookContext, HookError, Hooks, InputSource, ToolCall, ToolDecision};
+use serde_json::Value;
 
 use crate::approval::{ApprovalOutcome, ApprovalRequest, Approver};
 use crate::audit::{Approver as AuditApprover, AuditSink, PermissionResolved, ResolvedDecision};
 use crate::profile::{ApprovalPolicy, Profile};
+use crate::readonly::{self, ReadOnlyHit};
 use crate::rule::{Action, Resource, evaluate, resolve, resource_of};
 
 /// The grant key: one tool plus one exact resource. Paths are keyed by their resolved form,
@@ -205,7 +207,9 @@ impl PermissionHooks {
         };
         let action = self.apply_policy(evaluated.action);
 
-        if action == Action::Deny {
+        // A rule denial wins before everything else (deny outranks ask and allow
+        // under every approval policy).
+        if evaluated.action == Action::Deny {
             let reason = evaluated
                 .reason
                 .clone()
@@ -219,7 +223,47 @@ impl PermissionHooks {
             );
             return Ok(ToolDecision::Deny { reason });
         }
-        if action == Action::Allow {
+        // The built-in read-only shell table: allow rules placed after the user's
+        // rules and before the tier's blanket shell rule. A hit bypasses the
+        // approval policy (`always`/`never`/`auto` never turn it into a question:
+        // read-only commands are not worth reviewing, and a headless turn must
+        // not lose them) and is audited as a policy decision. A named `ask` rule
+        // is an explicit user rule and outranks the table; the tier's blanket
+        // shell `ask` and the no-match default carry no reason, so they still
+        // fall through to it.
+        if evaluated.action != Action::Ask || evaluated.reason.is_none() {
+            if let Some(hit) = readonly::match_command(&workspace, call) {
+                match hit {
+                    ReadOnlyHit::Allow => {
+                        self.record(
+                            &request_id,
+                            &call_id,
+                            ResolvedDecision::Allow,
+                            AuditApprover::Policy,
+                            Some("read-only shell command (built-in table)".into()),
+                        );
+                        return Ok(ToolDecision::Allow);
+                    }
+                    ReadOnlyHit::Rewrite { command } => {
+                        let mut arguments = call.arguments.clone();
+                        arguments["command"] = Value::String(command);
+                        self.record(
+                            &request_id,
+                            &call_id,
+                            ResolvedDecision::Rewrite,
+                            AuditApprover::Policy,
+                            Some(
+                                "read-only git command (built-in table): added --no-ext-diff --no-textconv"
+                                    .into(),
+                            ),
+                        );
+                        return Ok(ToolDecision::Rewrite { arguments });
+                    }
+                }
+            }
+        }
+
+        if action == Action::Deny {
             self.record(
                 &request_id,
                 &call_id,

@@ -12,8 +12,8 @@ pub enum Approver {
     Policy,
 }
 
-/// The decision in the §5.9 shape. `rewrite` exists for a hook that rewrites arguments; this
-/// layer never produces it.
+/// The decision in the §5.9 shape. `rewrite` is produced by the built-in read-only
+/// git table (`git diff`/`log`/`show` gain `--no-ext-diff --no-textconv`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedDecision {
