@@ -48,7 +48,6 @@
 | `workspace-git-exec-entries-file-tools.md` | idea（bug 待验证） | 0038、0039 | `write`/`patch` 不经沙箱，`workspace` 档能写 `.git/hooks/`，绕过 0038 的只读清单；修法倾向规则层 deny + 与沙箱共用一张清单 |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
-| `post-edit-diagnostics.md` | idea | 新 ADR | 编辑后诊断：tree-sitter 语法层 + 配置的检查命令；先数 dogfood 里 patch→check 序列 |
 | `subagent-ask-forwarding.md` | idea | 0043、0010、0024 | 子会话仍要问的 ask 转回父会话；缺 durable `PermissionRequested` 与 control 收审批；依赖沙箱内放行 |
 | `subagent-explore-model.md` | idea | 0043、0026 | 用户级配置给 `explore` 更便宜的模型（0043 §1 已允许，未实现） |
 | `verify-test-binaries.md` | idea | 新 ADR | 合并集成测试二进制压 Verify 时间；`set_var` 与全局状态先处理；release 调优不做 |
