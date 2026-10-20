@@ -24,6 +24,22 @@ use std::process::Command;
 /// The `git config` keys under `filter.<name>` that name a command.
 const FILTER_KEYS: [&str; 3] = ["clean", "smudge", "process"];
 
+/// The `git config` keys under `diff.<name>` that name a command: an external diff driver
+/// (`command`) and a text converter (`textconv`).
+const DIFF_KEYS: [&str; 2] = ["command", "textconv"];
+
+/// What neutralises an external diff without breaking the git call (verified on git
+/// 2.53.0): an empty override errors out (`cannot run : No such file...`, exit 128),
+/// while `true` runs nothing, exits 0, and leaves `--stat`/`--name-only` working. A plain
+/// `git diff` shows no patch for the affected paths, but the model's own `--no-ext-diff`
+/// still restores the internal diff.
+const DISABLE_EXTERNAL_DIFF: &str = "true";
+
+/// What neutralises a text converter without breaking the git call (verified on git
+/// 2.53.0): an empty override errors out (exit 128), while `cat` passes the content
+/// through, exits 0, and the text diff is preserved.
+const NEUTRAL_TEXTCONV: &str = "cat";
+
 fn static_pairs() -> Vec<(String, String)> {
     vec![
         ("core.fsmonitor".into(), "false".into()),
@@ -47,17 +63,53 @@ fn filter_pairs(names: Vec<String>) -> Vec<(String, String)> {
     pairs
 }
 
-/// Every `(key, value)` pair the hardening sets: the static three plus the emptied filter
-/// commands for each driver name in the effective config. [`host_git_overrides`] (host `-c`
+/// Every `(key, value)` pair the hardening sets: the static three, the emptied filter
+/// commands for each driver name in the effective config, the neutralised external diff
+/// (`diff.external`, only when the effective config sets it) and the neutralised diff
+/// driver commands (`diff.<name>.command` -> `true`, `diff.<name>.textconv` -> `cat`, only
+/// for the keys the effective config actually sets). [`host_git_overrides`] (host `-c`
 /// args) and [`hardening_env`] (shell `GIT_CONFIG_*` environment) both build from here:
 /// one list, two spellings.
 fn config_pairs(dir: &Path) -> Result<Vec<(String, String)>, String> {
     let mut pairs = static_pairs();
     pairs.extend(filter_pairs(filter_driver_names(dir)?));
+    pairs.extend(diff_pairs(dir)?);
+    Ok(pairs)
+}
+/// The neutralised diff pairs: `diff.external` (only when the effective config sets it —
+/// a static override would suppress every patch diff, even in repos without one) and, for
+/// each diff driver name in the effective config, the command keys it actually sets
+/// (`command` -> `true`, `textconv` -> `cat`). Keys the config does not set are left alone:
+/// adding a `command` to a driver that only sets `textconv` would hijack its diff.
+fn diff_pairs(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut pairs = Vec::new();
+    if config_has_value(dir, "diff.external")? {
+        pairs.push(("diff.external".into(), DISABLE_EXTERNAL_DIFF.into()));
+    }
+    for (name, key) in section_key_entries(dir, "diff", &DIFF_KEYS)? {
+        let value = if key == "textconv" {
+            NEUTRAL_TEXTCONV
+        } else {
+            DISABLE_EXTERNAL_DIFF
+        };
+        pairs.push((format!("diff.{name}.{key}"), value.into()));
+    }
     Ok(pairs)
 }
 /// The `-c` overrides every host git call carries ([`config_pairs`] spelled as `-c` args).
 /// Build every host `git` invocation from [`host_git_command`], not from here.
+///
+/// - `core.fsmonitor=false`, `core.hooksPath=/dev/null`: a repo-config command never runs on
+///   `git add`/`commit`/`checkout` (ADR 0039);
+/// - `core.attributesFile=/dev/null`: the global attributes file cannot name a driver either;
+/// - every `filter.<name>.{clean,smudge,process}` emptied, with `filter.<name>.required=false`,
+///   for each name in the effective config — so an attributes file can still *name* a driver but
+///   there is no command left to run;
+/// - `diff.external=true`, but only when the effective config sets it (verified on git 2.53.0:
+///   an empty override errors out instead of disabling);
+/// - every configured `diff.<name>.command` neutralised to `true` and every configured
+///   `diff.<name>.textconv` neutralised to `cat`, so an attributes file can still *name* a
+///   driver but no repo-config command runs.
 ///
 /// - `core.fsmonitor=false`, `core.hooksPath=/dev/null`: a repo-config command never runs on
 ///   `git add`/`commit`/`checkout` (ADR 0039);
@@ -84,13 +136,10 @@ pub fn host_git_overrides(dir: &Path) -> Result<Vec<String>, String> {
 /// decision 5), so repository configuration cannot run commands through a shell git. In a
 /// trusted project nothing is set, so the user's own hooks still run.
 ///
-/// A filter query that fails contributes no filter pairs (the git that would run them failed
-/// the same way); the static three are always present.
+/// A config query that fails contributes no dynamic pairs (the git that would run them
+/// failed the same way); the static three are always present.
 pub fn hardening_env(dir: &Path) -> Vec<(String, String)> {
-    let mut pairs = static_pairs();
-    if let Ok(names) = filter_driver_names(dir) {
-        pairs.extend(filter_pairs(names));
-    }
+    let pairs = config_pairs(dir).unwrap_or_else(|_| static_pairs());
     let mut env = vec![("GIT_CONFIG_COUNT".to_owned(), pairs.len().to_string())];
     for (n, (key, value)) in pairs.into_iter().enumerate() {
         env.push((format!("GIT_CONFIG_KEY_{n}"), key));
@@ -129,14 +178,51 @@ pub fn host_git_attributes_command(dir: &Path) -> Result<Command, String> {
 /// (repo, global, system) reachable from `dir`. Exit 1 (no match) is an empty list; any other
 /// failure is an error, so a broken config read can never leave a filter unguarded.
 fn filter_driver_names(dir: &Path) -> Result<Vec<String>, String> {
+    let mut names: Vec<String> = Vec::new();
+    for (name, _) in section_key_entries(dir, "filter", &FILTER_KEYS)? {
+        if !names.iter().any(|known| known == &name) {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+/// Whether `key` is set in the effective config reachable from `dir`: exit 0 means set
+/// (the value is ignored), exit 1 means unset, anything else is an error.
+fn config_has_value(dir: &Path, key: &str) -> Result<bool, String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args([
-            "config",
-            "--get-regexp",
-            r"^filter\..*\.(clean|smudge|process)$",
-        ])
+        .args(["config", "--get", key])
+        .output()
+        .map_err(|error| format!("could not run git: {error}"))?;
+    if output.status.success() {
+        Ok(true)
+    } else if output.status.code() == Some(1) {
+        Ok(false)
+    } else {
+        Err(format!(
+            "git config failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+/// The distinct `(<name>, <key>)` entries in `<section>.<name>.{keys...}` in the effective
+/// config (repo, global, system) reachable from `dir`: the one enumeration behind both the
+/// filter names and the diff driver keys, so the key list lives in exactly one place per
+/// section ([`FILTER_KEYS`], [`DIFF_KEYS`]). Exit 1 (no match) is an empty list; any other
+/// failure is an error, so a broken config read can never leave a driver unguarded.
+fn section_key_entries(
+    dir: &Path,
+    section: &str,
+    keys: &[&str],
+) -> Result<Vec<(String, String)>, String> {
+    let pattern = format!(r"^{section}\..*\.({})$", keys.join("|"));
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["config", "--get-regexp", &pattern])
         .output()
         .map_err(|error| format!("could not run git: {error}"))?;
     if !output.status.success() && output.status.code() != Some(1) {
@@ -145,20 +231,20 @@ fn filter_driver_names(dir: &Path) -> Result<Vec<String>, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let mut names: Vec<String> = Vec::new();
+    let mut entries: Vec<(String, String)> = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        // Each line is "filter.<name>.<key> <value>"; the first whitespace-free token is the key.
+        // Each line is "<section>.<name>.<key> <value>"; the first whitespace-free token is the key.
         let key = line.split_whitespace().next().unwrap_or("");
-        if let Some(rest) = key.strip_prefix("filter.")
+        if let Some(rest) = key.strip_prefix(&format!("{section}."))
             && let Some((name, kind)) = rest.rsplit_once('.')
-            && matches!(kind, "clean" | "smudge" | "process")
+            && keys.contains(&kind)
             && !name.is_empty()
-            && !names.iter().any(|known| known == name)
+            && !entries.iter().any(|known| known == &(name.to_owned(), kind.to_owned()))
         {
-            names.push(name.to_owned());
+            entries.push((name.to_owned(), kind.to_owned()));
         }
     }
-    Ok(names)
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -188,11 +274,13 @@ mod tests {
         dir
     }
 
-    /// The dangerous repo config is off, the global attributes file is hidden, and every
-    /// configured filter command is emptied (ADR 0039 decision 3).
+    /// The dangerous repo config is off, the global attributes file is hidden, every
+    /// configured filter command is emptied, and the diff commands are neutralised
+    /// (ADR 0039 decision 3).
     #[test]
     fn the_overrides_disable_the_dangerous_repo_config() {
         let dir = repo_with_a_filter("overrides");
+        configure_diff_commands(&dir);
         let overrides = host_git_overrides(&dir).expect("the overrides");
         for wanted in [
             "core.fsmonitor=false",
@@ -203,13 +291,50 @@ mod tests {
             "filter.evil.process=",
             "filter.evil.required=false",
             "filter.lfs.process=",
+            "diff.external=true",
+            "diff.tc.textconv=cat",
+            "diff.dc.command=true",
         ] {
             assert!(
                 overrides.iter().any(|arg| arg == wanted),
                 "missing {wanted}: {overrides:?}"
             );
         }
+        // A diff driver that only sets `textconv` gets no `command` override: adding one
+        // would hijack its diff.
+        assert!(
+            !overrides.iter().any(|arg| arg == "diff.tc.command=true"),
+            "unconfigured keys stay alone: {overrides:?}"
+        );
+        // Without any diff config there is no diff override at all: a static
+        // `diff.external` would suppress every patch diff.
+        let plain_dir = repo_with_a_filter("plain");
+        let plain = host_git_overrides(&plain_dir).expect("the overrides");
+        assert!(
+            !plain.iter().any(|arg| arg.starts_with("diff.")),
+            "no diff config, no diff override: {plain:?}"
+        );
+        let _ = std::fs::remove_dir_all(&plain_dir);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A repo with an external diff and two diff drivers configured: `textconv` becomes
+    /// `cat`, `command` becomes `true`, and nothing else is added.
+    fn configure_diff_commands(dir: &std::path::Path) {
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .current_dir(dir)
+                    .args(args)
+                    .status()
+                    .expect("git")
+                    .success(),
+                "git {args:?}"
+            );
+        };
+        run(&["config", "diff.external", "evil-external"]);
+        run(&["config", "diff.tc.textconv", "evil-textconv"]);
+        run(&["config", "diff.dc.command", "evil-command"]);
     }
 
     /// The attribute read must see the true attributes: it keeps `core.attributesFile` (only
