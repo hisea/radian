@@ -35,7 +35,7 @@
 | `overflow-three-stage.md` | decided | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `first-launch.md` | decided | 0008 | 首次启动建默认配置、无模型时进 `/model` 选择器并写回 |
 | `project-skills.md` | decided | 0025、0031 | 接上项目级 skill，并支持 `$ARGUMENTS` |
-| `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 工具报告 P6/P5 的小修 + 前台 shell 默认输出上限下调 |
+| `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 工具小修剩余：前台 shell 默认输出上限下调 + patch 缩进容忍（待决） |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `tool-definitions-trim.md` | idea | 0043、0037、0021 | 工具定义瘦身：合并低频工具、去重 schema 文字 |
 | `post-edit-diagnostics.md` | idea | 新 ADR | 编辑后诊断：tree-sitter 语法层 + 配置的检查命令；先数 dogfood 里 patch→check 序列 |
