@@ -109,6 +109,7 @@ impl Resource {
 pub fn canonical_tool_name(name: &str) -> &str {
     match name {
         "git_status" => "git_diff",
+        "list" => "read",
         "job_output" | "job_list" | "job_kill" | "shell_output" => "job",
         other => other,
     }

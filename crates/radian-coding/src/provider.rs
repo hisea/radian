@@ -23,9 +23,9 @@ pub struct Limits {
     pub max_write_bytes: usize,
     /// Largest file `patch` will edit in memory.
     pub max_patch_bytes: usize,
-    /// Hard cap for `list`.
+    /// Hard cap for a directory `read` (the old `list`).
     pub max_list_entries: usize,
-    /// `list`'s default entry cap.
+    /// A directory `read`'s default entry cap.
     pub default_list_entries: usize,
     /// Hard cap for one `glob` result set.
     pub max_glob_results: usize,
@@ -330,7 +330,7 @@ fn specs(shell: Option<(SandboxMode, bool)>, foreground: bool) -> Vec<ToolSpec> 
         read::spec(),
         write::spec(),
         patch::spec(),
-        list::spec(),
+        list::alias_spec(),
         glob::spec(),
         grep::spec(),
         git::diff_spec(),
@@ -368,7 +368,7 @@ impl ToolSession for CodingSession {
             "read" => read::run(&self.root, &self.limits, &call.arguments).await,
             "write" => write::run(&self.root, &self.limits, &call.arguments).await,
             "patch" => patch::run(&self.root, &self.limits, &call.arguments).await,
-            "list" => list::run(&self.root, &self.limits, &call.arguments).await,
+            "list" => list::run_alias(&self.root, &self.limits, &call.arguments).await,
             "glob" => glob::run(&self.root, &self.limits, &call.arguments).await,
             "grep" => grep::run(&self.root, &self.limits, &call.arguments).await,
             "git_status" => git::status(&self.root, &self.limits, &call.arguments).await,

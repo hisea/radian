@@ -47,9 +47,10 @@ async fn agent_core_accepts_the_built_in_tool_specs() {
             "glob",
             "grep",
             "git_diff",
-            // The one-version alias for the removed `git_status` (ADR 0043 decision 3). It is
-            // registered so a call to the old name passes Core's preflight, and the host strips
-            // it from every model request, so the model never sees it.
+            // The one-version aliases (ADR 0043 decision 3): `list` for `read` on a
+            // directory, `git_status` for `git_diff { stat: true }`. Both are registered
+            // so a call to an old name passes Core's preflight, and the host strips
+            // them from every model request, so the model never sees them.
             "git_status"
         ]
     );
@@ -121,4 +122,47 @@ async fn agent_core_accepts_the_ask_user_spec() {
     let agent = Arc::new(Agent::new(NeverModel, ask));
     let mut chat = agent.open_session().await.unwrap();
     chat.close().await.unwrap();
+}
+
+/// ADR 0043 decision 1: `read` on a directory lists it. The description says so in one
+/// sentence (decision 5's budget: the serialized spec stays within 150 bytes of the
+/// file-only definition it replaced).
+#[tokio::test]
+async fn the_read_spec_names_directory_listing() {
+    let dir = TempDir::new("read-dir-spec");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let coding = tools(&root);
+    let session = coding.open_session().await.unwrap();
+    let specs: std::collections::HashMap<&str, &agent_core::ToolSpec> = session
+        .tool_specs()
+        .iter()
+        .map(|spec| (spec.name.as_str(), spec))
+        .collect();
+    let read = specs["read"];
+    assert!(
+        read.description.contains("A directory path lists it"),
+        "{}",
+        read.description
+    );
+    // Decision 5's size budget: the file-only `read` serialized to 1601 bytes (measured
+    // 2026-10-20); the directory sentence must fit in 150 bytes on top of that.
+    let bytes = serde_json::to_vec(read).unwrap().len();
+    assert!(
+        bytes <= 1601 + 150,
+        "the read definition grew to {bytes} bytes, past the 1751 budget"
+    );
+    // The `list` alias keeps its old schema (so a stale call still parses) and its
+    // description names the rename.
+    let list = specs["list"];
+    assert!(
+        list.description.contains("Deprecated alias for `read`"),
+        "{}",
+        list.description
+    );
+    assert!(
+        list.input_schema["properties"].get("max_entries").is_some(),
+        "the alias keeps the old arguments: {}",
+        list.input_schema
+    );
 }

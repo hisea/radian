@@ -9,10 +9,9 @@ contract; this file is the practical summary.
 
 | Tool | Concurrency | What it does |
 |---|---|---|
-| `read` | `Shared` | Read a UTF-8 file, bounded by `max_bytes` (default 64 KiB, hard cap 1 MiB). Every returned line is prefixed with its file line number, `N: ` (that prefix is not file content). `offset` (1-based first line) and `limit` (lines) read a large file in sections. Reports `start_line`/`end_line`/`line_truncated` and, when not finished, `next_offset`; a missing file names up to three close names in its directory; refuses non-UTF-8. A cargo-registry or toolchain source file may also be named as an absolute or `~` path (read-only; see below). |
+| `read` | `Shared` | Read a UTF-8 file, bounded by `max_bytes` (default 64 KiB, hard cap 1 MiB). Every returned line is prefixed with its file line number, `N: ` (that prefix is not file content). `offset` (1-based first line) and `limit` (lines) read a large file in sections. Reports `start_line`/`end_line`/`line_truncated` and, when not finished, `next_offset`; a missing file names up to three close names in its directory; refuses non-UTF-8. A cargo-registry or toolchain source file may also be named as an absolute or `~` path (read-only; see below). A directory path lists it instead: sorted entries with kind and size, symlinks shown but not followed; `limit` then caps entries (default 500, hard cap 5000), `offset`/`max_bytes` are ignored and said once. |
 | `write` | `Exclusive` | Create or overwrite a file with exact content (no newline added). Parent must exist. Never follows a symlink at the destination. |
 | `patch` | `Exclusive` | Replace `old` with `new`, or apply an `edits` array atomically. A match is located by layer (exact, then typographic normalisation, then line-by-line ignoring trailing whitespace) and must be unique unless `replace_all` is set. With `edits`, every edit is located in the original file, ranges must be disjoint, and if any edit fails nothing is written. A CRLF file is matched on an LF view and stays CRLF. Zero matches refuse the edit and report the closest region with line numbers. |
-| `list` | `Shared` | List a directory, sorted, with kind and size; symlinks shown but not followed; capped by `max_entries`. A cargo-registry or toolchain source directory may also be named absolutely or with `~` (read-only). |
 | `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore` respected, `.git` skipped, symlinks never followed; capped by `max_results`. A read-only registry/toolchain base works too, and its results are absolute paths. |
 | `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore` respected, binary files skipped; capped per file, in total matches, and in total output bytes (32 KiB, context lines dropped before matches, each cut named in the text). `output: "files"` lists one line per matching file with its count, `output: "count"` prints only the totals; the default `content` is unchanged. A read-only registry/toolchain base works too, and its results are absolute paths. |
 | `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. `stat: true` returns the working tree status (`git status --porcelain=v1 --branch --untracked-files=all`) followed by the `--stat` summary instead of the diff (ADR 0043 decision 3). |
@@ -26,9 +25,11 @@ racing on one file. The read-only tools are `Shared` so a batch of reads/diffs c
 `ask_user` is `Exclusive` (the default) so a session has at most one pending question: a batch
 with two calls asks them one after the other instead of opening two modals.
 
-`git_status` is a **one-version alias** for `git_diff { stat: true }` (ADR 0043 decision 3): it
-is registered so a call to the old name still runs, it is never advertised to the model, and its
-result starts with one line naming the rename. The permission layer judges it as `git_diff`.
+`git_status` is a **one-version alias** for `git_diff { stat: true }` (ADR 0043 decision 3), and
+`list` is a **one-version alias** for `read` on a directory: they
+are registered so a call to the old name still runs, they are never advertised to the model, and their
+results start with one line naming the rename. The permission layer judges them as `git_diff`
+and `read`.
 
 `read` addresses **lines**: `offset` is the 1-based first line, `limit` caps the line count,
 and `max_bytes` still bounds the result. A byte cut that would land mid-line drops the whole
@@ -90,7 +91,7 @@ another (the reason they exist: `shell` is `Exclusive`, and the safe tier has no
 Both walk from a base (`path`, default the workspace root) opened through the workspace root's
 directory fd (ADR 0039 decision 2: every component `openat(O_NOFOLLOW | O_DIRECTORY)`), and the
 walk itself descends by fd and hands matched files back as open fds; nothing is re-opened by
-path. The per-entry rules, which `list`/`read` do not have because they look at one path:
+path. The per-entry rules, which a directory `read` does not have because it looks at one path:
 
 - `.gitignore` (and `.ignore`) files **inside** the tree are respected, with or without a git
   repository; no ignore file **above** the base and no global gitignore is consulted, so the
@@ -117,7 +118,7 @@ and total-byte caps apply in every mode, and the default `content` output is unc
 
 ## Read-only roots outside the workspace (ADR 0039)
 
-`read`, `grep`, `glob` and `list` also read two roots outside the workspace, **read-only**:
+`read`, `grep` and `glob` also read two roots outside the workspace, **read-only**:
 
 - the cargo registry sources, `$CARGO_HOME/registry/src` (default `~/.cargo/registry/src`);
 - every installed toolchain's `$RUSTUP_HOME/toolchains/*/lib/rustlib/src` (default `~/.rustup`).
@@ -146,7 +147,7 @@ developer's real `~/.cargo`/`~/.rustup`; `tests/common`'s `tools()` builds with
 | `max_read_bytes` / `default_read_bytes` | 1 MiB / 64 KiB | A tool result goes straight into the model context and the session JSONL; a whole large file must not. |
 | `max_write_bytes` | 8 MiB | Bound a single write so a runaway model cannot fill the disk in one call. |
 | `max_patch_bytes` | 4 MiB | Patch holds the file in memory twice; the cap keeps that bounded. |
-| `max_list_entries` / `default_list_entries` | 5000 / 500 | Bound the listing result. |
+| `max_list_entries` / `default_list_entries` | 5000 / 500 | Bound a directory `read` (entry cap). |
 | `max_glob_results` / `default_glob_results` | 5000 / 500 | Bound one `glob` result set. |
 | `max_grep_matches` / `default_grep_matches` | 5000 / 200 | Bound `grep`'s total matches. |
 | `max_grep_output_bytes` | 32 KiB | Bound `grep`'s total output bytes (match and context lines plus notes); past it context lines are dropped before matches, then whole match lines, ending with one note naming the limit, what was dropped, and how to narrow the search. |
@@ -164,7 +165,7 @@ developer's real `~/.cargo`/`~/.rustup`; `tests/common`'s `tools()` builds with
 Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 
 - absolute paths and `..` are refused before any filesystem access (`path_outside_workspace`);
-- `read`/`grep`/`glob`/`list` additionally read two **read-only** roots outside the workspace
+- `read`/`grep`/`glob` additionally read two **read-only** roots outside the workspace
   (ADR 0039): `$CARGO_HOME/registry/src` and every
   `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`. An absolute or `~` path under one is opened from
   that root's fd with every component `O_NOFOLLOW`; a path under none of them is refused with a
@@ -186,7 +187,7 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
   target path.**
 - a symlinked workspace root works (the root is canonicalized once, then held as an fd);
 - `write`/`patch` check the open fd to be a regular file with one hard link **before**
-  truncating (`hard_link_refused`); `list`/`glob`/`grep` classify entries with
+  truncating (`hard_link_refused`); a directory `read`/`glob`/`grep` classify entries with
   `fstatat(AT_SYMLINK_NOFOLLOW)` and descend by fd, so a walk never follows a link out.
 
 **Not** enforced — stated, not hidden:

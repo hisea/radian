@@ -1,4 +1,4 @@
-//! The workspace boundary, read/list half: absolute paths, `..`, symlink escapes,
+//! The workspace boundary, read half: absolute paths, `..`, symlink escapes,
 //! symlinked parents, a symlinked workspace root, and the stated hard-link limit.
 
 mod common;
@@ -20,7 +20,7 @@ async fn an_absolute_read_path_is_refused() {
         .unwrap_err();
     assert_outside(&failure, "/etc/passwd");
 
-    let failure = call(&tools, "list", json!({"path": "/etc"}))
+    let failure = call(&tools, "read", json!({"path": "/etc"}))
         .await
         .unwrap_err();
     assert_outside(&failure, "/etc");
@@ -45,8 +45,8 @@ async fn parent_dir_escapes_are_refused() {
             .unwrap_err();
         assert_outside(&failure, path);
     }
-    // `list a/../../..` is the same escape through `list`, which does exist.
-    let failure = call(&tools, "list", json!({"path": "a/../../.."}))
+    // `read a/../../..` is the same escape through a directory read.
+    let failure = call(&tools, "read", json!({"path": "a/../../.."}))
         .await
         .unwrap_err();
     assert_outside(&failure, "a/../../..");
@@ -69,9 +69,9 @@ async fn a_symlink_pointing_outside_is_refused_for_read() {
         .unwrap_err();
     assert_outside(&failure, "leak.txt");
 
-    // A link to the outside directory, listed: the entry is shown but never followed.
+    // A link to the outside directory, listed by `read`: the entry is shown but never followed.
     std::os::unix::fs::symlink(&outside, root.join("leak_dir")).unwrap();
-    let listed = call(&tools, "list", json!({})).await.unwrap();
+    let listed = call(&tools, "read", json!({"path": "."})).await.unwrap();
     let body = text(&listed);
     assert!(body.contains("symlink"), "{body}");
     assert!(!body.contains("SENTINEL-CONTENT"), "{body}");
@@ -93,7 +93,7 @@ async fn a_symlinked_parent_directory_escape_is_refused() {
         .unwrap_err();
     assert_outside(&failure, "link_dir/sentinel.txt");
 
-    let failure = call(&tools, "list", json!({"path": "link_dir"}))
+    let failure = call(&tools, "read", json!({"path": "link_dir"}))
         .await
         .unwrap_err();
     assert_outside(&failure, "link_dir");
@@ -252,15 +252,15 @@ async fn read_refuses_a_budget_above_the_hard_cap() {
 }
 
 #[tokio::test]
-async fn list_reports_entries_sorted_with_kinds() {
-    let dir = TempDir::new("list");
+async fn read_lists_entries_sorted_with_kinds() {
+    let dir = TempDir::new("read-entries");
     let root = dir.file("ws");
     std::fs::create_dir_all(root.join("sub")).unwrap();
     std::fs::write(root.join("b.txt"), "bb").unwrap();
     std::fs::write(root.join("a.txt"), "a").unwrap();
     let tools = tools(&root);
 
-    let output = call(&tools, "list", json!({})).await.unwrap();
+    let output = call(&tools, "read", json!({"path": "."})).await.unwrap();
     let body = text(&output);
     let names: Vec<&str> = body
         .lines()
@@ -279,18 +279,18 @@ async fn list_reports_entries_sorted_with_kinds() {
     assert_eq!(info["truncated"], false);
 }
 
-/// `list` omits the workspace-local worktree root (one full checkout per worktree; ADR 0043
-/// O7).
+/// `read` on a directory omits the workspace-local worktree root (one full checkout per
+/// worktree; ADR 0043 O7).
 #[tokio::test]
-async fn list_omits_the_radian_worktrees_directory() {
-    let dir = TempDir::new("list-worktrees");
+async fn read_omits_the_radian_worktrees_directory() {
+    let dir = TempDir::new("read-worktrees");
     let root = dir.file("ws");
     std::fs::create_dir_all(root.join(".radian-worktrees/t1")).unwrap();
     std::fs::write(root.join(".radian-worktrees/t1/f.txt"), "x").unwrap();
     std::fs::write(root.join("kept.txt"), "k").unwrap();
     let tools = tools(&root);
 
-    let output = call(&tools, "list", json!({})).await.unwrap();
+    let output = call(&tools, "read", json!({"path": "."})).await.unwrap();
     let body = text(&output);
     let names: Vec<&str> = body
         .lines()
@@ -300,8 +300,8 @@ async fn list_omits_the_radian_worktrees_directory() {
 }
 
 #[tokio::test]
-async fn list_truncates_at_max_entries() {
-    let dir = TempDir::new("list-cap");
+async fn read_truncates_at_limit() {
+    let dir = TempDir::new("read-cap");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
     for i in 0..10 {
@@ -309,14 +309,19 @@ async fn list_truncates_at_max_entries() {
     }
     let tools = tools(&root);
 
-    let output = call(&tools, "list", json!({"max_entries": 3}))
+    let output = call(&tools, "read", json!({"path": ".", "limit": 3}))
         .await
         .unwrap();
     let info = structured(&output);
     assert_eq!(info["entries"], 3);
     assert_eq!(info["total_entries"], 10);
     assert_eq!(info["truncated"], true);
-    assert_eq!(text(&output).lines().count(), 3);
+    let body = text(&output);
+    assert_eq!(body.lines().count(), 4, "{body}");
+    assert!(
+        body.ends_with("[truncated: showing 3 of 10 entries; narrow it with `glob` or `grep`]\n"),
+        "the cut is said in the body: {body}"
+    );
 }
 
 /// The rule is "workspace-relative paths only", so even an absolute path that happens to
