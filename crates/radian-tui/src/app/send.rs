@@ -38,6 +38,15 @@ impl App {
             self.restore_input(text);
             return refused;
         }
+        // ADR 0008 §2: a session that started with no model sends nothing until `/model`
+        // queues a route. The typed text stays in the input box.
+        if !self.session.has_model {
+            self.push_notice(
+                "no model is set; choose one with /model (and /login if the provider needs a key) — the message was not sent",
+            );
+            self.restore_input(text);
+            return UpdateResult::dirty();
+        }
         let kind = if self.turn() == TurnState::Running {
             PendingSend::Steer
         } else {

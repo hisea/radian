@@ -195,6 +195,9 @@ pub(super) fn ui_loop(
             usage_gate,
             chatgpt_usage_gate,
             herdr: herdr.take(),
+            // ADR 0008 §2: the first `/model` in a session that started without one
+            // writes back to the config file; later switches never do.
+            model_writeback_done: false,
         }),
     };
     // The first frame: the startup notices and the resumed history are already in the app, and

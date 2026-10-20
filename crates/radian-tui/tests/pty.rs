@@ -12871,3 +12871,159 @@ async fn pty_a_submit_after_the_driver_ended_says_the_session_is_dead() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(1));
 }
+
+/// ADR 0008 §2: a fresh install with no config and no `--model` still starts the TUI. The
+/// footer shows `no model`, the input box points at `/model`, a submit sends nothing (the
+/// text stays) and reaches no model; picking one with `/model` writes the two keys to the
+/// freshly created config file, and the next message reaches the mock model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_first_launch_starts_with_no_model_and_writes_back_the_first_pick() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("first-launch");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let sessions = dir.path().join("sessions");
+    let server = MockServer::start(vec![text_reply("FIRST-LAUNCH-OK")]).await;
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "first-launch",
+            "--offline-catalog",
+        ],
+        &[
+            ("RADIAN_HOME", home.to_str().unwrap()),
+            ("OPENAI_API_KEY", "sk-first-launch-test"),
+            ("RADIAN_BASE_URL", &server.base_url),
+        ],
+        30,
+        110,
+    );
+    // The TUI starts instead of exiting: the footer and the input box say no model is set.
+    assert!(
+        pty.wait_for_screen("no model", wait_positive()),
+        "the screen does not say no model is set:\n{}",
+        pty.screen()
+    );
+    // A submit sends nothing, keeps the text, and reaches no model.
+    pty.send(b"hello there\r");
+    assert!(
+        pty.wait_for_screen("no model is set", wait_positive()),
+        "the submit was silently swallowed:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("hello there"),
+        "the message must stay in the composer:\n{}",
+        pty.screen()
+    );
+    assert!(
+        server.requests().is_empty(),
+        "no request may reach the model: {:?}",
+        server.requests()
+    );
+    // Picking a model writes the two keys to the freshly created default config.
+    // The blocked submit kept the draft, so clear the line first (Ctrl-U).
+    pty.send(&[0x15]);
+    pty.send(b"/model openai-compatible/mock\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: openai-compatible/mock", wait_positive()),
+        "the switch was not queued:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("model saved to", wait_positive()),
+        "the write-back notice is missing:\n{}",
+        pty.screen()
+    );
+    let config_path = home.join("config/config.toml");
+    assert!(config_path.is_file(), "the default config was created");
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        text.contains("provider = \"openai-compatible\"") && text.contains("model = \"mock\""),
+        "the two keys were not written back:\n{text}"
+    );
+    // The next message reaches the mock model.
+    pty.send(b"hello again\r");
+    assert!(
+        pty.wait_for_screen("FIRST-LAUNCH-OK", wait_positive()),
+        "the reply did not arrive:\n{}",
+        pty.screen()
+    );
+    assert_eq!(server.requests().len(), 1, "one request after the pick");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// ADR 0008 §2 + ADR 0026 D5: a session that started with a configured model never writes
+/// the config on `/model` — the switch only advances the journal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_model_switch_never_writes_when_a_model_was_configured() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("model-no-write");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let sessions = dir.path().join("sessions");
+    let server = MockServer::start(vec![text_reply("SWITCH-OK")]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m1\"\nbase_url = \"{}\"\n",
+        server.base_url,
+    );
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "model-no-write",
+            "--offline-catalog",
+        ],
+        &[
+            ("RADIAN_HOME", home.to_str().unwrap()),
+            ("OPENAI_API_KEY", "sk-no-write-test"),
+            ("RADIAN_BASE_URL", &server.base_url),
+        ],
+        &config,
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    let config_path = home.join("config/config.toml");
+    let before = std::fs::read(&config_path).unwrap();
+    pty.send(b"/model openai-compatible/m2\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: openai-compatible/m2", wait_positive()),
+        "the switch was not queued:\n{}",
+        pty.screen()
+    );
+    // The write-back notice must never appear for a session that had a model.
+    assert!(
+        pty.screen_absent("model saved to"),
+        "a configured session must not write the config:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        std::fs::read(&config_path).unwrap(),
+        before,
+        "not one byte of the config may change"
+    );
+    pty.send(b"hi\r");
+    assert!(
+        pty.wait_for_screen("SWITCH-OK", wait_positive()),
+        "the reply did not arrive:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        std::fs::read(&config_path).unwrap(),
+        before,
+        "a later turn must not write either"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}

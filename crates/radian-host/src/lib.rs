@@ -94,7 +94,9 @@ pub use command_footer::{
     COMMAND_TIMEOUT, CommandContributor, CommandSpec, FooterContext, FooterSnapshot,
     MAX_OUTPUT_BYTES, command_specs, parse_command as parse_footer_command,
 };
+pub use config::default::{DEFAULT_CONFIG_TEMPLATE, ensure_default_config};
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
+pub use config::model_write::{ModelWriteError, write_model_route};
 pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{
     CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ControlConfig, ModelConfig,

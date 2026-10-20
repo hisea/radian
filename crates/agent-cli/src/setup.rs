@@ -84,6 +84,14 @@ pub(crate) async fn setup(
     // ADR 0008: the config file provides defaults; every CLI flag wins. A refused file (a
     // plaintext secret, an unknown permission value, an older schema_version) fails startup
     // before any session file exists.
+    // ADR 0008 §2: a fresh install has no config file; create the commented default at the
+    // default location (never an explicit `--config`/`RADIAN_CONFIG` path). A failure warns
+    // once and the run continues.
+    match radian_host::ensure_default_config(cli.config.as_deref()) {
+        Ok(Some(path)) => eprintln!("created a default config at {}", path.display()),
+        Ok(None) => {}
+        Err(warning) => eprintln!("[config] {warning}; continuing without creating it"),
+    }
     let config = radian_host::load_config(cli.config.as_deref())
         .map_err(|error| SetupError(format!("config: {error}")))?;
     if config.read_only {
@@ -110,8 +118,16 @@ pub(crate) async fn setup(
             .map(|route| route.model.clone())
             .or_else(|| config.model.model.clone())
             .ok_or_else(|| {
-                SetupError("no model: pass --model, or set model.model in the config file".into())
-            })?,
+                // ADR 0008 §2: `radian exec` with no model still fails non-zero, but the
+                // message names the config file (created above or existing) and the
+                // `--provider <p> --model <m>` form.
+                let path = radian_host::resolved_config_path(cli.config.as_deref())
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<no config location>".to_owned());
+                SetupError(format!(
+                    "no model: pass --provider <p> --model <m>, or set model.provider/model in {path}"
+                ))
+            })?
     };
     // `--model` takes a bare model name; the form is `--provider <p> --model
     // <m>`. A value that looks like a known provider's `<provider>/<model>` with no `--provider`

@@ -4856,6 +4856,8 @@ async fn session_commands_do_not_need_a_model() {
 /// A conversation still requires a model: with no `--model` and no `model.model` in the
 /// config file, `-p` and interactive mode are usage errors (exit 2, before any session is
 /// created). The decision moved from clap to `setup` so the config file can supply it.
+/// ADR 0008 §2: the message names the config file path and the `--provider <p> --model <m>`
+/// form.
 #[tokio::test]
 async fn a_conversation_still_requires_a_model() {
     // The setup check runs **before** the API-key lookup, and its wording is unique: asserting
@@ -4864,15 +4866,101 @@ async fn a_conversation_still_requires_a_model() {
     let (code, _, stderr) = feed_and_wait(spawn_radian(&["-p", "hi"], &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
     assert!(
-        stderr.contains("no model: pass --model, or set model.model in the config file"),
+        stderr.contains("no model: pass --provider <p> --model <m>"),
         "{stderr}"
     );
 
     let (code, _, stderr) = feed_and_wait(spawn_radian(&[], &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
     assert!(
-        stderr.contains("no model: pass --model, or set model.model in the config file"),
+        stderr.contains("no model: pass --provider <p> --model <m>"),
         "{stderr}"
+    );
+}
+
+/// ADR 0008 §2: a fresh `RADIAN_HOME` gets a commented default config on startup; the
+/// no-model failure names its path. A second run leaves it untouched (bytes and mode), and
+/// an explicit `--config` path that does not exist is never created.
+#[tokio::test]
+async fn first_launch_creates_a_default_config_and_names_it() {
+    let dir = scratch("first-launch");
+    let home = dir.0.join("home");
+    let expected = home.join("config/config.toml");
+    // First run: the file is created, the message names it and the `--provider/--model` form.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(&["-p", "hi"], &[("RADIAN_HOME", home.to_str().unwrap())]),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "created a default config at {}",
+            expected.display()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "no model: pass --provider <p> --model <m>, or set model.provider/model in {}",
+            expected.display()
+        )),
+        "{stderr}"
+    );
+    assert!(expected.is_file(), "the default config was created");
+    let before = std::fs::read(&expected).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&expected).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the fresh config is owner-only"
+        );
+        assert_eq!(
+            std::fs::metadata(expected.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "the config directory is owner-only"
+        );
+    }
+    // The template parses to the default config (every key commented out).
+    let parsed = radian_host::parse_config(&expected, &std::fs::read_to_string(&expected).unwrap())
+        .expect("the template must parse");
+    assert_eq!(parsed.model, radian_host::ModelConfig::default());
+    // Second run: the file is not touched.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(&["-p", "hi"], &[("RADIAN_HOME", home.to_str().unwrap())]),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        !stderr.contains("created a default config"),
+        "an existing file is never rewritten: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&expected).unwrap(),
+        before,
+        "not one byte changes"
+    );
+    // An explicit missing path is never created (a typo must not leave a file).
+    let missing = dir.0.join("custom.toml");
+    let (code, _, _) = feed_and_wait(
+        spawn_radian(
+            &["-p", "hi", "--config", missing.to_str().unwrap()],
+            &[("RADIAN_HOME", home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2);
+    assert!(
+        !missing.exists(),
+        "an explicit missing path is never created"
     );
 }
 
@@ -7242,15 +7330,16 @@ async fn a_failing_config_in_the_temp_radian_home_is_read_and_named() {
 
 /// The harness must never read the user's real `~/.radian/config/config.toml`. `spawn_radian`
 /// pins the whole root (`RADIAN_HOME`) and drops `RADIAN_CONFIG`, so a `HOME` whose
-/// `.radian/config/config.toml` would refuse startup is **not** consulted: the run reports
-/// `[config] none` and reaches the model. Without the pin it would refuse with the version
-/// error instead — the test would fail.
+/// `.radian/config/config.toml` would refuse startup is **not** consulted. ADR 0008 §2: with
+/// no config in the pinned root the run creates the commented default there and names it —
+/// never the outside file.
 #[tokio::test]
 async fn the_harness_never_reads_a_config_outside_its_temp_root() {
     let dir = scratch("config-fake-home");
     let config_dir = dir.join(".radian").join("config");
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(config_dir.join("config.toml"), "schema_version = 0\n").unwrap();
+    let home = dir.join("rh");
 
     // A local mock keeps the run past the API-key check, so the `[config]` startup line is
     // reached.
@@ -7258,7 +7347,10 @@ async fn the_harness_never_reads_a_config_outside_its_temp_root() {
     let (code, _, stderr) = feed_and_wait(
         spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
-            &[("HOME", dir.to_str().unwrap())],
+            &[
+                ("HOME", dir.to_str().unwrap()),
+                ("RADIAN_HOME", home.to_str().unwrap()),
+            ],
         ),
         "",
     )
@@ -7268,9 +7360,17 @@ async fn the_harness_never_reads_a_config_outside_its_temp_root() {
         !stderr.contains("older than the supported"),
         "a config outside the harness root must not be read: {stderr}"
     );
+    let expected = home.join("config/config.toml");
     assert!(
-        stderr.contains("[config] none"),
-        "the harness resolved no config file at all: {stderr}"
+        stderr.contains(&format!(
+            "created a default config at {}",
+            expected.display()
+        )),
+        "the default is created inside the harness root: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("[config] {}", expected.display())),
+        "the run reads the created file, not the outside one: {stderr}"
     );
     assert_eq!(server.requests().len(), 1, "the run reached the model");
 }

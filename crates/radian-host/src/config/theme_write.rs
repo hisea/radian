@@ -1,18 +1,14 @@
 //! The `/theme` write-back (ADR 0008 revision, ).
 //!
-//! The first place a program writes the configuration file. It changes **only** `tui.theme`,
-//! through `toml_edit`, so every other byte — comments, blank lines, key order, unknown
-//! fields (ADR 0008 §5.4) — is preserved. The result is re-read with the normal reader and
-//! the write is refused (nothing is written) when anything but `tui.theme` differs. The write
-//! goes through the shared [`crate::atomic_write`] helper (a unique temp file + rename, the
-//! original file's permissions), and a symbolic link is resolved first so a dotfiles setup
-//! keeps its link.
+//! The first place a program writes the configuration file. It changes **only** `tui.theme`
+//! through the shared [`super::preserve`] helper, so every other byte — comments, blank lines,
+//! key order, unknown fields (ADR 0008 §5.4) — is preserved.
 
 use std::path::{Path, PathBuf};
 
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{Item, Table, value};
 
-use super::{Config, SUPPORTED_SCHEMA_VERSION, parse};
+use super::preserve::{PreserveError, edit_preserving};
 
 /// Why the write-back did not happen. Every variant leaves the file untouched.
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +36,18 @@ pub enum ThemeWriteError {
     },
 }
 
+impl From<PreserveError> for ThemeWriteError {
+    fn from(error: PreserveError) -> Self {
+        match error {
+            PreserveError::ReadOnly { path, supported } => Self::ReadOnly { path, supported },
+            PreserveError::Read { path, source } => Self::Read { path, source },
+            PreserveError::Parse { path, message } => Self::Parse { path, message },
+            PreserveError::Verify { path, .. } => Self::Verify { path },
+            PreserveError::Write { path, source } => Self::Write { path, source },
+        }
+    }
+}
+
 /// Writes `tui.theme = theme` into the configuration at `path` (created when absent).
 ///
 /// `read_only` is the reading process's verdict (ADR 0008 §5.2: a `schema_version` newer
@@ -47,109 +55,32 @@ pub enum ThemeWriteError {
 /// against a fresh parse of the file's own text, so no other caller state is needed.
 /// Returns the path on success.
 pub fn write_theme(path: &Path, read_only: bool, theme: &str) -> Result<PathBuf, ThemeWriteError> {
-    if read_only {
-        return Err(ThemeWriteError::ReadOnly {
-            path: path.to_path_buf(),
-            supported: SUPPORTED_SCHEMA_VERSION,
-        });
-    }
-    let original = match std::fs::read_to_string(path) {
-        Ok(text) => Some(text),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(source) => {
-            return Err(ThemeWriteError::Read {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-    };
-
-    // The document to edit: the file's own bytes, or a fresh one.
-    let mut doc = match &original {
-        Some(text) => text
-            .parse::<DocumentMut>()
-            .map_err(|error| ThemeWriteError::Parse {
-                path: path.to_path_buf(),
-                message: error.to_string(),
-            })?,
-        None => DocumentMut::new(),
-    };
-    if original.is_none() {
-        doc["schema_version"] = value(SUPPORTED_SCHEMA_VERSION as i64);
-    }
-    let tui = doc
-        .entry("tui")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .ok_or_else(|| ThemeWriteError::Verify {
-            path: path.to_path_buf(),
-        })?;
-    tui["theme"] = value(theme);
-    let new_text = doc.to_string();
-
-    // Verify with the normal reader: only `tui.theme` may differ. The baseline is the file's
-    // own parse (or the default for a fresh file), so the comparison does not depend on the
-    // caller's `current` being built by this same reader.
-    let mut expected = match &original {
-        Some(text) => parse(path, text).map_err(|error| ThemeWriteError::Parse {
-            path: path.to_path_buf(),
-            message: error.to_string(),
-        })?,
-        None => Config {
-            source: Some(path.to_path_buf()),
-            schema_version: Some(SUPPORTED_SCHEMA_VERSION),
-            ..Config::default()
+    edit_preserving(
+        path,
+        read_only,
+        "`tui.theme`",
+        |doc| {
+            let tui = doc
+                .entry("tui")
+                .or_insert(Item::Table(Table::new()))
+                .as_table_mut()
+                .ok_or_else(|| PreserveError::Verify {
+                    path: path.to_path_buf(),
+                    keys: "`tui.theme`",
+                })?;
+            tui["theme"] = value(theme);
+            Ok(())
         },
-    };
-    let after = parse(path, &new_text).map_err(|error| ThemeWriteError::Parse {
-        path: path.to_path_buf(),
-        message: error.to_string(),
-    })?;
-    expected.tui.theme = Some(theme.to_string());
-    expected.source = after.source.clone();
-    if expected != after {
-        return Err(ThemeWriteError::Verify {
-            path: path.to_path_buf(),
-        });
-    }
-
-    // Resolve a symbolic link: a dotfiles setup links `config.toml` into a repository, and a
-    // rename onto the link's path would replace the link with a plain file.
-    // The write goes to the link's target; the notice keeps naming the path the user knows.
-    let target = resolve_target(path);
-    let mut bytes = new_text.into_bytes();
-    if !bytes.ends_with(b"\n") {
-        bytes.push(b'\n');
-    }
-    crate::atomic_write::write_atomic(&target, &bytes, None).map_err(|source| {
-        ThemeWriteError::Write {
-            path: path.to_path_buf(),
-            source,
-        }
-    })?;
-    Ok(path.to_path_buf())
-}
-
-/// The real file a write targets: the symbolic link is resolved (all of it, through
-/// `canonicalize`), and when the file does not exist yet the nearest existing ancestor is
-/// resolved so a symlinked parent directory still lands in the repository.
-fn resolve_target(path: &Path) -> PathBuf {
-    if let Ok(real) = std::fs::canonicalize(path) {
-        return real;
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
-            match std::fs::canonicalize(parent) {
-                Ok(real_parent) => real_parent.join(name),
-                Err(_) => path.to_path_buf(),
-            }
-        }
-        _ => path.to_path_buf(),
-    }
+        |expected| {
+            expected.tui.theme = Some(theme.to_string());
+        },
+    )
+    .map_err(ThemeWriteError::from)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::{SUPPORTED_SCHEMA_VERSION, parse};
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -22,6 +22,7 @@ pub(super) fn build_startup_screen(
     workspace_path: &Path,
     window: &radian_host::Window,
     model_name: &str,
+    has_model: bool,
     tier: radian_tui::profile::Tier,
     access_source: radian_tui::profile::AccessSource,
     config: &radian_host::Config,
@@ -174,6 +175,14 @@ pub(super) fn build_startup_screen(
     if pick_notice {
         startup_lines.push("no sessions for this workspace yet; starting a new one".to_string());
     }
+    // ADR 0008 §2: with no model routed, the startup block (and the empty input box) point
+    // at `/model` (and `/login` when the provider needs a key).
+    if !has_model {
+        startup_lines.push(
+            "no model is set; choose one with /model (and /login if the provider needs a key)"
+                .to_string(),
+        );
+    }
     startup_lines.push(session_line);
     // ADR 0031 T3: the trust state, in the startup block (same style as `ask_user: off`).
     startup_lines.push(radian_host::trust::status_line(&session.trust()));
@@ -200,7 +209,9 @@ pub(super) fn build_startup_screen(
     }
     let banner = if config.tui.banner.unwrap_or(true) {
         let path = radian_tui::workspace::display_coding_root(workspace_root, home.as_deref());
-        radian_tui::startup::banner_rows(env!("CARGO_PKG_VERSION"), model_name, &path)
+        // ADR 0008 §2: the banner names the missing model instead of a blank.
+        let banner_model = if has_model { model_name } else { "no model" };
+        radian_tui::startup::banner_rows(env!("CARGO_PKG_VERSION"), banner_model, &path)
     } else {
         Vec::new()
     };
@@ -256,6 +267,7 @@ pub(super) fn run_loop_and_teardown(
     session_id: &str,
     secrets: &radian_tui::terminal::SharedSecrets,
     provider: radian_host::Provider,
+    has_model: bool,
 ) -> Result<Option<String>, RunError> {
     // ADR 0008 revision: `/theme` writes to the file this process read, or to the path it
     // would read when there is no file yet (the write creates it).
@@ -263,6 +275,11 @@ pub(super) fn run_loop_and_teardown(
         .source
         .clone()
         .or_else(|| radian_host::resolved_config_path(cli.config.as_deref()));
+    // ADR 0008 §2: the session records whether it started without a model; the first
+    // `/model` writes back to this same path.
+    app.set_has_model(has_model);
+    app.session.model_name = model_name.to_owned();
+    app.session.provider = (!model_name.is_empty()).then(|| provider_name.to_owned());
     let session_host = SessionHost {
         dir: dir.to_path_buf(),
         workspace: workspace_path.to_string_lossy().into_owned(),
@@ -276,6 +293,7 @@ pub(super) fn run_loop_and_teardown(
         theme_colors: config.tui.colors.clone(),
         theme_write_path: theme_write_path.clone(),
         config_read_only: config.read_only,
+        started_without_model: !has_model,
     };
     mark("startup-set");
     let session = Arc::new(session);
