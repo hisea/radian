@@ -42,8 +42,7 @@
   hook 超时失败（已做变异，见下）。原 seam 在静态锁里调 hook，两个扫描永远会合不了，
   改为 clone 出 `Arc` 再调（只改 `testing` 特性下的调用方式，`resolve_hook` 签名不变，
   `safe_fs.rs` 的 swap 测试全过）。
-- 取消（`a_cancelled_batch_returns_without_the_scan_result`）：hook 按住扫描时取消赢得
-  竞争，放行后扫描仍在后台跑完并找到匹配，但结果从不是返回值。
+- 取消是 Core 的：它丢掉 tool future；分离出去的阻塞扫描只读，它的返回值从不被使用（无新测试；Core 自己的取消测试覆盖了丢 future 的行为）。
 - 变异：`grep.rs` 去掉 `spawn_blocking` → `two_greps_in_one_batch_overlap` 失败；
   `glob.rs` 去掉 → `two_globs_in_one_batch_overlap` 失败；恢复后 `git diff` 确认还原。
 - `read` 未动：`pi/read-absorbs-list` 正在把 `list` 并进 `read`，等那条分支落地后 `read`
