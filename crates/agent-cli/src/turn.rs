@@ -138,14 +138,22 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
             .session
             .job_notifier()
             .map(|notifier| notifier.settled_signal());
-        let settled = settled_notify.as_ref().map(|notify| notify.notified());
         let stops_notify = run.session.command_hooks().stops_signal();
-        let stops = stops_notify.notified();
-        let finished = run.ui.finished.notified();
-        let started = run.ui.started.notified();
-        let ended = run.driver_ended.notified();
         let idle_notify = run.session.idle_signal();
-        let idle = idle_notify.notified();
+        // Edge-triggered waits, subscribed BEFORE the checks below: a signal landing
+        // between the check and the wait still resolves the wait, so no wakeup is lost.
+        // (The driver's own `wake_signal` wait is deliberately not among them: the
+        // driver is its only waiter, and a second waiter could steal its one permit —
+        // a wake entry always reaches the driver, which claims it and reports
+        // `started`, so exec learns about it that way instead.)
+        let waits = ProgressWaits {
+            settled: settled_notify.as_ref().map(|notify| notify.notified()),
+            stops: stops_notify.notified(),
+            finished: run.ui.finished.notified(),
+            started: run.ui.started.notified(),
+            ended: run.driver_ended.notified(),
+            idle: idle_notify.notified(),
+        };
         // A degraded notice never opens a turn (the wake gate is closed): end the session
         // instead of waiting for something that cannot happen. Exit 3, the budget family
         // (ADR 0044); the `Result` record names the budget and the unhandled counts. A
@@ -182,12 +190,7 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
             &run.session,
             &run.inbox,
             &mut cancelling,
-            settled,
-            stops,
-            finished,
-            started,
-            ended,
-            idle,
+            waits,
         )
         .await
         {
@@ -331,19 +334,33 @@ async fn jobs_quiescent(run: &Run) -> bool {
 /// a second Ctrl-C forces, a first Ctrl-C cancels a running turn and otherwise just
 /// re-checks (cancelling with no turn in flight could eat the next woken turn, so an
 /// idle Ctrl-C only wakes the loop).
+/// Edge-triggered waits for [`wait_for_progress`], subscribed before the exit-condition
+/// check so a signal landing between the check and the wait still resolves the wait.
+struct ProgressWaits<'a> {
+    settled: Option<tokio::sync::futures::Notified<'a>>,
+    stops: tokio::sync::futures::Notified<'a>,
+    finished: tokio::sync::futures::Notified<'a>,
+    started: tokio::sync::futures::Notified<'a>,
+    ended: tokio::sync::futures::Notified<'a>,
+    idle: tokio::sync::futures::Notified<'a>,
+}
+
 async fn wait_for_progress(
     signals: &mut mpsc::UnboundedReceiver<i32>,
     ui: &Arc<Ui>,
     session: &Arc<radian_host::LocalSession>,
     inbox: &Arc<Inbox>,
     cancelling: &mut bool,
-    settled: Option<tokio::sync::futures::Notified<'_>>,
-    stops: tokio::sync::futures::Notified<'_>,
-    finished: tokio::sync::futures::Notified<'_>,
-    started: tokio::sync::futures::Notified<'_>,
-    ended: tokio::sync::futures::Notified<'_>,
-    idle: tokio::sync::futures::Notified<'_>,
+    waits: ProgressWaits<'_>,
 ) -> TurnEnd {
+    let ProgressWaits {
+        settled,
+        stops,
+        finished,
+        started,
+        ended,
+        idle,
+    } = waits;
     tokio::select! {
         biased;
         Some(signal) = signals.recv() => {
