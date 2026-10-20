@@ -34,13 +34,16 @@ pub const MAX_NAME_CHARS: usize = 64;
 pub const MAX_DESCRIPTION_CHARS: usize = 1024;
 
 /// Where a skill came from (ADR 0025). The order is the discovery order: a
-/// user-level or `extra_paths` skill of the same name wins over a built-in one.
+/// user-level or `extra_paths` skill of the same name wins over a project or built-in one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSource {
     /// `$RADIAN_HOME/skills/` or `$HOME/.agents/skills/` (the Agent Skills standard location).
     User,
     /// A `[skills] extra_paths` root.
     Extra,
+    /// `<project>/.agents/skills/`, from the workspace up to the repository root. Only read
+    /// when the project is trusted (ADR 0031 T1).
+    Project,
     /// Compiled into the binary (`include_str!`); not on the filesystem.
     Builtin,
 }
@@ -50,6 +53,7 @@ impl SkillSource {
         match self {
             SkillSource::User => "user",
             SkillSource::Extra => "extra_paths",
+            SkillSource::Project => "project",
             SkillSource::Builtin => "builtin",
         }
     }
@@ -105,7 +109,7 @@ pub fn discover(root: &Path) -> Discovery {
 /// itself one skill (the same rule as a subdirectory of the primary root).
 /// The built-in skills are discovered **last** (ADR 0025): a user-level or
 /// `extra_paths` skill of the same name wins. `builtin` is `[skills] builtin` (default true),
-/// `disabled` is `[skills] disabled`.
+/// `disabled` is `[skills] disabled`. This is [`discover_with_project`] with no project roots.
 pub fn discover_with_user_roots(
     primary: Option<&Path>,
     secondary: Option<&Path>,
@@ -113,15 +117,33 @@ pub fn discover_with_user_roots(
     builtin: bool,
     disabled: &[String],
 ) -> Discovery {
+    discover_with_project(primary, secondary, extras, &[], builtin, disabled)
+}
+
+/// [`discover_with_user_roots`] plus the trusted project's skill roots, scanned after
+/// `extra_paths` and before the built-ins (ADR 0025 S1): a project skill never shadows a
+/// user-level or `extra_paths` skill of the same name, and a built-in never shadows a project
+/// one. The caller passes [`project_roots_for`]'s result — empty when the project is
+/// untrusted, so its skills are never read (ADR 0031 T1) — and the first discovery of a name
+/// wins, whichever root it came from, with one warning for the later one.
+pub fn discover_with_project(
+    primary: Option<&Path>,
+    secondary: Option<&Path>,
+    extras: &[PathBuf],
+    project_roots: &[PathBuf],
+    builtin: bool,
+    disabled: &[String],
+) -> Discovery {
     let mut discovery = Discovery::default();
     // One name map across every root: the first discovery of a name wins, whichever root it came
     // from, and a later one is warned about.
     let mut by_name: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut allowed_tools = 0usize;
     if let Some(primary) = primary {
-        collect_from(primary, SkillSource::User, &mut discovery, &mut by_name);
+        allowed_tools += collect_from(primary, SkillSource::User, &mut discovery, &mut by_name);
     }
     if let Some(secondary) = secondary {
-        collect_from(secondary, SkillSource::User, &mut discovery, &mut by_name);
+        allowed_tools += collect_from(secondary, SkillSource::User, &mut discovery, &mut by_name);
     }
     for extra in extras {
         if !extra.is_dir() {
@@ -131,10 +153,27 @@ pub fn discover_with_user_roots(
             ));
             continue;
         }
-        collect_from(extra, SkillSource::Extra, &mut discovery, &mut by_name);
+        allowed_tools += collect_from(extra, SkillSource::Extra, &mut discovery, &mut by_name);
+    }
+    for project in project_roots {
+        allowed_tools += collect_from(project, SkillSource::Project, &mut discovery, &mut by_name);
     }
     if builtin {
-        collect_builtin(&mut discovery, &mut by_name, disabled);
+        allowed_tools += collect_builtin(&mut discovery, &mut by_name, disabled);
+    }
+    // `allowed-tools` is never wired to permissions (ADR 0025 S4); the declarations are read
+    // as text and ignored with one warning per discovery — one per session, since discovery
+    // runs once per session — no matter how many skills declare it.
+    if allowed_tools > 0 {
+        discovery.warnings.push(format!(
+            "{} {} `allowed-tools`, which Radian does not implement; it has no effect",
+            allowed_tools,
+            if allowed_tools == 1 {
+                "skill declares"
+            } else {
+                "skills declare"
+            }
+        ));
     }
     discovery
 }
@@ -177,15 +216,51 @@ pub fn missing(skills: &[Skill], allow: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The project skill roots for `workspace`: `<dir>/.agents/skills` for every directory from
+/// the workspace up to and including the repository root, nearest first (ADR 0025 S1, like
+/// pi). Outside a repository only the workspace itself is searched. Missing directories are
+/// fine — [`collect_from`] skips them silently — so every candidate is returned.
+pub fn project_skill_roots(workspace: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(root) = crate::context::repo_root(workspace) {
+        let mut dir = Some(workspace.to_path_buf());
+        while let Some(current) = dir {
+            dirs.push(current.clone());
+            if current.as_path() == root.as_path() {
+                break;
+            }
+            dir = current.parent().map(Path::to_path_buf);
+        }
+    } else {
+        // Outside a repository: only the workspace directory itself.
+        dirs.push(workspace.to_path_buf());
+    }
+    dirs.into_iter()
+        .map(|dir| dir.join(".agents").join("skills"))
+        .collect()
+}
+
+/// The project roots a session may scan: [`project_skill_roots`] when the project is trusted,
+/// empty when it is not — an untrusted project's skills are never read (ADR 0031 T1). The
+/// trust decision is the caller's; this keeps the gate a one-line, unit-testable rule.
+pub fn project_roots_for(workspace: &Path, trusted: bool) -> Vec<PathBuf> {
+    if !trusted {
+        return Vec::new();
+    }
+    project_skill_roots(workspace)
+}
+
 /// Collects the skills of one root into `discovery`, keeping the first name seen in `by_name`.
+/// Returns how many loaded skills declare `allowed-tools`: the caller merges them into one
+/// warning per discovery (ADR 0025 S4).
 fn collect_from(
     root: &Path,
     source: SkillSource,
     discovery: &mut Discovery,
     by_name: &mut BTreeMap<String, PathBuf>,
-) {
+) -> usize {
     if !root.is_dir() {
-        return;
+        return 0;
     }
     // Every directory that holds a SKILL.md, in path order (the deterministic order ADR 0025
     // S2 requires); a directory with SKILL.md is a skill and is not descended into.
@@ -199,6 +274,7 @@ fn collect_from(
     walk(root, &mut candidates);
     candidates.sort();
 
+    let mut allowed_tools = 0usize;
     for path in candidates {
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
@@ -210,8 +286,10 @@ fn collect_from(
             }
         };
         match load_text(&path, &text, source, None) {
-            Ok((skill, extra)) => {
-                discovery.warnings.extend(extra);
+            Ok((skill, declares_allowed_tools)) => {
+                if declares_allowed_tools {
+                    allowed_tools += 1;
+                }
                 if let Some(first) = by_name.get(&skill.name) {
                     // ADR 0025 S1: keep the first discovered (the earlier root, then the earlier
                     // path) and warn once.
@@ -229,6 +307,7 @@ fn collect_from(
             Err(reason) => discovery.warnings.push(reason),
         }
     }
+    allowed_tools
 }
 
 /// Whether `root` holds at least one `SKILL.md` under the discovery rules, **without parsing
@@ -265,19 +344,23 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Collects the built-in skills (ADR 0025), last in the discovery order. A name in
 /// `disabled` is skipped; a name already discovered is shadowed with the usual warning.
+/// Returns the `allowed-tools` count, like [`collect_from`].
 fn collect_builtin(
     discovery: &mut Discovery,
     by_name: &mut BTreeMap<String, PathBuf>,
     disabled: &[String],
-) {
+) -> usize {
+    let mut allowed_tools = 0usize;
     for (name, text) in BUILTIN {
         if disabled.iter().any(|disabled| disabled == name) {
             continue;
         }
         let path = PathBuf::from(format!("<builtin>/{name}/{SKILL_FILE_NAME}"));
         match load_text(&path, text, SkillSource::Builtin, Some(text)) {
-            Ok((skill, extra)) => {
-                discovery.warnings.extend(extra);
+            Ok((skill, declares_allowed_tools)) => {
+                if declares_allowed_tools {
+                    allowed_tools += 1;
+                }
                 if let Some(first) = by_name.get(&skill.name) {
                     discovery.warnings.push(format!(
                         "skill `{}` in {} shadows {} (kept the first)",
@@ -293,27 +376,39 @@ fn collect_builtin(
             Err(reason) => discovery.warnings.push(reason),
         }
     }
+    allowed_tools
 }
 
-/// Validates one `SKILL.md`'s text. `Err` is the one-line warning; the skill is skipped.
+/// Validates one `SKILL.md`'s text. `Err` is the one-line warning; the skill is skipped. `Ok`
+/// carries whether the skill declares `allowed-tools`, so the caller can merge those into one
+/// warning per discovery instead of one per skill.
 fn load_text(
     path: &Path,
     text: &str,
     source: SkillSource,
     body: Option<&'static str>,
-) -> Result<(Skill, Vec<String>), String> {
+) -> Result<(Skill, bool), String> {
     let dir = path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let front = parse_frontmatter(text)
         .map_err(|reason| format!("skill {} has bad frontmatter: {reason}", path.display()))?;
-    let name = front
+    let mut name = front
         .get("name")
         .cloned()
         .unwrap_or_default()
         .trim()
         .to_owned();
+    if name.is_empty() {
+        // Claude Code compatibility: a missing `name` defaults to the directory name, then
+        // faces the same `valid_name` check (an unusable directory name still rejects).
+        name = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+    }
     if !valid_name(&name) {
         return Err(format!(
             "skill {} has an invalid name {name:?} (1–{MAX_NAME_CHARS} of letters, digits, `-`, `_`)",
@@ -340,15 +435,9 @@ fn load_text(
             dir.display()
         ));
     }
-    let mut warnings = Vec::new();
-    if front.contains_key("allowed-tools") {
-        // Owner ruling 4: `allowed-tools` is never wired to permissions (that would let a skill
-        // grant itself tools); it is read as text and ignored with one warning.
-        warnings.push(format!(
-            "skill `{name}` declares `allowed-tools`, which Radian does not implement; it has \
-             no effect"
-        ));
-    }
+    // Owner ruling 4: `allowed-tools` is never wired to permissions (that would let a skill
+    // grant itself tools); it is read as text and ignored. The caller warns once per discovery.
+    let declares_allowed_tools = front.contains_key("allowed-tools");
     let disable_model_invocation = front
         .get("disable-model-invocation")
         .is_some_and(|value| value.eq_ignore_ascii_case("true"));
@@ -362,7 +451,7 @@ fn load_text(
             source,
             body,
         },
-        warnings,
+        declares_allowed_tools,
     ))
 }
 
@@ -562,8 +651,9 @@ resolved from the skill's own directory.\n";
 /// The message text `/skill:<name> [args]` puts into the inbox (ADR 0025 S3): the body with the
 /// frontmatter stripped, wrapped in a `<skill name=… location=…>` block that names the skill's
 /// directory as the base for relative paths, and `args` appended verbatim (pi's
-/// `_expandSkillCommand`). Reads the file; the caller has already found `skill` in the
-/// discovered table.
+/// `_expandSkillCommand`) — unless the body has a `$ARGUMENTS` placeholder, which is filled in
+/// place instead and nothing is appended. Reads the file; the caller has already found `skill`
+/// in the discovered table.
 /// Reads a skill body with `O_NOFOLLOW` on the leaf (ADR 0039): a `SKILL.md` that became a
 /// symlink after discovery is refused instead of followed.
 pub(crate) fn read_skill_body(path: &std::path::Path) -> std::io::Result<String> {
@@ -585,6 +675,13 @@ pub fn expand(skill: &Skill, args: &str) -> Result<String, String> {
         })?,
     };
     let body = tools::strip_frontmatter(&text).unwrap_or(&text).trim();
+    // `$ARGUMENTS` is substituted before the frame escaping, so the args cannot smuggle in a
+    // `</skill>` of their own; a body without the placeholder keeps the verbatim append.
+    let (body, appended) = match tools::substitute_arguments(body, args) {
+        Some(substituted) => (substituted, None),
+        None if args.is_empty() => (body.to_owned(), None),
+        None => (body.to_owned(), Some(args.to_owned())),
+    };
     // The body and the path are project/user input: escape a literal `</skill>` and the
     // attribute characters, so a skill file cannot close its own frame (ADR 0036 C2's rule
     // applied to the other model-visible frame).
@@ -593,12 +690,11 @@ pub fn expand(skill: &Skill, args: &str) -> Result<String, String> {
         crate::escape::attr(&skill.name),
         crate::escape::attr(&skill.path.display().to_string()),
         crate::escape::attr(&skill.dir.display().to_string()),
-        crate::escape::close_tag(body, "skill")
+        crate::escape::close_tag(&body, "skill")
     );
-    Ok(if args.is_empty() {
-        block
-    } else {
-        format!("{block}\n\n{args}")
+    Ok(match appended {
+        Some(args) => format!("{block}\n\n{args}"),
+        None => block,
     })
 }
 
@@ -817,18 +913,24 @@ mod tests {
         );
     }
 
+    /// `allowed-tools` is read as text and ignored with one warning per discovery, no matter
+    /// how many skills declare it (backlog project-skills: was one warning per skill).
     #[test]
-    fn allowed_tools_is_read_and_warned_once_per_skill() {
+    fn allowed_tools_warnings_are_merged_into_one_per_discovery() {
         let scratch = Scratch::new("allowed-tools");
-        scratch.skill(
-            "a",
-            "---\nname: a\ndescription: d\nallowed-tools:\n  - Bash\n  - Read\n---\nBody.\n",
-        );
+        for dir in ["a", "b", "c"] {
+            scratch.skill(
+                dir,
+                "---\nname: x\ndescription: d\nallowed-tools:\n  - Bash\n---\nBody.\n"
+                    .replace("name: x", &format!("name: {dir}"))
+                    .as_str(),
+            );
+        }
         let discovery = discover(&scratch.skills_dir());
-        assert_eq!(discovery.skills.len(), 1);
-        assert_eq!(discovery.warnings.len(), 1);
+        assert_eq!(discovery.skills.len(), 3);
+        assert_eq!(discovery.warnings.len(), 1, "{:?}", discovery.warnings);
         assert!(
-            discovery.warnings[0].contains("allowed-tools"),
+            discovery.warnings[0].contains("3 skills declare `allowed-tools`"),
             "{:?}",
             discovery.warnings
         );
@@ -883,6 +985,159 @@ mod tests {
         assert_eq!(discovery.warnings.len(), 1);
         assert!(
             discovery.warnings[0].contains("shadows"),
+            "{:?}",
+            discovery.warnings
+        );
+    }
+
+    /// Writes `<root>/<dir>/.agents/skills/<skill>/SKILL.md`: a project skill at an arbitrary
+    /// directory (the `Scratch::skill` helper only writes the user-level root).
+    fn project_skill(root: &Path, dir: &str, skill: &str, body: &str) {
+        let path = root.join(dir).join(".agents/skills").join(skill);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join(SKILL_FILE_NAME), body).unwrap();
+    }
+
+    /// A trusted project's skill is discovered with `Project` source, listed in the prompt
+    /// section and `/skills`, and expandable through `/skill:` (catches: the project roots are
+    /// never scanned).
+    #[test]
+    fn a_trusted_project_skill_is_discovered_listed_and_expandable() {
+        let scratch = Scratch::new("project");
+        project_skill(
+            &scratch.root,
+            "ws",
+            "greet",
+            &frontmatter("greet", "From the project."),
+        );
+        let ws = scratch.root.join("ws");
+        let roots = project_roots_for(&ws, true);
+        assert_eq!(roots, vec![ws.join(".agents/skills")]);
+        let discovery = discover_with_project(None, None, &[], &roots, false, &[]);
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(discovery.skills[0].source, SkillSource::Project);
+        let section = prompt_section(&discovery.skills, SECTION_BUDGET_TOKENS, 4);
+        assert!(section.contains("- greet: From the project."), "{section}");
+        assert!(
+            notices(&discovery.skills)
+                .iter()
+                .any(|line| line.contains("greet: From the project.")),
+            "{:?}",
+            notices(&discovery.skills)
+        );
+        let expanded = expand(&discovery.skills[0], "").unwrap();
+        assert!(expanded.contains("Body line."), "{expanded}");
+    }
+
+    /// The gate: an untrusted project's roots are empty even when its skills exist, so
+    /// discovery never reads them (catches: the trust check is dropped and everything loads).
+    #[test]
+    fn project_roots_for_is_empty_unless_trusted() {
+        let scratch = Scratch::new("project-gate");
+        project_skill(
+            &scratch.root,
+            "ws",
+            "greet",
+            &frontmatter("greet", "Secret."),
+        );
+        let ws = scratch.root.join("ws");
+        assert!(project_roots_for(&ws, false).is_empty());
+        let discovery =
+            discover_with_project(None, None, &[], &project_roots_for(&ws, false), false, &[]);
+        assert!(discovery.skills.is_empty());
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+    }
+
+    /// The upward search stops at the repository root: the workspace's own skill and the root's
+    /// both load, nearest first, and one above the root never does (catches: the walk climbs
+    /// past the root).
+    #[test]
+    fn the_upward_search_stops_at_the_repository_root() {
+        let scratch = Scratch::new("project-up");
+        let repo = scratch.root.join("repo");
+        let ws = repo.join("sub/ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        project_skill(
+            &scratch.root,
+            "repo/sub/ws",
+            "near",
+            &frontmatter("near", "Nearest."),
+        );
+        project_skill(
+            &scratch.root,
+            "repo",
+            "far",
+            &frontmatter("far", "At the root."),
+        );
+        // Above the repository root: never scanned.
+        project_skill(&scratch.root, "", "outer", &frontmatter("outer", "Above."));
+        let roots = project_roots_for(&ws, true);
+        assert_eq!(
+            roots,
+            vec![
+                ws.join(".agents/skills"),
+                repo.join("sub/.agents/skills"),
+                repo.join(".agents/skills"),
+            ]
+        );
+        let discovery = discover_with_project(None, None, &[], &roots, false, &[]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["near", "far"], "{:?}", discovery.warnings);
+    }
+
+    /// A user-level skill wins a conflict with a project skill; the project's other skills
+    /// still load (catches: the project roots are scanned before the user level).
+    #[test]
+    fn a_user_skill_wins_a_conflict_with_a_project_skill() {
+        let scratch = Scratch::new("project-conflict");
+        scratch.skill("same", &frontmatter("same", "From the user level."));
+        project_skill(
+            &scratch.root,
+            "ws",
+            "same",
+            &frontmatter("same", "From the project."),
+        );
+        project_skill(
+            &scratch.root,
+            "ws",
+            "project-only",
+            &frontmatter("project-only", "Only in the project."),
+        );
+        let ws = scratch.root.join("ws");
+        let discovery = discover_with_project(
+            Some(&scratch.skills_dir()),
+            None,
+            &[],
+            &project_roots_for(&ws, true),
+            false,
+            &[],
+        );
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["same", "project-only"], "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills[0].description, "From the user level.");
+        assert_eq!(discovery.warnings.len(), 1, "{:?}", discovery.warnings);
+        assert!(
+            discovery.warnings[0].contains("shadows"),
+            "{:?}",
+            discovery.warnings
+        );
+    }
+
+    /// A missing `name` defaults to the directory name (Claude Code compatibility); a
+    /// directory name that is not a valid name still rejects (catches: `name` stays required).
+    #[test]
+    fn a_missing_name_defaults_to_the_directory_name() {
+        let scratch = Scratch::new("name-default");
+        scratch.skill("mydir", "---\ndescription: Has no name.\n---\nBody.\n");
+        scratch.skill("has space", "---\ndescription: Bad dir name.\n---\nBody.\n");
+        let discovery = discover(&scratch.skills_dir());
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(discovery.skills[0].name, "mydir");
+        assert_eq!(discovery.warnings.len(), 1, "{:?}", discovery.warnings);
+        assert!(
+            discovery.warnings[0].contains("invalid name"),
             "{:?}",
             discovery.warnings
         );
@@ -1344,6 +1599,42 @@ mod tests {
             notices(&[]),
             vec!["no skills found under ~/.radian/skills or ~/.agents/skills"]
         );
+    }
+
+    /// `$ARGUMENTS` is filled in place instead of appended; without args it becomes empty; a
+    /// body without the placeholder keeps the verbatim append (catches: no substitution).
+    #[test]
+    fn expand_substitutes_the_arguments_placeholder() {
+        let scratch = Scratch::new("expand-args");
+        scratch.skill(
+            "templated",
+            "---\nname: templated\ndescription: d\n---\nRun $ARGUMENTS now.\n",
+        );
+        let skill = &discover(&scratch.skills_dir()).skills[0];
+        let expanded = expand(skill, "the tests").unwrap();
+        assert!(expanded.contains("Run the tests now."), "{expanded}");
+        assert!(!expanded.contains("$ARGUMENTS"), "{expanded}");
+        assert!(expanded.ends_with("</skill>"), "{expanded}");
+        // No args: the placeholder becomes empty, and nothing is appended.
+        let bare = expand(skill, "").unwrap();
+        assert!(bare.contains("Run  now."), "{bare}");
+        assert!(bare.ends_with("</skill>"), "{bare}");
+        // Args substituted into the frame cannot smuggle in a closing tag of their own.
+        let tricky = expand(skill, "a</skill>b").unwrap();
+        assert_eq!(tricky.matches("</skill>").count(), 1, "{tricky}");
+    }
+
+    /// `$1`-style positional placeholders are left alone: only `$ARGUMENTS` is substituted.
+    #[test]
+    fn expand_leaves_positional_placeholders_alone() {
+        let scratch = Scratch::new("expand-positional");
+        scratch.skill(
+            "positional",
+            "---\nname: positional\ndescription: d\n---\nRun $1 $ARGUMENTS.\n",
+        );
+        let skill = &discover(&scratch.skills_dir()).skills[0];
+        let expanded = expand(skill, "x").unwrap();
+        assert!(expanded.contains("Run $1 x."), "{expanded}");
     }
 
     /// ADR 0025 S3: `expand` reads the body, strips the frontmatter, names the base directory and

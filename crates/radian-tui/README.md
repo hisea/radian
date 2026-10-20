@@ -1024,11 +1024,13 @@ throwaway terminal, not your working one.
     verification error text (it must name a redacted URL, never the key).
 11. **`/skill:` and `/skills`** (ADR 0025 slices 3+4; merge `1a8c0e8`). *Steps*: put a skill
     under `~/.radian/skills/<name>/SKILL.md` (or a `[skills] extra_paths` root); type
-    `/skill:` + Tab; run one with args; run `/skills`.
+    `/skill:` + Tab; run one with args; run `/skills`. In a trusted workspace a skill under
+    `.agents/skills/<name>/SKILL.md` behaves the same; untrusted, it stays invisible.
     *Expect*: completion lists the discovered skill names; `/skill:<name> args` folds the body
-    into one user message containing the args; `/skills` lists name + description, with
-    `(model-invocation off)` for a `disable-model-invocation: true` skill; an unknown name is a
-    notice, not a message. *Fail*: record the completion list and the folded message.
+    into one user message containing the args (a `$ARGUMENTS` placeholder is filled in place);
+    `/skills` lists name + description, with `(model-invocation off)` for a
+    `disable-model-invocation: true` skill; an unknown name is a notice, not a message.
+    *Fail*: record the completion list and the folded message.
 12. **auto mode `!` and the `AUTO` marker** (ADR 0026 D9; merge `8086b40`; also in the bullet
     list above). *Steps*: trigger an approval; press `!`; trigger another. *Expect*: `!`
     approves once **and** turns auto on for the session (the next ask never prompts), the

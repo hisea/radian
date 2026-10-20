@@ -35,14 +35,15 @@
 | `remove-safe-tier.md` | decided | 0016 主，另 11 个提及 | 档位只剩 `workspace`/`full`；`safe` 从不执行命令，沙箱侧只有测试在用；旧名不留别名，按未知档位 fail closed |
 | `sandbox-auto-allow-shell.md` | decided | 0012、0016、0043 | 片 0 Linux seccomp 堵 Unix socket；片 1 workspace 沙箱内 shell `allow`、越界显式请求再 `ask`；片 2 会话授权按前缀 |
 | `exec-jsonl-output.md` | decided | 0032、0010、0006，新 ADR | `--output jsonl`：journal 记录原样 + live 行 + `Result` 行；退出码 0/1/2/3/4/130 按结局；`-p -` 读 stdin |
-| `project-skills.md` | decided | 0025、0031 | 接上项目级 skill（`<project>/.agents/skills`，到仓库根），并支持 `$ARGUMENTS` |
-| `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 剩余：前台 shell 默认上限（等 shell-job）；patch 缩进容忍（待决） |
 | `file-tools-spawn-blocking.md` | decided | 无 | 提示词一句 → 基准 → `spawn_blocking`，让同一批 grep 真正并行 |
-| `full-tier-unrestricted.md` | decided | 0012 主、0043、0016、0038、0031 | `full` 档像 pi：shell `allow`，不弹内建提示，`--yes` 在 `full` 下无作用；启动行写 `no prompts`；三处细节待 owner 确认（用户 deny 仍生效、信任门缺省选 workspace、`always` 保留） |
+| `full-tier-unrestricted.md` | decided | 0012 主、0043、0016、0038、0031 | `full` 档像 pi：shell `allow`，不弹内建提示，`--yes` 在 `full` 下无作用；启动行写 `no prompts`；用户 deny 仍生效、陌生项目信任门缺省高亮 workspace + 启动画面字标下提示 `/trust`、`always` 保留＼� |
 | `shell-readonly-allow.md` | decided | 0012 修订、0039 | 内建一组只读命令免问（`git status`、`ls`、`rg`…），路径限工作区、不带可执行或写文件选项；`full` 全放行后实际作用在 `workspace` 与 `approval = always` |
 | `shell-compound-allow.md` | decided | 0012 不变，改 `radian-permissions/README.md` | 未加引号的 `&& \|\| ; \|` 切段，每段都命中 allow 才 allow，`xargs`/`env`/`sh` 等执行其参数的程序不放行 |
 | `ask-user-pass.md` | decided | 0024、0036 | 保留 `ask_user`：描述写明只问用户拥有的取舍、能查到的不问；定义瘦身到约 1 KB |
-| `jobs-running-only.md` | decided | 0037 | TUI `/jobs` 只列正在运行的后台 job（推翻同日“也列已结束的前台条目”） |
+| `context-at-imports.md` | decided（生态 1/4） | 0036 | 三个候选文件都展开 `@path` 导入：4 层、跳过代码块、只展开仓库内、计入 128 KiB，启动行列出 |
+| `mcp-servers-json.md` | decided（生态 2/4） | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门、按内容哈希确认，确认即批准其 server（一道门）；缺省 `inherit_env=["HOME"]`；环境白名单不变；MCP 文本结果套 `read` 的 64 KiB 上限并带截断标记 |
+| `command-hooks-claude-subset.md` | decided（生态 3/4） | 新 ADR；0012、0031、0011、0017、0016 | 外部命令 hook 只做 `PreToolUse`/`PostToolUse`/`Stop`，配置与 stdin 用 Claude/Codex 的子集，`allow`/`ask` 拒收，用户级 `[hooks]`、项目级 `.radian/hooks.json` 进信任门，工具名只在导入时翻译；吸收总报告第 17 条；编辑后检查是项目级 `PostToolUse`：配了才跑、同步每次、不批处理不延后、不内置不自动启用（本机数据：92% 的编辑消息只有一次编辑、跨轮段平均 1.83） |
+| `import-claude.md` | decided（生态 4/4） | 新 ADR；0029、0008、0025、0031 | `radian config import-claude` 一次性翻译，来源哪一级产物落哪一级， commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话与 memory；依赖前两条与 project-skills |
 | `workspace-git-exec-entries-file-tools.md` | idea（bug 待验证） | 0038、0039 | `write`/`patch` 不经沙箱，`workspace` 档能写 `.git/hooks/`，绕过 0038 的只读清单；修法倾向规则层 deny + 与沙箱共用一张清单 |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
@@ -60,6 +61,7 @@
 | `prompt-deliver-first.md` | idea | 0036 | 提示词：先交付能跑的版本再迭代、用参照物差分；cobol smoke 是现成复现 |
 | `runtime-resource-limits.md` | idea | 0036 | `<runtime>` 写实际可用 CPU/内存（cgroup），避免 `make -j16` 跑在 2 核容器 |
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
+| `acp-server.md` | idea（暂定不做） | 新 ADR；0032、0009、0024、0011、0010、0043 | ACP 服务端：先做外部适配器验证需求；审批→`request_permission`、inbox→`session/prompt`、live→`session/update`；在 exec jsonl 与控制口客户端之后 |
 
 只占索引行（暂无文件；来源都是总报告 `docs/research/2026-10-18-area-deep-dive/README.md`）：
 
@@ -69,4 +71,3 @@
 | 持久 todo + `/goal` | idea | 新 ADR（第 19 条） | 目标确定性带过压缩，轮末自动续跑，resume 后一键续跑 |
 | CI 与发布 | idea | 分发 ADR（第 27 条） | Linux/macOS CI、`cargo-deny`、安装方式；前提是公开仓库 |
 | SECURITY.md | idea | 无（第 28 条） | 一页威胁模型 + CVE 对照表 |
-| 生态兼容 | idea | 待定（第 31 条） | 读 `.agents/skills`、接受 `mcpServers`、Codex 子集 hook、`radian import claude` |

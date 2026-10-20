@@ -155,7 +155,7 @@ developer's real `~/.cargo`/`~/.rustup`; `tests/common`'s `tools()` builds with
 | `max_grep_context` | 30 | Bound the context lines a single match can add; a larger request is cut to it (with a `[context cut to N lines]` line), not refused. |
 | `max_git_output_bytes` | 1 MiB | Bound git output, truncated on a character boundary with a marker. |
 | `git_timeout` | 10 s | A hung git must not hang the turn. |
-| `default_shell_output_bytes` / `max_shell_output_bytes` | 64 KiB / 1 MiB, **per stream** | Aligned with `read`'s default and hard cap. Past the budget the first quarter and the last three quarters are kept and the middle is replaced by a marker naming the discarded bytes; the tail is larger because a failing build's error is at the end. `max_output_bytes` lets the model raise it, clamped to the hard cap. Discarded bytes are reported per stream in the text and in `structured.*_truncated_bytes`. |
+| `default_shell_output_bytes` / `max_shell_output_bytes` | 24 KiB / 1 MiB, **per stream** | Past the budget the middle is replaced by a marker naming the discarded bytes. Success keeps the first quarter and the last three quarters; a failed command (non-zero exit, signal kill, timeout, cancellation) keeps the first eighth and the last seven eighths of the same budget, so the error at the end survives. The exit status is only known at the end, so the capture keeps the maximum of both splits (a `9/8`-budget buffer) and trims to the right one at render time. `max_output_bytes` lets the model raise it, clamped to the hard cap. Discarded bytes are reported per stream in the text and in `structured.*_truncated_bytes`. |
 | `default_shell_timeout` / `max_shell_timeout` | 60 s / 600 s | A model-supplied `timeout_secs` is clamped to the maximum, and the clamp is reported. A command that needs longer uses `background: true` (no default timeout). |
 | `auto_background_after` | 120 s (`[shell] auto_background_secs`, `0` = off) | ADR 0037: a **foreground** `shell` call still running after this is adopted by the job registry in place — the same process group, never restarted — and the call returns at once with the job id, a `job` hint (not a path) and a bounded tail of the output so far. The pre-adoption output is written to the job's file and `job` starts at the adoption point. An explicit `timeout_secs` keeps counting from the command's start; with none there is no post-adoption deadline. If all four slots are busy the call is not adopted and runs to its foreground timeout. `!`/`!!` never adopt. |
 | `MAX_RUNNING_JOBS` / `JOB_RING_BYTES` | 4 / 64 KiB | At most four background jobs run at once (a fifth start is a tool error); each holds a process group, a 0600 `.out` file and a bounded ring. The ring only has to cover one `job` gap; the file keeps the full history for the host and `job` is the model's only read path (ADR 0039 decision 1). A truncated foreground result registers as a settled entry in the same registry without taking a slot (ADR 0037 decision 3a). |
@@ -215,8 +215,8 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
   cancellation and leader exit, and filters the environment to the sandbox whitelist, so a
   model-controlled shell never inherits the host's API keys. Output is read as a stream:
   only a bounded head and a trimmed tail are retained, so a command that prints gigabytes
-  cannot grow this process's memory (50 MiB through a 64 KiB budget grows peak RSS by about
-  688 KiB, measured).
+  cannot grow this process's memory (50 MiB through the default per-stream budget stays far
+  under the test's 16 MiB RSS-growth ceiling).
 
 ## Mounting
 
