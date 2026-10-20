@@ -29,18 +29,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            [
-                "read",
-                "write",
-                "patch",
-                "list",
-                "glob",
-                "grep",
-                "git_diff",
-                // The one-version aliases (ADR 0043 decision 3): registered for preflight, never
-                // advertised (the host model strips them from every request).
-                "git_status"
-            ]
+            ["read", "write", "patch", "glob", "grep"]
         );
 
         let call = agent_core::ToolCall {

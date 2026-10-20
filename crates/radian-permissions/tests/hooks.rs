@@ -631,96 +631,41 @@ async fn the_tool_gate_denies_before_the_rules_and_the_approver() {
     assert_eq!(events[1].decision, ResolvedDecision::Allow);
 }
 
-// ---------- ADR 0043 decision 3: the one-version tool aliases ----------
+// ---------- removed tool names: no alias judging ----------
 
-/// A renamed tool's old name is judged under the **new** name, so a `deny` on the new tool
-/// denies the alias and an `allow` written for the old name cannot widen it.
-#[tokio::test]
-async fn a_renamed_tool_is_judged_under_its_new_name() {
-    let dir = TempDir::new("alias-deny");
-    // The old name is `allow`ed, the new one `deny`ed: the alias must still be denied.
-    let profile = Profile::custom(
-        Preset::FullAccess,
-        ApprovalPolicy::OnAsk,
-        dir.path(),
-        vec![
-            Rule::new(
-                ToolMatcher::Name("git_status".into()),
-                ResourceMatcher::Any,
-                Action::Allow,
-            ),
-            Rule::new(
-                ToolMatcher::Name("git_diff".into()),
-                ResourceMatcher::Any,
-                Action::Deny,
-            )
-            .with_reason("git_diff is off"),
-        ],
-    )
-    .unwrap();
-    let approver = ScriptedApprover::scripted(Vec::new());
-    let audit = Arc::new(RecordingAudit::default());
-    let hooks = make_hooks(profile, Arc::clone(&approver), Arc::clone(&audit));
-    hooks.set_turn_source(Some(InputSource::User));
-    let cx = ctx();
+/// A rule written against a removed name matches only that literal name: there is no alias
+/// mapping, so a `deny` on `git_diff` never touches `read`, and an `allow` on `list` does
+/// not allow `read`. (Calls to removed names never reach this layer at all: the provider
+/// refuses them as unknown tools.)
 
-    let decision = decide(&hooks, &cx, &call("git_status", json!({})))
-        .await
-        .unwrap();
-    let ToolDecision::Deny { reason: got } = decision else {
-        panic!("`git_status` must be denied by its new name's rule, got {decision:?}");
-    };
-    assert!(got.contains("git_diff is off"), "`git_status`: {got}");
+#[test]
+fn rules_against_removed_names_match_only_the_literal_name() {
+    let dir = TempDir::new("removed-names");
+    let rules = vec![
+        Rule::new(
+            ToolMatcher::Name("git_diff".into()),
+            ResourceMatcher::Any,
+            Action::Deny,
+        ),
+        Rule::new(
+            ToolMatcher::Name("list".into()),
+            ResourceMatcher::Any,
+            Action::Allow,
+        ),
+    ];
+    // No canonical mapping: a `deny` on the removed `git_diff` leaves `read` at no-match
+    // (`ask`), and an `allow` on the removed `list` does not allow `read` either.
     assert_eq!(
-        approver.calls(),
-        0,
-        "a deny on the new name must not reach the approver"
+        evaluate(&rules, dir.path(), &call("read", json!({"path": "a"}))).action,
+        Action::Ask
     );
-    let events = audit.events();
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(events[0].decision, ResolvedDecision::Deny);
-}
-
-/// ADR 0043 decision 3: `list` is judged as `read` — an `allow` on the new name allows the
-/// alias, a `deny` on it denies the alias without reaching the approver.
-#[tokio::test]
-async fn the_list_alias_is_judged_as_read() {
-    let dir = TempDir::new("list-alias");
-    let profile = Profile::custom(
-        Preset::FullAccess,
-        ApprovalPolicy::OnAsk,
-        dir.path(),
-        vec![
-            Rule::new(
-                ToolMatcher::Name("read".into()),
-                ResourceMatcher::Any,
-                Action::Allow,
-            ),
-            Rule::new(
-                ToolMatcher::Name("list".into()),
-                ResourceMatcher::Any,
-                Action::Deny,
-            )
-            .with_reason("stale rule on the old name"),
-        ],
-    )
-    .unwrap();
-    let approver = ScriptedApprover::scripted(Vec::new());
-    let audit = Arc::new(RecordingAudit::default());
-    let hooks = make_hooks(profile, Arc::clone(&approver), Arc::clone(&audit));
-    hooks.set_turn_source(Some(InputSource::User));
-    let cx = ctx();
-
-    let decision = decide(&hooks, &cx, &call("list", json!({"path": "."})))
-        .await
-        .unwrap();
-    assert!(
-        matches!(decision, ToolDecision::Allow),
-        "`list` must be allowed by its new name's rule, got {decision:?}"
+    // The literal names still match literally (a stale config rule is inert, not an error).
+    assert_eq!(
+        evaluate(&rules, dir.path(), &call("git_diff", json!({}))).action,
+        Action::Deny
     );
     assert_eq!(
-        approver.calls(),
-        0,
-        "an allow on the new name must not reach the approver"
+        evaluate(&rules, dir.path(), &call("list", json!({}))).action,
+        Action::Allow
     );
 }

@@ -123,10 +123,6 @@ impl HostTools {
                 "job",
                 "read, wait for, or stop a background shell job by id",
             );
-            push(
-                "git_diff",
-                "a diff of the working tree; `stat: true` gives the status and a --stat summary",
-            );
         }
         if self.memory.is_some() {
             push(
