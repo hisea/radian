@@ -6635,7 +6635,8 @@ async fn memory_search_mounts_only_past_the_injection_budget() {
     let (code, _, stderr) = env.run(&["project", "new"]).await;
     assert_eq!(code, 0, "{stderr}");
     for n in 0..3 {
-        let content = format!("budget filler {n} ").repeat(600);
+        // ~800 tokens each: the first two fill the fixed block, the third does not fit.
+        let content = format!("budget filler {n} ").repeat(200);
         let (code, _, stderr) = env.run(&["add", &content]).await;
         assert_eq!(code, 0, "{stderr}");
     }
@@ -6667,6 +6668,12 @@ async fn memory_search_mounts_only_past_the_injection_budget() {
         names.iter().any(|name| name == "memory_search"),
         "a memory past the budget mounts the search: {names:?}"
     );
+    for gone in ["memory_save", "memory_revise", "memory_get"] {
+        assert!(
+            !names.iter().any(|name| name == gone),
+            "only `memory_search` mounts, never `{gone}`: {names:?}"
+        );
+    }
     let system = messages_of(&server, 0)[0]["content"]
         .as_str()
         .unwrap()
