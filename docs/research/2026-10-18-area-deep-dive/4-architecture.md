@@ -126,7 +126,7 @@ Radian 的骨架本身就快：单个 Rust 二进制，单进程，不需要 dae
 
 - ① 的前提是先用 seccomp 堵上 Linux bwrap 的 Unix socket（`docs/sandbox.md`，决定 4），前缀授权受 shell 匹配器看不见复合命令的限制；成本中高。它同时解决无头 `radian exec` 不带 `--yes` 跑不了 shell 的问题。
 - ② 不只是修订 0043 1a.7：缺 durable 的 `PermissionRequested`，`control` 还拒绝审批答复；成本中高，依赖 ①。
-- ④ 由 `docs/backlog/post-edit-diagnostics.md` 的两层方案替代。
+- ④ 由 `docs/backlog/command-hooks-claude-subset.md` 的项目级 `PostToolUse` 替代（编辑后检查：配了才跑、每次同步，不内置）。
 - ⑤ 的测试二进制合并要单独立 ADR（`set_var` 与全局状态已实测），release 调优先不做。
 
-对应的 backlog：`sandbox-auto-allow-shell.md`、`subagent-ask-forwarding.md`、`subagent-explore-model.md`、`exec-jsonl-output.md`、`post-edit-diagnostics.md`、`verify-test-binaries.md`。
+对应的 backlog：`sandbox-auto-allow-shell.md`、`subagent-ask-forwarding.md`、`subagent-explore-model.md`、`exec-jsonl-output.md`、`command-hooks-claude-subset.md`、`verify-test-binaries.md`。
