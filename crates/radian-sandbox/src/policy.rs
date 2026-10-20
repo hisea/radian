@@ -270,6 +270,9 @@ pub(crate) fn canonical_dir(path: &Path) -> Result<PathBuf, SandboxError> {
 
 /// Canonicalizes `path`, or its nearest existing ancestor when the path itself is absent, so
 /// a deny rule for `~/.ssh` still binds before the directory has been created.
+///
+/// The denial classifier also uses this to resolve the paths a failed command spells: the
+/// shell prints `/var/...` while the policy holds `/private/var/...`.
 pub(crate) fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
     // Resolve symlinks in the part that exists and keep the missing tail: a deny rule for a
     // not-yet-created `~/.netrc` must name `~/.netrc`, never stop at `$HOME` (which would
