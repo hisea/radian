@@ -12,4 +12,4 @@ Radian 完全没有评测，改进收益量不出来。journal 已有时间戳�
 
 ## 待决方向
 
-写 journal 指标提取器（成功率、耗时、token、缓存命中率、工具调用数、单次成功成本），搭最小评测集：15 道 Terminal-Bench 2.0 子集题 + 5 道 dogfood 提炼的真实任务，Radian 和 pi 各跑 3 次。Terminal-Bench 适配器正在 Linux 盒子上做（分支 `remote/tbench-lxc`，不在 `main`）。
+写 journal 指标提取器（成功率、耗时、token、缓存命中率、工具调用数、单次成功成本），搭最小评测集：15 道 Terminal-Bench 2.0 子集题 + 5 道 dogfood 提炼的真实任务，Radian 和 pi 各跑 3 次。Terminal-Bench 适配器已在 `main`（`benchmarks/terminal-bench/`，Harbor 0.24.0，静态 musl 二进制）；2026-10-20 的 4 题 smoke 在 LXC 上跑通（2 题得分，2 题超时），后续修补见 `bench-adapter-followups.md`。第一步：15–20 题子集 × 3 次，与 pi 用同一模型对比。
