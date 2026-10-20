@@ -64,7 +64,7 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
 
 ## Build
 
-The workspace MSRV is **Rust 1.88**. Debug build:
+The workspace MSRV is **Rust 1.99.1**. Debug build:
 
 ```sh
 cargo build --workspace --locked
