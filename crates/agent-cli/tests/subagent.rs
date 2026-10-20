@@ -901,11 +901,33 @@ async fn a_cancelled_parent_turn_stops_the_childs_background_job() {
     assert_ne!(code, 0, "a cancelled turn is not a clean exit");
 }
 
+/// Directory holding the real `cargo` binary: `rustup which cargo` resolves the active
+/// toolchain's binary, never the proxy. Used to aim a sandboxed shell at the real
+/// toolchain (see `a_non_auto_workspace_child_runs_a_sandboxed_shell`).
+fn real_toolchain_bin() -> Option<PathBuf> {
+    let output = std::process::Command::new("rustup")
+        .args(["which", "cargo"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let cargo = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    cargo.parent().map(Path::to_path_buf)
+}
+
 /// Slice 1 of `sandbox-auto-allow-shell`: a `general` child of a non-auto `workspace`
 /// parent runs a sandboxed shell with no approval at all — the tier's blanket `allow`
 /// answers it, so the headless child never meets the no-terminal denial. No extra
 /// wiring: the child inherits the tier (0043 1a) and builds the sandboxed profile.
 /// Before the slice the same call was denied; denying it again fails this test.
+///
+/// The child's `cargo check` must reach the real toolchain binary, not the rustup proxy:
+/// the proxy wants to create `$HOME/.rustup`, and the child's `HOME` is a scratch
+/// directory outside the workspace, which the sandbox denies. `PATH` is the only channel
+/// that reaches the sandboxed grandchild — the sandbox clears every other variable to
+/// its whitelist — so the toolchain directory goes first on `PATH`; setting
+/// `RUSTUP_HOME`/`CARGO_HOME` on the child would not survive into the sandbox.
 #[tokio::test]
 async fn a_non_auto_workspace_child_runs_a_sandboxed_shell() {
     let server = MockServer::start(vec![
@@ -921,7 +943,22 @@ async fn a_non_auto_workspace_child_runs_a_sandboxed_shell() {
     .await;
     let env = Env::new("child-shell");
     let workspace = env.workspace.to_str().unwrap().to_owned();
-    let (code, stdout, stderr) = run(spawn_parent(
+    // The real toolchain's `bin` directory, first on the child's `PATH` (see above).
+    // `None` keeps the inherited `PATH`: when `rustup` is absent the plain `cargo`
+    // on `PATH` is whatever the machine runs outside any sandbox too.
+    let mut extra: Vec<(&str, String)> = Vec::new();
+    if let Some(bin) = real_toolchain_bin() {
+        let mut paths = vec![bin];
+        if let Some(current) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&current));
+        }
+        if let Ok(joined) = std::env::join_paths(paths)
+            && let Some(joined) = joined.into_string().ok()
+        {
+            extra.push(("PATH", joined));
+        }
+    }
+    let (code, stdout, stderr) = run(spawn_parent_env(
         &env,
         &[
             "--model",
@@ -937,6 +974,7 @@ async fn a_non_auto_workspace_child_runs_a_sandboxed_shell() {
             "-p",
             "go",
         ],
+        &extra,
     ))
     .await;
     assert_eq!(code, 0, "{stderr}");
