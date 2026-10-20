@@ -122,3 +122,65 @@ async fn agent_core_accepts_the_ask_user_spec() {
     let mut chat = agent.open_session().await.unwrap();
     chat.close().await.unwrap();
 }
+
+/// Opens an `AskTools` session (no workspace needed, ADR 0024 Q5) and returns the
+/// advertised `ask_user` spec. Small helper for the description pins below.
+async fn ask_user_spec() -> agent_core::ToolSpec {
+    use futures_util::future::BoxFuture;
+    use radian_coding::{PromptError, Prompter, QuestionAnswer, QuestionRequest};
+
+    struct SilentPrompter;
+
+    impl Prompter for SilentPrompter {
+        fn ask(
+            &self,
+            _request: QuestionRequest,
+        ) -> BoxFuture<'_, Result<QuestionAnswer, PromptError>> {
+            Box::pin(async { Err(PromptError::Gone) })
+        }
+    }
+
+    let ask = radian_coding::AskTools::new(Arc::new(SilentPrompter));
+    let session = ask.open_session().await.unwrap();
+    session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "ask_user")
+        .expect("ask_user is advertised when a prompter is set")
+        .clone()
+}
+
+/// ADR 0024 decision 2 (`ask-user-pass`): the description itself states when to ask —
+/// only a decision that belongs to the user, or a real ambiguity looking cannot
+/// resolve — and tells the model to mark its recommendation.
+#[tokio::test]
+async fn the_ask_user_description_states_when_to_ask() {
+    let spec = ask_user_spec().await;
+    assert!(
+        spec.description.contains("belongs to the user"),
+        "ask only for the user's own decisions: {}",
+        spec.description
+    );
+    assert!(
+        spec.description.contains("do not ask what you can find"),
+        "look before you ask (ADR 0036): {}",
+        spec.description
+    );
+    assert!(
+        spec.description.contains("recommend"),
+        "give a recommendation when asking: {}",
+        spec.description
+    );
+}
+
+/// `ask-user-pass` decision 3: the slimmed definition serializes to 1584 bytes
+/// (measured 2026-10-20, down from 2014); the pin leaves a little room above that.
+#[tokio::test]
+async fn the_ask_user_definition_stays_small() {
+    let spec = ask_user_spec().await;
+    let bytes = serde_json::to_vec(&spec).unwrap().len();
+    assert!(
+        bytes <= 1600,
+        "the ask_user definition grew to {bytes} bytes, past the 1600 budget"
+    );
+}
