@@ -811,7 +811,7 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
     for wanted in [
         "kills the whole process group",
         "never killed for time",
-        "by default 120 s",
+        "by default 60 s",
         "by default 60 s, at most 600 s",
         "counts from the command's start",
         "by default 24 KiB",

@@ -1391,6 +1391,22 @@ theme = "light"
         );
     }
 
+    /// An unset `auto_background_secs` is the 60 s built-in default, not the old 120 s: a
+    /// mutation back to 120 fails this test.
+    #[test]
+    fn an_unset_auto_background_secs_defaults_to_sixty_seconds() {
+        assert_eq!(
+            radian_coding::Limits::default().auto_background_after,
+            Some(std::time::Duration::from_secs(60))
+        );
+        let config = parse_str("schema_version = 1\n").unwrap();
+        assert_eq!(config.shell.auto_background_secs, None);
+        assert_eq!(
+            config.shell.auto_background_after(),
+            Some(std::time::Duration::from_secs(60))
+        );
+    }
+
     /// ADR 0037: `[shell] auto_background_secs` is carried; `0` means off, unset
     /// means the built-in default, and a bad value is skipped (never a refusal).
     #[test]
