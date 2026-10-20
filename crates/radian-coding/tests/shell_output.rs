@@ -12,7 +12,6 @@ mod common;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use agent_core::{
@@ -22,7 +21,7 @@ use agent_core::{
 use common::TempDir;
 use radian_coding::{CodingSession, CodingTools, Jobs, Limits};
 use radian_sandbox::{
-    ProbeReport, Sandbox, SandboxBackend, SandboxError, SandboxMode, SandboxPolicy,
+    ProbeReport, Sandbox, SandboxBackend, SandboxCommand, SandboxError, SandboxMode, SandboxPolicy,
 };
 use serde_json::{Value, json};
 
@@ -596,7 +595,7 @@ impl SandboxBackend for SpawnFailingBackend {
         _policy: &SandboxPolicy,
         _program: &OsStr,
         _args: &[OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         Err(SandboxError::BackendUnavailable {
             backend: self.name(),
             detail: "the test backend refuses to build the command".into(),

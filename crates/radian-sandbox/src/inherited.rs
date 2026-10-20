@@ -16,7 +16,7 @@ use std::process::Command;
 
 use crate::error::{ProbeReport, SandboxError};
 use crate::policy::SandboxPolicy;
-use crate::{SandboxBackend, apply_env, workspace_tmp};
+use crate::{SandboxBackend, SandboxCommand, apply_env, workspace_tmp};
 
 pub(crate) static INHERITED: Inherited = Inherited;
 
@@ -43,7 +43,7 @@ impl SandboxBackend for Inherited {
         policy: &SandboxPolicy,
         program: &OsStr,
         args: &[OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         let mut command = Command::new(program);
         command.args(args).current_dir(&policy.workspace);
         // Host-side, not sandbox-side: a model-controlled shell never inherits the host's API
@@ -53,6 +53,6 @@ impl SandboxBackend for Inherited {
         // files, and the writable tree the outer sandbox grants is the workspace, so keep
         // `TMPDIR` inside it rather than at whatever the host's is.
         command.env("TMPDIR", workspace_tmp(policy));
-        Ok(command)
+        Ok(SandboxCommand::new(command))
     }
 }

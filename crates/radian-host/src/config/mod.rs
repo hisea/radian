@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 
 pub use error::ConfigError;
 pub use model::ModelConfig;
-pub use sandbox::{SandboxConfig, resolve_allow_unix_sockets};
+pub use sandbox::{SandboxConfig, resolve_allow_unix_sockets, unix_sockets_ignored_warning};
 pub use tui::{
     TuiColorOverride, TuiColorValue, TuiConfig, TuiFooterConfig, TuiFooterItemConfig,
     TuiFooterRowConfig, TuiWidgetsConfig,
@@ -865,6 +865,28 @@ mod tests {
         assert_eq!(paths[0], std::fs::canonicalize(&sock).unwrap());
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Slice 0: on Linux a non-empty `allow_unix_sockets` warns once that it is ignored
+    /// (the seccomp filter cannot whitelist by path); an empty list never warns, and on
+    /// macOS the list is honored so there is no warning either.
+    #[test]
+    fn the_linux_unix_socket_warning_fires_only_for_a_non_empty_list() {
+        assert_eq!(
+            unix_sockets_ignored_warning(&[]),
+            None,
+            "an empty list needs no warning"
+        );
+        let warning = unix_sockets_ignored_warning(&[PathBuf::from("/run/herdr.sock")]);
+        if cfg!(target_os = "linux") {
+            let warning = warning.expect("a non-empty list warns on Linux");
+            assert!(
+                warning.contains("ignored on Linux"),
+                "the line says it is ignored: {warning}"
+            );
+        } else {
+            assert_eq!(warning, None, "macOS honors the list");
+        }
     }
 
     #[test]

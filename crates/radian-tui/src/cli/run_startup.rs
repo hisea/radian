@@ -148,6 +148,11 @@ pub(super) fn startup_preamble(
         radian_host::user_home().as_deref(),
     );
     config_warnings.extend(socket_warnings);
+    // Slice 0: on Linux the seccomp filter denies every Unix socket, so a non-empty
+    // list is ignored (warn once here, at startup, with the other `[config]` lines).
+    if let Some(warning) = radian_host::unix_sockets_ignored_warning(&allow_unix_sockets) {
+        config_warnings.push(warning);
+    }
     // ADR 0027: the configured footer `command` items, parsed once and
     // spawned as background producers later (their values travel only through the contribution
     // store). v1 has no project-level config layer (ADR 0031), so every current source is the

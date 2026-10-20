@@ -1748,10 +1748,10 @@ async fn the_default_role_layers_are_sent() {
     assert!(content.contains("model: m"), "{content}");
 }
 
-/// The `<runtime>` Unix-socket sentence follows the backend, not the tier: Linux bwrap
-/// does not restrict Unix sockets (the accepted gap), so a `workspace` session there must
-/// not tell the model otherwise; macOS seatbelt does, so the sentence stays exactly as
-/// today. Setting the flag from the tier again fails the Linux half.
+/// The `<runtime>` Unix-socket sentence follows the backend: Linux bwrap denies every
+/// Unix socket in `workspace` (slice 0's seccomp filter), so the sentence is present;
+/// macOS seatbelt does too, so the sentence stays exactly as today. Setting the flag
+/// from the tier again fails the Linux half.
 #[tokio::test]
 async fn the_workspace_system_prompt_unix_socket_sentence_follows_the_backend() {
     let dir = scratch("unix-sockets-backend");
@@ -1784,8 +1784,8 @@ async fn the_workspace_system_prompt_unix_socket_sentence_follows_the_backend() 
     let content = system["content"].as_str().unwrap_or_default();
     if cfg!(target_os = "linux") {
         assert!(
-            !content.contains("Outbound Unix socket connections are denied"),
-            "bwrap does not restrict Unix sockets, so the sentence must be gone: {content}"
+            content.contains("Outbound Unix socket connections are denied"),
+            "bwrap denies every Unix socket in workspace, so the sentence is present: {content}"
         );
     } else {
         assert!(
