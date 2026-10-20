@@ -45,7 +45,7 @@
 | `ask-user-pass.md` | decided | 0024、0036 | 保留 `ask_user`：描述写明只问用户拥有的取舍、能查到的不问；定义瘦身到约 1 KB |
 | `jobs-running-only.md` | decided | 0037 | TUI `/jobs` 只列正在运行的后台 job（推翻同日“也列已结束的前台条目”） |
 | `context-at-imports.md` | decided（生态 1/4） | 0036 | 三个候选文件都展开 `@path` 导入：4 层、跳过代码块、只展开仓库内、计入 128 KiB，启动行列出 |
-| `mcp-servers-json.md` | decided（生态 2/4） | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门、按内容哈希确认，确认即批准其 server（一道门）；缺省 `inherit_env=["HOME"]`；环境白名单不变 |
+| `mcp-servers-json.md` | decided（生态 2/4） | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门、按内容哈希确认，确认即批准其 server（一道门）；缺省 `inherit_env=["HOME"]`；环境白名单不变；MCP 文本结果套 `read` 的 64 KiB 上限并带截断标记 |
 | `command-hooks-claude-subset.md` | decided（生态 3/4） | 新 ADR；0012、0031、0011、0017、0016 | 外部命令 hook 只做 `PreToolUse`/`PostToolUse`/`Stop`，配置与 stdin 用 Claude/Codex 的子集，`allow`/`ask` 拒收，用户级 `[hooks]`、项目级 `.radian/hooks.json` 进信任门，工具名只在导入时翻译；吸收总报告第 17 条 |
 | `import-claude.md` | decided（生态 4/4） | 新 ADR；0029、0008、0025、0031 | `radian config import-claude` 一次性翻译，来源哪一级产物落哪一级， commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话与 memory；依赖前两条与 project-skills |
 | `workspace-git-exec-entries-file-tools.md` | idea（bug 待验证） | 0038、0039 | `write`/`patch` 不经沙箱，`workspace` 档能写 `.git/hooks/`，绕过 0038 的只读清单；修法倾向规则层 deny + 与沙箱共用一张清单 |
