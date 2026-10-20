@@ -28,7 +28,6 @@ pub(super) struct SessionInputs {
     pub(super) driver_stopped: std::sync::Arc<dyn Fn(radian_host::DriverEnd) + Send + Sync>,
     pub(super) before_driver: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     pub(super) memory_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
-    pub(super) memory_notice_line: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
     pub(super) trust_setup: radian_host::trust::Setup,
     /// Where the memory service lives (`None` when no RADIAN_HOME/HOME): the session
     /// shares it with the agent's tools and injection.
@@ -262,18 +261,6 @@ pub(super) fn build_session_inputs(
             )])));
         })
     };
-    // ADR 0021: the memory tools' notice (the project a default-scope write
-    // registered) is a line the user must see, so it goes into the transcript as a notice
-    // instead of stderr, which the fullscreen UI would draw over.
-    let memory_notice_line: Arc<dyn Fn(&str) + Send + Sync> = {
-        let tx = tx.clone();
-        Arc::new(move |line: &str| {
-            let _ = tx.send(UiEvent::Command(AppInput::SessionDone(vec![format!(
-                "[memory] {line}"
-            )])));
-        })
-    };
-
     // ADR 0031 T3: resolve project trust before the session exists. The TUI is interactive, so
     // a workspace with resources and no decision asks through a startup modal (pushed after
     // the terminal is entered); the persistent write + audit happen then, once the journal
@@ -311,7 +298,6 @@ pub(super) fn build_session_inputs(
             driver_stopped,
             before_driver,
             memory_warning,
-            memory_notice_line,
             trust_setup,
             memory_root,
         },
@@ -353,7 +339,6 @@ pub(super) fn open_session_and_refresh(
         driver_stopped,
         before_driver,
         memory_warning,
-        memory_notice_line,
         trust_setup,
         memory_root,
         access_builder,
@@ -442,8 +427,7 @@ pub(super) fn open_session_and_refresh(
                 driver_stopped,
                 before_driver,
                 memory_warning,
-                memory_notice_line,
-            },
+                },
         ))
         .map_err(|error| error.to_string())?;
     mark("open-session-done");

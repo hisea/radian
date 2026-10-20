@@ -17,7 +17,9 @@ use super::setup_types::{ApprovalRouting, HostBindings, SessionFacts, SessionQue
 use super::support::{build_coding_tools, memory_notice, open_journal, session_hooks};
 use crate::describe::{describe, sandbox_word};
 use crate::home::{radian_home, skills_dir, user_home};
-use crate::memory::{MemoryHooks, MemoryInjection, MemoryService, MemoryTools};
+use crate::memory::{
+    MemoryHooks, MemoryInjection, MemoryService, MemoryTools, ScopeSelection, exceeds_budget,
+};
 use crate::pending::{PendingQueue, QueuedApprover, QueuedPrompter};
 use crate::skills::tools::SkillTools;
 use crate::skills::{self, SkillsHooks};
@@ -45,7 +47,6 @@ pub async fn open_session(
         driver_stopped,
         before_driver,
         memory_warning,
-        memory_notice_line,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -146,8 +147,23 @@ pub async fn open_session(
     let memory = memory_root
         .as_ref()
         .map(|root| MemoryService::open(&workspace, root));
-    let memory_tools = memory.as_ref().map(|service| {
-        MemoryTools::new(service.clone()).with_notice(Arc::clone(&memory_notice_line))
+    // ADR 0021 D7: `memory_search` mounts only when the Active records' estimated total
+    // exceeds the injection budget — what fits in the fixed block needs no search. The view
+    // is the fixed block's (Project when linked, then Global); the decision is once per
+    // session. A read failure warns and mounts nothing (invariant 2), never failing the open.
+    let memory_tools = memory.as_ref().and_then(|service| {
+        match service.list(ScopeSelection::Default, false) {
+            Ok(view) if exceeds_budget(&view, &injection_config) => {
+                Some(MemoryTools::new(service.clone()))
+            }
+            Ok(_) => None,
+            Err(error) => {
+                memory_warning(&format!(
+                    "memory read failed; `memory_search` is not mounted: {error}"
+                ));
+                None
+            }
+        }
     });
     let memory_notice = memory_notice(&memory, &injection_config);
     radian_session::trace::took("open/memory", t0);

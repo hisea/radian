@@ -2123,10 +2123,10 @@ fn the_list_and_memory_cards_have_their_own_heads() {
             "╭─ ask",
         ),
         (
-            "memory_get",
-            serde_json::json!({"id": "mem-7"}),
+            "memory_search",
+            serde_json::json!({"ids": ["mem-7"]}),
             serde_json::json!({}),
-            "◻ memory_get mem-7 ✓",
+            "◻ memory_search mem-7 ✓",
         ),
     ] {
         let mut app = App::new("m", "s");

@@ -263,20 +263,14 @@ fn canonical_workspace(path: &Path) -> Result<PathBuf, ProfileError> {
     Ok(canonical)
 }
 
-/// The memory tools (ADR 0021 D5/D7). Reading is allowed in every tier; writing always asks,
-/// in every tier. `--yes` answers the ask like any other, and a `deny` rule would still win.
-/// There is deliberately **no** archive/forget/purge/confirm tool (agent writes are limited to
-/// save/revise, D5). `memory_get` is not here: it is a one-version alias judged as
-/// `memory_search` (ADR 0043 decision 3 / [`crate::rule::canonical_tool_name`]).
+/// The memory tool (ADR 0021 D5/D7). Reading is allowed in every tier. There is
+/// deliberately **no** archive/forget/purge/confirm/save/revise agent tool (D5: the model has
+/// no write path).
 fn memory_rules() -> Vec<Rule> {
-    [
-        ("memory_search", Action::Allow),
-        ("memory_save", Action::Ask),
-        ("memory_revise", Action::Ask),
-    ]
-    .into_iter()
-    .map(|(name, action)| Rule::new(ToolMatcher::Name(name.into()), ResourceMatcher::Any, action))
-    .collect()
+    [("memory_search", Action::Allow)]
+        .into_iter()
+        .map(|(name, action)| Rule::new(ToolMatcher::Name(name.into()), ResourceMatcher::Any, action))
+        .collect()
 }
 
 /// The read-only built-ins, allowed regardless of path: `radian-coding` enforces the
@@ -348,11 +342,9 @@ mod tests {
         crate::rule::evaluate(profile.rules(), &profile.workspace, &call(name)).action
     }
 
-    /// ADR 0021 D5/D7: `memory_search` is allowed in all three tiers; `memory_save`/
-    /// `memory_revise` ask in all three; no destructive memory tool exists. ADR 0043 decision 3:
-    /// `memory_get` is an alias judged as `memory_search`, so it has no rule of its own here.
+    /// ADR 0021 D5/D7: `memory_search` is allowed in all three tiers; no memory tool asks.
     #[test]
-    fn the_memory_tools_read_allowed_and_write_asked_in_every_tier() {
+    fn memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks() {
         let ws = std::env::temp_dir();
         for profile in [
             Profile::safe(&ws).unwrap(),
@@ -361,14 +353,12 @@ mod tests {
         ] {
             let tier = profile.preset.as_str();
             assert_eq!(action(&profile, "memory_search"), Action::Allow, "{tier}");
-            assert_eq!(action(&profile, "memory_save"), Action::Ask, "{tier}");
-            assert_eq!(action(&profile, "memory_revise"), Action::Ask, "{tier}");
-            // The old name has no rule of its own; the hook canonicalizes it to
-            // `memory_search` before the rules run.
-            assert_eq!(action(&profile, "memory_get"), Action::Ask, "{tier}");
-            // No rule matches a destructive name, so the default `ask` stands — but there is
-            // no tool to ask about either.
+            // No rule matches a write or destructive name, so the default `ask` stands —
+            // but there is no tool to ask about either.
             for name in [
+                "memory_save",
+                "memory_revise",
+                "memory_get",
                 "memory_archive",
                 "memory_forget",
                 "memory_purge",

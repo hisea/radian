@@ -401,24 +401,9 @@ pub fn renderer_for(name: &str) -> ToolRender {
             body: plain_body,
             compact: false,
         },
-        // The memory tools (ADR 0021): operation and record id, the tool's own record
+        // The memory tool (ADR 0021): operation and record id, the tool's own record
         // summary as the body.
         "memory_search" => ToolRender {
-            head: memory_head,
-            body: plain_body,
-            compact: false,
-        },
-        "memory_get" => ToolRender {
-            head: memory_head,
-            body: plain_body,
-            compact: false,
-        },
-        "memory_save" => ToolRender {
-            head: memory_head,
-            body: plain_body,
-            compact: false,
-        },
-        "memory_revise" => ToolRender {
             head: memory_head,
             body: plain_body,
             compact: false,
@@ -544,7 +529,10 @@ mod tests {
             "$ ls"
         );
         assert_eq!(
-            renderer_for("memory_get").head(&card("memory_get", json!({"id": "m1"})), ""),
+            renderer_for("memory_search").head(
+                &card("memory_search", json!({"ids": ["m1"]})),
+                ""
+            ),
             "m1"
         );
     }
@@ -872,11 +860,6 @@ mod tests {
         let ask1 = card("ask_user", json!({"questions": [{"id": "q1"}]}));
         assert_eq!(ask_head(&ask1, ""), "1 question");
         assert_eq!(
-            memory_head(&card("memory_get", json!({"id": "mem-7"})), ""),
-            "mem-7"
-        );
-        // ADR 0043 decision 3: `memory_search { ids }` is the renamed `memory_get`.
-        assert_eq!(
             memory_head(&card("memory_search", json!({"ids": ["mem-7"]})), ""),
             "mem-7"
         );
@@ -887,10 +870,6 @@ mod tests {
         assert_eq!(
             memory_head(&card("memory_search", json!({"query": "auth flow"})), ""),
             "auth flow"
-        );
-        assert_eq!(
-            memory_head(&card("memory_revise", json!({"id": "mem-9"})), ""),
-            "mem-9"
         );
         // The search tools are small tools with a title naming what was searched.
         assert_eq!(

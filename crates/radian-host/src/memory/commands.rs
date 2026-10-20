@@ -401,9 +401,9 @@ pub fn execute(
             content,
         } => {
             let scope = write_scope(global);
-            // ADR 0021: a user's default-scope `add` registers a git workspace the
-            // same way the agent's `memory_save` does, and shows the notice through the host's
-            // note channel. Reads (`list`/`search`/`show`) never create anything.
+            // ADR 0021: a user's default-scope `add` registers a git workspace and
+            // shows the notice through the host's note channel. Reads (`list`/`search`/`show`)
+            // never create anything.
             if scope == WriteScope::Project
                 && let ProjectForWrite::Created(created) = service.project_for_write()?
             {
@@ -931,9 +931,9 @@ mod tests {
     fn confirm_finds_a_global_record_in_an_unlinked_workspace() {
         let (dir, service) = service("confirm-global");
         let record = service
-            .save_as_agent(WriteScope::Global, Kind::Fact, None, "body".into())
+            .add(WriteScope::Global, Kind::Fact, None, "body".into())
             .unwrap();
-        assert!(!record.verification.is_confirmed());
+        assert!(record.verification.is_confirmed());
         let output = execute(
             &service,
             MemoryCommand::Confirm {
@@ -948,7 +948,7 @@ mod tests {
         assert!(output.text.contains("confirmed"), "{output:?}");
         let found = service.get(ScopeSelection::GlobalOnly, &record.id).unwrap();
         assert!(found.verification.is_confirmed());
-        assert_eq!(found.source, Source::Agent, "confirm keeps the source");
+        assert_eq!(found.source, Source::User, "confirm keeps the source");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
