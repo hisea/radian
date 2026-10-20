@@ -72,11 +72,7 @@ fn model(session_id: &str) -> radian_host::SwitchableModel {
 /// `workspace` sandbox is a transparent stand-in — this test is about the profile,
 /// projection and queue swap, not enforcement), and `workspace` can be made to fail its
 /// probe.
-fn switchable_builder(workspace: std::path::PathBuf) -> radian_host::AccessBuilder {
-    switchable_builder_inner(workspace, false)
-}
-
-fn switchable_builder_inner(
+fn switchable_builder(
     workspace: std::path::PathBuf,
     fail_workspace: bool,
 ) -> radian_host::AccessBuilder {
@@ -144,7 +140,7 @@ async fn open_switchable_inner(
             ),
             tier: Preset::FullAccess,
             profile: Profile::full_access(&workspace).unwrap(),
-            access_builder: Some(switchable_builder_inner(workspace.clone(), fail_workspace)),
+            access_builder: Some(switchable_builder(workspace.clone(), fail_workspace)),
             parent: None,
             subagent: None,
             memory_root: None,
