@@ -329,6 +329,54 @@ fn a_skill_command_expands_through_the_host_then_sends() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR 0025 S3, built-ins `init` and `review`: `/skill:init` and `/skill:review <target>`
+/// parse like `/skill:greet` — an expansion effect whose answer becomes one user message.
+/// The bodies themselves are pinned host-side
+/// (`the_builtin_init_and_review_skills_are_discovered_listed_and_expandable`); this pins
+/// the TUI half: the command reaches the host with the right name and args.
+#[test]
+fn skill_init_and_review_commands_expand_through_the_host_then_send() {
+    let (dir, mut app, service) = app_with_memory("skill-builtins");
+    // No args: the block stands alone.
+    assert_eq!(
+        submit(&mut app, &service, "/skill:init"),
+        vec![Effect::ExpandSkill {
+            name: "init".into(),
+            args: String::new(),
+            steer: false,
+        }]
+    );
+    let expanded = "<skill name=\"init\">body</skill>";
+    let update = app.update(Input::SkillExpanded {
+        result: Ok(expanded.into()),
+        steer: false,
+    });
+    assert_eq!(
+        update.effects,
+        vec![Effect::SendFollowup(agent_core::Message::user(expanded))]
+    );
+
+    // With a target: it travels as the args (`$ARGUMENTS` in the `review` body).
+    assert_eq!(
+        submit(&mut app, &service, "/skill:review main"),
+        vec![Effect::ExpandSkill {
+            name: "review".into(),
+            args: "main".into(),
+            steer: false,
+        }]
+    );
+    let expanded = "<skill name=\"review\">body</skill>";
+    let update = app.update(Input::SkillExpanded {
+        result: Ok(expanded.into()),
+        steer: false,
+    });
+    assert_eq!(
+        update.effects,
+        vec![Effect::SendFollowup(agent_core::Message::user(expanded))]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `/skills` is an effect too: the host owns discovery, and the answer is shown as notices.
 #[test]
 fn a_skills_command_lists_through_the_host() {

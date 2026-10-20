@@ -45,7 +45,6 @@
 | `tui-copy-command.md` | decided（第一档） | 0027、0028 | `/copy` 复制最近一条已提交 assistant 的 markdown 源；`/copy code` 取最后一个代码块 |
 | `tui-retry-command.md` | decided（第一档） | 0017、0011、0003 | `/retry` 在模型错误结束后重发上一条用户消息 |
 | `tui-bell.md` | decided（第一档） | 0027、0024、0008、0037 | `tui.bell = off|attention|all`（缺省 off）：审批/提问/回合结束发 BEL |
-| `skill-init-review.md` | decided | 0025、0036、0043 | 内建 skill `init`（核实命令后写 AGENTS.md）与 `review`（shell 取 diff、并行 `general` 子会话、P0–P3 合并）；只走 `/skill:` 形式 |
 | `tui-loop-continuation.md` | decided | 0011、0005、0037、0027、0023、0017 | 续跑引擎第一、二步：`/loop [--every] [--times] [--for] [prompt]` 轮末重投，`User` 来源 + meta，缺省上限 20 次/1 h，不计唤醒闸门 |
 | `goal-mode.md` | decided（依赖 tui-loop-continuation） | 新 ADR；0018、0036、0011、0005、0043、0037、0034、0006、0022 | `/goal` 持久目标 + `goal {progress\|done\|wait}` 工具 + 预算；目标块确定性注入不进摘要；resume 后 paused；`exec -p --goal` 待决 |
 | `tui-inspector-panel.md` | decided（mcp 页等 mcp-servers-json） | 0023、0035、0037、0043、0045、0027 | 一个带标签页的 Overlay：`jobs | tools | mcp | hooks`，`/panel` 总入口，只读除杀 job，文本形式保留 |
