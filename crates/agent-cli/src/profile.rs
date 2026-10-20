@@ -219,6 +219,18 @@ fn probe_failure_injected() -> bool {
 mod tests {
     use super::*;
 
+    /// The config file's `permissions.profile` names: the two tiers plus the old aliases.
+    /// Anything else — including the removed `safe` tier — is refused, never guessed.
+    #[test]
+    fn parse_profile_accepts_only_the_two_tiers_and_their_aliases() {
+        for name in ["workspace", "workspace-write", "full", "full-access"] {
+            assert!(parse_profile(name).is_ok(), "{name}");
+        }
+        for name in ["safe", "bogus"] {
+            assert!(parse_profile(name).is_err(), "{name} must be refused");
+        }
+    }
+
     /// ADR 0038 decision 4: the `workspace` tier a general (and later lead) session runs in
     /// must let it write `.git` except the exec entries. If a host forgets to ask for it, the
     /// policy falls back to the read-only default and native `git commit` stops working.
