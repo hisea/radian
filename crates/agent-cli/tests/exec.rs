@@ -119,7 +119,7 @@ async fn a_budget_exceeded_turn_names_the_limit_and_the_flag() {
     ))
     .await;
 
-    assert_eq!(code, 1, "a budget-exceeded turn exits 1: {err}");
+    assert_eq!(code, 3, "a budget-exceeded turn exits 3 (ADR 0044): {err}");
     assert!(out.is_empty(), "stdout carries only model text: {out}");
     assert!(
         err.contains("the turn used its 1 model calls; raise the limit with --max-model-calls N"),

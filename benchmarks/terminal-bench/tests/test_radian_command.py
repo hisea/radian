@@ -18,6 +18,7 @@ from radian_command import (  # noqa: E402
     build_auth_json,
     build_command,
     derive_turn_timeout_secs,
+    parse_result_line,
     redact_base_url,
     select_provider,
     sha256_of_file,
@@ -152,6 +153,12 @@ class BuildCommandTest(unittest.TestCase):
         for flag in ("--yes", "--profile", "full", "--no-trust", "--offline-catalog"):
             self.assertIn(flag, command)
 
+    def test_stdout_is_machine_readable_jsonl(self):
+        command = build_command(
+            "/tmp/radian", base_invocation(), "do the thing", "/logs/out.txt", "/logs/err.txt"
+        )
+        self.assertIn("--output jsonl", command)
+
     def test_instruction_is_one_shell_word(self):
         instruction = 'write a file; rm -rf /tmp/x && echo "hi"'
         command = build_command(
@@ -267,6 +274,38 @@ class SummarizeUsageTest(unittest.TestCase):
             self.assertIsNone(usage.n_output_tokens)
             self.assertIsNone(usage.n_cache_tokens)
             self.assertIsNone(usage.cost_usd)
+
+
+class ParseResultLineTest(unittest.TestCase):
+    RESULT = {
+        "type": "Result",
+        "session_id": "s",
+        "outcome": "incomplete",
+        "exit_code": 4,
+        "stop_reason": "max_tokens",
+        "turns": 1,
+        "usage": {"input": 10},
+        "cost": None,
+        "text": "partial",
+    }
+
+    def test_last_line_result_is_returned(self):
+        stdout = (
+            '{"live": true, "event": "ModelTextDelta", '
+            '"data": {"text": "partial"}}\n'
+            + json.dumps(self.RESULT)
+            + "\n"
+        )
+        self.assertEqual(parse_result_line(stdout), self.RESULT)
+
+    def test_empty_stdout_has_no_result(self):
+        self.assertIsNone(parse_result_line(""))
+        self.assertIsNone(parse_result_line(None))
+        self.assertIsNone(parse_result_line("\n   \n"))
+
+    def test_non_result_last_line_is_none_not_an_error(self):
+        self.assertIsNone(parse_result_line("hello jsonl\n"))
+        self.assertIsNone(parse_result_line('{"live": true}\nnot json\n'))
 
 
 class DeriveTurnTimeoutTest(unittest.TestCase):
