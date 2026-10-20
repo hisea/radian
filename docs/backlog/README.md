@@ -34,7 +34,6 @@
 |---|---|---|---|
 | `remove-safe-tier.md` | decided | 0016 主，另 11 个提及 | 档位只剩 `workspace`/`full`；`safe` 从不执行命令，沙箱侧只有测试在用；旧名不留别名，按未知档位 fail closed |
 | `sandbox-auto-allow-shell.md` | decided | 0012、0016、0043 | 片 0 Linux seccomp 堵 Unix socket；片 1 workspace 沙箱内 shell `allow`、越界显式请求再 `ask`；片 2 会话授权按前缀 |
-| `exec-jsonl-output.md` | decided | 0032、0010、0006，新 ADR | `--output jsonl`：journal 记录原样 + live 行 + `Result` 行；退出码 0/1/2/3/4/130 按结局；`-p -` 读 stdin |
 | `read-absorbs-list.md` | decided | 0043、0039 | `read` 读目录即列目录，`list` 退为一个版本的别名，`explore` 变三个工具；基于 shell/job 合并后的 main 开分支 |
 | `file-tools-spawn-blocking.md` | decided | 无 | 提示词一句 → 基准 → `spawn_blocking`，让同一批 grep 真正并行 |
 | `tool-description-audit.md` | decided（pi B，remove-safe-tier 之后、full-tier-unrestricted 之前） | 0039、0021、0024、0025、0037 | 工具描述 10 处与代码不符（`grep`/`glob` 子目录不读上层 `.gitignore` 连行为一起改，`shell` 写明超时/转后台/输出预算，`ask_user` 去掉按字符数的 `maxLength`…）+ 4 处重复删掉；`<runtime>` 清单保留，不做整体压缩 |

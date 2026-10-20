@@ -1,0 +1,1 @@
+{"cost":{"estimated":false,"incomplete":false,"micros":3270},"exit_code":0,"outcome":"completed","session_id":"550e8400-e29b-41d4-a716-446655440000","stop_reason":"completed","text":"hello jsonl","turns":1,"type":"Result","usage":{"input":1234,"output":56}}
