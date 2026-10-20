@@ -171,7 +171,7 @@ config error). Without it the glyph set's default is used (`nerd` `󰰠`, `unico
 lacks it draws a fallback glyph, which may sit off the baseline. `[tui.footer.items.brand] style`
 still overrides the color.
 The collapsed summary names the sandbox in plain words: `workspace · macOS
-sandbox · context …` on macOS, `workspace · Linux sandbox · context …` on Linux and `no sandbox` for
+sandbox · context …` on macOS, `workspace · Linux sandbox · context …` on Linux and `no sandbox · no prompts` for
 `full`; the exact backend name (`macos-seatbelt`, `linux-bwrap`)
 stays in the expanded `profile:` line.
 The transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
@@ -713,7 +713,7 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   without reading as an error? pty automation asserts the text, not the prominence.
 - **the `/access` confirmation and marker** (ADR 0038 slice 2): type `/access` — does it name
   the current tier and its source (`flag`/`config`/`project`/`session`/`default`)? Type
-  `/access full` — does the confirmation panel make "full means no sandbox" obvious, is the
+  `/access full` — does the confirmation panel make "full means no sandbox" and "no prompts" obvious, is the
   default highlight on `cancel`, and do ↑/↓/Enter/Esc feel right? After "remember for this
   project", restart — is the tier applied and is the `(project)` marker readable in the footer
   and the startup summary? pty automation asserts the text, not the feel (ADR 0009).
@@ -1306,7 +1306,7 @@ could be built. This is the same wiring `agent-cli` uses:
 
 Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
 
-- `--profile workspace|full` picks the rule set (default `full`, ADR 0043: no sandbox;
+- `--profile workspace|full` picks the rule set (default `full`, ADR 0043: no sandbox, no prompts;
   `workspace` enforces the sandbox: reads allowed, writes allowed only when the resolved path
   stays inside the workspace, and the network is on). A project's `.radian/config.toml` can
   narrow the tier, never widen it.

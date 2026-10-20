@@ -10,7 +10,7 @@
 
 Claude Code 的做法：沙箱层拒 `.git/hooks`、`.git/config` 的写，权限层另有 protected paths 表，文件工具写 `.git` 也要问。Codex 在 `workspace-write` 下整个 `.git` 只读。
 
-`full` 档按 `full-tier-unrestricted.md` 全部放行，本项只管 `workspace`。
+`full` 档按 ADR 0012/0043 全部放行（不弹内建提示），本项只管 `workspace`。
 
 ## 待决问题
 

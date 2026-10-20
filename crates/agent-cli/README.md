@@ -316,8 +316,9 @@ radian config import-pi --from ~/.pi/agent --write              # save it (refus
   `y` (once), `a` (this session) or anything else (deny). Ctrl-C while waiting cancels the
   turn. "This session" grants are in memory only and are gone after `--resume`.
 - **`--allow-shell-command PREFIX`** allows one simple shell command prefix without asking
-  (e.g. `--allow-shell-command "git status"`). It replaces the blanket "shell asks" rule, so
-  unmatched commands still ask; a composite command (`git status; rm -x`) never matches.
+  (e.g. `--allow-shell-command "git status"`). In the `workspace` tier it replaces the
+  blanket "shell asks" rule, so unmatched commands still ask; a composite command
+  (`git status; rm -x`) never matches. The `full` tier allows shell without asking.
 - **Audit**: every decision writes one `PermissionResolved` to the session file, with
   `approver = policy` for a rule/grant decision and `user` for an answered prompt.
 

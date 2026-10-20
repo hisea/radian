@@ -226,7 +226,7 @@ declaration can only **narrow**, never widen.
 |---|---|---|---|---|
 | `safe` | none needed — nothing executes | not offered | denied | `read`/`list`/`glob`/`grep`/`git_diff` allowed; `write`/`patch` denied |
 | `workspace` | enforced: macOS seatbelt or Linux bubblewrap, probed at startup | offered, **inside** the sandbox | asks | `write`/`patch` allowed only when the resolved path stays under the workspace |
-| `full` | none — the default (ADR 0043) | offered, **not** sandboxed | allowed | `write`/`patch` as `workspace` |
+| `full` | none — the default (ADR 0043) | offered, **not** sandboxed, no prompts | allowed | `write`/`patch` as `workspace` |
 
 - **A failed probe refuses to run.** If the backend is missing or its probe fails, the host
   exits with an error instead of falling back to an unsandboxed run. There is no degrade path
@@ -245,11 +245,15 @@ declaration can only **narrow**, never widen.
   once" without showing the question; `deny` rules still deny, `allow` rules still allow, the
   sandbox is unchanged, and every decision is still audited. `radian` also has
   `--approval on-ask|always|never` (default `on-ask`).
+- **`full` trusts your environment.** It asks no built-in prompts and does not defend against
+  prompt injection from an unfamiliar repository — a malicious skill, config or context file
+  runs unimpeded. For a boundary use `workspace`, a container, or a dedicated OS user.
 - **Audit**: every decision writes one `PermissionResolved` event to the session file
   (`approver` = `policy` for a rule or grant, `user` for an answered prompt).
 - Approval shows the tool and its **resolved** resource; `y` allows once, `a` allows for the
   session (in memory only, gone after a resume), anything else denies. `--allow-shell-command
-  PREFIX` allows one *simple* command prefix without asking; a compound command always asks.
+  PREFIX` allows one *simple* command prefix without asking; in the `workspace` tier a compound
+  command still asks.
   Write these at the subcommand level, never at a bare program name.
 
 Common exit codes (ADR 0032 A3, unified): 0 success, 1 this turn/run failed, 2 a usage, setup
