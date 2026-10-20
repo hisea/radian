@@ -81,23 +81,25 @@ pub(crate) fn default_profile() -> ProfileArg {
 /// add `allow` rules, and only at the subcommand level — see
 /// `crates/radian-permissions/README.md`).
 ///
-/// Slice 1 of `sandbox-auto-allow-shell`: `sandboxed` is the sandbox's effective state —
-/// `true` when the caller just built one (a probed local backend, or `inherited`) — so
-/// the `workspace` rule is static for the session: `allow` inside the sandbox, `ask`
+/// Slice 1 of `sandbox-auto-allow-shell`: `sandbox` is the sandbox itself — `Some` when
+/// the caller just built one (a probed local backend, or `inherited`) — so the
+/// `workspace` rule is static for the session: `allow` inside an enforced sandbox, `ask`
 /// without one (fail closed). The caller builds the sandbox first and passes
-/// `sandbox.is_some()`; a failed probe is the error that refuses the run, never a
+/// `sandbox.as_ref()`; a failed probe is the error that refuses the run, never a
 /// fallback.
 pub(crate) fn build_profile(
     profile: ProfileArg,
     workspace: &Path,
     allow_shell_commands: &[String],
-    sandboxed: bool,
+    sandbox: Option<&Sandbox>,
 ) -> Result<Profile, SetupError> {
     let preset = profile.preset();
-    let base = match preset {
-        Preset::WorkspaceWrite if sandboxed => Profile::workspace_write_sandboxed(workspace),
-        Preset::WorkspaceWrite => Profile::workspace_write(workspace),
-        Preset::FullAccess => Profile::full_access(workspace),
+    let base = match (preset, sandbox) {
+        (Preset::WorkspaceWrite, Some(sandbox)) => {
+            Profile::workspace_write_sandboxed(workspace, sandbox)
+        }
+        (Preset::WorkspaceWrite, None) => Profile::workspace_write(workspace),
+        (Preset::FullAccess, _) => Profile::full_access(workspace),
     }
     .map_err(|e| SetupError(format!("--workspace {}: {e}", workspace.display())))?;
     if allow_shell_commands.is_empty() {
@@ -133,7 +135,7 @@ pub(crate) fn build_profile(
         );
     }
     Profile::custom(preset, ApprovalPolicy::OnAsk, workspace, rules)
-        .map(|profile| profile.with_sandboxed(sandboxed && preset == Preset::WorkspaceWrite))
+        .map(|profile| profile.with_sandbox(sandbox.filter(|_| preset == Preset::WorkspaceWrite)))
         .map_err(|e| SetupError(format!("--workspace {}: {e}", workspace.display())))
 }
 

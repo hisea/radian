@@ -41,7 +41,6 @@
 | `tui-loop-continuation.md` | decided | 0011、0005、0037、0027、0023、0017 | 续跑引擎第一、二步：`/loop [--every] [--times] [--for] [prompt]` 轮末重投，`User` 来源 + meta，缺省上限 20 次/1 h，不计唤醒闸门 |
 | `goal-mode.md` | decided（依赖 tui-loop-continuation） | 新 ADR；0018、0036、0011、0005、0043、0037、0034、0006、0022 | `/goal` 持久目标 + `goal {progress\|done\|wait}` 工具 + 预算；目标块确定性注入不进摘要；resume 后 paused；`exec -p --goal` 待决 |
 | `tui-inspector-panel.md` | decided（mcp 页等 mcp-servers-json） | 0023、0035、0037、0043、0045、0027 | 一个带标签页的 Overlay：`jobs | tools | mcp | hooks`，`/panel` 总入口，只读除杀 job，文本形式保留 |
-| `sandbox-token-profile.md` | decided | 0012、0016、0043 | 沙箱档 profile 构造收 `&Sandbox` 而不是 `bool`，拿不到实例造不出放行 profile（外部审核 P1-1） |
 | `exec-result-run-usage.md` | decided | 0044、0007 | `Result` 加 `run_turns`/`run_usage`/`run_cost`，以 tee 的 `written_len` 为本次运行边界；累计字段不变（外部审核 P2-2） |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
