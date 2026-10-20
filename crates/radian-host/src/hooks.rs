@@ -41,7 +41,8 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use tokio::sync::Notify;
 
 use crate::config::{HookCommand, HookMatcher, HooksConfig};
 use crate::wake_gate::WakeGate;
@@ -89,6 +90,12 @@ pub struct CommandHooks {
     /// needed. Each `CommandHooks` holds its own count (see the follow-up on
     /// `crate::job_notify::JobNotifier`): the same rate rule, not a shared counter.
     gate: Arc<WakeGate>,
+    /// Stop runs currently in flight: `on_turn_end` spawned them and they have not
+    /// finished yet. `exec -p` waits for these before deciding the run is over — a
+    /// verdict still running may yet open (or degrade) a turn.
+    pending: Arc<AtomicU64>,
+    /// Bumped whenever a spawned Stop run finishes, so a waiter re-checks.
+    pending_signal: Arc<Notify>,
     /// Continuations degraded to inject-only since the last wake. A woken turn absorbs
     /// the waiting injects, so a wake ends the burst; a user message resets it at once.
     degraded: Arc<AtomicU32>,
@@ -96,7 +103,6 @@ pub struct CommandHooks {
     /// The wake-budget notice line (routed like `warn`, as its own transcript notice).
     wake: HooksWarning,
 }
-
 impl CommandHooks {
     /// Builds the hooks from the resolved `[hooks]` section. Empty when the user configured
     /// nothing, in which case every method is a no-op.
@@ -122,6 +128,8 @@ impl CommandHooks {
             runtime: runtime.clone(),
             gate: Arc::new(WakeGate::new()),
             degraded: Arc::new(AtomicU32::new(0)),
+            pending: Arc::new(AtomicU64::new(0)),
+            pending_signal: Arc::new(Notify::new()),
             warn,
             wake,
         }
@@ -156,6 +164,18 @@ impl CommandHooks {
     /// ever start for. `exec -p` ends the session on these (exit 3) instead of waiting.
     pub fn degraded_pending(&self) -> u64 {
         u64::from(self.degraded.load(Ordering::SeqCst))
+    }
+
+    /// Stop runs spawned by `on_turn_end` and not finished yet (tests drive
+    /// `run_stop_once` directly, so only spawned runs count).
+    pub fn pending_stops(&self) -> u64 {
+        self.pending.load(Ordering::SeqCst)
+    }
+
+    /// Resolves whenever a spawned Stop run finishes. A waiter re-checks its exit
+    /// condition on each one.
+    pub fn stops_signal(&self) -> Arc<Notify> {
+        Arc::clone(&self.pending_signal)
     }
 
     /// Whether a compiled matcher matches a Radian tool name.
@@ -682,10 +702,16 @@ impl Hooks for CommandHooks {
         if !matches!(outcome.status, RunStatus::Completed) {
             return;
         }
+        // Counted before the spawn, synchronously: the increment happens before the
+        // driver's turn-end bookkeeping, so a host that sees the turn end also sees the
+        // pending run and waits for its verdict instead of exiting first.
+        self.pending.fetch_add(1, Ordering::SeqCst);
         let this = self.clone();
         let status = outcome.status.clone();
         self.runtime.spawn(async move {
             this.run_stop_once(&status).await;
+            this.pending.fetch_sub(1, Ordering::SeqCst);
+            this.pending_signal.notify_one();
         });
     }
 }

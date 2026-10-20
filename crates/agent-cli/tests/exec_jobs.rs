@@ -116,35 +116,30 @@ fn bg_reply(id: &str, command: &str) -> Reply {
 }
 
 /// Runs one `-p` turn in `--output jsonl` mode and returns the exit code, the closing
-/// `Result` record, and stderr.
+/// `Result` record, and stderr. `extra` prepends CLI flags (e.g. `--config`).
 async fn run_jsonl(
     server_base_url: &str,
     env: &Env,
     session_id: &str,
     prompt: &str,
+    extra: &[&str],
 ) -> (i32, Value, String) {
-    let (code, out, err) = feed(
-        spawn(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                server_base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--yes",
-                "--session-id",
-                session_id,
-                "--output",
-                "jsonl",
-                "-p",
-                prompt,
-            ],
-            env,
-        ),
-        "",
-    )
-    .await;
+    let mut args: Vec<&str> = vec![
+        "--model",
+        "m",
+        "--base-url",
+        server_base_url,
+        "--workspace",
+        env.ws.to_str().unwrap(),
+        "--yes",
+        "--session-id",
+        session_id,
+        "--output",
+        "jsonl",
+    ];
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&["-p", prompt]);
+    let (code, out, err) = feed(spawn(&args, env), "").await;
     let mut lines: Vec<&str> = out.lines().collect();
     assert!(!lines.is_empty(), "jsonl stdout ends with a Result line");
     let result: Value =
@@ -164,7 +159,7 @@ async fn p_waits_for_a_background_job_and_exits_with_the_woken_turn() {
     ])
     .await;
     let env = Env::fresh("basic");
-    let (code, result, err) = run_jsonl(&server.base_url, &env, "basic", "start a job").await;
+    let (code, result, err) = run_jsonl(&server.base_url, &env, "basic", "start a job", &[]).await;
 
     assert_eq!(code, 0, "{err}");
     assert_eq!(result.get("outcome"), Some(&json!("completed")), "{result}");
@@ -283,25 +278,25 @@ async fn p_waits_for_a_job_settling_as_the_turn_ends() {
     );
 }
 
-/// Four settles with no user input close today's count gate (3): the fourth notice is
-/// degraded to inject-only, so exec ends the session with exit 3 and names the unhandled
-/// notice in the `Result` record.
+/// Eleven settles inside one window fill the rate gate (10 wakes per 10 minutes): each
+/// woken turn starts the next job, the first ten settles wake a turn each, and the 11th
+/// notice is degraded to inject-only — so exec ends the session with exit 3 and names
+/// the unhandled notice in the `Result` record. (Eleven jobs at once is impossible: at
+/// most 4 background jobs run concurrently, ADR 0037 decision 9.)
 /// Mutation: exit 0 instead of 3 on a closed gate → this fails.
 #[tokio::test]
 async fn p_exits_three_when_the_wake_gate_closes() {
-    let server = MockServer::start(vec![
-        bg_reply("c1", "sleep 2"),
-        bg_reply("c2", "sleep 3"),
-        bg_reply("c3", "sleep 4"),
-        bg_reply("c4", "sleep 5"),
-        text_reply("first"),
-        text_reply("wake one"),
-        text_reply("wake two"),
-        text_reply("wake three"),
-    ])
-    .await;
+    let mut replies = vec![bg_reply("c1", "sleep 2"), text_reply("first")];
+    for i in 2..=11 {
+        // Each woken turn starts the next 2-second job and ends: every settle lands
+        // while idle, each waking exactly one turn until the gate is full.
+        replies.push(bg_reply(&format!("c{i}"), "sleep 2"));
+        replies.push(text_reply(&format!("got {}", i - 1)));
+    }
+    let server = MockServer::start(replies).await;
     let env = Env::fresh("gate");
-    let (code, result, err) = run_jsonl(&server.base_url, &env, "gate", "start four jobs").await;
+    let (code, result, err) =
+        run_jsonl(&server.base_url, &env, "gate", "start eleven jobs", &[]).await;
 
     assert_eq!(code, 3, "{err}");
     assert_eq!(
@@ -320,7 +315,65 @@ async fn p_exits_three_when_the_wake_gate_closes() {
         Some(&json!(1)),
         "{result}"
     );
-    assert_eq!(result.get("turns"), Some(&json!(4)), "{result}");
+    assert_eq!(result.get("turns"), Some(&json!(11)), "{result}");
+    assert!(
+        err.contains("wake budget is used up"),
+        "the degraded ending is visible on stderr: {err}"
+    );
+}
+
+/// A `Stop` hook that always asks for another turn fills the rate gate the same way job
+/// wakes do: past ten continuations its verdict degrades to inject-only, so exec ends
+/// the session with exit 3 and names the unhandled Stop verdict (not a job notice) in
+/// the `Result` record.
+/// Mutation: exec ignores a degraded Stop (exits 0 with the verdict unread) → this fails.
+#[tokio::test]
+async fn p_exits_three_when_a_stop_hook_fills_the_wake_gate() {
+    let mut replies = vec![text_reply("first")];
+    for i in 1..=10 {
+        replies.push(text_reply(&format!("again {i}")));
+    }
+    let server = MockServer::start(replies).await;
+    let env = Env::fresh("stop-gate");
+    let config = env.home.join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[model]\nmodel = \"m\"\n\
+         [[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"exit 2\"\n",
+    )
+    .unwrap();
+    let (code, result, err) = run_jsonl(
+        &server.base_url,
+        &env,
+        "stop-gate",
+        "keep going",
+        &["--config", config.to_str().unwrap()],
+    )
+    .await;
+
+    assert_eq!(code, 3, "{err}");
+    assert_eq!(
+        result.get("outcome"),
+        Some(&json!("budget_exceeded")),
+        "{result}"
+    );
+    assert_eq!(result.get("exit_code"), Some(&json!(3)), "{result}");
+    assert_eq!(
+        result.get("stop_reason"),
+        Some(&json!("wake_budget")),
+        "{result}"
+    );
+    assert_eq!(
+        result.get("unhandled_job_notices"),
+        Some(&json!(0)),
+        "no job notice waits: {result}"
+    );
+    assert_eq!(
+        result.get("unhandled_stop_notices"),
+        Some(&json!(1)),
+        "{result}"
+    );
+    assert_eq!(result.get("turns"), Some(&json!(11)), "{result}");
     assert!(
         err.contains("wake budget is used up"),
         "the degraded ending is visible on stderr: {err}"

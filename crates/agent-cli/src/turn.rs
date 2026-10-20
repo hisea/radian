@@ -223,16 +223,25 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
 /// The quiescence predicate, pure for testing: `-p` may exit only when no job is running,
 /// every recorded settle was fully handled, nothing queued could open a turn, and the
 /// driver is idle. `handled < settled` means a settle was recorded but its inject/followup
-/// has not returned yet: exiting then would miss the turn it wakes.
-fn may_exit(running: usize, settled: u64, handled: u64, wake_pending: bool, active: bool) -> bool {
-    running == 0 && handled >= settled && !wake_pending && !active
+/// has not returned yet: exiting then would miss the turn it wakes. `stops` counts Stop
+/// runs `on_turn_end` spawned and not finished yet: a verdict still running may yet open
+/// (or degrade) a turn, so exiting first would lose it.
+fn may_exit(
+    running: usize,
+    settled: u64,
+    handled: u64,
+    wake_pending: bool,
+    active: bool,
+    stops: u64,
+) -> bool {
+    running == 0 && handled >= settled && !wake_pending && !active && stops == 0
 }
 
 /// Whether `-p` may exit: [`may_exit`] over one consistent observation.
 ///
 /// # Why this is race-free
 ///
-/// Three orderings compose. (1) The registry: `settle` flips the cell, bumps its settle
+/// Four orderings compose. (1) The registry: `settle` flips the cell, bumps its settle
 /// total and sends the broadcast under one lock, and `settle_snapshot` reads `(running,
 /// settled)` under the same lock — so a settle either precedes the snapshot (the total
 /// includes it, and this waits for its delivery via `handled`) or follows it (the job
@@ -246,7 +255,10 @@ fn may_exit(running: usize, settled: u64, handled: u64, wake_pending: bool, acti
 /// exiting. A claimed entry the driver has not started yet is covered by the `close` in
 /// `close_and_join`, which never cancels it (see `active` below). A wake entry the
 /// driver has not claimed yet is still queued (`wake_pending`); inject-only leftovers
-/// never open a turn (ADR 0011 L5), so they do not block the exit.
+/// never open a turn (ADR 0011 L5), so they do not block the exit. (4) A spawned Stop
+/// run counts in `pending` synchronously inside `on_turn_end`, before the driver's
+/// turn-end bookkeeping notifies — so a check that sees the turn end also sees the
+/// pending run, and the `stops` signal below wakes the wait when it finishes.
 ///
 /// Residual: `Lagged` broadcast losses (the channel holds 16 with at most 4 jobs in
 /// flight) would stall `handled` below `settled`; the existing deadline/SIGTERM handling
@@ -264,6 +276,10 @@ async fn jobs_quiescent(run: &Run) -> bool {
         .map(|notifier| notifier.settled_handled())
         .unwrap_or(0);
     let wake_pending = run.inbox.snapshot().await.iter().any(|entry| entry.wake);
+    // A `Stop` run `on_turn_end` spawned and not finished yet: its verdict may yet open
+    // (or degrade) a turn. The increment happens synchronously inside `on_turn_end`,
+    // before the driver's turn-end bookkeeping notifies, so a check that sees the turn
+    // end also sees the pending run.
     // A core turn in flight (`busy`): only a turn can start a job or absorb a notice.
     // This deliberately does not use the driver's `turn_running` flag: that flag also
     // covers finalizing (journaling `TurnFinished`) after the core loop ended, and
@@ -275,8 +291,9 @@ async fn jobs_quiescent(run: &Run) -> bool {
     // turn — it still runs to completion, the join waits for it, and its status becomes
     // the last. Only a job it newly starts would outlive the exit, as on today's `-p`.
     let active = run.ui.busy();
+    let stops = run.session.command_hooks().pending_stops();
     let after = run.inbox.version();
-    after == before && may_exit(running, settled, handled, wake_pending, active)
+    after == before && may_exit(running, settled, handled, wake_pending, active, stops)
 }
 
 /// After a `-p` turn ends with jobs still outstanding: waits for the next thing that can
@@ -290,6 +307,7 @@ async fn wait_for_progress(run: &mut Run, cancelling: &mut bool) -> TurnEnd {
         .session
         .job_notifier()
         .map(|notifier| notifier.settled_signal());
+    let stops = run.session.command_hooks().stops_signal();
     tokio::select! {
         biased;
         Some(signal) = run.signals.recv() => {
@@ -312,6 +330,7 @@ async fn wait_for_progress(run: &mut Run, cancelling: &mut bool) -> TurnEnd {
         _ = run.driver_ended.notified() => TurnEnd::DriverEnded,
         _ = run.ui.finished.notified() => TurnEnd::Done,
         _ = run.ui.started.notified() => TurnEnd::Done,
+        _ = stops.notified() => TurnEnd::Done,
         _ = async {
             match &settled {
                 Some(signal) => signal.notified().await,
@@ -486,25 +505,28 @@ mod tests {
     use super::*;
 
     /// The exit predicate, one row per reason to stay: a running job, an unhandled
-    /// settle, a queued wake entry, or an active driver each blocks the exit on its own.
+    /// settle, a queued wake entry, an active driver, or a running Stop hook each blocks
+    /// the exit on its own.
     /// Mutation: drop any conjunct (in particular the `handled >= settled` check) → the
     /// row that names it fails.
     #[test]
-    fn the_exit_needs_no_running_job_no_unhandled_settle_no_wake_and_no_turn() {
+    fn the_exit_needs_no_running_job_no_unhandled_settle_no_wake_no_turn_and_no_stop() {
         // Fully quiescent: may exit.
-        assert!(may_exit(0, 2, 2, false, false));
+        assert!(may_exit(0, 2, 2, false, false, 0));
         // No settle was ever recorded: `0 >= 0` exits (the no-background-job run).
-        assert!(may_exit(0, 0, 0, false, false));
+        assert!(may_exit(0, 0, 0, false, false, 0));
         // A job is still running.
-        assert!(!may_exit(1, 0, 0, false, false));
+        assert!(!may_exit(1, 0, 0, false, false, 0));
         // A settle was recorded but its inject/followup has not returned: the turn it
         // wakes has not started yet, so exiting now would miss it.
-        assert!(!may_exit(0, 2, 1, false, false));
+        assert!(!may_exit(0, 2, 1, false, false, 0));
         // A wake entry is queued: the driver is about to open a turn for it.
-        assert!(!may_exit(0, 2, 2, true, false));
+        assert!(!may_exit(0, 2, 2, true, false, 0));
         // The driver is running a turn (or claimed its input and is about to).
-        assert!(!may_exit(0, 2, 2, false, true));
+        assert!(!may_exit(0, 2, 2, false, true, 0));
+        // A Stop run is still going: its verdict may yet open (or degrade) a turn.
+        assert!(!may_exit(0, 0, 0, false, false, 1));
         // Over-delivery is not a thing, but the comparison stays total either way.
-        assert!(may_exit(0, 2, 3, false, false));
+        assert!(may_exit(0, 2, 3, false, false, 0));
     }
 }
