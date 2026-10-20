@@ -67,6 +67,14 @@ pub(super) fn startup_preamble(
     // startup before any session file exists.
     // v1 has one configuration layer, chosen by the user (`--config` > `RADIAN_CONFIG` >
     // `~/.radian/config/config.toml`); there is no project-level config (ADR 0031).
+    // ADR 0008 §2: a fresh install has no config file; create the commented default at the
+    // default location (never an explicit `--config`/`RADIAN_CONFIG` path). A failure warns
+    // once and the run continues.
+    match radian_host::ensure_default_config(cli.config.as_deref()) {
+        Ok(Some(path)) => eprintln!("created a default config at {}", path.display()),
+        Ok(None) => {}
+        Err(warning) => eprintln!("[config] {warning}; continuing without creating it"),
+    }
     let config =
         radian_host::load_config(cli.config.as_deref()).map_err(|error| error.to_string())?;
     if config.read_only {
