@@ -107,6 +107,27 @@ pub(crate) async fn shutdown(
     }
 }
 
+/// Closes the inbox at once and joins the driver, without running queued input.
+///
+/// Unlike [`shutdown`], this does not let queued inputs run first: `-p` only reaches a
+/// close once nothing queued can open a turn (a wake entry would have kept it waiting).
+/// What is left then is dead `inject` context no turn will ever absorb, and waiting for
+/// it to drain would hang. A claimed-but-unstarted turn still runs to completion; the
+/// join waits for it.
+pub(crate) async fn close_and_join(
+    inbox: &Arc<Inbox>,
+    session: &Arc<radian_host::LocalSession>,
+) -> Result<(), String> {
+    inbox.close();
+    match session.join().await {
+        radian_host::DriverEnd::Ok => Ok(()),
+        radian_host::DriverEnd::Failed(error) => Err(error),
+        radian_host::DriverEnd::Panicked(message) => {
+            Err(format!("the driver task ended unexpectedly: {message}"))
+        }
+    }
+}
+
 /// Aborts the driver: the session is dropped, which kills the tool processes at once. Used
 /// only for the forced second Ctrl-C.
 pub(crate) async fn force_exit(session: &Arc<radian_host::LocalSession>) -> i32 {

@@ -14,8 +14,8 @@ use tokio::sync::{Notify, mpsc};
 
 use super::approval::TERMINAL_SOURCE;
 use super::events::{
-    Next, SIGTERM, TurnEnd, force_exit, next_event, report_error, report_task, shutdown, terminate,
-    wait_for_turn,
+    Next, SIGTERM, TurnEnd, close_and_join, force_exit, next_event, report_error, report_task,
+    shutdown, terminate, wait_for_turn,
 };
 use super::jsonl::{self, ExecEnd};
 use super::redact::redact;
@@ -77,7 +77,13 @@ async fn enqueue_input(
     }
 }
 
-/// `-p`: send one input, wait for its turn, then shut the driver down.
+/// `-p`: send one input, wait for its turn, then wait for the background jobs that turn
+/// (or a woken one) started, until no job is running and no woken turn is left.
+///
+/// Each settle is delivered by the notifier as usual: a woken turn runs, and this waits
+/// for it the same way it waited for the first. The exit code and the `Result` record
+/// come from the last turn (ADR 0044). With no background job the loop below breaks at
+/// once and the run is exactly what it was before.
 pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
     if let Err(error) = enqueue_input(&run.inbox, &run.hooks, prompt, TERMINAL_SOURCE, false).await
     {
@@ -121,8 +127,56 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
         }
         TurnEnd::Done => {}
     }
+    loop {
+        // A degraded notice never opens a turn (the wake gate is closed): end the session
+        // instead of waiting for something that cannot happen. Exit 3, the budget family
+        // (ADR 0044); the `Result` record names the budget and the unhandled count.
+        if let Some(notifier) = run.session.job_notifier()
+            && notifier.degraded_pending() > 0
+        {
+            let unhandled = notifier.degraded_pending();
+            eprintln!(
+                "radian: the wake budget is used up with {unhandled} job completion \
+                 notice(s) unhandled; ending the run"
+            );
+            if let Err(error) = close_and_join(&run.inbox, &run.session).await {
+                eprintln!("radian: {}", redact(&error, &run.secrets));
+            }
+            return LoopDone {
+                code: 3,
+                end: ExecEnd::WakeBudget { unhandled },
+            };
+        }
+        if jobs_quiescent(run).await {
+            break;
+        }
+        match wait_for_progress(run, &mut cancelling).await {
+            TurnEnd::Terminated => {
+                let code = terminate(&run.inbox, &run.session, &run.secrets, SIGTERM).await;
+                return LoopDone {
+                    code,
+                    end: ExecEnd::Terminated,
+                };
+            }
+            TurnEnd::Forced => {
+                let code = force_exit(&run.session).await;
+                return LoopDone {
+                    code,
+                    end: ExecEnd::Forced,
+                };
+            }
+            TurnEnd::DriverEnded => {
+                let (code, ok) = report_task(&run.session, &run.secrets).await;
+                return LoopDone {
+                    code,
+                    end: ExecEnd::DriverEnded { code, ok },
+                };
+            }
+            TurnEnd::Done => {}
+        }
+    }
     if let Some(code) = report_error(
-        &shutdown(&run.inbox, &run.ui, &run.session).await,
+        &close_and_join(&run.inbox, &run.session).await,
         &run.secrets,
     ) {
         return LoopDone {
@@ -155,6 +209,96 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
             code: 1,
             end: ExecEnd::Status(None),
         },
+    }
+}
+
+/// The quiescence predicate, pure for testing: `-p` may exit only when no job is running,
+/// every recorded settle was fully handled, nothing queued could open a turn, and the
+/// driver is idle. `handled < settled` means a settle was recorded but its inject/followup
+/// has not returned yet: exiting then would miss the turn it wakes.
+fn may_exit(running: usize, settled: u64, handled: u64, wake_pending: bool, active: bool) -> bool {
+    running == 0 && handled >= settled && !wake_pending && !active
+}
+
+/// Whether `-p` may exit: [`may_exit`] over one consistent observation.
+///
+/// # Why this is race-free
+///
+/// Three orderings compose. (1) The registry: `settle` flips the cell, bumps its settle
+/// total and sends the broadcast under one lock, and `settle_snapshot` reads `(running,
+/// settled)` under the same lock — so a settle either precedes the snapshot (the total
+/// includes it, and this waits for its delivery via `handled`) or follows it (the job
+/// still counts as running, and this waits for it). (2) The notifier bumps `handled`
+/// only after the inject/followup returns, so `handled >= settled` means every recorded
+/// settle reached the inbox; each bump also resolves `settled_signal`, so a settle that
+/// lands after the snapshot wakes the wait below instead of being missed. (3) The inbox
+/// version brackets the whole check: the driver's claim pops silently, with no
+/// notification, but it bumps the version inside the same critical section — a claim
+/// between the two version reads makes them differ and this re-checks instead of
+/// exiting. A wake entry the driver has not claimed yet is still queued (`wake_pending`)
+/// or the driver is already running (`active`); inject-only leftovers never open a turn
+/// (ADR 0011 L5), so they do not block the exit.
+///
+/// Residual: `Lagged` broadcast losses (the channel holds 16 with at most 4 jobs in
+/// flight) would stall `handled` below `settled`; the existing deadline/SIGTERM handling
+/// still bounds that wait, and no new timer is added.
+async fn jobs_quiescent(run: &Run) -> bool {
+    let before = run.inbox.version();
+    let (running, settled) = run
+        .session
+        .jobs_registry()
+        .map(|jobs| jobs.settle_snapshot())
+        .unwrap_or((0, 0));
+    let handled = run
+        .session
+        .job_notifier()
+        .map(|notifier| notifier.settled_handled())
+        .unwrap_or(0);
+    let wake_pending = run.inbox.snapshot().await.iter().any(|entry| entry.wake);
+    let active = run.ui.busy() || run.session.turn_running();
+    run.inbox.version() == before && may_exit(running, settled, handled, wake_pending, active)
+}
+
+/// After a `-p` turn ends with jobs still outstanding: waits for the next thing that can
+/// change the exit condition — a turn ending or starting, a handled settle, a queued wake
+/// entry, the driver ending, or a signal. Signal handling matches [`wait_for_turn`]:
+/// SIGTERM stops, a second Ctrl-C forces, a first Ctrl-C cancels a running turn and
+/// otherwise just re-checks (cancelling with no turn in flight could eat the next woken
+/// turn, so an idle Ctrl-C only wakes the loop).
+async fn wait_for_progress(run: &mut Run, cancelling: &mut bool) -> TurnEnd {
+    let settled = run
+        .session
+        .job_notifier()
+        .map(|notifier| notifier.settled_signal());
+    tokio::select! {
+        biased;
+        Some(signal) = run.signals.recv() => {
+            if signal == SIGTERM {
+                // The process was asked to stop: no more turns, and `terminate` closes
+                // the session once this one has ended.
+                return TurnEnd::Terminated;
+            }
+            if *cancelling {
+                return TurnEnd::Forced;
+            }
+            if !run.ui.busy() && !run.session.turn_running() {
+                return TurnEnd::Done;
+            }
+            *cancelling = true;
+            run.inbox.cancel(CancelCause::Requested);
+            eprintln!("radian: cancelling (Ctrl-C again to quit)");
+            TurnEnd::Done
+        }
+        _ = run.driver_ended.notified() => TurnEnd::DriverEnded,
+        _ = run.ui.finished.notified() => TurnEnd::Done,
+        _ = run.ui.started.notified() => TurnEnd::Done,
+        _ = async {
+            match &settled {
+                Some(signal) => signal.notified().await,
+                None => std::future::pending().await,
+            }
+        } => TurnEnd::Done,
+        _ = run.inbox.wake_signal() => TurnEnd::Done,
     }
 }
 
@@ -315,4 +459,32 @@ pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> LoopDone
         None => ExecEnd::NoTurns,
     };
     LoopDone { code: 0, end }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exit predicate, one row per reason to stay: a running job, an unhandled
+    /// settle, a queued wake entry, or an active driver each blocks the exit on its own.
+    /// Mutation: drop any conjunct (in particular the `handled >= settled` check) → the
+    /// row that names it fails.
+    #[test]
+    fn the_exit_needs_no_running_job_no_unhandled_settle_no_wake_and_no_turn() {
+        // Fully quiescent: may exit.
+        assert!(may_exit(0, 2, 2, false, false));
+        // No settle was ever recorded: `0 >= 0` exits (the no-background-job run).
+        assert!(may_exit(0, 0, 0, false, false));
+        // A job is still running.
+        assert!(!may_exit(1, 0, 0, false, false));
+        // A settle was recorded but its inject/followup has not returned: the turn it
+        // wakes has not started yet, so exiting now would miss it.
+        assert!(!may_exit(0, 2, 1, false, false));
+        // A wake entry is queued: the driver is about to open a turn for it.
+        assert!(!may_exit(0, 2, 2, true, false));
+        // The driver is running a turn (or claimed its input and is about to).
+        assert!(!may_exit(0, 2, 2, false, true));
+        // Over-delivery is not a thing, but the comparison stays total either way.
+        assert!(may_exit(0, 2, 3, false, false));
+    }
 }
