@@ -7362,7 +7362,10 @@ async fn the_harness_never_reads_a_config_outside_its_temp_root() {
     );
     let expected = home.join("config/config.toml");
     assert!(
-        stderr.contains(&format!("created a default config at {}", expected.display())),
+        stderr.contains(&format!(
+            "created a default config at {}",
+            expected.display()
+        )),
         "the default is created inside the harness root: {stderr}"
     );
     assert!(
