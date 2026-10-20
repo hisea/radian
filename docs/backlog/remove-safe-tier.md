@@ -1,6 +1,6 @@
 # 去掉 `safe` 档：档位只剩 `workspace` 与 `full`
 
-- 状态：idea�；剩"已记录的 `safe` 映射到什么"一条待确认）
+- 状态：decided＼�
 - 涉及 ADR：0016（主）、0012、0038、0043、0031、0008、0020、0021、0026、0033、0034、0036
 - 来源：
 
@@ -18,12 +18,9 @@
 - `radian-permissions` 删 `Preset::Safe` 与 `Profile::safe()`；`radian-sandbox` 删 `SandboxMode::Safe`、`Policy::safe()` 和逃逸矩阵的 safe 行；`describe` 删 "no exec" 一句；TUI 删 `Tier::Safe`、`/access safe` 补全、`!` 的 safe 拒绝分支；herdr 上报的 `tier` 只剩两个值（0034）；Terminal-Bench 适配器的 `profile` Literal 同步。
 - 旧 journal 不动：`SessionCreated.profile = "safe"` 作为历史字符串原样读回，replay 与 `journal-selfcheck` 不因它失败（0006 的兼容要求）。
 
-## 待决问题
+## 已记录的 `safe` 怎么处理＼�radian 还没发布，没有人用 `safe`）
 
-**已记录的 `safe` 映射到什么。** 今天 `access.json` 遇到未知档位名是整文件拒绝（fail closed），项目 `config.toml` 的未知值也是 fail closed（0008）。去掉之后，`access.json` 里的 `"safe"`、项目 `profile = "safe"`、命令行 `--profile safe`、`/access safe`、resume 一个 `safe` 会话，都要有一条规则。两个选项：
-
-1. **映射为 `workspace` 并警告一行**（推荐）：它是剩下最窄的档位，绝不放宽到 `full`；写法与 0016 保留 `workspace-write`/`full-access` 旧名的做法一致，但 `safe` 不进帮助、不长期保留。
-2. **按未知值 fail closed**：最省代码，但一条过去的记录会让启动失败；没有人在用 `safe`，实际影响接近零。
+不做映射、不留别名、不警告：`safe` 和任何打错的档位名一样，走现有的 fail closed 路径。`access.json` 里出现 `"safe"` 整文件拒绝，项目 `profile = "safe"` 按未知值处理（0008），`--profile safe` 与 `/access safe` 报未知档位。旧 journal 的 `profile = "safe"` 仍是一个原样读回的字符串，不需要特殊处理。
 
 ## 落地
 
@@ -32,4 +29,4 @@
 
 ## 验收
 
-`--profile safe` 与 `/access safe` 按待决问题选定的规则处理；`access.json` 与项目配置里的 `"safe"` 同样；旧 journal 的 `profile = "safe"` 能 resume 且 `journal-selfcheck` 通过；信任门与 `/access` 只出现两个档位；逃逸矩阵没有 safe 行且 Linux 的已知限制表少一行；herdr 上报只有两个 `tier` 值。变异：映射规则改成放宽到 `full`，测试应失败。
+`--profile safe` 与 `/access safe` 报未知档位；`access.json` 里的 `"safe"` 整文件拒绝，项目配置里的按未知值处理；旧 journal 的 `profile = "safe"` 能 resume 且 `journal-selfcheck` 通过；信任门与 `/access` 只出现两个档位；逃逸矩阵没有 safe 行且 Linux 的已知限制表少一行；herdr 上报只有两个 `tier` 值。变异：`safe` 被悄悄当成 `full` 或 `workspace` 接受，测试应失败。

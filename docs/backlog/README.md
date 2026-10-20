@@ -33,12 +33,12 @@
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
 | `tool-definitions-trim.md` | in-progress（pi/shell-job） | 0037、0043、0039、0006 | 一个 `job { id, op }` 替掉 `job_output`/`job_list`/`job_kill`/`shell_output`，前台留存输出进同一注册表 |
+| `remove-safe-tier.md` | decided | 0016 主，另 11 个提及 | 档位只剩 `workspace`/`full`；`safe` 从不执行命令，沙箱侧只有测试在用；旧名不留别名，按未知档位 fail closed |
 | `project-skills.md` | decided | 0025、0031 | 接上项目级 skill（`<project>/.agents/skills`，到仓库根），并支持 `$ARGUMENTS` |
 | `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 剩余：grep 先丢上下文 + 上限降到 24–32 KiB + 描述指向 files/count；前台 shell 默认上限（等 shell-job）；patch 缩进容忍（待决） |
 | `read-absorbs-list.md` | decided | 0043、0039 | `read` 读目录即列目录，`list` 退为一个版本的别名，`explore` 变三个工具；基于 shell/job 合并后的 main 开分支 |
 | `file-tools-spawn-blocking.md` | decided | 无 | 提示词一句 → 基准 → `spawn_blocking`，让同一批 grep 真正并行 |
 | `ask-user-pass.md` | decided | 0024、0036 | 保留 `ask_user`：描述写明只问用户拥有的取舍、能查到的不问；定义瘦身到约 1 KB |
-| `remove-safe-tier.md` | idea | 0016 主，另 11 个提及 | 档位只剩 `workspace`/`full`；`safe` 从不执行命令，沙箱侧只有测试在用；待定已记录的 `safe` 映射规则 |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `post-edit-diagnostics.md` | idea | 新 ADR | 编辑后诊断：tree-sitter 语法层 + 配置的检查命令；先数 dogfood 里 patch→check 序列 |
