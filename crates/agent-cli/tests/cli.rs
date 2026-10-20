@@ -1642,10 +1642,12 @@ async fn system_prompt_is_sent() {
 #[tokio::test]
 async fn the_default_role_layers_are_sent() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
+    // A private home: the runtime tool list must not depend on the machine's real memory.
+    let home = scratch("default-role");
     let (code, _, _) = feed_and_wait(
         spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
-            &[],
+            &[("RADIAN_HOME", home.to_str().unwrap())],
         ),
         "",
     )
@@ -1663,8 +1665,10 @@ async fn the_default_role_layers_are_sent() {
         content.contains("You are radian, a coding agent"),
         "the default role: {content}"
     );
+    // ADR 0021 D7: an empty memory mounts no search, so the runtime tool list names no
+    // memory tool at all.
     assert!(
-        content.contains("- memory_search:"),
+        !content.contains("memory_search"),
         "the runtime tool list: {content}"
     );
     assert!(content.trim_end().ends_with("</session>"), "{content}");
@@ -6314,64 +6318,6 @@ async fn memory_add_registers_a_git_workspace_and_prints_one_notice() {
     assert_eq!(after, registry, "a read registered a project");
 }
 
-/// ADR 0021, for the agent's own tool: the first `memory_save` in a git
-/// workspace registers the project, `radian exec` shows the notice line, and the record lands
-/// in that project.
-#[tokio::test]
-async fn memory_save_in_a_git_workspace_creates_the_project_and_exec_shows_the_notice() {
-    if !git_available() {
-        eprintln!("skipping: git is not on PATH");
-        return;
-    }
-    let env = MemoryEnv::new("mem-save-create");
-    git(&env.ws, &["init", "-q"]);
-
-    let server = MockServer::start(vec![
-        tool_reply("call_1", "memory_save", r#"{"content":"agent note"}"#),
-        text_reply("remembered"),
-    ])
-    .await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--session-id",
-                "auto-created",
-                "--yes",
-                "-p",
-                "remember this",
-            ],
-            &[
-                ("RADIAN_HOME", env.home.to_str().unwrap()),
-                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-            ],
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(
-        stderr.contains("[memory] created project"),
-        "exec shows the notice line: {stderr}"
-    );
-
-    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json");
-    let record = &value.as_array().unwrap()[0];
-    assert_eq!(record["content"], "agent note");
-    assert_eq!(record["source"], "agent");
-    assert!(
-        record["scope"]["project"].is_string(),
-        "the record went to the new project: {record}"
-    );
-}
-
 #[tokio::test]
 async fn memory_relink_after_a_move_finds_the_original_records() {
     let env = MemoryEnv::new("mem-relink");
@@ -6546,13 +6492,14 @@ async fn memory_injection_reaches_the_system_prompt() {
     );
 }
 
-/// ADR 0021 and ADR 0036, end to end in one
-/// process: two user turns with a `write` and a `memory_save` in between. Every request
-/// carries the **same** system prompt bytes — the fixed block is ranked by the session's first
-/// user message and computed once, and the `<session>` layer's git state is **not** refreshed
-/// when the write makes the tree dirty — the agent's new record reaches the model as one
-/// System-source message right after the second user message, the tool definitions never move,
-/// and `MemoryInjected` gains the new id.
+/// ADR 0021, ADR 0021 D7 and ADR 0036, end to
+/// end in one process: two user turns with a `write` in between. Every request carries the
+/// **same** system prompt bytes — the fixed block is ranked by the session's first user
+/// message and computed once, and the `<session>` layer's git state is **not** refreshed
+/// when the write makes the tree dirty. The fixed block holds the two filler records the
+/// first turn's text hits; the third record does not fit the budget, so the second turn's
+/// text appends it as one System-source message right after the second user message. The
+/// tool definitions never move, and `MemoryInjected` gains the new id.
 #[tokio::test]
 async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once() {
     if !git_available() {
@@ -6568,20 +6515,25 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
     git(&env.ws, &["commit", "-qm", "init"]);
     let (code, _, stderr) = env.run(&["project", "new"]).await;
     assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env
-        .run(&["add", "--key", "style", "tabs over spaces"])
-        .await;
+    // Two filler records (~1900 tokens together) that the first turn's text hits, plus one
+    // small record (~150 tokens) that does not fit the 2000-token budget beside them and
+    // that only the second turn's text hits.
+    for (key, word) in [("filler-a", "quarry alpha"), ("filler-b", "quarry beta")] {
+        let content = format!("{} ", word).repeat(300);
+        let (code, _, stderr) = env.run(&["add", "--key", key, &content]).await;
+        assert_eq!(code, 0, "{stderr}");
+    }
+    let target_content = format!(
+        "the parser lives in src/parse.rs{}",
+        " padding note".repeat(40)
+    );
+    let (code, _, stderr) = env.run(&["add", "--key", "target", &target_content]).await;
     assert_eq!(code, 0, "{stderr}");
 
     let server = MockServer::start(vec![
         // The write makes the working tree dirty; the `<session>` line must not follow it
         // (ADR 0036: the git state is not refreshed between turns).
         tool_reply("call_1", "write", r#"{"path":"x.txt","content":"y"}"#),
-        tool_reply(
-            "call_2",
-            "memory_save",
-            r#"{"content":"second: the parser lives in src/parse.rs"}"#,
-        ),
         text_reply("saved"),
         text_reply("done"),
     ])
@@ -6605,15 +6557,15 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
             ],
         ),
         &env.sessions,
-        // Turn 1 writes and saves the record; turn 2's text hits it.
-        &["first", "second"],
+        // Turn 1's text hits the fillers; turn 2's text hits the record beside the budget.
+        &["quarry", "parser"],
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
     assert!(env.ws.join("x.txt").exists(), "the write ran");
 
-    // Turn 1 takes three model calls (write, memory_save, answer), turn 2 one.
-    assert_eq!(server.requests().len(), 4, "{}", server.requests().len());
+    // Turn 1 takes two model calls (write, answer), turn 2 one.
+    assert_eq!(server.requests().len(), 3, "{}", server.requests().len());
     let system = |n: usize| {
         messages_of(&server, n)[0]["content"]
             .as_str()
@@ -6622,12 +6574,12 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
     };
     let first = system(0);
     assert!(
-        first.contains("tabs over spaces"),
-        "the fixed block holds the record that existed then: {first}"
+        first.contains("quarry"),
+        "the fixed block holds the records the first turn hit: {first}"
     );
     assert!(
         !first.contains("src/parse.rs"),
-        "the block must not be recomputed from the memory saved mid-session: {first}"
+        "the record beside the budget is not in the fixed block: {first}"
     );
     assert!(
         first.contains("git: "),
@@ -6637,7 +6589,7 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
         first.contains("(clean)"),
         "the tree was clean when the process started: {first}"
     );
-    for n in 1..4 {
+    for n in 1..3 {
         assert_eq!(
             system(n),
             first,
@@ -6646,16 +6598,16 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
     }
     assert_eq!(
         advertised_tools(&server, 0),
-        advertised_tools(&server, 3),
+        advertised_tools(&server, 2),
         "tool definitions are never withdrawn mid-session (ADR 0036)"
     );
 
     // The second turn's first request carries the addition right after its user message.
-    let messages = messages_of(&server, 3);
+    let messages = messages_of(&server, 2);
     let messages = messages.as_array().unwrap();
     let user_at = messages
         .iter()
-        .position(|m| m["role"] == "user" && m["content"] == json!("second"))
+        .position(|m| m["role"] == "user" && m["content"] == json!("parser"))
         .unwrap_or_else(|| panic!("no second user message in {messages:?}"));
     let addition = &messages[user_at + 1];
     assert_eq!(addition["role"], "user", "{addition}");
@@ -6678,7 +6630,7 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
                 .is_some_and(|origin| origin.get().contains("memory_addition"))
         })
         .unwrap_or_else(|| panic!("no addition in {history:?}"));
-    assert_eq!(history[addition_at - 1].text(), "second");
+    assert_eq!(history[addition_at - 1].text(), "parser");
     assert_eq!(
         history[addition_at].meta().source,
         Some(agent_core::InputSource::System),
@@ -6700,20 +6652,20 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
         })
         .collect();
     assert_eq!(sets.len(), 2, "only the set changes are written: {sets:?}");
-    // The record the agent saved mid-session is in the second set only.
+    // The record beside the budget is in the second set only.
     let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
     assert_eq!(code, 0, "{stderr}");
     let value: Value = serde_json::from_str(stdout.trim()).expect("list --json");
-    let saved = value
+    let target = value
         .as_array()
         .unwrap()
         .iter()
-        .find(|record| record["content"] == json!("second: the parser lives in src/parse.rs"))
-        .expect("the saved record")
+        .find(|record| record["key"] == json!("target"))
+        .expect("the target record")
         .clone();
-    let saved_id = saved["id"].as_str().unwrap().to_owned();
-    assert!(!sets[0].contains(&saved_id), "{sets:?}");
-    assert!(sets[1].contains(&saved_id), "{sets:?}");
+    let target_id = target["id"].as_str().unwrap().to_owned();
+    assert!(!sets[0].contains(&target_id), "{sets:?}");
+    assert!(sets[1].contains(&target_id), "{sets:?}");
 
     // The addition's content is in the session file (decision 3's accepted cost); the
     // `MemoryInjected` records still carry ids only.
@@ -6721,6 +6673,153 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
     assert!(
         raw.contains("src/parse.rs"),
         "the addition is in the transcript"
+    );
+}
+
+/// ADR 0021 D7: `memory_search` mounts only when the Active records' estimated total exceeds
+/// the injection budget (2000 tokens). A memory that fits in the fixed block needs no search.
+#[tokio::test]
+async fn memory_search_mounts_only_past_the_injection_budget() {
+    if !git_available() {
+        eprintln!("skipping: git is not on PATH");
+        return;
+    }
+    // Within the budget: one small record — the tool is not advertised.
+    let env = MemoryEnv::new("mem-budget-in");
+    git(&env.ws, &["init", "-q"]);
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env.run(&["add", "tabs over spaces"]).await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let server = MockServer::start(vec![text_reply("noted")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "-p",
+                "hello",
+            ],
+            &[
+                ("RADIAN_HOME", env.home.to_str().unwrap()),
+                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let names = advertised_tools(&server, 0);
+    assert!(
+        !names.iter().any(|name| name == "memory_search"),
+        "a memory within the budget mounts no search: {names:?}"
+    );
+
+    // Past the budget: ~9 KB of records at 4 bytes per token — the tool is advertised and
+    // the fixed block carries what fits.
+    let env = MemoryEnv::new("mem-budget-over");
+    git(&env.ws, &["init", "-q"]);
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    for n in 0..3 {
+        // ~800 tokens each: the first two fill the fixed block, the third does not fit.
+        let content = format!("budget filler {n} ").repeat(200);
+        let (code, _, stderr) = env.run(&["add", &content]).await;
+        assert_eq!(code, 0, "{stderr}");
+    }
+
+    let server = MockServer::start(vec![text_reply("noted")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "-p",
+                "hello",
+            ],
+            &[
+                ("RADIAN_HOME", env.home.to_str().unwrap()),
+                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let names = advertised_tools(&server, 0);
+    assert!(
+        names.iter().any(|name| name == "memory_search"),
+        "a memory past the budget mounts the search: {names:?}"
+    );
+    for gone in ["memory_save", "memory_revise", "memory_get"] {
+        assert!(
+            !names.iter().any(|name| name == gone),
+            "only `memory_search` mounts, never `{gone}`: {names:?}"
+        );
+    }
+    let system = messages_of(&server, 0)[0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        system.contains("budget filler"),
+        "the fixed block carries what fits: {system}"
+    );
+}
+
+/// ADR 0021 D5: there is no model-writable memory path. A script model that calls
+/// `memory_save` gets Core's unknown-tool result, and the turn still succeeds.
+#[tokio::test]
+async fn a_model_call_to_memory_save_is_an_unknown_tool_and_the_turn_succeeds() {
+    let env = MemoryEnv::new("mem-no-write-tool");
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "memory_save", r#"{"content":"agent note"}"#),
+        text_reply("done"),
+    ])
+    .await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "-p",
+                "remember this",
+            ],
+            &[
+                ("RADIAN_HOME", env.home.to_str().unwrap()),
+                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert_eq!(server.requests().len(), 2);
+    let result = tool_result_content(&server, 1);
+    assert!(
+        result.contains("no tool named `memory_save`"),
+        "the model is told the tool does not exist: {result}"
+    );
+    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stdout.trim(),
+        "[]",
+        "the refused call wrote nothing: {stdout}"
     );
 }
 
@@ -6953,11 +7052,16 @@ async fn exec_p_ranks_the_block_by_its_prompt_and_appends_nothing() {
     );
 }
 /// ADR 0021: `[memory.injection] additions = false` leaves the fixed
-/// block as the only injection — a mid-session save never reaches the transcript.
+/// block as the only injection — a record the second turn's text hits is already in it, so
+/// nothing is appended.
 #[tokio::test]
 async fn memory_additions_can_be_turned_off_in_the_config() {
     let env = MemoryEnv::new("mem-additions-off");
     let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env
+        .run(&["add", "second: the parser lives in src/parse.rs"])
+        .await;
     assert_eq!(code, 0, "{stderr}");
     let config = write_file(
         &env.dir,
@@ -6965,16 +7069,7 @@ async fn memory_additions_can_be_turned_off_in_the_config() {
         "schema_version = 1\n[memory.injection]\nadditions = false\n",
     );
 
-    let server = MockServer::start(vec![
-        tool_reply(
-            "call_1",
-            "memory_save",
-            r#"{"content":"second: the parser lives in src/parse.rs"}"#,
-        ),
-        text_reply("saved"),
-        text_reply("done"),
-    ])
-    .await;
+    let server = MockServer::start(vec![text_reply("saved"), text_reply("done")]).await;
     let (code, _, stderr) = feed_turns_and_wait(
         spawn_radian(
             &[
@@ -7006,7 +7101,12 @@ async fn memory_additions_can_be_turned_off_in_the_config() {
             .unwrap()
             .to_owned()
     };
-    assert_eq!(system(0), system(2));
+    assert_eq!(system(0), system(1));
+    assert!(
+        system(0).contains("src/parse.rs"),
+        "the fixed block carries the record: {}",
+        system(0)
+    );
 
     let session = radian_session::Session::open(env.sessions.join("off.jsonl")).unwrap();
     let history = session.history().unwrap();
@@ -7020,110 +7120,12 @@ async fn memory_additions_can_be_turned_off_in_the_config() {
         }),
         "additions = false appends nothing: {history:?}"
     );
-    // The saved content is in the transcript only through the `memory_save` tool result (which
-    // echoes it); no injected <memory> block carries it.
+    // The record is in the fixed block (the system prompt), not in an addition message:
+    // no injected <memory> block carries it.
     let raw = std::fs::read_to_string(env.sessions.join("off.jsonl")).unwrap();
     assert!(!raw.contains("<memory>"), "{raw}");
 }
 
-/// `--yes` allows `memory_save`, and the decision is written to the session audit.
-#[tokio::test]
-async fn memory_save_with_yes_is_allowed_and_audited() {
-    let env = MemoryEnv::new("mem-save-yes");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-
-    let server = MockServer::start(vec![
-        tool_reply("call_1", "memory_save", r#"{"content":"agent note"}"#),
-        text_reply("remembered"),
-    ])
-    .await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--session-id",
-                "audited",
-                "--yes",
-                "-p",
-                "remember this",
-            ],
-            &[
-                ("RADIAN_HOME", env.home.to_str().unwrap()),
-                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-            ],
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-
-    // The record was saved as an agent record.
-    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json");
-    let record = &value.as_array().unwrap()[0];
-    assert_eq!(record["content"], "agent note");
-    assert_eq!(record["source"], "agent");
-    assert_eq!(record["verification"], "unverified");
-
-    // The permission decision is in the session file.
-    let raw = std::fs::read_to_string(env.sessions.join("audited.jsonl")).unwrap();
-    assert!(raw.contains("PermissionResolved"), "{raw}");
-    assert!(raw.contains("\"call_id\":\"call_1\""), "{raw}");
-    assert!(raw.contains("\"decision\":\"allow\""), "{raw}");
-}
-
-/// Without `--yes` there is no terminal to ask in, so the save is denied and nothing is
-/// written.
-#[tokio::test]
-async fn memory_save_without_yes_is_denied() {
-    let env = MemoryEnv::new("mem-save-ask");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-
-    let server = MockServer::start(vec![
-        tool_reply("call_1", "memory_save", r#"{"content":"agent note"}"#),
-        text_reply("done"),
-    ])
-    .await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "-p",
-                "remember this",
-            ],
-            &[("RADIAN_HOME", env.home.to_str().unwrap())],
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-
-    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json");
-    assert!(
-        value.as_array().unwrap().is_empty(),
-        "a denied save wrote nothing: {value}"
-    );
-}
-
-// ---------- interactive `/compact` (ADR 0018) ----------
-
-/// In interactive mode `/compact` is a control command (nothing is sent), while a line that
-/// merely starts with `/compact` (no separator) is an ordinary message.
 #[tokio::test]
 async fn an_interactive_compact_is_a_command_and_compactfoo_is_a_message() {
     let server = MockServer::start(vec![text_reply("REPLY-TO-COMPACTFOO")]).await;
@@ -8332,10 +8334,12 @@ async fn pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo() {
 #[tokio::test]
 async fn a_headless_exec_mounts_no_orchestration_tools() {
     let server = MockServer::start(vec![text_reply("hi")]).await;
+    // A private home: the tool set must not depend on the machine's real memory.
+    let home = scratch("headless-tools");
     let (code, _, stderr) = feed_and_wait(
         spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
-            &[],
+            &[("RADIAN_HOME", home.to_str().unwrap())],
         ),
         "",
     )
@@ -8366,26 +8370,17 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
             "`{gone}` must not be mounted: {names:?}"
         );
     }
-    // The exact set: a headless session with no `--workspace` mounts the memory tools, the
-    // built-in `skill` (its `theme-import` skill is compiled in), and `subagent` (ADR 0043
+    // The exact set: a headless session with no `--workspace` and an empty memory mounts the
+    // built-in `skill` (its `theme-import` skill is compiled in) and `subagent` (ADR 0043
     // decision 1a — a parent mounts it even with no workspace; only `explore` needs one), and
-    // nothing else. ADR 0043 decision 3: `memory_get` is gone; `memory_search` reads by id.
+    // nothing else. `memory_search` mounts only past the injection budget (ADR 0021 D7), so an
+    // empty memory does not list it; `memory_save`/`memory_revise` do not exist.
     let mut got = names.clone();
     got.sort();
     assert_eq!(
         got,
-        [
-            "memory_revise",
-            "memory_save",
-            "memory_search",
-            "skill",
-            "subagent"
-        ],
+        ["skill", "subagent"],
         "the exact tool set of a fresh headless session: {names:?}"
-    );
-    assert!(
-        !names.iter().any(|name| name == "memory_get"),
-        "the renamed `memory_get` must not be advertised: {names:?}"
     );
 }
 

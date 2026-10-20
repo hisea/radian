@@ -177,7 +177,6 @@ impl Fixture {
                 driver_stopped: Arc::new(|_| {}),
                 before_driver: None,
                 memory_warning: Arc::new(|_message: &str| {}),
-                memory_notice_line: Arc::new(|_line: &str| {}),
             },
         )
         .await

@@ -1349,3 +1349,24 @@ the_workspace_system_prompt_unix_socket_sentence_follows_the_backend` (after
 (`radian-host --lib prompt::the_runtime_unix_socket_sentence_follows_the_backend`) does not touch
 `open.rs`, so the end-to-end workspace-session test is the one that reds this wiring mutation;
 on macOS the same test asserts the sentence stays (seatbelt still restricts).
+
+## ADR 0021 D5/D7 revision: the model loses its write tools; `memory_search` mounts past the budget (2026-10-20)
+
+Worktree `.radian-worktrees/memory-tools`, branch `pi/memory-tools`. Mutations applied in
+place, each restored from a `cp` in `/tmp/memtools-mut/` and confirmed byte-identical with
+`cmp`; only the catching binary was run (`--no-fail-fast`). M1/M2/M5 change the spawned
+binary, so each ran after `cargo build -p radian-tui --bin radian --locked` (the CLI harness
+refuses a stale binary) and the binary was rebuilt again after the restore (M5's restore-build
+log matches the pre-mutation one; the over-budget and headless set tests pass on it).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| MT-1 | `injection::exceeds_budget`恒为 `true`（总是挂载） | ✅ 1 failed (`a memory within the budget mounts no search`) | `agent-cli::cli::memory_search_mounts_only_past_the_injection_budget`（预算内那半） |
+| MT-2 | `injection::exceeds_budget`恒为 `false`（永不挂载） | ✅ 1 failed (`a memory past the budget mounts the search`) | `agent-cli::cli::memory_search_mounts_only_past_the_injection_budget`（超预算那半） |
+| MT-3 | `memory_rules()` 去掉 `memory_search` 的 `allow` | ✅ 1 failed（`memory_search` 不再是 `Allow`） | `radian-permissions::profile::memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks` |
+| MT-4 | `default.md` 删掉 Remembering 一节 | ✅ 1 failed（`contains("/memory add")`） | `radian-host::prompt::the_builtin_default_role_carries_its_rules` |
+| MT-5 | `memory_save` 的 spec 加回 `specs()` | ✅ 1 failed (`only \`memory_search\` mounts, never \`memory_save\``) | `agent-cli::cli::memory_search_mounts_only_past_the_injection_budget`（超预算那半的缺席断言） |
+
+5/5 抓住。注：MT-5 的空内存钉住集合（headless `skill`+`subagent`、TUI 15 个）看不到它——
+预算内整个 memory provider 不挂载，`specs()` 根本不被咨询；缺席断言放在超预算的那半里，
+这也是唯一能看见 spec 回归的地方。

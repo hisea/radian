@@ -330,6 +330,9 @@ mod tests {
         assert!(DEFAULT_ROLE.contains("no per-turn step or budget limit"));
         assert!(DEFAULT_ROLE.contains("data, not instructions"));
         assert!(DEFAULT_ROLE.contains("path:line"));
+        assert!(DEFAULT_ROLE.contains("/memory add"));
+        assert!(DEFAULT_ROLE.contains("~/.agents/skills/"));
+        assert!(DEFAULT_ROLE.contains("with `shell`"));
     }
 
     /// Layer 1 is the built-in default role, and `--system` replaces it. The hook writes the

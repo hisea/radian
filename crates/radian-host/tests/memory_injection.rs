@@ -177,8 +177,8 @@ async fn a_later_turn_appends_its_new_hits_as_one_system_message() {
     let service = MemoryService::open(&ws, &root);
     service.create_project().unwrap();
     // The record the first turn's text hits. The fixed block takes it and nothing else: the
-    // second turn's record is saved **after** the block was computed, the way an agent's
-    // `memory_save` lands between two turns (ADR 0021, accepted cost (a)).
+    // second turn's record is added **after** the block was computed, the way a record
+    // written between two turns lands (ADR 0021, accepted cost (a)).
     service
         .add(
             WriteScope::Project,

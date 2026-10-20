@@ -383,7 +383,7 @@ impl MemoryService {
         Ok(None)
     }
 
-    // ---- writes. Every one is `Source::User` (ADR 0021 D7: user commands). ----
+    // ---- writes. Every one is `Source::User` (ADR 0021 D5: user commands). ----
 
     pub fn add(
         &self,
@@ -401,41 +401,6 @@ impl MemoryService {
             content,
             Provenance::default(),
         )?)
-    }
-
-    /// The agent's `memory_save` (ADR 0021 D5): `source: Agent`, and the store's key rules still
-    /// apply — an Active user record with the key makes this a `KeyConflict`.
-    pub fn save_as_agent(
-        &self,
-        scope: WriteScope,
-        kind: Kind,
-        key: Option<String>,
-        content: String,
-    ) -> Result<MemoryRecord, MemoryServiceError> {
-        let scope = self.write_scope(scope)?;
-        Ok(self.store.create(
-            &scope,
-            Source::Agent,
-            kind,
-            key,
-            content,
-            Provenance::default(),
-        )?)
-    }
-
-    /// The agent's `memory_revise` (ADR 0021 D5): the store refuses a `Source::User` record,
-    /// so an agent can only change what an agent wrote. The user command uses [`Self::edit`].
-    pub fn revise_as_agent(
-        &self,
-        scope: WriteScope,
-        id: &MemoryId,
-        expected_revision: u64,
-        content: String,
-    ) -> Result<MemoryRecord, MemoryServiceError> {
-        let scope = self.write_scope(scope)?;
-        Ok(self
-            .store
-            .revise(&scope, Source::Agent, id, expected_revision, content)?)
     }
 
     pub fn edit(

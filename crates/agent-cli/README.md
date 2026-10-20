@@ -130,7 +130,7 @@ key. Writes default to Project; `--global` writes a Global record.
   by hand. `project`/`relink` remain the explicit route to link or re-link an identity key.
 - **`--global` is for facts that hold in every project**, or when the user asks for global: a
   memory that mentions this project's paths, branches or structure belongs to the project
-  scope (the `memory_save` tool description says this too).
+  scope.
 - **Confirmations** (`forget`, `purge`, `split`, `merge`): a terminal asks `y/N`; `--yes`
   skips it; **without a terminal and without `--yes` the command refuses, exits 2 and does
   nothing**.
@@ -145,15 +145,18 @@ key. Writes default to Project; `--global` writes a Global record.
 - **Exit codes**: 0 on success; 1 for a conflict, a missing record or an unlinked workspace;
   2 for a usage error or a refused confirmation (plus clap's own usage failures).
 
-### The agent's own memory tools and injection (ADR 0021 D5/D6)
+### The agent's own memory tool and injection (ADR 0021 D5/D6)
 
-During a conversation the model also gets three tools: `memory_search` (a keyword search, or a
-full read of records by `ids`; **allowed** by the rules), `memory_save` and `memory_revise`
-(write, always **asked**; `--yes` answers the ask and the decision is still audited). Agent writes are `source: agent`
-and `unverified`; a user record is never modified, and a user key still wins. A `memory_save`
-in the default scope registers a git workspace whose project is not registered yet (the same
-notice line as above, on stderr); a directory that is not a project workspace is refused with
-a tool error that says the memory was not saved and does not point at another scope.
+During a conversation the model gets one tool, and only past the injection budget:
+`memory_search` (a keyword search, or a full read of records by `ids`; **allowed** by the
+rules) mounts when the Active records' estimated total exceeds `[memory.injection]
+max_tokens` (ADR 0021 D7). There is no model-writable memory path: a user record is never
+modified by the model, and old `source: agent` records in existing logs stay readable.
+When the user asks the model to remember something, the model routes it to a file instead
+(ADR 0036): a project fact (or a procedure that only applies to this project) goes into
+`AGENTS.md`, a procedure useful across projects becomes a user-level skill at
+`~/.agents/skills/<name>/SKILL.md`, a cross-project preference is the user's to save
+with `/memory add` (the model only suggests the command).
 
 Each request carries the memory **fixed block** in the **system prompt** (never the
 transcript): Active records in the D6 order, up to 2000 tokens (Global 500 / Project 1500 soft

@@ -51,10 +51,7 @@ import sys
 #   crates/radian-coding/src/ask.rs:397        ask_user        Exclusive
 #   crates/radian-host/src/git_commit.rs:81    git_commit      Exclusive
 #   crates/radian-host/src/skills/tools.rs:185 skill           Shared
-#   crates/radian-host/src/memory/tools.rs:372 memory_search   Shared
-#   crates/radian-host/src/memory/tools.rs:388 memory_get      Shared
-#   crates/radian-host/src/memory/tools.rs:424 memory_save     Exclusive
-#   crates/radian-host/src/memory/tools.rs:453 memory_revise   Exclusive
+#   crates/radian-host/src/memory/tools.rs:271 memory_search   Shared
 #
 # MCP tools (aliased `<server>__<tool>`) are config-driven, not fixed:
 # crates/agent-extensions/src/session.rs:508-521 makes a tool Shared only when
@@ -79,9 +76,6 @@ BUILT_IN = {
     "git_commit": "Exclusive",
     "skill": "Shared",
     "memory_search": "Shared",
-    "memory_get": "Shared",
-    "memory_save": "Exclusive",
-    "memory_revise": "Exclusive",
 }
 
 
