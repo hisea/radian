@@ -86,7 +86,6 @@ pub fn host_git_overrides(dir: &Path) -> Result<Vec<String>, String> {
 ///
 /// A filter query that fails contributes no filter pairs (the git that would run them failed
 /// the same way); the static three are always present.
-
 pub fn hardening_env(dir: &Path) -> Vec<(String, String)> {
     let mut pairs = static_pairs();
     if let Ok(names) = filter_driver_names(dir) {
