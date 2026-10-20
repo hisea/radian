@@ -58,6 +58,23 @@ Harbor releases may rename these modules.
   `--yes --no-trust --offline-catalog`; `auth.json` is 0600 under a 0700
   `RADIAN_HOME`; sessions and stdout/stderr land in the agent logs dir
   (`radian-sessions/`).
+- **Usage reporting.** After the logs sync back, `populate_context_post_run`
+  sums the trial's `radian-sessions/*.jsonl` — each call's
+  `ModelUsageRecorded` plus the summarizer's `CompactionUsageRecorded` — into
+  Harbor's token/cost fields, with fee micros converted to USD. A counter no
+  record reported stays `None` ("not reported", never 0). `run()` deliberately
+  leaves the context empty: Harbor only calls the backfill while it is empty.
+- **auth.json ownership.** `auth.json` goes up through Harbor's
+  `_upload_config_text`, which chowns it to the container's default agent user
+  (plus 0600): a 0600 root-owned file would be unreadable to radian under a
+  non-root agent user. It still holds only the `$RADIAN_BENCH_API_KEY`
+  reference, never the value.
+- **Turn timeout.** An explicit `--turn-timeout-secs` always wins; otherwise,
+  when the adapter-side exec timeout (`timeout_sec`) is set, the turn timeout
+  is that deadline minus 60 s (floor 60), so radian wraps up and writes its
+  journal before the kill. The task's own agent timeout cannot feed this:
+  Harbor applies it as an external wait around `run()` and never passes it to
+  the agent object.
 - **Reproducible.** `install()` refuses a dynamically linked binary (pure-Python
   ELF `PT_INTERP` check — the task images cannot satisfy a glibc loader) and
   records the binary sha256 plus `radian exec --version` in
