@@ -79,7 +79,7 @@ const READER_GRACE: Duration = Duration::from_secs(2);
 /// field that once carried a workspace-relative path (`StartInfo::output`,
 /// `JobEvent::Started::output`, `JobSummary::output`, `OutputResult::output`) carries this
 /// sentence instead, which names the one channel that still reaches the output.
-pub const OUTPUT_HINT: &str = "available through job_output";
+pub const OUTPUT_HINT: &str = "available through job";
 
 /// The `job_settled` broadcast capacity. A subscriber that falls this far behind loses old
 /// notices; slice 3 re-reads the state instead of trusting the channel alone.
@@ -137,10 +137,13 @@ enum Termination {
 
 /// One job's shared state, written by the supervisor and read by the tools.
 pub(crate) struct JobCell {
-    /// The command's first line (the summary the list shows).
+    /// The command's first line (the summary the TUI `/jobs` list shows).
     command: String,
     started: Instant,
     state: JobState,
+    /// `true` for a retained foreground result (ADR 0037 decision 3a): a settled entry the
+    /// model reads like any job, evicted with the foreground bounds, never counted as running.
+    retained: bool,
     /// Set by `job_kill`/the timeout before the session is signalled, so the supervisor can
     /// label the settle. `None` means the leader exited on its own.
     termination: Option<Termination>,
@@ -319,6 +322,7 @@ impl Jobs {
             command: first_line(command),
             started: Instant::now(),
             state: JobState::Running,
+            retained: false,
             termination: None,
             ring: Ring::default(),
             read_offset: 0,
@@ -446,6 +450,7 @@ impl Jobs {
             command: first_line(command),
             started,
             state: JobState::Running,
+            retained: false,
             termination: None,
             ring: Ring::default(),
             read_offset: 0,
@@ -528,6 +533,14 @@ impl Jobs {
         })
     }
 
+    /// `job { op: read }` without a range, or the old `job_output` without a file mode: the
+    /// increment since the last call, plus the state. Never waits.
+    pub(crate) fn read_increment(&self, id: &str) -> Result<OutputResult, ToolFailure> {
+        let cell = self.get(id)?;
+        let mut cell = lock(&cell);
+        Ok(Self::take_increment(&mut cell, false, false))
+    }
+
     /// `job_output`: the increment since the last call, plus the state. `wait` blocks until
     /// the job settles, `timeout` elapses or the turn is cancelled; a wait timeout never kills
     /// the job, and neither does a cancellation (ADR 0037 decision 6).
@@ -568,21 +581,30 @@ impl Jobs {
             }
         }
         let mut cell = lock(&cell);
-        let (dropped, increment) = cell.ring.since(cell.read_offset);
-        cell.read_offset = cell.ring.total;
-        let result = OutputResult {
-            state: cell.state.clone(),
-            dropped,
-            increment,
-            waited_out,
-            wait_cancelled,
-            output: OUTPUT_HINT.to_owned(),
-        };
-        drop(cell);
-        Ok(result)
+        Ok(Self::take_increment(&mut cell, waited_out, wait_cancelled))
     }
 
-    /// `job_list`: every job of this session, in start order.
+/// Reads the ring increment under the cell lock and advances the cursor. Shared by the wait
+/// path and the plain incremental read.
+fn take_increment(
+    cell: &mut JobCell,
+    waited_out: bool,
+    wait_cancelled: bool,
+) -> OutputResult {
+    let (dropped, increment) = cell.ring.since(cell.read_offset);
+    cell.read_offset = cell.ring.total;
+    OutputResult {
+        state: cell.state.clone(),
+        dropped,
+        increment,
+        waited_out,
+        wait_cancelled,
+        output: OUTPUT_HINT.to_owned(),
+    }
+}
+
+/// Every job of this session, in start order: background jobs and retained foreground
+/// results (ADR 0037 decision 3a). The TUI `/jobs` command reads this, not a tool.
     pub fn list(&self) -> Vec<JobSummary> {
         let state = self.lock_state();
         state
@@ -668,12 +690,60 @@ impl Jobs {
         }
     }
 
+    /// Registers a finished foreground command's retained output as a settled entry (ADR
+    /// 0037 decision 3a): a normal job id, the command's exit state, the same output file the
+    /// foreground retention wrote. No events, no journal records, never counted as running.
+    /// The caller owns the file's lifecycle (eviction, shutdown); this only owns the lookup.
+    pub(crate) fn insert_settled(
+        &self,
+        id: String,
+        command: String,
+        state: JobState,
+        output: PathBuf,
+        ring: Ring,
+    ) {
+        debug_assert!(!state.is_running());
+        let (settled, _) = tokio::sync::watch::channel(true);
+        let cell = Arc::new(Mutex::new(JobCell {
+            command: first_line(&command),
+            started: Instant::now(),
+            state,
+            retained: true,
+            termination: None,
+            ring,
+            read_offset: 0,
+            output,
+            sid: 0,
+            reaped: Arc::new(Mutex::new(true)),
+            waiters: 0,
+            settled,
+        }));
+        let mut registry = self.lock_state();
+        registry.order.push(id.clone());
+        registry.jobs.insert(id, cell);
+    }
+
+    /// Drops a retained foreground entry, so its id reads as unknown (ADR 0037 decision 3a:
+    /// eviction). Only retained entries can be removed; background jobs are never dropped.
+    /// The caller removes the file.
+    pub(crate) fn remove(&self, id: &str) {
+        let mut registry = self.lock_state();
+        let retained = registry
+            .jobs
+            .get(id)
+            .is_some_and(|cell| lock(cell).retained);
+        if retained {
+            registry.jobs.remove(id);
+            registry.order.retain(|kept| kept != id);
+        }
+    }
+
     fn get(&self, id: &str) -> Result<Arc<Mutex<JobCell>>, ToolFailure> {
         let state = self.lock_state();
         state.jobs.get(id).cloned().ok_or_else(|| {
             fail(
                 "unknown_job",
-                format!("no background job `{id}` in this session; use job_list to see them"),
+                format!("no job `{id}` in this session; a truncated `shell` result carries its job id"),
             )
         })
     }
@@ -756,13 +826,28 @@ pub(crate) enum KillResult {
 /// A bounded tail of a job's output. `start` is the absolute offset of `buf[0]`; `total` is
 /// every byte the job produced.
 #[derive(Default)]
-struct Ring {
+pub(crate) struct Ring {
     buf: VecDeque<u8>,
     start: u64,
     total: u64,
 }
 
 impl Ring {
+    /// A ring holding the last bytes of `total` produced bytes (ADR 0037 decision 3a: a
+    /// retained foreground entry's increment starts at byte 0, bounded by the ring). Longer
+    /// input is cut from the front, and the cut is visible as `start > 0`.
+    pub(crate) fn seeded(mut bytes: Vec<u8>, total: u64) -> Self {
+        if bytes.len() > JOB_RING_BYTES {
+            bytes.drain(..bytes.len() - JOB_RING_BYTES);
+        }
+        let start = total.saturating_sub(bytes.len() as u64);
+        Ring {
+            buf: bytes.into(),
+            start,
+            total,
+        }
+    }
+
     /// A ring whose absolute origin is `at` (ADR 0037): bytes before `at` live in
     /// the job's output file, not the ring, and a cursor at `at` begins the post-adoption
     /// increments.
@@ -912,7 +997,7 @@ impl Drop for WaiterGuard {
     }
 }
 
-fn exit_state(status: Option<ExitStatus>) -> JobState {
+pub(crate) fn exit_state(status: Option<ExitStatus>) -> JobState {
     match status {
         Some(status) => match status.code() {
             Some(code) => JobState::Exited(code),
@@ -968,8 +1053,9 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 static NEXT_JOB: AtomicU64 = AtomicU64::new(1);
 
-/// A process-unique, readable job id (`job-<pid>-<n>`).
-fn next_job_id() -> String {
+/// A process-unique, readable job id (`job-<pid>-<n>`). Foreground retention mints from the
+/// same counter (ADR 0037 decision 3a: one id space), so the two can never collide.
+pub(crate) fn next_job_id() -> String {
     format!(
         "job-{}-{}",
         std::process::id(),
@@ -990,7 +1076,110 @@ fn first_line(command: &str) -> String {
 
 // ---------- tools ----------
 
-/// The `job_output` spec.
+/// The `job` spec: the model's only background tool (ADR 0037 decision 4). Its serialized
+/// size is pinned by `crate::tests::size` (`shell` + `job` must stay small enough for the
+/// cached prefix): keep every rule to one sentence and never repeat the description.
+pub(crate) fn job_schema() -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        "id".into(),
+        json!({
+            "type": "string",
+            "description": "The job id `shell` returned."
+        }),
+    );
+    properties.insert(
+        "op".into(),
+        json!({
+            "type": "string",
+            "enum": ["read", "wait", "kill"],
+            "description": "`read` the output, `wait` for the end, or `kill` the job."
+        }),
+    );
+    // The full-file read arguments (crate::output); only `read` uses them.
+    if let Some(fields) = crate::output::file_properties().as_object() {
+        for (key, value) in fields {
+            properties.insert(key.clone(), value.clone());
+        }
+    }
+    properties.insert(
+        "timeout_ms".into(),
+        json!({
+            "type": "integer",
+            "minimum": 1,
+            "description": "How long `wait` may block, in milliseconds (default 30000, \
+                            maximum 600000). On timeout the job keeps running."
+        }),
+    );
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": ["id", "op"],
+        "additionalProperties": false
+    })
+}
+
+pub(crate) fn job_spec() -> ToolSpec {
+    ToolSpec {
+        name: "job".into(),
+        description: "Read or stop one `shell` job by its job id (`read`, `wait` or \
+                      `kill`). Plain `read` returns the output since your last read plus \
+                      `[status: ...]` (running / exited n / signal n / killed / timed \
+                      out). With `tail_lines` (last N), `from_line`/`max_lines` (numbered \
+                      range, page with the `more` hint) or `pattern` (matching lines, Rust \
+                      regex) it reads the full file by line instead and names the file's \
+                      total line count. `wait` blocks until the job ends or `timeout_ms` \
+                      elapses (default 30000, max 600000) and never kills it. `kill` stops \
+                      the job's whole session (SIGTERM, then SIGKILL after 2 s); a finished \
+                      job is a no-op. The output file is outside the workspace, so this \
+                      tool is the only way to read it. A completion notice tells you when a \
+                      running job ends — prefer it over `wait`; never sleep or poll."
+            .into(),
+        input_schema: job_schema(),
+        concurrency: ToolConcurrency::Shared,
+    }
+}
+
+/// The one-version alias specs (ADR 0043 decision 3): registered so Core's preflight
+/// accepts a call to an old name, stripped from every model request by the host, and
+/// answered with a rename line. Their mount conditions mirror the tools they replace:
+/// the `job_*` aliases need `shell`, the `shell_output` alias needs the private directory.
+pub(crate) fn output_alias_spec() -> ToolSpec {
+    ToolSpec {
+        name: "job_output".into(),
+        description: "Deprecated alias for `job` with `{\"op\": \"read\"}`; kept for one version."
+            .into(),
+        input_schema: output_schema(),
+        concurrency: ToolConcurrency::Shared,
+    }
+}
+
+pub(crate) fn list_alias_spec() -> ToolSpec {
+    ToolSpec {
+        name: "job_list".into(),
+        description: "Deprecated alias; kept for one version. Job ids are already in \
+                      your context, so there is no list tool."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        concurrency: ToolConcurrency::Shared,
+    }
+}
+
+pub(crate) fn kill_alias_spec() -> ToolSpec {
+    ToolSpec {
+        name: "job_kill".into(),
+        description: "Deprecated alias for `job` with `{\"op\": \"kill\"}`; kept for one version."
+            .into(),
+        input_schema: kill_schema(),
+        concurrency: ToolConcurrency::Shared,
+    }
+}
+
+/// The `job_output` spec (argument shape only now: the alias parses the old call).
 pub(crate) fn output_schema() -> serde_json::Value {
     let mut properties = serde_json::Map::new();
     properties.insert(
@@ -1044,45 +1233,6 @@ pub(crate) fn output_schema() -> serde_json::Value {
     })
 }
 
-pub(crate) fn output_spec() -> ToolSpec {
-    ToolSpec {
-        name: "job_output".into(),
-        description: "Read what a background `shell` job has produced **since your last \
-                      job_output call**, then a `[status: ...]` line (running / exited n / \
-                      signal n / killed / timed out). Do not sleep or poll: pass `wait: true` \
-                      to block until the job ends (or `timeout_ms` elapses; the default is \
-                      30000, the maximum 600000). A wait timeout returns `[status: running]` \
-                      and does **not** kill the job. The job's output file is outside the \
-                      workspace and not readable from inside the sandbox, so this tool is the \
-                      only way to read it. The incremental read above is a bounded ring; when \
-                      it has dropped bytes, read the full file by line with `tail_lines` (the \
-                      last N), `from_line`/`max_lines` (a range, numbered like `read`), or \
-                      `pattern` (only matching lines). The file result names the file's total \
-                      line count and whether more remains, so you can page."
-            .into(),
-        input_schema: output_schema(),
-        concurrency: ToolConcurrency::Shared,
-    }
-}
-
-/// The `job_list` spec.
-pub(crate) fn list_spec() -> ToolSpec {
-    ToolSpec {
-        name: "job_list".into(),
-        description: "List this session's background `shell` jobs: id, the command's first \
-                      line, its state (running / exited n / signal n / killed / timed out), and \
-                      how long it has run. Use `job_output` to read one and `job_kill` to stop \
-                      one."
-            .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        }),
-        concurrency: ToolConcurrency::Shared,
-    }
-}
-
 pub(crate) fn kill_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -1097,19 +1247,7 @@ pub(crate) fn kill_schema() -> serde_json::Value {
     })
 }
 
-/// The `job_kill` spec.
-pub(crate) fn kill_spec() -> ToolSpec {
-    ToolSpec {
-        name: "job_kill".into(),
-        description: "Stop a background `shell` job: SIGTERM to its whole session (every \
-                      process the job started, including a child that left its process group), \
-                      then SIGKILL after 2 seconds. The job settles as killed. Killing a job \
-                      that has already finished is a no-op that says so."
-            .into(),
-        input_schema: kill_schema(),
-        concurrency: ToolConcurrency::Shared,
-    }
-}
+/// The `job_kill` argument shape (used by the alias now).
 
 #[derive(Deserialize)]
 struct JobIdArgs {
@@ -1126,30 +1264,77 @@ struct OutputArgs {
     file: crate::output::FileArgs,
 }
 
-pub(crate) async fn run_output(
+/// The `job` arguments: which job, and which of the three operations.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum JobOp {
+    Read,
+    Wait,
+    Kill,
+}
+
+#[derive(Deserialize)]
+struct JobArgs {
+    id: String,
+    op: JobOp,
+    timeout_ms: Option<u64>,
+    /// The full-file read arguments ([`crate::output::FileArgs`]); only `read` uses them.
+    /// `mode` never survives validation (the schema has no such property).
+    #[serde(flatten)]
+    file: crate::output::FileArgs,
+}
+
+/// `job`: the model's only background tool (ADR 0037 decision 4). `read` without a range is
+/// the incremental ring plus `[status]`; with one range form it reads the full file by line;
+/// `wait` blocks (never kills); `kill` stops the session (a finished job is a no-op).
+/// Parameter errors use [`args::invalid`] like the other tools.
+pub(crate) async fn run_job(
     jobs: &Jobs,
     limits: &Limits,
     arguments: &serde_json::Value,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: OutputArgs = args::parse("job_output", &output_schema(), arguments)?;
-    if let Some(mode) = crate::output::FileMode::from_args("job_output", &args.file, arguments)? {
-        return read_output_file(jobs, &args.job_id, mode, limits);
+    let args: JobArgs = args::parse("job", &job_schema(), arguments)?;
+    match args.op {
+        JobOp::Kill => run_kill(jobs, &kill_args(&args.id)),
+        JobOp::Wait => {
+            if let Some(mode) =
+                crate::output::FileMode::from_args("job", &args.file, arguments)?
+            {
+                // A range names a file read even with `op: wait`: the old `job_output`
+                // treated the file arguments the same way, so an old transcript's
+                // `wait: true` + range still reads.
+                return read_output_file(jobs, &args.id, mode, limits);
+            }
+            let timeout = clamp_wait(args.timeout_ms);
+            let result = jobs
+                .output(&args.id, true, timeout, &cx.cancellation)
+                .await?;
+            Ok(render_output(&args.id, &result, timeout))
+        }
+        JobOp::Read => {
+            if let Some(mode) =
+                crate::output::FileMode::from_args("job", &args.file, arguments)?
+            {
+                return read_output_file(jobs, &args.id, mode, limits);
+            }
+            let result = jobs.read_increment(&args.id)?;
+            Ok(render_output(&args.id, &result, Duration::ZERO))
+        }
     }
-    let timeout = Duration::from_millis(
-        args.timeout_ms
-            .unwrap_or(DEFAULT_WAIT_MS)
-            .clamp(1, MAX_WAIT_MS),
-    );
-    let result = jobs
-        .output(
-            &args.job_id,
-            args.wait.unwrap_or(false),
-            timeout,
-            &cx.cancellation,
-        )
-        .await?;
+}
 
+fn kill_args(id: &str) -> serde_json::Value {
+    serde_json::json!({ "job_id": id })
+}
+
+fn clamp_wait(timeout_ms: Option<u64>) -> Duration {
+    Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_WAIT_MS).clamp(1, MAX_WAIT_MS))
+}
+
+/// Renders an incremental or waited read: the increment, the dropped-bytes note, the
+/// timeout/cancel note, then `[status]`. Shared by `job` and the `job_output` alias.
+fn render_output(id: &str, result: &OutputResult, timeout: Duration) -> ToolOutput {
     let mut text = String::new();
     if result.increment.is_empty() {
         text.push_str("[no new output]\n");
@@ -1179,25 +1364,103 @@ pub(crate) async fn run_output(
     }
     text.push_str(&format!("[status: {}]\n", result.state.label()));
 
-    Ok(ToolOutput {
+    ToolOutput {
         content: vec![ContentPart::text(text)],
         structured: Some(json!({
-            "job_id": args.job_id,
+            "job_id": id,
             "state": result.state.label(),
             "running": result.state.is_running(),
             "output": result.output,
             "new_bytes": result.increment.len(),
             "dropped_bytes": result.dropped,
         })),
-    })
+    }
+}
+
+// ---------- one-version aliases (ADR 0043 decision 3) ----------
+
+/// The line every `job_output` alias result starts with.
+const JOB_OUTPUT_RENAME: &str = "`job_output` was renamed: call `job` with `{\"id\": ..., \"op\": \"read\"}` (`wait` to wait, `tail_lines`/`from_line`/`max_lines`/`pattern` to page) for the same output.";
+
+/// The line every `job_list` alias result starts with. There is no new list call: job ids
+/// are already in the model's context, so the alias shows the current list once.
+const JOB_LIST_RENAME: &str = "`job_list` was renamed: there is no list tool — the job ids are already in your context. This is the current list, shown once.";
+
+/// The line every `job_kill` alias result starts with.
+const JOB_KILL_RENAME: &str =
+    "`job_kill` was renamed: call `job` with `{\"id\": ..., \"op\": \"kill\"}` to stop it.";
+
+/// The line every `shell_output` alias result starts with.
+pub(crate) const SHELL_OUTPUT_RENAME: &str = "`shell_output` was renamed: call `job` with `{\"id\": ..., \"op\": \"read\"}` for the same output; a truncated `shell` result now carries a job id, not a handle.";
+
+/// Prefixes a rename line to a tool result's text, for the one-version aliases.
+pub(crate) fn renamed(rename: &str, mut output: ToolOutput) -> ToolOutput {
+    for part in &mut output.content {
+        if let ContentPart::Text { text, .. } = part {
+            *text = format!("{rename}\n{text}");
+            break;
+        }
+    }
+    output
+}
+
+/// Prefixes a rename line to a tool failure, keeping its code.
+pub(crate) fn rename_failure(rename: &str, failure: ToolFailure) -> ToolFailure {
+    ToolFailure::new(failure.code, format!("{rename}\n{}", failure.message))
+}
+
+/// `job_output`, the one-version alias for `job { op: read | wait }` (ADR 0043 decision 3).
+/// The old arguments run the same reads `job` runs; the result opens with the rename line.
+pub(crate) async fn run_output_alias(
+    jobs: &Jobs,
+    limits: &Limits,
+    arguments: &serde_json::Value,
+    cx: &ToolContext<'_>,
+) -> Result<ToolOutput, ToolFailure> {
+    let args: OutputArgs = args::parse("job_output", &output_schema(), arguments)?;
+    if let Some(mode) = crate::output::FileMode::from_args("job_output", &args.file, arguments)?
+    {
+        return read_output_file(jobs, &args.job_id, mode, limits)
+            .map(|output| renamed(JOB_OUTPUT_RENAME, output))
+            .map_err(|failure| rename_failure(JOB_OUTPUT_RENAME, failure));
+    }
+    let timeout = clamp_wait(args.timeout_ms);
+    let result = jobs
+        .output(
+            &args.job_id,
+            args.wait.unwrap_or(false),
+            timeout,
+            &cx.cancellation,
+        )
+        .await
+        .map_err(|failure| rename_failure(JOB_OUTPUT_RENAME, failure))?;
+    Ok(renamed(
+        JOB_OUTPUT_RENAME,
+        render_output(&args.job_id, &result, timeout),
+    ))
+}
+
+/// `job_list`, the one-version alias (ADR 0043 decision 3). The list itself is unchanged;
+/// the result opens with the rename line.
+pub(crate) fn run_list_alias(jobs: &Jobs) -> Result<ToolOutput, ToolFailure> {
+    run_list(jobs).map(|output| renamed(JOB_LIST_RENAME, output))
+}
+
+/// `job_kill`, the one-version alias for `job { op: kill }` (ADR 0043 decision 3).
+pub(crate) fn run_kill_alias(
+    jobs: &Jobs,
+    arguments: &serde_json::Value,
+) -> Result<ToolOutput, ToolFailure> {
+    let args: JobIdArgs = args::parse("job_kill", &kill_schema(), arguments)?;
+    run_kill(jobs, &kill_args(&args.job_id)).map(|output| renamed(JOB_KILL_RENAME, output))
 }
 
 // ---------- reading the full output file ----------
 
 /// Reads a job's own output file in the requested [`crate::output::FileMode`], shared with
-/// `shell_output` (ADR 0039 decision 1: the model reads the whole output through the tools). The
+/// the alias (ADR 0039 decision 1: the model reads the whole output through the tools). The
 /// id must be a real registry key; a path-like id is an unknown job, never a path.
-fn read_output_file(
+pub(crate) fn read_output_file(
     jobs: &Jobs,
     id: &str,
     mode: crate::output::FileMode,
@@ -1339,6 +1602,7 @@ mod tests {
             command: "test".into(),
             started: Instant::now(),
             state: JobState::Running,
+            retained: false,
             termination: None,
             ring: Ring::default(),
             read_offset: 0,

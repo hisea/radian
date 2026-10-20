@@ -200,36 +200,9 @@ impl PrivateDir {
             .create_new(true)
             .open(self.path.join(name))
     }
-
-    /// Opens `name` inside the directory read-only: `O_NOFOLLOW` at every step.
-    #[cfg(unix)]
-    pub(crate) fn open_read(&self, name: &OsStr) -> std::io::Result<File> {
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::io::{AsRawFd, FromRawFd};
-        let c = std::ffi::CString::new(name.as_bytes())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in name"))?;
-        // SAFETY: `dir` is an open directory fd and `c` a NUL-terminated name.
-        let fd = unsafe {
-            libc::openat(
-                self.dir.as_raw_fd(),
-                c.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: a fresh descriptor we own.
-        Ok(unsafe { File::from_raw_fd(fd) })
-    }
-
-    #[cfg(not(unix))]
-    pub(crate) fn open_read(&self, name: &OsStr) -> std::io::Result<File> {
-        OpenOptions::new().read(true).open(self.path.join(name))
-    }
 }
 
-/// The shared file-read arguments of `job_output` and `shell_output`.
+/// The shared file-read arguments of `job` (and the one-version aliases).
 #[derive(Deserialize)]
 pub(crate) struct FileArgs {
     /// 1-based line of the output file to start at.

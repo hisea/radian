@@ -235,11 +235,12 @@ impl ToolProvider for CodingTools {
             Some(jobs) => {
                 let jobs = Arc::clone(jobs);
                 // Retained foreground output lives in the caller-supplied, session-private jobs
-                // directory (ADR 0039 decision 1). The registry is *per session*: its handles
-                // and nonce are fresh, so another session's handle is unknown.
+                // directory (ADR 0039 decision 1) and is registered in the same job registry
+                // (ADR 0037 decision 3a: one id space). The registry is *per session*.
                 let foreground = Arc::new(foreground::ForegroundOutputs::new(
                     jobs.dir().to_path_buf(),
                     &self.limits,
+                    &jobs,
                 ));
                 (jobs, Some(foreground))
             }
@@ -323,14 +324,17 @@ fn specs(shell: Option<(SandboxMode, bool)>, foreground: bool) -> Vec<ToolSpec> 
     ];
     if let Some((mode, git_writable)) = shell {
         specs.push(shell::spec(mode, git_writable));
-        // The job tools exist only with `shell`: without a sandbox there are no jobs.
-        specs.push(jobs::output_spec());
-        specs.push(jobs::list_spec());
-        specs.push(jobs::kill_spec());
+        // The job tool exists only with `shell`: without a sandbox there are no jobs. The
+        // four old names stay registered as one-version aliases (ADR 0043 decision 3): the
+        // host strips them from every model request, so the model never sees them.
+        specs.push(jobs::job_spec());
+        specs.push(jobs::output_alias_spec());
+        specs.push(jobs::list_alias_spec());
+        specs.push(jobs::kill_alias_spec());
         // Only a `shell` call produces retained foreground output, and only when there is a
         // caller-supplied private directory to keep it in.
         if foreground {
-            specs.push(foreground::spec());
+            specs.push(foreground::alias_spec());
         }
     }
     specs
@@ -375,16 +379,15 @@ impl ToolSession for CodingSession {
                     "`shell` needs a sandbox and this session has none",
                 )),
             },
-            "job_output" => jobs::run_output(&self.jobs, &self.limits, &call.arguments, &cx).await,
-            "job_list" => jobs::run_list(&self.jobs),
-            "job_kill" => jobs::run_kill(&self.jobs, &call.arguments),
-            "shell_output" => match &self.foreground {
-                Some(foreground) => foreground::run_read(foreground, &self.limits, &call.arguments),
-                None => Err(fail(
-                    "unknown_tool",
-                    "`shell_output` needs a caller-supplied private output directory",
-                )),
-            },
+            "job" => jobs::run_job(&self.jobs, &self.limits, &call.arguments, &cx).await,
+            "job_output" => {
+                jobs::run_output_alias(&self.jobs, &self.limits, &call.arguments, &cx).await
+            }
+            "job_list" => jobs::run_list_alias(&self.jobs),
+            "job_kill" => jobs::run_kill_alias(&self.jobs, &call.arguments),
+            "shell_output" => {
+                foreground::run_alias(&self.jobs, &self.limits, &call.arguments)
+            }
             other => Err(fail(
                 "unknown_tool",
                 format!("`{other}` is not one of the built-in coding tools"),

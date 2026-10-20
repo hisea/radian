@@ -69,15 +69,10 @@ pub(crate) fn schema() -> serde_json::Value {
             "timeout_secs": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "How long a **foreground** command may run before its whole \
-                                session (every process it started) is \
-                                killed. Clamped to the configured maximum. Ignored for \
-                                `background: true` (ADR 0037): a background job \
-                                has no deadline, so bound the command itself (`timeout N …`) \
-                                or stop it with `job_kill`. For a foreground command this \
-                                deadline is kept from the command's \
-                                start even if the command is moved to the background when it \
-                                runs past the auto-background threshold."
+                "description": "How long a foreground command may run before its whole \
+                                session is killed. Clamped to the configured maximum. Ignored \
+                                for `background: true` (no deadline: bound the command itself \
+                                or stop it with `job`)."
             },
             "cwd": {
                 "type": "string",
@@ -88,26 +83,14 @@ pub(crate) fn schema() -> serde_json::Value {
             "max_output_bytes": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Output budget per stream (stdout and stderr each). Over \
-                                that, the start and the end are kept and the middle is \
-                                replaced by a marker; the end is always kept, because \
-                                that is where a failing command's error is. Clamped to \
-                                the configured maximum. Ignored for `background: true` \
-                                (the `job_output` ring is fixed)."
+                "description": "Output budget per stream. Past it the start and the end \
+                                are kept and the middle is replaced by a marker naming the \
+                                discarded bytes. Clamped to the configured maximum."
             },
             "background": {
                 "type": "boolean",
-                "description": "Run the command in the background and return at once \
-                                (default false). It keeps running under the same sandbox; \
-                                its output goes outside the workspace and is not readable \
-                                from inside the sandbox. Read it with `job_output` (pass \
-                                `wait: true` to wait for the end), list jobs with \
-                                `job_list`, stop one with `job_kill`. `job_output` returns \
-                                a bounded incremental ring; use `job_output` with \
-                                `tail_lines` / `pattern` / `from_line` to see more than the \
-                                last 64 KiB. No default timeout, and `timeout_secs` is \
-                                ignored: bound the command itself (`timeout N …`) or stop it \
-                                with `job_kill`. Do not sleep or poll."
+                "description": "Run in the background and return at once with a job id \
+                                (default false). No default timeout. Read it with `job`."
             }
         },
         "required": ["command"],
@@ -155,29 +138,18 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
     ToolSpec {
         name: "shell".into(),
         description: format!(
-            "Run a shell command with `/bin/sh -c`. {confinement} Read files with `read` and \
-             `list`, and search with `grep` and `glob`, not with `cat`, `sed -n`, `ls`, `grep` \
-             or `find` through `shell`: they report truncation and total size, they use less of \
-             the context window, and they run in parallel, while `shell` runs alone. Use \
-             `shell` to run programs (builds, tests). Each stream's \
-             output is \
-             capped: past the budget the start and the end are kept and the middle is \
-             replaced by a marker naming the discarded bytes (the end is always kept, \
-             because that is where a failing command's error is). The whole session is \
-             killed on timeout or cancellation. The timeout is clamped to the configured \
-             maximum (600 s by default); for a command that needs longer use `background: \
-             true`, which has no default timeout. A foreground command still running after the \
-             configured auto-background threshold (120 s by default) is moved to the \
-             background **in place** — the same process, never restarted — and this call \
-             returns at once with a job id, its output file, and the output so far. Use `cwd` \
-             (workspace-relative) to run \
-             somewhere other than the workspace root. Set `background: true` for a command \
-             that outlives the foreground timeout: it returns at once with a job id, and the \
-             three `job_*` tools read, list and stop it. `job_output` is a bounded \
-             incremental ring; use `job_output` with `tail_lines` / `pattern` / `from_line` to \
-             see more than the last 64 KiB. Background jobs \
-             have no default timeout. Do not sleep or poll; use `job_output` with `wait: \
-             true` to wait for the end."
+            "Run a shell command with `/bin/sh -c`. {confinement} Read files with `read` \
+             and `list`, and search with `grep` and `glob`, not with `cat`, `sed`, `ls` or \
+             `find` through `shell`: they report truncation and totals, use less context, \
+             and run in parallel, while `shell` runs alone. Each stream is capped: past the \
+             budget the start and the end are kept and the middle names the discarded \
+             bytes. A truncated foreground result keeps its full output under a job id; \
+             read it with `job`. The whole session is killed on timeout or cancellation. A \
+             foreground command still running after the auto-background threshold is moved \
+             to the background in place — never restarted — and returns at once with a job \
+             id. `background: true` starts it there at once. Background results end: `You \
+             will be notified when it finishes. Do not sleep or poll. If you have nothing \
+             else to do, end your reply.`"
         ),
         input_schema: schema(),
         // A shell command has side effects and is not safe to overlap with other calls.
@@ -301,9 +273,12 @@ pub(crate) async fn run(
 
     // Retain the whole output so a truncated result's discarded middle stays retrievable. `None`
     // when the provider has no caller-supplied private directory (no-hand embedders) or the
-    // private root is unusable: the command runs and its result simply has no handle. The file
+    // private root is unusable: the command runs and its result simply has no job id. The file
     // is removed again below (or by `Retention`'s drop on an error path) when it is not kept.
-    let retention = foreground.and_then(ForegroundOutputs::open);
+    let retention = match foreground {
+        Some(foreground) => foreground.open(&args.command),
+        None => None,
+    };
 
     let outcome = execute(
         sandbox,
@@ -328,18 +303,23 @@ pub(crate) async fn run(
             let truncated = outcome.stdout.is_truncated() || outcome.stderr.is_truncated();
             let retained = match (foreground, &retention) {
                 (Some(foreground), Some(retention)) if truncated => {
+                    let state = if outcome.timed_out {
+                        crate::jobs::JobState::TimedOut
+                    } else {
+                        crate::jobs::exit_state(outcome.status)
+                    };
                     let view = RetainedView {
-                        handle: retention.handle().to_owned(),
+                        job_id: retention.id().to_owned(),
                         retained_bytes: retention.retained(),
                         total_bytes: retention.total(),
                         cut: retention.is_cut(),
                     };
-                    foreground.finish(retention, true);
+                    foreground.finish(retention, Some(state));
                     Some(view)
                 }
                 (Some(foreground), Some(retention)) => {
-                    // No truncation: no handle, no artifact. The file is removed.
-                    foreground.finish(retention, false);
+                    // No truncation: no entry, no artifact. The file is removed.
+                    foreground.finish(retention, None);
                     None
                 }
                 _ => None,
@@ -361,7 +341,7 @@ pub(crate) async fn run(
             // The job's own output file is the retained output now; the foreground file is
             // redundant. Drop it (the pre-adoption bytes already reached the job's file).
             if let (Some(foreground), Some(retention)) = (foreground, &retention) {
-                foreground.finish(retention, false);
+                foreground.finish(retention, None);
             }
             Ok(adopted_report(
                 &args.command,
@@ -379,10 +359,10 @@ pub(crate) async fn run(
 }
 
 /// Starts `command` as a background job (ADR 0037) and returns the one-line acknowledgement:
-/// the job id, the `job_output` hint and the three tools. No timeout: a background job has no
-/// deadline, and an explicit `timeout_secs` is **ignored** (ADR 0037). The
-/// acknowledgement says so and names the two ways to bound the job — `timeout N …` inside the
-/// command, or `job_kill`.
+/// the job id and the `job` hint. No timeout: a background job has no deadline, and an
+/// explicit `timeout_secs` is **ignored** (ADR 0037). The acknowledgement says so
+/// and names the two ways to bound the job — `timeout N …` inside the command, or `job`
+/// (`op: "kill"`).
 fn start_background(
     root: &WorkspaceRoot,
     sandbox: &Sandbox,
@@ -404,12 +384,12 @@ fn start_background(
         "started background job {id}\n\
          its output is {output}\n\
          `timeout_secs` is ignored for background jobs; bound it in the command \
-         (`timeout N …`) or stop it with `job_kill`.\n\
-         read it with `job_output` (pass `wait: true` to wait for the end); `job_list` lists \
-         this session's jobs; `job_kill` stops one.\n\
-         `job_output` is a bounded incremental ring; use `job_output` with `tail_lines`, \
-         `pattern` or `from_line`/`max_lines` to see the whole file.\n\
-         Do not sleep or poll: use `job_output` with `wait: true` to wait for the end.\n",
+         (`timeout N …`) or stop it with `job` (`op: \"kill\"`).\n\
+         read it with `job` (`op: \"read\"` reads the output so far, `op: \"wait\"` waits \
+         for the end). `job` reads a bounded incremental ring; use `op: \"read\"` with \
+         `tail_lines`, `pattern` or `from_line`/`max_lines` to see the whole file.\n\
+         You will be notified when it finishes. Do not sleep or poll. If you have nothing \
+         else to do, end your reply.\n",
         id = info.id,
         output = info.output,
     );
@@ -1331,8 +1311,8 @@ fn report(
     if outcome.timed_out {
         text.push_str(&format!(
             "[timed out after {timeout:?}; the whole session was killed. For a command that \
-             needs longer, use `background: true` (no default timeout) and `job_output` with \
-             `wait: true`.\n"
+             needs longer, use `background: true` (no default timeout) and `job` with \
+             `op: \"wait\"`.\n"
         ));
     }
     if outcome.cancelled {
@@ -1341,8 +1321,7 @@ fn report(
     if outcome.slots_full {
         text.push_str(
             "[all background job slots were busy, so this call was **not** moved to the \
-             background; it ran to its foreground timeout. Finish a job with `job_output \
-             wait: true`, stop one with `job_kill`, or list them with `job_list`.]\n",
+             background; it ran to its foreground timeout. Wait for a job with `job` \n             (`op: \"wait\"`), or stop one with `job` (`op: \"kill\"`).]\n",
         );
     }
     match exit_code {
@@ -1377,8 +1356,8 @@ fn report(
         let discarded = outcome.stdout.discarded() + outcome.stderr.discarded();
         text.push_str(&format!(
             "[{discarded} bytes were discarded from this view; the full output is retained. \
-             Read it with `shell_output` handle={}.]\n",
-            retained.handle
+             Read it with `job read` job_id={}.]\n",
+            retained.job_id
         ));
         if retained.cut {
             text.push_str(&format!(
@@ -1432,7 +1411,7 @@ fn report(
             "stderr_total_bytes": outcome.stderr.total,
             "stdout_truncated_bytes": outcome.stdout.discarded(),
             "stderr_truncated_bytes": outcome.stderr.discarded(),
-            "output_handle": retained.as_ref().map(|r| r.handle.clone()),
+            "job_id": retained.as_ref().map(|r| r.job_id.clone()),
             "output_retained_bytes": retained.as_ref().map(|r| r.retained_bytes),
             "output_total_bytes": retained.as_ref().map(|r| r.total_bytes),
             "output_retained_cut": retained.as_ref().map(|r| r.cut),
@@ -1441,17 +1420,17 @@ fn report(
     }
 }
 
-/// What a truncated foreground result exposes about its retained output: the opaque handle the
-/// model passes to `shell_output`, and the retained/total byte counts so a cut is stated.
+/// What a truncated foreground result exposes about its retained output: the job id the model
+/// passes to `job`, and the retained/total byte counts so a cut is stated.
 struct RetainedView {
-    handle: String,
+    job_id: String,
     retained_bytes: u64,
     total_bytes: u64,
     cut: bool,
 }
 
 /// The result of a foreground call that was adopted by the job registry in place (ADR 0037
-/// revision 1): the job id, the `job_output` hint, and a bounded tail of the output produced
+/// revision 1): the job id, the `job` hint, and a bounded tail of the output produced
 /// before adoption. The command is **not** restarted, and its output file already holds that
 /// pre-adoption output.
 #[allow(clippy::too_many_arguments)]
@@ -1470,9 +1449,9 @@ fn adopted_report(
     text.push_str(&format!("$ {command}\n"));
     text.push_str(&format!(
         "[still running after {threshold:?}; moved to the background as job {id} — the same \
-         process, not restarted. Its output is {output}. Read it with `job_output` (pass \
-         `wait: true` to wait for the end); `job_list` lists this session's jobs and \
-         `job_kill` stops one. Do not sleep or poll.]\n",
+         process, not restarted. Its output is {output}. Read it with `job` (`op: \"read\"`; \
+         `op: \"wait\"` waits for the end). You will be notified when it finishes. Do not \
+         sleep or poll. If you have nothing else to do, end your reply.]\n",
         id = info.id,
         output = info.output,
     ));
