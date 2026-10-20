@@ -25,15 +25,14 @@ A rule is `(tool matcher, resource matcher) -> allow | ask | deny`.
 **Priority: `deny` > `ask` > `allow`; no rule matching means `ask`.** So an `ask` rule beats
 an `allow` rule when both match, and the default is conservative.
 
-The memory tools (ADR 0021 D5) follow this rule: `memory_search` is `allow` in all three tiers,
-`memory_save` and `memory_revise` are `ask` in all three (`--yes` answers the ask, a `deny`
-still wins). There is deliberately no agent tool for archive/forget/purge/confirm; an agent can
-only add or revise, and the store refuses a `source: User` record.
+The memory tool (ADR 0021 D5) follows this rule: `memory_search` is `allow` in all three tiers.
+There is deliberately no agent tool for archive/forget/purge/confirm/save/revise (D5: the
+model has no write path).
 
 Renamed tools (ADR 0043 decision 3) are judged under their **new** name
-(`rule::canonical_tool_name`): a call to `git_status` is checked as `git_diff`, a call to
-`memory_get` as `memory_search`. A config rule written against an old name therefore never
-matches; the alias can never bypass a `deny` on the new tool.
+(`rule::canonical_tool_name`): a call to `git_status` is checked as `git_diff`. A config rule
+written against an old name therefore never matches; the alias can never bypass a `deny` on
+the new tool.
 
 `ask_user` (ADR 0024 Q6) is `allow` in **all three** tiers: it writes nothing and runs
 nothing, so it never prompts. It still goes through the ordinary hook path, and its answer is

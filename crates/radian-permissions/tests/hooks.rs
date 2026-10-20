@@ -649,17 +649,6 @@ async fn a_renamed_tool_is_judged_under_its_new_name() {
                 Action::Deny,
             )
             .with_reason("git_diff is off"),
-            Rule::new(
-                ToolMatcher::Name("memory_get".into()),
-                ResourceMatcher::Any,
-                Action::Allow,
-            ),
-            Rule::new(
-                ToolMatcher::Name("memory_search".into()),
-                ResourceMatcher::Any,
-                Action::Deny,
-            )
-            .with_reason("memory_search is off"),
         ],
     )
     .unwrap();
@@ -669,25 +658,19 @@ async fn a_renamed_tool_is_judged_under_its_new_name() {
     hooks.set_turn_source(Some(InputSource::User));
     let cx = ctx();
 
-    for (old, reason) in [
-        ("git_status", "git_diff is off"),
-        ("memory_get", "memory_search is off"),
-    ] {
-        let decision = decide(&hooks, &cx, &call(old, json!({"id": "mem-1"})))
-            .await
-            .unwrap();
-        let ToolDecision::Deny { reason: got } = decision else {
-            panic!("`{old}` must be denied by its new name's rule, got {decision:?}");
-        };
-        assert!(got.contains(reason), "`{old}`: {got}");
-    }
+    let decision = decide(&hooks, &cx, &call("git_status", json!({})))
+        .await
+        .unwrap();
+    let ToolDecision::Deny { reason: got } = decision else {
+        panic!("`git_status` must be denied by its new name's rule, got {decision:?}");
+    };
+    assert!(got.contains("git_diff is off"), "`git_status`: {got}");
     assert_eq!(
         approver.calls(),
         0,
         "a deny on the new name must not reach the approver"
     );
     let events = audit.events();
-    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0].decision, ResolvedDecision::Deny);
-    assert_eq!(events[1].decision, ResolvedDecision::Deny);
 }

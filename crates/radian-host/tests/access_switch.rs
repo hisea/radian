@@ -150,7 +150,6 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
-            memory_notice_line: Arc::new(|_line: &str| {}),
         },
     )
     .await
@@ -285,7 +284,6 @@ async fn a_session_without_a_builder_refuses_set_access() {
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
-            memory_notice_line: Arc::new(|_line: &str| {}),
         },
     )
     .await

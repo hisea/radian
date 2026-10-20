@@ -258,6 +258,21 @@ fn record_tokens(record: &MemoryRecord, bytes_per_token: u32) -> u64 {
     request_size_of(&record_line(record)).tokens(bytes_per_token)
 }
 
+/// Whether the Active records' estimated total exceeds the injection budget (ADR 0021 D7):
+/// only then is `memory_search` mounted. The caller passes the same view the fixed block is
+/// planned from (Project when linked, then Global); archived records never count. Pure.
+///
+/// A read failure is not a `false` from here: the caller warns and mounts nothing (invariant
+/// 2), which is why this takes the view instead of the service.
+pub fn exceeds_budget(view: &[MemoryRecord], config: &InjectionConfig) -> bool {
+    let total: u64 = view
+        .iter()
+        .filter(|record| record.is_active())
+        .map(|record| record_tokens(record, config.bytes_per_token))
+        .sum();
+    total > config.max_tokens
+}
+
 /// Counts a string the way `agent_core` does, without building a `ModelRequest`.
 fn request_size_of(text: &str) -> RequestSize {
     let mut size = RequestSize::default();
@@ -938,5 +953,53 @@ mod tests {
                 .records
                 .is_empty()
         );
+    }
+
+    /// ADR 0021 D7: an empty memory never mounts the tool; archived records never count.
+    #[test]
+    fn an_empty_or_archived_view_stays_under_the_budget() {
+        let config = InjectionConfig::default();
+        assert!(!exceeds_budget(&[], &config));
+        let mut archived = record(
+            "x",
+            Scope::Global,
+            Source::User,
+            Kind::Fact,
+            None,
+            &"a".repeat(100_000),
+            "2026-01-01T00:00:00Z",
+        );
+        archived.status = Status::Archived;
+        assert!(!exceeds_budget(&[archived], &config));
+    }
+
+    /// ADR 0021 D7: the total is the same conservative estimate the fixed block selects
+    /// with — one record over the cap mounts the tool.
+    #[test]
+    fn a_view_over_the_budget_mounts_the_tool() {
+        let config = InjectionConfig {
+            max_tokens: 10,
+            ..InjectionConfig::default()
+        };
+        let small = record(
+            "s",
+            Scope::Global,
+            Source::User,
+            Kind::Fact,
+            None,
+            "hi",
+            "2026-01-01T00:00:00Z",
+        );
+        assert!(!exceeds_budget(std::slice::from_ref(&small), &config));
+        let big = record(
+            "b",
+            Scope::Global,
+            Source::User,
+            Kind::Fact,
+            None,
+            &"a".repeat(400),
+            "2026-01-01T00:00:00Z",
+        );
+        assert!(exceeds_budget(&[small, big], &config));
     }
 }

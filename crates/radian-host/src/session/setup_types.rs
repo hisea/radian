@@ -179,10 +179,6 @@ pub struct HostBindings {
     pub before_driver: Option<Arc<dyn Fn() + Send + Sync>>,
     /// A memory hook's warning line (the two hosts prefix it differently).
     pub memory_warning: Arc<dyn Fn(&str) + Send + Sync>,
-    /// A memory notice line for the user (ADR 0021: the project a default-scope
-    /// write registered, and how to join it to a previous one). The CLI prints it to stderr
-    /// and the TUI shows it as a notice.
-    pub memory_notice_line: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).
