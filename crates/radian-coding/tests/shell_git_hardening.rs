@@ -1,7 +1,8 @@
 //! ADR 0039 decision 5: in a project the user has **not** trusted, every `shell` child
-//! (foreground and background job alike) carries the host git hardening as `GIT_CONFIG_*`
-//! environment, so repository configuration cannot run commands through a shell git. In a
-//! trusted project nothing is injected, so the user's own hooks still run.
+//! (foreground and background job alike, sandboxed or approved `outside_sandbox`) carries
+//! the host git hardening as `GIT_CONFIG_*` environment, so repository configuration
+//! cannot run commands through a shell git. In a trusted project nothing is injected, so
+//! the user's own hooks still run.
 //!
 //! Each test is self-validating: it first runs the same command **without** hardening and
 //! asserts the marker appears (the trap works), then with hardening and asserts it does
@@ -257,6 +258,182 @@ async fn untrusted_shell_empties_repo_filter_commands() {
     );
 }
 
+/// A hardened `git diff` must not run the repository's `diff.<driver>.textconv`: the driver
+/// is still named by `.gitattributes`, but its command becomes `cat`, so the text diff is
+/// preserved (verified on git 2.53.0: an empty override would error out instead).
+#[tokio::test]
+async fn untrusted_shell_neutralises_repo_diff_textconv() {
+    let dir = TempDir::new("shell-git-textconv");
+    let ws = dir.file("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    repo(&ws);
+
+    let marker = dir.file("marker-textconv");
+    let conv = ws.join("textconv-hook.sh");
+    marker_script(&conv, &marker, true);
+    git(&ws, &["config", "diff.tc.textconv", &conv.to_string_lossy()]);
+    std::fs::write(ws.join(".gitattributes"), "*.bin diff=tc\n").unwrap();
+    std::fs::write(ws.join("f.bin"), "AAA\n").unwrap();
+    git(&ws, &["add", ".gitattributes", "f.bin"]);
+    git(&ws, &["commit", "-qm", "baseline"]);
+    std::fs::write(ws.join("f.bin"), "BBB\n").unwrap();
+
+    // Control: without hardening the textconv fires on `git diff`.
+    let plain = tools(&ws, &dir.file("sessions/plain.jobs"), false);
+    let session = plain.open_session().await.expect("session");
+    let out = exec(&session, "shell", json!({"command": "git diff -- f.bin"}))
+        .await
+        .unwrap();
+    assert!(output_text(&out).contains("exit code: 0"), "{out:?}");
+    assert!(marker.exists(), "the control must fire the textconv");
+
+    // Hardened: the same diff succeeds without running the converter, and still shows
+    // the text diff.
+    std::fs::remove_file(&marker).unwrap();
+    let hardened = tools(&ws, &dir.file("sessions/hardened.jobs"), true);
+    let session = hardened.open_session().await.expect("session");
+    let out = exec(&session, "shell", json!({"command": "git diff -- f.bin"}))
+        .await
+        .unwrap();
+    let text = output_text(&out);
+    assert!(text.contains("exit code: 0"), "{out:?}");
+    assert!(!marker.exists(), "hardened git must not run the textconv");
+    assert!(
+        text.contains("-AAA") && text.contains("+BBB"),
+        "the text diff is preserved: {out:?}"
+    );
+}
+
+/// A hardened `git diff` must not run the repository's `diff.external`: it becomes `true`,
+/// so the patch is suppressed but the command still succeeds (verified on git 2.53.0: an
+/// empty override would error out instead).
+#[tokio::test]
+async fn untrusted_shell_disables_repo_diff_external() {
+    let dir = TempDir::new("shell-git-external");
+    let ws = dir.file("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    repo(&ws);
+
+    let marker = dir.file("marker-external");
+    let external = ws.join("external-hook.sh");
+    marker_script(&external, &marker, false);
+    git(&ws, &["config", "diff.external", &external.to_string_lossy()]);
+    std::fs::write(ws.join("a.txt"), "hello\nchange\n").unwrap();
+
+    // Control: without hardening the external diff fires.
+    let plain = tools(&ws, &dir.file("sessions/plain.jobs"), false);
+    let session = plain.open_session().await.expect("session");
+    exec(&session, "shell", json!({"command": "git diff -- a.txt"}))
+        .await
+        .unwrap();
+    assert!(marker.exists(), "the control must fire the external diff");
+
+    // Hardened: the same diff succeeds without running it.
+    std::fs::remove_file(&marker).unwrap();
+    let hardened = tools(&ws, &dir.file("sessions/hardened.jobs"), true);
+    let session = hardened.open_session().await.expect("session");
+    let out = exec(&session, "shell", json!({"command": "git diff -- a.txt"}))
+        .await
+        .unwrap();
+    let text = output_text(&out);
+    assert!(text.contains("exit code: 0"), "{out:?}");
+    assert!(!marker.exists(), "hardened git must not run diff.external");
+    assert!(!text.contains("fatal"), "the diff still succeeds: {out:?}");
+}
+
+/// A hardened `git diff` must not run a `diff.<driver>.command` external driver: it becomes
+/// `true`, so the command still succeeds while the patch for those paths is suppressed
+/// (verified on git 2.53.0: an empty override would error out instead).
+#[tokio::test]
+async fn untrusted_shell_disables_repo_diff_command() {
+    let dir = TempDir::new("shell-git-command");
+    let ws = dir.file("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    repo(&ws);
+
+    let marker = dir.file("marker-command");
+    let driver = ws.join("driver-hook.sh");
+    marker_script(&driver, &marker, false);
+    git(&ws, &["config", "diff.dc.command", &driver.to_string_lossy()]);
+    std::fs::write(ws.join(".gitattributes"), "*.dcf diff=dc\n").unwrap();
+    std::fs::write(ws.join("g.dcf"), "data\n").unwrap();
+    git(&ws, &["add", ".gitattributes", "g.dcf"]);
+
+    // Control: without hardening the driver fires on `git diff`.
+    let plain = tools(&ws, &dir.file("sessions/plain.jobs"), false);
+    let session = plain.open_session().await.expect("session");
+    exec(
+        &session,
+        "shell",
+        json!({"command": "git diff --cached -- g.dcf"}),
+    )
+    .await
+    .unwrap();
+    assert!(marker.exists(), "the control must fire the diff driver");
+
+    // Hardened: the same diff succeeds without running the driver.
+    std::fs::remove_file(&marker).unwrap();
+    let hardened = tools(&ws, &dir.file("sessions/hardened.jobs"), true);
+    let session = hardened.open_session().await.expect("session");
+    let out = exec(
+        &session,
+        "shell",
+        json!({"command": "git diff --cached -- g.dcf"}),
+    )
+    .await
+    .unwrap();
+    let text = output_text(&out);
+    assert!(text.contains("exit code: 0"), "{out:?}");
+    assert!(!marker.exists(), "hardened git must not run diff.<name>.command");
+}
+
+/// An approved `outside_sandbox` call in an untrusted project carries the same hardening:
+/// the approval names the command, not the repository's config.
+#[tokio::test]
+async fn untrusted_outside_sandbox_shell_does_not_run_repo_fsmonitor() {
+    let dir = TempDir::new("shell-git-outside");
+    let ws = dir.file("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    repo(&ws);
+
+    let marker = dir.file("marker-fsmonitor-outside");
+    let hook = ws.join("fsmonitor-hook.sh");
+    marker_script(&hook, &marker, false);
+    git(&ws, &["config", "core.fsmonitor", &hook.to_string_lossy()]);
+
+    async fn status_outside(session: &CodingSession) -> String {
+        let out = exec(
+            session,
+            "shell",
+            json!({
+                "command": "git status --porcelain --branch",
+                "outside_sandbox": true,
+                "outside_sandbox_reason": "test the hardening outside the sandbox",
+            }),
+        )
+        .await
+        .unwrap();
+        output_text(&out)
+    }
+
+    // Control: without hardening the trap fires, sandbox or not.
+    let plain = tools(&ws, &dir.file("sessions/plain.jobs"), false);
+    let session = plain.open_session().await.expect("session");
+    let text = status_outside(&session).await;
+    assert!(text.contains("## "), "{text}");
+    assert!(marker.exists(), "the control must fire the hook");
+
+    // Hardened: the same approved call succeeds without running the hook.
+    std::fs::remove_file(&marker).unwrap();
+    let hardened = tools(&ws, &dir.file("sessions/hardened.jobs"), true);
+    let session = hardened.open_session().await.expect("session");
+    let text = status_outside(&session).await;
+    assert!(text.contains("## "), "{text}");
+    assert!(
+        !marker.exists(),
+        "a hardened outside_sandbox call must not run core.fsmonitor"
+    );
+}
 /// A trusted project injects nothing: the user's own `pre-commit` hook still runs on a
 /// `git commit` through `shell`.
 #[tokio::test]
