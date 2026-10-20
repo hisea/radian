@@ -10,7 +10,7 @@ An ADR is a snapshot of the decisions in force. It holds no revision history, no
 
 ## Verify
 
-Run these before you say a change is done. All of them must pass. The `journal-selfcheck` runs replay every session's journal against its transcript, so they check every transcript write. The minimum Rust version is 1.88.
+Run these before you say a change is done. All of them must pass. The `journal-selfcheck` runs replay every session's journal against its transcript, so they check every transcript write. The minimum Rust version is 1.99.1.
 
 ```sh
 cargo fmt --all -- --check
@@ -26,8 +26,8 @@ Run tests with `--no-fail-fast`. Cargo stops at the first failing test binary by
 default, which makes a mutation look like it was caught by one test when it was
 caught by seven, and hides failures in the binaries that never ran.
 
-The workspace MSRV is checked, not assumed: `cargo +1.88 check --workspace
---all-targets` passes (`rustup toolchain install 1.88 --profile minimal`).
+The workspace MSRV is checked, not assumed: `cargo +1.99.1 check --workspace
+--all-targets` passes (`rustup toolchain install 1.99.1 --profile minimal`).
 
 A change to a provider adapter must also keep **both** contract suites green:
 
@@ -68,7 +68,7 @@ Use this section when the owner asks you to hand work to pi in herdr. pi is a se
 
 - The worktree path and the branch, and a ban on touching the main working tree.
 - The files to read first, the background, and the steps.
-- The limits: do not change the public API of `agent-core` without saying why, no new dependencies without a reason, minimum Rust 1.88, follow the style around it.
+- The limits: do not change the public API of `agent-core` without saying why, no new dependencies without a reason, minimum Rust 1.99.1, follow the style around it.
 - The acceptance commands from the Verify section, and how many times to repeat flaky-prone tests.
 - The write-as-you-go rule: pi writes each finished piece to disk and commits it before it starts the next piece. It keeps a short progress note in the worktree (what is done, what is verified, what is next) and updates it after each step. A context compaction loses work that lives only in the conversation; it does not lose a file or a commit.
 - The test rule: each new test must fail when the feature is broken. pi runs the test against the broken code, and does a mutation check for each behavior it adds. The report names the test that caught each mutation.
