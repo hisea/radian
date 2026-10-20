@@ -7,7 +7,7 @@
 ## 背景（已核实）
 
 - `compile-compcert` 在 40 分钟上限前 3 分钟才开始主构建；`cobol-modernization` 到 900 s 都没写交付物。两次都是被外部强制停掉，radian 没有自己结束这一轮，journal 不完整。
-- `radian exec` 已有 `--turn-timeout-secs`；Terminal-Bench 适配器没有传它（见 `bench-adapter-followups.md`）。
+- `radian exec` 已有 `--turn-timeout-secs`。Terminal-Bench 适配器在传了 `--ak timeout_sec` 时用它减 60 s 作为 `--turn-timeout-secs`�此替代）：Harbor 0.24.0 不把任务自己的 agent 超时传给 agent，只在外面用 `asyncio.wait_for` 到点杀掉，所以不传 `timeout_sec` 时仍会被外部强制停掉。
 
 ## 待决方向
 
