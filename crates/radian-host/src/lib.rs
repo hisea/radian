@@ -97,7 +97,8 @@ pub use command_footer::{
 };
 pub use config::default::{DEFAULT_CONFIG_TEMPLATE, ensure_default_config};
 pub use config::migrate_claude::{
-    ClaudeDraft, ClaudeMigrateError, ClaudeSkill, ClaudeTargets, import_claude, write_claude_draft,
+    ClaudeDraft, ClaudeMigrateError, ClaudeSkill, ClaudeTargets, ClaudeWriteReport, import_claude,
+    write_claude_draft,
 };
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::model_write::{ModelWriteError, write_model_route};

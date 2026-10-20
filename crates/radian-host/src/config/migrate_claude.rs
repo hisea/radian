@@ -25,9 +25,11 @@
 //!
 //! What is reported as **not imported**, with the reason:
 //!
-//! - `<claude-home>/.claude.json` `mcpServers`: waits for the `[mcp]` section (slice B).
-//! - `<project>/.claude/settings.json` `hooks`: waits for project hooks (slice B).
-//! - `<project>/.mcp.json`: never translated; the runtime will read it once slice B lands.
+//! - `<claude-home>/.claude.json` `mcpServers`: not imported (there is no `[mcp]` section
+//!   yet); reported per server.
+//! - `<project>/.claude/settings.json` `hooks`: not imported (project hooks are not loaded
+//!   yet); reported per item.
+//! - `<project>/.mcp.json`: never translated; reported as handled by the trust gate.
 //!
 //! Every other dropped item (`if`, `async`, http hooks, `context: fork`, agents, plugins,
 //! LSP, `.claude/rules`, `CLAUDE.local.md`, memory, sessions) gets one report line each.
@@ -42,13 +44,23 @@
 //!   directories.
 //! - The generated config draft is validated with the real reader ([`super::parse`]) and
 //!   every generated skill is validated with the skill rules before anything is printed or
-//!   written, and writing refuses an existing target without `--force`.
+//!   written. `radian config import-claude --write` never overwrites a file that exists:
+//!   the configuration is merged into the existing file, format-preserving, through
+//!   [`super::preserve::edit_preserving`] (ADR 0008 §5: comments, order and unknown keys
+//!   survive; `extra_paths` gains only missing entries; `[hooks]` gains only new entries;
+//!   anything that would have to change to land is left alone with one report line naming
+//!   the key). `AGENTS.md` and `SKILL.md` targets are created with `create_new`: an
+//!   existing target is skipped with one report line, and the other targets are still
+//!   written.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value as Json;
 use toml::Value as Toml;
+use toml_edit::{Array, ArrayOfTables, Item, Table, value};
+
+use super::preserve::PreserveError;
 
 /// One generated skill file: `<skills-dir>/<name>/SKILL.md` with this text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +89,17 @@ pub struct ClaudeDraft {
     /// Every file actually read, as given (never credential files). Tests assert the
     /// credential names never appear here.
     pub files_read: Vec<PathBuf>,
+}
+
+/// What `write_claude_draft` did. Nothing that existed was changed: the configuration was
+/// merged, and every other target was created new or skipped with one line each.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClaudeWriteReport {
+    /// Files this run created.
+    pub written: Vec<PathBuf>,
+    /// One line per target not written (an existing file) and per merge part not landed
+    /// (a conflict naming the key). For stderr; never a secret value.
+    pub skipped: Vec<String>,
 }
 
 /// Where `write_claude_draft` puts the draft. The CLI resolves these from the environment;
@@ -110,8 +133,8 @@ pub enum ClaudeMigrateError {
     Parse { path: PathBuf, message: String },
     /// The generated draft is not accepted by the reader: an internal error, never written.
     InvalidDraft { message: String },
-    /// `--write` target already exists; pass `--force` to overwrite it.
-    TargetExists { path: PathBuf },
+    /// The configuration file is newer than this build supports: nothing was written.
+    ReadOnly { path: PathBuf, supported: u64 },
     /// The write itself failed.
     Write {
         path: PathBuf,
@@ -143,9 +166,10 @@ impl std::fmt::Display for ClaudeMigrateError {
                     "the generated draft is not a valid Radian configuration: {message}"
                 )
             }
-            ClaudeMigrateError::TargetExists { path } => write!(
+            ClaudeMigrateError::ReadOnly { path, supported } => write!(
                 f,
-                "{}: already exists; refusing to overwrite (pass --force to overwrite it)",
+                "{}: the configuration file is newer than the supported v{supported}; \
+                 nothing was written",
                 path.display()
             ),
             ClaudeMigrateError::Write { path, source } => {
@@ -156,6 +180,32 @@ impl std::fmt::Display for ClaudeMigrateError {
 }
 
 impl std::error::Error for ClaudeMigrateError {}
+
+impl From<super::preserve::PreserveError> for ClaudeMigrateError {
+    fn from(error: super::preserve::PreserveError) -> Self {
+        match error {
+            super::preserve::PreserveError::ReadOnly { path, supported } => {
+                ClaudeMigrateError::ReadOnly { path, supported }
+            }
+            super::preserve::PreserveError::Read { path, source } => {
+                ClaudeMigrateError::Read { path, source }
+            }
+            super::preserve::PreserveError::Parse { path, message } => {
+                ClaudeMigrateError::Parse { path, message }
+            }
+            // The pre-pass keeps the two closures in sync, so a verify failure is an
+            // internal error, never a user-facing conflict.
+            super::preserve::PreserveError::Verify { path, keys } => {
+                ClaudeMigrateError::InvalidDraft {
+                    message: format!("{}: refusing a write that changes {keys}", path.display()),
+                }
+            }
+            super::preserve::PreserveError::Write { path, source } => {
+                ClaudeMigrateError::Write { path, source }
+            }
+        }
+    }
+}
 
 /// Reads the named Claude directories and returns the draft. `None` means "not given": that
 /// tree is never touched. At least one must be `Some`.
@@ -230,16 +280,29 @@ fn require_dir(dir: &Path) -> Result<(), ClaudeMigrateError> {
     }
 }
 
-/// Writes the draft to `targets`, creating parent directories. Existing files are refused
-/// unless `force` is set. Project-level skill files are trust-gate resources (ADR 0031 T1);
-/// the CLI prints that notice before calling this.
+/// Writes the draft to `targets`, creating parent directories. Nothing that exists is
+/// ever changed or removed:
+///
+/// - the configuration is merged into the existing file through
+///   [`super::preserve::edit_preserving`] (ADR 0008 §5): comments, order and unknown keys
+///   survive byte-for-byte; `extra_paths` gains only entries that are not already listed;
+///   `[hooks]` gains only matcher entries that are not already present; anything the
+///   import would have to change to land is left alone with one report line naming the
+///   key. A file the reader refuses, or one read read-only (a newer `schema_version`),
+///   stops the whole write with an error and nothing is written.
+/// - `AGENTS.md` and every `SKILL.md` target is created with `create_new`: an existing
+///   file is skipped with one report line (`<path>: exists, not written; the draft is in
+///   the dry-run output`), and the other targets are still written.
+///
+/// Project-level skill files are trust-gate resources (ADR 0031 T1); the CLI prints that
+/// notice before calling this.
 pub fn write_claude_draft(
     draft: &ClaudeDraft,
     targets: &ClaudeTargets,
-    force: bool,
-) -> Result<Vec<PathBuf>, ClaudeMigrateError> {
-    // Validate first: what lands on disk must be the accepted document.
-    super::parse(Path::new("<draft>"), &draft.config_toml).map_err(|error| {
+) -> Result<ClaudeWriteReport, ClaudeMigrateError> {
+    // Validate first: what lands on disk must be the accepted document, so a bad draft
+    // writes nothing.
+    let parsed = super::parse(Path::new("<draft>"), &draft.config_toml).map_err(|error| {
         ClaudeMigrateError::InvalidDraft {
             message: error.to_string(),
         }
@@ -252,28 +315,27 @@ pub fn write_claude_draft(
         })?;
     }
 
-    let mut written = Vec::new();
-    write_one(
+    let mut report = ClaudeWriteReport::default();
+    merge_config(
         &targets.config_path,
-        &draft.config_toml,
-        force,
-        true,
-        &mut written,
+        &parsed.skills.extra_paths,
+        &parsed.hooks,
+        &mut report,
     )?;
     if let Some(body) = &draft.user_agents_md {
-        write_one(&targets.user_agents_path, body, force, true, &mut written)?;
+        write_one(&targets.user_agents_path, body, true, &mut report)?;
     }
     for skill in &draft.user_skills {
         let path = targets.user_skills_dir.join(&skill.name).join("SKILL.md");
-        write_one(&path, &skill.content, force, false, &mut written)?;
+        write_one(&path, &skill.content, false, &mut report)?;
     }
     if let Some(dir) = &targets.project_skills_dir {
         for skill in &draft.project_skills {
             let path = dir.join(&skill.name).join("SKILL.md");
-            write_one(&path, &skill.content, force, false, &mut written)?;
+            write_one(&path, &skill.content, false, &mut report)?;
         }
     }
-    // Read back what landed through the same reader: the files on disk must be accepted.
+    // Read back what landed through the same reader: the file on disk must be accepted.
     let text = std::fs::read_to_string(&targets.config_path).map_err(|source| {
         ClaudeMigrateError::Read {
             path: targets.config_path.clone(),
@@ -285,20 +347,374 @@ pub fn write_claude_draft(
             message: error.to_string(),
         }
     })?;
-    Ok(written)
+    Ok(report)
 }
 
+/// The keys one merge may touch, for the verify error.
+const MERGE_KEYS: &str = "`[skills] extra_paths`/`[hooks]`";
+
+/// One event's imported matcher entries to append.
+struct PlannedHooks {
+    event: &'static str,
+    entries: Vec<(Option<String>, Vec<(String, Option<u64>)>)>,
+}
+
+/// What [`plan_merge`] decided: additions plus conflict lines.
+#[derive(Default)]
+struct PlannedMerge {
+    add_paths: Vec<String>,
+    add_hooks: Vec<PlannedHooks>,
+    conflicts: Vec<String>,
+}
+
+/// Merges the imported paths and hooks into the configuration at `path` (created when
+/// absent), format-preserving. Additions that are already present are skipped; shapes the
+/// merge cannot extend are left alone with one conflict line each in `report`.
+fn merge_config(
+    path: &Path,
+    add_paths: &[String],
+    add_hooks: &super::HooksConfig,
+    report: &mut ClaudeWriteReport,
+) -> Result<(), ClaudeMigrateError> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(ClaudeMigrateError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if let Some(text) = &existing {
+        let baseline = super::parse(path, text).map_err(|error| ClaudeMigrateError::Parse {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        if baseline.read_only {
+            return Err(ClaudeMigrateError::ReadOnly {
+                path: path.to_path_buf(),
+                supported: super::SUPPORTED_SCHEMA_VERSION,
+            });
+        }
+    }
+    let plan = plan_merge(existing.as_deref(), path, add_paths, add_hooks)?;
+    report.skipped.extend(plan.conflicts);
+
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        let _ = crate::home::ensure_private_dir(parent);
+    }
+    super::preserve::edit_preserving(
+        path,
+        false,
+        MERGE_KEYS,
+        |doc| {
+            if !plan.add_paths.is_empty() {
+                let skills = doc.entry("skills").or_insert(Item::Table(Table::new()));
+                let table = skills.as_table_mut().ok_or_else(|| PreserveError::Verify {
+                    path: path.to_path_buf(),
+                    keys: MERGE_KEYS,
+                })?;
+                let array = table
+                    .entry("extra_paths")
+                    .or_insert(Item::Value(toml_edit::Value::Array(Array::new())));
+                let array = array.as_array_mut().ok_or_else(|| PreserveError::Verify {
+                    path: path.to_path_buf(),
+                    keys: MERGE_KEYS,
+                })?;
+                for entry in &plan.add_paths {
+                    array.push(entry.as_str());
+                }
+            }
+            for event in &plan.add_hooks {
+                if event.entries.is_empty() {
+                    continue;
+                }
+                let root = doc.entry("hooks").or_insert(Item::Table(Table::new()));
+                let table = root.as_table_mut().ok_or_else(|| PreserveError::Verify {
+                    path: path.to_path_buf(),
+                    keys: MERGE_KEYS,
+                })?;
+                let list = table
+                    .entry(event.event)
+                    .or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
+                let tables =
+                    list.as_array_of_tables_mut()
+                        .ok_or_else(|| PreserveError::Verify {
+                            path: path.to_path_buf(),
+                            keys: MERGE_KEYS,
+                        })?;
+                for (matcher, commands) in &event.entries {
+                    let mut entry = Table::new();
+                    if let Some(matcher) = matcher {
+                        entry["matcher"] = value(matcher.as_str());
+                    }
+                    let mut hooks = ArrayOfTables::new();
+                    for (command, timeout) in commands {
+                        let mut hook = Table::new();
+                        hook["type"] = value("command");
+                        hook["command"] = value(command.as_str());
+                        if let Some(secs) = timeout {
+                            hook["timeout"] = value(*secs as i64);
+                        }
+                        hooks.push(hook);
+                    }
+                    entry["hooks"] = Item::ArrayOfTables(hooks);
+                    tables.push(entry);
+                }
+            }
+            Ok(())
+        },
+        |expected| {
+            for entry in &plan.add_paths {
+                expected.skills.extra_paths.push(entry.clone());
+            }
+            for event in &plan.add_hooks {
+                for (matcher, commands) in &event.entries {
+                    let matcher_entry = super::HookMatcher {
+                        matcher: matcher.clone(),
+                        hooks: commands
+                            .iter()
+                            .map(|(command, timeout)| super::HookCommand {
+                                command: command.clone(),
+                                timeout_secs: *timeout,
+                            })
+                            .collect(),
+                    };
+                    match event.event {
+                        "PreToolUse" => expected.hooks.pre_tool_use.push(matcher_entry),
+                        "PostToolUse" => expected.hooks.post_tool_use.push(matcher_entry),
+                        _ => expected.hooks.stop.push(matcher_entry),
+                    }
+                }
+            }
+        },
+    )?;
+    Ok(())
+}
+
+/// Works out what the merge may append. Shapes the reader accepts but the merge cannot
+/// extend (a non-table `hooks`, a non-list event) become conflict lines; shapes the reader
+/// refuses never reach here (the baseline parse above already failed on them).
+fn plan_merge(
+    existing: Option<&str>,
+    path: &Path,
+    add_paths: &[String],
+    add_hooks: &super::HooksConfig,
+) -> Result<PlannedMerge, ClaudeMigrateError> {
+    let mut plan = PlannedMerge::default();
+    let Some(text) = existing else {
+        plan.add_paths = add_paths.to_owned();
+        plan.add_hooks = planned_hooks(add_hooks);
+        return Ok(plan);
+    };
+    let doc =
+        text.parse::<toml_edit::DocumentMut>()
+            .map_err(|error| ClaudeMigrateError::Parse {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+    let present_paths: Vec<String> = doc
+        .get("skills")
+        .and_then(|skills| skills.as_table())
+        .and_then(|skills| skills.get("extra_paths"))
+        .and_then(|paths| paths.as_array())
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    for entry in add_paths {
+        if !present_paths.contains(entry) && !plan.add_paths.contains(entry) {
+            plan.add_paths.push(entry.clone());
+        }
+    }
+    let hooks = doc.get("hooks");
+    if hooks.is_none() {
+        plan.add_hooks = planned_hooks(add_hooks);
+        return Ok(plan);
+    }
+    let Some(table) = hooks.and_then(|hooks| hooks.as_table()) else {
+        plan.conflicts
+            .push("`hooks`: is not a table, hooks left unchanged".to_owned());
+        return Ok(plan);
+    };
+    for (event, entries) in [
+        ("PreToolUse", &add_hooks.pre_tool_use),
+        ("PostToolUse", &add_hooks.post_tool_use),
+        ("Stop", &add_hooks.stop),
+    ] {
+        let imported: Vec<(Option<String>, Vec<(String, Option<u64>)>)> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.matcher.clone(),
+                    entry
+                        .hooks
+                        .iter()
+                        .map(|hook| (hook.command.clone(), hook.timeout_secs))
+                        .collect(),
+                )
+            })
+            .collect();
+        if imported.is_empty() {
+            continue;
+        }
+        let present = match table.get(event) {
+            None => Vec::new(),
+            Some(list) => match existing_hook_entries(list) {
+                Some(entries) => entries,
+                None => {
+                    plan.conflicts.push(format!(
+                        "`hooks.{event}`: is not a hook list, left unchanged"
+                    ));
+                    continue;
+                }
+            },
+        };
+        let mut planned = PlannedHooks {
+            event,
+            entries: Vec::new(),
+        };
+        for entry in imported {
+            if !present.contains(&entry) && !planned.entries.contains(&entry) {
+                planned.entries.push(entry);
+            }
+        }
+        plan.add_hooks.push(planned);
+    }
+    Ok(plan)
+}
+
+/// The imported hooks in merge-plan shape (every entry is new: there is no file yet).
+fn planned_hooks(hooks: &super::HooksConfig) -> Vec<PlannedHooks> {
+    [
+        ("PreToolUse", &hooks.pre_tool_use),
+        ("PostToolUse", &hooks.post_tool_use),
+        ("Stop", &hooks.stop),
+    ]
+    .into_iter()
+    .map(|(event, entries)| PlannedHooks {
+        event,
+        entries: entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.matcher.clone(),
+                    entry
+                        .hooks
+                        .iter()
+                        .map(|hook| (hook.command.clone(), hook.timeout_secs))
+                        .collect(),
+                )
+            })
+            .collect(),
+    })
+    .collect()
+}
+
+/// The canonical entries of an existing `hooks.<Event>` list: `None` when the value is not
+/// a list of tables (a conflict the merge leaves alone).
+fn existing_hook_entries(list: &Item) -> Option<Vec<(Option<String>, Vec<(String, Option<u64>)>)>> {
+    if let Some(tables) = list.as_array_of_tables() {
+        return Some(tables.iter().map(table_hook_entry).collect());
+    }
+    if let Some(array) = list.as_array() {
+        let mut entries = Vec::new();
+        for value in array {
+            let Some(table) = value.as_inline_table() else {
+                return None;
+            };
+            entries.push(inline_hook_entry(table));
+        }
+        return Some(entries);
+    }
+    None
+}
+
+/// The canonical shape of one existing matcher entry: the matcher and every hook's
+/// `(command, timeout)`.
+fn table_hook_entry(table: &Table) -> (Option<String>, Vec<(String, Option<u64>)>) {
+    let matcher = table
+        .get("matcher")
+        .and_then(|matcher| matcher.as_str())
+        .map(str::to_owned);
+    let hooks = table
+        .get("hooks")
+        .and_then(|hooks| hooks.as_array_of_tables())
+        .map(|hooks| hooks.iter().map(hook_command_entry).collect())
+        .unwrap_or_default();
+    (matcher, hooks)
+}
+
+/// The same shape for an inline-table entry (`hooks.<Event> = [{ ... }]`).
+fn inline_hook_entry(
+    table: &toml_edit::InlineTable,
+) -> (Option<String>, Vec<(String, Option<u64>)>) {
+    let matcher = table
+        .get("matcher")
+        .and_then(|matcher| matcher.as_str())
+        .map(str::to_owned);
+    let hooks = table
+        .get("hooks")
+        .and_then(|hooks| hooks.as_array())
+        .map(|hooks| {
+            hooks
+                .iter()
+                .filter_map(|hook| hook.as_inline_table())
+                .map(|hook| {
+                    (
+                        hook.get("command")
+                            .and_then(|command| command.as_str())
+                            .unwrap_or_default()
+                            .to_owned(),
+                        hook.get("timeout")
+                            .and_then(|timeout| timeout.as_integer())
+                            .and_then(|secs| u64::try_from(secs).ok()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (matcher, hooks)
+}
+
+/// One existing hook's `(command, timeout)` in canonical shape.
+fn hook_command_entry(table: &Table) -> (String, Option<u64>) {
+    (
+        table
+            .get("command")
+            .and_then(|command| command.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        table
+            .get("timeout")
+            .and_then(|timeout| timeout.as_integer())
+            .and_then(|secs| u64::try_from(secs).ok()),
+    )
+}
+
+/// Creates `path` with mode `0600` (unix) and writes `text`, or records one skip line when
+/// the target exists. `create_new` means an existing file is never truncated, replaced, or
+/// removed. The other targets are unaffected by one skip.
 fn write_one(
     path: &Path,
     text: &str,
-    force: bool,
     private_parent: bool,
-    written: &mut Vec<PathBuf>,
+    report: &mut ClaudeWriteReport,
 ) -> Result<(), ClaudeMigrateError> {
-    if std::fs::symlink_metadata(path).is_ok() && !force {
-        return Err(ClaudeMigrateError::TargetExists {
-            path: path.to_path_buf(),
-        });
+    if std::fs::symlink_metadata(path).is_ok() {
+        report.skipped.push(format!(
+            "`{}`: exists, not written; the draft is in the dry-run output",
+            path.display()
+        ));
+        return Ok(());
     }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         if private_parent {
@@ -307,16 +723,13 @@ fn write_one(
             let _ = std::fs::create_dir_all(parent);
         }
     }
-    if force {
-        let _ = std::fs::remove_file(path);
-    }
     write_private_new(path, text)?;
-    written.push(path.to_path_buf());
+    report.written.push(path.to_path_buf());
     Ok(())
 }
 
 /// Creates `path` with mode `0600` (unix) and writes `text`. `create_new` means an existing
-/// file is never truncated (callers remove it first when `--force` is given).
+/// file is never truncated: callers skip existing targets instead of replacing them.
 fn write_private_new(path: &Path, text: &str) -> Result<(), ClaudeMigrateError> {
     use std::io::Write as _;
     let mut options = std::fs::OpenOptions::new();

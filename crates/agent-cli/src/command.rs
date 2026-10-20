@@ -86,13 +86,11 @@ pub enum ConfigCommand {
         #[arg(long, value_name = "DIR")]
         project: Option<PathBuf>,
         /// Write the draft (configuration, skills, `AGENTS.md`) to the Radian paths instead
-        /// of printing it. Refuses to overwrite an existing file without `--force`.
+        /// of printing it. Nothing that exists is ever changed: the configuration is
+        /// merged, and existing `AGENTS.md`/`SKILL.md` targets are skipped with one report
+        /// line each.
         #[arg(long)]
         write: bool,
-        /// Overwrite existing targets when writing. Without it an existing target stops
-        /// the write and nothing is overwritten.
-        #[arg(long)]
-        force: bool,
     },
 }
 
@@ -143,7 +141,6 @@ fn config_command(cli: &Cli, command: ConfigCommand) -> Result<(), OutputError> 
             claude_home,
             project,
             write,
-            force,
         } => {
             let draft = radian_host::import_claude(claude_home.as_deref(), project.as_deref())?;
             // The report goes to stderr, so a stdout redirect still shows what could not
@@ -165,9 +162,12 @@ fn config_command(cli: &Cli, command: ConfigCommand) -> Result<(), OutputError> 
                      they will be asked about on the next start"
                 );
             }
-            let written = radian_host::write_claude_draft(&draft, &targets, force)?;
-            for path in &written {
+            let report = radian_host::write_claude_draft(&draft, &targets)?;
+            for path in &report.written {
                 eprintln!("[import-claude] wrote {}", path.display());
+            }
+            for line in &report.skipped {
+                eprintln!("[import-claude] {line}");
             }
             Ok(())
         }
