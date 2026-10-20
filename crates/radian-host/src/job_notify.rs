@@ -10,10 +10,10 @@
 //! wake-started turns with no user input in between it degrades to `inject` only, so a job
 //! that starts another job cannot wake the session forever (ADR 0037 decision 3).
 //!
-//! A settle is **not** notified when the model already has it: a `job_output wait=true` that
-//! returned the settle, a `job_kill`, or a session-exit cleanup (the registry marks those
-//! `notify: false`). A timeout **is** notified: the model set the timeout but did not ask to
-//! kill the job, so it may be waiting on it.
+//! A settle is **not** notified when the model already has it: a `job` wait (`op: "wait"`)
+//! that returned the settle, a `job` kill (`op: "kill"`), or a session-exit cleanup (the
+//! registry marks those `notify: false`). A timeout **is** notified: the model set the timeout
+//! but did not ask to kill the job, so it may be waiting on it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -27,7 +27,7 @@ use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};
 /// The most output bytes a completion message inlines (ADR 0037 decision 5; omp's
 /// `ASYNC_INLINE_RESULT_MAX_CHARS` idea). 4 KiB is the tail of a failing build between two
 /// tool calls without letting a chatty job flood the context; the rest is read with
-/// `job_output`, the model's only channel to a job's output (ADR 0039 decision 1).
+/// `job`, the model's only channel to a job's output (ADR 0039 decision 1).
 pub const NOTIFY_INLINE_BYTES: usize = 4 << 10;
 
 /// How many consecutive wake-started turns are allowed before settles are injected only
@@ -189,7 +189,7 @@ impl JobNotifier {
                     text.push('\n');
                 }
             }
-            text.push_str("Use job_output to read more.");
+            text.push_str("Read its output with job.");
         }
         text
     }

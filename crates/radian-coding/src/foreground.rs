@@ -4,31 +4,19 @@
 //! bytes between the head and the tail are normally gone. When such a result is truncated, the
 //! model still needs them. This module tees the command's whole output to a private file in the
 //! session's own directory (the jobs directory ADR 0039 decision 1 already established), and
-//! hands the model an **opaque handle** — never a path.
+//! registers it in the **same job registry** as a settled entry with a normal `job-…` id (ADR
+//! 0037 decision 3a): one id space, one reader (`job`), no journal records for it.
 //!
-//! The registry is per [`crate::provider::CodingSession`] (its state, and the handle's nonce,
-//! are fresh per session), so a handle from another session is unknown. A handle is
-//! `out-<nonce>-<n>`; the nonce keeps two sessions in one process from ever colliding.
-//!
-//! The private root is held as an `O_DIRECTORY|O_NOFOLLOW` fd ([`crate::output::PrivateDir`]) and
-//! every file is created/read relative to it (`O_CREAT|O_EXCL|O_NOFOLLOW`, 0600), so a symlink
-//! planted at the root or swapped in later cannot redirect the output. The root is only enabled
-//! when the provider has a **caller-supplied** session-private directory; a provider built
-//! without one (`CodingTools::with_sandbox` and no `with_jobs`) has no retention and no
-//! `shell_output` — there is no safe place to put it inside the model-readable workspace.
-//!
-//! Retention is bounded: at most [`Limits::max_foreground_retained_bytes`] per item and
-//! [`Limits::max_foreground_session_bytes`] across the session (plus
-//! [`Limits::max_foreground_items`] items). Making room evicts the oldest item, whose handle
-//! then reads as unknown. A command whose output fits the model-facing cap creates no item and
-//! leaves no handle: its file is removed as soon as the call ends (including an error path, via
-//! [`RetentionInner`]'s `Drop`).
+//! The registry is per [`crate::provider::CodingSession`]. Retention is bounded: at most
+//! [`Limits::max_foreground_retained_bytes`] per item and [`Limits::max_foreground_session_bytes`]
+//! across the session (plus [`Limits::max_foreground_items`] items). Making room evicts the
+//! oldest retained entry, whose id then reads as unknown.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
@@ -37,12 +25,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::args;
-use crate::fail;
+use crate::jobs::{JobState, Jobs, Ring};
 use crate::output::PrivateDir;
 use crate::provider::Limits;
 
 /// One retained item, as the registry tracks it.
 struct Item {
+    /// The job id the model reads it with (ADR 0037 decision 3a: one id space).
+    id: String,
     path: PathBuf,
     retained: u64,
 }
@@ -66,12 +56,10 @@ struct ForegroundInner {
     /// outside the workspace (ADR 0039 decision 1), never a workspace path.
     dir: PathBuf,
     /// The root fd, opened lazily on the first retained command. `Err` means there is no safe
-    /// private root (missing/unusable/symlinked); retention is then simply unavailable.
+    /// private root (missing/unusable/symlinked); retention is then unavailable.
     root: OnceLock<Result<PrivateDir, String>>,
-    /// A per-registry random token embedded in every handle, so two sessions in one process
-    /// cannot resolve each other's handles even though they share the directory.
-    nonce: u64,
-    next: AtomicU64,
+    /// The job registry the retained entries are registered in (ADR 0037 decision 3a).
+    jobs: Arc<Jobs>,
     max_item: u64,
     max_session: u64,
     max_items: usize,
@@ -79,13 +67,12 @@ struct ForegroundInner {
 }
 
 impl ForegroundOutputs {
-    pub(crate) fn new(dir: PathBuf, limits: &Limits) -> Self {
+    pub(crate) fn new(dir: PathBuf, limits: &Limits, jobs: &Arc<Jobs>) -> Self {
         Self {
             inner: Arc::new(ForegroundInner {
                 dir,
                 root: OnceLock::new(),
-                nonce: random_nonce(),
-                next: AtomicU64::new(1),
+                jobs: Arc::clone(jobs),
                 max_item: limits.max_foreground_retained_bytes as u64,
                 max_session: limits.max_foreground_session_bytes as u64,
                 max_items: limits.max_foreground_items,
@@ -103,18 +90,19 @@ impl ForegroundOutputs {
             .ok()
     }
 
-    /// Creates the retained file for one command and returns its sink. `None` when there is no
-    /// usable private root, or the file cannot be created exclusively: the shell still runs, it
-    /// just has no retrievable handle.
-    pub(crate) fn open(&self) -> Option<Retention> {
+    /// Creates the retained file for one command and returns its sink. The file is named for
+    /// the job id the model will read it with (ADR 0037 decision 3a: one id space, minted
+    /// from the registry's counter). `None` when there is no usable private root, or the file
+    /// cannot be created exclusively: the shell still runs, it just has no retrievable id.
+    pub(crate) fn open(&self, command: &str) -> Option<Retention> {
         let root = self.root()?;
-        let n = self.inner.next.fetch_add(1, Ordering::SeqCst);
-        let handle = format!("out-{:016x}-{n}", self.inner.nonce);
-        let name = format!("{handle}.out");
+        let id = crate::jobs::next_job_id();
+        let name = format!("{id}.out");
         let file = root.create(std::ffi::OsStr::new(&name)).ok()?;
         Some(Retention {
             inner: Arc::new(RetentionInner {
-                handle,
+                id,
+                command: command.to_owned(),
                 path: self.inner.dir.join(name),
                 cap: self.inner.max_item,
                 file: Mutex::new(file),
@@ -125,31 +113,53 @@ impl ForegroundOutputs {
         })
     }
 
-    /// Commits a finished command's retention. `keep` inserts the item (evicting the oldest to
-    /// stay inside the session bounds) and returns its handle; otherwise the file is removed and
-    /// no handle exists.
-    pub(crate) fn finish(&self, retention: &Retention, keep: bool) -> Option<String> {
+    /// Commits a finished command's retention. `keep` registers the item in the job registry
+    /// as a settled entry (evicting the oldest retained entries to stay inside the session
+    /// bounds) and returns its job id; otherwise the file is removed and no id exists.
+    /// An evicted or shut-down entry's id reads as unknown.
+    pub(crate) fn finish(&self, retention: &Retention, keep: Option<JobState>) -> Option<String> {
         // Stop the `Drop` guard first: it must not remove a file this method is about to keep,
         // and it must not race the explicit removal below.
         retention.inner.finished.store(true, Ordering::SeqCst);
-        let handle = retention.handle().to_owned();
+        let id = retention.id().to_owned();
+        let command = retention.inner.command.clone();
         let path = retention.path().to_owned();
         let retained = retention.retained();
-        if !keep {
+        let total = retention.total();
+        if keep.is_none() {
             {
                 let mut state = lock(&self.inner.state);
-                state.items.remove(&handle);
-                state.order.retain(|kept| kept != &handle);
+                state.items.remove(&id);
+                state.order.retain(|kept| kept != &id);
             }
             let _ = std::fs::remove_file(&path);
             return None;
         }
+        // The entry's increment starts at byte 0, bounded by the ring (ADR 0037 decision 4).
+        let ring = Ring::seeded(
+            tail_of(&path, (retained as usize).min(crate::jobs::JOB_RING_BYTES)),
+            total,
+        );
+        self.inner.jobs.insert_settled(
+            id.clone(),
+            command,
+            keep.expect("checked above"),
+            path.clone(),
+            ring,
+        );
 
-        let mut evicted: Vec<PathBuf> = Vec::new();
+        let mut evicted: Vec<(String, PathBuf)> = Vec::new();
         {
             let mut state = lock(&self.inner.state);
-            state.order.push_back(handle.clone());
-            state.items.insert(handle.clone(), Item { path, retained });
+            state.order.push_back(id.clone());
+            state.items.insert(
+                id.clone(),
+                Item {
+                    id: id.clone(),
+                    path,
+                    retained,
+                },
+            );
             state.total += retained;
             // Keep at least the item just committed, even if it alone exceeds the session cap;
             // its own per-item cap is the hard bound.
@@ -161,49 +171,43 @@ impl ForegroundOutputs {
                 };
                 if let Some(item) = state.items.remove(&oldest) {
                     state.total = state.total.saturating_sub(item.retained);
-                    evicted.push(item.path);
+                    evicted.push((item.id, item.path));
                 }
             }
         }
-        for path in evicted {
+        for (id, path) in evicted {
+            self.inner.jobs.remove(&id);
             let _ = std::fs::remove_file(path);
         }
-        Some(handle)
+        Some(id)
     }
 
-    /// Opens a kept item for reading. An unknown, malformed or cross-session handle is
-    /// `unknown_output` — never a filesystem lookup.
-    pub(crate) fn open_read(&self, handle: &str) -> Result<File, ToolFailure> {
-        if !lock(&self.inner.state).items.contains_key(handle) {
-            return Err(unknown_output(handle));
-        }
-        let root = self.root().ok_or_else(|| unknown_output(handle))?;
-        root.open_read(std::ffi::OsStr::new(&format!("{handle}.out")))
-            .map_err(|error| crate::output::read_failure("output_read", &error))
-    }
-
-    /// Session end: drop every kept item and release its file. Synchronous file removal only, so
-    /// the normal shutdown path leaves no retained output behind. The panic path never calls
-    /// this; the state drops with the session instead.
+    /// Session end: drop every kept item, unregister its id and remove its file. Synchronous
+    /// file removal only, so the normal shutdown path leaves no retained output behind. The
+    /// panic path never calls this; the state drops with the session instead.
     pub(crate) fn shutdown(&self) {
-        let paths: Vec<PathBuf> = {
+        let ids: Vec<(String, PathBuf)> = {
             let mut state = lock(&self.inner.state);
             state.order.clear();
             state.total = 0;
             state
                 .items
                 .drain()
-                .map(|(_, item)| item.path)
+                .map(|(_, item)| (item.id, item.path))
                 .collect::<Vec<_>>()
         };
-        for path in paths {
+        for (id, path) in ids {
+            self.inner.jobs.remove(&id);
             let _ = std::fs::remove_file(path);
         }
     }
 }
 
 struct RetentionInner {
-    handle: String,
+    /// The job id the model reads the entry with (ADR 0037 decision 3a: one id space).
+    id: String,
+    /// The command's first line, for the registry entry.
+    command: String,
     path: PathBuf,
     cap: u64,
     file: Mutex<File>,
@@ -244,8 +248,8 @@ impl Retention {
         }
     }
 
-    pub(crate) fn handle(&self) -> &str {
-        &self.inner.handle
+    pub(crate) fn id(&self) -> &str {
+        &self.inner.id
     }
 
     fn path(&self) -> &std::path::Path {
@@ -281,27 +285,43 @@ impl Drop for RetentionInner {
     }
 }
 
-/// A process-wide unique token from the standard library's random hasher state (no dependency).
-fn random_nonce() -> u64 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    RandomState::new().build_hasher().finish()
+/// The last `max` bytes of a retained file, for seeding a settled entry's ring (ADR 0037
+/// decision 4: the increment starts at byte 0, bounded by the ring). Empty when the file
+/// cannot be read; the entry then states the whole total as dropped.
+fn tail_of(path: &Path, max: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let Ok(mut file) = crate::output::open_output_read(path) else {
+        return bytes;
+    };
+    let Ok(end) = file.seek(SeekFrom::End(0)) else {
+        return bytes;
+    };
+    if file
+        .seek(SeekFrom::Start(end.saturating_sub(max as u64)))
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let _ = file.read_to_end(&mut bytes);
+    bytes
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-// ---------- the `shell_output` tool ----------
+// ---------- the `shell_output` one-version alias (ADR 0043 decision 3) ----------
 
-/// The read arguments: the opaque handle plus the shared file reads.
+/// The read arguments: the old opaque handle (now a job id) plus the shared file reads.
+/// A handle from before the rename never resolves; a current job id does.
 #[derive(Deserialize)]
-struct ReadArgs {
-    handle: String,
+pub(crate) struct ReadArgs {
+    pub(crate) handle: String,
     #[serde(flatten)]
-    file: crate::output::FileArgs,
+    pub(crate) file: crate::output::FileArgs,
 }
 
+/// The argument shape the alias parses (the old `shell_output` schema).
 pub(crate) fn schema() -> serde_json::Value {
     let mut properties = serde_json::Map::new();
     properties.insert(
@@ -337,32 +357,28 @@ pub(crate) fn schema() -> serde_json::Value {
     })
 }
 
-pub(crate) fn spec() -> ToolSpec {
+pub(crate) fn alias_spec() -> ToolSpec {
     ToolSpec {
         name: "shell_output".into(),
-        description: "Read the output a **foreground** `shell` command produced, when its \
-                      result said bytes were discarded. Pass the opaque `output_handle` from \
-                      that result; the output file is outside the workspace and this is the \
-                      only way to reach it (a path is refused). Read the last N lines with \
-                      `tail_lines`, a line range with `from_line`/`max_lines` (numbered, so \
-                      you can page), or only matching lines with `pattern` (a Rust regex). \
-                      The retained output is itself bounded; the `shell` result says when it \
-                      was cut. A handle belongs to the session that produced it."
+        description: "Deprecated alias for `job` with `{\"op\": \"read\"}`; kept for one \
+                      version."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
     }
 }
 
-/// Reads a retained foreground output. The handle resolves only inside this registry; anything
-/// else is `unknown_output`, never a path open.
-pub(crate) fn run_read(
-    foreground: &ForegroundOutputs,
+/// `shell_output`, the one-version alias for `job { op: read }` (ADR 0043 decision 3). The
+/// old arguments read the same full-file modes; the `handle` is looked up in the job registry
+/// (a current job id resolves, a pre-rename handle does not). The result opens with the
+/// rename line.
+pub(crate) fn run_alias(
+    jobs: &Jobs,
     limits: &Limits,
     arguments: &Value,
 ) -> Result<ToolOutput, ToolFailure> {
+    use crate::jobs::{SHELL_OUTPUT_RENAME, read_output_file, rename_failure, renamed};
     let args: ReadArgs = args::parse("shell_output", &schema(), arguments)?;
-    let file = foreground.open_read(&args.handle)?;
     let mode = crate::output::FileMode::from_args("shell_output", &args.file, arguments)?
         .ok_or_else(|| {
             args::invalid(
@@ -371,23 +387,7 @@ pub(crate) fn run_read(
                 ["give `tail_lines`, `from_line`/`max_lines` or `pattern`"],
             )
         })?;
-    crate::output::read_file(
-        &file,
-        "handle",
-        &args.handle,
-        mode,
-        limits.default_read_bytes,
-        limits.default_grep_matches,
-        "output_read",
-    )
-}
-
-fn unknown_output(handle: &str) -> ToolFailure {
-    fail(
-        "unknown_output",
-        format!(
-            "no retained output with handle `{handle}` in this session; the handle is the one \
-             a truncated `shell` result returned, and it is not a path"
-        ),
-    )
+    read_output_file(jobs, &args.handle, mode, limits)
+        .map(|output| renamed(SHELL_OUTPUT_RENAME, output))
+        .map_err(|failure| rename_failure(SHELL_OUTPUT_RENAME, failure))
 }

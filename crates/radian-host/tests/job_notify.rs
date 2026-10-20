@@ -120,6 +120,52 @@ fn job_id_of(event: &RuntimeEvent) -> String {
     }
 }
 
+/// The completion message names `job` as the read channel (ADR 0037 decision 4): a settle
+/// the model has not seen tells it where to read.
+#[tokio::test]
+async fn the_completion_message_names_job_as_the_read_channel() {
+    let dir = scratch("notice-text");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let (notifier, jobs, inbox, _turn_running) = notifier(&dir);
+    let mut events = jobs.subscribe();
+
+    // A real finished job, so the message carries the tail and the read hint.
+    let policy = SandboxPolicy::new(SandboxMode::FullAccess, &ws).expect("full-access policy");
+    let sandbox = Sandbox::from_policy(policy).expect("full-access needs no backend");
+    let started = jobs.start(&sandbox, &ws, "echo hi").expect("start the job");
+    let id = loop {
+        match tokio::time::timeout(Duration::from_secs(15), events.recv()).await {
+            Ok(Ok(JobEvent::Settled { id, notify, .. })) if notify => break id,
+            Ok(Ok(_)) => continue,
+            other => panic!("no notifiable settle: {other:?}"),
+        }
+    };
+    assert_eq!(id, started.id);
+
+    notifier
+        .deliver(JobEvent::Settled {
+            id: id.clone(),
+            state: radian_coding::JobState::Exited(0),
+            duration_ms: 1,
+            notify: true,
+        })
+        .await;
+    let texts: Vec<String> = inbox
+        .snapshot()
+        .await
+        .iter()
+        .map(|entry| entry.message.text())
+        .collect();
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].contains("hi"), "the tail is inline: {}", texts[0]);
+    assert!(
+        texts[0].contains("Read its output with job."),
+        "the notice names the one tool: {}",
+        texts[0]
+    );
+}
+
 /// Busy chooses `inject` (`next_step`, no wake); idle chooses `followup` (`next_turn`, which
 /// wakes a turn).
 #[tokio::test]
@@ -193,7 +239,7 @@ async fn the_wake_cap_degrades_to_inject_and_a_user_message_resets_it() {
     );
 }
 
-/// A settle the model already has (`notify: false`: a `job_output wait`, a `job_kill`, a
+/// A settle the model already has (`notify: false`: a `job` wait, a `job` kill, a
 /// session-exit cleanup) sends nothing.
 #[tokio::test]
 async fn a_non_notifiable_settle_is_silent() {

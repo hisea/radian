@@ -121,14 +121,8 @@ impl HostTools {
                  it there at once)",
             );
             push(
-                "job_output",
-                "read a background job's new output (wait: true waits for the end)",
-            );
-            push("job_list", "list this session's background jobs");
-            push("job_kill", "stop a background job's process group");
-            push(
-                "shell_output",
-                "read a truncated foreground shell command's retained output by its opaque handle",
+                "job",
+                "read, wait for, or stop a background shell job by id",
             );
             push(
                 "git_diff",

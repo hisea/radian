@@ -853,33 +853,26 @@ async fn pty_mounts_only_the_builtin_tools() {
     }
     // The built-ins a workspace session mounts are exactly these, and nothing else. ADR 0043
     // decision 3: `git_status` is renamed; its old name is registered for one version but
-    // never advertised. `memory_search` mounts only past the injection budget (ADR 0021 D7),
+    // never advertised. ADR 0037 decision 4: the four job readers are one
+    // `job` tool; `job_output`, `job_list`, `job_kill` and `shell_output` are never advertised.
+    // `memory_search` mounts only past the injection budget (ADR 0021 D7),
     // so this workspace — with an empty memory — does not list it.
     let mut got = names.clone();
     got.sort();
     assert_eq!(
         got,
         [
-            "ask_user",
-            "git_diff",
-            "glob",
-            "grep",
-            "job_kill",
-            "job_list",
-            "job_output",
-            "list",
-            "patch",
-            "read",
-            "shell",
-            "shell_output",
-            "skill",
-            "subagent",
-            "write"
+            "ask_user", "git_diff", "glob", "grep", "job", "list", "patch", "read", "shell",
+            "skill", "subagent", "write"
         ],
         "the exact tool set of a fresh TUI session: {names:?}"
     );
     for gone in [
         "git_status",
+        "job_output",
+        "job_list",
+        "job_kill",
+        "shell_output",
         "memory_search",
         "memory_save",
         "memory_revise",

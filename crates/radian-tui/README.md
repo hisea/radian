@@ -669,7 +669,7 @@ The transcript owns its scrolling:
 | 21 | syntax highlighting (ADR 0028 R2): keyword/string/comment take the theme's `syntax*` colors, a theme file's value reaches the cells, an unclosed or unknown-language block stays plain, `highlight = false` disables it, a truncated line keeps its colors, and the text is unchanged (copy/search) | `tests/highlight.rs` |
 | — | the thin redesign (ADR 0028, slice ⑦): whole-screen snapshots of every shape at 80/120, dark/light and with CJK; the `│ ` rail and the marker column in every built-in theme; no background in any row; the three-hunk numbering row by row; the diff copy rule | `tests/thin.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
-| — | background jobs (ADR 0037): `shell` `background:true` returns at once, `job_output wait=true` returns the increment and the settle, `job_list`/`job_kill` work, `/jobs` lists and `/jobs kill all` stops them, a settle arrives as a System message, and a crash reports an orphan | `tests/jobs.rs` (coding), `tests/job_notify.rs` (host), `tests/pty.rs` |
+| — | background jobs (ADR 0037): `shell` `background:true` returns at once, `job` (`op: "wait"`) returns the increment and the settle, `job` (`op: "kill"`) stops one, `/jobs` lists and `/jobs kill all` stops them, a settle arrives as a System message, and a crash reports an orphan | `tests/jobs.rs` (coding), `tests/job_notify.rs` (host), `tests/pty.rs` |
 
 ## Must be hand-tested in a real terminal
 

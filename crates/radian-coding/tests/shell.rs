@@ -775,7 +775,7 @@ async fn the_shell_description_points_file_reading_and_searching_at_the_read_onl
         for wanted in [
             "Read files with `read` and `list`",
             "search with `grep` and `glob`",
-            "they run in parallel, while `shell` runs alone",
+            "run in parallel, while `shell` runs alone",
         ] {
             assert!(
                 spec.description.contains(wanted),
@@ -968,10 +968,10 @@ async fn shell_description(backend: &'static dyn SandboxBackend, root: &Path) ->
         .clone()
 }
 
-/// ADR 0038 decision 4: with the writable carve-out in force the shell description says git can
-/// commit, branch and stash in the sandbox and that the executable entries stay read-only; with
-/// the read-only answer it keeps today's wording (`.git` read-only, `git commit` fails by
-/// design). The two mutations this catches are showing either text under the other answer.
+/// ADR 0038 decision 4: with the writable carve-out in force the shell description says
+/// native `git commit` works and the executable entries stay read-only; with the read-only
+/// answer `.git` stays read-only and so does `git commit`. The two mutations this catches
+/// are showing either text under the other answer.
 #[tokio::test]
 async fn the_shell_description_follows_the_effective_git_access() {
     let dir = TempDir::new("shell-git-text");
@@ -979,23 +979,15 @@ async fn the_shell_description_follows_the_effective_git_access() {
     std::fs::create_dir_all(&root).unwrap();
 
     let writable = shell_description(&GIT_WRITABLE, &root).await;
-    assert!(writable.contains("git commit"), "{writable}");
-    assert!(writable.contains("git branch"), "{writable}");
-    assert!(writable.contains("git stash"), "{writable}");
+    assert!(writable.contains("native `git commit` works"), "{writable}");
     assert!(writable.contains("stay read-only"), "{writable}");
-    assert!(
-        !writable.contains("`git commit` fails by design"),
-        "{writable}"
-    );
+    assert!(!writable.contains("(so is"), "{writable}");
 
     let read_only = shell_description(&GIT_READ_ONLY, &root).await;
     assert!(
         read_only.contains("the repository's `.git` is read-only"),
         "{read_only}"
     );
-    assert!(
-        read_only.contains("`git commit` fails by design"),
-        "{read_only}"
-    );
-    assert!(!read_only.contains("git stash"), "{read_only}");
+    assert!(read_only.contains("`git commit`, by design"), "{read_only}");
+    assert!(!read_only.contains("is writable"), "{read_only}");
 }

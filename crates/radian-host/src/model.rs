@@ -185,8 +185,9 @@ impl Model for HostModel {
     }
 }
 
-/// Removes the one-version alias spec (ADR 0043 decision 3) from every request, so the model
-/// is never offered `git_status`.
+/// Removes the one-version alias specs (ADR 0043 decision 3) from every request, so the model
+/// is never offered `git_status`, `job_output`, `job_list`, `job_kill` or
+/// `shell_output`.
 ///
 /// The alias stays in the provider's `tool_specs()` because `agent_core`'s preflight refuses a
 /// call whose name is not registered **before** any host hook or the provider runs, and a call
@@ -613,7 +614,18 @@ mod tests {
         let mut request = ModelRequest {
             system_prompt: None,
             messages: Vec::new(),
-            tools: vec![spec("read"), spec("git_status"), spec("git_diff")],
+            tools: vec![
+                spec("read"),
+                spec("git_status"),
+                spec("git_diff"),
+                spec("memory_search"),
+                spec("shell"),
+                spec("job"),
+                spec("job_output"),
+                spec("job_list"),
+                spec("job_kill"),
+                spec("shell_output"),
+            ],
             settings: serde_json::json!({}),
         };
         strip_renamed_tool_aliases(&mut request);
@@ -622,7 +634,7 @@ mod tests {
             .iter()
             .map(|spec| spec.name.as_str())
             .collect();
-        assert_eq!(names, ["read", "git_diff"]);
+        assert_eq!(names, ["read", "git_diff", "memory_search", "shell", "job"]);
     }
 
     #[test]

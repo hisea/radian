@@ -199,7 +199,7 @@ fn start_job(app: &mut App) {
     app.update(Input::Runtime(RuntimeEvent::BackgroundJobStarted {
         job_id: "job-1".to_string(),
         command: "make test".to_string(),
-        output: "available through job_output".to_string(),
+        output: "available through job".to_string(),
     }));
     app.set_now(start + std::time::Duration::from_secs(18 * 60));
 }
