@@ -1247,7 +1247,7 @@ mod tests {
         let root = TempRoot::new("stop-degraded");
         let journal = Arc::new(
             SessionJournal::create(
-                &root.dir.join("s.jsonl"),
+                root.dir.join("s.jsonl"),
                 "sid",
                 SessionCreatedData::new(
                     "/work/example",
