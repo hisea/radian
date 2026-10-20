@@ -8165,9 +8165,10 @@ async fn config_import_pi_requires_from_and_an_existing_directory() {
 }
 
 /// `radian config import-claude`: a dry run drafts user + project skills, translates hooks
-/// and reports the slice-B waits on stderr without writing; `--write` writes the config,
-/// the skills and `AGENTS.md` (with the trust-gate notice) and refuses to overwrite without
-/// `--force`.
+/// and reports the waits on stderr without writing; `--write` merges the config (never
+/// overwrites) and creates the skills and `AGENTS.md` (with the trust-gate notice); an
+/// existing `AGENTS.md`/`SKILL.md` is skipped, a second `--write` adds nothing, and there
+/// is no `--force` flag.
 #[tokio::test]
 async fn config_import_claude_drafts_and_writes() {
     let dir = scratch("import-claude");
@@ -8247,10 +8248,18 @@ async fn config_import_claude_drafts_and_writes() {
     );
     assert!(stderr.contains("nothing was written"), "{stderr}");
 
-    // `--write`: everything lands, with the trust-gate notice for project files.
+    // `--write`: the config is merged (a comment and an unrelated key survive), the
+    // skills and `AGENTS.md` land, with the trust-gate notice for project files.
     let out = dir.join("out");
     std::fs::create_dir_all(&out).unwrap();
     let out_arg = out.to_str().unwrap().to_owned();
+    let config_path = out.join("config/config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        "# keep me\nschema_version = 1\n[model]\nmodel = \"m-1\"\n",
+    )
+    .unwrap();
     let (code, _, stderr) = feed_and_wait(
         spawn_radian_top(
             &[
@@ -8269,9 +8278,11 @@ async fn config_import_claude_drafts_and_writes() {
     .await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("trust-gate resources"), "{stderr}");
-    let config_path = out.join("config/config.toml");
     let text = std::fs::read_to_string(&config_path).unwrap();
     radian_host::parse_config(&config_path, &text).expect("the written file reads back");
+    assert!(text.contains("# keep me"), "{text}");
+    assert!(text.contains("model = \"m-1\""), "{text}");
+    assert!(text.contains("echo pre"), "{text}");
     assert!(
         out.join(".agents/skills/review/SKILL.md").exists(),
         "{stderr}"
@@ -8286,7 +8297,8 @@ async fn config_import_claude_drafts_and_writes() {
         "{stderr}"
     );
 
-    // A second `--write` refuses; `--force` overwrites.
+    // A second `--write` merges again: nothing is duplicated, existing files are skipped
+    // with one line each, and the exit is still 0.
     let (code, _, stderr) = feed_and_wait(
         spawn_radian_top(
             &[
@@ -8301,8 +8313,12 @@ async fn config_import_claude_drafts_and_writes() {
         "",
     )
     .await;
-    assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("already exists"), "{stderr}");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("exists, not written"), "{stderr}");
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    assert_eq!(text.matches("echo pre").count(), 1, "{text}");
+
+    // There is no `--force` flag: it is rejected as an unknown argument (exit 2).
     let (code, _, stderr) = feed_and_wait(
         spawn_radian_top(
             &[
@@ -8318,7 +8334,8 @@ async fn config_import_claude_drafts_and_writes() {
         "",
     )
     .await;
-    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
 
     // No source is a usage error.
     let (code, _, stderr) =

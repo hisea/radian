@@ -356,8 +356,11 @@ const MERGE_KEYS: &str = "`[skills] extra_paths`/`[hooks]`";
 /// One event's imported matcher entries to append.
 struct PlannedHooks {
     event: &'static str,
-    entries: Vec<(Option<String>, Vec<(String, Option<u64>)>)>,
+    entries: Vec<PlannedEntry>,
 }
+
+/// One matcher entry in merge-plan shape: the matcher and every hook's `(command, timeout)`.
+type PlannedEntry = (Option<String>, Vec<(String, Option<u64>)>);
 
 /// What [`plan_merge`] decided: additions plus conflict lines.
 #[derive(Default)]
@@ -550,7 +553,7 @@ fn plan_merge(
         ("PostToolUse", &add_hooks.post_tool_use),
         ("Stop", &add_hooks.stop),
     ] {
-        let imported: Vec<(Option<String>, Vec<(String, Option<u64>)>)> = entries
+        let imported: Vec<PlannedEntry> = entries
             .iter()
             .map(|entry| {
                 (
@@ -621,16 +624,14 @@ fn planned_hooks(hooks: &super::HooksConfig) -> Vec<PlannedHooks> {
 
 /// The canonical entries of an existing `hooks.<Event>` list: `None` when the value is not
 /// a list of tables (a conflict the merge leaves alone).
-fn existing_hook_entries(list: &Item) -> Option<Vec<(Option<String>, Vec<(String, Option<u64>)>)>> {
+fn existing_hook_entries(list: &Item) -> Option<Vec<PlannedEntry>> {
     if let Some(tables) = list.as_array_of_tables() {
         return Some(tables.iter().map(table_hook_entry).collect());
     }
     if let Some(array) = list.as_array() {
         let mut entries = Vec::new();
         for value in array {
-            let Some(table) = value.as_inline_table() else {
-                return None;
-            };
+            let table = value.as_inline_table()?;
             entries.push(inline_hook_entry(table));
         }
         return Some(entries);

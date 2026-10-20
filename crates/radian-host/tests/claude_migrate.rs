@@ -256,8 +256,9 @@ fn the_typical_fixtures_map_commands_hooks_and_agents_md() {
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: Some(scratch.path().join("project-skills")),
     };
-    let written = write_claude_draft(&draft, &targets, false).unwrap();
-    assert!(!written.is_empty());
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(!report.written.is_empty());
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
     let user_found = radian_host::discover(&targets.user_skills_dir);
     for skill in &draft.user_skills {
         assert!(
@@ -389,45 +390,202 @@ fn a_literal_secret_is_never_shown_and_becomes_a_reference() {
     readable(home.path());
 }
 
-/// An existing target is never overwritten without `--force`; `--force` overwrites it. A
-/// mutation that overwrites unconditionally fails this test.
+/// The merge promise: an existing `config.toml` survives byte-for-byte
+/// (comment, unrelated keys, existing hook entries) while the imported `extra_paths` entry
+/// and hook entries are appended. A mutation that writes the draft whole fails this test.
 #[test]
-fn existing_targets_are_kept_without_force() {
-    let home = Temp::new("write-home");
-    let proj = Temp::new("write-proj");
+fn existing_config_is_merged_preserving_everything() {
+    let home = Temp::new("merge-home");
+    let proj = Temp::new("merge-proj");
     user_home(home.path());
     project(proj.path());
     let draft = import_claude(Some(home.path()), Some(proj.path())).unwrap();
 
-    let scratch = Temp::new("write-scratch");
+    let scratch = Temp::new("merge-scratch");
     let targets = ClaudeTargets {
         config_path: scratch.path().join("config.toml"),
         user_skills_dir: scratch.path().join("user-skills"),
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: Some(scratch.path().join("project-skills")),
     };
-    write_claude_draft(&draft, &targets, false).unwrap();
+    let original = "# my configuration\n\
+        schema_version = 1\n\
+        \n\
+        [model]\n\
+        model = \"m-1\"\n\
+        \n\
+        [skills]\n\
+        extra_paths = [\"keep\"]\n\
+        \n\
+        [[hooks.PreToolUse]]\n\
+        matcher = \"read\"\n\
+        [[hooks.PreToolUse.hooks]]\n\
+        type = \"command\"\n\
+        command = \"existing\"\n";
+    std::fs::write(&targets.config_path, original).unwrap();
+
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(report.skipped.is_empty(), "{report:?}");
+    let after = std::fs::read_to_string(&targets.config_path).unwrap();
+    // Everything that existed is byte-identical: the comment, the unrelated key, the kept
+    // path entry and the existing hook entry.
+    assert!(after.contains("# my configuration"), "{after}");
+    assert!(after.contains("model = \"m-1\""), "{after}");
+    assert!(after.contains("\"keep\""), "{after}");
+    assert!(after.contains("command = \"existing\""), "{after}");
+    // The import landed alongside it.
+    let imported_path = home.path().join("skills").display().to_string();
+    assert!(after.contains(&imported_path), "{after}");
+    assert!(after.contains("command = \"echo pre\""), "{after}");
+    let config = radian_host::parse_config(&targets.config_path, &after).unwrap();
+    assert!(config.skipped.is_empty(), "{config:?}");
+    assert!(config.skills.extra_paths.contains(&"keep".to_owned()));
+    assert!(config.skills.extra_paths.contains(&imported_path));
+    assert!(
+        config
+            .hooks
+            .pre_tool_use
+            .iter()
+            .any(|entry| entry.hooks.iter().any(|hook| hook.command == "existing"))
+    );
+    assert!(
+        config
+            .hooks
+            .pre_tool_use
+            .iter()
+            .any(|entry| entry.hooks.iter().any(|hook| hook.command == "echo pre"))
+    );
+    readable(home.path());
+}
+
+/// Importing twice adds nothing: no duplicate `extra_paths`, no duplicate hook entries. A
+/// mutation that drops the dedupe fails this test.
+#[test]
+fn a_second_import_adds_nothing() {
+    let home = Temp::new("twice-home");
+    let proj = Temp::new("twice-proj");
+    user_home(home.path());
+    project(proj.path());
+    let draft = import_claude(Some(home.path()), Some(proj.path())).unwrap();
+
+    let scratch = Temp::new("twice-scratch");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: Some(scratch.path().join("project-skills")),
+    };
+    let first = write_claude_draft(&draft, &targets).unwrap();
+    assert!(!first.written.is_empty());
     let before = std::fs::read(&targets.config_path).unwrap();
 
-    let error = write_claude_draft(&draft, &targets, false).unwrap_err();
+    let second = write_claude_draft(&draft, &targets).unwrap();
+    assert!(second.written.is_empty(), "{second:?}");
+    assert_eq!(
+        std::fs::read(&targets.config_path).unwrap(),
+        before,
+        "a second import changes nothing"
+    );
+    let after = std::fs::read_to_string(&targets.config_path).unwrap();
+    assert_eq!(after.matches("\"keep\"").count(), 0, "{after}");
+    assert_eq!(after.matches("echo pre").count(), 1, "{after}");
+    let imported_path = home.path().join("skills").display().to_string();
+    assert_eq!(after.matches(&imported_path).count(), 1, "{after}");
+    readable(home.path());
+}
+
+/// Existing `AGENTS.md`/`SKILL.md` targets are skipped with one report line each and keep
+/// their bytes, while the other targets are still written. A mutation that overwrites
+/// fails this test.
+#[test]
+fn existing_files_are_skipped_and_other_targets_still_written() {
+    let home = Temp::new("skip-home");
+    let proj = Temp::new("skip-proj");
+    user_home(home.path());
+    project(proj.path());
+    let draft = import_claude(Some(home.path()), Some(proj.path())).unwrap();
+
+    let scratch = Temp::new("skip-scratch");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: Some(scratch.path().join("project-skills")),
+    };
+    let agents_path = targets.user_agents_path.clone();
+    let review_path = targets.user_skills_dir.join("review").join("SKILL.md");
+    std::fs::create_dir_all(review_path.parent().unwrap()).unwrap();
+    std::fs::write(&agents_path, "MINE\n").unwrap();
+    std::fs::write(&review_path, "MINE SKILL\n").unwrap();
+
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert_eq!(std::fs::read_to_string(&agents_path).unwrap(), "MINE\n");
+    assert_eq!(
+        std::fs::read_to_string(&review_path).unwrap(),
+        "MINE SKILL\n"
+    );
+    for path in [&agents_path, &review_path] {
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|line| line.contains(&path.display().to_string())
+                    && line.contains("exists, not written; the draft is in the dry-run output")),
+            "{report:?}"
+        );
+    }
+    // The other targets still landed.
+    assert!(targets.config_path.exists());
+    let plan = targets.user_skills_dir.join("plan").join("SKILL.md");
     assert!(
-        matches!(error, ClaudeMigrateError::TargetExists { .. }),
+        std::fs::read_to_string(&plan)
+            .unwrap()
+            .contains("$ARGUMENTS")
+    );
+    assert!(
+        targets
+            .project_skills_dir
+            .as_ref()
+            .unwrap()
+            .join("team")
+            .join("SKILL.md")
+            .exists()
+    );
+    readable(home.path());
+}
+
+/// A read-only configuration (a newer `schema_version`) stops the whole write with an
+/// error and nothing is written: no config change, no skill files, no `AGENTS.md`.
+#[test]
+fn a_read_only_config_writes_nothing() {
+    let home = Temp::new("readonly-home");
+    let proj = Temp::new("readonly-proj");
+    user_home(home.path());
+    project(proj.path());
+    let draft = import_claude(Some(home.path()), Some(proj.path())).unwrap();
+
+    let scratch = Temp::new("readonly-scratch");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: Some(scratch.path().join("project-skills")),
+    };
+    let original = "schema_version = 99\n";
+    std::fs::write(&targets.config_path, original).unwrap();
+
+    let error = write_claude_draft(&draft, &targets).unwrap_err();
+    assert!(
+        matches!(error, ClaudeMigrateError::ReadOnly { .. }),
         "{error}"
     );
     assert_eq!(
-        std::fs::read(&targets.config_path).unwrap(),
-        before,
-        "bytes unchanged without --force"
+        std::fs::read_to_string(&targets.config_path).unwrap(),
+        original
     );
-
-    // `--force` overwrites: break the file first, then watch the rewrite restore it.
-    std::fs::write(&targets.config_path, "schema_version = 1\n").unwrap();
-    write_claude_draft(&draft, &targets, true).unwrap();
-    assert_eq!(
-        std::fs::read(&targets.config_path).unwrap(),
-        before,
-        "the draft must be restored with --force"
-    );
+    assert!(!targets.user_agents_path.exists());
+    assert!(!targets.user_skills_dir.exists());
+    assert!(!targets.project_skills_dir.as_ref().unwrap().exists());
     readable(home.path());
 }
 
@@ -463,7 +621,7 @@ fn an_invalid_draft_is_never_written() {
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: None,
     };
-    let error = write_claude_draft(&draft, &targets, false).unwrap_err();
+    let error = write_claude_draft(&draft, &targets).unwrap_err();
     assert!(
         matches!(error, ClaudeMigrateError::InvalidDraft { .. }),
         "{error}"
