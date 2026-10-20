@@ -1,8 +1,8 @@
 """Harbor custom agent that benchmarks Radian on Terminal-Bench tasks.
 
-Harbor loads this file by import path (`--agent
-benchmarks.terminal-bench.radian_agent:RadianAgent`); it is not part of the
-Rust workspace and adds no dependency to it.
+Harbor loads this file by import path (`-a radian_agent:RadianAgent` with
+`PYTHONPATH=benchmarks/terminal-bench`); it is not part of the Rust workspace
+and adds no dependency to it.
 
 Design (see `README.md` in this directory):
 
@@ -28,26 +28,22 @@ from typing import Annotated, Literal, override
 
 from pydantic import Field
 
-from harbor.agents.agent_auth_resolution import (
-    ModelConnectionSpec,
-    ProviderAccess,
-    require_model_api_key,
-)
 from harbor.agents.capabilities import AgentCapabilities
 from harbor.agents.installed.base import (
     BaseInstalledAgent,
     NonZeroAgentExitCodeError,
     with_prompt_template,
 )
+from harbor.agents.model_connection import ModelConnectionSpec
 from harbor.agents.options import Cli, InstalledAgentOptions
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
-from harbor.models.model_api_format import ModelApiFormat
 
 from radian_command import (
     CREDENTIAL_ENV_NAME,
     GENERIC_PROVIDER_ID,
     RadianInvocation,
+    assert_binary_static,
     build_auth_json,
     build_command,
     redact_base_url,
@@ -58,6 +54,15 @@ from radian_command import (
 _DEFAULT_REMOTE_BINARY = "/tmp/harbor-radian-bin/radian"
 _DEFAULT_RADIAN_HOME = "/tmp/harbor-radian-home"
 _BINARY_ENV_FALLBACK = "RADIAN_BENCH_BINARY"
+# The container path whose existence (`test -s`: present and non-empty) proves
+# the image ships its own CA bundle. This is the Debian/Ubuntu OpenSSL default
+# (`python:slim`, `ubuntu:24.04`, `debian:bullseye-slim` all use it); images
+# without `ca-certificates` have neither the file nor the directory. `-s`
+# rather than `-e` because an empty placeholder would break radian's HTTP
+# client exactly like a missing file.
+SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+_DEFAULT_CA_BUNDLE_PATH = "/etc/ssl/certs/ca-certificates.crt"
+_SSL_CERT_FILE = "SSL_CERT_FILE"
 
 
 class RadianOptions(InstalledAgentOptions):
@@ -83,6 +88,16 @@ class RadianOptions(InstalledAgentOptions):
     radian_home: str = Field(
         default=_DEFAULT_RADIAN_HOME,
         description="Container RADIAN_HOME holding the generated auth.json.",
+    )
+    ca_bundle_path: str = Field(
+        default=_DEFAULT_CA_BUNDLE_PATH,
+        description="Host CA bundle uploaded next to the binary for containers "
+        "without a system bundle.",
+    )
+    remote_ca_bundle: str | None = Field(
+        default=None,
+        description="Container path the CA bundle is uploaded to. Defaults to "
+        "the remote binary's directory.",
     )
     profile: Literal["full", "workspace", "safe"] = Field(
         default="full",
@@ -115,10 +130,12 @@ class RadianOptions(InstalledAgentOptions):
     thinking: Annotated[str | None, Cli("--thinking")] = Field(
         default=None, description="Anthropic thinking mode; ignored otherwise."
     )
-    timeout_sec: int = Field(
-        default=1800,
+    timeout_sec: int | None = Field(
+        default=None,
         ge=1,
-        description="Container exec timeout for the whole trial in seconds.",
+        description="Container exec timeout for the whole trial in seconds. "
+        "Omit to let the task's own agent timeout govern: the framework then "
+        "ends the trial gracefully and still runs the verifier.",
     )
 
 
@@ -126,16 +143,13 @@ class RadianAgent(BaseInstalledAgent):
     """Runs the radian binary under test against one task instruction."""
 
     capabilities = AgentCapabilities()
-    MODEL_CONNECTION = ModelConnectionSpec(
-        agent_provider_access=ProviderAccess(
-            api_key_candidate_names=["OPENAI_API_KEY"],
-            base_url_candidate_names=["OPENAI_BASE_URL", "OPENAI_API_BASE"],
-        ),
-        supported_api_formats=[
-            ModelApiFormat.OPENAI_CHAT_COMPLETIONS,
-            ModelApiFormat.ANTHROPIC_MESSAGES,
-        ],
-    )
+    # The only credential source: Harbor resolves the trial key from this env
+    # var (trial `--ae` first, then the `harbor run` process environment), for
+    # any provider slug — including `opencode-go`, which Harbor's own
+    # `PROVIDERS` table does not list. The base URL stays Harbor-resolved: an
+    # explicitly configured endpoint becomes the generic provider's
+    # `--base-url`, a built-in descriptor id needs none.
+    MODEL_CONNECTION = ModelConnectionSpec(api_key_envs=(CREDENTIAL_ENV_NAME,))
     options_model = RadianOptions
     options: RadianOptions
 
@@ -152,10 +166,12 @@ class RadianAgent(BaseInstalledAgent):
     def version(self) -> str | None:
         return self._radian_version if hasattr(self, "_radian_version") else None
 
-    @classmethod
-    @override
-    def check_model_credentials(cls, connection, *, kwargs, env, explicit_env=None):
-        require_model_api_key(connection, cls.name())
+    def _remote_ca_bundle_path(self) -> str:
+        """Where the CA bundle lives in the container."""
+        if self.options.remote_ca_bundle is not None:
+            return self.options.remote_ca_bundle
+        parent = PurePosixPath(self.options.remote_binary).parent
+        return (parent / Path(SYSTEM_CA_BUNDLE).name).as_posix()
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
@@ -172,12 +188,20 @@ class RadianAgent(BaseInstalledAgent):
             )
         if not os.path.isfile(binary):
             raise FileNotFoundError(f"Radian binary not found: {binary}")
+        assert_binary_static(binary)
         digest = sha256_of_file(binary)
         if self.options.binary_sha256 is not None and digest != self.options.binary_sha256:
             raise ValueError(
                 f"Radian binary sha256 mismatch: expected {self.options.binary_sha256}, "
                 f"got {digest}."
             )
+        ca_bundle = self.options.ca_bundle_path
+        if not os.path.isfile(ca_bundle):
+            raise ValueError(
+                f"CA bundle not found: {ca_bundle}; pass `ca_bundle_path` to a "
+                f"host PEM bundle (default {_DEFAULT_CA_BUNDLE_PATH})."
+            )
+        ca_digest = sha256_of_file(ca_bundle)
         remote = self.options.remote_binary
         parent = str(PurePosixPath(remote).parent)
         await self.exec_as_agent(
@@ -185,6 +209,8 @@ class RadianAgent(BaseInstalledAgent):
             command=f"mkdir -p {shlex.quote(parent)}",
         )
         await environment.upload_file(binary, remote)
+        remote_ca = self._remote_ca_bundle_path()
+        await environment.upload_file(ca_bundle, remote_ca)
         result = await self.exec_as_agent(
             environment,
             command=f"chmod 755 {shlex.quote(remote)} && {shlex.quote(remote)} exec --version",
@@ -198,6 +224,9 @@ class RadianAgent(BaseInstalledAgent):
                     "sha256": digest,
                     "remote": remote,
                     "version": self._radian_version,
+                    "ca_bundle_path": ca_bundle,
+                    "ca_bundle_sha256": ca_digest,
+                    "ca_bundle_remote": remote_ca,
                 },
                 indent=2,
             )
@@ -214,24 +243,17 @@ class RadianAgent(BaseInstalledAgent):
     ) -> None:
         if not self.model_name:
             raise ValueError("Model name must be in the format provider/model_name")
-        _, model_id = self._parse_model_name(self.model_name)
+        model_id = self._parsed_model_name or self.model_name
         access = self.model_connection
         if not access.api_key:
             raise ValueError(
-                "No model API key selected: set the provider key (e.g. "
-                "OPENAI_API_KEY) for this trial."
+                "No model API key selected: set RADIAN_BENCH_API_KEY in the "
+                "`harbor run` environment for this trial."
             )
-        api_format = access.model_api_format
-        format_name = (
-            api_format.value
-            if hasattr(api_format, "value")
-            else (str(api_format) if api_format is not None else None)
-        )
         provider, base_url = select_provider(
-            model_api_format=format_name,
-            user_supplied_base_url=access.user_supplied_base_url,
-            resolved_base_url=access.resolved_base_url,
-            provider=access.provider,
+            provider=access.provider or self._parsed_model_provider,
+            configured_base_url=access.configured_base_url,
+            base_url=access.base_url,
         )
         workdir_result = await self.exec_as_agent(environment, command="pwd")
         workdir = (workdir_result.stdout or "").strip() or "/"
@@ -253,6 +275,10 @@ class RadianAgent(BaseInstalledAgent):
                 environment,
                 command=f"chmod 600 {shlex.quote(f'{credentials_dir}/auth.json')}",
             )
+        probe = await environment.exec(
+            command=f"test -s {shlex.quote(SYSTEM_CA_BUNDLE)}",
+            timeout_sec=30,
+        )
         logs = self.environment_logs_dir
         stdout_path = (logs / self._OUTPUT_FILENAME).as_posix()
         stderr_path = (logs / self._ERROR_FILENAME).as_posix()
@@ -280,6 +306,8 @@ class RadianAgent(BaseInstalledAgent):
             "RADIAN_HOME": home,
             CREDENTIAL_ENV_NAME: access.api_key,
         }
+        if probe.return_code != 0:
+            env[_SSL_CERT_FILE] = self._remote_ca_bundle_path()
         result = await self.exec_as_agent(
             environment,
             command=command,
