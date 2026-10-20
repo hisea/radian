@@ -2617,7 +2617,7 @@ fn wait_for_bang_file(pty: &mut Pty, path: &Path) -> bool {
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// The shell approval shows the whole command, and a capped result keeps the truncation
-/// marker visible.
+/// marker visible. Runs under `--profile workspace`, the tier that still asks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
 #[allow(clippy::await_holding_lock)]
@@ -2649,6 +2649,8 @@ async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
             "shell",
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         30,
         110,
@@ -2688,7 +2690,8 @@ async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// A compound command is never matched by an allow rule, so it always asks.
+/// A compound command is never matched by an allow rule, so it always asks. Runs under
+/// `--profile workspace`, the tier that still asks (`full` allows every segment).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
 #[allow(clippy::await_holding_lock)]
@@ -2722,6 +2725,8 @@ async fn pty_a_compound_shell_command_always_asks() {
             "shell-compound",
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
             "--allow-shell-command",
             &allowed,
         ],
@@ -10501,6 +10506,8 @@ async fn pty_herdr_reports_metadata_changes() {
             "herdr-meta",
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &env_refs,
         30,
@@ -10786,6 +10793,8 @@ async fn pty_herdr_reports_blocked_without_the_command_text() {
             "herdr-approval",
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &env_refs,
         30,

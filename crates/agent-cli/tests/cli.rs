@@ -3134,6 +3134,7 @@ fn shell_reply(id: &str, command: &str) -> Reply {
 }
 
 /// 3: a shell command asks; "allow once" runs it; the *next* identical command asks again.
+/// Runs under `--profile workspace`, the tier that still asks.
 #[tokio::test]
 async fn a_shell_command_asks_every_time_when_allowed_once() {
     let dir = scratch("shell-ask");
@@ -3154,6 +3155,8 @@ async fn a_shell_command_asks_every_time_when_allowed_once() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &[],
     );
@@ -3215,6 +3218,8 @@ async fn allow_for_session_covers_the_turn_and_not_a_resume() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
             "--session-id",
             "s-session",
             "--session-dir",
@@ -3249,6 +3254,8 @@ async fn allow_for_session_covers_the_turn_and_not_a_resume() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
             "--resume",
             "s-session",
             "--session-dir",
@@ -3266,6 +3273,7 @@ async fn allow_for_session_covers_the_turn_and_not_a_resume() {
 }
 
 /// 5: an allow rule is matched at the subcommand level, so a composite command always asks.
+/// Runs under `--profile workspace`, the tier that still asks.
 #[tokio::test]
 async fn a_composite_shell_command_always_asks() {
     let dir = scratch("composite");
@@ -3290,6 +3298,8 @@ async fn a_composite_shell_command_always_asks() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
             "--allow-shell-command",
             "git status",
         ],
@@ -3425,6 +3435,8 @@ async fn cancelling_at_the_shell_approval_does_not_hang() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &[],
     );
@@ -3479,6 +3491,8 @@ async fn every_decision_is_audited_once_with_the_right_approver() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
             "--session-id",
             "s-audit",
             "--session-dir",
