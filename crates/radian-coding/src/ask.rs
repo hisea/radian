@@ -346,7 +346,7 @@ pub(crate) fn spec() -> ToolSpec {
                             "header": {
                                 "type": "string",
                                 "maxLength": MAX_HEADER_WIDTH,
-                                "description": "Tab label, two or three words; the `id` when absent."
+                                "description": "Tab label, two or three words, at most 16 display cells (a CJK character is 2); the `id` when absent."
                             },
                             "prompt": {
                                 "type": "string",
