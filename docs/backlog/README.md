@@ -32,7 +32,6 @@
 
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
-| `remove-git-diff.md` | decided（`shell-readonly-allow` 之后） | 0043、0039、0028、0012 | 删 `git_diff`（模型 12:1 走 shell），留一个版本的别名；shell 里的 git 要不要注入加固配置待决 |
 | `wake-cap-unattended.md` | decided（与 exec-waits-for-jobs 一起落地） | 0037、0011、0034、0032/0044 | 唤醒上限数的是「每条用户消息 3 次唤醒」而不是自激，正常 worker 第四个后台 job 就停住且无提示；换成按速率的闸门、到顶时 TUI/herdr/journal 可见、`exec -p` 到顶就结束并报告；和 `exec-waits-for-jobs.md` 一起定 |
 | `exec-waits-for-jobs.md` | decided（选 (a)） | 0037、0044、0032 | `radian exec -p` 一轮结束就退出，后台 job 随之被杀（夜间 LXC worker 的 Verify 因此中断）；候选：等 job 并按 0037 唤醒、`-p` 禁后台、只改提示 |
 | `mcp-servers-json.md` | decided（生态 2/4） | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门、按内容哈希确认，确认即批准其 server（一道门）；缺省 `inherit_env=["HOME"]`；环境白名单不变；MCP 文本结果套 `read` 的 64 KiB 上限并带截断标记 |

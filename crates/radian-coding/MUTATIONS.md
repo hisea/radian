@@ -17,7 +17,6 @@ after each; `git status --short` empty at the end.
 | M9 | read size limit | make the `max_bytes > max_read_bytes` check unreachable | ✅ caught (`read_refuses_a_budget_above_the_hard_cap`) |
 | M10 | read size limit | ignore the byte budget (`.take(u64::MAX)`) | ✅ caught (`read_reports_truncation_and_the_total_size`) |
 | M11 | `patch` auditability | let multiple matches fall through and edit anyway | ✅ caught (`patch_refuses_an_ambiguous_needle_and_leaves_the_file_alone`) |
-| M12 | `.git` must not be written | remove **both** `--no-optional-locks` and `GIT_OPTIONAL_LOCKS=0` | ✅ caught (`git_status_and_diff_report_the_worktree_and_leave_dot_git_untouched`) |
 
 ## The two mutations that were not behaviour changes
 
@@ -525,7 +524,7 @@ deleted, so shell commands no longer queue. The mutations below were applied in 
 restored from a `cp` in `.radian/scratch/mut/` and confirmed byte-identical with `cmp` before the
 next one (no `git checkout --`/`restore`/`stash`); `git status --short` was checked after each run.
 
-Run: `cargo test -p radian-coding --test git --test shell_overlap --locked --no-fail-fast`
+Run: `cargo test -p radian-coding --test shell_overlap --locked --no-fail-fast`
 (`shell_overlap` runs one test in its own binary, so its `PATH` change reaches no other test).
 
 | # | Mutation | Result | Test that caught it |

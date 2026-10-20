@@ -103,17 +103,9 @@ Base `63fafba` · 工作树 `.radian-worktrees/orch-s5`。改前把 `src/profile
 |---|---|---|---|
 | SP-1 | `always_allowed()` 去掉 `subagent` | ✅ 1 failed（`workspace` 档 `left: Ask`，`right: Allow`） | `profile::tests::subagent_is_allowed_in_every_tier` |
 
-## ADR 0043 slice ③: a renamed tool is judged under its new name (2026-10-17)
+## ADR 0043 slice ③: a renamed tool is judged under its new name (2026-10-17, removed 2026-10-20)
 
-`rule::canonical_tool_name` maps `git_status` -> `git_diff` and `memory_get` -> `memory_search`,
-and `PermissionHooks::decide` builds the canonical call **before** the name gate, `evaluate`, the
-session-grant key and the approval request, so the alias can never bypass a `deny` on the new tool
-and an `allow` written for the old name no longer matches. Mutation applied in place in
-`src/hooks.rs`, restored from a `cp` in `.radian/scratch/mut/` and confirmed byte-identical with
-`cmp`.
-
-| # | Mutation | Result | Test that caught it |
-|---|---|---|---|
-| AR-1 | `decide` keeps the call's own name as the canonical one (`name: call.name.clone()`) | ✅ 1 failed (`git_status` must be denied by its new name's rule, got Allow) | `a_renamed_tool_is_judged_under_its_new_name` |
-
-Command: `timeout 300 cargo test -p radian-permissions --test hooks --locked --no-fail-fast a_renamed_tool_is_judged_under_its_new_name`.
+(Removed with `remove-git-diff`: the alias mapping is gone — `rule::canonical_tool_name` is
+deleted, rules match literal tool names, and calls to removed names never reach this layer. The
+AR-1 mutation below no longer applies; `rules_against_removed_names_match_only_the_literal_name`
+pins the new behaviour.)

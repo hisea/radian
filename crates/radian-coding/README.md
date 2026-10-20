@@ -2,8 +2,9 @@
 
 Built-in coding tools for radian, bound to one workspace root. The file tools enforce the
 workspace boundary themselves; `shell` exists **only when the host supplies a sandbox** and
-never runs without one. Git is read-only. See the crate docs (`src/lib.rs`) for the security
-contract; this file is the practical summary.
+never runs without one. There is no git tool: the model runs git through `shell` (hardened
+via `GIT_CONFIG_*` in untrusted projects, ADR 0039 decision 5). See the crate docs
+(`src/lib.rs`) for the security contract; this file is the practical summary.
 
 ## Tools
 
@@ -14,8 +15,7 @@ contract; this file is the practical summary.
 | `patch` | `Exclusive` | Replace `old` with `new`, or apply an `edits` array atomically. A match is located by layer (exact, then typographic normalisation, then line-by-line ignoring trailing whitespace) and must be unique unless `replace_all` is set. With `edits`, every edit is located in the original file, ranges must be disjoint, and if any edit fails nothing is written. A CRLF file is matched on an LF view and stays CRLF. Zero matches refuse the edit and report the closest region with line numbers. |
 | `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore`/`.ignore` respected (workspace root down to the search base), `.git` skipped, symlinks never followed; capped by `max_results`. A read-only registry/toolchain base works too, and its results are absolute paths. |
 | `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore`/`.ignore` respected (workspace root down to the search base), binary files skipped; capped per file, in total matches, and in total output bytes (32 KiB, context lines dropped before matches, each cut named in the text). `output: "files"` lists one line per matching file with its count, `output: "count"` prints only the totals; the default `content` is unchanged. A read-only registry/toolchain base works too, and its results are absolute paths. |
-| `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. `stat: true` returns the working tree status (`git status --porcelain=v1 --branch --untracked-files=all`) followed by the `--stat` summary instead of the diff (ADR 0043 decision 3). |
-| `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id (no default timeout, and `timeout_secs` is ignored — ADR 0037: bound the command itself or stop it with `job`); `job` below is the only way to read it (ADR 0037 decision 4). Its output goes to the session's own jobs directory, outside the workspace and unreadable from inside the sandbox (ADR 0039 decision 1). |
+| `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id (no default timeout, and `timeout_secs` is ignored — ADR 0037: bound the command itself or stop it with `job`); `job` below is the only way to read it (ADR 0037 decision 4). Its output goes to the session's own jobs directory, outside the workspace and unreadable from inside the sandbox (ADR 0039 decision 1). The model runs git through `shell`; in a project the user has not trusted, every shell child carries the host git hardening as environment (`GIT_CONFIG_*`, ADR 0039 decision 5). |
 | `job` | `Shared` | Read or stop one `shell` job by its job id (`read`, `wait` or `kill`). Plain `read` returns the output since the last call plus a `[status: …]` line; `tail_lines`, `from_line`/`max_lines` or `pattern` page the full file by line. `wait` blocks (default 30 s, max 600 s) and never kills; `kill` SIGTERMs the job's process group, then SIGKILLs after 2 s. A truncated foreground result is a settled entry under a normal job id — the same reader. No list tool: job ids are already in context. |
 | `ask_user` | `Exclusive` | Ask the user one or more structured questions (single/multi/text) and wait for the answers. Its **own** provider (`AskTools`, not part of `CodingTools`): a host mounts it only when a human is there to answer, and it exists whether or not the host has a workspace (ADR 0024 Q5). The wait races the turn's cancellation and never fabricates an answer. |
 
@@ -25,11 +25,8 @@ racing on one file. The read-only tools are `Shared` so a batch of reads/diffs c
 `ask_user` is `Exclusive` (the default) so a session has at most one pending question: a batch
 with two calls asks them one after the other instead of opening two modals.
 
-`git_status` is a **one-version alias** for `git_diff { stat: true }` (ADR 0043 decision 3), and
-`list` is a **one-version alias** for `read` on a directory: they
-are registered so a call to the old name still runs, they are never advertised to the model, and their
-results start with one line naming the rename. The permission layer judges them as `git_diff`
-and `read`.
+`read` on a directory lists it (`limit` caps entries); removed names (`git_diff`, `list`,
+`git_status`, `job_output`, `job_list`, `job_kill`, `shell_output`) are unknown tools.
 
 `read` addresses **lines**: `offset` is the 1-based first line, `limit` caps the line count,
 and `max_bytes` still bounds the result. A byte cut that would land mid-line drops the whole
@@ -155,8 +152,6 @@ developer's real `~/.cargo`/`~/.rustup`; `tests/common`'s `tools()` builds with
 | `max_grep_output_bytes` | 32 KiB | Bound `grep`'s total output bytes (match and context lines plus notes); past it context lines are dropped before matches, then whole match lines, ending with one note naming the limit, what was dropped, and how to narrow the search. |
 | `default_grep_matches_per_file` | 50 | One file must not fill the result (not model-settable). |
 | `max_grep_context` | 30 | Bound the context lines a single match can add; a larger request is cut to it (with a `[context cut to N lines]` line), not refused. |
-| `max_git_output_bytes` | 1 MiB | Bound git output, truncated on a character boundary with a marker. |
-| `git_timeout` | 10 s | A hung git must not hang the turn. |
 | `default_shell_output_bytes` / `max_shell_output_bytes` | 24 KiB / 1 MiB, **per stream** | Past the budget the middle is replaced by a marker naming the discarded bytes. Success keeps the first quarter and the last three quarters; a failed command (non-zero exit, signal kill, timeout, cancellation) keeps the first eighth and the last seven eighths of the same budget, so the error at the end survives. The exit status is only known at the end, so the capture keeps the maximum of both splits (a `9/8`-budget buffer) and trims to the right one at render time. `max_output_bytes` lets the model raise it, clamped to the hard cap. Discarded bytes are reported per stream in the text and in `structured.*_truncated_bytes`. |
 | `default_shell_timeout` / `max_shell_timeout` | 60 s / 600 s | A model-supplied `timeout_secs` is clamped to the maximum, and the clamp is reported. A command that needs longer uses `background: true` (no default timeout). |
 | `auto_background_after` | 120 s (`[shell] auto_background_secs`, `0` = off) | ADR 0037: a **foreground** `shell` call still running after this is adopted by the job registry in place — the same process group, never restarted — and the call returns at once with the job id, a `job` hint (not a path) and a bounded tail of the output so far. The pre-adoption output is written to the job's file and `job` starts at the adoption point. An explicit `timeout_secs` keeps counting from the command's start; with none there is no post-adoption deadline. If all four slots are busy the call is not adopted and runs to its foreground timeout. `!`/`!!` never adopt. |
@@ -201,8 +196,13 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
   file; see above).
 - **Sensitive contents are not filtered.** Reading a secret file puts it in the session
   JSONL (ADR 0006 §11). Treat session files as sensitive.
-- **`git` is a child process** and can read `~/.gitconfig` and the repository. It is told
-  not to take optional locks; tests assert `.git` is unchanged, but no sandbox wraps it.
+- **`git` runs through `shell`, not through a tool of its own.** In a project the user has
+  not trusted, every shell child carries the host git hardening as environment
+  (`GIT_CONFIG_*`: `core.fsmonitor=false`, `core.hooksPath=/dev/null`,
+  `core.attributesFile=/dev/null`, emptied filter commands — ADR 0039 decision 5), so
+  repository configuration cannot run commands through it; `tests/shell_git_hardening.rs`
+  pins the marker-file behaviour for foreground and background jobs. In a trusted
+  project nothing is injected, so the user's own hooks run.
 - Windows: `safe_fs` falls back to std's path-based opens with no symlink defence and no link
   count; the fd walk is Unix-only (tested on macOS; Linux uses the same per-component
   `openat`, `openat2(RESOLVE_BENEATH)` is not used).
@@ -222,9 +222,8 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 
 ## Mounting
 
-- In `agent-cli`: `--workspace <dir>` exposes the file/git/search tools (`read`, `write`,
-  `patch`, `glob`, `grep`, `git_diff`, plus the `list` and `git_status` one-version aliases),
-  plus `shell` and `job` when the profile built a sandbox (`workspace`/`full`). Without the flag nothing changes.
+- In `agent-cli`: `--workspace <dir>` exposes the file/search tools (`read`, `write`,
+  `patch`, `glob`, `grep`), plus `shell` and `job` when the profile built a sandbox (`workspace`/`full`). Without the flag nothing changes.
 - Directly: `CodingTools::new(root)` returns a `ToolProvider` (no shell); pass it to
   `Agent::new(model, tools)`.
 - With a sandbox: build one with `radian_sandbox::Sandbox::new(mode, root)` (an enforced mode
