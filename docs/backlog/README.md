@@ -36,7 +36,7 @@
 | `first-launch.md` | decided | 0008 | 首次启动建默认配置、无模型时进 `/model` 选择器并写回 |
 | `project-skills.md` | decided | 0025、0031 | 接上项目级 skill，并支持 `$ARGUMENTS` |
 | `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 工具报告 P6/P5 的小修 + 前台 shell 默认输出上限下调 |
-| `memory-provider.md` | idea | 0021、0043 | 模型侧 memory 工具改成宿主 context hook + 外部 provider 子进程协议 |
+| `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `tool-definitions-trim.md` | idea | 0043、0037、0021 | 工具定义瘦身：合并低频工具、去重 schema 文字 |
 | `post-edit-diagnostics.md` | idea | 新 ADR | 编辑后诊断：tree-sitter 语法层 + 配置的检查命令；先数 dogfood 里 patch→check 序列 |
 | `sandbox-auto-allow-shell.md` | idea | 0012、0016、0043 | workspace 档沙箱内 shell 自动放行，越界再问；前提是重开 Unix socket 限制 |

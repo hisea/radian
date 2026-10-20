@@ -10,7 +10,7 @@
 
 ## 待决方向
 
-合并 `job_list`、`job_output`、`shell_output` 为一个"读命令输出"工具；合并 `memory_save`/`memory_revise`（或随 memory-provider 项一起删）；schema 里删掉复述描述的文字；别名只保留一个版本。合并工具要写 ADR 0043 修订并给一个版本的别名；只删描述文字不需要。
+合并 `job_list`、`job_output`、`shell_output` 为一个"读命令输出"工具；schema 里删掉复述描述的文字；别名只保留一个版本。合并工具要写 ADR 0043 修订并给一个版本的别名；只删描述文字不需要。
 
 ## 验收
 
