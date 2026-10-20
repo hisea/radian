@@ -195,8 +195,8 @@ pub async fn run_user_bash(
         unreachable!("a user `!` command never adopts a job");
     };
     Ok(UserBash {
-        stdout: outcome.stdout.render(),
-        stderr: outcome.stderr.render(),
+        stdout: outcome.stdout.render_for(outcome.succeeded()),
+        stderr: outcome.stderr.render_for(outcome.succeeded()),
         exit_code: outcome.status.and_then(|status| status.code()),
         signal: status_signal(outcome.status),
         timed_out: outcome.timed_out,
@@ -292,7 +292,11 @@ pub(crate) async fn run(
     .await?;
     match outcome {
         ExecOutcome::Ran(outcome) => {
-            let truncated = outcome.stdout.is_truncated() || outcome.stderr.is_truncated();
+            // The exit status is known only now, so the view (success 1/4:3/4, failure
+            // 1/8:7/8) is picked here; the capture kept the maximum of both.
+            let success = outcome.succeeded();
+            let truncated = outcome.stdout.is_truncated_for(success)
+                || outcome.stderr.is_truncated_for(success);
             let retained = match (foreground, &retention) {
                 (Some(foreground), Some(retention)) if truncated => {
                     let state = if outcome.timed_out {
@@ -578,9 +582,14 @@ async fn execute(
 
 #[derive(Default)]
 struct Capped {
-    /// The first quarter of the budget, kept verbatim.
+    /// The inline budget per stream (`output_cap`). The capture keeps the maximum of both
+    /// views: the success head (`cap / 4`) and the failure tail (`cap - cap / 8`), so the
+    /// buffer never exceeds `9/8` of the budget. The exit status is only known at the end,
+    /// so both splits are trimmed at render time from this one capture.
+    cap: usize,
+    /// The largest head any view needs (the success head, `cap / 4`), kept verbatim.
     head_cap: usize,
-    /// The last three quarters, kept as a ring.
+    /// The largest tail any view needs (the failure tail, `cap - cap / 8`), kept as a ring.
     tail_cap: usize,
     /// The first part of the stream, kept verbatim.
     head: Vec<u8>,
@@ -592,14 +601,27 @@ struct Capped {
 }
 
 impl Capped {
-    /// A capture with `cap` bytes of budget: the first quarter as the head, the last three
-    /// quarters as the tail.
+    /// A capture with `cap` bytes of inline budget. The head keeps the success head
+    /// (`cap / 4`) and the tail ring keeps the failure tail (`cap - cap / 8`); each view
+    /// trims down to its own split at render time.
     fn with_cap(cap: usize) -> Self {
         let head_cap = cap / 4;
         Self {
+            cap,
             head_cap,
-            tail_cap: cap - head_cap,
+            tail_cap: cap - cap / 8,
             ..Self::default()
+        }
+    }
+
+    /// The inline split for this result: success keeps 1/4 head and 3/4 tail, failure keeps
+    /// 1/8 head and 7/8 tail of the same budget. Failure is any non-zero exit, signal kill,
+    /// timeout or cancellation: the error is at the end, so it gets the tail.
+    fn split(&self, success: bool) -> (usize, usize) {
+        if success {
+            (self.cap / 4, self.cap - self.cap / 4)
+        } else {
+            (self.cap / 8, self.cap - self.cap / 8)
         }
     }
 
@@ -632,46 +654,100 @@ impl Capped {
         }
     }
 
-    /// Bytes that are in neither `head` nor `tail`.
-    fn discarded(&self) -> u64 {
+    /// Bytes the capture itself dropped (neither in `head` nor `tail`). A view can drop more
+    /// by trimming to its split; see [`Capped::discarded_for`].
+    fn capture_discarded(&self) -> u64 {
         self.total - (self.head.len() + self.tail.len()) as u64
     }
 
-    fn is_truncated(&self) -> bool {
-        self.discarded() > 0
+    /// The view for `success`: the first `head_need` bytes and the last `tail_need` bytes of
+    /// the stream, plus how many bytes between them are hidden. Sliced from the one capture,
+    /// so the buffer never grows past `9/8` of the budget while both splits stay available.
+    fn view(&self, success: bool) -> (&[u8], &[u8], u64) {
+        let (head_need, tail_need) = self.split(success);
+        if self.capture_discarded() == 0 {
+            // The capture holds the whole stream; show it whole when it fits the view.
+            let full = self.total as usize;
+            if full <= head_need + tail_need {
+                return (&self.head, &self.tail, 0);
+            }
+            // Whole stream present but larger than the view: first `head_need`, last
+            // `tail_need`. The halves concatenate to the stream, so index into them.
+            let head_part = &self.head[..head_need.min(self.head.len())];
+            let tail_from = full - tail_need;
+            let tail_part = if tail_from >= self.head.len() {
+                &self.tail[tail_from - self.head.len()..]
+            } else {
+                // The tail need reaches back into the head region; the head part already
+                // covers it, so the view is head part plus the whole tail half.
+                return (
+                    head_part,
+                    &self.tail,
+                    full as u64 - head_part.len() as u64 - self.tail.len() as u64,
+                );
+            };
+            let discarded = full as u64 - head_part.len() as u64 - tail_part.len() as u64;
+            return (head_part, tail_part, discarded);
+        }
+        let head_part = &self.head[..head_need.min(self.head.len())];
+        let tail_part = if self.tail.len() > tail_need {
+            &self.tail[self.tail.len() - tail_need..]
+        } else {
+            &self.tail[..]
+        };
+        let discarded = self
+            .total
+            .saturating_sub((head_part.len() + tail_part.len()) as u64);
+        (head_part, tail_part, discarded)
     }
 
-    /// What the model sees: the head, a marker naming the discarded bytes, then the tail.
-    /// The tail is what a failing build's error message is almost always in, so it is kept
-    /// deliberately larger than the head.
-    fn render(&self) -> String {
-        if !self.is_truncated() {
-            let mut bytes = self.head.clone();
-            bytes.extend_from_slice(&self.tail);
+    /// Bytes hidden from the `success` view (the number the marker names).
+    fn discarded_for(&self, success: bool) -> u64 {
+        self.view(success).2
+    }
+
+    fn is_truncated_for(&self, success: bool) -> bool {
+        self.discarded_for(success) > 0
+    }
+
+    /// Bytes the `success` view shows (head plus tail, without the marker).
+    fn shown_for(&self, success: bool) -> usize {
+        let (head, tail, _) = self.view(success);
+        head.len() + tail.len()
+    }
+
+    /// What the model sees for this result: the view's head, a marker naming the discarded
+    /// bytes, then the view's tail. The failure view keeps less start and more end than the
+    /// success view; a failing build's error message is almost always at the end.
+    fn render_for(&self, success: bool) -> String {
+        let (head, tail, discarded) = self.view(success);
+        if discarded == 0 {
+            let mut bytes = head.to_vec();
+            bytes.extend_from_slice(tail);
             return String::from_utf8_lossy(&bytes).into_owned();
         }
-        let mut out = String::from_utf8_lossy(&self.head).into_owned();
-        out.push_str(&self.marker());
-        out.push_str(&String::from_utf8_lossy(&self.tail));
+        let mut out = String::from_utf8_lossy(head).into_owned();
+        out.push_str(&Self::marker_for(discarded));
+        out.push_str(&String::from_utf8_lossy(tail));
         out
     }
 
     /// The marker that names the discarded middle, on its own line.
-    fn marker(&self) -> String {
-        format!(
-            "\n[... {} bytes discarded; showing the start and the end ...]\n",
-            self.discarded()
-        )
+    fn marker_for(discarded: u64) -> String {
+        format!("\n[... {discarded} bytes discarded; showing the start and the end ...]\n")
     }
 
     /// Writes the retained bytes (head, marker if the middle was dropped, then tail) to `out`.
     /// Used to seed a job's output file when a foreground command is adopted (ADR 0037
-    /// revision 1). Returns the number of bytes written.
+    /// revision 1). Returns the number of bytes written. The seed is the whole capture
+    /// (up to `9/8` of the budget), not one view: the job file keeps the full history and
+    /// the ring bounds the increment, so extra pre-adoption bytes are never lost here.
     fn write_to(&self, out: &mut impl Write) -> std::io::Result<u64> {
         out.write_all(&self.head)?;
         let mut written = self.head.len() as u64;
-        if self.is_truncated() {
-            let marker = self.marker();
+        let discarded = self.capture_discarded();
+        if discarded > 0 {
+            let marker = Self::marker_for(discarded);
             out.write_all(marker.as_bytes())?;
             written += marker.len() as u64;
         }
@@ -730,7 +806,9 @@ impl StreamSink {
     /// holds this sink's lock; the file is written before the sink can accept more bytes.
     pub(crate) fn promote(&mut self, mut file: File, cell: Arc<Mutex<JobCell>>) -> (u64, String) {
         self.capped.trim();
-        let rendered = self.capped.render();
+        // Still running: no exit status yet, so the snapshot uses the success split (the same
+        // proportions as before this change). The full capture seeds the job file.
+        let rendered = self.capped.render_for(true);
         let written = self.capped.write_to(&mut file).unwrap_or(0);
         self.capped = Capped::default();
         // The job's own file is the retained output now; stop teeing to the foreground one.
@@ -740,8 +818,8 @@ impl StreamSink {
     }
 
     /// Takes the captured head+tail at end of stream. Empty for a stream that was promoted
-    /// (its bytes went to the job instead). Trimmed to the exact budget, so the reported size
-    /// is the budget and not up to twice it.
+    /// (its bytes went to the job instead). Trimmed to the capture caps, so memory stays
+    /// bounded; each inline view trims further to its own split at render time.
     fn take_capped(&mut self) -> Capped {
         let mut capped = std::mem::take(&mut self.capped);
         capped.trim();
@@ -761,6 +839,14 @@ pub(crate) struct Outcome {
     duration: Duration,
     /// The readers did not reach EOF within the drain grace after the group was killed.
     drain_incomplete: bool,
+}
+
+impl Outcome {
+    /// Success is exit code 0 without a timeout or cancellation. Anything else (non-zero
+    /// exit, signal kill, timeout, cancellation) is a failure and gets the larger tail.
+    fn succeeded(&self) -> bool {
+        !self.timed_out && !self.cancelled && matches!(self.status.and_then(|s| s.code()), Some(0))
+    }
 }
 
 impl Default for Outcome {
@@ -949,10 +1035,11 @@ fn collect(rx: &mpsc::Receiver<Capped>) -> (Capped, bool) {
     }
 }
 
-/// Reads to EOF, keeping at most `cap` bytes: the first quarter as the head and the last
-/// three quarters as the tail, with a count of what fell in between. Reading continues past
-/// the cap (and the tail is trimmed as it goes), so a chatty command neither blocks on a full
-/// pipe nor grows this process's memory with its output.
+/// Reads to EOF, keeping the success head (`cap / 4`) and the failure tail (`cap - cap / 8`):
+/// the maximum of both views, so the exit status — known only at the end — can still pick
+/// either split at render time. Reading continues past the caps (and the tail is trimmed as
+/// it goes), so a chatty command neither blocks on a full pipe nor grows this process's
+/// memory with its output.
 ///
 /// The tool itself reads through [`StreamSink`] (so a running command can be adopted in
 /// place); this is the plain capture the reader tests pin.
@@ -1293,8 +1380,9 @@ fn report(
     outcome: &Outcome,
     retained: Option<RetainedView>,
 ) -> ToolOutput {
-    let stdout = outcome.stdout.render();
-    let stderr = outcome.stderr.render();
+    let success = outcome.succeeded();
+    let stdout = outcome.stdout.render_for(success);
+    let stderr = outcome.stderr.render_for(success);
     let exit_code = outcome.status.and_then(|s| s.code());
     let signal = exit_code.is_none().then(|| status_signal(outcome.status));
 
@@ -1330,22 +1418,23 @@ fn report(
     if !stderr.is_empty() && !stderr.ends_with('\n') {
         text.push('\n');
     }
-    if outcome.stdout.is_truncated() {
+    if outcome.stdout.is_truncated_for(success) {
         text.push_str(&format!(
             "[stdout truncated: {} of {} bytes discarded]\n",
-            outcome.stdout.discarded(),
+            outcome.stdout.discarded_for(success),
             outcome.stdout.total
         ));
     }
-    if outcome.stderr.is_truncated() {
+    if outcome.stderr.is_truncated_for(success) {
         text.push_str(&format!(
             "[stderr truncated: {} of {} bytes discarded]\n",
-            outcome.stderr.discarded(),
+            outcome.stderr.discarded_for(success),
             outcome.stderr.total
         ));
     }
     if let Some(retained) = &retained {
-        let discarded = outcome.stdout.discarded() + outcome.stderr.discarded();
+        let discarded =
+            outcome.stdout.discarded_for(success) + outcome.stderr.discarded_for(success);
         text.push_str(&format!(
             "[{discarded} bytes were discarded from this view; the full output is retained. \
              Read it with `job read` job_id={}.]\n",
@@ -1397,12 +1486,12 @@ fn report(
             "timeout_clamped": clamped,
             "output_bytes_per_stream": output_cap,
             "output_clamped": output_clamped,
-            "stdout_bytes": outcome.stdout.head.len() + outcome.stdout.tail.len(),
-            "stderr_bytes": outcome.stderr.head.len() + outcome.stderr.tail.len(),
+            "stdout_bytes": outcome.stdout.shown_for(success),
+            "stderr_bytes": outcome.stderr.shown_for(success),
             "stdout_total_bytes": outcome.stdout.total,
             "stderr_total_bytes": outcome.stderr.total,
-            "stdout_truncated_bytes": outcome.stdout.discarded(),
-            "stderr_truncated_bytes": outcome.stderr.discarded(),
+            "stdout_truncated_bytes": outcome.stdout.discarded_for(success),
+            "stderr_truncated_bytes": outcome.stderr.discarded_for(success),
             "job_id": retained.as_ref().map(|r| r.job_id.clone()),
             "output_retained_bytes": retained.as_ref().map(|r| r.retained_bytes),
             "output_total_bytes": retained.as_ref().map(|r| r.total_bytes),
@@ -1527,12 +1616,19 @@ mod tests {
         let capped = read_capped(Repeating { remaining: total }, cap);
 
         assert_eq!(capped.total, total as u64);
+        // The capture keeps the maximum of both views: the success head and the failure
+        // tail, so the buffer is `9/8` of the budget — a small constant factor.
         assert_eq!(capped.head.len(), cap / 4);
-        assert_eq!(capped.tail.len(), cap - cap / 4);
-        assert_eq!(capped.discarded(), total as u64 - cap as u64);
-        // The retained bytes are bounded by the cap, not by the output size: this is the
-        // property that keeps a 50 MiB build log out of this process's memory.
-        assert!(capped.head.len() + capped.tail.len() <= cap);
+        assert_eq!(capped.tail.len(), cap - cap / 8);
+        assert_eq!(
+            capped.capture_discarded(),
+            total as u64 - (cap / 4 + cap - cap / 8) as u64
+        );
+        // Either inline view is exactly the budget, never more.
+        assert_eq!(capped.shown_for(true), cap);
+        assert_eq!(capped.shown_for(false), cap);
+        assert_eq!(capped.discarded_for(true), total as u64 - cap as u64);
+        assert_eq!(capped.discarded_for(false), total as u64 - cap as u64);
     }
 
     #[test]
@@ -1568,9 +1664,12 @@ mod tests {
     fn a_short_stream_is_kept_whole() {
         let capped = read_capped(std::io::Cursor::new(b"hello".to_vec()), 64 << 10);
         assert_eq!(capped.total, 5);
-        assert_eq!(capped.discarded(), 0);
-        assert!(!capped.is_truncated());
-        assert_eq!(capped.render(), "hello");
+        assert_eq!(capped.discarded_for(true), 0);
+        assert_eq!(capped.discarded_for(false), 0);
+        assert!(!capped.is_truncated_for(true));
+        assert!(!capped.is_truncated_for(false));
+        assert_eq!(capped.render_for(true), "hello");
+        assert_eq!(capped.render_for(false), "hello");
     }
 
     #[test]
@@ -1578,12 +1677,25 @@ mod tests {
         let data: Vec<u8> = (0..10_000u32).map(|i| b'a' + (i % 26) as u8).collect();
         let capped = read_capped(std::io::Cursor::new(data.clone()), 40);
 
+        // The capture keeps the success head (10) and the failure tail (35).
         assert_eq!(capped.head.len(), 10);
-        assert_eq!(capped.tail.len(), 30);
-        assert_eq!(capped.tail.as_slice(), &data[data.len() - 30..]);
-        let rendered = capped.render();
+        assert_eq!(capped.tail.len(), 35);
+        assert_eq!(capped.tail.as_slice(), &data[data.len() - 35..]);
+        // Success shows 1/4 head and 3/4 tail of the same budget.
+        let rendered = capped.render_for(true);
         assert!(rendered.contains("bytes discarded"), "{rendered}");
         let expected_tail = String::from_utf8_lossy(&data[data.len() - 30..]).into_owned();
         assert!(rendered.ends_with(&expected_tail), "{rendered}");
+        assert_eq!(capped.shown_for(true), 40);
+        // Failure shows less start (1/8) and more end (7/8): the very last byte survives.
+        let failed = capped.render_for(false);
+        assert!(failed.contains("bytes discarded"), "{failed}");
+        let expected_failure_tail = String::from_utf8_lossy(&data[data.len() - 35..]).into_owned();
+        assert!(failed.ends_with(&expected_failure_tail), "{failed}");
+        assert_eq!(capped.shown_for(false), 40);
+        let (success_head, _, _) = capped.view(true);
+        let (failure_head, _, _) = capped.view(false);
+        assert_eq!(success_head.len(), 10);
+        assert_eq!(failure_head.len(), 5);
     }
 }

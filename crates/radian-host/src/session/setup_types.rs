@@ -104,8 +104,9 @@ pub struct SessionSetup {
     /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
     pub memory_root: Option<PathBuf>,
     /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
-    /// host (`~` and paths relative to the config file). The user-level `~/.radian/skills` is
-    /// discovered first, so it wins a name conflict.
+    /// host (`~` and paths relative to the config file). Discovery order is user-level, then
+    /// these, then the trusted project's `.agents/skills`, then built-ins — so the user-level
+    /// `~/.radian/skills` wins a name conflict with a project skill.
     pub skills_extra_paths: Vec<PathBuf>,
     /// `[skills] builtin` (ADR 0025): include the compiled-in skills. Default true.
     pub skills_builtin: bool,
@@ -189,7 +190,7 @@ pub struct SessionFacts {
     /// The `[sandbox]` line.
     pub sandbox_facts: String,
     /// The startup summary's word for the sandbox (ADR 0027): the real backend in plain
-    /// words for `workspace` (`macOS sandbox` / `Linux sandbox`), `no exec` for `safe`,
+    /// words for `workspace` (`macOS sandbox` / `Linux sandbox`),
     /// `no sandbox` for `full`. The TUI prints it as-is.
     pub sandbox_word: String,
     /// The `[memory]` line.

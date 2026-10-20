@@ -783,9 +783,9 @@ async fn a_workspace_with_project_resources_is_untrusted_without_a_terminal() {
     let dir = scratch("trust-default");
     let home = dir.0.join("home");
     let ws = dir.0.join("ws");
-    std::fs::create_dir_all(ws.join(".radian/skills/greet")).unwrap();
+    std::fs::create_dir_all(ws.join(".agents/skills/greet")).unwrap();
     std::fs::write(
-        ws.join(".radian/skills/greet/SKILL.md"),
+        ws.join(".agents/skills/greet/SKILL.md"),
         "---\nname: greet\n---\n",
     )
     .unwrap();
@@ -834,9 +834,9 @@ async fn trust_flags_override_without_writing() {
     let dir = scratch("trust-flags");
     let home = dir.0.join("home");
     let ws = dir.0.join("ws");
-    std::fs::create_dir_all(ws.join(".radian/skills/greet")).unwrap();
+    std::fs::create_dir_all(ws.join(".agents/skills/greet")).unwrap();
     std::fs::write(
-        ws.join(".radian/skills/greet/SKILL.md"),
+        ws.join(".agents/skills/greet/SKILL.md"),
         "---\nname: greet\n---\n",
     )
     .unwrap();
@@ -888,6 +888,79 @@ async fn trust_flags_override_without_writing() {
     }
 }
 
+/// Project skills (backlog project-skills): a trusted project's `.agents/skills` reach the
+/// system prompt, `skill` tool and `/skill:` catalog; an untrusted project's do not. The
+/// startup line tells the truth in both states.
+#[tokio::test]
+async fn project_skills_load_only_when_trusted() {
+    let dir = scratch("project-skills-e2e");
+    let home = dir.0.join("home");
+    let ws = dir.0.join("ws");
+    std::fs::create_dir_all(ws.join(".agents/skills/greet")).unwrap();
+    std::fs::write(
+        ws.join(".agents/skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: PROJECT-SKILL-MARKER greets.\n---\nbody\n",
+    )
+    .unwrap();
+    let sessions = dir.0.join("sessions");
+    // One reply per iteration: `-p` runs a turn each time.
+    let server = MockServer::start(vec![text_reply("OK"), text_reply("OK")]).await;
+    for (n, (flag, loaded, status)) in [
+        (
+            "--trust",
+            true,
+            "project resources: loaded (trusted: command line)",
+        ),
+        (
+            "--no-trust",
+            false,
+            "project resources: not loaded (untrusted: command line)",
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (code, _, stderr) = feed_and_wait(
+            spawn_radian(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "-p",
+                    "hi",
+                    flag,
+                    "--workspace",
+                    ws.to_str().unwrap(),
+                    "--session-dir",
+                    sessions.to_str().unwrap(),
+                    "--session-id",
+                    &format!("project-skills-{n}"),
+                ],
+                &[("RADIAN_HOME", home.to_str().unwrap())],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{flag}: {stderr}");
+        assert!(stderr.contains(status), "{flag}: {stderr}");
+        let system = messages_of(&server, n)
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "system")
+            .and_then(|message| message["content"].as_str())
+            .unwrap_or_default()
+            .to_owned();
+        assert_eq!(
+            system.contains("PROJECT-SKILL-MARKER"),
+            *loaded,
+            "{flag}: the project skill must{} reach the system prompt: {system}",
+            if *loaded { "" } else { " not" }
+        );
+    }
+}
+
 /// ADR 0031 T3: piped stdin is **not** an interactive user. The trust question must not read
 /// its first line (which could be a message, or a stray `y`), so a piped run takes the
 /// untrusted default and sends the piped line as a message.
@@ -896,9 +969,9 @@ async fn piped_stdin_is_never_read_as_the_trust_answer() {
     let dir = scratch("trust-piped");
     let home = dir.0.join("home");
     let ws = dir.0.join("ws");
-    std::fs::create_dir_all(ws.join(".radian/skills/greet")).unwrap();
+    std::fs::create_dir_all(ws.join(".agents/skills/greet")).unwrap();
     std::fs::write(
-        ws.join(".radian/skills/greet/SKILL.md"),
+        ws.join(".agents/skills/greet/SKILL.md"),
         "---\nname: greet\n---\n",
     )
     .unwrap();

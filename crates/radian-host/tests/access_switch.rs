@@ -2,10 +2,11 @@
 //! read (`resumed_access`).
 //!
 //! `set_access` rebuilds the profile and the sandbox through the host's `AccessBuilder`. These
-//! tests use a builder that returns a transparent `full` sandbox, `None` for `safe`, and an
-//! error for `workspace` (a simulated probe failure), so all three paths run without a real
-//! backend. The switch must apply to the live hooks and the projection, queue one
-//! `ConfigChanged`, and a failed probe must refuse and change nothing.
+//! tests use a builder that returns a transparent `full` sandbox and a `workspace`
+//! profile over a transparent stand-in sandbox (or a simulated probe failure), so the swap
+//! and the refusal paths run without a real backend. The switch must apply to the live
+//! hooks and the projection, queue one `ConfigChanged`, and a failed probe must refuse
+//! and change nothing.
 
 use std::sync::Arc;
 

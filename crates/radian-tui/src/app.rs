@@ -189,7 +189,7 @@ pub enum Effect {
     /// List the discovered skills (`/skills`, ADR 0025 S3) as notices. The answer is
     /// [`Input::SessionDone`].
     ListSkills,
-    /// `/jobs` (ADR 0037 decision 4): list the session's background jobs, or stop one/all. The
+    /// `/jobs` (ADR 0037 decision 4): list the running background jobs, or stop one/all. The
     /// loop runs it (the registry lives in the host) and answers with [`Input::SessionDone`].
     Jobs(command::JobsRequest),
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
@@ -522,7 +522,7 @@ pub struct SessionView {
     pub bash_running: Option<String>,
     /// A `!`/`!!` command submitted while a turn was running: it starts when the turn ends.
     pub queued_bash: Option<(String, bool)>,
-    /// Whether this session has a shell (`!`) at all: false on the `safe` tier (ADR 0012).
+    /// Whether this session has a shell (`!`) at all: false when no `shell` is mounted.
     pub bash_available: bool,
     /// The exact `Ran \`cmd\`` text we displayed live as a [`EntryKind::Bash`] block for a `!`
     /// command. When that message is admitted to the transcript, `push_message` skips it so

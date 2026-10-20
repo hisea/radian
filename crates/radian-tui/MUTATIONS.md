@@ -1037,7 +1037,7 @@ Base `aec64f0` · 一次性 worktree `/tmp/radian-mut-bang`（`git worktree add 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | BANG-A | `!!` 也进上下文（`bash_done` 的 `if !exclude_from_context` 换成 `if true`） | `a_bang_done_injects_and_audits_and_a_bangbang_only_audits` | ✅ |
-| BANG-B | `safe` 档照样执行（`begin_bash` 的 `if !self.bash_available` 换成 `if false`） | `a_bang_on_the_safe_tier_does_not_run` | ✅ |
+| BANG-B | 无 shell 照样执行（`begin_bash` 的 `if !self.bash_available` 换成 `if false`） | `a_bang_without_a_shell_does_not_run` | ✅ |
 | BANG-C | 不写 journal（删掉 `Effect::AuditUserBash` 的 push） | `a_bang_done_injects_and_audits_and_a_bangbang_only_audits`（audit 断言/索引） | ✅ |
 | BANG-D | 绕过沙箱（`main.rs` 的 RunBash 用 `std::process::Command::new("/bin/sh")` 直接跑，替换 `run_user_bash`） | `the_bang_command_runs_through_the_sandboxed_executor`（结构测试） | ✅ |
 | BANG-E | `!` 当普通 turn 发出去（`begin_bash` 发 `SendFollowup`，即走模型/工具/审批那条路） | `a_bang_routes_to_a_run_bash_effect` | ✅ |

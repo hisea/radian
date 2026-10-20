@@ -210,8 +210,9 @@ fn context_file_in(dir: &Path) -> Option<PathBuf> {
 
 /// The repository root: the nearest directory at or above `workspace` that holds a `.git`
 /// entry (a directory for an ordinary repo, a file for a worktree or submodule). `None` when
-/// there is none, so the caller reads only the workspace directory.
-fn repo_root(workspace: &Path) -> Option<PathBuf> {
+/// there is none, so the caller reads only the workspace directory. Shared with skill
+/// discovery's upward search (ADR 0025 S1), which stops at the same root.
+pub(crate) fn repo_root(workspace: &Path) -> Option<PathBuf> {
     let mut dir = Some(workspace);
     while let Some(current) = dir {
         if current.join(".git").exists() {

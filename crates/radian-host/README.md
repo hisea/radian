@@ -249,8 +249,8 @@ line's skipped list.
 
 `describe(mode, sandbox, wording) -> (String, String)` returns the two startup lines: what was
 chosen, and what it actually means. The two hosts keep only the phrases that are honestly
-different, in `Wording`: `CLI_WORDING` ("commands and built-in tools", and the `safe` line names
-MCP) and `TUI_WORDING` ("shell and the built-in tools"). Everything else — including the sentence
+different, in `Wording`: `CLI_WORDING` ("commands and built-in tools")
+and `TUI_WORDING` ("shell and the built-in tools"). Everything else — including the sentence
 that must **not** be weakened, "MCP servers are NOT sandboxed" (ADR 0012 decision 4) — is
 written once here.
 
@@ -258,7 +258,7 @@ written once here.
 `workspace` it names the real backend in plain words — `macOS sandbox` for `macos-seatbelt`,
 `Linux sandbox` for `linux-bwrap`, and the backend's own name for one this build does not know —
 so a summary can never be read as "no sandbox"; the exact backend name stays in the expanded
-`profile:` line. `safe` is `no exec` (there is no command execution to sandbox) and `full` is
+`profile:` line. `full` is
 `no sandbox` (the built-in default since ADR 0043). A missing backend in an enforced mode is
 `sandbox missing`, never `none`.
 
@@ -268,11 +268,11 @@ The `workspace` line says `sandbox on: commands stay in the workspace` (ADR 0043
 ## The project declaration
 
 `project::read(workspace)` reads `<workspace>/.radian/config.toml` (ADR 0043 decision 2). The
-only key it uses is `[permissions] profile = "workspace" | "safe"`; `full` there is a warning
+only key it uses is `[permissions] profile = "workspace"`; `full` there is a warning
 and is ignored, any other key is skipped and named, and `[sandbox]` keys (`allow_env`,
 `allow_unix_sockets`) are refused by name because the user-level configuration owns them
 (ADR 0034). `project::narrow` / `project::effective` return the narrower
-of two tiers (`safe` < `workspace` < `full`): a project can turn the sandbox on and can never
+of two tiers (`workspace` < `full`): a project can turn the sandbox on and can never
 turn it off. The file's presence also counts as a project resource for the trust gate.
 
 ## What it guarantees (each with the test that holds it)

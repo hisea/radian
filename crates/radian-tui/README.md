@@ -171,8 +171,8 @@ config error). Without it the glyph set's default is used (`nerd` `󰰠`, `unico
 lacks it draws a fallback glyph, which may sit off the baseline. `[tui.footer.items.brand] style`
 still overrides the color.
 The collapsed summary names the sandbox in plain words: `workspace · macOS
-sandbox · context …` on macOS, `workspace · Linux sandbox · context …` on Linux, `no exec` for
-`safe` and `no sandbox` for `full`; the exact backend name (`macos-seatbelt`, `linux-bwrap`)
+sandbox · context …` on macOS, `workspace · Linux sandbox · context …` on Linux and `no sandbox` for
+`full`; the exact backend name (`macos-seatbelt`, `linux-bwrap`)
 stays in the expanded `profile:` line.
 The transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
 bare arrow keys belong to the composer.
@@ -707,7 +707,7 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   does the output arrive without a perceptible stall? Type `!!ls` — is the dimmer block clearly
   different? Does `!sleep 30` cancel with Esc, and does a second `!` while one runs say so? Is
   the sandbox visible (a write outside the workspace fails with a readable line) and does the
-  command never open an approval box? On the `safe` tier `!` must refuse with one line.
+  command never open an approval box?
 - **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
   `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
   without reading as an error? pty automation asserts the text, not the prominence.
@@ -721,9 +721,9 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   `main`** of a real repo, start a general `workspace` session and run a `git commit` through
   `shell` — the commit must land with native git. The `shell` tool
   description the model sees and the startup line must say git can commit/branch/stash in the
-  sandbox while `.git/config` and `.git/hooks/` stay read-only. After `/access safe` the notice
+  sandbox while `.git/config` and `.git/hooks/` stay read-only. After `/access workspace` the notice
   must say the shell description and the startup line are fixed for this session; a new session
-  must show the read-only wording. pty automation cannot see the model-facing description, so
+  must show the new tier's wording. pty automation cannot see the model-facing description, so
   this one is yours (ADR 0009).
 - **starting inside an outer sandbox** (ADR 0016): run `radian` from a context that is
   already confined — e.g. `sandbox-exec -p '(version 1)(deny default)(allow file-read*)(allow
@@ -1024,11 +1024,13 @@ throwaway terminal, not your working one.
     verification error text (it must name a redacted URL, never the key).
 11. **`/skill:` and `/skills`** (ADR 0025 slices 3+4; merge `1a8c0e8`). *Steps*: put a skill
     under `~/.radian/skills/<name>/SKILL.md` (or a `[skills] extra_paths` root); type
-    `/skill:` + Tab; run one with args; run `/skills`.
+    `/skill:` + Tab; run one with args; run `/skills`. In a trusted workspace a skill under
+    `.agents/skills/<name>/SKILL.md` behaves the same; untrusted, it stays invisible.
     *Expect*: completion lists the discovered skill names; `/skill:<name> args` folds the body
-    into one user message containing the args; `/skills` lists name + description, with
-    `(model-invocation off)` for a `disable-model-invocation: true` skill; an unknown name is a
-    notice, not a message. *Fail*: record the completion list and the folded message.
+    into one user message containing the args (a `$ARGUMENTS` placeholder is filled in place);
+    `/skills` lists name + description, with `(model-invocation off)` for a
+    `disable-model-invocation: true` skill; an unknown name is a notice, not a message.
+    *Fail*: record the completion list and the folded message.
 12. **auto mode `!` and the `AUTO` marker** (ADR 0026 D9; merge `8086b40`; also in the bullet
     list above). *Steps*: trigger an approval; press `!`; trigger another. *Expect*: `!`
     approves once **and** turns auto on for the session (the next ask never prompts), the
@@ -1253,7 +1255,7 @@ The common flags have short forms: `-m`/`--model`, `-w`/`--workspace`, `-r`/`--r
 `-m`/`--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
 `--system`, `--session-dir`, `--session-id`, `-r`/`--resume`, `-l`/`--list`, `--pick`,
 `--version`, `-w`/`--workspace DIR`, `--mcp-config FILE`,
-`--profile safe|workspace|full` (default `full`, ADR 0043; the old `workspace-write`/`full-access`
+`--profile workspace|full` (default `full`, ADR 0043; the old `workspace-write`/`full-access`
 are accepted aliases but not listed),
 `--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
 `--context-window TOKENS`, `--offline-catalog`, `--catalog-provider PROVIDER`. The key is
@@ -1284,8 +1286,7 @@ could be built. This is the same wiring `agent-cli` uses:
   is inherited (`Sandbox::inherited`), nothing is probed, and the startup line and `/access` say
   so — no flag, config key or environment variable can select it.
 - `shell` exists only when a sandbox does (`radian-coding` does not advertise it otherwise), and
-  it never runs without one. `safe` builds no sandbox, so it has no shell; its rules deny
-  writes and execution.
+  it never runs without one.
 - `--allow-shell-command "git status"` (repeatable) adds a host `allow` rule. Only a **simple**
   command matches: any shell metacharacter (`;`, `&`, `|`, `$`, quotes, …) keeps the call at
   `ask`, so a compound command always prompts. Write these at the subcommand level, never at a
@@ -1305,7 +1306,7 @@ could be built. This is the same wiring `agent-cli` uses:
 
 Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
 
-- `--profile safe|workspace|full` picks the rule set (default `full`, ADR 0043: no sandbox;
+- `--profile workspace|full` picks the rule set (default `full`, ADR 0043: no sandbox;
   `workspace` enforces the sandbox: reads allowed, writes allowed only when the resolved path
   stays inside the workspace, and the network is on). A project's `.radian/config.toml` can
   narrow the tier, never widen it.
@@ -1554,7 +1555,7 @@ owns fork/rewind).
   (`crates/radian-host`'s provider). A name collision fails the session rather than silently
   shadowing a built-in tool.
 - Under `workspace` an MCP call is an `ask`: it goes through the same approval dialog
-  as a built-in tool. `safe` denies MCP; `full` allows it.
+  as a built-in tool. `full` allows it.
 - **The servers themselves are not sandboxed** (ADR 0012 option B). The `workspace`
   startup notice says so, because the notice is the only safeguard.
 
@@ -1566,7 +1567,7 @@ The bottom line carries, most important first:
 |---|---|
 | model | the `--model` value |
 | turn | `idle` / `running` / `cancelled` |
-| tier | `safe` / `workspace` / `full` |
+| tier | `workspace` / `full` |
 | usage | `usage <input>/<output>` from **provider-reported** totals; `-` for a field never reported, `none` for a session with no reports |
 | mcp | `mcp off`, `mcp N/…` (configured, not open) or `mcp servers/tools` (what connected) |
 | context | the ADR 0015 wording above |
