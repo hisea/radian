@@ -128,6 +128,24 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
         TurnEnd::Done => {}
     }
     loop {
+        // Edge-triggered waits, subscribed BEFORE the checks below: a signal landing
+        // between the check and the wait still resolves the wait, so no wakeup is lost.
+        // (The driver's own `wake_signal` wait is deliberately not among them: the
+        // driver is its only waiter, and a second waiter could steal its one permit —
+        // a wake entry always reaches the driver, which claims it and reports
+        // `started`, so exec learns about it that way instead.)
+        let settled_notify = run
+            .session
+            .job_notifier()
+            .map(|notifier| notifier.settled_signal());
+        let settled = settled_notify.as_ref().map(|notify| notify.notified());
+        let stops_notify = run.session.command_hooks().stops_signal();
+        let stops = stops_notify.notified();
+        let finished = run.ui.finished.notified();
+        let started = run.ui.started.notified();
+        let ended = run.driver_ended.notified();
+        let idle_notify = run.session.idle_signal();
+        let idle = idle_notify.notified();
         // A degraded notice never opens a turn (the wake gate is closed): end the session
         // instead of waiting for something that cannot happen. Exit 3, the budget family
         // (ADR 0044); the `Result` record names the budget and the unhandled counts. A
@@ -158,7 +176,21 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
         if jobs_quiescent(run).await {
             break;
         }
-        match wait_for_progress(run, &mut cancelling).await {
+        match wait_for_progress(
+            &mut run.signals,
+            &run.ui,
+            &run.session,
+            &run.inbox,
+            &mut cancelling,
+            settled,
+            stops,
+            finished,
+            started,
+            ended,
+            idle,
+        )
+        .await
+        {
             TurnEnd::Terminated => {
                 let code = terminate(&run.inbox, &run.session, &run.secrets, SIGTERM).await;
                 return LoopDone {
@@ -276,41 +308,45 @@ async fn jobs_quiescent(run: &Run) -> bool {
         .map(|notifier| notifier.settled_handled())
         .unwrap_or(0);
     let wake_pending = run.inbox.snapshot().await.iter().any(|entry| entry.wake);
-    // A `Stop` run `on_turn_end` spawned and not finished yet: its verdict may yet open
-    // (or degrade) a turn. The increment happens synchronously inside `on_turn_end`,
-    // before the driver's turn-end bookkeeping notifies, so a check that sees the turn
-    // end also sees the pending run.
-    // A core turn in flight (`busy`): only a turn can start a job or absorb a notice.
-    // This deliberately does not use the driver's `turn_running` flag: that flag also
-    // covers finalizing (journaling `TurnFinished`) after the core loop ended, and
-    // nothing notifies its clear — waiting on it parks with no waker. Finalizing starts
-    // nothing and claims nothing, so it is idle for this decision; `close_and_join`
-    // absorbs it through the join. The residual pop-to-`TurnStarted` gap is synchronous
-    // (no await between the claim and the flag store, and `TurnStarted` follows in the
-    // same task): a check landing in it exits, but `close` does not cancel the claimed
-    // turn — it still runs to completion, the join waits for it, and its status becomes
-    // the last. Only a job it newly starts would outlive the exit, as on today's `-p`.
-    let active = run.ui.busy();
+    // A core turn in flight: only a turn can start a job or absorb a notice. Both the
+    // UI's `busy` (set at `TurnStarted`, cleared at the turn's end event) and the
+    // driver's `turn_running` (set synchronously right after the claim, cleared after
+    // finalizing) count: `busy` alone misses the claim-to-`TurnStarted` gap (journal
+    // appends run in between, and a check landing in it would exit while the claimed
+    // turn still starts its jobs); `turn_running` alone has no waker for its clear —
+    // so the wait below also watches the driver's idle signal. A claimed turn still
+    // runs to completion and the join waits for it; only a job it newly starts would
+    // outlive the exit, as on today's `-p`.
+    let active = run.ui.busy() || run.session.turn_running();
     let stops = run.session.command_hooks().pending_stops();
     let after = run.inbox.version();
     after == before && may_exit(running, settled, handled, wake_pending, active, stops)
 }
 
 /// After a `-p` turn ends with jobs still outstanding: waits for the next thing that can
-/// change the exit condition — a turn ending or starting, a handled settle, a queued wake
-/// entry, the driver ending, or a signal. Signal handling matches [`wait_for_turn`]:
-/// SIGTERM stops, a second Ctrl-C forces, a first Ctrl-C cancels a running turn and
-/// otherwise just re-checks (cancelling with no turn in flight could eat the next woken
-/// turn, so an idle Ctrl-C only wakes the loop).
-async fn wait_for_progress(run: &mut Run, cancelling: &mut bool) -> TurnEnd {
-    let settled = run
-        .session
-        .job_notifier()
-        .map(|notifier| notifier.settled_signal());
-    let stops = run.session.command_hooks().stops_signal();
+/// change the exit condition — a turn ending, starting, or going idle, a handled settle,
+/// a finished Stop run, the driver ending, or a signal. The notify futures are created by the caller
+/// *before* it checks the exit condition, so a signal landing between the check and
+/// this wait still resolves it. Signal handling matches [`wait_for_turn`]: SIGTERM stops,
+/// a second Ctrl-C forces, a first Ctrl-C cancels a running turn and otherwise just
+/// re-checks (cancelling with no turn in flight could eat the next woken turn, so an
+/// idle Ctrl-C only wakes the loop).
+async fn wait_for_progress(
+    signals: &mut mpsc::UnboundedReceiver<i32>,
+    ui: &Arc<Ui>,
+    session: &Arc<radian_host::LocalSession>,
+    inbox: &Arc<Inbox>,
+    cancelling: &mut bool,
+    settled: Option<tokio::sync::futures::Notified<'_>>,
+    stops: tokio::sync::futures::Notified<'_>,
+    finished: tokio::sync::futures::Notified<'_>,
+    started: tokio::sync::futures::Notified<'_>,
+    ended: tokio::sync::futures::Notified<'_>,
+    idle: tokio::sync::futures::Notified<'_>,
+) -> TurnEnd {
     tokio::select! {
         biased;
-        Some(signal) = run.signals.recv() => {
+        Some(signal) = signals.recv() => {
             if signal == SIGTERM {
                 // The process was asked to stop: no more turns, and `terminate` closes
                 // the session once this one has ended.
@@ -319,25 +355,25 @@ async fn wait_for_progress(run: &mut Run, cancelling: &mut bool) -> TurnEnd {
             if *cancelling {
                 return TurnEnd::Forced;
             }
-            if !run.ui.busy() && !run.session.turn_running() {
+            if !ui.busy() && !session.turn_running() {
                 return TurnEnd::Done;
             }
             *cancelling = true;
-            run.inbox.cancel(CancelCause::Requested);
+            inbox.cancel(CancelCause::Requested);
             eprintln!("radian: cancelling (Ctrl-C again to quit)");
             TurnEnd::Done
         }
-        _ = run.driver_ended.notified() => TurnEnd::DriverEnded,
-        _ = run.ui.finished.notified() => TurnEnd::Done,
-        _ = run.ui.started.notified() => TurnEnd::Done,
-        _ = stops.notified() => TurnEnd::Done,
+        _ = ended => TurnEnd::DriverEnded,
+        _ = idle => TurnEnd::Done,
+        _ = finished => TurnEnd::Done,
+        _ = started => TurnEnd::Done,
+        _ = stops => TurnEnd::Done,
         _ = async {
-            match &settled {
-                Some(signal) => signal.notified().await,
+            match settled {
+                Some(signal) => signal.await,
                 None => std::future::pending().await,
             }
         } => TurnEnd::Done,
-        _ = run.inbox.wake_signal() => TurnEnd::Done,
     }
 }
 

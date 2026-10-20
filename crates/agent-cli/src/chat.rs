@@ -457,6 +457,14 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         session: Arc::clone(&session),
         secrets: setup.secrets.clone(),
     };
+    // Count started-but-unresolved turns for `exec -p`'s exit decision (see
+    // `CommandHooks::note_turn_started`): every turn start raises it synchronously,
+    // `on_turn_end` resolves it, so the run never decides in the gap between
+    // `RunFinished` emission and the Stop verdict.
+    let command_hooks = run.session.command_hooks();
+    run.ui.set_turn_started_hook(Arc::new(move || {
+        command_hooks.note_turn_started();
+    }));
     let done: LoopDone = if let Some(prompt) = cli.prompt {
         one_shot(&mut run, prompt).await
     } else {

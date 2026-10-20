@@ -464,6 +464,7 @@ pub async fn open_session(
     // live runtime-event sink, which is how the TUI's footer `jobs` item reads them (never
     // by polling the journal file).
     let turn_running = driver.turn_running_handle();
+    let idle = driver.idle_signal();
     let job_notifier = jobs.as_ref().map(|jobs| {
         let notifier = crate::job_notify::JobNotifier::new(
             Arc::clone(jobs),
@@ -572,6 +573,7 @@ pub async fn open_session(
         sandbox_slot,
         access_builder,
         turn_running,
+        idle,
         projection,
         queue,
         memory,

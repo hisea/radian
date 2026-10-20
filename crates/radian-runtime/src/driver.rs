@@ -167,6 +167,10 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// 3). The host shares it so a job-settle notifier can choose the `inject` lane (busy) or
     /// the waking `followup` lane (idle).
     turn_running: Arc<AtomicBool>,
+    /// Fired whenever `turn_running` clears (a turn or control request ended, including
+    /// finalizing). Hosts that decide on the flag wait on this instead of polling: the
+    /// flag alone has no waker, so a check-then-wait on it could sleep through the clear.
+    idle: Arc<tokio::sync::Notify>,
     /// The host's per-turn addition seam (ADR 0021). `None` keeps the
     /// behavior a host that never installed one had before.
     turn_additions: Option<TurnAdditions>,
@@ -258,6 +262,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             compaction_settings_for: None,
             turn_compaction_settings: None,
             turn_running: Arc::new(AtomicBool::new(false)),
+            idle: Arc::new(tokio::sync::Notify::new()),
             turn_additions: None,
             closed: false,
         };
@@ -323,6 +328,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// the driver moves into its task; the driver sets it around every turn and control run.
     pub fn turn_running_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.turn_running)
+    }
+
+    /// Fired whenever the driver stops running a turn or control request (`turn_running`
+    /// clears). The host clones it before the driver moves into its task.
+    pub fn idle_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.idle)
     }
 
     /// Installs the host's per-turn addition seam (ADR 0021). Set it
@@ -436,6 +447,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 self.turn_running.store(true, Ordering::SeqCst);
                 let result = self.run_control(request).await;
                 self.turn_running.store(false, Ordering::SeqCst);
+                self.idle.notify_one();
                 result?;
                 continue;
             }
@@ -450,6 +462,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             self.turn_running.store(true, Ordering::SeqCst);
             let result = self.run_turn(entry).await;
             self.turn_running.store(false, Ordering::SeqCst);
+            self.idle.notify_one();
             result?;
         }
         Ok(())

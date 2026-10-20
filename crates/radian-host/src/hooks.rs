@@ -90,11 +90,12 @@ pub struct CommandHooks {
     /// needed. Each `CommandHooks` holds its own count (see the follow-up on
     /// `crate::job_notify::JobNotifier`): the same rate rule, not a shared counter.
     gate: Arc<WakeGate>,
-    /// Stop runs currently in flight: `on_turn_end` spawned them and they have not
-    /// finished yet. `exec -p` waits for these before deciding the run is over — a
-    /// verdict still running may yet open (or degrade) a turn.
+    /// Turns started and not resolved yet: a spawned Stop run still going, or a turn
+    /// whose `on_turn_end` has not run. `exec -p` waits for these before deciding the
+    /// run is over — the count is raised synchronously at turn start, strictly before
+    /// the turn can end, so there is no gap for the exit check to slip through.
     pending: Arc<AtomicU64>,
-    /// Bumped whenever a spawned Stop run finishes, so a waiter re-checks.
+    /// Bumped whenever `pending` drops, so a waiter re-checks.
     pending_signal: Arc<Notify>,
     /// Continuations degraded to inject-only since the last wake. A woken turn absorbs
     /// the waiting injects, so a wake ends the burst; a user message resets it at once.
@@ -166,14 +167,26 @@ impl CommandHooks {
         u64::from(self.degraded.load(Ordering::SeqCst))
     }
 
-    /// Stop runs spawned by `on_turn_end` and not finished yet (tests drive
-    /// `run_stop_once` directly, so only spawned runs count).
+    /// A turn started: [`Hooks::on_turn_end`] will balance this (it keeps the count
+    /// when it spawns a Stop run, drops it otherwise). Called synchronously from the
+    /// turn-start event, strictly before the turn can end — so a host that sees the
+    /// turn end also sees a pending count while the verdict is unresolved. (There is
+    /// no such guarantee for work `on_turn_end` itself starts: `RunFinished` is
+    /// emitted before it runs.)
+    pub fn note_turn_started(&self) {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Stop turns started and not resolved yet: a spawned run still going, or a turn
+    /// whose `on_turn_end` has not run. (Tests drive `run_stop_once` directly, so only
+    /// `on_turn_end` and `note_turn_started` move this.)
     pub fn pending_stops(&self) -> u64 {
         self.pending.load(Ordering::SeqCst)
     }
 
-    /// Resolves whenever a spawned Stop run finishes. A waiter re-checks its exit
-    /// condition on each one.
+    /// Resolves whenever `pending_stops` drops (a spawned Stop run finished, or a turn
+    /// ended with no Stop run coming). A waiter re-checks its exit condition on each
+    /// one.
     pub fn stops_signal(&self) -> Arc<Notify> {
         Arc::clone(&self.pending_signal)
     }
@@ -696,21 +709,29 @@ impl Hooks for CommandHooks {
     /// A hook asking for more (exit 2) opens another turn through the inbox. The work
     /// spawns onto the session runtime so this sync callback never blocks a turn.
     fn on_turn_end(&self, _cx: &HookContext, outcome: &RunOutcome) {
-        if self.stop.is_empty() {
+        if self.stop.is_empty() || !matches!(outcome.status, RunStatus::Completed) {
+            // No Stop run will come for this turn: drop the turn-start count.
+            // Saturating: sessions that never called `note_turn_started` (only the
+            // hosts that read `pending_stops` wire it) must not wrap the counter.
+            self.pending
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    Some(n.saturating_sub(1))
+                })
+                .ok();
+            self.pending_signal.notify_one();
             return;
         }
-        if !matches!(outcome.status, RunStatus::Completed) {
-            return;
-        }
-        // Counted before the spawn, synchronously: the increment happens before the
-        // driver's turn-end bookkeeping, so a host that sees the turn end also sees the
-        // pending run and waits for its verdict instead of exiting first.
-        self.pending.fetch_add(1, Ordering::SeqCst);
+        // The turn-start count covers the spawned run; it drops when the run ends.
         let this = self.clone();
         let status = outcome.status.clone();
         self.runtime.spawn(async move {
             this.run_stop_once(&status).await;
-            this.pending.fetch_sub(1, Ordering::SeqCst);
+            // Paired with `note_turn_started`; saturating for the same reason.
+            this.pending
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    Some(n.saturating_sub(1))
+                })
+                .ok();
             this.pending_signal.notify_one();
         });
     }

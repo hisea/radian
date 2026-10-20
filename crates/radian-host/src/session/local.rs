@@ -54,6 +54,9 @@ pub struct LocalSession {
     /// Whether a turn is running right now (the driver's own flag, `false` before the first
     /// turn).
     pub(super) turn_running: Arc<std::sync::atomic::AtomicBool>,
+    /// Fired whenever the driver stops running a turn or control request. Hosts that
+    /// decide on `turn_running` wait on this instead of polling.
+    pub(super) idle: Arc<tokio::sync::Notify>,
     pub(super) projection: Arc<SessionProjection>,
     /// The pending approvals and questions (ADR 0023 U7).
     pub(super) queue: Arc<SessionQueue>,
@@ -131,6 +134,13 @@ impl LocalSession {
     /// between turns.
     pub fn turn_running(&self) -> bool {
         self.turn_running.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Resolves whenever the driver stops running a turn or control request. Pair with
+    /// [`LocalSession::turn_running`]: subscribe first, then check, so a clear between
+    /// the check and the wait still resolves the wait.
+    pub fn idle_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.idle)
     }
 
     pub fn projection(&self) -> &Arc<SessionProjection> {
