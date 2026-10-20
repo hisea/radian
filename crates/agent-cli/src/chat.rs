@@ -453,8 +453,11 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     };
     ui.end_of_turn();
     // Flush the audit: dropping the session drops the agent and the hooks, and dropping the
-    // last sender closes the channel; the task writes what is left before it ends.
+    // last sender closes the channel; the task writes what is left before it ends. The UI is
+    // dropped here too: in `--output jsonl` mode it holds a live-line sender, and the
+    // printer below only ends once every sender is gone.
     drop(run);
+    drop(ui);
     drop(session);
     drop(audit_tx);
     let _ = audit_task.await;
