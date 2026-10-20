@@ -29,6 +29,9 @@ pub(super) struct SessionInputs {
     pub(super) before_driver: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     pub(super) memory_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
     pub(super) hooks_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+    /// A wake-budget degrade's notice line: one transcript notice per burst, plus the
+    /// herdr `wake budget` block while the notices wait.
+    pub(super) wake_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
     pub(super) trust_setup: radian_host::trust::Setup,
     /// Where the memory service lives (`None` when no RADIAN_HOME/HOME): the session
     /// shares it with the agent's tools and injection.
@@ -283,6 +286,17 @@ pub(super) fn build_session_inputs(
             )])));
         })
     };
+    // A wake-budget degrade (a background-job settle or a `Stop`-hook continuation past
+    // its cap): its own input, so `update` shows one notice line per burst and marks the
+    // session wake-waiting for herdr, instead of pushing a line per degrade.
+    let wake_warning: Arc<dyn Fn(&str) + Send + Sync> = {
+        let tx = tx.clone();
+        Arc::new(move |message: &str| {
+            let _ = tx.send(UiEvent::Command(AppInput::WakeBudgetNotice(
+                message.to_owned(),
+            )));
+        })
+    };
     // ADR 0031 T3: resolve project trust before the session exists. The TUI is interactive, so
     // a workspace with resources and no decision asks through a startup modal (pushed after
     // the terminal is entered); the persistent write + audit happen then, once the journal
@@ -321,6 +335,7 @@ pub(super) fn build_session_inputs(
             before_driver,
             memory_warning,
             hooks_warning,
+            wake_warning,
             trust_setup,
             memory_root,
         },
@@ -363,6 +378,7 @@ pub(super) fn open_session_and_refresh(
         before_driver,
         memory_warning,
         hooks_warning,
+        wake_warning,
         trust_setup,
         memory_root,
         access_builder,
@@ -452,6 +468,7 @@ pub(super) fn open_session_and_refresh(
                 before_driver,
                 memory_warning,
                 hooks_warning,
+                wake_warning,
             },
         ))
         .map_err(|error| error.to_string())?;

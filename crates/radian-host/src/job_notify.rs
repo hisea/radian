@@ -24,6 +24,8 @@ use radian_coding::{JobEvent, Jobs};
 use radian_runtime::{Inbox, RuntimeEvents};
 use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};
 
+use crate::hooks::HooksWarning;
+
 /// The most output bytes a completion message inlines (ADR 0037 decision 5; omp's
 /// `ASYNC_INLINE_RESULT_MAX_CHARS` idea). 4 KiB is the tail of a failing build between two
 /// tool calls without letting a chatty job flood the context; the rest is read with
@@ -33,6 +35,14 @@ pub const NOTIFY_INLINE_BYTES: usize = 4 << 10;
 /// How many consecutive wake-started turns are allowed before settles are injected only
 /// (ADR 0037 decision 3).
 pub const MAX_CONSECUTIVE_WAKES: u32 = 3;
+
+/// The one TUI notice line a degraded wake shows: `N` is the notices degraded since the
+/// last wake. The Stop-hook degrade reuses it (ADR 0045 §2).
+pub fn wake_budget_line(degraded: u32) -> String {
+    format!(
+        "wake budget used up: {degraded} job notices are waiting — send any message to continue"
+    )
+}
 
 /// The per-session job notifier. One per session; the host holds it for `reset_wakes`.
 pub struct JobNotifier {
@@ -52,6 +62,12 @@ pub struct JobNotifier {
     events: Arc<dyn RuntimeEvents>,
     /// Consecutive wake-started turns with no user input in between.
     wakes: AtomicU32,
+    /// Notices degraded to inject-only since the last wake reset. The TUI notice line
+    /// carries the count, so one line per burst still names every waiting notice.
+    degraded: AtomicU32,
+    /// The wake-budget notice line (the TUI shows it as a transcript notice, the CLI
+    /// prints it). Fired on every degrade; the TUI shows one line per burst.
+    wake: HooksWarning,
 }
 
 impl JobNotifier {
@@ -61,6 +77,7 @@ impl JobNotifier {
         journal: Arc<SessionJournal>,
         turn_running: Arc<AtomicBool>,
         events: Arc<dyn RuntimeEvents>,
+        wake: HooksWarning,
     ) -> Arc<Self> {
         Arc::new(Self {
             jobs: Arc::downgrade(&jobs),
@@ -69,6 +86,8 @@ impl JobNotifier {
             turn_running,
             events,
             wakes: AtomicU32::new(0),
+            degraded: AtomicU32::new(0),
+            wake,
         })
     }
 
@@ -104,11 +123,17 @@ impl JobNotifier {
     /// A user message resets the wake budget (ADR 0037 decision 3).
     pub fn reset_wakes(&self) {
         self.wakes.store(0, Ordering::SeqCst);
+        self.degraded.store(0, Ordering::SeqCst);
     }
 
     /// How many wake-started turns are outstanding (tests).
     pub fn wakes(&self) -> u32 {
         self.wakes.load(Ordering::SeqCst)
+    }
+
+    /// How many notices were degraded since the last wake reset (tests).
+    pub fn degraded(&self) -> u32 {
+        self.degraded.load(Ordering::SeqCst)
     }
 
     /// Handles one lifecycle event: write the durable record, forward it on the live
@@ -156,8 +181,12 @@ impl JobNotifier {
                         self.wakes.fetch_add(1, Ordering::SeqCst);
                     }
                 } else {
-                    // The cap is reached: inject only, no wake.
-                    let _ = self.inbox.inject(text, source).await;
+                    // The cap is reached: inject only, no wake. The durable record says so
+                    // (`degraded`), and the TUI/herdr legs hear it through the wake notice.
+                    if self.inbox.inject_degraded(text, source).await.is_ok() {
+                        let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
+                        (self.wake)(&wake_budget_line(degraded));
+                    }
                 }
             }
         }

@@ -48,6 +48,7 @@ pub async fn open_session(
         before_driver,
         memory_warning,
         hooks_warning,
+        wake_warning,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -268,6 +269,7 @@ pub async fn open_session(
         &inbox,
         &runtime,
         hooks_warning,
+        Arc::clone(&wake_warning),
     ));
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),
@@ -469,6 +471,7 @@ pub async fn open_session(
             Arc::clone(&journal),
             Arc::clone(&turn_running),
             Arc::clone(&runtime_events),
+            wake_warning,
         );
         notifier.spawn(&runtime);
         notifier
