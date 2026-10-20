@@ -130,10 +130,12 @@ class RadianOptions(InstalledAgentOptions):
     thinking: Annotated[str | None, Cli("--thinking")] = Field(
         default=None, description="Anthropic thinking mode; ignored otherwise."
     )
-    timeout_sec: int = Field(
-        default=1800,
+    timeout_sec: int | None = Field(
+        default=None,
         ge=1,
-        description="Container exec timeout for the whole trial in seconds.",
+        description="Container exec timeout for the whole trial in seconds. "
+        "Omit to let the task's own agent timeout govern: the framework then "
+        "ends the trial gracefully and still runs the verifier.",
     )
 
 

@@ -176,6 +176,14 @@ class InstallTest(unittest.TestCase):
 
 
 class RunTest(unittest.TestCase):
+    def test_default_exec_timeout_is_unset(self):
+        # The task's own agent timeout governs; an adapter-side ceiling would
+        # kill long tasks (e.g. compile-compcert's 2400 s) before the framework
+        # ends the trial gracefully and runs the verifier.
+        with scrub_host_key():
+            agent = make_agent(tempfile.mkdtemp())
+            self.assertIsNone(agent.options.timeout_sec)
+
     def run_trial(self, tmp, **kwargs):
         binary = Path(tmp) / "radian"
         binary.write_bytes(b"fake-elf")
