@@ -4,10 +4,12 @@
 `bubblewrap`。它只提供一件事——**受约束地启动一个子进程**；审批（`ApprovalPolicy`）与规则集
 （`ToolRuleSet`）不在本 crate，也**没有**接进 `agent-cli`。
 
+**`full` 的安全声明＼�：** `full` 信任你的环境，不弹任何内建审批，也不防陌生仓库里的提示注入——恶意的 skill、配置与上下文文件里的指令在 `full` 下畅通无阻。想要边界就用 `workspace`、容器或专用 OS 用户。
+
 **消费者（2026-10-12，Phase 3 shell 切片）：** `radian-coding` 的 `shell` 工具是第一个消费者
 （`CodingTools::with_sandbox`）；没有 `Sandbox` 时它根本不注册。三点值得记在这里：① `FullAccess`
 下后端是透明的（不探测、不包裹），但 shell 工具仍自己按 `allow_env` 清环境——**full 是
-"文件系统/网络不设限"，不是"把宿主环境交给模型控制的 shell"**；**full 不放开环境变量白名单**
+“文件系统/网络不设限”，不是“把宿主环境交给模型控制的 shell”**；**full 不放开环境变量白名单**
 ＼�。② 进程组清理：shell 工具用 `setsid` 让子进程自成会话与进程组
 （没有控制终端），超时/取消/leader 退出都杀整组（ADR 0016 取代了原先的 `process_group(0)`）。
 ③ 输出截断也是 shell 工具自己的策略：每流独立预算、保留头尾（尾部更大，因为失败命令的错误在

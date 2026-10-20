@@ -224,6 +224,9 @@ pub(super) fn build_startup_screen(
     app.set_startup(radian_tui::startup::StartupScreen {
         banner,
         banner_narrow: format!("{} radian {}", app.brand_mark(), env!("CARGO_PKG_VERSION")),
+        // decision 2026-10-20: while the project has no trusted decision, the
+        // wordmark carries the `/trust` hint under it; trusted projects show nothing.
+        trust_hint: radian_tui::startup::trust_hint(&session.trust()),
         summary,
         lines: startup_lines,
         safety,

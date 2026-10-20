@@ -87,7 +87,7 @@ pub(super) fn wire_post_open(
     // remembered record, the `(project)` marker. The host set the projection's tier when it
     // opened the session; the marker is added here.
     app.set_access_source(access_source);
-    app.set_tier(format!("{}{}", tier.as_str(), access_source.suffix()));
+    app.set_tier(radian_tui::profile::footer_tier(tier, access_source));
     // ADR 0016: `/access` repeats the startup line's own words for an
     // inherited sandbox (and says nothing extra for any other tier).
     if inherited_sandbox {

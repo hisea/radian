@@ -34,7 +34,6 @@
 |---|---|---|---|
 | `sandbox-auto-allow-shell.md` | decided | 0012、0016、0043 | 片 0 Linux seccomp 堵 Unix socket；片 1 workspace 沙箱内 shell `allow`、越界显式请求再 `ask`；片 2 会话授权按前缀 |
 | `file-tools-spawn-blocking.md` | decided（`grep`/`glob` 已落地；剩 `read`） | 无 | 提示词一句 → 基准（串 3.1×→并 ~1×）→ `spawn_blocking`，`grep`/`glob` 已并行，`read` 待做 |
-| `full-tier-unrestricted.md` | decided | 0012 主、0043、0016、0038、0031 | `full` 档像 pi：shell `allow`，不弹内建提示，`--yes` 在 `full` 下无作用；启动行写 `no prompts`；用户 deny 仍生效、陌生项目信任门缺省高亮 workspace + 启动画面字标下提示 `/trust`、`always` 保留＼� |
 | `remove-git-diff.md` | decided（`shell-readonly-allow` 之后） | 0043、0039、0028、0012 | 删 `git_diff`（模型 12:1 走 shell），留一个版本的别名；shell 里的 git 要不要注入加固配置待决 |
 | `exec-waits-for-jobs.md` | idea | 0037、0044、0032 | `radian exec -p` 一轮结束就退出，后台 job 随之被杀（夜间 LXC worker 的 Verify 因此中断）；候选：等 job 并按 0037 唤醒、`-p` 禁后台、只改提示 |
 | `mcp-servers-json.md` | decided（生态 2/4） | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门、按内容哈希确认，确认即批准其 server（一道门）；缺省 `inherit_env=["HOME"]`；环境白名单不变；MCP 文本结果套 `read` 的 64 KiB 上限并带截断标记 |

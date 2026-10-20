@@ -177,7 +177,10 @@ fn an_applied_switch_updates_the_footer_and_the_shell_flag() {
         result: Ok(()),
     });
     assert!(result.effects.is_empty());
-    assert_eq!(app.session.projection.read().tier(), Some("full (project)"));
+    assert_eq!(
+        app.session.projection.read().tier(),
+        Some("full · no prompts (project)")
+    );
     assert!(app.session.bash_available, "full has a shell");
 }
 

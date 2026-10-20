@@ -99,7 +99,14 @@ impl AccessSource {
     }
 }
 
-/// The [`radian_host::AccessParts`] a run-time tier switch rebuilds (ADR 0038 slice 2): the
+/// The footer's tier item: the tier plus where it came from. For `full` it says plainly
+/// that nothing prompts (`full · no prompts`); `workspace` stays bare.
+pub fn footer_tier(tier: Tier, source: AccessSource) -> String {
+    match tier {
+        Tier::FullAccess => format!("full · no prompts{}", source.suffix()),
+        Tier::WorkspaceWrite => format!("{}{}", tier.as_str(), source.suffix()),
+    }
+}
 /// profile with this host's `--allow-shell-command` rules, and the sandbox with the deny-read
 /// list and the Unix-socket whitelist. A failed sandbox probe is the `Err` that makes
 /// `/access` refuse (ADR 0012: a failed probe never degrades).
@@ -279,6 +286,24 @@ mod tests {
             assert!(!error.contains("workspace-write"), "{bogus}: {error}");
             assert!(!error.contains("full-access"), "{bogus}: {error}");
         }
+    }
+
+    /// The footer's tier item says `no prompts` for `full` and stays bare for `workspace`.
+    /// Dropping the words fails this test.
+    #[test]
+    fn the_footer_tier_says_no_prompts_for_full() {
+        assert_eq!(
+            footer_tier(Tier::FullAccess, AccessSource::Default),
+            "full · no prompts"
+        );
+        assert_eq!(
+            footer_tier(Tier::FullAccess, AccessSource::Project),
+            "full · no prompts (project)"
+        );
+        assert_eq!(
+            footer_tier(Tier::WorkspaceWrite, AccessSource::Session),
+            "workspace (session)"
+        );
     }
 
     /// ADR 0038 decision 4: the TUI's `workspace` tier must request `WritableExceptExec` so

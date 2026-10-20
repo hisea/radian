@@ -258,12 +258,12 @@ written once here.
 `workspace` it names the real backend in plain words — `macOS sandbox` for `macos-seatbelt`,
 `Linux sandbox` for `linux-bwrap`, and the backend's own name for one this build does not know —
 so a summary can never be read as "no sandbox"; the exact backend name stays in the expanded
-`profile:` line. `full` is
-`no sandbox` (the built-in default since ADR 0043). A missing backend in an enforced mode is
+`profile:` line. `full` is `no sandbox · no prompts` (the built-in default since ADR 0043). A missing backend in an enforced mode is
 `sandbox missing`, never `none`.
 
 The `workspace` line says `sandbox on: commands stay in the workspace` (ADR 0043 decision 2.4);
-`full`'s line is plain `full`, with the "no sandbox" sentence as its facts line.
+`full`'s line is `full · no sandbox · no prompts`, with the "no sandbox … · no prompts"
+sentence as its facts line.
 
 ## The project declaration
 
