@@ -36,9 +36,14 @@
 | `sandbox-auto-allow-shell.md` | decided | 0012、0016、0043 | 片 0 Linux seccomp 堵 Unix socket；片 1 workspace 沙箱内 shell `allow`、越界显式请求再 `ask`；片 2 会话授权按前缀 |
 | `exec-jsonl-output.md` | decided | 0032、0010、0006，新 ADR | `--output jsonl`：journal 记录原样 + live 行 + `Result` 行；退出码 0/1/2/3/4/130 按结局；`-p -` 读 stdin |
 | `project-skills.md` | decided | 0025、0031 | 接上项目级 skill（`<project>/.agents/skills`，到仓库根），并支持 `$ARGUMENTS` |
-| `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 剩余：grep 先丢上下文 + 上限降到 24–32 KiB + 描述指向 files/count；前台 shell 默认上限（等 shell-job）；patch 缩进容忍（待决） |
+| `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 剩余：前台 shell 默认上限（等 shell-job）；patch 缩进容忍（待决） |
 | `file-tools-spawn-blocking.md` | decided | 无 | 提示词一句 → 基准 → `spawn_blocking`，让同一批 grep 真正并行 |
+| `full-tier-unrestricted.md` | decided | 0012 主、0043、0016、0038、0031 | `full` 档像 pi：shell `allow`，不弹内建提示，`--yes` 在 `full` 下无作用；启动行写 `no prompts`；三处细节待 owner 确认（用户 deny 仍生效、信任门缺省选 workspace、`always` 保留） |
+| `shell-readonly-allow.md` | decided | 0012 修订、0039 | 内建一组只读命令免问（`git status`、`ls`、`rg`…），路径限工作区、不带可执行或写文件选项；`full` 全放行后实际作用在 `workspace` 与 `approval = always` |
+| `shell-compound-allow.md` | decided | 0012 不变，改 `radian-permissions/README.md` | 未加引号的 `&& \|\| ; \|` 切段，每段都命中 allow 才 allow，`xargs`/`env`/`sh` 等执行其参数的程序不放行 |
 | `ask-user-pass.md` | decided | 0024、0036 | 保留 `ask_user`：描述写明只问用户拥有的取舍、能查到的不问；定义瘦身到约 1 KB |
+| `jobs-running-only.md` | decided | 0037 | TUI `/jobs` 只列正在运行的后台 job（推翻同日“也列已结束的前台条目”） |
+| `workspace-git-exec-entries-file-tools.md` | idea（bug 待验证） | 0038、0039 | `write`/`patch` 不经沙箱，`workspace` 档能写 `.git/hooks/`，绕过 0038 的只读清单；修法倾向规则层 deny + 与沙箱共用一张清单 |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `post-edit-diagnostics.md` | idea | 新 ADR | 编辑后诊断：tree-sitter 语法层 + 配置的检查命令；先数 dogfood 里 patch→check 序列 |

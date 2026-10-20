@@ -13,7 +13,7 @@ contract; this file is the practical summary.
 | `write` | `Exclusive` | Create or overwrite a file with exact content (no newline added). Parent must exist. Never follows a symlink at the destination. |
 | `patch` | `Exclusive` | Replace `old` with `new`, or apply an `edits` array atomically. A match is located by layer (exact, then typographic normalisation, then line-by-line ignoring trailing whitespace) and must be unique unless `replace_all` is set. With `edits`, every edit is located in the original file, ranges must be disjoint, and if any edit fails nothing is written. A CRLF file is matched on an LF view and stays CRLF. Zero matches refuse the edit and report the closest region with line numbers. |
 | `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore` respected, `.git` skipped, symlinks never followed; capped by `max_results`. A read-only registry/toolchain base works too, and its results are absolute paths. |
-| `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore` respected, binary files skipped; capped per file, in total matches, and in total output bytes (64 KiB). `output: "files"` lists one line per matching file with its count, `output: "count"` prints only the totals; the default `content` is unchanged. A read-only registry/toolchain base works too, and its results are absolute paths. |
+| `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore` respected, binary files skipped; capped per file, in total matches, and in total output bytes (32 KiB, context lines dropped before matches, each cut named in the text). `output: "files"` lists one line per matching file with its count, `output: "count"` prints only the totals; the default `content` is unchanged. A read-only registry/toolchain base works too, and its results are absolute paths. |
 | `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. `stat: true` returns the working tree status (`git status --porcelain=v1 --branch --untracked-files=all`) followed by the `--stat` summary instead of the diff (ADR 0043 decision 3). |
 | `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id (no default timeout, and `timeout_secs` is ignored — ADR 0037: bound the command itself or stop it with `job`); `job` below is the only way to read it (ADR 0037 decision 4). Its output goes to the session's own jobs directory, outside the workspace and unreadable from inside the sandbox (ADR 0039 decision 1). |
 | `job` | `Shared` | Read or stop one `shell` job by its job id (`read`, `wait` or `kill`). Plain `read` returns the output since the last call plus a `[status: …]` line; `tail_lines`, `from_line`/`max_lines` or `pattern` page the full file by line. `wait` blocks (default 30 s, max 600 s) and never kills; `kill` SIGTERMs the job's session, then SIGKILLs after 2 s. A truncated foreground result is a settled entry under a normal job id — the same reader. No list tool: job ids are already in context. |
@@ -109,9 +109,10 @@ as `path-line-text`, and `--` between non-contiguous groups. A line longer than 
 on its prefix and reported with a `[truncated]` marker, so one enormous line cannot grow the
 result. Matches are capped per file (`default_grep_matches_per_file`) and in total
 (`max_matches`), each cut named in the text. Total output is bounded by `max_grep_output_bytes`
-(64 KiB): past it the tool stops adding whole lines and ends with one note naming the byte
-limit and how to narrow the search (a more specific `pattern`, `path` or `glob`, or
-`output: "files"`). `output: "files"` prints one line per matching file with its match count
+(32 KiB): past it the tool first drops context lines to keep every match line (with the `--`
+group separators readable) and only then cuts whole match lines in order, ending with one note
+naming the byte limit, what was dropped, and how to narrow the search (a more specific `pattern`,
+`path` or `glob`, or `output: "files"`). `output: "files"` prints one line per matching file with its match count
 and `output: "count"` prints only the totals (`N matches in M files`); the per-file, total-match
 and total-byte caps apply in every mode, and the default `content` output is unchanged.
 
@@ -149,7 +150,7 @@ developer's real `~/.cargo`/`~/.rustup`; `tests/common`'s `tools()` builds with
 | `max_list_entries` / `default_list_entries` | 5000 / 500 | Bound a directory `read` (entry cap). |
 | `max_glob_results` / `default_glob_results` | 5000 / 500 | Bound one `glob` result set. |
 | `max_grep_matches` / `default_grep_matches` | 5000 / 200 | Bound `grep`'s total matches. |
-| `max_grep_output_bytes` | 64 KiB | Bound `grep`'s total output bytes (match and context lines plus notes); past it the tool keeps whole lines only and ends with one note naming the limit and how to narrow the search. |
+| `max_grep_output_bytes` | 32 KiB | Bound `grep`'s total output bytes (match and context lines plus notes); past it context lines are dropped before matches, then whole match lines, ending with one note naming the limit, what was dropped, and how to narrow the search. |
 | `default_grep_matches_per_file` | 50 | One file must not fill the result (not model-settable). |
 | `max_grep_context` | 30 | Bound the context lines a single match can add; a larger request is cut to it (with a `[context cut to N lines]` line), not refused. |
 | `max_git_output_bytes` | 1 MiB | Bound git output, truncated on a character boundary with a marker. |
