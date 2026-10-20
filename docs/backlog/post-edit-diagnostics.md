@@ -15,3 +15,7 @@
 ## 验收
 
 先数数据：dogfood 里 patch→`cargo check` 序列有多少；评测集上比较每个任务编辑后检查的调用数与总轮数。
+
+## 补充Ｐ）
+
+`4-architecture.md` §6 ④ 提的"`after_edit` + `on_turn_end` 两个外部命令 hook"由本条替代：tree-sitter 层优先，通用的 `post_tool` 命令 hook 只作为更便宜的中间方案；两边不一致时以本条为准。

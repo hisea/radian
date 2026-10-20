@@ -33,6 +33,9 @@
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
 | `tool-definitions-trim.md` | in-progress（pi/shell-job） | 0037、0043、0039、0006 | 一个 `job { id, op }` 替掉 `job_output`/`job_list`/`job_kill`/`shell_output`，前台留存输出进同一注册表 |
+| `remove-safe-tier.md` | decided | 0016 主，另 11 个提及 | 档位只剩 `workspace`/`full`；`safe` 从不执行命令，沙箱侧只有测试在用；旧名不留别名，按未知档位 fail closed |
+| `sandbox-auto-allow-shell.md` | decided | 0012、0016、0043 | 片 0 Linux seccomp 堵 Unix socket；片 1 workspace 沙箱内 shell `allow`、越界显式请求再 `ask`；片 2 会话授权按前缀 |
+| `exec-jsonl-output.md` | decided | 0032、0010、0006，新 ADR | `--output jsonl`：journal 记录原样 + live 行 + `Result` 行；退出码 0/1/2/3/4/130 按结局；`-p -` 读 stdin |
 | `project-skills.md` | decided | 0025、0031 | 接上项目级 skill（`<project>/.agents/skills`，到仓库根），并支持 `$ARGUMENTS` |
 | `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 剩余：grep 先丢上下文 + 上限降到 24–32 KiB + 描述指向 files/count；前台 shell 默认上限（等 shell-job）；patch 缩进容忍（待决） |
 | `read-absorbs-list.md` | decided | 0043、0039 | `read` 读目录即列目录，`list` 退为一个版本的别名，`explore` 变三个工具；基于 shell/job 合并后的 main 开分支 |
@@ -42,9 +45,10 @@
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `post-edit-diagnostics.md` | idea | 新 ADR | 编辑后诊断：tree-sitter 语法层 + 配置的检查命令；先数 dogfood 里 patch→check 序列 |
-| `sandbox-auto-allow-shell.md` | idea | 0012、0016、0043 | workspace 档沙箱内 shell 自动放行，越界再问；前提是重开 Unix socket 限制 |
+| `subagent-ask-forwarding.md` | idea | 0043、0010、0024 | 子会话仍要问的 ask 转回父会话；缺 durable `PermissionRequested` 与 control 收审批；依赖沙箱内放行 |
+| `subagent-explore-model.md` | idea | 0043、0026 | 用户级配置给 `explore` 更便宜的模型（0043 §1 已允许，未实现） |
+| `verify-test-binaries.md` | idea | 新 ADR | 合并集成测试二进制压 Verify 时间；`set_var` 与全局状态先处理；release 调优不做 |
 | `mcp-full-tier-ask.md` | idea | 0012、0043 | full 档 MCP 按 server 首次询问，工具定义按哈希固定 |
-| `exec-jsonl-output.md` | idea | 0032 | `radian exec --output jsonl`：结果行、细分退出码、`-p -` 读 stdin |
 | `eval-metrics.md` | idea | 无 | journal 指标提取器 + 固定任务集；Terminal-Bench 适配器在 Linux 盒子上做 |
 | `cache-efficiency.md` | idea | 0018、0026 | `prompt_cache_key`、TTL、摘要复用前缀；实测现用路由命中 98.7%，接入 Anthropic 路由时再做 |
 | `context-pruning.md` | idea | 新 ADR | 轻量档：清被同路径后续 `read` 取代的旧结果（占工具字节 24%）；条件：阈值 A/B 收益不够时才做 |
@@ -61,7 +65,6 @@
 |---|---|---|---|
 | no-edit 看门狗 | idea | 新 ADR（第 15 条） | 长时间只读不改时宿主自动发 steer；先在 D26 任务上 A/B |
 | 持久 todo + `/goal` | idea | 新 ADR（第 19 条） | 目标确定性带过压缩，轮末自动续跑，resume 后一键续跑 |
-| subagent 指定模型 | idea | 0043（第 14 条） | 小模型跑 explore/压缩；后台与续接是同条的后半 |
 | CI 与发布 | idea | 分发 ADR（第 27 条） | Linux/macOS CI、`cargo-deny`、安装方式；前提是公开仓库 |
 | SECURITY.md | idea | 无（第 28 条） | 一页威胁模型 + CVE 对照表 |
 | 生态兼容 | idea | 待定（第 31 条） | 读 `.agents/skills`、接受 `mcpServers`、Codex 子集 hook、`radian import claude` |
