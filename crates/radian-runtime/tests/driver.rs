@@ -948,3 +948,24 @@ async fn the_inbox_sink_hears_the_lane_of_every_enqueue() {
         vec!["NextTurn", "NextStep", "NextStep"]
     );
 }
+
+/// The sink-forwarded `InboxEnqueued` carries the wake-gate degrade mark: an
+/// `inject_degraded` forwards `degraded: true`, an ordinary `inject` forwards
+/// `degraded: false` (the journal line and the live event agree).
+#[tokio::test]
+async fn the_inbox_sink_forwards_the_degraded_mark() {
+    let inbox = Inbox::new(16);
+    let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let sink_seen = Arc::clone(&seen);
+    inbox.set_runtime_events(Arc::new(move |event: &radian_session::RuntimeEvent| {
+        if let radian_session::RuntimeEvent::InboxEnqueued { degraded, .. } = event {
+            sink_seen.lock().unwrap().push(*degraded);
+        }
+    }));
+    inbox.inject("plain", InputSource::User).await.unwrap();
+    inbox
+        .inject_degraded("gated", InputSource::User)
+        .await
+        .unwrap();
+    assert_eq!(*seen.lock().unwrap(), vec![false, true]);
+}
