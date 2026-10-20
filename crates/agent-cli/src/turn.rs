@@ -235,9 +235,10 @@ fn may_exit(running: usize, settled: u64, handled: u64, wake_pending: bool, acti
 /// version brackets the whole check: the driver's claim pops silently, with no
 /// notification, but it bumps the version inside the same critical section — a claim
 /// between the two version reads makes them differ and this re-checks instead of
-/// exiting. A wake entry the driver has not claimed yet is still queued (`wake_pending`)
-/// or the driver is already running (`active`); inject-only leftovers never open a turn
-/// (ADR 0011 L5), so they do not block the exit.
+/// exiting. A claimed entry the driver has not started yet is covered by the `close` in
+/// `close_and_join`, which never cancels it (see `active` below). A wake entry the
+/// driver has not claimed yet is still queued (`wake_pending`); inject-only leftovers
+/// never open a turn (ADR 0011 L5), so they do not block the exit.
 ///
 /// Residual: `Lagged` broadcast losses (the channel holds 16 with at most 4 jobs in
 /// flight) would stall `handled` below `settled`; the existing deadline/SIGTERM handling
@@ -255,8 +256,19 @@ async fn jobs_quiescent(run: &Run) -> bool {
         .map(|notifier| notifier.settled_handled())
         .unwrap_or(0);
     let wake_pending = run.inbox.snapshot().await.iter().any(|entry| entry.wake);
-    let active = run.ui.busy() || run.session.turn_running();
-    run.inbox.version() == before && may_exit(running, settled, handled, wake_pending, active)
+    // A core turn in flight (`busy`): only a turn can start a job or absorb a notice.
+    // This deliberately does not use the driver's `turn_running` flag: that flag also
+    // covers finalizing (journaling `TurnFinished`) after the core loop ended, and
+    // nothing notifies its clear — waiting on it parks with no waker. Finalizing starts
+    // nothing and claims nothing, so it is idle for this decision; `close_and_join`
+    // absorbs it through the join. The residual pop-to-`TurnStarted` gap is synchronous
+    // (no await between the claim and the flag store, and `TurnStarted` follows in the
+    // same task): a check landing in it exits, but `close` does not cancel the claimed
+    // turn — it still runs to completion, the join waits for it, and its status becomes
+    // the last. Only a job it newly starts would outlive the exit, as on today's `-p`.
+    let active = run.ui.busy();
+    let after = run.inbox.version();
+    after == before && may_exit(running, settled, handled, wake_pending, active)
 }
 
 /// After a `-p` turn ends with jobs still outstanding: waits for the next thing that can
