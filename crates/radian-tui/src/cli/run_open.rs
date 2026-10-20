@@ -420,6 +420,7 @@ pub(super) fn open_session_and_refresh(
                 budget_for: Some(budget_for),
                 price_for: Some(Arc::clone(&route_price)),
                 servers,
+                mcp_config_path: cli.mcp_config.clone(),
                 system_prompt: cli.system.clone(),
                 context_budget: window
                     .budget

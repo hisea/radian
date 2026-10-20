@@ -28,6 +28,7 @@ pub(crate) struct Setup {
     /// The provider actually chosen, for the session's config snapshot.
     pub(crate) provider: Provider,
     pub(crate) servers: Vec<McpServerConfig>,
+    pub(crate) mcp_config: Option<String>,
     pub(crate) system_prompt: Option<String>,
     pub(crate) max_model_calls: u32,
     pub(crate) turn_timeout_secs: Option<u64>,
@@ -563,6 +564,7 @@ pub(crate) async fn setup(
         price_for,
         provider,
         servers,
+        mcp_config: cli.mcp_config.clone(),
         system_prompt,
         max_model_calls: cli.max_model_calls,
         turn_timeout_secs: cli.turn_timeout_secs,

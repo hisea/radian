@@ -41,6 +41,7 @@ impl App {
             tool_display: crate::tools::ToolDisplay::default(),
             mermaid_enabled: true,
             highlight_enabled: true,
+            inspector_last: None,
             session: SessionView {
                 session_id: session_id.into(),
                 model_name: model_name.into(),

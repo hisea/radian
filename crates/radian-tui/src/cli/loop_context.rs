@@ -505,6 +505,21 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
+            // The inspector overlay: gather the snapshot (jobs, tools, mcp, hooks) and
+            // hand it to `update`, which stays pure. Reads live in the loop (ADR 0023 U3).
+            Effect::OpenInspector { page } => {
+                let snapshot = Self::inspector_snapshot(self.session);
+                self.send(AppInput::InspectorOpened {
+                    requested: page,
+                    snapshot,
+                });
+                Ok(())
+            }
+            Effect::RefreshInspector => {
+                let snapshot = Self::inspector_snapshot(self.session);
+                self.send(AppInput::InspectorRefreshed(snapshot));
+                Ok(())
+            }
             // ADR 0031 T3: apply the startup trust choice through the facade (it writes
             // `trust.json` and journals `ProjectTrustChanged`), then show the new state.
             Effect::SetTrust { choice } => {
@@ -845,5 +860,39 @@ impl LoopContext<'_> {
     /// Sends an effect's result back as an event, so it is handled like every other input.
     pub(super) fn send(&self, input: AppInput) {
         let _ = self.tx.send(UiEvent::Command(input));
+    }
+
+    /// Gathers the inspector's snapshot from the facade: jobs with their tails, the
+    /// model-visible tools, the MCP servers with
+    /// their tool counts, and the hooks. The tail is in-memory (the ring), so this is
+    /// not I/O; it still runs in the loop so `update` stays pure (ADR 0023 U3).
+    fn inspector_snapshot(
+        session: &Arc<dyn radian_host::SessionFacade>,
+    ) -> radian_tui::inspector::InspectorSnapshot {
+        let jobs = session.jobs();
+        let tails: Vec<(String, radian_coding::JobState, String)> = jobs
+            .iter()
+            .map(|job| {
+                let (state, tail) = session
+                    .job_tail(&job.id, 4096)
+                    .unwrap_or((job.state.clone(), String::new()));
+                (job.id.clone(), state, tail)
+            })
+            .collect();
+        let specs = session.tool_specs();
+        let mcp_servers = session.mcp_servers();
+        let mcp_ids: Vec<String> = mcp_servers.iter().map(|server| server.id.clone()).collect();
+        let tool_names: Vec<String> = specs.iter().map(|spec| spec.name.clone()).collect();
+        radian_tui::inspector::InspectorSnapshot {
+            jobs: radian_tui::inspector::job_entries(&jobs, &tails),
+            tools: radian_tui::inspector::tool_entries(&specs, &mcp_ids),
+            mcp: radian_tui::inspector::mcp_entries(
+                &mcp_servers,
+                &tool_names,
+                session.mcp_config_path().as_deref(),
+            ),
+            hooks: radian_tui::inspector::hook_entries(&session.hooks_config()),
+            mcp_config_path: session.mcp_config_path(),
+        }
     }
 }

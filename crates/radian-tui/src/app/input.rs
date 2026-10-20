@@ -121,6 +121,18 @@ pub enum Input {
     PickerClose,
     /// The session picker's data arrived (the result of [`Effect::OpenPicker`]).
     PickerOpened(PickerData),
+    /// One key for the inspector overlay. The inspector owns its own parser, so the key
+    /// is forwarded rather than resolved here.
+    InspectorKey(KeyEvent),
+    /// The inspector's snapshot arrived (the result of [`Effect::OpenInspector`]): the
+    /// requested page (`None` = the last page, `/panel`) and the data to show.
+    InspectorOpened {
+        requested: Option<command::InspectorPage>,
+        snapshot: crate::inspector::InspectorSnapshot,
+    },
+    /// The open inspector's snapshot was reloaded (the result of
+    /// [`Effect::RefreshInspector`]).
+    InspectorRefreshed(crate::inspector::InspectorSnapshot),
     /// One key inside the `/login` wizard (ADR 0026 D3). Hardcoded keys, like the approval.
     LoginKey(LoginKey),
     /// The `/login` verification request finished (D3). `name` is the provider the wizard is

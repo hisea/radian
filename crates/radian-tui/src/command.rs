@@ -35,7 +35,11 @@ pub const HELP: &str = "\
                       forget, purge, confirm, export, import, project, relink, split, merge
 /skill:<name> [args]  run a skill: read its body into the message (ADR 0025)
 /skills               list the discovered skills
-/jobs [kill <id|all>] list the running background jobs, or stop one/all (ADR 0037)
+/jobs                 open the inspector's jobs page (list) or stop one/all (ADR 0037)
+/tools                open the inspector's tools page
+/mcp                  open the inspector's mcp page
+/hooks                open the inspector's hooks page
+/panel                open the inspector on the last page
 /login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
@@ -65,6 +69,35 @@ pub enum JobsRequest {
     Kill(String),
     /// `/jobs kill all`: stop every running job.
     KillAll,
+}
+
+/// One page of the inspector overlay (`jobs | tools | mcp | hooks`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectorPage {
+    Jobs,
+    Tools,
+    Mcp,
+    Hooks,
+}
+
+impl InspectorPage {
+    /// The four pages in tab order.
+    pub const ALL: [InspectorPage; 4] = [
+        InspectorPage::Jobs,
+        InspectorPage::Tools,
+        InspectorPage::Mcp,
+        InspectorPage::Hooks,
+    ];
+
+    /// The tab label.
+    pub fn label(self) -> &'static str {
+        match self {
+            InspectorPage::Jobs => "jobs",
+            InspectorPage::Tools => "tools",
+            InspectorPage::Mcp => "mcp",
+            InspectorPage::Hooks => "hooks",
+        }
+    }
 }
 
 /// What one submitted `/…` line meant. Parsing only: running the command is the loop's job
@@ -123,7 +156,10 @@ pub enum Outcome {
     /// `/skills`: list the discovered skills (name + description) as notices.
     Skills,
     /// `/jobs`: list the running background jobs, or stop one/all (ADR 0037 decision 4).
+    /// A bare `/jobs` opens the inspector's jobs page; `kill` forms stay text notices.
     Jobs(JobsRequest),
+    /// Open the inspector overlay on one page, or on the last page (`None` = `/panel`).
+    Inspector(Option<InspectorPage>),
     /// A user's `!`/`!!` shell command (ADR 0033). The command string runs in the sandbox
     /// (the tier's shell); `exclude_from_context` (`!!`) keeps its output out of the model's
     /// context. Execution is the loop's effect.
@@ -316,6 +352,31 @@ pub fn tree() -> &'static [Command] {
             name: "logout",
             description: "remove a stored credential (asks first)",
             levels: &[logout_level],
+        },
+        Command {
+            name: "jobs",
+            description: "open the inspector's jobs page (list) or stop one/all",
+            levels: &[jobs_level],
+        },
+        Command {
+            name: "tools",
+            description: "open the inspector's tools page",
+            levels: &[],
+        },
+        Command {
+            name: "mcp",
+            description: "open the inspector's mcp page",
+            levels: &[],
+        },
+        Command {
+            name: "hooks",
+            description: "open the inspector's hooks page",
+            levels: &[],
+        },
+        Command {
+            name: "panel",
+            description: "open the inspector on the last page",
+            levels: &[],
         },
     ];
     TREE
@@ -534,6 +595,18 @@ fn access_level(_typed: &[&str], _partial: &str) -> Level {
             current: false,
         },
     ])
+}
+
+/// `/jobs`: `kill` then the id (`all` or free text). A bare `/jobs` opens the panel.
+fn jobs_level(typed: &[&str], _partial: &str) -> Level {
+    match typed.first() {
+        None => Level::Ready(vec![Candidate {
+            insert: "kill".to_owned(),
+            description: "stop one/all background jobs".to_owned(),
+            current: false,
+        }]),
+        Some(_) => Level::Free,
+    }
 }
 
 /// `/copy [code]`: the only argument is the `code` selector; past it, free text (nothing).
@@ -980,6 +1053,14 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/skills") if tokens.len() == 1 => Outcome::Skills,
         Some("/skills") => Outcome::Notices(vec!["usage: /skills (no arguments)".to_owned()]),
         Some("/jobs") => jobs_request(&tokens[1..]),
+        Some("/tools") if tokens.len() == 1 => Outcome::Inspector(Some(InspectorPage::Tools)),
+        Some("/tools") => Outcome::Notices(vec!["usage: /tools (no arguments)".to_owned()]),
+        Some("/mcp") if tokens.len() == 1 => Outcome::Inspector(Some(InspectorPage::Mcp)),
+        Some("/mcp") => Outcome::Notices(vec!["usage: /mcp (no arguments)".to_owned()]),
+        Some("/hooks") if tokens.len() == 1 => Outcome::Inspector(Some(InspectorPage::Hooks)),
+        Some("/hooks") => Outcome::Notices(vec!["usage: /hooks (no arguments)".to_owned()]),
+        Some("/panel") if tokens.len() == 1 => Outcome::Inspector(None),
+        Some("/panel") => Outcome::Notices(vec!["usage: /panel (no arguments)".to_owned()]),
         Some(other) if other.starts_with("/skill:") => skill_command(other, line),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
@@ -1013,10 +1094,12 @@ pub fn jobs_list_notices(jobs: &[radian_coding::JobSummary]) -> Vec<String> {
     }
 }
 
-/// `/jobs [kill <id|all>]` (ADR 0037 decision 4). Anything else is a usage notice.
+/// `/jobs [kill <id|all>]` (ADR 0037 decision 4, inspector panel): a bare `/jobs` opens
+/// the inspector's jobs page; `kill` forms stay text notices on the same path as before,
+/// so scripts and herdr are unaffected. Anything else is a usage notice.
 fn jobs_request(args: &[String]) -> Outcome {
     match args {
-        [] => Outcome::Jobs(JobsRequest::List),
+        [] => Outcome::Inspector(Some(InspectorPage::Jobs)),
         [kill, id] if kill == "kill" && id == "all" => Outcome::Jobs(JobsRequest::KillAll),
         [kill, id] if kill == "kill" && !id.is_empty() => {
             Outcome::Jobs(JobsRequest::Kill(id.clone()))

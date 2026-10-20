@@ -257,4 +257,23 @@ impl App {
     pub(super) fn picker_close(&mut self) {
         self.remove_overlay(|overlay| matches!(overlay, Overlay::Picker(_)));
     }
+
+    /// The inspector overlay, if it is up.
+    pub fn inspector(&self) -> Option<&crate::inspector::Inspector> {
+        self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Overlay(Overlay::Inspector(inspector)) => Some(inspector),
+            _ => None,
+        })
+    }
+
+    pub(super) fn inspector_mut(&mut self) -> Option<&mut crate::inspector::Inspector> {
+        self.layers.iter_mut().rev().find_map(|layer| match layer {
+            Layer::Overlay(Overlay::Inspector(inspector)) => Some(inspector),
+            _ => None,
+        })
+    }
+
+    pub(super) fn inspector_close(&mut self) {
+        self.remove_overlay(|overlay| matches!(overlay, Overlay::Inspector(_)));
+    }
 }

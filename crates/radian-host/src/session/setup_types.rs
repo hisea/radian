@@ -68,6 +68,9 @@ pub struct SessionSetup {
     /// disables adoption (the config's `0`, or a host that does not set it).
     pub shell_auto_background: Option<Duration>,
     pub servers: Vec<McpServerConfig>,
+    /// Where the MCP servers came from (`--mcp-config <FILE>`), for the inspector's mcp
+    /// page. `None` when no file was given; the servers are then empty too.
+    pub mcp_config_path: Option<String>,
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
     pub auto_compact: bool,

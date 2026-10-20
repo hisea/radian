@@ -13139,6 +13139,218 @@ async fn pty_a_model_switch_never_writes_when_a_model_was_configured() {
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
+/// The inspector panel: `/jobs`, `/tools`, `/mcp` and `/hooks` each open their page, and
+/// `/panel` returns to the last page. Esc closes to the composer.
+#[test]
+fn pty_inspector_four_commands_open_their_pages() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("inspector-pages");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "inspector-pages",
+            "--offline-catalog",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    // jobs: no background jobs yet.
+    pty.send(b"/jobs\r");
+    assert!(
+        pty.wait_for_screen("inspector", wait_positive()),
+        "the jobs page did not open:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("no background jobs", wait_positive()),
+        "the jobs page shows no list:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_until(wait_positive(), |screen| !screen.contains("inspector")),
+        "Esc did not close the panel:\n{}",
+        pty.screen()
+    );
+    // tools: the built-ins are listed, the old names are not.
+    pty.send(b"/tools\r");
+    assert!(
+        pty.wait_for_screen("inspector", wait_positive()),
+        "the tools page did not open:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("read", wait_positive()),
+        "the tools page shows no tools:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen_absent("job_output"),
+        "an old name leaked into the tools page:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_until(wait_positive(), |screen| !screen.contains("inspector")),
+        "Esc did not close the panel:\n{}",
+        pty.screen()
+    );
+    // mcp: no servers configured.
+    pty.send(b"/mcp\r");
+    assert!(
+        pty.wait_for_screen("no MCP servers", wait_positive()),
+        "the mcp page did not open:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_until(wait_positive(), |screen| !screen.contains("inspector")),
+        "Esc did not close the panel:\n{}",
+        pty.screen()
+    );
+    // hooks: none configured.
+    pty.send(b"/hooks\r");
+    assert!(
+        pty.wait_for_screen("no hooks configured", wait_positive()),
+        "the hooks page did not open:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_until(wait_positive(), |screen| !screen.contains("inspector")),
+        "Esc did not close the panel:\n{}",
+        pty.screen()
+    );
+    // `/panel` returns to the last page (hooks), not jobs.
+    pty.send(b"/panel\r");
+    assert!(
+        pty.wait_for_screen("no hooks configured", wait_positive()),
+        "/panel did not return to the last page:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_until(wait_positive(), |screen| !screen.contains("inspector")),
+        "Esc did not close the panel:\n{}",
+        pty.screen()
+    );
+    // The composer kept the keys: typing after close types, it does not reopen.
+    pty.send(b"hi");
+    assert!(
+        pty.wait_for_screen("hi", wait_positive()),
+        "the composer did not keep the keys:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+}
+
+/// The inspector opens while a turn runs and does not disturb it: the running state stays
+/// visible under the panel, and the turn still settles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_inspector_opens_during_a_running_turn() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(
+        pty.wait_for_screen("type a message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("Working", wait_positive()),
+        "the turn did not start:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/tools\r");
+    assert!(
+        pty.wait_for_screen("inspector", wait_positive()),
+        "the panel did not open mid-turn:\n{}",
+        pty.screen()
+    );
+    // The running state is still there: the panel did not swallow the turn.
+    assert!(
+        pty.screen().contains("Working"),
+        "opening mid-turn hid the running state:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_until(wait_positive(), |screen| !screen.contains("inspector")),
+        "Esc did not close the panel:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("Working"),
+        "closing mid-turn stopped the turn:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+}
+
+/// The open panel is idle-zero-redraw like an idle screen (ADR 0023 U2, extended to the
+/// panel layer): with no events, the frame count over an idle window must not move.
+#[test]
+fn pty_an_open_panel_is_not_redrawn() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("inspector-idle");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "inspector-idle",
+            "--offline-catalog",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"/tools\r");
+    assert!(
+        pty.wait_for_screen("inspector", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    let before = settled_frame_count(&mut pty);
+    assert!(before >= 1, "the panel frame is drawn");
+    let window = std::time::Instant::now();
+    while window.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let after = frame_count(&pty);
+    pty.quit();
+    assert_eq!(
+        after, before,
+        "an open panel with no events must not be redrawn (ADR 0023 U2)"
+    );
+}
+
 /// A text reply streamed slowly: `pause` between SSE pieces, so the turn stays running for a
 /// few seconds while the test queues behind it.
 fn slow_text_reply(text: &str, pause: Duration) -> Reply {

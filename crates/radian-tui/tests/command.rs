@@ -396,14 +396,17 @@ fn a_skills_command_lists_through_the_host() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `/jobs` (ADR 0037 decision 4) is an effect: the registry lives in the host, so listing and
-/// stopping are the loop's job. The parser maps the three forms.
+/// `/jobs` (ADR 0037 decision 4, inspector panel): a bare `/jobs` opens the inspector's
+/// jobs page; `kill` forms stay text notices on the same path as before. The parser maps
+/// the forms.
 #[test]
 fn a_jobs_command_lists_or_kills_through_the_host() {
     let (dir, mut app, service) = app_with_memory("jobs");
     assert_eq!(
         submit(&mut app, &service, "/jobs"),
-        vec![Effect::Jobs(radian_tui::command::JobsRequest::List)]
+        vec![Effect::OpenInspector {
+            page: Some(radian_tui::command::InspectorPage::Jobs)
+        }]
     );
     assert_eq!(
         submit(&mut app, &service, "/jobs kill job-1"),
