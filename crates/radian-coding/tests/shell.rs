@@ -1052,7 +1052,10 @@ async fn default_output_budget_is_24kib_per_stream() {
     );
     assert_eq!(structured["stdout_bytes"], json!(24 << 10), "{structured}");
     let truncated = structured["stdout_truncated_bytes"].as_u64().unwrap();
-    assert!(truncated > 100_000, "most of the output is cut: {structured}");
+    assert!(
+        truncated > 100_000,
+        "most of the output is cut: {structured}"
+    );
     let text = output_text(&output);
     assert!(
         text.contains("bytes discarded") && text.contains(&truncated.to_string()),
@@ -1084,7 +1087,10 @@ async fn success_keeps_quarter_head_and_three_quarter_tail() {
     assert_eq!(structured["stdout_bytes"], json!(4096), "{structured}");
     let text = output_text(&output);
     let (head, tail, truncated) = stdout_view(&text);
-    assert!(truncated, "74_000 bytes through a 4096 budget must truncate");
+    assert!(
+        truncated,
+        "74_000 bytes through a 4096 budget must truncate"
+    );
     assert_eq!(head.len(), 1024, "success keeps a 1/4 head");
     assert_eq!(tail.len(), 3072, "success keeps a 3/4 tail");
     assert!(head.starts_with("out-00000-"), "the start survives: {head}");
@@ -1122,10 +1128,16 @@ async fn failure_keeps_eighth_head_and_seven_eighth_tail() {
     let text = output_text(&output);
     assert!(text.contains("exit code: 1"), "{text}");
     let (head, tail, truncated) = stdout_view(&text);
-    assert!(truncated, "74_000 bytes through a 4096 budget must truncate");
+    assert!(
+        truncated,
+        "74_000 bytes through a 4096 budget must truncate"
+    );
     assert_eq!(head.len(), 512, "failure keeps a 1/8 head");
     assert_eq!(tail.len(), 3584, "failure keeps a 7/8 tail");
-    assert!(head.starts_with("out-00000-"), "some start survives: {head}");
+    assert!(
+        head.starts_with("out-00000-"),
+        "some start survives: {head}"
+    );
     assert!(
         tail.ends_with("out-01999-abcdefghijklmnopqrstuvwxyz\n"),
         "the very last line survives"
@@ -1204,5 +1216,9 @@ async fn failing_commands_last_line_is_always_present() {
         "the last line survives at a 256-byte budget: {text}"
     );
     let (head, tail, _) = stdout_view(&text);
-    assert_eq!(head.len() + tail.len(), 256, "the view is still exactly the budget");
+    assert_eq!(
+        head.len() + tail.len(),
+        256,
+        "the view is still exactly the budget"
+    );
 }

@@ -299,8 +299,8 @@ pub(crate) async fn run(
             // The exit status is known only now, so the view (success 1/4:3/4, failure
             // 1/8:7/8) is picked here; the capture kept the maximum of both.
             let success = outcome.succeeded();
-            let truncated =
-                outcome.stdout.is_truncated_for(success) || outcome.stderr.is_truncated_for(success);
+            let truncated = outcome.stdout.is_truncated_for(success)
+                || outcome.stderr.is_truncated_for(success);
             let retained = match (foreground, &retention) {
                 (Some(foreground), Some(retention)) if truncated => {
                     let state = if outcome.timed_out {
@@ -684,7 +684,11 @@ impl Capped {
             } else {
                 // The tail need reaches back into the head region; the head part already
                 // covers it, so the view is head part plus the whole tail half.
-                return (head_part, &self.tail, full as u64 - head_part.len() as u64 - self.tail.len() as u64);
+                return (
+                    head_part,
+                    &self.tail,
+                    full as u64 - head_part.len() as u64 - self.tail.len() as u64,
+                );
             };
             let discarded = full as u64 - head_part.len() as u64 - tail_part.len() as u64;
             return (head_part, tail_part, discarded);
@@ -734,9 +738,7 @@ impl Capped {
 
     /// The marker that names the discarded middle, on its own line.
     fn marker_for(discarded: u64) -> String {
-        format!(
-            "\n[... {discarded} bytes discarded; showing the start and the end ...]\n"
-        )
+        format!("\n[... {discarded} bytes discarded; showing the start and the end ...]\n")
     }
 
     /// Writes the retained bytes (head, marker if the middle was dropped, then tail) to `out`.
@@ -847,9 +849,7 @@ impl Outcome {
     /// Success is exit code 0 without a timeout or cancellation. Anything else (non-zero
     /// exit, signal kill, timeout, cancellation) is a failure and gets the larger tail.
     fn succeeded(&self) -> bool {
-        !self.timed_out
-            && !self.cancelled
-            && matches!(self.status.and_then(|s| s.code()), Some(0))
+        !self.timed_out && !self.cancelled && matches!(self.status.and_then(|s| s.code()), Some(0))
     }
 }
 
@@ -1695,8 +1695,7 @@ mod tests {
         // Failure shows less start (1/8) and more end (7/8): the very last byte survives.
         let failed = capped.render_for(false);
         assert!(failed.contains("bytes discarded"), "{failed}");
-        let expected_failure_tail =
-            String::from_utf8_lossy(&data[data.len() - 35..]).into_owned();
+        let expected_failure_tail = String::from_utf8_lossy(&data[data.len() - 35..]).into_owned();
         assert!(failed.ends_with(&expected_failure_tail), "{failed}");
         assert_eq!(capped.shown_for(false), 40);
         let (success_head, _, _) = capped.view(true);
