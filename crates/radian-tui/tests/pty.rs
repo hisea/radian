@@ -13138,3 +13138,171 @@ async fn pty_a_model_switch_never_writes_when_a_model_was_configured() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
+
+/// A text reply streamed slowly: `pause` between SSE pieces, so the turn stays running for a
+/// few seconds while the test queues behind it.
+fn slow_text_reply(text: &str, pause: Duration) -> Reply {
+    let pieces = vec![
+        format!(
+            "data: {}\n\n",
+            chunk(json!({"role": "assistant", "content": text}), None)
+        )
+        .into_bytes(),
+        format!("data: {}\n\n", chunk(json!({}), Some("stop"))).into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    Reply::Sse {
+        pieces,
+        pause,
+        headers: Vec::new(),
+    }
+}
+
+/// `/queue <text>` while a turn runs: the running turn is untouched, and each queued message
+/// opens its own turn in order when it ends (ADR 0011 L4 FIFO). The footer's `queued` item
+/// shows the waiting count (2, then 1) and hides when drained.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_queue_during_a_running_turn_runs_queued_turns_in_order() {
+    let _serial = pty_guard();
+    let pause = Duration::from_secs(2);
+    let server = MockServer::start(vec![
+        slow_text_reply("FIRST-REPLY-OK", pause),
+        slow_text_reply("SECOND-REPLY-OK", pause),
+        slow_text_reply("THIRD-REPLY-OK", pause),
+    ])
+    .await;
+    let dir = TempDir::new("queue");
+    // The real defaults: the `deck` footer carries `queued` (the suite's `classic` does not).
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "queue",
+        ],
+        &[],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"start\r");
+    // Wait until the request reached the mock: the turn is running now.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server.requests().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !server.requests().is_empty(),
+        "the turn never started:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/queue alpha\r");
+    pty.send(b"/queue beta\r");
+    assert!(
+        pty.wait_for_screen("2 queued", wait_positive()),
+        "the queue count did not reach 2:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("FIRST-REPLY-OK", wait_positive()),
+        "the first turn did not answer:\n{}",
+        pty.screen()
+    );
+    // Alpha's turn admitted it: one waits while it streams.
+    assert!(
+        pty.wait_for_screen("1 queued", wait_positive()),
+        "the count did not drop to 1:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("SECOND-REPLY-OK", wait_positive()),
+        "alpha's turn did not answer:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("THIRD-REPLY-OK", wait_positive()),
+        "beta's turn did not answer:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_until_gone("queued", wait_positive()),
+        "the item did not hide after the drain:\n{}",
+        pty.screen()
+    );
+
+    // Three turns, in order: the running turn never saw the queued text, and each queued
+    // message opened its own turn carrying its own text.
+    let bodies = server.requests();
+    assert_eq!(bodies.len(), 3, "three turns ran");
+    assert!(
+        last_user_text(&server, 0).contains("start")
+            && !last_user_text(&server, 0).contains("alpha"),
+        "the running turn is untouched: {:?}",
+        bodies[0].json()
+    );
+    assert!(
+        last_user_text(&server, 1).contains("alpha"),
+        "alpha opened the second turn: {:?}",
+        bodies[1].json()
+    );
+    assert!(
+        last_user_text(&server, 2).contains("beta"),
+        "beta opened the third turn: {:?}",
+        bodies[2].json()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `/queue <text>` while idle opens a turn at once, carrying the queued text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_queue_while_idle_starts_a_turn_at_once() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("IDLE-QUEUE-REPLY-OK")]).await;
+    let dir = TempDir::new("queue-idle");
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "queue-idle",
+        ],
+        &[],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/queue do it now\r");
+    assert!(
+        pty.wait_for_screen("IDLE-QUEUE-REPLY-OK", wait_positive()),
+        "the queued turn did not answer:\n{}",
+        pty.screen()
+    );
+    let bodies = server.requests();
+    assert_eq!(bodies.len(), 1, "one turn ran");
+    assert!(
+        last_user_text(&server, 0).contains("do it now"),
+        "the turn carries the queued text: {:?}",
+        bodies[0].json()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

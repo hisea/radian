@@ -34,6 +34,18 @@ impl App {
     /// result becomes the follow-up or steer effect. Whether it steers is decided here, because
     /// the turn state is app state.
     pub(super) fn begin_send(&mut self, text: String) -> UpdateResult {
+        self.begin_send_as(text, None)
+    }
+
+    /// Starts a `/queue` send: like a send, but always a followup — even while a turn runs
+    /// (Enter steers then).
+    pub(super) fn begin_queue(&mut self, text: String) -> UpdateResult {
+        self.begin_send_as(text, Some(PendingSend::Followup))
+    }
+
+    /// The shared send path: the session-ended and no-model guards, then the `@` expansion
+    /// effect. `None` keeps the turn-dependent followup/steer choice; `Some` forces it.
+    fn begin_send_as(&mut self, text: String, kind: Option<PendingSend>) -> UpdateResult {
         if let Some(refused) = self.refuse_if_session_ended() {
             self.restore_input(text);
             return refused;
@@ -47,12 +59,14 @@ impl App {
             self.restore_input(text);
             return UpdateResult::dirty();
         }
-        let kind = if self.turn() == TurnState::Running {
-            PendingSend::Steer
-        } else {
-            PendingSend::Followup
-        };
-        self.pending_expand = Some(PendingExpand {
+        let kind = kind.unwrap_or_else(|| {
+            if self.turn() == TurnState::Running {
+                PendingSend::Steer
+            } else {
+                PendingSend::Followup
+            }
+        });
+        self.pending_expand.push_back(PendingExpand {
             kind,
             text: text.clone(),
         });
@@ -124,7 +138,9 @@ impl App {
         &mut self,
         result: Result<Expansion, ExpandError>,
     ) -> UpdateResult {
-        let Some(pending) = self.pending_expand.take() else {
+        // The front entry: results come back in the order their effects ran, which is the
+        // submit order, so a later submit waiting behind this one keeps its own entry.
+        let Some(pending) = self.pending_expand.pop_front() else {
             return UpdateResult::none();
         };
         match result {

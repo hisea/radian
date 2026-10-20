@@ -54,6 +54,8 @@ use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::futures::Notified;
 
+use super::driver::RuntimeEvents;
+
 /// Which queue an input waits in (ADR 0011 L1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
@@ -176,6 +178,11 @@ pub struct Inbox {
     closed: AtomicBool,
     /// When present, `InboxEnqueued` is written before the input becomes visible.
     journal: Option<Arc<SessionJournal>>,
+    /// When present, every accepted `InboxEnqueued` is also forwarded here (after the
+    /// journal write, without holding the queue lock): the host's live listener hears the
+    /// enqueue without reading the journal. Installed by the driver from its own
+    /// `set_runtime_events`, so a host sets one listener, not two.
+    runtime_events: std::sync::Mutex<Option<Arc<dyn RuntimeEvents>>>,
     /// Control requests the driver runs between turns (ADR 0018: `/compact`). Not a lane.
     control: Mutex<VecDeque<ControlRequest>>,
 }
@@ -228,8 +235,19 @@ impl Inbox {
             last_cause: std::sync::Mutex::new(None),
             closed: AtomicBool::new(false),
             journal,
+            runtime_events: std::sync::Mutex::new(None),
             control: Mutex::new(VecDeque::new()),
         })
+    }
+
+    /// Installs the host listener for `InboxEnqueued` (the driver calls this from its own
+    /// `set_runtime_events`, so a host sets one listener, not two). `None` keeps the
+    /// behavior a host that never installed one had before.
+    pub fn set_runtime_events(&self, sink: Arc<dyn RuntimeEvents>) {
+        *self
+            .runtime_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sink);
     }
 
     /// `next_turn`: a new task for after the current turn. Wakes an idle driver.
@@ -299,19 +317,20 @@ impl Inbox {
                 id
             }
         };
+        let event = RuntimeEvent::InboxEnqueued {
+            message: message.clone(),
+            message_id: id.clone(),
+            lane: lane.wire(),
+            source,
+            // ADR 0011: the entry's waking flag is durable, so a resume
+            // knows which `next_step` entries may open a turn themselves.
+            wake,
+        };
         if let Some(journal) = &self.journal {
             // Journal first, then memory (ADR 0001 S1): an input that is not durable was
             // never accepted.
             journal
-                .append_runtime_event(RuntimeEvent::InboxEnqueued {
-                    message: message.clone(),
-                    message_id: id.clone(),
-                    lane: lane.wire(),
-                    source,
-                    // ADR 0011: the entry's waking flag is durable, so a resume
-                    // knows which `next_step` entries may open a turn themselves.
-                    wake,
-                })
+                .append_runtime_event(event.clone())
                 .await
                 .map_err(|error| InboxError::Journal {
                     message: message.clone(),
@@ -328,6 +347,17 @@ impl Inbox {
             seq,
         });
         drop(state);
+        // The host hears the enqueue once it is durable, like the turn boundary: the sink
+        // sends on an unbounded channel, so it never blocks, and it runs without the queue
+        // lock held.
+        if let Some(sink) = self
+            .runtime_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            sink.on_runtime_event(&event);
+        }
         if wake {
             self.wake.notify_one();
         }

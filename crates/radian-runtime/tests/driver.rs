@@ -855,3 +855,96 @@ async fn the_runtime_events_sink_hears_the_turn_start_before_its_end() {
     handle.abort();
     assert_eq!(*seen.lock().unwrap(), vec!["TurnStarted", "TurnFinished"]);
 }
+
+// ---------- the host's runtime-events sink hears the queue ----------
+
+/// Waits until `seen` holds `wanted`, polling (the sink runs on the driver's task, so the
+/// test cannot rendezvous with it directly). Panics with what did arrive.
+async fn wait_sink(seen: &Arc<Mutex<Vec<String>>>, wanted: &[&str]) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let current = seen.lock().unwrap().clone();
+        if current
+            .iter()
+            .map(String::as_str)
+            .eq(wanted.iter().copied())
+        {
+            return;
+        }
+        // A wrong event (or a wrong order) fails fast instead of timing out: the sink hears
+        // every event, so a prefix that already differs can never become `wanted`.
+        if current.len() >= wanted.len()
+            || wanted[..current.len()] != current[..]
+            || std::time::Instant::now() >= deadline
+        {
+            panic!("the sink heard {current:?}, wanted {wanted:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// The host sink hears `InboxEnqueued` (with its lane) and `InputAdmitted` live: the TUI's
+/// `queued` footer item counts the `next_turn` entries the runtime has not admitted yet, so
+/// it reads these two events instead of polling. A `steer` admission never touches that
+/// count (its enqueue is `NextStep`, its admission carries an untracked id).
+#[tokio::test]
+async fn the_runtime_events_sink_hears_enqueue_and_admission() {
+    let model = ScriptedModel::new([text("one"), text("two")]);
+    let (mut driver, env) = open_env("sink-queue", model, MemTools::new()).await;
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink_seen = Arc::clone(&seen);
+    driver.set_runtime_events(Arc::new(move |event: &radian_session::RuntimeEvent| {
+        let name = match event {
+            radian_session::RuntimeEvent::InboxEnqueued { lane, .. } => {
+                format!("enqueued:{lane:?}")
+            }
+            radian_session::RuntimeEvent::InputAdmitted { .. } => "admitted".to_owned(),
+            _ => return,
+        };
+        sink_seen.lock().unwrap().push(name);
+    }));
+    let handle = tokio::spawn(async move { driver.run().await });
+
+    env.inbox
+        .followup("first", InputSource::User)
+        .await
+        .unwrap();
+    wait_sink(&seen, &["enqueued:NextTurn", "admitted"]).await;
+    env.inbox
+        .followup("second", InputSource::User)
+        .await
+        .unwrap();
+    wait_sink(
+        &seen,
+        &[
+            "enqueued:NextTurn",
+            "admitted",
+            "enqueued:NextTurn",
+            "admitted",
+        ],
+    )
+    .await;
+    handle.abort();
+    let _ = handle.await;
+}
+
+/// The inbox forwards every lane's enqueue to the sink with its lane (no driver needed): a
+/// `followup` is `NextTurn`, a `steer` and an `inject` are `NextStep`.
+#[tokio::test]
+async fn the_inbox_sink_hears_the_lane_of_every_enqueue() {
+    let inbox = Inbox::new(16);
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink_seen = Arc::clone(&seen);
+    inbox.set_runtime_events(Arc::new(move |event: &radian_session::RuntimeEvent| {
+        if let radian_session::RuntimeEvent::InboxEnqueued { lane, .. } = event {
+            sink_seen.lock().unwrap().push(format!("{lane:?}"));
+        }
+    }));
+    inbox.followup("a", InputSource::User).await.unwrap();
+    inbox.steer("b", InputSource::User).await.unwrap();
+    inbox.inject("c", InputSource::User).await.unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["NextTurn", "NextStep", "NextStep"]
+    );
+}

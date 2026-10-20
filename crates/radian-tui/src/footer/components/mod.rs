@@ -26,6 +26,7 @@ mod jobs;
 mod mcp;
 mod model;
 mod pending;
+mod queued;
 mod reasoning;
 mod scroll;
 mod session;
@@ -129,6 +130,7 @@ static COMPONENTS: &[&'static dyn Component] = &[
     &elapsed::Elapsed,
     &cost::Cost,
     &pending::Pending,
+    &queued::Queued,
     &jobs::Jobs,
     &mcp::Mcp,
     &scroll::Scroll,

@@ -89,6 +89,26 @@ impl App {
 
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
     pub(super) fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
+        if let RuntimeEvent::InboxEnqueued {
+            lane, message_id, ..
+        } = event
+        {
+            // The `queued` footer item: a `next_turn` input the runtime has not admitted
+            // yet. The set dedupes by id (a re-enqueue of the same input cannot
+            // double-count); a `NextStep` enqueue (`steer`, `inject`) never enters it.
+            if *lane == radian_session::InboxLane::NextTurn
+                && self.session.queued.insert(message_id.clone())
+            {
+                return UpdateResult::dirty();
+            }
+        }
+        if let RuntimeEvent::InputAdmitted { message_id, .. } = event {
+            // Only a tracked id leaves the set: a `steer` admission carries an id that
+            // was never queued here, so it cannot move the count.
+            if self.session.queued.remove(message_id) {
+                return UpdateResult::dirty();
+            }
+        }
         if let RuntimeEvent::TurnFinished { .. } = event {
             // The turn boundary is on disk: a `/fork` that was waiting for it can run now.
             self.session.turn_committed = true;

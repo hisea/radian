@@ -10,11 +10,14 @@
 //! layer: approval prompt, `/memory` confirmation, find box), and [`App::on_key`] is the thin
 //! wrapper that resolves and updates.
 
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agent_core::{AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, UsageSource};
+use agent_core::{
+    AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, MessageId, UsageSource,
+};
 use radian_coding::PromptError;
 use radian_host::memory::commands::MemoryCommand;
 use radian_host::{PendingRequest, PendingResponse, PendingView};
@@ -479,6 +482,12 @@ pub struct SessionView {
     /// appends with the loop's clock, its settle removes; the age ticks with the existing
     /// footer refresh (a contributor tick redraws), so no new timer exists for it.
     pub(crate) running_jobs: Vec<RunningJob>,
+    /// The `next_turn` inputs this process sent that the runtime has not admitted yet: one
+    /// entry per `InboxEnqueued` without a matching `InputAdmitted`, by message id. The
+    /// footer's `queued` item reads its length. A `steer` never touches it — its enqueue is
+    /// `NextStep` and its admission carries an untracked id — so the count only moves on a
+    /// followup's own enqueue and admission.
+    pub(crate) queued: HashSet<MessageId>,
     /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
     /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
     /// reason is readable; the user quits with the ordinary keys.
@@ -593,8 +602,12 @@ pub struct App {
     /// Whether this process has a memory root. `/memory` runs through the loop, which owns the
     /// service; without one the command is refused with the same notice as before.
     pub memory_enabled: bool,
-    /// The send waiting for its `@` expansion (see [`Effect::ExpandMentions`]).
-    pending_expand: Option<PendingExpand>,
+    /// The sends waiting for their `@` expansion, in submit order (see
+    /// [`Effect::ExpandMentions`]): one entry per submitted send, so two rapid submits —
+    /// `/queue a` then `/queue b`, or two fast Enters — cannot overwrite each other and drop
+    /// one. The loop runs the effects in order and their results come back in order, so the
+    /// front entry is always the one a result belongs to.
+    pending_expand: VecDeque<PendingExpand>,
     /// The `/…` completion on screen: the range a candidate replaces and the candidates, best
     /// first. `None` when the line is not a slash command or the level has nothing to offer.
     /// (The overlay's *rows* live in the layer stack, next to the `@` list's.)

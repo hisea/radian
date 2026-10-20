@@ -52,6 +52,9 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            // `/queue`: the text goes through the same `@` expansion as a send, but the
+            // result is always a followup — never a steer, even while a turn runs.
+            command::Outcome::Queue(text) => self.begin_queue(text),
             command::Outcome::Memory(command) => UpdateResult::effect(Effect::RunMemoryCommand {
                 command,
                 confirmed: false,
