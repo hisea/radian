@@ -93,9 +93,11 @@ directory fd (ADR 0039 decision 2: every component `openat(O_NOFOLLOW | O_DIRECT
 walk itself descends by fd and hands matched files back as open fds; nothing is re-opened by
 path. The per-entry rules, which a directory `read` does not have because it looks at one path:
 
-- `.gitignore` (and `.ignore`) files **inside** the tree are respected, with or without a git
-  repository; no ignore file **above** the base and no global gitignore is consulted, so the
-  same tree gives the same result on every machine;
+- `.gitignore` (and `.ignore`) files are respected with or without a git repository, from
+  the workspace root down through the search base: a nearer directory's rules win, as in
+  git, so a repository-root ignore keeps working when the search starts in a subdirectory.
+  The global gitignore is not consulted, so the same tree gives the same result on every
+  machine;
 - the `.git` directory is pruned;
 - symlinks are **never** followed — a symlinked file is not a match and a symlinked directory is
   not descended — so a link out of the workspace is never read;

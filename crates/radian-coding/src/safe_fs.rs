@@ -706,6 +706,12 @@ impl RootDir {
         &self.path
     }
 
+    /// The root's open directory fd, for opening levels below it fd-relative (the search
+    /// tools load the ignore files above their base through this fd, ADR 0039 decision 2).
+    pub(crate) fn fd(&self) -> &File {
+        &self.fd
+    }
+
     /// Opens `user` (workspace-relative) as a file.
     pub fn file(&self, user: &Path, mode: OpenMode) -> Result<File, SafeFsError> {
         let parts = components(user)?;

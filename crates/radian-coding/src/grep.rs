@@ -167,14 +167,16 @@ pub(crate) fn spec() -> ToolSpec {
         description: "Search file contents under the workspace (or under path) with a regex. \
                       Each match is reported as `path:line:text`; with `context` the lines \
                       around it are reported too, as `path-line-text`, and groups are separated \
-                      by `--`. `.gitignore` is respected, `.git` and symlinks are skipped, and \
-                      binary files are skipped. `glob` limits the files searched, \
-                      `case_insensitive` ignores case. Matches are capped per file and in \
-                      total, total output is bounded by bytes, each cut named in the text; \
-                      `output` selects `content` (default), `files` (one line per matching file) \
-                      or `count` (totals only). Use `output: \"files\"` for which files contain \
-                      a pattern and `output: \"count\"` for how many matches there are. \
-                      An invalid regex is an error."
+                      by `--`. `.gitignore` and `.ignore` files are respected, from the \
+                      workspace root down through the search directory (a nearer directory's \
+                      rules win, as in git); the global gitignore is not read. `.git` and \
+                      symlinks are skipped, and binary files are skipped. `glob` limits the \
+                      files searched, `case_insensitive` ignores case. Matches are capped per \
+                      file and in total, total output is bounded by bytes, each cut named in \
+                      the text; `output` selects `content` (default), `files` (one line per \
+                      matching file) or `count` (totals only). Use `output: \"files\"` for \
+                      which files contain a pattern and `output: \"count\"` for how many \
+                      matches there are. An invalid regex is an error."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
@@ -293,7 +295,7 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
     match root.read_base(requested) {
         Ok(base) => {
             let prefix = base.prefix.clone();
-            search::walk(&base.dir, &base.relative, &mut |found| {
+            search::walk(&base.dir, &base.relative, base.ancestors, &mut |found| {
                 let rel = found.relative;
                 if let Some(filter) = &file_filter
                     && !filter.is_match(&rel)
