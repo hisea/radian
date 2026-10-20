@@ -497,3 +497,144 @@ async fn both_search_tools_are_advertised_and_shared() {
         );
     }
 }
+
+// ---------- the total byte cap and the output modes ----------
+
+/// Many long matching lines: the output stays within the byte cap, ends with the one
+/// byte-limit note, and keeps whole lines only (every line ends at a newline and every
+/// shown match line is byte-identical to a file line).
+#[tokio::test]
+async fn grep_byte_cap_bounds_long_lines_with_whole_lines_only() {
+    let dir = TempDir::new("grep-byte-cap");
+    let root = dir.file("ws");
+    // Twenty 500-byte matching lines: ~10 KiB of matches against a 2 KiB cap.
+    let line = format!("needle-{}", "x".repeat(490));
+    let content = (0..20)
+        .map(|_| line.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    dir.write("ws/f.txt", &content);
+    let tools = tools_with(
+        &root,
+        Limits {
+            max_grep_output_bytes: 2048,
+            ..Limits::default()
+        },
+    );
+
+    let out = call(&tools, "grep", json!({"pattern": "needle"}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    assert!(
+        body.len() <= 2048,
+        "output {}B passes the 2048B cap",
+        body.len()
+    );
+    assert!(
+        body.contains("2048 byte limit"),
+        "the one note names the byte limit: {body}"
+    );
+    assert!(
+        body.contains("output: \"files\""),
+        "the note says how to narrow it: {body}"
+    );
+    assert!(body.ends_with("]\n"), "the output ends with the note: {body}");
+    // Whole lines only: every shown match line is exactly one file line with its prefix.
+    for output_line in body.lines() {
+        if output_line.starts_with('[') || output_line == "--" {
+            continue; // the truncation notes and the group separator
+        }
+        let rest = output_line.strip_prefix("f.txt:").unwrap_or_else(|| {
+            panic!("a match line carries the `path:line:` prefix: {output_line}")
+        });
+        let (_, text_part) = rest
+            .split_once(':')
+            .unwrap_or_else(|| panic!("a match line carries `line:text`: {output_line}"));
+        assert_eq!(
+            text_part, line,
+            "a shown line is a whole file line, never a prefix: {output_line}"
+        );
+    }
+    assert_eq!(structured(&out)["truncated"], json!(true));
+}
+
+/// `output: "files"` returns one line per matching file with its match count, and no line
+/// text at all.
+#[tokio::test]
+async fn grep_files_mode_returns_paths_and_counts_without_line_text() {
+    let dir = TempDir::new("grep-files-mode");
+    let root = dir.file("ws");
+    dir.write("ws/a.txt", "needle one\nneedle two\nother\n");
+    dir.write("ws/b.txt", "needle three\nother\n");
+    dir.write("ws/c.txt", "nothing here\n");
+    let tools = tools(&root);
+
+    let out = call(&tools, "grep", json!({"pattern": "needle", "output": "files"}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    assert!(body.contains("a.txt"), "{body}");
+    assert!(body.contains('2'), "a.txt's count is shown: {body}");
+    assert!(body.contains("b.txt"), "{body}");
+    assert!(!body.contains("c.txt"), "a file without matches is absent: {body}");
+    assert!(
+        !body.contains("needle"),
+        "no line text is returned, only paths and counts: {body}"
+    );
+    assert_eq!(structured(&out)["matches"], json!(3));
+    assert_eq!(structured(&out)["files"], json!(2));
+    assert_eq!(structured(&out)["output"], json!("files"));
+}
+
+/// `output: "count"` returns only the totals: no paths, no line text.
+#[tokio::test]
+async fn grep_count_mode_returns_totals_only() {
+    let dir = TempDir::new("grep-count-mode");
+    let root = dir.file("ws");
+    dir.write("ws/a.txt", "needle one\nneedle two\n");
+    dir.write("ws/b.txt", "needle three\n");
+    let tools = tools(&root);
+
+    let out = call(&tools, "grep", json!({"pattern": "needle", "output": "count"}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    assert!(body.contains('3'), "the total matches are shown: {body}");
+    assert!(body.contains('2'), "the file count is shown: {body}");
+    assert!(
+        !body.contains("a.txt") && !body.contains("b.txt"),
+        "no paths are returned, totals only: {body}"
+    );
+    assert!(
+        !body.contains("needle"),
+        "no line text is returned: {body}"
+    );
+    assert_eq!(structured(&out)["matches"], json!(3));
+    assert_eq!(structured(&out)["files"], json!(2));
+    assert_eq!(structured(&out)["output"], json!("count"));
+}
+
+/// The default (no `output`) is byte-identical to today: `content` changes nothing for a
+/// small fixture. Guards the default against silently becoming `files`.
+#[tokio::test]
+async fn grep_default_output_is_byte_identical_to_content_mode() {
+    let dir = TempDir::new("grep-default-identical");
+    let root = dir.file("ws");
+    dir.write("ws/a.txt", "alpha\nbeta\nAlpha gamma\n");
+    let tools = tools(&root);
+
+    let default = call(&tools, "grep", json!({"pattern": "alpha"}))
+        .await
+        .unwrap();
+    let explicit = call(
+        &tools,
+        "grep",
+        json!({"pattern": "alpha", "output": "content"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text(&default), text(&explicit));
+    assert_eq!(text(&default), "a.txt:1:alpha\n");
+}
