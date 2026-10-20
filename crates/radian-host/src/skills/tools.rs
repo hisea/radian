@@ -307,10 +307,7 @@ mod tests {
     #[tokio::test]
     async fn the_name_field_names_the_directory_fallback() {
         let scratch = Scratch::new("spec-name");
-        scratch.write(
-            "mydir",
-            "---\ndescription: Has no name.\n---\nBody.\n",
-        );
+        scratch.write("mydir", "---\ndescription: Has no name.\n---\nBody.\n");
         let session = scratch.session().await;
         // The behavior the description promises: readable under the directory name.
         let out = run(&session, &call("mydir", None)).await.unwrap();
@@ -322,7 +319,9 @@ mod tests {
             .expect("the skill spec");
         let field = &spec.input_schema["properties"]["name"]["description"];
         assert!(
-            field.as_str().is_some_and(|text| text.contains("directory name")),
+            field
+                .as_str()
+                .is_some_and(|text| text.contains("directory name")),
             "the `name` field must name the directory fallback: {field}"
         );
     }

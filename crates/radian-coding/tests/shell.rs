@@ -838,15 +838,14 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
     // The schema fields carry the same numbers (the model reads them too).
     let timeout = &spec.input_schema["properties"]["timeout_secs"]["description"];
     assert!(
-        timeout.as_str().is_some_and(|text| text.contains("by default 60")
-            && text.contains("whole process group")),
+        timeout.as_str().is_some_and(
+            |text| text.contains("by default 60") && text.contains("whole process group")
+        ),
         "the `timeout_secs` field must name the default and the process group: {timeout}"
     );
     let budget = &spec.input_schema["properties"]["max_output_bytes"]["description"];
     assert!(
-        budget
-            .as_str()
-            .is_some_and(|text| text.contains("24 KiB")),
+        budget.as_str().is_some_and(|text| text.contains("24 KiB")),
         "the `max_output_bytes` field must name the budget: {budget}"
     );
 }

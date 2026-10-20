@@ -550,7 +550,8 @@ async fn the_job_description_names_the_process_group_and_leaves_numbers_to_the_s
         .find(|spec| spec.name == "job")
         .expect("job is advertised with a sandbox");
     assert!(
-        spec.description.contains("stops the job's whole process group"),
+        spec.description
+            .contains("stops the job's whole process group"),
         "`kill` must name the process group: {}",
         spec.description
     );
@@ -566,8 +567,9 @@ async fn the_job_description_names_the_process_group_and_leaves_numbers_to_the_s
     );
     let field = &spec.input_schema["properties"]["timeout_ms"]["description"];
     assert!(
-        field.as_str().is_some_and(|text| text.contains("30000")
-            && text.contains("600000")),
+        field
+            .as_str()
+            .is_some_and(|text| text.contains("30000") && text.contains("600000")),
         "the schema keeps the `timeout_ms` default and maximum: {field}"
     );
 }

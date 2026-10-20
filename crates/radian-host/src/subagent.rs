@@ -721,23 +721,22 @@ mod tests {
     fn the_agent_field_does_not_repeat_the_explore_general_difference() {
         let spec = spec();
         assert!(
-            spec.description.contains(
-                "`explore` (read glob grep only) is for reading and searching"
-            ),
+            spec.description
+                .contains("`explore` (read glob grep only) is for reading and searching"),
             "the description keeps what `explore` is: {}",
             spec.description
         );
         assert!(
-            spec.description.contains(
-                "`general` (the default) has this session's tools minus `subagent`"
-            ),
+            spec.description
+                .contains("`general` (the default) has this session's tools minus `subagent`"),
             "the description keeps what `general` is: {}",
             spec.description
         );
         let field = &spec.input_schema["properties"]["agent"]["description"];
         assert!(
-            field.as_str().is_some_and(|text| text.contains("`explore`")
-                && text.contains("`general`")),
+            field
+                .as_str()
+                .is_some_and(|text| text.contains("`explore`") && text.contains("`general`")),
             "the field still names the values and the default: {field}"
         );
         assert!(

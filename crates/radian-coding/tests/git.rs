@@ -64,7 +64,8 @@ async fn the_git_diff_description_names_the_status_command() {
         .find(|spec| spec.name == "git_diff")
         .expect("the git_diff spec");
     assert!(
-        spec.description.contains("--porcelain=v1 --branch --untracked-files=all"),
+        spec.description
+            .contains("--porcelain=v1 --branch --untracked-files=all"),
         "the description must name the status command: {}",
         spec.description
     );

@@ -520,9 +520,13 @@ async fn ignore_files_above_the_base_apply_with_git_precedence() {
         .unwrap();
     assert_eq!(text(&out), "sub/keep.rs\n", "{out:?}");
 
-    let out = call(&tools, "glob", json!({"pattern": "**/*.log", "path": "sub"}))
-        .await
-        .unwrap();
+    let out = call(
+        &tools,
+        "glob",
+        json!({"pattern": "**/*.log", "path": "sub"}),
+    )
+    .await
+    .unwrap();
     assert_eq!(text(&out), "sub/keep.log\n", "{out:?}");
 
     let out = call(&tools, "grep", json!({"pattern": "needle", "path": "sub"}))
@@ -589,15 +593,18 @@ async fn the_output_values_are_defined_in_the_schema_only() {
         spec.description
     );
     assert!(
-        spec.description.contains("for which files contain a pattern"),
+        spec.description
+            .contains("for which files contain a pattern"),
         "the description keeps the usage: {}",
         spec.description
     );
     let field = &spec.input_schema["properties"]["output"]["description"];
     assert!(
-        field.as_str().is_some_and(|text| text.contains("`content` (default)")
-            && text.contains("`files`")
-            && text.contains("`count`")),
+        field
+            .as_str()
+            .is_some_and(|text| text.contains("`content` (default)")
+                && text.contains("`files`")
+                && text.contains("`count`")),
         "the schema still defines all three values: {field}"
     );
 }
