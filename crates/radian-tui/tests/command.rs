@@ -377,6 +377,45 @@ fn a_jobs_command_lists_or_kills_through_the_host() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `/jobs` lists only running background jobs (ADR 0037 decision 4, jobs-running-only): a
+/// finished background job and a settled foreground retention (decision 3a) stay out of the
+/// list but remain readable through the `job` tool. The notices come from
+/// [`radian_tui::command::jobs_list_notices`], the same function the event loop calls for
+/// `JobsRequest::List`, so removing the filter fails this test.
+#[test]
+fn jobs_list_shows_only_running_background_jobs() {
+    use std::time::Duration;
+
+    use radian_coding::{JobState, JobSummary};
+
+    let summary = |id: &str, state: JobState, command: &str| JobSummary {
+        id: id.to_owned(),
+        command: command.to_owned(),
+        state,
+        elapsed: Duration::from_secs(7),
+        output: radian_coding::OUTPUT_HINT.to_owned(),
+    };
+    let jobs = vec![
+        summary("job-1", JobState::Running, "sleep 60"),
+        summary("job-2", JobState::Exited(0), "echo done"),
+        summary("job-3", JobState::TimedOut, "grep -r x /"),
+    ];
+    assert_eq!(
+        radian_tui::command::jobs_list_notices(&jobs),
+        vec!["job-1  running  7s  sleep 60  available through job".to_owned()]
+    );
+    // Settled entries only (a finished background job and a foreground retention): one
+    // line, not the entries and not the old "no background jobs in this session".
+    assert_eq!(
+        radian_tui::command::jobs_list_notices(&jobs[1..]),
+        vec!["no running background jobs".to_owned()]
+    );
+    assert_eq!(
+        radian_tui::command::jobs_list_notices(&[]),
+        vec!["no running background jobs".to_owned()]
+    );
+}
+
 /// The footer's `reasoning` item shows the level that takes effect, not the configured one
 /// (ADR 0026 D11): `deepseek-v4.1-flash` supports low/high/max, so a configured `medium` shows
 /// `high`.
