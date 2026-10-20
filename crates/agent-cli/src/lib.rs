@@ -115,8 +115,9 @@ pub struct Cli {
     profile: Option<profile::ProfileArg>,
 
     /// Allow a simple shell command prefix without asking (repeatable), e.g.
-    /// `--allow-shell-command "git status"`. Only a simple command matches; a composite
-    /// (`git status; rm -x`) still asks. There is no allow rule for shell by default.
+    /// `--allow-shell-command "git status"`. Only a simple command matches; in the `workspace`
+    /// tier a composite (`git status; rm -x`) still asks. The `workspace` tier has no allow
+    /// rule for shell by default; the `full` tier allows shell without asking.
     #[arg(long = "allow-shell-command", value_name = "PREFIX")]
     allow_shell_command: Vec<String>,
 
@@ -237,8 +238,9 @@ pub struct Cli {
     include_usage: Option<bool>,
 
     /// Allow a simple shell command prefix without asking (repeatable), e.g.
-    /// `--allow-shell-command "git status"`. Only a simple command matches; a composite
-    /// (`git status; rm -x`) still asks. There is no allow rule for shell by default.
+    /// `--allow-shell-command "git status"`. Only a simple command matches; in the `workspace`
+    /// tier a composite (`git status; rm -x`) still asks. The `workspace` tier has no allow
+    /// rule for shell by default; the `full` tier allows shell without asking.
 
     /// The per-turn model call limit. The default is shared with the TUI and named in
     /// `--help`; agent-core's own default is a lower fuse for a host that sets no limit.
