@@ -1035,3 +1035,43 @@ cargo test -p radian-coding --test perf_file_tools -- --ignored --nocapture --te
 parallel"至此证实，无需改字。`glob` 走同一条路（同一实现形状）；重叠的确定性证明
 见 `crates/radian-coding/tests/file_tools_parallel.rs`（`resolve_hook` 里的 `Barrier`，
 不依赖墙钟），取消见同一文件的 `a_cancelled_batch_returns_without_the_scan_result`。
+
+## 编辑后同步检查的增量耗时（edit-check-timing，2026-10-20）
+
+为 `docs/backlog/command-hooks-claude-subset.md` 的"编辑后 hook 的批处理"一节量
+`cargo check` 增量一次的实际时长。只测量，不改产品代码；本项的提交只有
+`benchmarks/edit-check-timing.sh`（复现脚本）与本节。
+
+```sh
+bash benchmarks/edit-check-timing.sh [/tmp/edit-check-timing]
+```
+
+**方法**（debug profile，worktree 内默认 `target/`，`CARGO_TARGET_DIR` 未设置）：
+先 `cargo check --workspace --all-targets` warm 一次（35.8 s）；然后对每个文件，
+**每次计时运行前**都追加一行 `// timing …`（内容变化，触发该 crate 重查），
+分别计时 `cargo check -p <crate>` 与 `cargo check --workspace`（各 5 次，取中位与最大），
+以及 `cargo clippy -p <crate>`（3 次，取中位与最大）。每次运行都检查 cargo 输出里有
+`Checking <crate>`（clippy 首轮冷缓存时是 `Compiling <crate>`，同样算重建）；
+跑完 `git checkout` 恢复全部 5 个文件。计时是包住 cargo 子进程的
+`time.monotonic()` 墙钟。
+
+| 编辑的文件 | crate | `check -p` 中位 / 最大 | `check --workspace` 中位 / 最大 | `clippy -p` 中位 / 最大 | 稳态重查范围（第 2–5 轮） |
+|---|---|---|---|---|---|
+| `radian-permissions/src/shell.rs`（leaf） | radian-permissions | 0.179 s / 7.990 s | 1.185 s / 10.431 s | 0.250 s / 1.697 s | `-p` 1 个；workspace 4 个（permissions、host、agent-cli、tui） |
+| `radian-coding/src/read.rs`（mid） | radian-coding | 0.294 s / 4.724 s | 1.231 s / 1.290 s | 0.433 s / 1.583 s | `-p` 1 个；workspace 4 个（coding、host、agent-cli、tui） |
+| `radian-host/src/context.rs`（host） | radian-host | 0.448 s / 7.140 s | 1.113 s / 1.140 s | 0.699 s / 3.514 s | `-p` 1 个；workspace 3 个（host、agent-cli、tui） |
+| `radian-tui/src/startup.rs`（TUI） | radian-tui | 0.599 s / 1.123 s | 0.560 s / 0.588 s | 0.844 s / 6.109 s | `-p` 1 个；workspace 1 个（tui） |
+| `agent-core/src/turn.rs`（core） | agent-core | 0.242 s / 0.400 s | 1.584 s / 1.632 s | 0.325 s / 0.447 s | `-p` 1 个；workspace 13 个（core 之上全部） |
+
+**负载**：warm 前 1 分钟 load 13.7；各系列开始前 `uptime` 的 1 分钟 load 在
+22.7–47.3 之间（同一台机器上别的 agent 在编译，15 分钟 load 约 23–24）。
+第 2–5 轮彼此相差约 10% 以内，中位不受首轮离群影响；**最大值都是第 1 轮**：
+它是 `--all-targets` warm 后首次换 flag 集（特性统一变化导致第三方依赖重查，
+如 permissions 首轮重查 33 个单元）叠加 load 尖峰（首系列时 1 分钟 load 47.3），
+不是稳态。clippy 的最大值同样是首轮冷缓存（clippy driver 首次跑）。
+
+**这对"每次编辑同步跑"意味着什么**：模型每次编辑后要等的，是上面对应格的中位——
+单 crate 检查约 0.2–0.6 s，workspace 全查约 0.6–1.6 s（core 改动最大，1.58 s；
+TUI 改动最小，workspace 与 `-p` 都是约 0.6 s，因为它是没有下游的顶层），
+clippy 约 0.3–0.8 s。冷缓存或高负载尖峰下同一次检查可到 6–10 s（本轮量到的最大）。
+本节只给数字，不做 (a)/(b) 取舍的推荐。
