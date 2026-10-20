@@ -775,7 +775,7 @@ async fn the_shell_description_points_file_reading_and_searching_at_the_read_onl
         for wanted in [
             "Read files with `read` and `list`",
             "search with `grep` and `glob`",
-            "they run in parallel, while `shell` runs alone",
+            "run in parallel, while `shell` runs alone",
         ] {
             assert!(
                 spec.description.contains(wanted),
