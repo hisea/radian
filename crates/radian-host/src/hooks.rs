@@ -101,6 +101,7 @@ pub struct CommandHooks {
 impl CommandHooks {
     /// Builds the hooks from the resolved `[hooks]` section. Empty when the user configured
     /// nothing, in which case every method is a no-op.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: &HooksConfig,
         workspace: &Path,
