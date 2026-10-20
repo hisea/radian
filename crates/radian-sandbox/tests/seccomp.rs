@@ -162,11 +162,12 @@ fn foreign_arch_syscalls_fail_with_eperm_in_workspace() {
 #include <unistd.h>
 static int fails_eperm(long rc) { return rc == -1 && errno == EPERM; }
 int main(void) {
-    // 1. socketcall SYS_SOCKET via int 0x80 (arch AUDIT_ARCH_I386).
+    // 1. socketcall SYS_SOCKET via int 0x80 (arch AUDIT_ARCH_I386). Raw entry: the
+    // kernel returns -EPERM in the register and no glibc runs, so errno is untouched.
     long args[3] = { AF_UNIX, SOCK_STREAM, 0 };
     long fd;
     __asm__ volatile("int $0x80" : "=a"(fd) : "a"(102), "b"(1), "c"(args) : "memory");
-    if (!fails_eperm(fd)) { printf("socketcall: rc=%ld errno=%d\n", fd, errno); return 11; }
+    if (fd != -EPERM) { printf("socketcall: rc=%ld errno=%d\n", fd, errno); return 11; }
     // 2. the x32 socket number through the syscall instruction.
     errno = 0;
     long xfd = syscall(0x40000000L + 41, AF_UNIX, SOCK_STREAM, 0);
@@ -192,10 +193,10 @@ int main(void) {
         .arg(&bin)
         .arg(&src)
         .output();
-    let _ = std::fs::remove_dir_all(&dir);
     let built = match built {
         Ok(out) if out.status.success() && bin.exists() => bin,
         _ => {
+            let _ = std::fs::remove_dir_all(&dir);
             println!("radian-test: skipped foreign-arch: no working host cc");
             return;
         }
@@ -204,6 +205,7 @@ int main(void) {
     // writable under the sandbox; the binary itself lives outside).
     let ws_bin = sandbox.policy().workspace.join("arch_probe");
     std::fs::copy(&built, &ws_bin).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
     let run = |sandbox: &Sandbox| {
         sandbox
             .command(ws_bin.to_str().unwrap(), std::iter::empty::<&str>())
