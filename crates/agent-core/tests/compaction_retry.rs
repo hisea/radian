@@ -397,3 +397,126 @@ async fn each_summary_attempt_has_its_own_retry_budget() {
         "four summary calls, then the compacted conversation"
     );
 }
+
+/// ADR 0017 fix round 1: an empty summary (`""`) is NOT the conversation empty-retry. ADR 0018
+/// handles it itself — `check_summary` resends the original request once, immediately, and
+/// every summary attempt is recorded as `CompactionUsage`.
+#[tokio::test(start_paused = true)]
+async fn an_empty_summary_is_resent_once_without_a_backoff_and_both_attempts_are_billed() {
+    let model = ScriptedModel::new([
+        summary_reply("", 50),
+        summary_reply("short summary", 60),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = retrying_agent(model.clone(), 3);
+    let mut session = agent
+        .open_session_with_journal(big_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+    let started = tokio::time::Instant::now();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the retry committed");
+    assert!(
+        session.transcript()[0].text().contains("short summary"),
+        "the model summary committed: {}",
+        session.transcript()[0].text()
+    );
+    assert_eq!(
+        compacted_deterministic(&journal),
+        vec![false],
+        "the model summary committed, not the deterministic fallback"
+    );
+    // Two summary requests, then the compacted conversation.
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3, "two summaries, one conversation");
+    assert_eq!(
+        requests[0].messages, requests[1].messages,
+        "the second summary resends the original summary request (not a shorten request)"
+    );
+    // ADR 0018 billing: every summary attempt is recorded, even the empty one.
+    let billed: Vec<u64> = journal
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            JournalRecord::CompactionUsage { usage, .. } => usage.input,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        billed,
+        vec![50, 60],
+        "both summary attempts are recorded as CompactionUsage"
+    );
+    assert_eq!(model_retrying_count(&recorder), 0);
+    // The conversation empty-retry would have waited 2 s plus jitter; the controlled resend
+    // is immediate.
+    assert!(
+        tokio::time::Instant::now() - started < Duration::from_secs(2),
+        "the empty summary was resent immediately, with no retry backoff"
+    );
+}
+
+/// ADR 0017 fix round 1: a manual `/compact` whose two summaries are both `""` fails with
+/// `InvalidSummary` (ADR 0018), not with the conversation empty-retry's transport error.
+#[tokio::test(start_paused = true)]
+async fn two_empty_summaries_fail_a_manual_compact_with_invalid_summary() {
+    let model = ScriptedModel::new([summary_reply("", 50), summary_reply("", 60)]);
+    // `retries = 1`: on the old (buggy) path the two empties spend exactly the one retry and
+    // fail as `Summary(Transport("... (after 1 retry)"))`; on the fixed path the retry count
+    // is irrelevant — ADR 0018 resends once and reports `InvalidSummary`.
+    let agent = retrying_agent(model.clone(), 1);
+    let mut session = agent
+        .open_session_with_journal(
+            vec![
+                Message::user("x".repeat(200_000)),
+                Message::assistant("ok"),
+                Message::user("last"),
+            ],
+            Arc::new(RecordingJournal::new()),
+        )
+        .await
+        .unwrap();
+    let started = tokio::time::Instant::now();
+
+    let error = session
+        .compact_now(
+            None,
+            &CancellationToken::new(),
+            &Recorder::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    let CompactionFailure::Compaction(CompactionError::InvalidSummary(message)) = &error else {
+        panic!("expected InvalidSummary, not the empty-retry transport error: {error:?}");
+    };
+    assert!(
+        message.contains("empty"),
+        "the InvalidSummary names the empty summary: {message}"
+    );
+    assert_eq!(session.transcript_revision(), 0, "nothing committed");
+    let requests = model.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "the original request plus its one resend"
+    );
+    assert_eq!(
+        requests[0].messages, requests[1].messages,
+        "the resend is the original summary request"
+    );
+    assert!(
+        tokio::time::Instant::now() - started < Duration::from_secs(2),
+        "the resend was immediate, with no retry backoff"
+    );
+}

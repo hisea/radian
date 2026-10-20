@@ -12,6 +12,7 @@ use agent_core::{
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, message_item, output_item_done,
 };
+use agent_provider_openai_responses::{OpenAiResponsesConfig, build_client};
 use radian_host::oauth_chatgpt::Endpoints;
 use radian_host::{AuthStore, ChatGptModel, OAuthEntry};
 use serde_json::Value;
@@ -109,6 +110,7 @@ async fn headers_carry_originator_radian_and_the_account_id_from_the_token() {
             ("session_id".to_owned(), "sess-headers-test".to_owned()),
         ],
         reasoning_effort: None,
+        client: build_client(OpenAiResponsesConfig::new("", "").connect_timeout).unwrap(),
         endpoints: Endpoints::default(),
     };
 

@@ -387,7 +387,12 @@ impl SubagentSession {
             args.push("--thinking".into());
             args.push(thinking.clone());
         }
-        if let Some(mcp) = &self.parts.mcp_config {
+        // `explore` mounts exactly the four read-only tools, and MCP specs are never
+        // filtered by `--tools`: passing the parent's config would hand the child tools
+        // that can write. A `general` child keeps it — it runs the parent's own set.
+        if kind != Kind::Explore
+            && let Some(mcp) = &self.parts.mcp_config
+        {
             args.push("--mcp-config".into());
             args.push(mcp.clone());
         }

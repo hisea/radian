@@ -48,56 +48,36 @@ impl std::fmt::Debug for OpenAiResponses {
     }
 }
 
+/// Builds the HTTP client every [`OpenAiResponses`] sends through: the connect timeout the
+/// caller passes, the `radian/<version>` user agent, and no redirects (a redirect would
+/// resend the request, and the access token with it, elsewhere). [`OpenAiResponses::new`]
+/// builds this; a caller that supplies its own client ([`OpenAiResponses::with_client`], e.g.
+/// `ChatGptModel`, which keeps one client across calls) builds it here too, so the supplied
+/// client carries exactly these settings.
+pub fn build_client(connect_timeout: Duration) -> Result<Client, ConfigError> {
+    Client::builder()
+        .connect_timeout(connect_timeout)
+        .user_agent(concat!("radian/", env!("CARGO_PKG_VERSION")))
+        .redirect(redirect::Policy::none())
+        .build()
+        .map_err(|e| ConfigError::Client(e.without_url().to_string()))
+}
+
 impl OpenAiResponses {
     pub fn new(config: OpenAiResponsesConfig) -> Result<Self, ConfigError> {
-        let mut base = Url::parse(&config.base_url).map_err(|e| ConfigError::BaseUrl {
-            url: redact_url(&config.base_url),
-            reason: e.to_string(),
-        })?;
-        if !matches!(base.scheme(), "http" | "https") {
-            return Err(ConfigError::BaseUrl {
-                url: redact_url(&config.base_url),
-                reason: "the scheme must be http or https".into(),
-            });
-        }
-        let host = base.host_str().unwrap_or_default().to_owned();
-        if host.is_empty() {
-            return Err(ConfigError::BaseUrl {
-                url: redact_url(&config.base_url),
-                reason: "there is no host".into(),
-            });
-        }
-        // Every header here may carry the access token, so plain http is refused off-box.
-        if !config.headers.is_empty() && base.scheme() == "http" && !is_local_host(&host) {
-            return Err(ConfigError::InsecureHeaders { host });
-        }
-        // `join` would drop the last path segment of a base without a trailing slash.
-        let path = format!("{}/responses", base.path().trim_end_matches('/'));
-        base.set_path(&path);
+        let client = build_client(config.connect_timeout)?;
+        Self::with_client(config, client)
+    }
 
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        for (name, value) in &config.headers {
-            let header_name = HeaderName::from_bytes(name.as_bytes())
-                .map_err(|_| ConfigError::Header(name.clone()))?;
-            let mut header_value =
-                HeaderValue::from_str(value).map_err(|_| ConfigError::Header(name.clone()))?;
-            header_value.set_sensitive(true);
-            headers.insert(header_name, header_value);
-        }
-
-        let client = Client::builder()
-            .connect_timeout(config.connect_timeout)
-            .user_agent(concat!("radian/", env!("CARGO_PKG_VERSION")))
-            // A redirect would resend the request, and the access token with it, elsewhere.
-            .redirect(redirect::Policy::none())
-            .build()
-            .map_err(|e| ConfigError::Client(e.without_url().to_string()))?;
+    /// [`Self::new`], but over a caller-supplied client built by [`build_client`]. Every
+    /// other guarantee is the same: the base URL is validated, plain http refuses to carry
+    /// headers off-box, and header values are masked in errors.
+    pub fn with_client(config: OpenAiResponsesConfig, client: Client) -> Result<Self, ConfigError> {
+        let (endpoint, headers) = validated_endpoint_and_headers(&config)?;
         let secrets = secrets(&config.headers);
         Ok(Self {
             client,
-            endpoint: base,
+            endpoint,
             headers,
             config,
             secrets,
@@ -177,6 +157,50 @@ impl OpenAiResponses {
     }
 }
 
+/// The endpoint (`<base>/responses`) and the request headers for `config`, validated the
+/// same way for [`OpenAiResponses::new`] and [`OpenAiResponses::with_client`].
+fn validated_endpoint_and_headers(
+    config: &OpenAiResponsesConfig,
+) -> Result<(Url, HeaderMap), ConfigError> {
+    let mut base = Url::parse(&config.base_url).map_err(|e| ConfigError::BaseUrl {
+        url: redact_url(&config.base_url),
+        reason: e.to_string(),
+    })?;
+    if !matches!(base.scheme(), "http" | "https") {
+        return Err(ConfigError::BaseUrl {
+            url: redact_url(&config.base_url),
+            reason: "the scheme must be http or https".into(),
+        });
+    }
+    let host = base.host_str().unwrap_or_default().to_owned();
+    if host.is_empty() {
+        return Err(ConfigError::BaseUrl {
+            url: redact_url(&config.base_url),
+            reason: "there is no host".into(),
+        });
+    }
+    // Every header here may carry the access token, so plain http is refused off-box.
+    if !config.headers.is_empty() && base.scheme() == "http" && !is_local_host(&host) {
+        return Err(ConfigError::InsecureHeaders { host });
+    }
+    // `join` would drop the last path segment of a base without a trailing slash.
+    let path = format!("{}/responses", base.path().trim_end_matches('/'));
+    base.set_path(&path);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+    for (name, value) in &config.headers {
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| ConfigError::Header(name.clone()))?;
+        let mut header_value =
+            HeaderValue::from_str(value).map_err(|_| ConfigError::Header(name.clone()))?;
+        header_value.set_sensitive(true);
+        headers.insert(header_name, header_value);
+    }
+    Ok((base, headers))
+}
+
 impl Model for OpenAiResponses {
     async fn complete(
         &self,
@@ -218,6 +242,8 @@ impl OpenAiResponses {
                 retry_after,
             },
             ModelError::ContextOverflow(text) => ModelError::ContextOverflow(scrub(text)),
+            // The core's own fixed string; it carries no provider text to scrub.
+            ModelError::EmptyResponse => ModelError::EmptyResponse,
         }
     }
 }

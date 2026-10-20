@@ -222,12 +222,22 @@ pub enum ModelError {
     /// turn ends `failed`); the automatic-compaction retry is a later slice.
     #[error("model context overflow: {0}")]
     ContextOverflow(String),
+    /// The model returned a final answer with no tool calls and no visible text
+    /// (`stop_reason == EndTurn`). For an unattended run that is a false success, so the
+    /// core treats it as a transient failure: it is retried like any other transient error
+    /// and, once the retries are spent, fails the turn instead of completing it (ADR 0017).
+    /// Reasoning does not count — a reasoning-only answer is empty for the user.
+    #[error("the model returned an empty response")]
+    EmptyResponse,
 }
 
 impl ModelError {
     /// Whether the **same** request could succeed if it were sent again (ADR 0017).
     ///
     /// - [`ModelError::Unavailable`]: yes (408/429/5xx/529 and explicit overload).
+    /// - [`ModelError::EmptyResponse`]: yes. An empty final answer is never a success, and a
+    ///   later attempt of the same request can produce one, so it retries like any other
+    ///   temporary failure (ADR 0017).
     /// - [`ModelError::Transport`]: yes for a connection failure, a stream that ended early or
     ///   an idle timeout — **unless** it is the cancellation sentinel, which is never transient.
     /// - [`ModelError::Protocol`], [`ModelError::ContextOverflow`]: no. A 400/401/403/404, a
@@ -235,7 +245,7 @@ impl ModelError {
     ///   not the provider's mood; the overflow has its own path (ADR 0018).
     pub fn is_transient(&self) -> bool {
         match self {
-            ModelError::Unavailable { .. } => true,
+            ModelError::Unavailable { .. } | ModelError::EmptyResponse => true,
             ModelError::Transport(message) => message != CANCELLATION_MESSAGE,
             ModelError::Protocol(_) | ModelError::ContextOverflow(_) => false,
         }

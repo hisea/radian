@@ -281,3 +281,100 @@ async fn the_git_tools_never_run_a_repository_filter() {
         "git_diff must not run a repository filter in the host"
     );
 }
+
+/// ADR 0039 decision 3: a `.gitattributes` line the model can write (`*.txt diff=evil`)
+/// must not make the host `git_diff` run the driver's external command. That command runs
+/// with host privileges, so the test points it at a marker file outside the workspace and
+/// asserts the marker never appears — while the diff itself still shows the change. An
+/// external command's stdout replaces the diff, so the silent script below would also hide
+/// `+two` if it ever ran.
+#[tokio::test]
+async fn git_diff_never_runs_an_external_diff_command() {
+    let dir = TempDir::new("git-ext-diff");
+    let root = repo(&dir);
+    let marker = common::sentinel_outside(&dir).join("EXT-DIFF-RAN");
+    let script = root.join("evil-ext-diff.sh");
+    std::fs::write(&script, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(
+        &root,
+        &["config", "diff.evil.command", script.to_str().unwrap()],
+    );
+    std::fs::write(root.join(".gitattributes"), "*.txt diff=evil\n").unwrap();
+
+    let tools = tools(&root);
+    let diff = call(&tools, "git_diff", json!({})).await.expect("diff");
+    assert!(text(&diff).contains("+two"), "{}", text(&diff));
+    assert!(
+        !marker.exists(),
+        "git_diff must not run an external diff command in the host"
+    );
+
+    let stat = call(&tools, "git_diff", json!({"stat": true}))
+        .await
+        .expect("stat");
+    assert!(
+        text(&stat).contains("tracked.txt |"),
+        "the --stat summary: {}",
+        text(&stat)
+    );
+    assert!(
+        !marker.exists(),
+        "git_diff --stat must not run an external diff command in the host"
+    );
+}
+
+/// ADR 0039 decision 3, the textconv twin of the test above: `diff.<driver>.textconv` is
+/// the other command a `diff=` attribute can name, and it needs its own flag
+/// (`--no-textconv`). The converter swallows both blobs and prints one fixed line, so a
+/// run would both leave the marker and hide the change.
+#[tokio::test]
+async fn git_diff_never_runs_a_diff_textconv() {
+    let dir = TempDir::new("git-textconv");
+    let root = repo(&dir);
+    let marker = common::sentinel_outside(&dir).join("TEXTCONV-RAN");
+    let script = root.join("evil-textconv.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntouch {}\ncat >/dev/null\necho MANGLED\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(
+        &root,
+        &["config", "diff.evil.textconv", script.to_str().unwrap()],
+    );
+    std::fs::write(root.join(".gitattributes"), "*.txt diff=evil\n").unwrap();
+
+    let tools = tools(&root);
+    let diff = call(&tools, "git_diff", json!({})).await.expect("diff");
+    assert!(text(&diff).contains("+two"), "{}", text(&diff));
+    assert!(
+        !marker.exists(),
+        "git_diff must not run a diff textconv in the host"
+    );
+
+    let stat = call(&tools, "git_diff", json!({"stat": true}))
+        .await
+        .expect("stat");
+    assert!(
+        text(&stat).contains("tracked.txt |"),
+        "the --stat summary: {}",
+        text(&stat)
+    );
+    assert!(
+        !marker.exists(),
+        "git_diff --stat must not run a diff textconv in the host"
+    );
+}

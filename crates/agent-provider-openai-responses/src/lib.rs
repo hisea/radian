@@ -33,5 +33,5 @@ mod usage_limit;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use config::{ConfigError, OpenAiResponsesConfig, redact_url};
-pub use model::OpenAiResponses;
+pub use config::{ConfigError, DEFAULT_CONNECT_TIMEOUT, OpenAiResponsesConfig, redact_url};
+pub use model::{OpenAiResponses, build_client};
