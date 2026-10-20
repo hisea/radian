@@ -13,9 +13,10 @@
 //! - `PostToolUse` runs after each matching call's result, before it is committed. Exit 2
 //!   feeds the hook's stderr back to the model alongside the result; any other exit or a
 //!   timeout is a hook error and fails closed (the result is replaced with `hook_error`).
-//! - `Stop` runs once per turn end (see [`Hooks::on_turn_end`]). Exit 2 starts another
-//!   turn with the hook's stderr as a `System` `followup` through the inbox, at most
-//!   [`STOP_MAX_CONTINUATIONS`] consecutive continuations.
+//! - `Stop` runs once per completed turn (see [`Hooks::on_turn_end`]: only
+//!   [`RunStatus::Completed`] runs the hook; any other terminal status runs nothing).
+//!   Exit 2 starts another turn with the hook's stderr as a `System` `followup` through
+//!   the inbox, at most [`STOP_MAX_CONTINUATIONS`] consecutive continuations.
 //!
 //! The matcher names **Radian** tool names as exact names joined by `|` (a missing or
 //! empty matcher matches every tool); `Stop` ignores it. There is no runtime aliasing of
@@ -31,8 +32,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use agent_core::{
-    ContentPart, HookContext, HookError, Hooks, InputSource, Message, RunOutcome, ToolCall,
-    ToolDecision, ToolResult,
+    ContentPart, HookContext, HookError, Hooks, InputSource, Message, RunOutcome, RunStatus,
+    ToolCall, ToolDecision, ToolResult,
 };
 use radian_runtime::Inbox;
 use radian_sandbox::SandboxSlot;
@@ -124,9 +125,15 @@ impl CommandHooks {
 
     /// Runs one `Stop` cycle synchronously: every configured Stop hook in order; the first
     /// exit 2 opens another turn with its stderr as a `System` followup, unless the
-    /// continuation cap is already reached. [`Hooks::on_turn_end`] spawns this; tests drive
-    /// it directly so there is no timing involved.
-    pub async fn run_stop_once(&self) {
+    /// continuation cap is already reached. Only [`RunStatus::Completed`] runs the hook:
+    /// a cancelled, failed, or otherwise non-completed turn runs nothing (an exit-2 hook
+    /// after a user interrupt would otherwise open a turn the user just asked to end).
+    /// [`Hooks::on_turn_end`] spawns this with the outcome's status; tests drive it
+    /// directly so there is no timing involved.
+    pub async fn run_stop_once(&self, status: &RunStatus) {
+        if !matches!(status, RunStatus::Completed) {
+            return;
+        }
         if self.stop.is_empty() {
             return;
         }
@@ -569,17 +576,21 @@ impl Hooks for CommandHooks {
         Ok(())
     }
 
-    /// Every turn end runs the Stop hooks once, after `RunFinished` — normal, failed and
-    /// cancelled alike — and a hook asking for more (exit 2) opens another turn through the
-    /// inbox. The work spawns onto the session runtime so this sync callback never blocks a
-    /// turn.
-    fn on_turn_end(&self, _cx: &HookContext, _outcome: &RunOutcome) {
+    /// A completed turn runs the Stop hooks once, after `RunFinished`; any other terminal
+    /// status (cancelled, failed, budget, incomplete, refused, poisoned) runs nothing.
+    /// A hook asking for more (exit 2) opens another turn through the inbox. The work
+    /// spawns onto the session runtime so this sync callback never blocks a turn.
+    fn on_turn_end(&self, _cx: &HookContext, outcome: &RunOutcome) {
         if self.stop.is_empty() {
             return;
         }
+        if !matches!(outcome.status, RunStatus::Completed) {
+            return;
+        }
         let this = self.clone();
+        let status = outcome.status.clone();
         self.runtime.spawn(async move {
-            this.run_stop_once().await;
+            this.run_stop_once(&status).await;
         });
     }
 }
@@ -587,7 +598,7 @@ impl Hooks for CommandHooks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::CancellationToken;
+    use agent_core::{CancelReason, CancellationToken};
     use std::sync::Mutex;
 
     static N: AtomicU32 = AtomicU32::new(0);
@@ -955,7 +966,7 @@ mod tests {
         };
         let fixture = plain(&config);
         for _ in 0..5 {
-            fixture.hooks.run_stop_once().await;
+            fixture.hooks.run_stop_once(&RunStatus::Completed).await;
         }
         assert_eq!(fixture.hooks.stop_wakes(), 3);
         // `claim_next_turn` is non-blocking: three followups are there to take.
@@ -983,8 +994,50 @@ mod tests {
         );
         // A user message restarts the budget.
         fixture.hooks.reset_wakes();
-        fixture.hooks.run_stop_once().await;
+        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
         assert_eq!(fixture.hooks.stop_wakes(), 1);
+    }
+
+    /// A cancelled turn runs no Stop hook: an exit-2 hook after a user interrupt must not
+    /// open another turn.
+    #[tokio::test]
+    async fn stop_does_not_run_on_a_cancelled_turn() {
+        let config = HooksConfig {
+            stop: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![hook("echo keep-going >&2; exit 2")],
+            }],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        fixture
+            .hooks
+            .run_stop_once(&RunStatus::Cancelled(CancelReason::Requested))
+            .await;
+        assert_eq!(fixture.hooks.stop_wakes(), 0);
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "a cancelled turn starts no new turn"
+        );
+    }
+
+    /// A failed turn runs no Stop hook either.
+    #[tokio::test]
+    async fn stop_does_not_run_on_a_failed_turn() {
+        let config = HooksConfig {
+            stop: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![hook("echo keep-going >&2; exit 2")],
+            }],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        fixture.hooks.run_stop_once(&RunStatus::Failed).await;
+        assert_eq!(fixture.hooks.stop_wakes(), 0);
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "a failed turn starts no new turn"
+        );
     }
 
     /// `Stop` exit 0 ends the turn with no followup.
@@ -998,7 +1051,7 @@ mod tests {
             ..HooksConfig::default()
         };
         let fixture = plain(&config);
-        fixture.hooks.run_stop_once().await;
+        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
         assert_eq!(fixture.hooks.stop_wakes(), 0);
         assert!(
             fixture.inbox.claim_next_turn().await.is_none(),
