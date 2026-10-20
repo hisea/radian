@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use radian_coding::{JobEvent, JobState, Jobs, OUTPUT_HINT};
-use radian_host::job_notify::{JobNotifier, MAX_CONSECUTIVE_WAKES, orphan_jobs};
+use radian_host::job_notify::{JobNotifier, orphan_jobs};
+use radian_host::wake_gate::{MAX_WAKES_PER_WINDOW, WAKE_WINDOW};
 use radian_runtime::{Inbox, Lane};
 use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
 use radian_session::{EventData, RuntimeEvent, Session, SessionCreatedData, SessionJournal};
@@ -52,6 +53,8 @@ fn notifier(dir: &Path) -> (Arc<JobNotifier>, Arc<Jobs>, Arc<Inbox>, Arc<AtomicB
         Arc::clone(&turn_running),
         // The live runtime-event sink: these tests do not read it.
         Arc::new(|_: &RuntimeEvent| {}),
+        // The wake-budget notice: most tests below do not read it.
+        Arc::new(|_: &str| {}),
     );
     (notifier, jobs, inbox, turn_running)
 }
@@ -93,6 +96,7 @@ async fn start_and_settle_reach_the_live_runtime_sink() {
                 .unwrap_or_else(|e| e.into_inner())
                 .push((event.name().to_string(), job_id_of(event)));
         }),
+        Arc::new(|_: &str| {}),
     );
     notifier
         .deliver(JobEvent::Started {
@@ -187,56 +191,114 @@ async fn busy_injects_and_idle_wakes() {
     );
 }
 
-/// After `MAX_CONSECUTIVE_WAKES` wake-started turns the next settle is injected only, and a
-/// user message resets the budget.
+/// A worker doing round after round of "background job -> wake -> handle" with realistic
+/// spacing is never degraded: six wakes minutes apart all open a turn. (The old per-message
+/// count of 3 would stop this chain at the fourth round.)
 #[tokio::test]
-async fn the_wake_cap_degrades_to_inject_and_a_user_message_resets_it() {
-    let dir = scratch("cap");
+async fn a_worker_chain_of_six_wakes_is_never_degraded() {
+    tokio::time::pause();
+    let dir = scratch("rate-chain");
     let (notifier, _jobs, inbox, _) = notifier(&dir);
 
-    for i in 0..MAX_CONSECUTIVE_WAKES {
+    for i in 0..6 {
         notifier.deliver(settled(&format!("job-{i}"), true)).await;
+        assert!(
+            inbox.claim_next_turn().await.is_some(),
+            "round {i}: the wake opens a turn"
+        );
+        // Realistic spacing: the job ran minutes before its notice woke a turn.
+        tokio::time::advance(Duration::from_secs(180)).await;
     }
-    assert_eq!(notifier.wakes(), MAX_CONSECUTIVE_WAKES);
-    let wake_lane = lanes(&inbox)
-        .await
-        .iter()
-        .filter(|l| **l == Lane::NextTurn)
-        .count();
-    let inject_lane = lanes(&inbox)
-        .await
-        .iter()
-        .filter(|l| **l == Lane::NextStep)
-        .count();
-    assert_eq!(
-        wake_lane, MAX_CONSECUTIVE_WAKES as usize,
-        "the first {MAX_CONSECUTIVE_WAKES} wakes use the waking lane"
+    assert!(
+        notifier.wakes() <= MAX_WAKES_PER_WINDOW,
+        "a minutes-apart chain never fills the window: {}",
+        notifier.wakes()
     );
-    assert_eq!(inject_lane, 0);
+}
 
-    notifier.deliver(settled("job-cap", true)).await;
-    assert_eq!(
-        lanes(&inbox)
-            .await
-            .iter()
-            .filter(|l| **l == Lane::NextStep)
-            .count(),
-        1,
-        "the settle past the cap is injected only"
+/// A self-exciting loop (a job that ends at once whose turn only starts the next job,
+/// wake gaps ~1 s) is degraded after N wakes: the next settle wakes nothing and is
+/// injected only.
+#[tokio::test]
+async fn a_self_exciting_loop_is_degraded_after_n_wakes() {
+    tokio::time::pause();
+    let dir = scratch("rate-loop");
+    let (notifier, _jobs, inbox, _) = notifier(&dir);
+
+    for i in 0..MAX_WAKES_PER_WINDOW {
+        notifier.deliver(settled(&format!("job-{i}"), true)).await;
+        assert!(
+            inbox.claim_next_turn().await.is_some(),
+            "wake {i}: the loop still wakes while the budget lasts"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    assert_eq!(notifier.wakes(), MAX_WAKES_PER_WINDOW);
+
+    notifier.deliver(settled("job-past-the-gate", true)).await;
+    assert!(
+        inbox.claim_next_turn().await.is_none(),
+        "past the gate: the settle wakes no turn"
     );
+    assert!(
+        inbox.claim_next_step().await.is_some(),
+        "past the gate: the settle is injected only (the degrade branch)"
+    );
+    assert_eq!(notifier.wakes(), MAX_WAKES_PER_WINDOW);
+}
+
+/// The window recovers with no user message: once the oldest wakes age out, settles wake
+/// turns again.
+#[tokio::test]
+async fn the_window_recovers_with_no_user_message() {
+    tokio::time::pause();
+    let dir = scratch("rate-recover");
+    let (notifier, _jobs, inbox, _) = notifier(&dir);
+
+    for i in 0..MAX_WAKES_PER_WINDOW {
+        notifier.deliver(settled(&format!("job-{i}"), true)).await;
+        assert!(inbox.claim_next_turn().await.is_some());
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    notifier.deliver(settled("job-capped", true)).await;
+    assert!(
+        inbox.claim_next_turn().await.is_none(),
+        "the gate is full before the window passes"
+    );
+    assert!(inbox.claim_next_step().await.is_some());
+
+    // No user message: the window passing alone reopens the gate.
+    tokio::time::advance(WAKE_WINDOW + Duration::from_secs(1)).await;
+    notifier.deliver(settled("job-after-window", true)).await;
+    assert!(
+        inbox.claim_next_turn().await.is_some(),
+        "after the window: the settle wakes a turn again"
+    );
+    assert_eq!(notifier.wakes(), 1);
+}
+
+/// A user message still resets the budget at once (ADR 0037 decision 3's reset survives
+/// the rate gate).
+#[tokio::test]
+async fn a_user_message_still_resets_the_budget() {
+    tokio::time::pause();
+    let dir = scratch("rate-reset");
+    let (notifier, _jobs, inbox, _) = notifier(&dir);
+
+    for i in 0..3 {
+        notifier.deliver(settled(&format!("job-{i}"), true)).await;
+        assert!(inbox.claim_next_turn().await.is_some());
+    }
+    assert_eq!(notifier.wakes(), 3);
 
     notifier.reset_wakes();
     assert_eq!(notifier.wakes(), 0);
     notifier.deliver(settled("job-after-user", true)).await;
-    assert_eq!(
-        lanes(&inbox)
-            .await
-            .iter()
-            .filter(|l| **l == Lane::NextTurn)
-            .count(),
-        MAX_CONSECUTIVE_WAKES as usize + 1,
+    assert!(
+        inbox.claim_next_turn().await.is_some(),
         "a user message restarts the wake budget"
     );
+    assert_eq!(notifier.wakes(), 1);
 }
 
 /// A settle the model already has (`notify: false`: a `job` wait, a `job` kill, a
@@ -453,6 +515,7 @@ async fn an_ended_session_releases_its_journal() {
         Arc::new(AtomicBool::new(false)),
         // The live runtime-event sink: this test only watches the registry drop.
         Arc::new(|_: &RuntimeEvent| {}),
+        Arc::new(|_: &str| {}),
     );
     notifier.spawn(&tokio::runtime::Handle::current());
     // The session ends: the host drops its notifier and its registry.
@@ -469,4 +532,95 @@ async fn an_ended_session_releases_its_journal() {
         "the subscriber task still holds the journal: {} references",
         Arc::strong_count(&journal)
     );
+}
+
+/// A later wake ends the degrade burst: the woken turn absorbs the waiting injects, so
+/// the degraded count clears with the turn, not only on a user message.
+#[tokio::test]
+async fn a_later_wake_ends_the_degrade_burst() {
+    tokio::time::pause();
+    let dir = scratch("rate-burst-end");
+    let (notifier, _jobs, inbox, _) = notifier(&dir);
+
+    for i in 0..MAX_WAKES_PER_WINDOW {
+        notifier.deliver(settled(&format!("job-{i}"), true)).await;
+        assert!(inbox.claim_next_turn().await.is_some());
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    notifier.deliver(settled("job-d1", true)).await;
+    notifier.deliver(settled("job-d2", true)).await;
+    assert_eq!(notifier.degraded(), 2);
+
+    // The window passes and a later wake lands: the burst is over.
+    tokio::time::advance(WAKE_WINDOW + Duration::from_secs(1)).await;
+    notifier.deliver(settled("job-after-window", true)).await;
+    assert!(inbox.claim_next_turn().await.is_some());
+    assert_eq!(notifier.degraded(), 0);
+}
+
+/// A settle past the gate is injected with the degrade mark, counted, and announced:
+/// the durable `InboxEnqueued` says `degraded`, and the wake notice carries the count
+/// since the last wake.
+#[tokio::test]
+async fn a_degraded_notice_writes_the_marked_record_and_announces_it() {
+    use std::sync::Mutex;
+    let dir = scratch("degraded");
+    let journal = journal(&dir);
+    let inbox = Inbox::durable(64, Arc::clone(&journal));
+    let notices: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let notices_in = Arc::clone(&notices);
+    let notifier = JobNotifier::new(
+        Arc::new(Jobs::new(dir.join("jobs"))),
+        Arc::clone(&inbox),
+        journal,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(|_: &RuntimeEvent| {}),
+        Arc::new(move |line: &str| {
+            notices_in
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(line.to_owned());
+        }),
+    );
+
+    tokio::time::pause();
+    for _ in 0..MAX_WAKES_PER_WINDOW {
+        notifier.deliver(settled("job-fill", true)).await;
+        // Each woken turn absorbs the queue; the test drains it like the driver would.
+        assert!(inbox.claim_next_turn().await.is_some());
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    notifier.deliver(settled("job-d1", true)).await;
+    notifier.deliver(settled("job-d2", true)).await;
+    assert_eq!(notifier.degraded(), 2);
+
+    // The waking followups record no degrade; the two degraded injects do.
+    let session = Session::open(dir.join("s.jsonl")).unwrap();
+    let degraded: Vec<bool> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::InboxEnqueued { degraded, .. } => Some(*degraded),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        degraded,
+        [vec![false; MAX_WAKES_PER_WINDOW as usize], vec![true, true]].concat()
+    );
+
+    // Every degrade fires the wake notice with the count since the last wake.
+    assert_eq!(
+        *notices.lock().unwrap_or_else(|e| e.into_inner()),
+        vec![
+            "wake budget used up: 1 job notices are waiting — send any message to continue"
+                .to_owned(),
+            "wake budget used up: 2 job notices are waiting — send any message to continue"
+                .to_owned(),
+        ]
+    );
+
+    // A user message restarts the count with the budget.
+    notifier.reset_wakes();
+    assert_eq!(notifier.degraded(), 0);
 }

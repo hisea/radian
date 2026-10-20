@@ -188,6 +188,9 @@ pub struct HostBindings {
     /// A command hook's warning line (ADR 0045: refused `allow`/`ask`, unparsable stdout,
     /// hook errors outside a turn). Routed like `memory_warning`, with the `[hooks]` prefix.
     pub hooks_warning: Arc<dyn Fn(&str) + Send + Sync>,
+    /// A wake-budget degrade's notice line (one per degrade; the TUI shows a single line
+    /// per burst and reports `blocked` with the `wake budget` label while they wait).
+    pub wake_warning: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).
