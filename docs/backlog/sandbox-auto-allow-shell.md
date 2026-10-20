@@ -20,6 +20,8 @@ workspace 与 full 两档 shell 都是 `ask`（`crates/radian-permissions/src/pr
 
 **片 1：沙箱内 shell 由 `ask` 改 `allow`。** 条件三个同时成立：档位是 workspace；这次调用会在沙箱里执行（探针成功的本地后端，或 0016 的 `inherited`）；没有 `deny` 规则命中（`deny` 永远最先）。full 档不变（没有沙箱，shell 仍 `ask`）。命令因沙箱被拒时（写工作区外或 `.git`、读禁读清单、连网被拒、Unix socket 被拒），工具结果里带一个固定标记 `sandbox denied: <类别>`，由沙箱层按 errno 与路径分类；分不清的照常当命令自己失败。模型要越界时显式带 `outside_sandbox: true` 和理由再调一次 shell，这一次走 `ask`；无头会话里 `ask` 仍按拒绝处理。**绝不自动在沙箱外重跑。** subagent 子进程继承父的档位（0043 1a），自然得到同一条规则，不另写代码。MCP 在 workspace 档仍是 `ask`，本项不动。
 
+片 1 已在本分支（`dogfood/sandbox-allow-shell-1`）落地：`workspace` profile 在沙箱建好之后按其有效状态静态生成（沙箱内 `allow`、无沙箱 `ask`，fail closed；见 0012），`shell` 多 `outside_sandbox`/`outside_sandbox_reason` 参数（越界走 `ask`、批后只那一次不套沙箱跑、前台、无理由拒绝、与 `background` 合用拒绝；见 0012、0043 §3 与 `docs/sandbox.md` 的标记表）。复合命令仍逐段问（只有具名用户 `allow` 规则与只读表能覆盖段落，档位的 blanket `allow` 不行），所以片 2 的前缀授权仍有对象。片 2 不在片 1 内，仍待做。
+
 **片 2：会话授权按前缀。** "本次会话允许"从 (tool, 完整命令串) 放宽到 (tool, 命令前缀)，只对 `crates/radian-permissions/README.md` 定义的"简单命令"生效；复合命令、`eval`、`source`、管道照旧按完整串匹配或 `ask`。前缀授权只存在用户级记录（`~/.radian/access/`），不进项目 `config.toml`：0012 的来源规则是项目只能收窄，放行不能来自项目。禁止清单（永远 `ask` 的前缀，如 `git push`、`rm -rf`）随 ADR 定。
 
 ## ADR 改动（docs-only commit，与代码同分支）

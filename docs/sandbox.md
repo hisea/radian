@@ -9,11 +9,28 @@
 **消费者（2026-10-12，Phase 3 shell 切片）：** `radian-coding` 的 `shell` 工具是第一个消费者
 （`CodingTools::with_sandbox`）；没有 `Sandbox` 时它根本不注册。三点值得记在这里：① `FullAccess`
 下后端是透明的（不探测、不包裹），但 shell 工具仍自己按 `allow_env` 清环境——**full 是
-“文件系统/网络不设限”，不是“把宿主环境交给模型控制的 shell”**；**full 不放开环境变量白名单**
+"文件系统/网络不设限"，不是"把宿主环境交给模型控制的 shell"**；**full 不放开环境变量白名单**
 ＼�。② 进程组清理：shell 工具用 `setsid` 让子进程自成会话与进程组
 （没有控制终端），超时/取消/leader 退出都杀整组（ADR 0016 取代了原先的 `process_group(0)`）。
 ③ 输出截断也是 shell 工具自己的策略：每流独立预算、保留头尾（尾部更大，因为失败命令的错误在
 末尾）、边读边丢，沙箱不参与。
+
+## 沙箱拒绝标记（片 1，2026-10-20）
+
+命令因沙箱被拒时，`shell` 工具的结果里带固定标记 `sandbox denied: <类别>`（正文一行，
+structured 里是 `sandbox_denied`）。分类在沙箱层按 errno 文本与策略路径做，分不清的当
+命令自己失败（没有标记；多标不如不标）：
+
+| 类别 | 含义 | Linux（bwrap + seccomp，已测） | macOS（seatbelt，预期、未在本机测） |
+|---|---|---|---|
+| `filesystem-write` | 写工作区外 | `EROFS`/`EACCES` | deny 规则 → `EPERM` |
+| `git` | 写受保护的 `.git` 条目 | `EROFS`/`EACCES` 且命令提到发现到的 git 路径 | deny 规则 → `EPERM` |
+| `sensitive-read` | 读禁读清单 | 遮住的目录 `ENOENT`（文件被盖成 `/dev/null`，读到空而不失败，无标记） | deny 规则 → `EPERM` |
+| `network` | 联网被拒 | `ENETUNREACH`（关网时；`workspace` 默认开网） | deny 规则 → `EPERM`（预期） |
+| `unix-socket` | Unix socket 被拒 | seccomp 拒 `socket(AF_UNIX, …)` 与 `io_uring_setup`，`EPERM` | 出站 unix-socket 拒绝（预期） |
+
+路径匹配优先于裸 errno（`EPERM` 既可能是 seccomp 的 socket 拒绝，也可能是 seatbelt
+的读拒绝）；`inherited` 后端不做分类（外层说了算，见上）。
 
 **ADR 0016（2026-10-13）：** `workspace` 档位改为**开网**（出站与本机回环 connect/bind/listen），
 并放开 **pty**（`/dev/ptmx` 与 `/dev/ttys[0-9]+` 的写与 `file-ioctl`，后者**只**对这两类路径）。shell 工具用 `setsid` 让受约束命令没有控制终端，配合内核的
