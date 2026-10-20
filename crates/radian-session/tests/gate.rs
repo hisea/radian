@@ -25,6 +25,7 @@ fn inbox_event(text: &str) -> RuntimeEvent {
         lane: InboxLane::NextTurn,
         source: InputSource::User,
         wake: true,
+        degraded: false,
     }
 }
 
