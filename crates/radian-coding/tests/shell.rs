@@ -1396,8 +1396,11 @@ async fn sandbox_denial_marks_a_masked_sensitive_read() {
     );
 }
 
-/// The seccomp filter denies `socket(AF_UNIX, …)` with EPERM: marked `unix-socket`.
-/// Skips without a backend or without python3.
+/// A Unix-socket connect the sandbox denies is marked `unix-socket`. On Linux the
+/// seccomp filter denies `socket(AF_UNIX, …)` itself; on macOS creating the socket
+/// succeeds and only the connect is denied, so the probe connects to a listener held
+/// outside the sandbox (a missing path would fail with ENOENT there instead, which is
+/// honestly unmarked). Skips without a backend or without python3.
 #[tokio::test]
 async fn sandbox_denial_marks_a_unix_socket() {
     let dir = TempDir::new("shell-denied-socket");
@@ -1413,10 +1416,21 @@ async fn sandbox_denial_marks_a_unix_socket() {
         eprintln!("skipping: no python3 in the sandbox");
         return;
     }
+    // A listener outside the sandbox, under `/tmp` for the ~104-byte AF_UNIX path
+    // limit; the sandboxed command connects to its canonical path.
+    let sock_path =
+        std::env::temp_dir().join(format!("radian-deny-sock-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock_path);
+    #[cfg(unix)]
+    let _listener = std::os::unix::net::UnixListener::bind(&sock_path).expect("bind a listener");
+    let sock_path = std::fs::canonicalize(&sock_path).expect("canonical socket path");
     let output = call(
         &confined,
         "shell",
-        json!({"command": "python3 -c 'import socket; socket.socket(socket.AF_UNIX)'"}),
+        json!({"command": format!(
+            "python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.connect(\"{}\")'",
+            sock_path.display()
+        )}),
     )
     .await
     .expect("the tool ran (and the command failed)");
