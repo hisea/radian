@@ -118,6 +118,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         &radian_runtime::Inbox::new(64),
         &tokio::runtime::Handle::current(),
         Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
     ));
     let hooks = session_hooks(role, permissions, commands, memory, skills_hooks, facts);
     let mut request = ModelRequest {

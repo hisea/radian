@@ -70,6 +70,15 @@ EXPECT = {
         inbox_wake=[(1, True), (2, None)],
         repair={},
     ),
+    "inbox-degraded.jsonl": dict(
+        outcome="accept",
+        events=3,
+        skips=[],
+        # 唤醒预算的降级注入：`degraded` 是可选字段。(seq, degraded)——一条降级记
+        # 录带 `true`，一条旧记录两个字段都没有（按 `false` 读）。
+        inbox_degraded=[(1, True), (2, None)],
+        repair={},
+    ),
     "memory-injected.jsonl": dict(
         outcome="accept",
         events=6,
@@ -704,6 +713,23 @@ def check_fixture(name, exp):
             raise Corruption(f"{name}: 期望至少一条旧记录（没有 wake 字段）")
         if not any(isinstance(wake, bool) for _, wake in got):
             raise Corruption(f"{name}: 期望至少一条带布尔 wake 的记录")
+    if "inbox_degraded" in exp:
+        # 唤醒预算的降级注入（ADR 0006 §5.5）：`degraded` 是 InboxEnqueued 的**可选**
+        # 字段，缺省即旧记录（不是降级）。这里逐条钉住带字段与缺字段两种形状，并检查类型。
+        got = []
+        for e in events:
+            if e["event"] != "InboxEnqueued":
+                continue
+            data = e["data"]
+            if "degraded" in data and not isinstance(data["degraded"], bool):
+                raise Corruption(f"{name}: seq {e['seq']}: InboxEnqueued.degraded 不是布尔值")
+            got.append((e["seq"], data.get("degraded")))
+        if got != [tuple(x) for x in exp["inbox_degraded"]]:
+            raise Corruption(f"{name}: inbox_degraded {got} != 期望 {exp['inbox_degraded']}")
+        if not any(degraded is None for _, degraded in got):
+            raise Corruption(f"{name}: 期望至少一条旧记录（没有 degraded 字段）")
+        if not any(degraded is True for _, degraded in got):
+            raise Corruption(f"{name}: 期望至少一条带 degraded:true 的降级记录")
     if "approval_changed" in exp:
         changed = [
             (e["seq"], e["data"].get("policy"))

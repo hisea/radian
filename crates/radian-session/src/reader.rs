@@ -132,6 +132,9 @@ pub enum EventData {
         /// revision 1). Absent in an old file; the reader derives it from the lane
         /// (`next_turn` true, `next_step` false), which is today's behaviour.
         wake: bool,
+        /// Whether the input is a wake-gate degrade (ADR 0006 §5.5). Absent in an old
+        /// file; the reader defaults it to `false`.
+        degraded: bool,
     },
     InputClaimed {
         message_ids: Vec<MessageId>,
@@ -724,6 +727,7 @@ impl LineScanner {
                     // (this is exactly today's behaviour: a `next_turn` opens a turn, a
                     // `next_step` entry waits).
                     wake: d.wake.unwrap_or(d.lane == InboxLane::NextTurn),
+                    degraded: d.degraded,
                 }
             }
             "InputClaimed" => {
@@ -1169,6 +1173,9 @@ struct InboxEnqueuedData {
     /// resolved from the lane, so an old session's semantics do not change.
     #[serde(default)]
     wake: Option<bool>,
+    /// A wake-gate degrade (ADR 0006 §5.5): optional on disk, absent is `false`.
+    #[serde(default)]
+    degraded: bool,
 }
 
 #[derive(Deserialize)]

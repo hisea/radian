@@ -33,8 +33,6 @@
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
 | `remove-git-diff.md` | decided（`shell-readonly-allow` 之后） | 0043、0039、0028、0012 | 删 `git_diff`（模型 12:1 走 shell），留一个版本的别名；shell 里的 git 要不要注入加固配置待决 |
-| `wake-cap-unattended.md` | decided（与 exec-waits-for-jobs 一起落地） | 0037、0011、0034、0032/0044 | 唤醒上限数的是「每条用户消息 3 次唤醒」而不是自激，正常 worker 第四个后台 job 就停住且无提示；换成按速率的闸门、到顶时 TUI/herdr/journal 可见、`exec -p` 到顶就结束并报告；和 `exec-waits-for-jobs.md` 一起定 |
-| `exec-waits-for-jobs.md` | decided（选 (a)） | 0037、0044、0032 | `radian exec -p` 一轮结束就退出，后台 job 随之被杀（夜间 LXC worker 的 Verify 因此中断）；候选：等 job 并按 0037 唤醒、`-p` 禁后台、只改提示 |
 | `mcp-servers-json.md` | decided（生态 2/4） | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门、按内容哈希确认，确认即批准其 server（一道门）；缺省 `inherit_env=["HOME"]`；环境白名单不变；MCP 文本结果套 `read` 的 64 KiB 上限并带截断标记 |
 | `command-hooks-claude-subset.md` | decided（生态 3/4） | 新 ADR；0012、0031、0011、0017、0016 | 外部命令 hook 只做 `PreToolUse`/`PostToolUse`/`Stop`，配置与 stdin 用 Claude/Codex 的子集，`allow`/`ask` 拒收，用户级 `[hooks]`、项目级 `.radian/hooks.json` 进信任门，工具名只在导入时翻译；吸收总报告第 17 条；编辑后检查是项目级 `PostToolUse`：配了才跑、同步每次、不批处理不延后、不内置不自动启用（本机数据：92% 的编辑消息只有一次编辑、跨轮段平均 1.83） |
 | `import-claude.md` | decided（生态 4/4） | 新 ADR；0029、0008、0025、0031 | `radian config import-claude` 一次性翻译，来源哪一级产物落哪一级， commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话与 memory；依赖前两条与 project-skills |
@@ -45,7 +43,6 @@
 | `tui-copy-command.md` | decided（第一档） | 0027、0028 | `/copy` 复制最近一条已提交 assistant 的 markdown 源；`/copy code` 取最后一个代码块 |
 | `tui-retry-command.md` | decided（第一档） | 0017、0011、0003 | `/retry` 在模型错误结束后重发上一条用户消息 |
 | `tui-bell.md` | decided（第一档） | 0027、0024、0008、0037 | `tui.bell = off|attention|all`（缺省 off）：审批/提问/回合结束发 BEL |
-| `skill-init-review.md` | decided | 0025、0036、0043 | 内建 skill `init`（核实命令后写 AGENTS.md）与 `review`（shell 取 diff、并行 `general` 子会话、P0–P3 合并）；只走 `/skill:` 形式 |
 | `tui-loop-continuation.md` | decided | 0011、0005、0037、0027、0023、0017 | 续跑引擎第一、二步：`/loop [--every] [--times] [--for] [prompt]` 轮末重投，`User` 来源 + meta，缺省上限 20 次/1 h，不计唤醒闸门 |
 | `goal-mode.md` | decided（依赖 tui-loop-continuation） | 新 ADR；0018、0036、0011、0005、0043、0037、0034、0006、0022 | `/goal` 持久目标 + `goal {progress\|done\|wait}` 工具 + 预算；目标块确定性注入不进摘要；resume 后 paused；`exec -p --goal` 待决 |
 | `tui-inspector-panel.md` | decided（mcp 页等 mcp-servers-json） | 0023、0035、0037、0043、0045、0027 | 一个带标签页的 Overlay：`jobs | tools | mcp | hooks`，`/panel` 总入口，只读除杀 job，文本形式保留 |
