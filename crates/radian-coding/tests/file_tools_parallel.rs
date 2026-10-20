@@ -181,4 +181,3 @@ fn two_globs_in_one_batch_overlap() {
         );
     });
 }
-
