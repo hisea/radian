@@ -878,7 +878,12 @@ async fn pty_mounts_only_the_builtin_tools() {
         ],
         "the exact tool set of a fresh TUI session: {names:?}"
     );
-    for gone in ["git_status", "memory_search", "memory_save", "memory_revise"] {
+    for gone in [
+        "git_status",
+        "memory_search",
+        "memory_save",
+        "memory_revise",
+    ] {
         assert!(
             !names.iter().any(|name| name == gone),
             "`{gone}` must not be advertised: {names:?}"

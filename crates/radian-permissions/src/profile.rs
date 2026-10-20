@@ -269,7 +269,9 @@ fn canonical_workspace(path: &Path) -> Result<PathBuf, ProfileError> {
 fn memory_rules() -> Vec<Rule> {
     [("memory_search", Action::Allow)]
         .into_iter()
-        .map(|(name, action)| Rule::new(ToolMatcher::Name(name.into()), ResourceMatcher::Any, action))
+        .map(|(name, action)| {
+            Rule::new(ToolMatcher::Name(name.into()), ResourceMatcher::Any, action)
+        })
         .collect()
 }
 

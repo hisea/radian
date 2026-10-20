@@ -151,20 +151,21 @@ pub async fn open_session(
     // exceeds the injection budget — what fits in the fixed block needs no search. The view
     // is the fixed block's (Project when linked, then Global); the decision is once per
     // session. A read failure warns and mounts nothing (invariant 2), never failing the open.
-    let memory_tools = memory.as_ref().and_then(|service| {
-        match service.list(ScopeSelection::Default, false) {
-            Ok(view) if exceeds_budget(&view, &injection_config) => {
-                Some(MemoryTools::new(service.clone()))
-            }
-            Ok(_) => None,
-            Err(error) => {
-                memory_warning(&format!(
-                    "memory read failed; `memory_search` is not mounted: {error}"
-                ));
-                None
-            }
-        }
-    });
+    let memory_tools =
+        memory.as_ref().and_then(
+            |service| match service.list(ScopeSelection::Default, false) {
+                Ok(view) if exceeds_budget(&view, &injection_config) => {
+                    Some(MemoryTools::new(service.clone()))
+                }
+                Ok(_) => None,
+                Err(error) => {
+                    memory_warning(&format!(
+                        "memory read failed; `memory_search` is not mounted: {error}"
+                    ));
+                    None
+                }
+            },
+        );
     let memory_notice = memory_notice(&memory, &injection_config);
     radian_session::trace::took("open/memory", t0);
     let mcp = McpToolProvider::new(servers);

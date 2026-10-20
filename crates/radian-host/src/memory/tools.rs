@@ -141,7 +141,9 @@ fn tool_failure(error: MemoryServiceError) -> ToolFailure {
         ),
         MemoryServiceError::NotAProjectWorkspace { .. } => ToolFailure::new(
             "not_a_project_workspace",
-            format!("{error}. Either ask the user to run `radian memory project new` here, or do not save it"),
+            format!(
+                "{error}. Either ask the user to run `radian memory project new` here, or do not save it"
+            ),
         ),
         MemoryServiceError::Storage(storage @ radian_memory::MemoryError::NotFound { .. }) => {
             ToolFailure::new("not_found", storage.to_string())
@@ -381,12 +383,7 @@ mod tests {
         let (dir, service) = service("search");
         service.create_project().unwrap();
         let user = service
-            .add(
-                WriteScope::Project,
-                Kind::Fact,
-                None,
-                "prefers tabs".into(),
-            )
+            .add(WriteScope::Project, Kind::Fact, None, "prefers tabs".into())
             .unwrap();
         assert_eq!(user.source, Source::User);
         let session = session(service.clone()).await;
@@ -454,12 +451,7 @@ mod tests {
         service.create_project().unwrap();
         for n in 0..3 {
             service
-                .add(
-                    WriteScope::Project,
-                    Kind::Fact,
-                    None,
-                    format!("record {n}"),
-                )
+                .add(WriteScope::Project, Kind::Fact, None, format!("record {n}"))
                 .unwrap();
         }
         let session = session(service).await;

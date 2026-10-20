@@ -427,7 +427,7 @@ pub(super) fn open_session_and_refresh(
                 driver_stopped,
                 before_driver,
                 memory_warning,
-                },
+            },
         ))
         .map_err(|error| error.to_string())?;
     mark("open-session-done");

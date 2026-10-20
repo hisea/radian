@@ -529,10 +529,7 @@ mod tests {
             "$ ls"
         );
         assert_eq!(
-            renderer_for("memory_search").head(
-                &card("memory_search", json!({"ids": ["m1"]})),
-                ""
-            ),
+            renderer_for("memory_search").head(&card("memory_search", json!({"ids": ["m1"]})), ""),
             "m1"
         );
     }

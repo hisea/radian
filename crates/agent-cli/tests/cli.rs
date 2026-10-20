@@ -1642,10 +1642,12 @@ async fn system_prompt_is_sent() {
 #[tokio::test]
 async fn the_default_role_layers_are_sent() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
+    // A private home: the runtime tool list must not depend on the machine's real memory.
+    let home = scratch("default-role");
     let (code, _, _) = feed_and_wait(
         spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
-            &[],
+            &[("RADIAN_HOME", home.to_str().unwrap())],
         ),
         "",
     )
@@ -1663,8 +1665,10 @@ async fn the_default_role_layers_are_sent() {
         content.contains("You are radian, a coding agent"),
         "the default role: {content}"
     );
+    // ADR 0021 D7: an empty memory mounts no search, so the runtime tool list names no
+    // memory tool at all.
     assert!(
-        content.contains("- memory_search:"),
+        !content.contains("memory_search"),
         "the runtime tool list: {content}"
     );
     assert!(content.trim_end().ends_with("</session>"), "{content}");
