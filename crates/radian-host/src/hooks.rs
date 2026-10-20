@@ -209,7 +209,12 @@ impl CommandHooks {
         let mut waiter = tokio::task::spawn_blocking(move || {
             use std::io::Write;
             if let Some(mut stdin) = stdin {
-                stdin.write_all(input.as_bytes())?;
+                // A hook that never reads its stdin (e.g. `exit 2`) may already have
+                // exited, closing the pipe: the write then fails with a broken pipe.
+                // That is not a hook failure — the hook's own exit code still reports
+                // its verdict — so a stdin write error is ignored, never fail-closed.
+                // (Dropping `stdin` closes the pipe, so a reading hook sees EOF.)
+                let _ = stdin.write_all(input.as_bytes());
             }
             std_child.wait_with_output()
         });
