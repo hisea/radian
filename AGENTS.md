@@ -26,9 +26,6 @@ Run tests with `--no-fail-fast`. Cargo stops at the first failing test binary by
 default, which makes a mutation look like it was caught by one test when it was
 caught by seven, and hides failures in the binaries that never ran.
 
-The workspace MSRV is checked, not assumed: `cargo +1.99.1 check --workspace
---all-targets` passes (`rustup toolchain install 1.99.1 --profile minimal`).
-
 A change to a provider adapter must also keep **both** contract suites green:
 
 ```sh
