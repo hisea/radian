@@ -242,6 +242,8 @@ impl Anthropic {
             },
             // ADR 0018: an overflow body may echo the key too, so it is masked like the rest.
             ModelError::ContextOverflow(text) => ModelError::ContextOverflow(scrub(text)),
+            // The core's own fixed string; it carries no provider text to scrub.
+            ModelError::EmptyResponse => ModelError::EmptyResponse,
         }
     }
 }
