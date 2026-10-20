@@ -844,7 +844,9 @@ async fn ambiguous_patch_lists_five_and_names_the_rest() {
     assert!(failure.message.contains("7 times"), "{failure:?}");
     for lineno in 1..=5 {
         assert!(
-            failure.message.contains(&format!("{lineno}: dup line {lineno}")),
+            failure
+                .message
+                .contains(&format!("{lineno}: dup line {lineno}")),
             "occurrence {lineno} is listed: {}",
             failure.message
         );

@@ -509,11 +509,7 @@ async fn grep_byte_cap_bounds_long_lines_with_whole_lines_only() {
     let root = dir.file("ws");
     // Twenty 500-byte matching lines: ~10 KiB of matches against a 2 KiB cap.
     let line = format!("needle-{}", "x".repeat(490));
-    let content = (0..20)
-        .map(|_| line.clone())
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
+    let content = (0..20).map(|_| line.clone()).collect::<Vec<_>>().join("\n") + "\n";
     dir.write("ws/f.txt", &content);
     let tools = tools_with(
         &root,
@@ -540,7 +536,10 @@ async fn grep_byte_cap_bounds_long_lines_with_whole_lines_only() {
         body.contains("output: \"files\""),
         "the note says how to narrow it: {body}"
     );
-    assert!(body.ends_with("]\n"), "the output ends with the note: {body}");
+    assert!(
+        body.ends_with("]\n"),
+        "the output ends with the note: {body}"
+    );
     // Whole lines only: every shown match line is exactly one file line with its prefix.
     for output_line in body.lines() {
         if output_line.starts_with('[') || output_line == "--" {
@@ -571,14 +570,21 @@ async fn grep_files_mode_returns_paths_and_counts_without_line_text() {
     dir.write("ws/c.txt", "nothing here\n");
     let tools = tools(&root);
 
-    let out = call(&tools, "grep", json!({"pattern": "needle", "output": "files"}))
-        .await
-        .unwrap();
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "output": "files"}),
+    )
+    .await
+    .unwrap();
     let body = text(&out);
     assert!(body.contains("a.txt"), "{body}");
     assert!(body.contains('2'), "a.txt's count is shown: {body}");
     assert!(body.contains("b.txt"), "{body}");
-    assert!(!body.contains("c.txt"), "a file without matches is absent: {body}");
+    assert!(
+        !body.contains("c.txt"),
+        "a file without matches is absent: {body}"
+    );
     assert!(
         !body.contains("needle"),
         "no line text is returned, only paths and counts: {body}"
@@ -597,9 +603,13 @@ async fn grep_count_mode_returns_totals_only() {
     dir.write("ws/b.txt", "needle three\n");
     let tools = tools(&root);
 
-    let out = call(&tools, "grep", json!({"pattern": "needle", "output": "count"}))
-        .await
-        .unwrap();
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "output": "count"}),
+    )
+    .await
+    .unwrap();
     let body = text(&out);
     assert!(body.contains('3'), "the total matches are shown: {body}");
     assert!(body.contains('2'), "the file count is shown: {body}");
@@ -607,10 +617,7 @@ async fn grep_count_mode_returns_totals_only() {
         !body.contains("a.txt") && !body.contains("b.txt"),
         "no paths are returned, totals only: {body}"
     );
-    assert!(
-        !body.contains("needle"),
-        "no line text is returned: {body}"
-    );
+    assert!(!body.contains("needle"), "no line text is returned: {body}");
     assert_eq!(structured(&out)["matches"], json!(3));
     assert_eq!(structured(&out)["files"], json!(2));
     assert_eq!(structured(&out)["output"], json!("count"));

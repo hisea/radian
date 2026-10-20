@@ -353,8 +353,7 @@ pub(crate) async fn run(
                         truncated = true;
                         break;
                     }
-                    let note =
-                        format!("[{rel}: more than {per_file_cap} matches in one file]\n");
+                    let note = format!("[{rel}: more than {per_file_cap} matches in one file]\n");
                     if !fits(body.len(), note.len(), byte_cap) {
                         byte_truncated = true;
                         break;
@@ -395,9 +394,7 @@ pub(crate) async fn run(
         ));
     }
     if truncated && !byte_truncated {
-        suffix.push_str(&format!(
-            "[truncated: showing the first {total} matches]\n"
-        ));
+        suffix.push_str(&format!("[truncated: showing the first {total} matches]\n"));
     }
     if byte_truncated {
         suffix.push_str(&byte_note(byte_cap, total, files_matched, mode));

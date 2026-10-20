@@ -340,12 +340,7 @@ fn edit_message(index: usize, message: &str) -> String {
 /// The refusal for text every layer located more than once: the existing first sentence and
 /// the file-is-unchanged guarantee, plus up to [`MAX_AMBIGUOUS_LISTED`] occurrence line
 /// numbers with each line's own text, then an "and N more" line when more remain.
-fn ambiguous(
-    content: &str,
-    path: &str,
-    layer: Layer,
-    ranges: &[Range<usize>],
-) -> ToolFailure {
+fn ambiguous(content: &str, path: &str, layer: Layer, ranges: &[Range<usize>]) -> ToolFailure {
     let mut message = format!(
         "`old` appears {} times in `{path}` (matched by {}); refusing to guess which one; \
          the file is unchanged",
