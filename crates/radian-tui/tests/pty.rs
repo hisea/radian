@@ -1236,9 +1236,9 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
     let dir = TempDir::new("trust-session");
     let home = TempDir::new("trust-home");
     let ws = TempDir::new("trust-ws");
-    std::fs::create_dir_all(ws.path().join(".radian/skills/greet")).unwrap();
+    std::fs::create_dir_all(ws.path().join(".agents/skills/greet")).unwrap();
     std::fs::write(
-        ws.path().join(".radian/skills/greet/SKILL.md"),
+        ws.path().join(".agents/skills/greet/SKILL.md"),
         "---\nname: greet\ndescription: d\n---\nbody\n",
     )
     .unwrap();
@@ -1330,9 +1330,9 @@ async fn pty_trust_sandbox_choice_writes_the_access_record() {
     let dir = TempDir::new("trust-sandbox-session");
     let home = TempDir::new("trust-sandbox-home");
     let ws = TempDir::new("trust-sandbox-ws");
-    std::fs::create_dir_all(ws.path().join(".radian/skills/greet")).unwrap();
+    std::fs::create_dir_all(ws.path().join(".agents/skills/greet")).unwrap();
     std::fs::write(
-        ws.path().join(".radian/skills/greet/SKILL.md"),
+        ws.path().join(".agents/skills/greet/SKILL.md"),
         "---\nname: greet\ndescription: d\n---\nbody\n",
     )
     .unwrap();
@@ -1404,9 +1404,9 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
     let dir = TempDir::new("trust-session-2");
     let home = TempDir::new("trust-home-2");
     let ws = TempDir::new("trust-ws-2");
-    std::fs::create_dir_all(ws.path().join(".radian/skills/greet")).unwrap();
+    std::fs::create_dir_all(ws.path().join(".agents/skills/greet")).unwrap();
     std::fs::write(
-        ws.path().join(".radian/skills/greet/SKILL.md"),
+        ws.path().join(".agents/skills/greet/SKILL.md"),
         "---\nname: greet\ndescription: d\n---\nbody\n",
     )
     .unwrap();

@@ -112,6 +112,12 @@ impl ToolSession for SkillSession {
             })?,
         };
         let body = strip_frontmatter(&text).unwrap_or(&text);
+        // `$ARGUMENTS` is filled in place instead of appended; a body without the placeholder
+        // keeps the verbatim `Arguments:` append.
+        let (body, appended) = match substitute_arguments(body, args.unwrap_or("")) {
+            Some(substituted) => (substituted, None),
+            None => (body.to_owned(), args),
+        };
         if body.len() > SKILL_BODY_LIMIT_BYTES {
             return Err(ToolFailure::new(
                 "skill_too_large",
@@ -130,7 +136,7 @@ impl ToolSession for SkillSession {
             "\nRelative paths in this skill are resolved from: {}\n",
             skill.dir.display()
         ));
-        if let Some(args) = args {
+        if let Some(args) = appended {
             // The arguments are appended verbatim (ADR 0025 S3): they are data the model wrote,
             // not a command line.
             out.push_str("\nArguments: ");
@@ -139,6 +145,17 @@ impl ToolSession for SkillSession {
         }
         Ok(ToolOutput::text(out))
     }
+}
+
+/// Fills the `$ARGUMENTS` placeholder (Claude Code's documented form): every occurrence in
+/// `body` becomes `args` (empty when the caller got none). `None` when the body has no
+/// placeholder — the caller keeps the append behavior. `$1`-style positional placeholders are
+/// left alone; Radian only implements `$ARGUMENTS`.
+pub fn substitute_arguments(body: &str, args: &str) -> Option<String> {
+    if !body.contains("$ARGUMENTS") {
+        return None;
+    }
+    Some(body.replace("$ARGUMENTS", args))
 }
 
 /// Cuts the leading YAML frontmatter block from a `SKILL.md` body. `None` when the file has no
@@ -164,8 +181,8 @@ fn specs() -> Vec<ToolSpec> {
         description: format!(
             "Read the full body of one of the skills listed in the system prompt. Pass the \
              skill's `name`; its body is returned with its directory noted as the base for \
-             relative paths. Optional `args` are appended to the returned text (for skills that \
-             template their arguments). The body is limited to {SKILL_BODY_LIMIT_BYTES} bytes."
+             relative paths. Optional `args` fill the body's `$ARGUMENTS` placeholder when it \
+             has one, and are appended verbatim otherwise. The body is limited to {SKILL_BODY_LIMIT_BYTES} bytes."
         ),
         input_schema: serde_json::json!({
             "type": "object",
@@ -176,7 +193,7 @@ fn specs() -> Vec<ToolSpec> {
                 },
                 "args": {
                     "type": "string",
-                    "description": "Optional arguments appended verbatim to the returned body."
+                    "description": "Optional arguments: fill the body's `$ARGUMENTS` placeholder, or are appended verbatim when it has none."
                 }
             },
             "required": ["name"],
@@ -293,6 +310,27 @@ mod tests {
             .unwrap();
         let text = text_of(&out);
         assert!(text.contains("--x \"引号\""), "{text}");
+    }
+
+    /// `$ARGUMENTS` is filled in place instead of appended; without args it becomes empty. A
+    /// body without the placeholder keeps the `Arguments:` append (catches: no substitution).
+    #[tokio::test]
+    async fn args_fill_the_arguments_placeholder_instead_of_appending() {
+        let scratch = Scratch::new("tool-args");
+        scratch.write(
+            "a",
+            "---\nname: a\ndescription: d\n---\nRun $ARGUMENTS now.\n",
+        );
+        let session = scratch.session().await;
+        let out = run(&session, &call("a", Some("the tests"))).await.unwrap();
+        let text = text_of(&out);
+        assert!(text.contains("Run the tests now."), "{text}");
+        assert!(!text.contains("$ARGUMENTS"), "{text}");
+        assert!(!text.contains("Arguments:"), "{text}");
+        // No args: the placeholder becomes empty.
+        let out = run(&session, &call("a", None)).await.unwrap();
+        let text = text_of(&out);
+        assert!(text.contains("Run  now."), "{text}");
     }
 
     #[tokio::test]

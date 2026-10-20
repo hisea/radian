@@ -13,7 +13,8 @@
 //!   included) with a saved decision, then "no decision" (untrusted). Paths are canonicalized
 //!   before both storing and looking up, so a symlink and its target share one decision (T5).
 //! - **Trigger**: a workspace needs a decision only when it holds a resource from T1's list;
-//!   today that list is `<workspace>/.radian/skills/<x>/SKILL.md` and the project declaration
+//!   today that list is a project skill (`<dir>/.agents/skills/<x>/SKILL.md` for any directory
+//!   from the workspace up to the repository root) and the project declaration
 //!   `<workspace>/.radian/config.toml` (ADR 0043 decision 1). A bare `.radian/` does not
 //!   trigger (T1).
 
@@ -421,15 +422,18 @@ pub fn untrusted_notice(workspace: &Path) -> String {
 /// Whether `workspace` holds a resource from T1's list. The list (ADR 0031 T1, shrunk by ADR
 /// 0043 decision 1 to the project's own skills and its project-level configuration):
 ///
-/// - a project-level skill: `<workspace>/.radian/skills/<x>/SKILL.md` (or directly under `skills/`);
+/// - a project-level skill: `<dir>/.agents/skills/<x>/SKILL.md` for any directory from the
+///   workspace up to and including the repository root (the same roots skill discovery scans
+///   when trusted);
 /// - the project declaration: `<workspace>/.radian/config.toml`.
 ///
 /// A bare `.radian/` does not trigger, and `.radian-sandbox/` is ignored. The check is a **file**
 /// question: a malformed file is still something the loader would read, so it still triggers.
 /// The walk reuses the skills module's ignore rules.
 pub fn has_project_resources(workspace: &Path) -> bool {
-    let dot_radian = workspace.join(".radian");
-    crate::skills::has_skill_file(&dot_radian.join("skills"))
+    crate::skills::project_skill_roots(workspace)
+        .iter()
+        .any(|root| crate::skills::has_skill_file(root))
         || crate::project::path(workspace).is_file()
 }
 
@@ -645,6 +649,8 @@ mod tests {
         assert_eq!(std::fs::read(scratch.path()).unwrap(), bytes);
     }
 
+    /// The trigger is a project skill (`.agents/skills`, workspace up to the repo root) and
+    /// not a bare `.radian/`.
     #[test]
     fn the_trigger_is_a_project_skill_and_not_a_bare_dot_radian() {
         let root = Scratch::new("trigger");
@@ -655,8 +661,13 @@ mod tests {
         // A `.radian-sandbox/` is not a resource.
         std::fs::create_dir_all(ws.join(".radian-sandbox")).unwrap();
         assert!(!has_project_resources(&ws));
-        // A `SKILL.md` under `.radian/skills/<x>/` triggers.
-        let skill = ws.join(".radian/skills/greet");
+        // The old location is gone: `.radian/skills/` no longer triggers.
+        let stale = ws.join(".radian/skills/greet");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("SKILL.md"), "---\nname: greet\n---\n").unwrap();
+        assert!(!has_project_resources(&ws));
+        // A `SKILL.md` under `.agents/skills/<x>/` triggers.
+        let skill = ws.join(".agents/skills/greet");
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "---\nname: greet\n---\n").unwrap();
         assert!(has_project_resources(&ws));
@@ -667,5 +678,30 @@ mod tests {
         assert!(!has_project_resources(&other));
         std::fs::write(other.join(".radian/config.toml"), "[permissions]\n").unwrap();
         assert!(has_project_resources(&other));
+    }
+
+    /// The trigger searches from the workspace up to the repository root: a skill at the root
+    /// counts for a workspace below it, one above the root does not.
+    #[test]
+    fn the_trigger_searches_up_to_the_repository_root() {
+        let root = Scratch::new("trigger-root");
+        let repo = root.root.join("repo");
+        let ws = repo.join("sub/ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        // The repository root marker (a plain `.git` directory is enough for the rule).
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        assert!(!has_project_resources(&ws));
+        // A skill at the repository root triggers for the workspace below it...
+        let at_root = repo.join(".agents/skills/team");
+        std::fs::create_dir_all(&at_root).unwrap();
+        std::fs::write(at_root.join("SKILL.md"), "---\nname: team\n---\n").unwrap();
+        assert!(has_project_resources(&ws));
+        // ...but one above the root never does.
+        let above = root.root.join(".agents/skills/outer");
+        std::fs::create_dir_all(&above).unwrap();
+        std::fs::write(above.join("SKILL.md"), "---\nname: outer\n---\n").unwrap();
+        let outside = root.root.join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert!(!has_project_resources(&outside));
     }
 }

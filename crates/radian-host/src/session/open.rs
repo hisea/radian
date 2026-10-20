@@ -259,12 +259,16 @@ pub async fn open_session(
     // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).
     let skills = {
         // The two user levels first (`$RADIAN_HOME/skills`, then the Agent Skills standard
-        // `$HOME/.agents/skills`), then `[skills] extra_paths` (ADR 0025 S1): the first
-        // discovery of a name wins, so `$RADIAN_HOME/skills` beats `~/.agents/skills`.
-        let discovery = skills::discover_with_user_roots(
+        // `$HOME/.agents/skills`), then `[skills] extra_paths`, then the trusted project's
+        // `.agents/skills` from the workspace up to the repository root (ADR 0025 S1): the
+        // first discovery of a name wins, so `$RADIAN_HOME/skills` beats `~/.agents/skills`
+        // and a user-level skill beats a project one. An untrusted project's roots are empty,
+        // so its skills are never read (ADR 0031 T1).
+        let discovery = skills::discover_with_project(
             skills_dir().as_deref(),
             agents_skills_dir().as_deref(),
             &skills_extra_paths,
+            &skills::project_roots_for(&workspace, trust.resolved.decision.as_bool()),
             skills_builtin,
             &skills_disabled,
         );
