@@ -994,3 +994,28 @@ Verify（含 1.88）已在该合并树上重跑。
 `terminal-ready` 里的 2 s pty 查询是探针环境的假象，真实终端不付；100k 条、真实 provider 首
 token 未测。
 
+
+## 文件工具 `spawn_blocking`（file-tools-parallel，本项改前）
+
+方法：`crates/radian-coding/tests/perf_file_tools.rs`（全部 `#[ignore]`），debug 构建。
+单次 grep 与同一任务里 `tokio::join!` 的三个 grep（Core 批量的形状：一个任务轮询三个
+`session.execute` future），pattern 都是全树扫完也命中不了的 needle（输出只有一个
+`[no matches]`，墙钟 = walk + 读文件）。本仓库以相对 `.` 为 workspace 搜；
+大树是 `~/.cargo/registry/src` 下最大的展开树（`index.crates.io-1949cf8c6b5b557f`，
+约 601 MB），以绝对路径搜（`CodingTools::new` 从环境解析只读根）。各 1 次 warmup，
+本仓库 5 次、registry 3 次取中位。
+
+```sh
+cargo test -p radian-coding --test perf_file_tools -- --ignored --nocapture --test-threads=1
+```
+
+**负载**：`uptime` 1 分钟负载约 24（同一台机器上还有别的编译）。
+
+| 树 | 单次 grep 中位 | 同一批三个 grep 中位 | 比值 |
+|---|---|---|---|
+| 本仓库（worktree，`.radian-worktrees` 被 walk 剪掉） | 162.6 ms | 504.8 ms | **3.10×** |
+| registry 最大展开树（601 MB） | 1.89 s | 5.83 s | **3.08×** |
+
+**结论：串行**。三个并发 grep 的墙钟 ≈ 单次的三倍：`run` 里的同步 walk + 逐行读从来不
+让出，一个任务里的批量只能一个一个跑。`shell` 描述里的"run in parallel"到此未经证实；
+本项把扫描搬进 `spawn_blocking` 后重测（见下节）。
