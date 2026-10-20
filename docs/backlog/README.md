@@ -32,12 +32,12 @@
 
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
+| `tool-definitions-trim.md` | in-progress（pi/shell-job） | 0037、0043、0039、0006 | 一个 `job { id, op }` 替掉 `job_output`/`job_list`/`job_kill`/`shell_output`，前台留存输出进同一注册表 |
 | `overflow-three-stage.md` | decided | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `first-launch.md` | decided | 0008 | 首次启动建默认配置、无模型时进 `/model` 选择器并写回 |
 | `project-skills.md` | decided | 0025、0031 | 接上项目级 skill，并支持 `$ARGUMENTS` |
-| `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 工具报告 P6/P5 的小修 + 前台 shell 默认输出上限下调 |
+| `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 工具报告 P6/P5 的小修 + 前台 shell 默认输出上限下调；第 4 层容忍缩进待定 |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
-| `tool-definitions-trim.md` | idea | 0043、0037、0021 | 工具定义瘦身：合并低频工具、去重 schema 文字 |
 | `post-edit-diagnostics.md` | idea | 新 ADR | 编辑后诊断：tree-sitter 语法层 + 配置的检查命令；先数 dogfood 里 patch→check 序列 |
 | `sandbox-auto-allow-shell.md` | idea | 0012、0016、0043 | workspace 档沙箱内 shell 自动放行，越界再问；前提是重开 Unix socket 限制 |
 | `mcp-full-tier-ask.md` | idea | 0012、0043 | full 档 MCP 按 server 首次询问，工具定义按哈希固定 |
@@ -45,6 +45,10 @@
 | `eval-metrics.md` | idea | 无 | journal 指标提取器 + 固定任务集；Terminal-Bench 适配器在 Linux 盒子上做 |
 | `cache-efficiency.md` | idea | 0018、0026 | OpenAI/Responses 路发 `prompt_cache_key`、缓存 TTL、摘要请求复用对话前缀读缓存 |
 | `herdr-prompt-radian.md` | idea | 0034 | `herdr agent prompt` 拒认运行中的 radian TUI，原因未查明 |
+| `read-absorbs-list.md` | idea | 0043、0039 | `read` 读目录即列目录，`list` 退为一个版本的别名；等 shell/job 合并后做 |
+| `shell-auto-background-60s.md` | idea | 0037、0036、0011 | 转后台阈值 120 s → 60 s，提示词要求独立调用放同一条回复 |
+| `file-tools-spawn-blocking.md` | idea | 无 | 文件工具同步 IO 可能串行；先基准，再 `spawn_blocking` |
+| `remember-routing-sandbox.md` | idea | 0021、0036、0039、0016 | 文件工具写不到 `~/.radian/skills/`；全局 skill 路由要定沙箱下的收口（round 1 输入） |
 
 只占索引行（暂无文件；来源都是总报告 `docs/research/2026-10-18-area-deep-dive/README.md`）：
 
@@ -53,7 +57,6 @@
 | no-edit 看门狗 | idea | 新 ADR（第 15 条） | 长时间只读不改时宿主自动发 steer；先在 D26 任务上 A/B |
 | 持久 todo + `/goal` | idea | 新 ADR（第 19 条） | 目标确定性带过压缩，轮末自动续跑，resume 后一键续跑 |
 | subagent 指定模型 | idea | 0043（第 14 条） | 小模型跑 explore/压缩；后台与续接是同条的后半 |
-| 转后台阈值 60 s | idea | 0011、0037（第 11 条） | 120 s 降到约 60 s，运行中允许 steer 打断 |
 | CI 与发布 | idea | 分发 ADR（第 27 条） | Linux/macOS CI、`cargo-deny`、安装方式；前提是公开仓库 |
 | SECURITY.md | idea | 无（第 28 条） | 一页威胁模型 + CVE 对照表 |
 | 生态兼容 | idea | 待定（第 31 条） | 读 `.agents/skills`、接受 `mcpServers`、Codex 子集 hook、`radian import claude` |
