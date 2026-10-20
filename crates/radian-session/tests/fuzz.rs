@@ -135,6 +135,7 @@ async fn build_base(dir: &TempDir) -> Base {
             lane: InboxLane::NextTurn,
             source: InputSource::User,
             wake: true,
+            degraded: false,
         },
         RuntimeEvent::InputClaimed {
             message_ids: vec![MessageId("m-1".into())],

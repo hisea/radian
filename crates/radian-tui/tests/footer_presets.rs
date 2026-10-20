@@ -213,6 +213,7 @@ fn enqueue(app: &mut App, id: &str) {
         lane: radian_session::InboxLane::NextTurn,
         source: agent_core::InputSource::User,
         wake: true,
+        degraded: false,
     }));
 }
 

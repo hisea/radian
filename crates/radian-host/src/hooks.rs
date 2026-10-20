@@ -16,7 +16,9 @@
 //! - `Stop` runs once per completed turn (see [`Hooks::on_turn_end`]: only
 //!   [`RunStatus::Completed`] runs the hook; any other terminal status runs nothing).
 //!   Exit 2 starts another turn with the hook's stderr as a `System` `followup` through
-//!   the inbox, at most [`STOP_MAX_CONTINUATIONS`] consecutive continuations.
+//!   the inbox, at most a [`WakeGate`] window's worth of continuations; past the gate
+//!   it degrades to a marked `inject` (no wake) with the wake-budget notice, the same
+//!   degrade as the background-job notifier (ADR 0045 §2).
 //!
 //! The matcher is Claude's case-sensitive pattern over **Radian** tool names: `*` or a
 //! missing/empty matcher matches every tool, otherwise the pattern is a regular
@@ -29,11 +31,6 @@
 //! one (enforced or not, with the same environment rules as `shell`); with no sandbox in
 //! the slot they run as plain `/bin/sh -c` with the host environment.
 
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use agent_core::{
     ContentPart, HookContext, HookError, Hooks, InputSource, Message, RunOutcome, RunStatus,
     ToolCall, ToolDecision, ToolResult,
@@ -41,13 +38,14 @@ use agent_core::{
 use radian_runtime::Inbox;
 use radian_sandbox::SandboxSlot;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use tokio::sync::Notify;
 
 use crate::config::{HookCommand, HookMatcher, HooksConfig};
-
-/// How many consecutive `Stop`-hook continuations may open a new turn before the hook is
-/// skipped until the next user message (ADR 0045; the same shape as ADR 0037's
-/// `MAX_CONSECUTIVE_WAKES`). Fixed, no config key.
-pub const STOP_MAX_CONTINUATIONS: u32 = 3;
+use crate::wake_gate::WakeGate;
 
 /// How many characters of a hook's stderr enter the transcript (deny reasons, PostToolUse
 /// feedback, Stop continuations). Hooks are the user's own commands, but their output is
@@ -87,14 +85,29 @@ pub struct CommandHooks {
     sandbox: SandboxSlot,
     inbox: Arc<Inbox>,
     runtime: tokio::runtime::Handle,
-    /// Consecutive `Stop` continuations with no user message in between.
-    stop_wakes: Arc<AtomicU32>,
+    /// The sliding-window wake budget (ADR 0037 decision 5's rate gate): Stop
+    /// continuations inside one window, expiring on their own with no user message
+    /// needed. Each `CommandHooks` holds its own count (see the follow-up on
+    /// `crate::job_notify::JobNotifier`): the same rate rule, not a shared counter.
+    gate: Arc<WakeGate>,
+    /// Turns started and not resolved yet: a spawned Stop run still going, or a turn
+    /// whose `on_turn_end` has not run. `exec -p` waits for these before deciding the
+    /// run is over — the count is raised synchronously at turn start, strictly before
+    /// the turn can end, so there is no gap for the exit check to slip through.
+    pending: Arc<AtomicU64>,
+    /// Bumped whenever `pending` drops, so a waiter re-checks.
+    pending_signal: Arc<Notify>,
+    /// Continuations degraded to inject-only since the last wake. A woken turn absorbs
+    /// the waiting injects, so a wake ends the burst; a user message resets it at once.
+    degraded: Arc<AtomicU32>,
     warn: HooksWarning,
+    /// The wake-budget notice line (routed like `warn`, as its own transcript notice).
+    wake: HooksWarning,
 }
-
 impl CommandHooks {
     /// Builds the hooks from the resolved `[hooks]` section. Empty when the user configured
     /// nothing, in which case every method is a no-op.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: &HooksConfig,
         workspace: &Path,
@@ -103,6 +116,7 @@ impl CommandHooks {
         inbox: &Arc<Inbox>,
         runtime: &tokio::runtime::Handle,
         warn: HooksWarning,
+        wake: HooksWarning,
     ) -> Self {
         Self {
             pre: compile_entries(&config.pre_tool_use, "PreToolUse", &warn),
@@ -113,8 +127,12 @@ impl CommandHooks {
             sandbox,
             inbox: Arc::clone(inbox),
             runtime: runtime.clone(),
-            stop_wakes: Arc::new(AtomicU32::new(0)),
+            gate: Arc::new(WakeGate::new()),
+            degraded: Arc::new(AtomicU32::new(0)),
+            pending: Arc::new(AtomicU64::new(0)),
+            pending_signal: Arc::new(Notify::new()),
             warn,
+            wake,
         }
     }
 
@@ -124,14 +142,53 @@ impl CommandHooks {
     }
 
     /// A user message arrived: the `Stop` continuation budget starts over (the same reset
-    /// the background-job notifier gets, ADR 0037 decision 3).
+    /// the background-job notifier gets, ADR 0037 decision 3). A degraded continuation
+    /// still runs the hook (its exit-2 verdict degrades); only the *wake* is gated.
     pub fn reset_wakes(&self) {
-        self.stop_wakes.store(0, Ordering::SeqCst);
+        self.gate.reset_wakes();
+        self.degraded.store(0, Ordering::SeqCst);
     }
 
-    /// Consecutive `Stop`-hook continuations so far (tests).
+    /// `Stop` continuations inside the window right now (tests).
     pub fn stop_wakes(&self) -> u32 {
-        self.stop_wakes.load(Ordering::SeqCst)
+        self.gate.wakes()
+    }
+
+    /// How many continuations were degraded since the last wake (tests). A woken turn
+    /// absorbs the waiting injects, so a wake resets this to zero; a user message does
+    /// too.
+    pub fn degraded(&self) -> u32 {
+        self.degraded.load(Ordering::SeqCst)
+    }
+
+    /// How many continuations are degraded and still waiting: a verdict no turn will
+    /// ever start for. `exec -p` ends the session on these (exit 3) instead of waiting.
+    pub fn degraded_pending(&self) -> u64 {
+        u64::from(self.degraded.load(Ordering::SeqCst))
+    }
+
+    /// A turn started: [`Hooks::on_turn_end`] will balance this (it keeps the count
+    /// when it spawns a Stop run, drops it otherwise). Called synchronously from the
+    /// turn-start event, strictly before the turn can end — so a host that sees the
+    /// turn end also sees a pending count while the verdict is unresolved. (There is
+    /// no such guarantee for work `on_turn_end` itself starts: `RunFinished` is
+    /// emitted before it runs.)
+    pub fn note_turn_started(&self) {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Stop turns started and not resolved yet: a spawned run still going, or a turn
+    /// whose `on_turn_end` has not run. (Tests drive `run_stop_once` directly, so only
+    /// `on_turn_end` and `note_turn_started` move this.)
+    pub fn pending_stops(&self) -> u64 {
+        self.pending.load(Ordering::SeqCst)
+    }
+
+    /// Resolves whenever `pending_stops` drops (a spawned Stop run finished, or a turn
+    /// ended with no Stop run coming). A waiter re-checks its exit condition on each
+    /// one.
+    pub fn stops_signal(&self) -> Arc<Notify> {
+        Arc::clone(&self.pending_signal)
     }
 
     /// Whether a compiled matcher matches a Radian tool name.
@@ -145,7 +202,9 @@ impl CommandHooks {
 
     /// Runs one `Stop` cycle synchronously: every configured Stop hook in order; the first
     /// exit 2 opens another turn with its stderr as a `System` followup, unless the
-    /// continuation cap is already reached. Only [`RunStatus::Completed`] runs the hook:
+    /// continuation cap is already reached — then it degrades to a marked `inject` (no
+    /// wake) with the wake-budget notice, so the verdict waits for the next user-woken
+    /// turn instead of being dropped silently. Only [`RunStatus::Completed`] runs the hook:
     /// a cancelled, failed, or otherwise non-completed turn runs nothing (an exit-2 hook
     /// after a user interrupt would otherwise open a turn the user just asked to end).
     /// [`Hooks::on_turn_end`] spawns this with the outcome's status; tests drive it
@@ -155,12 +214,6 @@ impl CommandHooks {
             return;
         }
         if self.stop.is_empty() {
-            return;
-        }
-        if self.stop_wakes.load(Ordering::SeqCst) >= STOP_MAX_CONTINUATIONS {
-            // The cap is reached: skip the run entirely until the next user message.
-            // Running a validation whose verdict cannot continue the turn would only
-            // spend the model wait for nothing.
             return;
         }
         let stdin = serde_json::json!({
@@ -180,13 +233,33 @@ impl CommandHooks {
                             reason
                         };
                         let text = format!("Stop hook requested another turn:\n{reason}");
-                        if self
-                            .inbox
-                            .followup(Message::user(text), InputSource::System)
-                            .await
-                            .is_ok()
-                        {
-                            self.stop_wakes.fetch_add(1, Ordering::SeqCst);
+                        // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): past the gate
+                        // the hook still runs, but an exit-2 verdict degrades to a marked
+                        // `inject` (no wake) with the wake-budget notice, the same degrade
+                        // as the background-job notifier (ADR 0045 §2) — a skipped run
+                        // would be silent, a degraded verdict waits visibly.
+                        if self.gate.wake_allowed() {
+                            // The woken turn absorbs the waiting injects, so a wake also
+                            // ends the degrade burst.
+                            if self
+                                .inbox
+                                .followup(Message::user(text), InputSource::System)
+                                .await
+                                .is_ok()
+                            {
+                                self.gate.note_wake();
+                                self.degraded.store(0, Ordering::SeqCst);
+                            }
+                        } else {
+                            if self
+                                .inbox
+                                .inject_degraded(Message::user(text), InputSource::System)
+                                .await
+                                .is_ok()
+                            {
+                                let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
+                                (self.wake)(&crate::job_notify::wake_budget_line(degraded));
+                            }
                         }
                         return;
                     }
@@ -636,16 +709,30 @@ impl Hooks for CommandHooks {
     /// A hook asking for more (exit 2) opens another turn through the inbox. The work
     /// spawns onto the session runtime so this sync callback never blocks a turn.
     fn on_turn_end(&self, _cx: &HookContext, outcome: &RunOutcome) {
-        if self.stop.is_empty() {
+        if self.stop.is_empty() || !matches!(outcome.status, RunStatus::Completed) {
+            // No Stop run will come for this turn: drop the turn-start count.
+            // Saturating: sessions that never called `note_turn_started` (only the
+            // hosts that read `pending_stops` wire it) must not wrap the counter.
+            self.pending
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    Some(n.saturating_sub(1))
+                })
+                .ok();
+            self.pending_signal.notify_one();
             return;
         }
-        if !matches!(outcome.status, RunStatus::Completed) {
-            return;
-        }
+        // The turn-start count covers the spawned run; it drops when the run ends.
         let this = self.clone();
         let status = outcome.status.clone();
         self.runtime.spawn(async move {
             this.run_stop_once(&status).await;
+            // Paired with `note_turn_started`; saturating for the same reason.
+            this.pending
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    Some(n.saturating_sub(1))
+                })
+                .ok();
+            this.pending_signal.notify_one();
         });
     }
 }
@@ -655,6 +742,8 @@ mod tests {
     use super::*;
     use agent_core::{CancelReason, CancellationToken};
     use std::sync::Mutex;
+
+    use crate::wake_gate::{MAX_WAKES_PER_WINDOW, WAKE_WINDOW};
 
     static N: AtomicU32 = AtomicU32::new(0);
 
@@ -692,6 +781,7 @@ mod tests {
         _root: TempRoot,
         hooks: CommandHooks,
         warnings: Arc<Mutex<Vec<String>>>,
+        wake_notices: Arc<Mutex<Vec<String>>>,
         inbox: Arc<Inbox>,
     }
 
@@ -726,6 +816,7 @@ mod tests {
 
     fn fixture_with_root(root: TempRoot, config: &HooksConfig, sandbox: SandboxSlot) -> Fixture {
         let (warn, warnings) = warnings_collector();
+        let (wake, wake_notices) = warnings_collector();
         let inbox = Inbox::new(64);
         let hooks = CommandHooks::new(
             config,
@@ -735,11 +826,13 @@ mod tests {
             &inbox,
             &tokio::runtime::Handle::current(),
             warn,
+            wake,
         );
         Fixture {
             _root: root,
             hooks,
             warnings,
+            wake_notices,
             inbox,
         }
     }
@@ -1008,6 +1101,7 @@ mod tests {
         let stdin_path = root.dir.join("stdin.json");
         let config = pre_config("shell", &format!("cat > {}", stdin_path.display()));
         let (warn, _) = warnings_collector();
+        let (wake, _) = warnings_collector();
         let inbox = Inbox::new(64);
         let hooks = CommandHooks::new(
             &config,
@@ -1017,6 +1111,7 @@ mod tests {
             &inbox,
             &tokio::runtime::Handle::current(),
             warn,
+            wake,
         );
         hooks
             .before_tool_call(&cx(), &call("shell", serde_json::json!({"command": "hi"})))
@@ -1076,10 +1171,13 @@ mod tests {
         assert!(ws.join("marker.txt").exists());
     }
 
-    /// `Stop` exit 2 opens another turn with the stderr as a `System` followup — at most
-    /// three consecutive continuations, then the hook is skipped until a user message.
+    /// `Stop` exit 2 opens another turn with the stderr as a `System` followup. Continuations
+    /// minutes apart never fill the rate gate: six in a row all open a turn; a fast loop
+    /// fills the window, and past the gate the hook still runs but its verdict degrades to
+    /// a marked inject (no wake) with the wake-budget notice, until the window passes.
     #[tokio::test]
-    async fn stop_exit_2_continues_at_most_three_times() {
+    async fn stop_continuations_minutes_apart_are_never_gated() {
+        tokio::time::pause();
         let config = HooksConfig {
             stop: vec![HookMatcher {
                 matcher: None,
@@ -1088,35 +1186,111 @@ mod tests {
             ..HooksConfig::default()
         };
         let fixture = plain(&config);
-        for _ in 0..5 {
+        for i in 0..6 {
             fixture.hooks.run_stop_once(&RunStatus::Completed).await;
-        }
-        assert_eq!(fixture.hooks.stop_wakes(), 3);
-        // `claim_next_turn` is non-blocking: three followups are there to take.
-        for _ in 0..3 {
             let entry = fixture
                 .inbox
                 .claim_next_turn()
                 .await
-                .expect("three followups are enqueued");
+                .unwrap_or_else(|| panic!("round {i}: the continuation opens a turn"));
             assert!(
                 entry.message.text().contains("keep-going"),
                 "the stderr is the input: {}",
                 entry.message.text()
             );
             assert_eq!(entry.source, InputSource::System);
+            tokio::time::advance(std::time::Duration::from_secs(180)).await;
         }
-        // The 4th (and 5th) continuation never happens: no followup, no inject either.
+    }
+
+    /// A fast `Stop` loop (every continuation ~1 s apart) fills the window: the 11th run
+    /// still runs the hook, but its exit-2 verdict degrades to a marked inject (no wake)
+    /// with the wake-budget notice; the window passing reopens followups with no user
+    /// message.
+    #[tokio::test]
+    async fn stop_fast_loop_is_gated_after_n_and_recovers_after_the_window() {
+        tokio::time::pause();
+        let config = HooksConfig {
+            stop: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![hook("echo keep-going >&2; exit 2")],
+            }],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        for i in 0..MAX_WAKES_PER_WINDOW {
+            fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+            assert!(
+                fixture.inbox.claim_next_turn().await.is_some(),
+                "continuation {i}: still inside the budget"
+            );
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        }
+        assert_eq!(fixture.hooks.stop_wakes(), MAX_WAKES_PER_WINDOW);
+        // The 11th run still runs the hook; its exit-2 verdict degrades to a marked
+        // inject (no wake) with the wake-budget notice.
+        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
         assert!(
             fixture.inbox.claim_next_turn().await.is_none(),
-            "the 4th continuation must not open a turn"
+            "the gated continuation must not open a turn"
+        );
+        let entry = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("the gated hook injects the verdict");
+        assert!(
+            entry.message.text().contains("keep-going"),
+            "the stderr is the input: {}",
+            entry.message.text()
+        );
+        assert_eq!(fixture.hooks.degraded(), 1);
+        assert_eq!(
+            warned(&fixture.wake_notices).len(),
+            1,
+            "the degrade fires the wake notice: {:?}",
+            warned(&fixture.wake_notices)
         );
         assert!(
-            fixture.inbox.claim_next_step().await.is_none(),
-            "the capped hook must not inject either"
+            warned(&fixture.wake_notices)[0].starts_with("wake budget used up: 1 "),
+            "the notice carries the degrade count: {:?}",
+            warned(&fixture.wake_notices)
         );
+        // The window passing alone reopens the gate: no user message needed; the later
+        // wake ends the burst.
+        tokio::time::advance(WAKE_WINDOW + std::time::Duration::from_secs(1)).await;
+        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+        assert_eq!(fixture.hooks.stop_wakes(), 1);
+        assert_eq!(
+            fixture.hooks.degraded(),
+            0,
+            "the later wake ends the degrade burst"
+        );
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_some(),
+            "after the window: the continuation opens a turn again"
+        );
+    }
+
+    /// A user message restarts the `Stop` budget at once.
+    #[tokio::test]
+    async fn stop_user_message_resets_the_budget() {
+        tokio::time::pause();
+        let config = HooksConfig {
+            stop: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![hook("echo keep-going >&2; exit 2")],
+            }],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        for _ in 0..3 {
+            fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+        }
+        assert_eq!(fixture.hooks.stop_wakes(), 3);
         // A user message restarts the budget.
         fixture.hooks.reset_wakes();
+        assert_eq!(fixture.hooks.degraded(), 0);
         fixture.hooks.run_stop_once(&RunStatus::Completed).await;
         assert_eq!(fixture.hooks.stop_wakes(), 1);
     }
@@ -1179,6 +1353,77 @@ mod tests {
         assert!(
             fixture.inbox.claim_next_turn().await.is_none(),
             "exit 0 continues nothing"
+        );
+    }
+
+    /// A `Stop` continuation past the gate runs the hook but injects the verdict with
+    /// the degrade mark: the durable `InboxEnqueued` says `degraded`, so the journal leg
+    /// matches the job notifier's (ADR 0045 §2).
+    #[tokio::test]
+    async fn stop_past_the_cap_injects_the_verdict_with_the_degrade_mark() {
+        use radian_session::{EventData, Session, SessionCreatedData, SessionJournal};
+        let root = TempRoot::new("stop-degraded");
+        let journal = Arc::new(
+            SessionJournal::create(
+                root.dir.join("s.jsonl"),
+                "sid",
+                SessionCreatedData::new(
+                    "/work/example",
+                    serde_json::json!({"provider": "example", "model": "m-1"}),
+                ),
+            )
+            .unwrap(),
+        );
+        let inbox = Inbox::durable(64, Arc::clone(&journal));
+        let (warn, _) = warnings_collector();
+        let (wake, wake_notices) = warnings_collector();
+        let config = HooksConfig {
+            stop: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![hook("echo keep-going >&2; exit 2")],
+            }],
+            ..HooksConfig::default()
+        };
+        let hooks = CommandHooks::new(
+            &config,
+            &root.ws,
+            "test-session",
+            SandboxSlot::empty(),
+            &inbox,
+            &tokio::runtime::Handle::current(),
+            warn,
+            wake,
+        );
+        for _ in 0..MAX_WAKES_PER_WINDOW {
+            hooks.run_stop_once(&RunStatus::Completed).await;
+        }
+        hooks.run_stop_once(&RunStatus::Completed).await;
+        assert_eq!(hooks.stop_wakes(), MAX_WAKES_PER_WINDOW);
+        assert_eq!(hooks.degraded(), 1);
+
+        // Waking followups record no degrade; the gated inject does.
+        let session = Session::open(root.dir.join("s.jsonl")).unwrap();
+        let degraded: Vec<bool> = session
+            .events()
+            .iter()
+            .filter_map(|event| match &event.data {
+                EventData::InboxEnqueued { degraded, .. } => Some(*degraded),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            degraded,
+            [vec![false; MAX_WAKES_PER_WINDOW as usize], vec![true]].concat()
+        );
+
+        // The wake notice names the one waiting continuation.
+        let notices = wake_notices.lock().unwrap().clone();
+        assert_eq!(
+            notices,
+            vec![
+                "wake budget used up: 1 job notices are waiting — send any message to continue"
+                    .to_owned()
+            ]
         );
     }
 }

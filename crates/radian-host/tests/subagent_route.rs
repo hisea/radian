@@ -245,6 +245,7 @@ async fn the_child_runs_the_parents_live_model_route() {
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
             hooks_warning: Arc::new(|_message: &str| {}),
+            wake_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await

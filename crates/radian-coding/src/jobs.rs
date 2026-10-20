@@ -225,6 +225,10 @@ struct JobsState {
     /// Start order, for `job_list`.
     order: Vec<String>,
     jobs: HashMap<String, Arc<Mutex<JobCell>>>,
+    /// How many background settles this registry has published. Bumped in the same
+    /// critical section that flips the cell and sends the broadcast (see `settle`), so
+    /// [`Jobs::settle_snapshot`] reads a consistent `(running, settled_total)` pair.
+    settled_total: u64,
 }
 
 impl Jobs {
@@ -372,9 +376,9 @@ impl Jobs {
 
         {
             let supervisor_cell = Arc::clone(&cell);
-            let events = self.inner.events.clone();
+            let inner = Arc::clone(&self.inner);
             let job_id = id.clone();
-            thread::spawn(move || supervise(pid, child, supervisor_cell, done_rx, events, job_id));
+            thread::spawn(move || supervise(pid, child, supervisor_cell, done_rx, inner, job_id));
         }
 
         Ok(StartInfo {
@@ -492,7 +496,7 @@ impl Jobs {
         });
         *supervised.adopted.lock().unwrap_or_else(|e| e.into_inner()) = Some(AdoptedHandle {
             cell: Arc::clone(&cell),
-            events: self.inner.events.clone(),
+            inner: Arc::clone(&self.inner),
             id: id.clone(),
         });
         // The process may have exited exactly at the threshold: the supervisor then sent
@@ -598,7 +602,24 @@ impl Jobs {
         }
     }
 
-    /// Every job of this session, in start order: background jobs and retained foreground
+    /// How many background jobs are running right now, and how many settles this
+    /// registry has published in total (both under one lock).
+    ///
+    /// The pair is consistent: `settle` flips the cell, bumps the total and sends the
+    /// broadcast while holding this same lock, so a snapshot either sees a settle fully
+    /// (the total includes it, and its broadcast was sent) or not at all (the job still
+    /// counts as running). Retained foreground entries (ADR 0037 decision 3a) never run
+    /// and never publish, so they affect neither number.
+    pub fn settle_snapshot(&self) -> (usize, u64) {
+        let registry = self.lock_state();
+        let mut running = 0;
+        for cell in registry.jobs.values() {
+            if lock(cell).state.is_running() {
+                running += 1;
+            }
+        }
+        (running, registry.settled_total)
+    }
     /// results (ADR 0037 decision 3a). The TUI `/jobs` command reads this, not a tool.
     pub fn list(&self) -> Vec<JobSummary> {
         let state = self.lock_state();
@@ -781,11 +802,11 @@ pub(crate) struct AdoptInfo {
 }
 
 /// The settle handle a foreground supervisor takes once it reaps (ADR 0037). It
-/// owns the job cell and the event sender so the supervisor can settle without knowing the
+/// owns the job cell and the registry so the supervisor can settle without knowing the
 /// registry.
 pub(crate) struct AdoptedHandle {
     cell: Arc<Mutex<JobCell>>,
-    events: tokio::sync::broadcast::Sender<JobEvent>,
+    inner: Arc<JobsInner>,
     id: String,
 }
 
@@ -793,7 +814,7 @@ impl AdoptedHandle {
     /// Settles the adopted job with the leader's exit status. Called exactly once, by whichever
     /// of the supervisor and [`Jobs::adopt`] wins the take.
     pub(crate) fn settle(self, status: Option<ExitStatus>) {
-        settle(&self.cell, &self.events, self.id, status);
+        settle(&self.inner, &self.cell, self.id, status);
     }
 }
 
@@ -922,7 +943,7 @@ fn supervise(
     mut child: Child,
     cell: Arc<Mutex<JobCell>>,
     done: mpsc::Receiver<()>,
-    events: tokio::sync::broadcast::Sender<JobEvent>,
+    inner: Arc<JobsInner>,
     id: String,
 ) {
     wait_for_exit_without_reaping(pid);
@@ -942,45 +963,50 @@ fn supervise(
     let _ = done.recv_timeout(READER_GRACE);
     let _ = done.recv_timeout(READER_GRACE);
 
-    settle(&cell, &events, id, status);
+    settle(&inner, &cell, id, status);
 }
 
 /// Records a job's settle from the leader's exit status and publishes one [`JobEvent::Settled`]
 /// (ADR 0037 decisions 2 and 4). Shared by a background job's own supervisor and the
 /// foreground supervisor of an adopted job (ADR 0037).
-fn settle(
-    cell: &Arc<Mutex<JobCell>>,
-    events: &tokio::sync::broadcast::Sender<JobEvent>,
-    id: String,
-    status: Option<ExitStatus>,
-) {
+fn settle(inner: &JobsInner, cell: &Arc<Mutex<JobCell>>, id: String, status: Option<ExitStatus>) {
+    // Read-only under the cell lock: nothing flips yet, so this section commutes with the
+    // snapshot below.
     let (state, duration_ms, notify) = {
-        let mut cell = lock(cell);
-        cell.state = match cell.termination {
+        let cell = lock(cell);
+        let state = match cell.termination {
             Some(Termination::Killed) => JobState::Killed,
             Some(Termination::TimedOut) => JobState::TimedOut,
             None => exit_state(status),
         };
-        let state = cell.state.clone();
         let duration_ms = cell.started.elapsed().as_millis() as u64;
         // `job_kill` and a session-exit settle are not notified; a settle a waiter is already
         // blocked on is not notified again (ADR 0037 decisions 2 and 4). A timeout **is**
         // notified: the model set the timeout but did not ask to kill the job, so it may be
         // waiting on it.
         let notify = !matches!(cell.termination, Some(Termination::Killed)) && cell.waiters == 0;
-        // `send_replace`, not `send`: tokio's `send` returns `Err` **without storing** the value
-        // when the channel has no receiver, and the receiver from `watch::channel(false)` is
-        // dropped at once, so a job that settles while nobody waits would leave the watched
-        // value `false` and a later `job_output wait=true` would sleep to its timeout.
-        cell.settled.send_replace(true);
         (state, duration_ms, notify)
     };
-    let _ = events.send(JobEvent::Settled {
-        id,
-        state,
-        duration_ms,
-        notify,
-    });
+    {
+        // One critical section, the same lock `settle_snapshot` reads: flip the cell, count
+        // the settle, then publish it. A snapshot either sees all three (the total includes
+        // this settle and its broadcast is already sent) or none of them (the job still
+        // counts as running). Lock order is registry-then-cell, the same as `list`.
+        let mut registry = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        lock(cell).state = state.clone();
+        registry.settled_total += 1;
+        let _ = inner.events.send(JobEvent::Settled {
+            id,
+            state,
+            duration_ms,
+            notify,
+        });
+    }
+    // `send_replace`, not `send`: tokio's `send` returns `Err` **without storing** the value
+    // when the channel has no receiver, and the receiver from `watch::channel(false)` is
+    // dropped at once, so a job that settles while nobody waits would leave the watched
+    // value `false` and a later `job_output wait=true` would sleep to its timeout.
+    lock(cell).settled.send_replace(true);
 }
 
 /// Decrements a job's waiter count on drop, so a cancelled or panicked `job_output wait`
@@ -1614,9 +1640,9 @@ mod tests {
     /// `true` anyway (`send_replace`), so a reader that subscribes afterwards sees it.
     #[test]
     fn a_settle_with_no_waiter_still_stores_the_watched_value() {
+        let jobs = Jobs::new(std::env::temp_dir().join("radian-jobs-settle-test"));
         let cell = test_cell();
-        let (events, _) = tokio::sync::broadcast::channel(4);
-        settle(&cell, &events, "job-0-0".into(), None);
+        settle(&jobs.inner, &cell, "job-0-0".into(), None);
 
         assert!(!lock(&cell).state.is_running());
         let mut rx = lock(&cell).settled.subscribe();

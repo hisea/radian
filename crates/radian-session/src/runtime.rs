@@ -130,6 +130,11 @@ pub enum RuntimeEvent {
         lane: InboxLane,
         source: InputSource,
         wake: bool,
+        /// Whether this input is a wake-gate degrade (the wake budget was used up, so it
+        /// was injected only and never wakes an idle driver). Written only when `true`, so
+        /// an ordinary line is byte-identical to before; an old journal has no such field
+        /// and reads as `false` (ADR 0006 §5.5).
+        degraded: bool,
     },
     /// The driver claimed these inputs for a turn (ADR 0006 §5.5).
     InputClaimed {
@@ -333,6 +338,11 @@ pub(crate) struct InboxEnqueuedData<'a> {
     /// revision 1). Written explicitly; an old file has no such field and the reader derives
     /// it from the lane (ADR 0006 §5.5).
     pub wake: bool,
+    /// Whether the input is a wake-gate degrade. Written only when `true` (an ordinary
+    /// line stays byte-identical); an old file has no such field and the reader defaults
+    /// it to `false` (ADR 0006 §5.5).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub degraded: bool,
 }
 
 #[derive(Serialize)]
@@ -495,12 +505,14 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             lane,
             source,
             wake,
+            degraded,
         } => RuntimeData::InboxEnqueued(InboxEnqueuedData {
             message,
             message_id,
             lane: *lane,
             source: *source,
             wake: *wake,
+            degraded: *degraded,
         }),
         RuntimeEvent::InputClaimed {
             message_ids,

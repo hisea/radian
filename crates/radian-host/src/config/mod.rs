@@ -21,6 +21,7 @@
 //! errors name the key path and nothing else.
 
 pub mod default;
+pub mod migrate_claude;
 pub mod migrate_pi;
 pub mod model_write;
 pub mod preserve;

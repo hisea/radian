@@ -149,6 +149,7 @@ fn enqueued(id: &str, lane: InboxLane) -> Input {
         lane,
         source: InputSource::User,
         wake: true,
+        degraded: false,
     })
 }
 

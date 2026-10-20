@@ -1,11 +1,15 @@
 //! Public queue semantics of the four input operations (ADR 0011): concurrency, the
 //! bounded-refusal path, `cancel`'s exemptions, and `inject` not waking the driver.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use agent_core::{InputSource, Message, MessageId, MessageMeta, OpaqueJson};
+use common::{TempDir, created};
 use radian_runtime::{CancelCause, Inbox, InboxError, Lane};
+use radian_session::{EventData, Session, SessionJournal};
 
 // ---------- 1. concurrent followup: nothing lost, FIFO by enqueue order ----------
 
@@ -283,4 +287,99 @@ async fn source_is_required_and_recorded_on_the_message() {
         }
         other => panic!("expected a user message, got {other:?}"),
     }
+}
+
+/// A degraded inject waits on the `next_step` lane like `inject` (never waking an idle
+/// driver), and its durable `InboxEnqueued` record says so (`degraded: true`, ADR 0006
+/// §5.5); a plain `inject` records `false`.
+#[tokio::test]
+async fn a_degraded_inject_marks_its_durable_record() {
+    let dir = TempDir::new("degraded");
+    let path = dir.file("s.jsonl");
+    let journal = Arc::new(SessionJournal::create(&path, "sid", created()).unwrap());
+    let inbox = Inbox::durable(8, Arc::clone(&journal));
+
+    inbox.inject("plain", InputSource::System).await.unwrap();
+    inbox
+        .inject_degraded("degraded", InputSource::System)
+        .await
+        .unwrap();
+
+    // Both wait on the no-wake lane.
+    let lanes: Vec<Lane> = inbox
+        .snapshot()
+        .await
+        .iter()
+        .map(|entry| entry.lane)
+        .collect();
+    assert_eq!(lanes, vec![Lane::NextStep, Lane::NextStep]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), inbox.wake_signal())
+            .await
+            .is_err(),
+        "neither inject wakes the driver"
+    );
+
+    let session = Session::open(&path).unwrap();
+    let degraded: Vec<(String, bool)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::InboxEnqueued {
+                message_id,
+                degraded,
+                ..
+            } => Some((message_id.0.clone(), *degraded)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(degraded.len(), 2);
+    assert!(!degraded[0].1, "a plain inject is not a degrade");
+    assert!(degraded[1].1, "a degraded inject is marked");
+}
+
+/// A turn-opening claim is already visible in the in-flight count when the claim
+/// returns: the pop and the count share the queue lock, so a host checking between
+/// the pop and the turn's start still sees the claimed turn (exec -p's exit check).
+/// Mutation: move the count out of `claim_next_turn` (let the caller set it
+/// afterwards) → the first `inflight_turns` assertion fails.
+#[tokio::test]
+async fn a_claimed_turn_is_inflight_before_the_claim_returns() {
+    let inbox = Inbox::new(8);
+    assert_eq!(inbox.inflight_turns(), 0, "nothing claimed yet");
+    inbox.followup("turn", InputSource::User).await.unwrap();
+    assert_eq!(inbox.inflight_turns(), 0, "queued, not yet claimed");
+    let entry = inbox
+        .claim_next_turn()
+        .await
+        .expect("the followup opens a turn");
+    assert_eq!(entry.lane, Lane::NextTurn);
+    assert_eq!(
+        inbox.inflight_turns(),
+        1,
+        "claimed: visible before any driver step runs"
+    );
+    // An empty claim changes nothing.
+    assert!(inbox.claim_next_turn().await.is_none());
+    assert_eq!(inbox.inflight_turns(), 1);
+    // The turn ends: back to zero.
+    inbox.turn_ended();
+    assert_eq!(inbox.inflight_turns(), 0);
+
+    // A waking `next_step` entry claimed through the turn lane counts the same way;
+    // a plain `inject` never opens a turn and never counts.
+    inbox.steer("steer", InputSource::User).await.unwrap();
+    inbox.inject("plain", InputSource::User).await.unwrap();
+    inbox
+        .claim_next_turn()
+        .await
+        .expect("the waking steer opens a turn");
+    assert_eq!(inbox.inflight_turns(), 1);
+    inbox.turn_ended();
+    assert!(inbox.claim_next_turn().await.is_none());
+    assert_eq!(
+        inbox.inflight_turns(),
+        0,
+        "a plain inject is not a turn-opening claim"
+    );
 }

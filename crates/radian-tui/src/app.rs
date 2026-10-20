@@ -568,6 +568,14 @@ pub struct SessionView {
     /// The last `CompactionFinished`'s numbers, handed to the summary message that follows it
     /// (ADR 0018). `(revision, tokens_before, tokens_after, deterministic, dropped)`.
     pending_compaction: Option<(u64, u64, u64, bool, u64)>,
+    /// The wake-budget notice entry of the current degrade burst, if shown. `update`
+    /// rewrites it with the latest count instead of pushing a line per degrade; the next
+    /// turn start clears it (the line stays as plain history). An entry-list mutation that
+    /// shifts entries (the startup-block splice) moves it along.
+    pub(crate) wake_notice: Option<usize>,
+    /// Degraded wake notices wait while the session is idle: herdr reports `blocked` with
+    /// the `wake budget` label until the next turn starts (which clears this).
+    pub(crate) wake_waiting: bool,
 }
 
 /// The whole TUI's state: the global chrome every session view shares, plus exactly one
