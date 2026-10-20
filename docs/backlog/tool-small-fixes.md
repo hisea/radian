@@ -8,7 +8,7 @@
 
 - `grep` 没有总字节上限，也没有 `files`/`count` 模式（`crates/radian-coding/src/provider.rs:73-75`、`grep.rs:22`）。
 - `patch_ambiguous` 只说"出现 N 次"，不给位置（`patch.rs:104-115`）。
-- 前台 shell 默认每流 64 KiB（`provider.rs:94`）；现在 `shell_output` 能取回全文（ADR 0037 §3a），大上限的理由已弱一半。
+- 前台 shell 默认每流 64 KiB（`provider.rs:94`）；现在 `job read` 能取回全文（ADR 0037 §3a），大上限的理由已弱一半。
 
 ## 决定（已定）
 
