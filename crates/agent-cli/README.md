@@ -185,7 +185,9 @@ Ctrl-C once cancels the turn; a second Ctrl-C while it is winding down exits 130
 
 stdout carries only the model's visible answer (so `-p` can be piped). Status, tool lines
 and **reasoning** go to stderr; reasoning is prefixed `[reasoning]` and kept on its own
-lines, never mixed with the answer (ADR 0014).
+lines, never mixed with the answer (ADR 0014). With `--output jsonl`, stdout instead carries
+the machine-readable stream: every durable journal line, the live-only delta lines and a
+closing `Result` record, one JSON object per line (ADR 0044).
 
 ## Context budget (ADR 0018) and the model catalog
 
@@ -289,7 +291,13 @@ radian config import-pi --from ~/.pi/agent --write              # save it (refus
 | 0 | the turn completed |
 | 1 | the turn failed, or the driver ended with an error |
 | 2 | usage or setup error (including a failed sandbox probe) |
-| 130 | forced exit after a second Ctrl-C |
+| 3 | the budget ran out (`BudgetExceeded`, deadline exceeded) |
+| 4 | the answer was unfinished (`Incomplete`, `Refused`) |
+| 130 | a requested cancellation, or a forced exit after a second Ctrl-C |
+| 143 | SIGTERM (128 + 15) |
+
+`--output jsonl` prints the same outcome as a closing `Result` record (`outcome`,
+`exit_code`, `stop_reason`; ADR 0044).
 
 ## Profiles, the sandbox, and permissions
 
@@ -317,8 +325,11 @@ radian config import-pi --from ~/.pi/agent --write              # save it (refus
   turn. "This session" grants are in memory only and are gone after `--resume`.
 - **`--allow-shell-command PREFIX`** allows one simple shell command prefix without asking
   (e.g. `--allow-shell-command "git status"`). In the `workspace` tier it replaces the
-  blanket "shell asks" rule, so unmatched commands still ask; a composite command
-  (`git status; rm -x`) never matches. The `full` tier allows shell without asking.
+  blanket "shell asks" rule, so unmatched commands still ask; a compound command is allowed
+  only when every segment is allowed (a user rule or the built-in read-only table below),
+  so (`git status; rm -x`) still asks. The `workspace` tier also allows read-only shell
+  commands from its built-in table without asking. The `full` tier allows everything without
+  built-in prompts.
 - **Audit**: every decision writes one `PermissionResolved` to the session file, with
   `approver = policy` for a rule/grant decision and `user` for an answered prompt.
 

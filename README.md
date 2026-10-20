@@ -25,7 +25,7 @@ constrain the code are ADRs under `docs/adr/` (see the index at the end of this 
 | `radian-runtime` | The layer above the turn loop: a durable, bounded inbox (`followup`/`steer`/`inject`/`cancel`) and the per-session driver. | `crates/radian-runtime/README.md`, ADR 0011 |
 | `radian-permissions` | The permission layer: `ApprovalPolicy` + `ToolRuleSet` as one `Hooks` implementation; decides allow / ask / deny. It does not enforce anything. | `crates/radian-permissions/README.md`, ADR 0012 |
 | `radian-sandbox` | OS sandbox backends (macOS `sandbox-exec`, Linux `bubblewrap`) that build a command under a policy and **refuse to run** without a proven backend. | `docs/sandbox.md`, ADR 0012, ADR 0016 |
-| `radian-coding` | Built-in coding tools — `read`, `write`, `patch` (single or atomic multi-edit), `list`, `glob`, `grep`, `git_diff` (`stat: true` gives the status and a `--stat` summary), when the host supplies a workspace; `shell` and the `job` tool additionally require a sandbox. A truncated foreground result registers under a normal job id; retention additionally requires a session-private output directory. Workspace path confinement applies throughout. | `crates/radian-coding/README.md` |
+| `radian-coding` | Built-in coding tools — `read` (files and directories), `write`, `patch` (single or atomic multi-edit), `glob`, `grep`, `git_diff` (`stat: true` gives the status and a `--stat` summary), when the host supplies a workspace; `shell` and the `job` tool additionally require a sandbox. A truncated foreground result registers under a normal job id; retention additionally requires a session-private output directory. `list` and `git_status` stay as one-version aliases, and `job_output`/`job_list`/`job_kill`/`shell_output` as one-version aliases of `job`. Workspace path confinement applies throughout. | `crates/radian-coding/README.md` |
 | `radian-memory` | The memory storage layer (ADR 0021 M1): Global/Project scope logs with replay, the source rules (an agent cannot touch a user record), Forget/Purge, the `projects.jsonl` registry and the Markdown import/export view. Host-free: the caller passes `~/.radian/memory/`. | `crates/radian-memory/README.md`, ADR 0021 |
 | `radian-host` | Host plumbing shared by the TUI and the headless command so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, the "built-in tools + MCP" provider, the `~/.radian/` layout and diagnostics, the model catalog, and the memory layer (`MemoryService`, project identity, the agent memory tools, injection, and the shared `radian memory` / `/memory` commands). | `crates/radian-host/README.md` |
 | `agent-cli` | The library behind `radian exec`: the line-prompt chat client with optional built-in tools, MCP servers, session-management commands and the `radian memory` commands. | `crates/agent-cli/README.md` |
@@ -100,7 +100,7 @@ export OPENAI_API_KEY=sk-...
   --provider openai-compatible \
   --model gpt-5 \
   --base-url https://api.openai.com/v1 \
-  --profile safe \
+  --profile workspace \
   --workspace "$PWD" \
   --session-id demo \
   --session-dir /tmp/radian-sessions \
@@ -118,7 +118,7 @@ Resume that saved session — `--resume` replaces `--session-id` (the two confli
 ./target/debug/radian exec \
   --provider openai-compatible \
   --model gpt-5 \
-  --profile safe \
+  --profile workspace \
   --workspace "$PWD" \
   --session-dir /tmp/radian-sessions \
   --resume demo \
@@ -190,7 +190,7 @@ api_key = { from = "env", name = "OPENAI_API_KEY" }   # a reference; never a val
 x-tenant = "team"
 
 [permissions]
-profile = "workspace"        # safe | workspace | full
+profile = "workspace"        # workspace | full
 
 [compaction]
 auto = true
@@ -215,16 +215,15 @@ theme = "dark"               # dark | light | mono; NO_COLOR forces mono
 
 `--profile` picks all three layers of ADR 0012 at once: the sandbox (the enforcement boundary),
 the rule set (allow / ask / deny) and what the host mounts. The names the binaries accept are
-`safe`, `workspace` and `full` (ADR 0016); the old `workspace-write` and `full-access` remain
+`workspace` and `full` (ADR 0016, ADR 0043); the old `workspace-write` and `full-access` remain
 accepted as aliases but are not listed in `--help`. **`full` is the default** (ADR 0043): the
 neighbouring harnesses run unsandboxed by default, and a sandbox is one flag away
 (`--profile workspace`). A project can turn it on for itself in
-`<workspace>/.radian/config.toml` (`[permissions] profile = "workspace" | "safe"`); that
+`<workspace>/.radian/config.toml` (`[permissions] profile = "workspace"`); that
 declaration can only **narrow**, never widen.
 
 | Tier | Sandbox | Shell | MCP | Built-in files |
 |---|---|---|---|---|
-| `safe` | none needed — nothing executes | not offered | denied | `read`/`list`/`glob`/`grep`/`git_diff` allowed; `write`/`patch` denied |
 | `workspace` | enforced: macOS seatbelt or Linux bubblewrap, probed at startup | offered, **inside** the sandbox | asks | `write`/`patch` allowed only when the resolved path stays under the workspace |
 | `full` | none — the default (ADR 0043) | offered, **not** sandboxed, no prompts | allowed | `write`/`patch` as `workspace` |
 
@@ -234,8 +233,9 @@ declaration can only **narrow**, never widen.
   cause a refusal.
 - **Without `--workspace`** no write or execute tool exists at all: the built-in tools are only
   mounted with a workspace, and `shell` additionally needs a sandbox.
-- **Under `workspace`**, writes are confined to the workspace, repository metadata (`.git`) is
-  read-only, sensitive directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, browser profiles, …) are
+- **Under `workspace`**, writes are confined to the workspace, `.git` stays writable except the
+  entries git can execute (`config`, `config.worktree`, `hooks/`, submodule and worktree
+  equivalents — ADR 0038), sensitive directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, browser profiles, …) are
   not readable by default, and the network is on (outbound and local-loopback
   connect/bind/listen) with the pty devices available, so a project's own tests can run
   (ADR 0016). This is **not** a claim of credential isolation: the macOS backend leaves
@@ -252,14 +252,16 @@ declaration can only **narrow**, never widen.
   (`approver` = `policy` for a rule or grant, `user` for an answered prompt).
 - Approval shows the tool and its **resolved** resource; `y` allows once, `a` allows for the
   session (in memory only, gone after a resume), anything else denies. `--allow-shell-command
-  PREFIX` allows one *simple* command prefix without asking; in the `workspace` tier a compound
-  command still asks.
+  PREFIX` allows one *simple* command prefix without asking; a compound command is allowed
+  only when **every** segment is allowed (a user rule or the built-in read-only table),
+  otherwise it still asks.
   Write these at the subcommand level, never at a bare program name.
 
-Common exit codes (ADR 0032 A3, unified): 0 success, 1 this turn/run failed, 2 a usage, setup
+Common exit codes (ADR 0032 A3, unified, plus ADR 0044's turn-outcome codes for `radian exec`): 0 success (the turn completed), 1 this turn/run failed, 2 a usage, setup
 or startup refusal (clap's own errors, a bad config, an unknown keybinding, a refused startup,
-a failed sandbox probe), 101 the app panicked, 128 + the signal number on SIGTERM/SIGHUP, and
-130 for a forced exit after a second Ctrl-C. `radian exec` and the TUI share the codes;
+a failed sandbox probe), 3 the budget ran out (`BudgetExceeded`, deadline exceeded), 4 the answer
+was unfinished (`Incomplete`, `Refused`), 101 the app panicked, 143 on SIGTERM (128 + 15), and
+130 for a requested cancellation or a forced exit after a second Ctrl-C. `radian exec` and the TUI share the codes;
 `radian`'s TUI used to return 1 for a startup refusal and now returns 2, which is the one
 behavior change. `radian exec --list | head` (and every print-and-exit mode) still exits 0
 silently on a broken pipe.
