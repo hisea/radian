@@ -45,3 +45,15 @@
 | `eval-metrics.md` | idea | 无 | journal 指标提取器 + 固定任务集；Terminal-Bench 适配器在 Linux 盒子上做 |
 | `cache-efficiency.md` | idea | 0018、0026 | OpenAI/Responses 路发 `prompt_cache_key`、缓存 TTL、摘要请求复用对话前缀读缓存 |
 | `herdr-prompt-radian.md` | idea | 0034 | `herdr agent prompt` 拒认运行中的 radian TUI，原因未查明 |
+
+只占索引行（暂无文件；来源都是总报告 `docs/research/2026-10-18-area-deep-dive/README.md`）：
+
+| (无文件) | 状态 | ADR | 一句话 |
+|---|---|---|---|
+| no-edit 看门狗 | idea | 新 ADR（第 15 条） | 长时间只读不改时宿主自动发 steer；先在 D26 任务上 A/B |
+| 持久 todo + `/goal` | idea | 新 ADR（第 19 条） | 目标确定性带过压缩，轮末自动续跑，resume 后一键续跑 |
+| subagent 指定模型 | idea | 0043（第 14 条） | 小模型跑 explore/压缩；后台与续接是同条的后半 |
+| 转后台阈值 60 s | idea | 0011、0037（第 11 条） | 120 s 降到约 60 s，运行中允许 steer 打断 |
+| CI 与发布 | idea | 分发 ADR（第 27 条） | Linux/macOS CI、`cargo-deny`、安装方式；前提是公开仓库 |
+| SECURITY.md | idea | 无（第 28 条） | 一页威胁模型 + CVE 对照表 |
+| 生态兼容 | idea | 待定（第 31 条） | 读 `.agents/skills`、接受 `mcpServers`、Codex 子集 hook、`radian import claude` |
