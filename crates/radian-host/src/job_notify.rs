@@ -17,13 +17,14 @@
 //! but did not ask to kill the job, so it may be waiting on it.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use agent_core::{InputSource, Message};
 use radian_coding::{JobEvent, Jobs};
 use radian_runtime::{Inbox, RuntimeEvents};
 use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};
+use tokio::sync::Notify;
 
 use super::wake_gate::WakeGate;
 use crate::hooks::HooksWarning;
@@ -63,10 +64,17 @@ pub struct JobNotifier {
     gate: WakeGate,
     /// Notices degraded to inject-only since the last wake reset. The TUI notice line
     /// carries the count, so one line per burst still names every waiting notice.
+    /// `exec -p` reads the same count through [`JobNotifier::degraded_pending`].
     degraded: AtomicU32,
     /// The wake-budget notice line (the TUI shows it as a transcript notice, the CLI
     /// prints it). Fired on every degrade; the TUI shows one line per burst.
     wake: HooksWarning,
+    /// How many settles this notifier has fully handled (journaled, then injected or
+    /// followed up). `exec -p` waits until this catches up with the registry's settle
+    /// total, so a settle recorded just before the check is never missed.
+    settled_handled: AtomicU64,
+    /// Bumped after every fully handled settle, so a waiter sees each delivery.
+    settled_signal: Arc<Notify>,
 }
 
 impl JobNotifier {
@@ -87,6 +95,8 @@ impl JobNotifier {
             gate: WakeGate::new(),
             degraded: AtomicU32::new(0),
             wake,
+            settled_handled: AtomicU64::new(0),
+            settled_signal: Arc::new(Notify::new()),
         })
     }
 
@@ -136,6 +146,32 @@ impl JobNotifier {
         self.degraded.load(Ordering::SeqCst)
     }
 
+    /// How many settles have been fully handled (journaled, then injected or followed
+    /// up). Only moves forward.
+    pub fn settled_handled(&self) -> u64 {
+        self.settled_handled.load(Ordering::SeqCst)
+    }
+
+    /// Resolves after every fully handled settle. A waiter re-checks its exit condition
+    /// on each one.
+    pub fn settled_signal(&self) -> Arc<Notify> {
+        Arc::clone(&self.settled_signal)
+    }
+
+    /// How many idle settles the wake gate degraded to inject-only. Each one is a notice
+    /// no turn will ever start for. `exec -p` ends the session on these (exit 3) instead
+    /// of waiting.
+    pub fn degraded_pending(&self) -> u64 {
+        u64::from(self.degraded.load(Ordering::SeqCst))
+    }
+
+    /// Marks one settle fully handled: the journal write and the inject/followup have
+    /// both returned. Called for every settle, notified or not.
+    fn note_handled(&self) {
+        self.settled_handled.fetch_add(1, Ordering::SeqCst);
+        self.settled_signal.notify_one();
+    }
+
     /// Handles one lifecycle event: write the durable record, forward it on the live
     /// runtime-event sink (the TUI's footer `jobs` item), then (for a notifiable settle)
     /// deliver the System message on the busy/idle lane.
@@ -168,6 +204,7 @@ impl JobNotifier {
                 let _ = self.journal.append_runtime_event(record.clone()).await;
                 self.events.on_runtime_event(&record);
                 if !notify {
+                    self.note_handled();
                     return;
                 }
                 let text = self.completion_message(&id, &state, duration_ms);
@@ -185,12 +222,15 @@ impl JobNotifier {
                     // full, so this settle is injected only and wakes nothing. The durable
                     // record says so (`degraded`), and the TUI/herdr legs hear it through
                     // the wake notice. This `else` branch is the single degrade point:
-                    // keep its shape (gate check above, marked `inject` here).
+                    // keep its shape (gate check above, marked `inject` here). `exec -p`
+                    // ends the session on these (exit 3) instead of waiting for a turn
+                    // that cannot come.
                     if self.inbox.inject_degraded(text, source).await.is_ok() {
                         let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
                         (self.wake)(&wake_budget_line(degraded));
                     }
                 }
+                self.note_handled();
             }
         }
     }

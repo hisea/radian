@@ -114,6 +114,13 @@ impl LocalSession {
         self.jobs.clone()
     }
 
+    /// The background-job notifier (ADR 0037 slices 3-4), for hosts that wait on job
+    /// completion (`radian exec -p` watches its handled/degraded counts). `None` for a
+    /// host with no coding tools.
+    pub fn job_notifier(&self) -> Option<Arc<crate::job_notify::JobNotifier>> {
+        self.job_notifier.clone()
+    }
+
     /// Whether a turn is running right now (the driver's flag). `false` before the first turn and
     /// between turns.
     pub fn turn_running(&self) -> bool {
