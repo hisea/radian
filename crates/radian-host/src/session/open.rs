@@ -47,6 +47,7 @@ pub async fn open_session(
         driver_stopped,
         before_driver,
         memory_warning,
+        hooks_warning,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -75,6 +76,7 @@ pub async fn open_session(
         tools_allow,
         skills_allow,
         memory_injection,
+        hooks: hooks_config,
         trust,
         resume,
         config_snapshot,
@@ -255,6 +257,18 @@ pub async fn open_session(
         Some(approver),
         audit(Arc::clone(&journal)),
     ));
+    // ADR 0045 slice A: the user-level command hooks, chained directly after the
+    // permissions (a hook can only narrow what the rules already allowed). The inbox
+    // carries the Stop continuations; the runtime spawns them off the sync turn-end hook.
+    let command_hooks = Arc::new(crate::CommandHooks::new(
+        &hooks_config,
+        &workspace,
+        session_id.as_str(),
+        sandbox_slot.clone(),
+        &inbox,
+        &runtime,
+        hooks_warning,
+    ));
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),
     // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).
@@ -373,6 +387,7 @@ pub async fn open_session(
             .with_hooks(session_hooks(
                 Arc::clone(&role_hooks),
                 Arc::clone(&hooks),
+                Arc::clone(&command_hooks),
                 Arc::clone(&memory_hooks),
                 Arc::clone(&skills_hooks),
                 Arc::clone(&facts_hooks),
@@ -550,6 +565,7 @@ pub async fn open_session(
         journal,
         inbox,
         hooks,
+        command_hooks,
         sandbox_slot,
         access_builder,
         turn_running,

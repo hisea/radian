@@ -220,6 +220,8 @@ pub struct SessionSettings {
     pub skills_disabled: Vec<String>,
     /// The memory injection configuration (ADR 0021).
     pub memory_injection: InjectionConfig,
+    /// The resolved `[hooks]` section (ADR 0045 slice A): user-level command hooks.
+    pub hooks: crate::config::HooksConfig,
 }
 
 impl SessionSettings {
@@ -269,6 +271,7 @@ impl SessionSettings {
             skills_builtin: config.skills.builtin.unwrap_or(true),
             skills_disabled: config.skills.disabled.clone(),
             memory_injection: config.memory.injection(),
+            hooks: config.hooks.clone(),
         };
         (settings, notice)
     }
@@ -365,6 +368,7 @@ impl LeadSetup {
             tools_allow: self.tools_allow,
             skills_allow: None,
             memory_injection: settings.memory_injection,
+            hooks: settings.hooks,
             trust: self.trust,
             resume: self.resume,
             config_snapshot: self.config_snapshot,

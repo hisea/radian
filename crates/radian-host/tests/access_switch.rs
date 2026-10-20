@@ -150,6 +150,7 @@ async fn open_switchable_inner(
             tools_allow: None,
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
+            hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: false,
             config_snapshot: json!({"provider": "openai-compatible", "model": "mock"}),
@@ -171,6 +172,7 @@ async fn open_switchable_inner(
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
+            hooks_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await
@@ -289,6 +291,7 @@ async fn a_session_without_a_builder_refuses_set_access() {
             tools_allow: None,
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
+            hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: false,
             config_snapshot: json!({}),
@@ -310,6 +313,7 @@ async fn a_session_without_a_builder_refuses_set_access() {
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
+            hooks_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await

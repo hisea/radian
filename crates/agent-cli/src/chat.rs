@@ -282,6 +282,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
             },
             before_driver: None,
             memory_warning: Arc::new(|message: &str| eprintln!("[memory] {message}")),
+            hooks_warning: Arc::new(|message: &str| eprintln!("[hooks] {message}")),
         },
     )
     .await

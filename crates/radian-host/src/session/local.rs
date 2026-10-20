@@ -65,6 +65,10 @@ pub struct LocalSession {
     /// The background-job notifier (ADR 0037 slices 3-4). `None` for a host with no coding
     /// tools. The host calls [`JobNotifier::reset_wakes`] when a user message arrives.
     pub(super) job_notifier: Option<Arc<crate::job_notify::JobNotifier>>,
+    /// The user-level command hooks (ADR 0045 slice A). The host calls
+    /// [`crate::CommandHooks::reset_wakes`] when a user message arrives, restarting the
+    /// `Stop` continuation budget.
+    pub(super) command_hooks: Arc<crate::CommandHooks>,
     /// The background-job registry, for `/jobs` (ADR 0037 decision 4).
     pub(super) jobs: Option<Arc<radian_coding::Jobs>>,
     /// The project-trust state (ADR 0031 T3). Interior mutability: the startup prompt resolves
@@ -454,10 +458,12 @@ impl SessionFacade for LocalSession {
                 // before it starts; an unset source is treated as non-human and denied.
                 self.hooks
                     .set_turn_source(Some(agent_core::InputSource::User));
-                // A user message resets the job-notification wake budget (ADR 0037 decision 3).
+                // A user message resets the notification wake budgets (ADR 0037 decision 3,
+                // ADR 0045).
                 if let Some(notifier) = &self.job_notifier {
                     notifier.reset_wakes();
                 }
+                self.command_hooks.reset_wakes();
                 self.runtime
                     .block_on(self.inbox.followup(text, agent_core::InputSource::User))
                     .map(|_| ())
@@ -469,6 +475,7 @@ impl SessionFacade for LocalSession {
                 if let Some(notifier) = &self.job_notifier {
                     notifier.reset_wakes();
                 }
+                self.command_hooks.reset_wakes();
                 self.runtime
                     .block_on(self.inbox.steer(text, agent_core::InputSource::User))
                     .map(|_| ())
@@ -482,6 +489,7 @@ impl SessionFacade for LocalSession {
                 if let Some(notifier) = &self.job_notifier {
                     notifier.reset_wakes();
                 }
+                self.command_hooks.reset_wakes();
                 self.runtime
                     .block_on(self.inbox.inject(message, agent_core::InputSource::User))
                     .map(|_| ())

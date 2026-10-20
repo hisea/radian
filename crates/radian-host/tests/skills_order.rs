@@ -107,8 +107,19 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         &ws, "m-1", None,
     ));
 
-    // The production function, called exactly as `open_session` calls it.
-    let hooks = session_hooks(role, permissions, memory, skills_hooks, facts);
+    // The production function, called exactly as `open_session` calls it (with an empty
+    // command-hooks layer: this test is about the memory/skills order, and `commands`
+    // neither writes the prompt nor decides tools when unconfigured).
+    let commands = Arc::new(radian_host::CommandHooks::new(
+        &Default::default(),
+        &ws,
+        "test-session",
+        radian_sandbox::SandboxSlot::empty(),
+        &radian_runtime::Inbox::new(64),
+        &tokio::runtime::Handle::current(),
+        Arc::new(|_message: &str| {}),
+    ));
+    let hooks = session_hooks(role, permissions, commands, memory, skills_hooks, facts);
     let mut request = ModelRequest {
         system_prompt: None,
         messages: vec![Message::user("what style?")],
