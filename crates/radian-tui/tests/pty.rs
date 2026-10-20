@@ -13307,7 +13307,66 @@ async fn pty_queue_while_idle_starts_a_turn_at_once() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// `/retry` after a model-error turn resends the same text: the second request's last user
+/// `/copy` copies the last committed assistant message through the clipboard backend, and
+/// `/copy code` copies only its last fenced block: the loop's honest `copied N chars`
+/// notice names what was copied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_copy_copies_the_last_message_and_its_code_block() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        text_reply("COPY-OK"),
+        text_reply("```rust\nlet x = 1;\n```"),
+    ])
+    .await;
+    let dir = TempDir::new("copy");
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "copy",
+        ],
+        &[],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"first\r");
+    assert!(
+        pty.wait_for_screen("COPY-OK", wait_positive()),
+        "the reply did not arrive:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/copy\r");
+    assert!(
+        pty.wait_for_screen("copied 7 chars", wait_positive()),
+        "the copy notice did not arrive:\n{}",
+        pty.screen()
+    );
+    pty.send(b"second\r");
+    assert!(
+        pty.wait_for_screen("let x = 1;", wait_positive()),
+        "the code reply did not arrive:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/copy code\r");
+    assert!(
+        pty.wait_for_screen("copied 10 chars", wait_positive()),
+        "the code copy notice did not arrive:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
 /// message matches the first one's, and the transcript gains a second user message without
 /// rewriting anything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

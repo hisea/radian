@@ -16,6 +16,7 @@ pub mod cli;
 pub mod clip;
 pub mod command;
 pub mod composer;
+pub mod copy;
 pub mod events;
 pub mod find;
 pub mod footer;

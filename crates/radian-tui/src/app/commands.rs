@@ -267,6 +267,7 @@ impl App {
             // `/skills`: the host lists the discovered skills as notices.
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
             command::Outcome::Jobs(request) => UpdateResult::effect(Effect::Jobs(request)),
+            command::Outcome::Copy { code_only } => self.copy(code_only),
             command::Outcome::Message => UpdateResult::none(),
         }
     }
@@ -385,5 +386,51 @@ impl App {
                 UpdateResult::dirty()
             }
         }
+    }
+
+    /// Runs `/copy [code]`: copy the last committed assistant message — or its last fenced
+    /// code block — through the configured clipboard backend (the same `Effect::Copy` a
+    /// mouse selection uses, so OSC 52 and `pbcopy` report the same way). A streaming entry
+    /// never counts; with no committed message, no block, an oversized message, or a
+    /// disabled/unsupported backend the reason is a notice and nothing is copied.
+    pub(super) fn copy(&mut self, code_only: bool) -> UpdateResult {
+        let Some(source) = crate::copy::last_assistant_text(&self.session.entries) else {
+            self.push_notice("nothing to copy");
+            return UpdateResult::dirty();
+        };
+        let text = if code_only {
+            match crate::copy::last_fenced_block(source) {
+                Some(block) => block,
+                None => {
+                    self.push_notice("no code block in the last assistant message");
+                    return UpdateResult::dirty();
+                }
+            }
+        } else {
+            source.to_owned()
+        };
+        // Refuse the absurd honestly, with the reason (the mouse selection's own rule).
+        if text.len() > MAX_CLIPBOARD_BYTES {
+            self.push_notice(format!(
+                "message too large to copy: {} bytes (the limit is {})",
+                text.len(),
+                MAX_CLIPBOARD_BYTES
+            ));
+            return UpdateResult::dirty();
+        }
+        // `off` keeps the selection visual for the mouse path, but an explicit `/copy`
+        // answers: nothing was copied, and why.
+        if self.clipboard == ClipboardMode::Off {
+            self.push_notice("copy is off (tui.clipboard = \"off\"); nothing was copied");
+            return UpdateResult::dirty();
+        }
+        if !self.clipboard.supported_on_this_platform() {
+            self.push_notice(format!(
+                "tui.clipboard = {:?} is not supported on this platform; nothing was copied",
+                self.clipboard
+            ));
+            return UpdateResult::dirty();
+        }
+        UpdateResult::effect(Effect::Copy { text })
     }
 }
