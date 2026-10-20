@@ -45,6 +45,14 @@
 | `tui-copy-command.md` | decided（第一档） | 0027、0028 | `/copy` 复制最近一条已提交 assistant 的 markdown 源；`/copy code` 取最后一个代码块 |
 | `tui-retry-command.md` | decided（第一档） | 0017、0011、0003 | `/retry` 在模型错误结束后重发上一条用户消息 |
 | `tui-bell.md` | decided（第一档） | 0027、0024、0008、0037 | `tui.bell = off|attention|all`（缺省 off）：审批/提问/回合结束发 BEL |
+| `skill-init-review.md` | decided | 0025、0036、0043 | 内建 skill `init`（核实命令后写 AGENTS.md）与 `review`（shell 取 diff、并行 `general` 子会话、P0–P3 合并）；只走 `/skill:` 形式 |
+| `tui-loop-continuation.md` | decided | 0011、0005、0037、0027、0023、0017 | 续跑引擎第一、二步：`/loop [--every] [--times] [--for] [prompt]` 轮末重投，`User` 来源 + meta，缺省上限 20 次/1 h，不计唤醒闸门 |
+| `goal-mode.md` | decided（依赖 tui-loop-continuation） | 新 ADR；0018、0036、0011、0005、0043、0037、0034、0006、0022 | `/goal` 持久目标 + `goal {progress\|done\|wait}` 工具 + 预算；目标块确定性注入不进摘要；resume 后 paused；`exec -p --goal` 待决 |
+| `tui-inspector-panel.md` | decided（mcp 页等 mcp-servers-json） | 0023、0035、0037、0043、0045、0027 | 一个带标签页的 Overlay：`jobs | tools | mcp | hooks`，`/panel` 总入口，只读除杀 job，文本形式保留 |
+| `sandbox-token-profile.md` | decided | 0012、0016、0043 | 沙箱档 profile 构造收 `&Sandbox` 而不是 `bool`，拿不到实例造不出放行 profile（外部审核 P1-1） |
+| `exec-result-run-usage.md` | decided | 0044、0007 | `Result` 加 `run_turns`/`run_usage`/`run_cost`，以 tee 的 `written_len` 为本次运行边界；累计字段不变（外部审核 P2-2） |
+| `foreground-orphan-sweep.md` | decided | 0037、0039、0020 | resume 时清扫 `.jobs/` 里无登记项的输出文件；删会话时删目录（外部审核第四节） |
+| `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `subagent-ask-forwarding.md` | idea | 0043、0010、0024 | 子会话仍要问的 ask 转回父会话；缺 durable `PermissionRequested` 与 control 收审批；依赖沙箱内放行 |
