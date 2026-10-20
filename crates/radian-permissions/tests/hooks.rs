@@ -35,7 +35,9 @@ fn make_hooks(
 }
 
 fn shell() -> ToolCall {
-    call("shell", json!({"command": "git status"}))
+    // Stays outside the built-in read-only table on purpose: these tests cover
+    // the ask path, so the example command must keep asking.
+    call("shell", json!({"command": "git push"}))
 }
 
 async fn decide(

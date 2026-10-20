@@ -28,6 +28,7 @@
 pub mod approval;
 pub mod audit;
 pub mod profile;
+pub mod readonly;
 pub mod rule;
 pub mod shell;
 

@@ -79,6 +79,48 @@ allows arbitrary code. **Write `allow` rules at the subcommand level, never at t
 program name,** and treat build tools as code execution by design — the sandbox, not this
 layer, is what contains them.
 
+## The built-in read-only table
+
+On top of the rules above, the hook consults a built-in table of read-only shell commands
+(`src/readonly.rs`): `git status`/`diff`/`log`/`show`, `git branch` (no arguments or
+`--list`), `git rev-parse`, `git remote -v`, `git stash list`, `ls`, `pwd`, `wc`, `cat`,
+`head`, `tail`, `stat`, `file`, `du`, `tree`, `rg`, `grep`, `find`, `cargo metadata` and
+`cargo tree`. It sits after the user's rules and before the tier's blanket shell rule: a
+rule `deny` still wins first, and a named `ask` rule (an explicit user rule) still wins
+over the table — only the tier's blanket shell `ask` and the no-match default yield to
+it. A hit bypasses the approval policy (`always`/`never`/`auto` never turn it into a
+question: read-only commands are not worth reviewing, and a headless turn must not lose
+them) and is recorded with `approver = policy`.
+
+A hit needs all three at once:
+
+1. The command is simple (see above): `~`, quotes, `$`, globs and `;` already fall
+   through to `ask`.
+2. Every non-option token resolves inside the workspace (the same `resolve` as path
+   rules: no `..` escape, no leading `/`, no symlink out). A token that is not a path
+   (a pattern, a count, a revision) just has to survive the same check, so plain words
+   pass and only real escapes fail.
+3. No executable, long-lived or file-writing option, and no unknown option. Each program
+   carries its own forbidden list — `find -exec`/`-execdir`/`-delete`/`-ok`/`-fprint*`,
+   `-L`/`-follow` anywhere traversal would follow symlinks out, `git -c`/`-C`/
+   `--exec-path`/`--git-dir`/`--work-tree`, global `-p`/`--paginate` (it executes the
+   pager), `grep`/`rg --pre`/`--pre-glob`, `tail -f`/`--follow`/`--retry`,
+   `file -C`/`--compile`, `tree -o`, `git diff/log/show --output`/`--ext-diff`/
+   `--textconv` — plus a small safe list; anything else falls through to `ask`.
+   Over-asking is the intended failure mode here too.
+
+`git diff`/`git log`/`git show` hits are a `Rewrite`, not an `Allow`: the hook inserts
+`--no-ext-diff --no-textconv` right after the subcommand, so a model-writable
+`.gitattributes` driver can never make the call execute an external diff or textconv
+command (ADR 0039 decision 3). Only those three subcommands take the flags: `git
+branch`/`status`/`rev-parse`/`remote`/`stash` reject `--no-textconv` (checked on git
+2.53.0), and `rev-parse` echoes it back as a revision instead of accepting it. The
+rewritten call is still judged `allow` by policy and audited as a policy `rewrite`.
+
+The option lists were read from each program's `--help` on the dev box, except `rg`,
+`tree` and `cargo`, which are not installed there: their lists come from their
+documented options.
+
 ## Paths
 
 `PathUnder` matches the **resolved** path: relative paths are joined to the permission
@@ -137,6 +179,10 @@ transcript record, so it never appears in `journal_records`/`replay`.
 | 10 | preset behaviour (workspace asks MCP, full allows) | `tests/rule.rs` |
 | 11 | resolved-path matching (`..`, symlinks) | `tests/rule.rs` |
 | 12 | `ask_user` is fixed `allow` in both tiers (ADR 0024 Q6) | `src/profile.rs` |
+| 13 | read-only shell table allows without a prompt, incl. under `always`/`never` and non-human turns | `tests/readonly.rs` |
+| 14 | paths, options and subcommand shapes outside the table still ask | `tests/readonly.rs` |
+| 15 | `git diff`/`log`/`show` rewritten with `--no-ext-diff --no-textconv`, audited as a policy rewrite | `tests/readonly.rs` |
+| 16 | `deny` and named user-`ask` outrank the table; user `allow` keeps the git rewrite | `tests/readonly.rs` |
 
 ## Not verified / limits
 
