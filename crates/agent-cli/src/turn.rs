@@ -130,21 +130,29 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
     loop {
         // A degraded notice never opens a turn (the wake gate is closed): end the session
         // instead of waiting for something that cannot happen. Exit 3, the budget family
-        // (ADR 0044); the `Result` record names the budget and the unhandled count.
-        if let Some(notifier) = run.session.job_notifier()
-            && notifier.degraded_pending() > 0
-        {
-            let unhandled = notifier.degraded_pending();
+        // (ADR 0044); the `Result` record names the budget and the unhandled counts. A
+        // degraded `Stop` verdict waits the same way: no running job, no wake pending,
+        // not busy, and exec would otherwise exit 0 with the verdict unread.
+        let unhandled = run
+            .session
+            .job_notifier()
+            .map(|notifier| notifier.degraded_pending())
+            .unwrap_or(0);
+        let unhandled_stop = run.session.command_hooks().degraded_pending();
+        if unhandled + unhandled_stop > 0 {
             eprintln!(
                 "radian: the wake budget is used up with {unhandled} job completion \
-                 notice(s) unhandled; ending the run"
+                 notice(s) and {unhandled_stop} Stop verdict(s) unhandled; ending the run"
             );
             if let Err(error) = close_and_join(&run.inbox, &run.session).await {
                 eprintln!("radian: {}", redact(&error, &run.secrets));
             }
             return LoopDone {
                 code: 3,
-                end: ExecEnd::WakeBudget { unhandled },
+                end: ExecEnd::WakeBudget {
+                    unhandled,
+                    unhandled_stop,
+                },
             };
         }
         if jobs_quiescent(run).await {

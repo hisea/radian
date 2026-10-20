@@ -62,9 +62,9 @@ pub struct JobNotifier {
     /// The sliding-window wake budget (ADR 0037 decision 5): at most a window's worth of
     /// wakes, expiring on their own with no user message needed.
     gate: WakeGate,
-    /// Notices degraded to inject-only since the last wake reset. The TUI notice line
-    /// carries the count, so one line per burst still names every waiting notice.
-    /// `exec -p` reads the same count through [`JobNotifier::degraded_pending`].
+    /// Notices degraded to inject-only since the last wake. A woken turn absorbs the
+    /// waiting injects (the driver drains `next_step` at turn start), so a wake ends
+    /// the burst; a user message resets it at once.
     degraded: AtomicU32,
     /// The wake-budget notice line (the TUI shows it as a transcript notice, the CLI
     /// prints it). Fired on every degrade; the TUI shows one line per burst.
@@ -141,7 +141,8 @@ impl JobNotifier {
         self.gate.wakes()
     }
 
-    /// How many notices were degraded since the last wake reset (tests).
+    /// How many notices were degraded since the last wake (tests). A woken turn absorbs
+    /// the waiting injects, so a wake resets this to zero; a user message does too.
     pub fn degraded(&self) -> u32 {
         self.degraded.load(Ordering::SeqCst)
     }
@@ -213,9 +214,13 @@ impl JobNotifier {
                     // Busy: context for the running turn, no wake (ADR 0037 decision 3).
                     let _ = self.inbox.inject(text, source).await;
                 } else if self.gate.wake_allowed() {
-                    // Idle: wake a turn, up to the rate gate.
+                    // Idle: wake a turn, up to the rate gate. The woken turn absorbs the
+                    // waiting injects, so a wake also ends the degrade burst: the count
+                    // (and the herdr `wake budget` label, cleared at turn start) does not
+                    // wait for a user message.
                     if self.inbox.followup(text, source).await.is_ok() {
                         self.gate.note_wake();
+                        self.degraded.store(0, Ordering::SeqCst);
                     }
                 } else {
                     // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): the rate gate is

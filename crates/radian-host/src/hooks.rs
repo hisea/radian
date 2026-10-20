@@ -89,7 +89,8 @@ pub struct CommandHooks {
     /// needed. Each `CommandHooks` holds its own count (see the follow-up on
     /// `crate::job_notify::JobNotifier`): the same rate rule, not a shared counter.
     gate: Arc<WakeGate>,
-    /// Continuations degraded to inject-only since the last wake reset.
+    /// Continuations degraded to inject-only since the last wake. A woken turn absorbs
+    /// the waiting injects, so a wake ends the burst; a user message resets it at once.
     degraded: Arc<AtomicU32>,
     warn: HooksWarning,
     /// The wake-budget notice line (routed like `warn`, as its own transcript notice).
@@ -144,9 +145,17 @@ impl CommandHooks {
         self.gate.wakes()
     }
 
-    /// How many continuations were degraded since the last wake reset (tests).
+    /// How many continuations were degraded since the last wake (tests). A woken turn
+    /// absorbs the waiting injects, so a wake resets this to zero; a user message does
+    /// too.
     pub fn degraded(&self) -> u32 {
         self.degraded.load(Ordering::SeqCst)
+    }
+
+    /// How many continuations are degraded and still waiting: a verdict no turn will
+    /// ever start for. `exec -p` ends the session on these (exit 3) instead of waiting.
+    pub fn degraded_pending(&self) -> u64 {
+        u64::from(self.degraded.load(Ordering::SeqCst))
     }
 
     /// Whether a compiled matcher matches a Radian tool name.
@@ -197,6 +206,8 @@ impl CommandHooks {
                         // as the background-job notifier (ADR 0045 §2) — a skipped run
                         // would be silent, a degraded verdict waits visibly.
                         if self.gate.wake_allowed() {
+                            // The woken turn absorbs the waiting injects, so a wake also
+                            // ends the degrade burst.
                             if self
                                 .inbox
                                 .followup(Message::user(text), InputSource::System)
@@ -204,6 +215,7 @@ impl CommandHooks {
                                 .is_ok()
                             {
                                 self.gate.note_wake();
+                                self.degraded.store(0, Ordering::SeqCst);
                             }
                         } else {
                             if self
@@ -1197,10 +1209,16 @@ mod tests {
             "the notice carries the degrade count: {:?}",
             warned(&fixture.wake_notices)
         );
-        // The window passing alone reopens the gate: no user message needed.
+        // The window passing alone reopens the gate: no user message needed; the later
+        // wake ends the burst.
         tokio::time::advance(WAKE_WINDOW + std::time::Duration::from_secs(1)).await;
         fixture.hooks.run_stop_once(&RunStatus::Completed).await;
         assert_eq!(fixture.hooks.stop_wakes(), 1);
+        assert_eq!(
+            fixture.hooks.degraded(),
+            0,
+            "the later wake ends the degrade burst"
+        );
         assert!(
             fixture.inbox.claim_next_turn().await.is_some(),
             "after the window: the continuation opens a turn again"

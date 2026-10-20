@@ -534,9 +534,33 @@ async fn an_ended_session_releases_its_journal() {
     );
 }
 
-/// A settle past the cap is injected with the degrade mark, counted, and announced: the
-/// durable `InboxEnqueued` says `degraded`, and the wake notice carries the count since
-/// the last wake.
+/// A later wake ends the degrade burst: the woken turn absorbs the waiting injects, so
+/// the degraded count clears with the turn, not only on a user message.
+#[tokio::test]
+async fn a_later_wake_ends_the_degrade_burst() {
+    tokio::time::pause();
+    let dir = scratch("rate-burst-end");
+    let (notifier, _jobs, inbox, _) = notifier(&dir);
+
+    for i in 0..MAX_WAKES_PER_WINDOW {
+        notifier.deliver(settled(&format!("job-{i}"), true)).await;
+        assert!(inbox.claim_next_turn().await.is_some());
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    notifier.deliver(settled("job-d1", true)).await;
+    notifier.deliver(settled("job-d2", true)).await;
+    assert_eq!(notifier.degraded(), 2);
+
+    // The window passes and a later wake lands: the burst is over.
+    tokio::time::advance(WAKE_WINDOW + Duration::from_secs(1)).await;
+    notifier.deliver(settled("job-after-window", true)).await;
+    assert!(inbox.claim_next_turn().await.is_some());
+    assert_eq!(notifier.degraded(), 0);
+}
+
+/// A settle past the gate is injected with the degrade mark, counted, and announced:
+/// the durable `InboxEnqueued` says `degraded`, and the wake notice carries the count
+/// since the last wake.
 #[tokio::test]
 async fn a_degraded_notice_writes_the_marked_record_and_announces_it() {
     use std::sync::Mutex;

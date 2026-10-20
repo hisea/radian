@@ -46,8 +46,9 @@ pub(crate) enum ExecEnd {
     /// The driver stopped on its own. `ok` tells whether it ended cleanly.
     DriverEnded { code: i32, ok: bool },
     /// The wake gate closed with notices no turn will ever run: exit 3, the budget
-    /// family (ADR 0044). `unhandled` counts them.
-    WakeBudget { unhandled: u64 },
+    /// family (ADR 0044). `unhandled` counts degraded job notices, `unhandled_stop`
+    /// counts degraded Stop verdicts.
+    WakeBudget { unhandled: u64, unhandled_stop: u64 },
 }
 
 /// The exit code for a Core turn status (all `exec` modes, not only jsonl). `RunStatus` is
@@ -134,7 +135,20 @@ impl ExecEnd {
     /// unchanged.
     pub(crate) fn unhandled_job_notices(&self) -> Option<u64> {
         match self {
-            ExecEnd::WakeBudget { unhandled } => Some(*unhandled),
+            ExecEnd::WakeBudget { unhandled, .. } => Some(*unhandled),
+            _ => None,
+        }
+    }
+
+    /// How many degraded Stop verdicts never ran, for the `Result` record. `Some` only
+    /// on the wake-budget path with a nonzero count; every other ending — and a
+    /// job-only wake-budget ending — serializes without the field, so their lines are
+    /// unchanged.
+    pub(crate) fn unhandled_stop_notices(&self) -> Option<u64> {
+        match self {
+            ExecEnd::WakeBudget { unhandled_stop, .. } if *unhandled_stop > 0 => {
+                Some(*unhandled_stop)
+            }
             _ => None,
         }
     }
@@ -293,6 +307,9 @@ pub(crate) fn result_line(
     });
     if let Some(unhandled) = end.unhandled_job_notices() {
         result["unhandled_job_notices"] = unhandled.into();
+    }
+    if let Some(unhandled_stop) = end.unhandled_stop_notices() {
+        result["unhandled_stop_notices"] = unhandled_stop.into();
     }
     let mut bytes = serde_json::to_vec(&result)
         .expect("a Result line is plain JSON and cannot fail to serialize");
@@ -529,17 +546,23 @@ mod tests {
     }
 
     /// The wake-budget ending exits 3 with a budget outcome, its own stop reason, and
-    /// the unhandled count; every other ending carries no such field. Mutation: exit 0
-    /// instead of 3, or drop the field → this fails.
+    /// the unhandled counts; every other ending carries no such fields. A nonzero Stop
+    /// count adds `unhandled_stop_notices`; a zero one serializes without it. Mutation:
+    /// exit 0 instead of 3, or drop a field → this fails.
     #[test]
     fn the_wake_budget_ending_exits_three_with_its_unhandled_count() {
-        let end = ExecEnd::WakeBudget { unhandled: 2 };
+        let end = ExecEnd::WakeBudget {
+            unhandled: 2,
+            unhandled_stop: 0,
+        };
         let (outcome, code, reason) = end.result_fields();
         assert_eq!(outcome, "budget_exceeded");
         assert_eq!(code, 3);
         assert_eq!(reason, "wake_budget");
         assert_eq!(end.unhandled_job_notices(), Some(2));
+        assert_eq!(end.unhandled_stop_notices(), None);
         assert_eq!(ExecEnd::Status(None).unhandled_job_notices(), None);
+        assert_eq!(ExecEnd::Status(None).unhandled_stop_notices(), None);
 
         let summary = JournalSummary {
             turns: 4,
@@ -562,6 +585,25 @@ mod tests {
                 "text": "stuck",
                 "unhandled_job_notices": 2,
             })
+        );
+
+        // A nonzero Stop count adds its own optional field.
+        let end = ExecEnd::WakeBudget {
+            unhandled: 0,
+            unhandled_stop: 1,
+        };
+        assert_eq!(end.unhandled_stop_notices(), Some(1));
+        let line = result_line("sid", &end, &summary, false);
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(
+            value.get("unhandled_job_notices"),
+            Some(&serde_json::json!(0)),
+            "{value}"
+        );
+        assert_eq!(
+            value.get("unhandled_stop_notices"),
+            Some(&serde_json::json!(1)),
+            "{value}"
         );
     }
 

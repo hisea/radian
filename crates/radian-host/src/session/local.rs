@@ -121,6 +121,12 @@ impl LocalSession {
         self.job_notifier.clone()
     }
 
+    /// The user-level command hooks (ADR 0045), for hosts that wait on degraded Stop
+    /// verdicts (`radian exec -p` ends the session on these with exit 3).
+    pub fn command_hooks(&self) -> Arc<crate::CommandHooks> {
+        Arc::clone(&self.command_hooks)
+    }
+
     /// Whether a turn is running right now (the driver's flag). `false` before the first turn and
     /// between turns.
     pub fn turn_running(&self) -> bool {
