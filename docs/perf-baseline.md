@@ -1019,3 +1019,19 @@ cargo test -p radian-coding --test perf_file_tools -- --ignored --nocapture --te
 **结论：串行**。三个并发 grep 的墙钟 ≈ 单次的三倍：`run` 里的同步 walk + 逐行读从来不
 让出，一个任务里的批量只能一个一个跑。`shell` 描述里的"run in parallel"到此未经证实；
 本项把扫描搬进 `spawn_blocking` 后重测（见下节）。
+
+## 文件工具 `spawn_blocking`（file-tools-parallel，本项改后）
+
+同一命令、同一台机器（`uptime` 负载约 30）。改动：`grep`/`glob` 的 `run` 只做参数
+解析与限额计算，fd walk + 逐文件读 + 渲染搬进 `tokio::task::spawn_blocking`（Core
+不改；取消时丢掉 future，阻塞侧读完即弃，只读所以无害）。
+
+| 树 | 单次 grep 中位 | 同一批三个 grep 中位 | 比值（改前） |
+|---|---|---|---|
+| 本仓库 | 174.8 ms | 200.9 ms | **1.15×**（改前 3.10×） |
+| registry 最大展开树 | 1.77 s | 1.57 s | **0.89×**（改前 3.08×） |
+
+**结论：并行**。三个并发 grep 的墙钟 ≈ 单次，不再是三倍。`shell` 描述里的"run in
+parallel"至此证实，无需改字。`glob` 走同一条路（同一实现形状）；重叠的确定性证明
+见 `crates/radian-coding/tests/file_tools_parallel.rs`（`resolve_hook` 里的 `Barrier`，
+不依赖墙钟），取消见同一文件的 `a_cancelled_batch_returns_without_the_scan_result`。
