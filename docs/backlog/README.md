@@ -41,6 +41,7 @@
 | `full-tier-unrestricted.md` | decided | 0012 主、0043、0016、0038、0031 | `full` 档像 pi：shell `allow`，不弹内建提示，`--yes` 在 `full` 下无作用；启动行写 `no prompts`；用户 deny 仍生效、陌生项目信任门缺省高亮 workspace + 启动画面字标下提示 `/trust`、`always` 保留＼� |
 | `shell-readonly-allow.md` | decided | 0012 修订、0039 | 内建一组只读命令免问（`git status`、`ls`、`rg`…），路径限工作区、不带可执行或写文件选项；`full` 全放行后实际作用在 `workspace` 与 `approval = always` |
 | `shell-compound-allow.md` | decided | 0012 不变，改 `radian-permissions/README.md` | 未加引号的 `&& \|\| ; \|` 切段，每段都命中 allow 才 allow，`xargs`/`env`/`sh` 等执行其参数的程序不放行 |
+| `remove-git-diff.md` | decided（`shell-readonly-allow` 之后） | 0043、0039、0028、0012 | 删 `git_diff`（模型 12:1 走 shell），留一个版本的别名；shell 里的 git 要不要注入加固配置待决 |
 | `ask-user-pass.md` | decided | 0024、0036 | 保留 `ask_user`：描述写明只问用户拥有的取舍、能查到的不问；定义瘦身到约 1 KB |
 | `context-at-imports.md` | decided（生态 1/4） | 0036 | 三个候选文件都展开 `@path` 导入：4 层、跳过代码块、只展开仓库内、计入 128 KiB，启动行列出 |
 | `mcp-servers-json.md` | decided（生态 2/4） | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门、按内容哈希确认，确认即批准其 server（一道门）；缺省 `inherit_env=["HOME"]`；环境白名单不变；MCP 文本结果套 `read` 的 64 KiB 上限并带截断标记 |
