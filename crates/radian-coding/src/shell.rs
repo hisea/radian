@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use agent_core::{
     CancellationToken, ContentPart, ToolConcurrency, ToolContext, ToolFailure, ToolOutput, ToolSpec,
 };
-use radian_sandbox::{Sandbox, SandboxCommand, SandboxMode};
+use radian_sandbox::{DenialCategory, Sandbox, SandboxCommand, SandboxMode, classify_denial};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -89,6 +89,16 @@ pub(crate) fn schema() -> serde_json::Value {
                 "type": "boolean",
                 "description": "Run in the background and return at once with a job id \
                                 (default false). Read it with `job`."
+            },
+            "outside_sandbox": {
+                "type": "boolean",
+                "description": "One call outside the sandbox (default false): needs a \
+                                reason and approval; never automatic, never in the background."
+            },
+            "outside_sandbox_reason": {
+                "type": "string",
+                "description": "Why the call leaves the sandbox; required with \
+                                `outside_sandbox`."
             }
         },
         "required": ["command"],
@@ -112,12 +122,15 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
              confined to the workspace, the repository's `.git` is writable so native \
              `git commit` works (only `.git/config`, `.git/config.worktree` and \
              `.git/hooks/` stay read-only), `~/.ssh` is not readable, and the network is \
-             **on**."
+             **on**. Set `outside_sandbox: true` with `outside_sandbox_reason` to ask \
+             approval for one unsandboxed call."
         }
         SandboxMode::WorkspaceWrite => {
             "The command runs under the OS sandbox in `workspace` mode: writes are \
              confined to the workspace, the repository's `.git` is read-only (so is \
-             `git commit`, by design), `~/.ssh` is not readable, and the network is **on**."
+             `git commit`, by design), `~/.ssh` is not readable, and the network is **on**. \
+             Set `outside_sandbox: true` with `outside_sandbox_reason` to ask approval \
+             for one unsandboxed call."
         }
         SandboxMode::FullAccess => {
             "**The command is NOT sandboxed** (`full`): it can read and write \
@@ -214,6 +227,13 @@ struct ShellArgs {
     max_output_bytes: Option<usize>,
     /// ADR 0037: run in the background and return at once.
     background: Option<bool>,
+    /// Slice 1 of `sandbox-auto-allow-shell`: run this one call outside the sandbox.
+    /// The permission layer forces it through `ask` with a required reason; the tool
+    /// re-checks the reason here, so a caller without the layer cannot slip one past.
+    outside_sandbox: Option<bool>,
+    /// Why this call must leave the sandbox. Required when `outside_sandbox` is set;
+    /// ignored otherwise.
+    outside_sandbox_reason: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -241,6 +261,34 @@ pub(crate) async fn run(
         Some(dir) => root.checked_dir_path(dir)?,
         None => root.root().to_path_buf(),
     };
+
+    // Slice 1 of `sandbox-auto-allow-shell`: the model may ask to leave the sandbox
+    // explicitly. Such a call goes through `ask` in the permission layer and, only
+    // when approved, runs **unsandboxed for that one call** below. The reason is
+    // re-checked here (fail closed for callers without the layer), a background
+    // outside call is refused outright, and nothing ever re-runs a command outside
+    // automatically.
+    if args.outside_sandbox.unwrap_or(false) {
+        let reason = args.outside_sandbox_reason.as_deref().unwrap_or("").trim();
+        if reason.is_empty() {
+            return Err(args::invalid(
+                "shell",
+                arguments,
+                ["`outside_sandbox: true` needs an `outside_sandbox_reason` saying why"],
+            ));
+        }
+        if args.background.unwrap_or(false) {
+            return Err(args::invalid(
+                "shell",
+                arguments,
+                [
+                    "`outside_sandbox: true` with `background: true` is refused: an unsandboxed \
+                  call runs in the foreground only",
+                ],
+            ));
+        }
+        return run_outside_sandbox(root, sandbox, limits, &cwd, &args, reason, cx).await;
+    }
 
     if args.background.unwrap_or(false) {
         return start_background(root, sandbox, jobs, &cwd, &args);
@@ -321,6 +369,17 @@ pub(crate) async fn run(
                 }
                 _ => None,
             };
+            // Slice 1 of `sandbox-auto-allow-shell`: when a sandboxed command failed
+            // because of the sandbox, the result carries the fixed marker, classified
+            // in the sandbox layer from errno text and the policy's paths. Only an
+            // enforced sandbox can produce one, and only a failure can carry one —
+            // anything else is an ordinary command failure with no marker.
+            let denied = if !success && sandbox.mode().is_enforced() {
+                let stderr = outcome.stderr.render_for(success);
+                classify_denial(sandbox.policy(), &args.command, &stderr)
+            } else {
+                None
+            };
             Ok(report(
                 &args.command,
                 root.root(),
@@ -332,6 +391,8 @@ pub(crate) async fn run(
                 output_clamped,
                 &outcome,
                 retained,
+                denied,
+                None,
             ))
         }
         ExecOutcome::Adopted(info) => {
@@ -461,6 +522,87 @@ pub(crate) fn sandboxed_command(
     Ok(process)
 }
 
+/// The one unsandboxed command construction in the tool (slice 1 of
+/// `sandbox-auto-allow-shell`). Only an approved `outside_sandbox` call reaches here —
+/// the permission layer forced it through `ask` (and the tool re-checked the reason),
+/// and this function has no other caller — so there is exactly one code path that
+/// runs a command without the sandbox, and it is reachable only from there. The
+/// environment whitelist still applies, exactly as for `FullAccess`: a
+/// model-controlled shell never inherits the host's keys, sandbox or not.
+fn unsandboxed_command(
+    sandbox: &Sandbox,
+    cwd: &Path,
+    command: &str,
+) -> Result<Command, ToolFailure> {
+    let mut process = Command::new("/bin/sh");
+    process.arg("-c").arg(command);
+    process.current_dir(cwd);
+    process.env_clear();
+    for name in &sandbox.policy().allow_env {
+        if let Some(value) = std::env::var_os(name) {
+            process.env(name, value);
+        }
+    }
+    Ok(process)
+}
+
+/// Runs one approved `outside_sandbox` call in the foreground, unsandboxed for that
+/// one call. `sandbox` supplies only the environment whitelist and the report's mode
+/// line; the command itself never goes through it. Never adopted to the background
+/// (the caller refused `background: true` already) and never classified: with no
+/// sandbox there is nothing to blame, so no `sandbox denied` marker by construction.
+#[allow(clippy::too_many_arguments)]
+async fn run_outside_sandbox(
+    root: &WorkspaceRoot,
+    sandbox: &Sandbox,
+    limits: &Limits,
+    cwd: &Path,
+    args: &ShellArgs,
+    reason: &str,
+    cx: &ToolContext<'_>,
+) -> Result<ToolOutput, ToolFailure> {
+    let (deadline, clamped) = clamp_timeout(args.timeout_secs, limits);
+    let (output_cap, output_clamped) = clamp_output(args.max_output_bytes, limits);
+    let mut process = unsandboxed_command(sandbox, cwd, &args.command)?;
+    let outcome = execute_built(
+        &mut process,
+        deadline,
+        output_cap,
+        &cx.cancellation,
+        None,
+        None,
+    )
+    .await?;
+    match outcome {
+        ExecOutcome::Ran(outcome) => {
+            let success = outcome.succeeded();
+            let truncated = outcome.stdout.is_truncated_for(success)
+                || outcome.stderr.is_truncated_for(success);
+            // An outside call is never retained: the foreground file (if any) is dropped.
+            let _ = truncated;
+            Ok(report(
+                &args.command,
+                root.root(),
+                cwd,
+                sandbox.mode(),
+                deadline,
+                clamped,
+                output_cap,
+                output_clamped,
+                &outcome,
+                None,
+                None,
+                Some(reason),
+            ))
+        }
+        // Unreachable: no adoption threshold is passed, so the call runs to its
+        // foreground deadline and is killed there.
+        ExecOutcome::Adopted(_) => Err(fail(
+            "shell_internal",
+            "an outside-sandbox call was adopted to the background",
+        )),
+    }
+}
 /// What a foreground [`execute`] produced (ADR 0037): the finished outcome, or the
 /// job the still-running call was adopted into.
 pub(crate) enum ExecOutcome {
@@ -491,9 +633,23 @@ async fn execute(
     retain: Option<Retention>,
 ) -> Result<ExecOutcome, ToolFailure> {
     let mut process = sandboxed_command(sandbox, cwd, command)?;
+    execute_built(&mut process, timeout, output_cap, cancel, adopt, retain).await
+}
 
+/// The supervision core both paths share: the sandboxed [`execute`] and the one
+/// unsandboxed [`run_outside_sandbox`] call. The command is already built; from here
+/// on the two are the same process-group supervision, timeout and output capture.
+#[allow(clippy::too_many_arguments)]
+async fn execute_built(
+    process: &mut Command,
+    timeout: Duration,
+    output_cap: usize,
+    cancel: &CancellationToken,
+    adopt: Option<Adopt<'_>>,
+    retain: Option<Retention>,
+) -> Result<ExecOutcome, ToolFailure> {
     let started = Instant::now();
-    let mut supervised = Supervised::spawn(&mut process, output_cap, retain).map_err(|e| {
+    let mut supervised = Supervised::spawn(&mut *process, output_cap, retain).map_err(|e| {
         fail(
             "shell_spawn_failed",
             format!("could not start the command: {e}"),
@@ -1380,6 +1536,8 @@ fn report(
     output_clamped: bool,
     outcome: &Outcome,
     retained: Option<RetainedView>,
+    denied: Option<DenialCategory>,
+    outside_reason: Option<&str>,
 ) -> ToolOutput {
     let success = outcome.succeeded();
     let stdout = outcome.stdout.render_for(success);
@@ -1389,6 +1547,17 @@ fn report(
 
     let mut text = String::new();
     text.push_str(&format!("$ {command}\n"));
+    // Slice 1 of `sandbox-auto-allow-shell`: when the command failed because of the
+    // sandbox, the result carries the fixed marker, classified in the sandbox layer
+    // (`radian_sandbox::classify_denial`); an ordinary command failure carries none.
+    // An approved `outside_sandbox` call instead names the reason it ran unsandboxed.
+    if let Some(reason) = outside_reason {
+        text.push_str(&format!(
+            "[ran outside the sandbox for this one call (approved): {reason}]\n"
+        ));
+    } else if let Some(denied) = denied {
+        text.push_str(&format!("[{}]\n", denied.marker()));
+    }
     if outcome.timed_out {
         text.push_str(&format!(
             "[timed out after {timeout:?}; the whole process group was killed. For a command that \
@@ -1498,6 +1667,9 @@ fn report(
             "output_total_bytes": retained.as_ref().map(|r| r.total_bytes),
             "output_retained_cut": retained.as_ref().map(|r| r.cut),
             "duration_ms": outcome.duration.as_millis() as u64,
+            "sandbox_denied": denied.map(|denied| denied.as_str()),
+            "outside_sandbox": outside_reason.is_some(),
+            "outside_sandbox_reason": outside_reason,
         })),
     }
 }
@@ -1637,6 +1809,11 @@ mod tests {
         // ADR 0037 decision 4: the two definitions stay small enough for the cached prefix.
         // Compact `{"name","description","input_schema"}` JSON, UTF-8 bytes. Both
         // sandbox modes (the longest confinement text wins) and the one `job` tool.
+        // Re-measured 2026-10-20 (slice 1 of `sandbox-auto-allow-shell`): the
+        // `outside_sandbox`/`outside_sandbox_reason` fields and the one sentence naming
+        // them joined the `shell` definition — FullAccess 2351 B, workspace 2580 B at
+        // most — so the cap moves from 2,200 B with a little room, the way the `read`
+        // and `ask_user` pins were re-measured when they grew.
         let size = |spec: &agent_core::ToolSpec| {
             serde_json::to_string(&serde_json::json!({
                 "name": spec.name,
@@ -1653,8 +1830,8 @@ mod tests {
         ] {
             let bytes = size(&spec(mode, git_writable));
             assert!(
-                bytes <= 2200,
-                "shell ({mode:?}, git {git_writable}) is {bytes} B, over the 2,200 B cap"
+                bytes <= 2600,
+                "shell ({mode:?}, git {git_writable}) is {bytes} B, over the 2,600 B cap"
             );
         }
         let bytes = size(&crate::jobs::job_spec());

@@ -19,6 +19,7 @@
 
 #[cfg(target_os = "linux")]
 mod bwrap;
+mod deny;
 mod error;
 mod git_exec;
 mod inherited;
@@ -36,6 +37,7 @@ use std::ffi::{OsStr, OsString};
 use std::ops::{Deref, DerefMut};
 use std::process::Command;
 
+pub use deny::{DenialCategory, MARKER_PREFIX, classify_denial};
 pub use error::{ProbeReport, SandboxError};
 pub use git_exec::{
     GIT_EXEC_DIRS, GIT_EXEC_FILES, GIT_MODULE_DIRS, GIT_MODULE_FILES, GIT_WORKTREE_FILES,

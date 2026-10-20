@@ -80,13 +80,22 @@ pub(crate) fn default_profile() -> ProfileArg {
 /// commands. The preset is never changed; extra rules are added on top (ADR 0012: a host may
 /// add `allow` rules, and only at the subcommand level — see
 /// `crates/radian-permissions/README.md`).
+///
+/// Slice 1 of `sandbox-auto-allow-shell`: `sandboxed` is the sandbox's effective state —
+/// `true` when the caller just built one (a probed local backend, or `inherited`) — so
+/// the `workspace` rule is static for the session: `allow` inside the sandbox, `ask`
+/// without one (fail closed). The caller builds the sandbox first and passes
+/// `sandbox.is_some()`; a failed probe is the error that refuses the run, never a
+/// fallback.
 pub(crate) fn build_profile(
     profile: ProfileArg,
     workspace: &Path,
     allow_shell_commands: &[String],
+    sandboxed: bool,
 ) -> Result<Profile, SetupError> {
     let preset = profile.preset();
     let base = match preset {
+        Preset::WorkspaceWrite if sandboxed => Profile::workspace_write_sandboxed(workspace),
         Preset::WorkspaceWrite => Profile::workspace_write(workspace),
         Preset::FullAccess => Profile::full_access(workspace),
     }
@@ -124,6 +133,7 @@ pub(crate) fn build_profile(
         );
     }
     Profile::custom(preset, ApprovalPolicy::OnAsk, workspace, rules)
+        .map(|profile| profile.with_sandboxed(sandboxed && preset == Preset::WorkspaceWrite))
         .map_err(|e| SetupError(format!("--workspace {}: {e}", workspace.display())))
 }
 

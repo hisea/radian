@@ -159,9 +159,16 @@ pub(super) fn build_session_inputs(
         tier.preset(),
         resume.is_some(),
     );
-    let profile =
-        radian_tui::profile::build_profile(tier, workspace_path, &cli.allow_shell_command)?
-            .with_approval(startup_approval.policy);
+    // Slice 1 of `sandbox-auto-allow-shell`: the sandbox above is already built, so the
+    // profile takes its effective state (`sandbox.is_some()`) and the `workspace` rule is
+    // static for the session.
+    let profile = radian_tui::profile::build_profile(
+        tier,
+        workspace_path,
+        &cli.allow_shell_command,
+        sandbox.is_some(),
+    )?
+    .with_approval(startup_approval.policy);
 
     // D4: panics after this point get a log in the diagnostics directory (ADR 0013 decision
     // 4), not next to the session: the session is the authoritative record and must not be

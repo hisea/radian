@@ -173,6 +173,20 @@ drift apart. The rest of `.git` stays writable, and `full` has no such rules by 
   `PermissionHooks` instance, so a new session (what resume is) no longer has it
   (`a_session_grant_applies_to_the_next_call_and_not_after_resume`). It is never written into
   a profile or the JSONL.
+- **A session grant for a `shell` call widens from the exact command line to the command's
+  prefix** — only for a simple command (`shell::session_grant_prefix`). For `cargo`, `git`,
+  `npm`, `pnpm`, `yarn`, `go` and `docker` the prefix is the program plus the first
+  non-option token (`cargo test`, `git log`, `npm run`); for every other program it is the
+  program alone (`rg`, `make`). A compound command, a wrapper first token
+  (`shell::starts_with_wrapper`, including `eval`), `source`/`.`, and anything non-simple
+  keep exact-string grants (or ask). These never become prefix grants, the exact string
+  only: `git push`, `git reset`, `git clean`, `git checkout`, `rm`, `mv`, `dd`, `chmod`,
+  `chown`, `curl`, `wget`, `ssh`, `scp`, `docker run`, `kubectl`
+  (`shell::NEVER_PREFIX_COMMANDS`). Prefix grants live where session grants live (real-time
+  state, per session); they are never written into the project's `config.toml` — an allow
+  can never come from the project (`a_project_config_cannot_create_a_prefix_grant`). A
+  non-human turn cannot borrow a prefix grant either
+  (`a_non_human_turn_cannot_borrow_a_prefix_grant`).
 - A turn whose source is not `User` cannot turn an `ask` into an `allow`, and cannot borrow a
   session grant; an `ask` from such a turn is denied. An unset source is treated the same way
   (fail safe). Explicit `allow`/`deny` **rules** still apply to every source — they are the
@@ -222,6 +236,13 @@ transcript record, so it never appears in `journal_records`/`replay`.
 | 18 | a wrapper segment (`ls \| xargs rm`) is never allowed by a prefix rule or the table | `tests/compound.rs` |
 | 19 | quoted separators do not split; `cd` needs the workspace tier and an inside target; later paths resolve from the `cd` target | `tests/compound.rs` |
 | 20 | a table segment in a compound command is rewritten in place, separators kept | `tests/compound.rs` |
+| 21 | session grant widens to the command prefix (`cargo test -p b` covered) | `tests/session_prefix.rs` |
+| 22 | a bare program grants the program, a subcommand program keeps its subcommand | `tests/session_prefix.rs` |
+| 23 | a compound command neither earns nor borrows a prefix grant | `tests/session_prefix.rs` |
+| 24 | the never-prefix list keeps exact-string grants | `tests/session_prefix.rs` |
+| 25 | a project config cannot create a prefix grant (grants are per-session state) | `tests/session_prefix.rs` |
+| 26 | a non-human turn cannot borrow a prefix grant | `tests/session_prefix.rs` |
+| 27 | a prefix grant never crosses the sandbox boundary | `tests/session_prefix.rs` |
 
 ## Not verified / limits
 

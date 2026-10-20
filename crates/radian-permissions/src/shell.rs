@@ -14,10 +14,11 @@
 //!   a match for the whole rule prefix. Any segment matching denies the whole command.
 //!
 //! A compound command (`a && b`) is allowed only when **every** `&&`/`||`/`;`/`|` segment
-//! is allowed — by a user `allow` rule or by the read-only table — with the effective
-//! directory carried through `cd` segments. See [`segments`], [`WRAPPER_PROGRAMS`] and
-//! [`cd_target`]: a wrapper first token never allows, and `cd` only moves inside the
-//! `workspace` tier.
+//! is allowed — by a user `allow` rule, by the tier's blanket `allow` (`full`, or
+//! `workspace` with a sandbox in force), or by the read-only table — with the
+//! effective directory carried through `cd` segments. See [`segments`],
+//! [`WRAPPER_PROGRAMS`] and [`cd_target`]: without a blanket `allow` a wrapper
+//! first token never allows, and `cd` only moves inside the `workspace` tier.
 //!
 //! What this **cannot** see, and never claims to: shell aliases, `eval`, a called program
 //! that starts its own shell, `.`/`source`, or `sh -c "…"` where the nested command is a
@@ -61,6 +62,73 @@ pub fn starts_with_wrapper(command: &str) -> bool {
     tokens(command)
         .first()
         .is_some_and(|first| WRAPPER_PROGRAMS.contains(&first.as_str()))
+}
+
+/// Programs whose session-grant prefix keeps the subcommand: the prefix is the program
+/// plus the first non-option token (`cargo test`, `git log`, `npm run`). Every other
+/// program grants the program alone (`rg`, `make`).
+const SUBCOMMAND_PROGRAMS: &[&str] = &["cargo", "git", "npm", "pnpm", "yarn", "go", "docker"];
+
+/// Commands that never earn a prefix grant (ADR 0012 slice 2): a grant for one of them
+/// covers the exact command line only. A one-token entry is a bare program (`rm …`);
+/// a longer entry is program plus subcommand (`git push …`). The list only ever grows
+/// toward narrower grants — over-asking is the intended failure mode.
+pub const NEVER_PREFIX_COMMANDS: &[&[&str]] = &[
+    &["rm"],
+    &["mv"],
+    &["dd"],
+    &["chmod"],
+    &["chown"],
+    &["curl"],
+    &["wget"],
+    &["ssh"],
+    &["scp"],
+    &["kubectl"],
+    &["git", "push"],
+    &["git", "reset"],
+    &["git", "clean"],
+    &["git", "checkout"],
+    &["docker", "run"],
+];
+
+/// The session-grant prefix for a shell command (`Some`), or `None` when the grant stays
+/// an exact command line. Only a simple, single-segment, non-wrapper command whose
+/// program evaluates nothing itself qualifies: a compound, a wrapper (`sh -c …`,
+/// `sudo …`, `eval …`), `source`/`.`, anything non-simple, and the never-prefix list
+/// keep exact-string grants (or ask). For the subcommand programs the prefix is the
+/// program plus the first non-option token; with no non-option token the grant stays
+/// exact (a bare `cargo` would cover `cargo build`). For every other program the prefix
+/// is the program alone.
+pub fn session_grant_prefix(command: &str) -> Option<Vec<String>> {
+    if !is_simple(command) {
+        return None;
+    }
+    let (segments, _) = split_compound(command)?;
+    if segments.len() != 1 {
+        return None;
+    }
+    if starts_with_wrapper(command) {
+        return None;
+    }
+    let tokens = tokens(&segments[0]);
+    let (program, rest) = tokens.split_first()?;
+    // `source`/`.` evaluate their arguments as shell, like `eval` (already a wrapper):
+    // a prefix grant could never see what they run, so they stay exact.
+    if program == "source" || program == "." {
+        return None;
+    }
+    let words: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    if NEVER_PREFIX_COMMANDS
+        .iter()
+        .any(|prefix| words.starts_with(prefix))
+    {
+        return None;
+    }
+    if SUBCOMMAND_PROGRAMS.contains(&program.as_str()) {
+        let sub = rest.iter().find(|token| !token.starts_with('-'))?;
+        return Some(vec![program.clone(), sub.clone()]);
+    }
+    Some(vec![program.clone()])
 }
 
 /// When the segment is exactly `cd <target>` (two tokens, no options), the target.
@@ -391,6 +459,67 @@ mod tests {
             16,
             "the runs-its-arguments table: {WRAPPER_PROGRAMS:?}"
         );
+    }
+
+    #[test]
+    fn session_grant_prefixes_keep_the_subcommand_where_there_is_one() {
+        for (command, want) in [
+            ("cargo test -p a", Some(vec!["cargo", "test"])),
+            ("cargo test", Some(vec!["cargo", "test"])),
+            ("git log -p", Some(vec!["git", "log"])),
+            ("npm run build", Some(vec!["npm", "run"])),
+            ("docker ps -a", Some(vec!["docker", "ps"])),
+            ("go test ./...", Some(vec!["go", "test"])),
+            ("rg foo", Some(vec!["rg"])),
+            ("make", Some(vec!["make"])),
+            ("make check", Some(vec!["make"])),
+        ] {
+            assert_eq!(
+                session_grant_prefix(command),
+                want.map(|words| words.iter().map(|w| (*w).to_owned()).collect()),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_grant_prefix_stays_exact_without_a_subcommand_or_outside_the_rule() {
+        // A subcommand program with no non-option token: a bare-program grant would
+        // cover `cargo build`, so the grant stays exact instead.
+        for command in [
+            "cargo --version",
+            "cargo",
+            // The never-prefix list: the exact string only, never a prefix.
+            "rm a",
+            "rm -rf x",
+            "mv a b",
+            "dd if=/dev/zero of=x",
+            "chmod 644 x",
+            "chown me x",
+            "curl https://example.com",
+            "wget https://example.com",
+            "ssh host",
+            "scp a host:b",
+            "kubectl get pods",
+            "git push origin main",
+            "git reset --hard",
+            "git clean -fd",
+            "git checkout main",
+            "docker run --rm img",
+            // Compounds, wrappers, shell-evaluating builtins, anything non-simple.
+            "cargo test && rm -rf x",
+            "cargo test; echo hi",
+            "sudo ls",
+            "eval echo hi",
+            "source env.sh",
+            ". env.sh",
+            "echo $HOME",
+            "git status > /tmp/x",
+            "",
+            "   ",
+        ] {
+            assert_eq!(session_grant_prefix(command), None, "{command:?}");
+        }
     }
 
     #[test]

@@ -118,9 +118,12 @@ pub fn build_access(
     allow_unix_sockets: &[std::path::PathBuf],
     allow_env: &[String],
 ) -> Result<radian_host::AccessParts, String> {
+    // Slice 1 of `sandbox-auto-allow-shell`: the sandbox is built first and the
+    // profile after it, so the `workspace` rule is static for the session. A failed
+    // probe is the `Err` that refuses the switch (and the startup), never a fallback.
     let tier = tier_of(preset);
-    let profile = build_profile(tier, workspace, allow_shell_commands)?;
     let sandbox = build_sandbox(tier, workspace, deny_read, allow_unix_sockets, allow_env)?;
+    let profile = build_profile(tier, workspace, allow_shell_commands, sandbox.is_some())?;
     Ok(radian_host::AccessParts { profile, sandbox })
 }
 
@@ -130,13 +133,20 @@ pub fn build_access(
 /// preset's blanket "shell asks" rule, because `evaluate` keeps the highest-ranked action and
 /// an `ask` would otherwise outrank every `allow`. A command matching no allow rule then falls
 /// to the default `ask`, and `deny` rules are never removed.
+///
+/// Slice 1 of `sandbox-auto-allow-shell`: `sandboxed` is the sandbox's effective state —
+/// the caller built it first and passes `sandbox.is_some()` — so the `workspace` rule is
+/// static for the session (`allow` inside, `ask` without). See `agent-cli`'s identical
+/// wiring; the two must not drift.
 pub fn build_profile(
     tier: Tier,
     workspace: &Path,
     allow_shell_commands: &[String],
+    sandboxed: bool,
 ) -> Result<Profile, String> {
     let preset = tier.preset();
     let base = match preset {
+        Preset::WorkspaceWrite if sandboxed => Profile::workspace_write_sandboxed(workspace),
         Preset::WorkspaceWrite => Profile::workspace_write(workspace),
         Preset::FullAccess => Profile::full_access(workspace),
     }
@@ -170,6 +180,7 @@ pub fn build_profile(
         );
     }
     Profile::custom(preset, ApprovalPolicy::OnAsk, workspace, rules)
+        .map(|profile| profile.with_sandboxed(sandboxed && preset == Preset::WorkspaceWrite))
         .map_err(|e| format!("--workspace {}: {e}", workspace.display()))
 }
 

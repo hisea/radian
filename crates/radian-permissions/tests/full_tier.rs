@@ -151,9 +151,10 @@ async fn full_approval_always_still_reviews() {
     assert_eq!(audit.events()[0].approver, AuditApprover::User);
 }
 
-/// The `workspace` tier is unchanged: shell still asks there (until
-/// `sandbox-auto-allow-shell.md` lands). Flipping its blanket rule to `allow`
-/// never reaches the approver, so this test is that mutation's catcher.
+/// The `workspace` tier without a sandbox still asks: the fail-closed constructor keeps
+/// the blanket `ask` (slice 1 of `sandbox-auto-allow-shell` only allows with a sandbox
+/// in force — see `workspace_sandbox.rs`). Flipping its blanket rule to `allow` never
+/// reaches the approver, so this test is that mutation's catcher.
 #[tokio::test]
 async fn workspace_shell_still_asks() {
     let dir = TempDir::new("workspace-ask");

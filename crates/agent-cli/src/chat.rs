@@ -52,11 +52,13 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     // The profile and the sandbox: what may run, and what the OS enforces. `full` is only
     // reachable because the user named it; a failed probe is an error, never a fallback. All
     // of this runs **before** the session file is created (dogfooding D2).
+    //
+    // Slice 1 of `sandbox-auto-allow-shell`: the sandbox is built first and the profile
+    // after it, so the `workspace` rule is static for the session — `allow` inside the
+    // sandbox (`sandbox.is_some()`: a probed backend, or `inherited`), `ask` without
+    // one. Approval still cannot widen the sandbox (ADR 0012 P1).
     let profile_arg = setup.profile;
     let workspace_path = setup.workspace.clone();
-    let permission_profile =
-        profile::build_profile(profile_arg, &workspace_path, &cli.allow_shell_command)?
-            .with_approval(setup.approval.policy);
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
     // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
     // paths that exist) can hide them.
@@ -88,6 +90,13 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         &setup.allow_unix_sockets,
         &setup.allow_env,
     )?;
+    let permission_profile = profile::build_profile(
+        profile_arg,
+        &workspace_path,
+        &cli.allow_shell_command,
+        sandbox.is_some(),
+    )?
+    .with_approval(setup.approval.policy);
 
     // The approver and the audit sink. An `auto` policy (ADR 0026 D9, from `--yes`/`--approval
     // auto`/config/resume) answers every `ask` before any approver is consulted, so the
