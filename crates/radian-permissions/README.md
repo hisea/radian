@@ -72,9 +72,9 @@ This is a deliberate conservative approximation, **not a shell parser**.
   runs first.
 - `cd <path>` as a segment is allowed only in the `workspace` tier, only with a user
   `allow` rule, and only when the target resolves inside the workspace (no `..` escape,
-  no symlink out) and is an existing directory. In the `full` tier a `cd` segment
-  always asks (git runs the target directory's hooks, and there is no sandbox wall
-  around that). Paths after a `cd` resolve from the `cd` target, not from the workspace
+  no symlink out) and is an existing directory. In the `full` tier the tier's blanket
+  `allow` judges a `cd` segment like any other (git runs the target directory's hooks,
+  and there is no sandbox wall around that — `full` trusts the environment). Paths after a `cd` resolve from the `cd` target, not from the workspace
   root: the effective directory is carried through the segments, so `cd sub && cat
   link/passwd` with `sub/link` pointing out asks.
 - When a table segment of a compound command would be rewritten (`git diff`/`git

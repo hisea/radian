@@ -119,11 +119,12 @@ impl Profile {
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
             rules.extend([
-                // Still ask: full-access is not "run anything silently".
+                // `full` trusts the environment (like pi): no built-in prompt.
+                // A user's own `deny`/`ask` rules still win (deny > ask > allow).
                 Rule::new(
                     ToolMatcher::Name("shell".into()),
                     ResourceMatcher::Any,
-                    Action::Ask,
+                    Action::Allow,
                 ),
                 Rule::new(ToolMatcher::Mcp, ResourceMatcher::Any, Action::Allow),
             ]);

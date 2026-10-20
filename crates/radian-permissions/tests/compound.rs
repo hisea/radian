@@ -321,14 +321,18 @@ async fn compound_rewrite_keeps_separators_and_flags() {
     assert_eq!(events[0].approver, AuditApprover::Policy);
 }
 
-/// A `cd` segment is never allowed in the `full` tier — not under `on-ask` and
-/// not under `always`: git runs the target directory's hooks, and there is no
-/// sandbox wall around that.
+/// `full` trusts the environment: a `cd` segment is judged like any other there — the
+/// tier's blanket allow covers it, in both `on-ask` and `always` (where the blanket
+/// allow is still reviewed). The `workspace` tier's `cd` restrictions are unchanged.
 #[tokio::test]
-async fn cd_never_allows_in_the_full_tier() {
+async fn cd_allows_in_the_full_tier() {
     let ws = Ws::new("cd-full");
     for approval in [ApprovalPolicy::OnAsk, ApprovalPolicy::Always] {
         let audit = Arc::new(RecordingAudit::default());
+        let answers = match approval {
+            ApprovalPolicy::Always => vec![ApprovalOutcome::AllowOnce],
+            _ => deny_answer(),
+        };
         let (hooks, approver) = hooks_with(
             profile_with_allow(
                 &ws.ws,
@@ -337,15 +341,21 @@ async fn cd_never_allows_in_the_full_tier() {
                 &["cd", "cargo test"],
                 vec![],
             ),
-            deny_answer(),
+            answers,
             &audit,
         );
         let decision = decide(&hooks, "cd sub && cargo test").await.unwrap();
         assert!(
-            matches!(decision, ToolDecision::Deny { .. }),
-            "{approval:?}: cd in the full tier must ask, got {decision:?}"
+            matches!(decision, ToolDecision::Allow),
+            "{approval:?}: cd in the full tier is allowed, got {decision:?}"
         );
-        assert_eq!(approver.calls(), 1, "{approval:?}: must reach the approver");
+        if approval == ApprovalPolicy::Always {
+            assert_eq!(approver.calls(), 1, "{approval:?}: must still be reviewed");
+            assert_eq!(audit.events()[0].approver, AuditApprover::User);
+        } else {
+            assert_eq!(approver.calls(), 0, "{approval:?}: must not ask");
+            assert_eq!(audit.events()[0].approver, AuditApprover::Policy);
+        }
     }
 }
 

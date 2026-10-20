@@ -143,8 +143,9 @@ fn a_deny_segment_denies_the_whole_composite_command() {
     );
 }
 
-/// Test 10: the presets differ — `workspace` asks for MCP and `full-access` allows it, while
-/// both allow a workspace write. The preset and the sandbox mode travel together.
+/// Test 10: the presets differ — `workspace` asks for shell and MCP while `full-access`
+/// allows both, and both allow a workspace write. The preset and the sandbox mode travel
+/// together.
 #[test]
 fn workspace_asks_for_mcp_where_full_access_allows_it() {
     let dir = TempDir::new("presets");
@@ -160,7 +161,7 @@ fn workspace_asks_for_mcp_where_full_access_allows_it() {
     assert_eq!(action_of(&full, "write", write.clone()), Action::Allow);
     assert_eq!(
         action_of(&full, "shell", json!({"command": "ls"})),
-        Action::Ask
+        Action::Allow
     );
     // MCP tools ask in `workspace` and are allowed in `full-access`.
     assert_eq!(

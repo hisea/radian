@@ -494,8 +494,10 @@ impl PermissionHooks {
                 break;
             }
             // A runs-its-arguments program only shows the wrapper's own tokens; no
-            // prefix rule and no table entry can see what it will run.
-            if shell::starts_with_wrapper(segment) {
+            // prefix rule and no table entry can see what it will run — outside
+            // `full`, where the blanket allow trusts the environment and judges
+            // the segment like any other.
+            if preset != Preset::FullAccess && shell::starts_with_wrapper(segment) {
                 blocked = true;
                 continue;
             }
@@ -509,8 +511,12 @@ impl PermissionHooks {
             // resolve against. It is allow-able only in the `workspace` tier, only
             // with a user `allow` rule, and only when the target stays inside the
             // workspace (in `full` git would run the target directory's hooks, and
-            // there is no sandbox wall around that).
-            if let Some(target) = shell::cd_target(segment) {
+            // there is no sandbox wall around that — which `full` accepts: its
+            // blanket allow trusts the environment, so the segment is judged like
+            // any other there).
+            if preset != Preset::FullAccess
+                && let Some(target) = shell::cd_target(segment)
+            {
                 match cd_dir(workspace, &effective, preset, target) {
                     Some(dir) if judged.action == Action::Allow => {
                         effective = dir;
