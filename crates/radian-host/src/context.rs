@@ -112,17 +112,34 @@ impl ContextFiles {
             .join(", ")
     }
 
-    /// The `config_snapshot.context` value: the loaded paths and sizes (ADR 0036 C2).
+    /// The `config_snapshot.context` value: the loaded paths and sizes, plus each file's
+    /// imports when it imported something (ADR 0036 C2). A file with no imports has no
+    /// `imports` key, so its entry is byte-identical to the shape before imports existed.
+    /// `not_read` is a startup warning, not prompt content, so it is never recorded.
     pub fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({
             "files": self
                 .files
                 .iter()
-                .map(|file| serde_json::json!({
-                    "path": file.path.to_string_lossy(),
-                    "bytes": file.bytes,
-                    "truncated": file.truncated,
-                }))
+                .map(|file| {
+                    let mut entry = serde_json::json!({
+                        "path": file.path.to_string_lossy(),
+                        "bytes": file.bytes,
+                        "truncated": file.truncated,
+                    });
+                    if !file.imports.is_empty() {
+                        entry["imports"] = serde_json::json!(
+                            file.imports
+                                .iter()
+                                .map(|import| serde_json::json!({
+                                    "path": import.path.to_string_lossy(),
+                                    "bytes": import.bytes,
+                                }))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    entry
+                })
                 .collect::<Vec<_>>(),
         })
     }
@@ -934,6 +951,46 @@ mod tests {
         assert!(line.contains("+docs/a.md"), "{line}");
     }
 
+    /// The snapshot lists each file's imports (the real path, the bytes that file
+    /// contributed) and omits the key when a file imported nothing, so an entry without
+    /// imports is byte-identical to the shape before imports existed (ADR 0036 C2).
+    /// Dropping the field makes this fail.
+    #[test]
+    fn the_snapshot_lists_a_files_imports() {
+        let dir = TempDir::new("snapshot-imports");
+        dir.mkdir("repo/.git");
+        dir.write("repo/docs/a.md", "A-CONTENT");
+        dir.write("repo/CLAUDE.md", "before\n@docs/a.md\nafter");
+        let files = load(&dir.path().join("repo"), None);
+        assert_eq!(files.files.len(), 1);
+        let snapshot = files.snapshot();
+        let imports = snapshot["files"][0]["imports"]
+            .as_array()
+            .expect("a file that imports one file has `imports`");
+        assert_eq!(imports.len(), 1, "{snapshot}");
+        assert_eq!(
+            imports[0]["path"].as_str().unwrap(),
+            files.files[0].imports[0].path.to_string_lossy().as_ref(),
+            "{snapshot}"
+        );
+        assert_eq!(
+            imports[0]["bytes"].as_u64().unwrap(),
+            files.files[0].imports[0].bytes as u64,
+            "{snapshot}"
+        );
+
+        // A file with no imports has no `imports` key.
+        let dir = TempDir::new("snapshot-no-imports");
+        dir.mkdir("repo/.git");
+        dir.write("repo/AGENTS.md", "plain");
+        let files = load(&dir.path().join("repo"), None);
+        let snapshot = files.snapshot();
+        assert!(
+            snapshot["files"][0].get("imports").is_none(),
+            "no `imports` key without imports: {snapshot}"
+        );
+    }
+
     /// `` `@README` `` and fenced `@x` stay literal and are never read (ADR 0036 C2).
     /// Removing the fenced-block skip makes this fail.
     #[test]
@@ -1153,8 +1210,8 @@ mod tests {
         assert!(line.contains("not read: docs/nope.md"), "{line}");
     }
 
-    /// The global file's imports resolve inside the radian home only (the lead's interim
-    /// choice): `@extra.md` expands, `@../repo/secret.md` stays literal and is listed.
+    /// The global file's imports resolve inside the radian home only (ADR 0036 C2):
+    /// `@extra.md` expands, `@../repo/secret.md` stays literal and is listed.
     #[test]
     fn a_global_import_resolves_inside_the_home_only() {
         let dir = TempDir::new("global-import");
