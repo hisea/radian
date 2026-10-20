@@ -231,36 +231,54 @@ impl PermissionHooks {
         // is an explicit user rule and outranks the table; the tier's blanket
         // shell `ask` and the no-match default carry no reason, so they still
         // fall through to it.
-        if evaluated.action != Action::Ask || evaluated.reason.is_none() {
-            if let Some(hit) = readonly::match_command(&workspace, call) {
-                match hit {
-                    ReadOnlyHit::Allow => {
-                        self.record(
-                            &request_id,
-                            &call_id,
-                            ResolvedDecision::Allow,
-                            AuditApprover::Policy,
-                            Some("read-only shell command (built-in table)".into()),
-                        );
-                        return Ok(ToolDecision::Allow);
-                    }
-                    ReadOnlyHit::Rewrite { command } => {
-                        let mut arguments = call.arguments.clone();
-                        arguments["command"] = Value::String(command);
-                        self.record(
-                            &request_id,
-                            &call_id,
-                            ResolvedDecision::Rewrite,
-                            AuditApprover::Policy,
-                            Some(
-                                "read-only git command (built-in table): added --no-ext-diff --no-textconv"
-                                    .into(),
-                            ),
-                        );
-                        return Ok(ToolDecision::Rewrite { arguments });
-                    }
+        let table_hit = (evaluated.action != Action::Ask || evaluated.reason.is_none())
+            .then(|| readonly::match_command(&workspace, call))
+            .flatten();
+        if let Some(hit) = table_hit {
+            match hit {
+                ReadOnlyHit::Allow => {
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Allow,
+                        AuditApprover::Policy,
+                        Some("read-only shell command (built-in table)".into()),
+                    );
+                    return Ok(ToolDecision::Allow);
+                }
+                ReadOnlyHit::Rewrite { command } => {
+                    let mut arguments = call.arguments.clone();
+                    arguments["command"] = Value::String(command);
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Rewrite,
+                        AuditApprover::Policy,
+                        Some(
+                            "read-only git command (built-in table): added --no-ext-diff --no-textconv"
+                                .into(),
+                        ),
+                    );
+                    return Ok(ToolDecision::Rewrite { arguments });
                 }
             }
+        }
+
+        // A policy denial (`never` turned an `ask` into one) denies here, after
+        // the table had its chance to allow.
+        if action == Action::Deny {
+            let reason = evaluated
+                .reason
+                .clone()
+                .unwrap_or_else(|| "denied by policy".into());
+            self.record(
+                &request_id,
+                &call_id,
+                ResolvedDecision::Deny,
+                AuditApprover::Policy,
+                Some(reason.clone()),
+            );
+            return Ok(ToolDecision::Deny { reason });
         }
 
         if action == Action::Allow {
