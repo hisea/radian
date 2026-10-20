@@ -61,6 +61,11 @@
 | `prompt-deliver-first.md` | idea | 0036 | 提示词：先交付能跑的版本再迭代、用参照物差分；cobol smoke 是现成复现 |
 | `runtime-resource-limits.md` | idea | 0036 | `<runtime>` 写实际可用 CPU/内存（cgroup），避免 `make -j16` 跑在 2 核容器 |
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
+| `mcp-servers-json.md` | idea | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门、按内容哈希确认；环境白名单不变 |
+| `command-hooks-claude-subset.md` | idea | 新 ADR；0012、0031、0011、0017、0016 | 外部命令 hook 只做 `PreToolUse`/`PostToolUse`/`Stop`，配置与 stdin 用 Claude/Codex 的子集，`allow`/`ask` 拒收，工具名不做别名；吸收总报告第 17 条 |
+| `import-claude.md` | idea | 新 ADR；0029、0008、0025、0031 | `radian import claude` 一次性翻译 commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话；依赖前两条与 project-skills |
+| `context-at-imports.md` | idea | 0036 | 上下文文件的 `@path` 导入：4 层、跳过代码块、只展开仓库内、计入 128 KiB |
+| `acp-server.md` | idea | 新 ADR；0032、0009、0024、0011、0010、0043 | ACP 服务端：先做外部适配器验证需求；审批→`request_permission`、inbox→`session/prompt`、live→`session/update`；在 exec jsonl 与控制口客户端之后 |
 
 只占索引行（暂无文件；来源都是总报告 `docs/research/2026-10-18-area-deep-dive/README.md`）：
 
@@ -70,4 +75,3 @@
 | 持久 todo + `/goal` | idea | 新 ADR（第 19 条） | 目标确定性带过压缩，轮末自动续跑，resume 后一键续跑 |
 | CI 与发布 | idea | 分发 ADR（第 27 条） | Linux/macOS CI、`cargo-deny`、安装方式；前提是公开仓库 |
 | SECURITY.md | idea | 无（第 28 条） | 一页威胁模型 + CVE 对照表 |
-| 生态兼容 | idea | 待定（第 31 条） | 读 `.agents/skills`、接受 `mcpServers`、Codex 子集 hook、`radian import claude` |
