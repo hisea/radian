@@ -153,8 +153,10 @@ rules) mounts when the Active records' estimated total exceeds `[memory.injectio
 max_tokens` (ADR 0021 D7). There is no model-writable memory path: a user record is never
 modified by the model, and old `source: agent` records in existing logs stay readable.
 When the user asks the model to remember something, the model routes it to a file instead
-(ADR 0036): a project fact goes into `AGENTS.md`, a repeatable procedure becomes a project
-skill, a cross-project preference is the user's to save with `/memory add`.
+(ADR 0036): a project fact (or a procedure that only applies to this project) goes into
+`AGENTS.md`, a procedure useful across projects becomes a user-level skill at
+`~/.radian/skills/<name>/SKILL.md`, a cross-project preference is the user's to save
+with `/memory add` (the model only suggests the command).
 
 Each request carries the memory **fixed block** in the **system prompt** (never the
 transcript): Active records in the D6 order, up to 2000 tokens (Global 500 / Project 1500 soft
