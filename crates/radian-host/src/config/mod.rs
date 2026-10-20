@@ -27,6 +27,7 @@ pub mod preserve;
 pub mod theme_write;
 
 mod error;
+mod hooks;
 mod model;
 mod sandbox;
 mod tui;
@@ -34,6 +35,7 @@ mod tui;
 use std::path::{Path, PathBuf};
 
 pub use error::ConfigError;
+pub use hooks::{DEFAULT_HOOK_TIMEOUT_SECS, HookCommand, HookMatcher, HooksConfig};
 pub use model::ModelConfig;
 pub use sandbox::{SandboxConfig, resolve_allow_unix_sockets, unix_sockets_ignored_warning};
 pub use tui::{
@@ -201,6 +203,8 @@ pub struct Config {
     pub skills: SkillsConfig,
     /// `[memory]` (ADR 0021): the injection keys this revision adds.
     pub memory: MemoryConfig,
+    /// `[hooks]` (ADR 0045 slice A): user-level external command hooks.
+    pub hooks: HooksConfig,
     /// `[shell]` (ADR 0037): the shell tool's limits.
     pub shell: ShellConfig,
     pub tui: TuiConfig,
@@ -308,6 +312,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "integrations" => parse_integrations(value, path, &mut config)?,
             "control" => parse_control(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
+            "hooks" => hooks::parse_hooks(value, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
             "memory" => parse_memory(value, path, &mut config)?,
             "shell" => parse_shell(value, &mut config)?,
