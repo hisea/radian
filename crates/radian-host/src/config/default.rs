@@ -24,7 +24,7 @@ schema_version = 1
 # provider = "openai-compatible"
 # model = "m-1"
 
-# The permission tier (ADR 0012/0016): "safe", "workspace" or "full".
+# The permission tier (ADR 0012/0016): "workspace" or "full".
 # [permissions]
 # profile = "workspace"
 

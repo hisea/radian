@@ -96,8 +96,8 @@ pub(super) fn build_coding_tools(
 ) -> Result<(Option<CodingTools>, Option<Arc<radian_coding::Jobs>>), SessionError> {
     match workspace {
         Some(dir) => {
-            // The slot decides whether `shell` exists: an empty slot is the `safe` tier (no
-            // shell advertised), a non-empty one is a sandbox the shell can run under. The
+            // The slot decides whether `shell` exists: an empty slot means no shell
+            // advertised, a non-empty one is a sandbox the shell can run under. The
             // tool set is fixed here at `open_session`; a later switch to a *narrower* tier
             // still denies `shell` through the permission rules (ADR 0038 slice 2).
             let tools = if sandbox.is_some() {

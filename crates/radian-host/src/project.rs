@@ -1,7 +1,7 @@
 //! The project-level declaration (ADR 0043 decision 2): `<workspace>/.radian/config.toml`.
 //!
 //! A project may say that it wants the sandbox, and nothing else. The only key read is
-//! `[permissions] profile = "workspace" | "safe"`; the tier is a **request to narrow** and is
+//! `[permissions] profile = "workspace"`; the tier is a **request to narrow** and is
 //! never allowed to widen (a cloned repository must not be able to open the sandbox). Writing
 //! `full` there is a configuration error: it is warned about and ignored. Any other key is
 //! skipped and named; `[sandbox]` keys (`allow_env`, `allow_unix_sockets`) are refused by name
@@ -117,7 +117,6 @@ pub fn read_at(path: &Path) -> ProjectConfig {
 
 fn apply_profile(path: &Path, profile: &str, out: &mut ProjectConfig) {
     match profile {
-        "safe" => out.tier = Some(Preset::Safe),
         "workspace" | "workspace-write" => out.tier = Some(Preset::WorkspaceWrite),
         // A project may only narrow. `full` is what the user runs by default, so accepting it
         // would be a no-op at best and a widening at worst.
@@ -127,13 +126,13 @@ fn apply_profile(path: &Path, profile: &str, out: &mut ProjectConfig) {
             path.display()
         )),
         other => out.warnings.push(format!(
-            "{}: permissions.profile = {other:?} is not one of safe, workspace, full; ignored",
+            "{}: permissions.profile = {other:?} is not one of workspace, full; ignored",
             path.display()
         )),
     }
 }
 
-/// The narrower of two tiers (`safe` < `workspace` < `full`).
+/// The narrower of two tiers (`workspace` < `full`).
 pub fn narrow(a: Preset, b: Preset) -> Preset {
     if rank(a) <= rank(b) { a } else { b }
 }
@@ -145,9 +144,8 @@ pub fn effective(chosen: Preset, declared: Option<Preset>) -> Preset {
 
 fn rank(tier: Preset) -> u8 {
     match tier {
-        Preset::Safe => 0,
-        Preset::WorkspaceWrite => 1,
-        Preset::FullAccess => 2,
+        Preset::WorkspaceWrite => 0,
+        Preset::FullAccess => 1,
     }
 }
 
@@ -194,20 +192,27 @@ mod tests {
     }
 
     #[test]
-    fn workspace_and_safe_narrow() {
-        for (text, expected) in [
-            (
-                "[permissions]\nprofile = \"workspace\"\n",
-                Preset::WorkspaceWrite,
-            ),
-            ("[permissions]\nprofile = \"safe\"\n", Preset::Safe),
-        ] {
-            let scratch = Scratch::new("tier");
-            scratch.write(text);
-            let read = read(&scratch.root);
-            assert_eq!(read.tier, Some(expected), "{text}");
-            assert!(read.warnings.is_empty(), "{:?}", read.warnings);
-        }
+    fn workspace_narrows() {
+        let scratch = Scratch::new("tier");
+        scratch.write("[permissions]\nprofile = \"workspace\"\n");
+        let read = read(&scratch.root);
+        assert_eq!(read.tier, Some(Preset::WorkspaceWrite));
+        assert!(read.warnings.is_empty(), "{:?}", read.warnings);
+    }
+
+    /// The removed tier name is unknown: it warns and asks for nothing, like any typo.
+    #[test]
+    fn safe_in_a_project_config_is_unknown_and_asks_for_nothing() {
+        let scratch = Scratch::new("safe");
+        scratch.write("[permissions]\nprofile = \"safe\"\n");
+        let read = read(&scratch.root);
+        assert_eq!(read.tier, None);
+        assert_eq!(read.warnings.len(), 1, "{:?}", read.warnings);
+        assert!(
+            read.warnings[0].contains("not one of workspace, full"),
+            "{:?}",
+            read.warnings
+        );
     }
 
     /// The mutation: accepting `full` from the project. The tier must stay `None`, and the
@@ -232,12 +237,12 @@ mod tests {
     fn other_keys_are_named_and_not_used() {
         let scratch = Scratch::new("keys");
         scratch.write(
-            "schema_version = 1\n[permissions]\nprofile = \"safe\"\nfuture = 1\n\
+            "schema_version = 1\n[permissions]\nprofile = \"workspace\"\nfuture = 1\n\
              [sandbox]\nallow_env = [\"FOO\"]\nallow_unix_sockets = [\"~/.x\"]\n\
              [model]\nmodel = \"m\"\n",
         );
         let read = read(&scratch.root);
-        assert_eq!(read.tier, Some(Preset::Safe));
+        assert_eq!(read.tier, Some(Preset::WorkspaceWrite));
         for expected in [
             "permissions.future",
             "sandbox.allow_env",
@@ -270,7 +275,7 @@ mod tests {
         );
     }
 
-    /// The narrowing rule (`safe` < `workspace` < `full`), both directions. Taking the wider of
+    /// The narrowing rule (`workspace` < `full`), both directions. Taking the wider of
     /// the two is the mutation this catches.
     #[test]
     fn the_narrower_tier_wins() {
@@ -278,23 +283,15 @@ mod tests {
             effective(Preset::FullAccess, Some(Preset::WorkspaceWrite)),
             Preset::WorkspaceWrite
         );
-        assert_eq!(
-            effective(Preset::FullAccess, Some(Preset::Safe)),
-            Preset::Safe
-        );
-        assert_eq!(
-            effective(Preset::WorkspaceWrite, Some(Preset::Safe)),
-            Preset::Safe
-        );
         // A project request wider than the chosen tier does not widen it.
-        assert_eq!(
-            effective(Preset::Safe, Some(Preset::WorkspaceWrite)),
-            Preset::Safe
-        );
         assert_eq!(
             effective(Preset::WorkspaceWrite, Some(Preset::FullAccess)),
             Preset::WorkspaceWrite
         );
         assert_eq!(effective(Preset::FullAccess, None), Preset::FullAccess);
+        assert_eq!(
+            effective(Preset::WorkspaceWrite, None),
+            Preset::WorkspaceWrite
+        );
     }
 }

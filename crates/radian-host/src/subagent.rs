@@ -486,9 +486,8 @@ impl Drop for SessionKillGuard {
 fn current_tier(sandbox: &SandboxSlot) -> &'static str {
     match sandbox.mode() {
         Some(SandboxMode::WorkspaceWrite) => "workspace",
-        Some(SandboxMode::FullAccess) => "full",
-        // No sandbox is the `safe` tier; `Some(Safe)` never happens (safe builds none).
-        _ => "safe",
+        // `full` and no sandbox alike: a session without a sandbox is unsandboxed.
+        _ => "full",
     }
 }
 

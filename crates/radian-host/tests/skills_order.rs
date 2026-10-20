@@ -88,7 +88,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     }];
     let skills_hooks = Arc::new(SkillsHooks::new(&skills));
     let permissions = Arc::new(PermissionHooks::new(
-        Profile::safe(&ws).unwrap(),
+        Profile::workspace_write(&ws).unwrap(),
         None,
         Arc::new(NoopAudit),
     ));

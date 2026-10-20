@@ -330,8 +330,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
 /// resolve the built-in instead).
 /// The profile names ADR 0008 §2 lists (`ask`/`allow`/`deny`) plus the tiers ADR 0012/0016
 /// define. A value outside this set is refused rather than guessed (fail-closed).
-const KNOWN_PROFILES: [&str; 8] = [
-    "safe",
+const KNOWN_PROFILES: [&str; 7] = [
     "workspace",
     "workspace-write",
     "full",
@@ -366,7 +365,7 @@ fn parse_permissions(
                     }
                 } else if matches!(
                     profile.as_str(),
-                    "safe" | "workspace" | "workspace-write" | "full" | "full-access"
+                    "workspace" | "workspace-write" | "full" | "full-access"
                 ) {
                     config.permissions.profile = Some(profile.clone());
                 } else {
