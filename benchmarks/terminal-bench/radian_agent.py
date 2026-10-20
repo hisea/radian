@@ -46,6 +46,7 @@ from radian_command import (
     build_auth_json,
     build_command,
     derive_turn_timeout_secs,
+    parse_result_line,
     redact_base_url,
     select_provider,
     sha256_of_file,
@@ -327,12 +328,20 @@ class RadianAgent(BaseInstalledAgent):
         )
         # Trial facts for populate_context_post_run: Harbor only calls it
         # while the context is still empty, so run() leaves the context alone
-        # and the metadata lands there, together with the usage totals.
+        # and the metadata lands there, together with the usage totals. The
+        # exit code and the stop reason come from the closing `Result` record
+        # (ADR 0044); without one (a killed run, an old binary) they fall back
+        # to the process exit code with no stop reason.
+        result_record = parse_result_line(result.stdout) or {}
         self._last_trial = {
             "provider": provider,
             "model": model_id,
             "return_code": result.return_code,
+            "exit_code": result_record.get("exit_code", result.return_code),
         }
+        stop_reason = result_record.get("stop_reason")
+        if stop_reason is not None:
+            self._last_trial["stop_reason"] = stop_reason
         if result.return_code != 0:
             shown_url = redact_base_url(base_url)
             raise NonZeroAgentExitCodeError(
@@ -369,8 +378,11 @@ class RadianAgent(BaseInstalledAgent):
                     "radian_provider": last.get("provider"),
                     "radian_model": last.get("model"),
                     "return_code": last.get("return_code"),
+                    "exit_code": last.get("exit_code", last.get("return_code")),
                 }
             )
+            if last.get("stop_reason") is not None:
+                metadata["stop_reason"] = last["stop_reason"]
         context.metadata = metadata
         usage = summarize_session_usage(self.logs_dir / self._SESSIONS_DIRNAME)
         context.n_input_tokens = usage.n_input_tokens

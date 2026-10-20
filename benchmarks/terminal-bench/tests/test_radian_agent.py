@@ -217,7 +217,8 @@ class RunTest(unittest.TestCase):
             command = main["command"]
             for flag in ("--yes", "--no-trust", "--offline-catalog",
                          "--profile", "full", "--provider", "opencode-go",
-                         "--model", "deepseek-v4.1-flash", "--workspace", "/work/task"):
+                         "--model", "deepseek-v4.1-flash", "--workspace", "/work/task",
+                         "--output", "jsonl"):
                 self.assertIn(flag, command)
             self.assertNotIn("--base-url", command)
             self.assertNotIn(TEST_KEY, command)
@@ -300,6 +301,42 @@ class RunTest(unittest.TestCase):
             env.on("test -s", ExecResult(stdout="", stderr="", return_code=0))
             asyncio.run(agent.run("Do it.", env, context))
             self.assertNotIn("SSL_CERT_FILE", env.last_exec()["env"])
+
+    def test_run_records_exit_code_and_stop_reason_from_result(self):
+        # A turn that ends without completing still parses: the exit code and
+        # the stop reason come from the closing `Result` record (ADR 0044).
+        with tempfile.TemporaryDirectory() as tmp, scrub_host_key():
+            agent, env, context = self.run_trial(tmp)
+            result = {
+                "type": "Result", "session_id": "s", "outcome": "incomplete",
+                "exit_code": 4, "stop_reason": "max_tokens", "turns": 1,
+                "usage": {"input": 10}, "cost": None, "text": "partial",
+            }
+            env.on(
+                "radian-stdout",
+                ExecResult(
+                    stdout=json.dumps(result) + "\n", stderr="", return_code=0
+                ),
+            )
+            asyncio.run(agent.run("Do it.", env, context))
+            self.assertEqual(agent._last_trial["exit_code"], 4)
+            self.assertEqual(agent._last_trial["stop_reason"], "max_tokens")
+            agent.populate_context_post_run(context)
+            self.assertEqual(context.metadata["exit_code"], 4)
+            self.assertEqual(context.metadata["stop_reason"], "max_tokens")
+
+    def test_run_without_a_result_falls_back_to_the_exit_code(self):
+        # A killed run has no `Result` record: no stop reason, and the exit
+        # code is the process exit code.
+        with tempfile.TemporaryDirectory() as tmp, scrub_host_key():
+            agent, env, context = self.run_trial(tmp)
+            env.on(
+                "radian-stdout",
+                ExecResult(stdout="partial text\n", stderr="", return_code=0),
+            )
+            asyncio.run(agent.run("Do it.", env, context))
+            self.assertEqual(agent._last_trial["exit_code"], 0)
+            self.assertNotIn("stop_reason", agent._last_trial)
 
     def test_nonzero_exit_raises_without_leaking_the_secret(self):
         with tempfile.TemporaryDirectory() as tmp, scrub_host_key():
