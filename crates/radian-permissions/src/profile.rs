@@ -100,6 +100,7 @@ impl Profile {
             rules.extend(memory_rules());
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
+            rules.extend(git_exec_denies(ws));
             rules.extend([
                 Rule::new(
                     ToolMatcher::Name("shell".into()),
@@ -269,6 +270,31 @@ fn always_allowed() -> Vec<Rule> {
             )
         })
         .collect()
+}
+
+/// ADR 0038 decision 3: in the `workspace` tier the file tools deny the `.git` entries git
+/// can execute — the same shared list the sandbox enforces (`radian_sandbox::git_exec`).
+/// `write`/`patch` never enter the sandbox, so without these rules the model could write
+/// `.git/hooks/pre-commit` and have it run at the next commit. `full` has no such rules by
+/// design (it allows everything). A worktree pointer file is denied whole: rewriting it
+/// repoints git at a gitdir the model controls.
+fn git_exec_denies(workspace: &Path) -> Vec<Rule> {
+    const REASON: &str = "denied by ADR 0038: .git entries git can execute (config, hooks) are read-only in the workspace tier; writing them would run code outside the sandbox";
+    let mut rules = Vec::new();
+    for git_path in radian_sandbox::discover_git_metadata(workspace) {
+        for tool in ["write", "patch"] {
+            let resource = if git_path.is_dir() {
+                ResourceMatcher::GitExec(git_path.clone())
+            } else {
+                ResourceMatcher::PathUnder(git_path.clone())
+            };
+            rules.push(
+                Rule::new(ToolMatcher::Name(tool.into()), resource, Action::Deny)
+                    .with_reason(REASON),
+            );
+        }
+    }
+    rules
 }
 
 /// File modification allowed only when the resolved path stays under the workspace.
