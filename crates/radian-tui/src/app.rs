@@ -189,7 +189,7 @@ pub enum Effect {
     /// List the discovered skills (`/skills`, ADR 0025 S3) as notices. The answer is
     /// [`Input::SessionDone`].
     ListSkills,
-    /// `/jobs` (ADR 0037 decision 4): list the session's background jobs, or stop one/all. The
+    /// `/jobs` (ADR 0037 decision 4): list the running background jobs, or stop one/all. The
     /// loop runs it (the registry lives in the host) and answers with [`Input::SessionDone`].
     Jobs(command::JobsRequest),
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
