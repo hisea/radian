@@ -483,10 +483,10 @@ mod tests {
             policy: &radian_sandbox::SandboxPolicy,
             program: &std::ffi::OsStr,
             args: &[std::ffi::OsString],
-        ) -> Result<std::process::Command, radian_sandbox::SandboxError> {
+        ) -> Result<radian_sandbox::SandboxCommand, radian_sandbox::SandboxError> {
             let mut command = std::process::Command::new(program);
             command.args(args).current_dir(&policy.workspace);
-            Ok(command)
+            Ok(radian_sandbox::SandboxCommand::new(command))
         }
 
         fn restricts_unix_sockets(&self, _policy: &radian_sandbox::SandboxPolicy) -> bool {

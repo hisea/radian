@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use agent_core::{
     CancellationToken, ContentPart, ToolConcurrency, ToolContext, ToolFailure, ToolOutput, ToolSpec,
 };
-use radian_sandbox::{Sandbox, SandboxMode};
+use radian_sandbox::{Sandbox, SandboxCommand, SandboxMode};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -436,7 +436,7 @@ pub(crate) fn sandboxed_command(
     sandbox: &Sandbox,
     cwd: &Path,
     command: &str,
-) -> Result<Command, ToolFailure> {
+) -> Result<SandboxCommand, ToolFailure> {
     let mut process = sandbox
         .command_str("/bin/sh", &["-c", command])
         .map_err(|e| {

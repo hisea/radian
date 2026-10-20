@@ -22,6 +22,8 @@ mod bwrap;
 mod error;
 mod inherited;
 mod policy;
+#[cfg(target_os = "linux")]
+mod seccomp;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 mod slot;
@@ -30,6 +32,7 @@ mod slot;
 pub mod harness;
 
 use std::ffi::{OsStr, OsString};
+use std::ops::{Deref, DerefMut};
 use std::process::Command;
 
 pub use error::{ProbeReport, SandboxError};
@@ -47,13 +50,15 @@ pub trait SandboxBackend: Send + Sync {
     fn probe(&self) -> Result<ProbeReport, SandboxError>;
 
     /// Builds the launcher command. `program`/`args` are the child's argv; the backend
-    /// prepends its own launcher and options.
+    /// prepends its own launcher and options. The returned [`SandboxCommand`] owns any file
+    /// descriptor the launcher needs (on Linux, the seccomp program); dropping it closes the
+    /// fd, so building commands in a loop cannot leak.
     fn command(
         &self,
         policy: &SandboxPolicy,
         program: &OsStr,
         args: &[OsString],
-    ) -> Result<Command, SandboxError>;
+    ) -> Result<SandboxCommand, SandboxError>;
 
     /// Whether this backend **enforces** [`GitAccess::WritableExceptExec`] for `policy`
     /// (ADR 0038 decision 4): the discovered git metadata is writable except the entries git
@@ -81,6 +86,59 @@ pub trait SandboxBackend: Send + Sync {
     }
 }
 
+/// A sandboxed launcher command: a [`std::process::Command`] plus ownership of any file
+/// descriptor the launcher needs (on Linux, the read end of the pipe holding the compiled
+/// seccomp program, inherited by `bwrap` under `--seccomp`).
+///
+/// It derefs to the inner command, so `stdin`/`spawn`/`output`/`pre_exec` (the shell tool
+/// registers its own `pre_exec` for `setsid` on the same command) all work unchanged; what
+/// it adds is lifetime: dropping the command closes the fd, whether the command was
+/// spawned or not. Each command owns a freshly written pipe, so concurrent builds never
+/// share an offset. There is deliberately no `Clone` and no `into_inner`: the fd must not
+/// outlive the command it was built for.
+#[derive(Debug)]
+pub struct SandboxCommand {
+    command: Command,
+    /// Linux `workspace` only: the seccomp program `bwrap` reads. `None` everywhere else
+    /// (`full`, `inherited`, macOS).
+    #[cfg(target_os = "linux")]
+    _seccomp_filter: Option<std::os::fd::OwnedFd>,
+}
+
+impl SandboxCommand {
+    /// Wraps a plain command (backends with no launcher fd: `full`, `inherited`, macOS).
+    pub fn new(command: Command) -> Self {
+        Self {
+            command,
+            #[cfg(target_os = "linux")]
+            _seccomp_filter: None,
+        }
+    }
+
+    /// A command whose launcher needs `filter` inherited (Linux `workspace`'s `--seccomp`).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_seccomp_filter(command: Command, filter: std::os::fd::OwnedFd) -> Self {
+        Self {
+            command,
+            _seccomp_filter: Some(filter),
+        }
+    }
+}
+
+impl Deref for SandboxCommand {
+    type Target = Command;
+
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
+}
+
+impl DerefMut for SandboxCommand {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.command
+    }
+}
+
 /// The backend used for `FullAccess`: it wraps nothing. It is never chosen for an enforced
 /// mode.
 pub struct NoSandbox;
@@ -104,10 +162,10 @@ impl SandboxBackend for NoSandbox {
         policy: &SandboxPolicy,
         program: &OsStr,
         args: &[OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         let mut command = Command::new(program);
         command.args(args).current_dir(&policy.workspace);
-        Ok(command)
+        Ok(SandboxCommand::new(command))
     }
 }
 
@@ -313,8 +371,9 @@ impl Sandbox {
     }
 
     /// A `Command` that runs `program args` under the sandbox. The returned command has its
-    /// environment cleared to the policy's whitelist and its cwd set to the workspace.
-    pub fn command<S, I, A>(&self, program: S, args: I) -> Result<Command, SandboxError>
+    /// environment cleared to the policy's whitelist and its cwd set to the workspace, and
+    /// owns any launcher fd (Linux `workspace`'s seccomp program) until it is dropped.
+    pub fn command<S, I, A>(&self, program: S, args: I) -> Result<SandboxCommand, SandboxError>
     where
         S: AsRef<OsStr>,
         I: IntoIterator<Item = A>,
@@ -328,7 +387,7 @@ impl Sandbox {
     }
 
     /// Convenience over [`Sandbox::command`] for string arguments.
-    pub fn command_str(&self, program: &str, args: &[&str]) -> Result<Command, SandboxError> {
+    pub fn command_str(&self, program: &str, args: &[&str]) -> Result<SandboxCommand, SandboxError> {
         self.command(program, args.iter().copied())
     }
 }

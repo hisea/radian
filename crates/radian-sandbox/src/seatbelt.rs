@@ -11,7 +11,7 @@ use std::process::Command;
 
 use crate::error::{ProbeReport, SandboxError};
 use crate::policy::{GitAccess, SandboxMode, SandboxPolicy};
-use crate::{SandboxBackend, apply_env, workspace_tmp};
+use crate::{SandboxBackend, SandboxCommand, apply_env, workspace_tmp};
 
 pub(crate) static SEATBELT: Seatbelt = Seatbelt;
 
@@ -126,7 +126,7 @@ impl SandboxBackend for Seatbelt {
         policy: &SandboxPolicy,
         program: &OsStr,
         args: &[OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         let profile = profile_text(policy);
         let mut command = Command::new(SANDBOX_EXEC);
         command
@@ -141,7 +141,7 @@ impl SandboxBackend for Seatbelt {
             // Tools write temporary files; keep them inside the one writable tree.
             command.env("TMPDIR", workspace_tmp(policy));
         }
-        Ok(command)
+        Ok(SandboxCommand::new(command))
     }
 }
 

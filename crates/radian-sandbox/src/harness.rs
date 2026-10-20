@@ -18,7 +18,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::policy::{SandboxMode, SandboxPolicy};
-use crate::{Sandbox, SandboxError};
+use crate::{Sandbox, SandboxCommand, SandboxError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expect {
@@ -1186,7 +1186,7 @@ impl Drop for OutsidePty {
     }
 }
 
-fn run_outcome(mut command: Command) -> Outcome {
+fn run_outcome(mut command: SandboxCommand) -> Outcome {
     match command.output() {
         Ok(output) => outcome_from(output),
         Err(e) => Outcome {
