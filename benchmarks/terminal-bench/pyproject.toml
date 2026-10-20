@@ -1,9 +1,13 @@
 [project]
 name = "radian-terminal-bench"
-version = "0.1.0"
+version = "0.2.0"
 description = "Harbor custom agent that benchmarks the radian binary on Terminal-Bench tasks"
 requires-python = ">=3.12"
 dependencies = []
 
 [tool.radian-bench]
-agent = "benchmarks.terminal-bench.radian_agent:RadianAgent"
+agent = "radian_agent:RadianAgent"
+# The Harbor release this adapter is written against. Not a build dependency
+# (the adapter itself is stdlib-only); Harbor runs the trial, the adapter only
+# speaks its 0.24.0 agent API.
+harbor = "0.24.0"

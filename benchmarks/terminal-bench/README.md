@@ -1,78 +1,126 @@
-# 用 Terminal-Bench（Harbor）评测 Radian
+# Benchmarking Radian on Terminal-Bench (Harbor)
 
-这个目录是 Radian 的 Terminal-Bench 接入层：一个 Harbor custom agent，把当前
-commit 构建出的 `radian` 二进制放进任务容器跑分。它**不是** Rust workspace 的
-一部分，不增加任何 Rust/Python 依赖。
+This directory is Radian's Terminal-Bench adapter: a Harbor custom agent that
+puts the current commit's `radian` binary into task containers and scores it.
+It is **not** part of the Rust workspace and adds no Python dependency beyond
+Harbor itself (the adapter and its command tests are stdlib-only).
 
-官方入口说明：Terminal-Bench 旧版 `tb` harness 已被 Harbor 取代
-（`harbor-framework/harbor`），新任务与评测都走 Harbor。本目录跟随 Harbor 的
-`BaseInstalledAgent` 接口（`--agent module.path:Class`）。
+Pinned Harbor release: **0.24.0** (see `pyproject.toml`
+`[tool.radian-bench]`). The adapter speaks the 0.24.0 agent API
+(`harbor.agents.model_connection`, `harbor.agents.installed.base`); newer
+Harbor releases may rename these modules.
 
-## 文件
+## Files
 
-| 文件 | 说明 |
+| File | Description |
 |---|---|
-| `radian_agent.py` | Harbor agent：上传二进制、写 `auth.json`、跑 `radian exec -p <instruction>` |
-| `radian_command.py` | 纯标准库的命令构造器（provider 选择、`auth.json` 渲染、shell 引用、脱敏），可独立单测 |
-| `tests/test_radian_command.py` | 构造器的单测（无 Harbor 依赖） |
-| `tests/test_radian_agent.py` | agent 的单测（Harbor 模块用替身，只覆盖传参/密钥/退出码链路） |
-| `pyproject.toml` | 说明性 metadata，不参与 Rust 构建 |
+| `radian_agent.py` | Harbor agent: uploads the binary + CA bundle, writes `auth.json`, runs `radian exec -p <instruction>` |
+| `radian_command.py` | Stdlib-only command builders (provider selection, `auth.json` rendering, static-binary check, shell quoting, redaction) |
+| `build-static.sh` | Builds the static musl binary the task containers need |
+| `tests/test_radian_command.py` | Builder unit tests (no Harbor dependency) |
+| `tests/test_radian_agent.py` | Agent unit tests against the real Harbor 0.24.0 package |
+| `pyproject.toml` | Descriptive metadata only (agent import path, Harbor pin) |
 
-## 关键设计（与评测有效性相关）
+## Key design (why the score measures the agent loop)
 
-- **测的是 agent 循环，不是 sandbox**。默认 `--profile full`：任务容器本身就是
-  隔离边界，在默认 Docker 配置里再嵌套 bwrap 经常被 user namespace/seccomp
-  拒绝。用 `workspace` 档会把"宿主是否允许嵌套沙箱"混进分数。Radian 自身的
-  sandbox 由 `crates/radian-sandbox` 的逃逸矩阵单独覆盖。
-- **密钥只走环境变量**。`$RADIAN_BENCH_API_KEY` 是唯一出现密钥的地方；命令行
-  与上传的 `auth.json` 只写 `$RADIAN_BENCH_API_KEY` 这个名字（ADR 0013，密钥
-  不进 stdout、不进文件）。Radian 的 `anthropic` provider 不接受 `--base-url`
- （ADR 0026 D0），所以带自定义端点的 Anthropic 格式流量走 `openai-compatible`；
-  只有无自定义端点的 Anthropic 格式才走 `--provider anthropic`。
-- **无人值守**：每次 trial 固定带 `--yes --no-trust --offline-catalog`，`auth.json`
-  权限 0600，session 与 stdout/stderr 落到 Harbor agent logs（`radian-sessions/`）。
-- **可复现**：`install()` 记录二进制 sha256 与 `radian exec --version`，写进
-  `radian-binary.json`；固定 `--context-window` 可跳过 models.dev 查询。
+- **The score measures the agent loop, not our sandbox.** Default
+  `--profile full`: the task container is already the isolation boundary, so a
+  nested sandbox would only measure whether the host allows nested sandboxing.
+  Radian's own sandbox has its own escape-matrix tests in
+  `crates/radian-sandbox`.
+- **The key only ever lives in `$RADIAN_BENCH_API_KEY`.** Harbor resolves the
+  trial key from that variable (`MODEL_CONNECTION` lists it in
+  `api_key_envs`, tried before Harbor's own provider defaults, so it works for
+  any provider slug including `opencode-go`). The command line and the uploaded
+  `auth.json` name the variable; neither ever holds the value (ADR 0013).
+- **Provider routing.** A model name whose prefix is a radian built-in
+  descriptor id (`opencode-go`, `anthropic`, `openai`, `openai-compatible`,
+  `chatgpt` — `crates/radian-host/src/provider.rs`) runs as
+  `radian exec --provider <id> --model <rest>` with no `--base-url`, and
+  `auth.json` gets `{"<id>": {"type": "api_key", "key": "$RADIAN_BENCH_API_KEY"}}`.
+  An explicitly configured endpoint (a `*_BASE_URL` trial env var, e.g. a
+  proxy) always runs as the generic `openai-compatible` provider with
+  `--base-url`, including proxied Anthropic traffic — radian's `anthropic`
+  provider takes no `--base-url` (ADR 0026 D0). Note `chatgpt` is OAuth-only,
+  so an `api_key` entry cannot log into it; the prefix still routes there and
+  radian reports the credential error.
+- **CA bundle.** Task images based on `ubuntu:24.04` / debian slim often ship
+  no system CA certificates, and then radian's HTTP client fails before the
+  first request. `install()` uploads the host bundle (option `ca_bundle_path`,
+  default `/etc/ssl/certs/ca-certificates.crt`) next to the binary and refuses
+  a missing bundle with a clear error. `run()` probes the container with
+  `test -s /etc/ssl/certs/ca-certificates.crt` (present **and** non-empty: an
+  empty placeholder breaks TLS exactly like a missing file) and sets
+  `SSL_CERT_FILE` to the uploaded bundle only when the probe fails. The
+  variable is process environment, so radian's child commands (the shell tool,
+  `curl` in tasks) inherit it while it is set.
+- **Unattended.** Every trial runs
+  `--yes --no-trust --offline-catalog`; `auth.json` is 0600 under a 0700
+  `RADIAN_HOME`; sessions and stdout/stderr land in the agent logs dir
+  (`radian-sessions/`).
+- **Reproducible.** `install()` refuses a dynamically linked binary (pure-Python
+  ELF `PT_INTERP` check — the task images cannot satisfy a glibc loader) and
+  records the binary sha256 plus `radian exec --version` in
+  `radian-binary.json`. A fixed `--context-window` skips the models.dev
+  lookup.
 
-## 运行单测（不需要 Harbor、不需要模型、不需要 Docker）
+## Unit tests (no Harbor run, no model, no Docker)
 
 ```sh
-python3 benchmarks/terminal-bench/tests/test_radian_command.py
-python3 benchmarks/terminal-bench/tests/test_radian_agent.py
+python3 benchmarks/terminal-bench/tests/test_radian_command.py   # stdlib only
+<home>/.local/share/uv/tools/harbor/bin/python benchmarks/terminal-bench/tests/test_radian_command.py
+<home>/.local/share/uv/tools/harbor/bin/python benchmarks/terminal-bench/tests/test_radian_agent.py
+PYTHONPATH=benchmarks/terminal-bench <home>/.local/share/uv/tools/harbor/bin/python -c \
+  "from harbor.utils.import_path import import_class; print(import_class('radian_agent:RadianAgent'))"
 ```
 
-## 跑 smoke（3–5 个任务，需 Docker + Harbor + 模型）
+The agent tests import the real Harbor 0.24.0 package; the fake environment is
+only a process double for container exec/upload. Trial orchestration is proven
+by the smoke below, not by these tests.
+
+## Smoke (needs Docker + Harbor + a model key)
 
 ```sh
-# 1. 构建待测的 Linux 二进制（Harbor 任务容器是 Linux）
-cargo build --locked --release
-# 产物：target/release/radian，记下 sha256
-sha256sum target/release/radian
+# 1. Build the static Linux binary (task containers are Linux; the host glibc
+#    does not fit them). Prints the binary path and sha256; fails unless
+#    `file` reports a static link.
+benchmarks/terminal-bench/build-static.sh
+BIN=~/.cache/radian-musl/target/release/radian
+SHA=$(cut -d' ' -f1 "$BIN.sha256")
 
-# 2. 装 Harbor（另建 venv，不要污染本仓库）
-uv tool install harbor  # 或 pip install harbor
+# 2. Install this box's Harbor release (pinned: 0.24.0).
+export PATH="$HOME/.local/bin:$PATH"
+uv tool install harbor==0.24.0
 
-# 3. smoke（示例，按 Harbor 当前文档核对 task 数据集名与版本）
-harbor run \
-  -t <task-id> \
-  -a benchmarks.terminal-bench.radian_agent:RadianAgent \
-  -m openai/gpt-5-mini \
-  --agent-kwarg binary_path=/absolute/path/to/target/release/radian \
-  --agent-kwarg binary_sha256=<sha256> \
-  --agent-kwarg max_model_calls=100 \
-  --agent-kwarg turn_timeout_secs=600 \
-  --agent-kwarg context_window=200000
+# 3. Export the trial key WITHOUT printing it (never echo/env/set -x it).
+#    The smoke uses the owner's opencode-go key with model deepseek-v4.1-flash.
+export RADIAN_BENCH_API_KEY="$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.radian/credentials/auth.json")))["opencode-go"]["key"])')"
+
+# 4. Run 3-5 easy tasks (repeat -i per task, -n 2 at most). Harbor resolves the
+#    key from the exported variable; PYTHONPATH puts radian_agent on the import path.
+PYTHONPATH=benchmarks/terminal-bench timeout 5400 harbor run \
+  -d terminal-bench@2.0 \
+  -i fix-git -i prove-plus-comm -i constraints-scheduling \
+  -a radian_agent:RadianAgent \
+  -m opencode-go/deepseek-v4.1-flash \
+  --ak binary_path="$BIN" --ak binary_sha256="$SHA" \
+  -n 2 -o /tmp/tbench-smoke/jobs -y
 ```
 
-`PYTHONPATH` 需要包含仓库根（让 `benchmarks.terminal-bench.radian_agent` 可
-import，且 `radian_command` 与它同目录）。smoke 先验证：二进制进容器、
-密钥传递、工作目录成为 `--workspace`、verifier 能看到修改、非零退出正确
-标记失败。smoke 全绿之前不跑完整集；全量前固定并记录：Radian git SHA、
-binary sha256、Harbor 版本、数据集名/版本/task IDs、模型与参数（见方案）。
+After the run, confirm the key leaked nowhere (this prints only a count, never
+the key):
 
-## 不测什么
+```sh
+grep -rlF -- "$RADIAN_BENCH_API_KEY" /tmp/tbench-smoke/jobs | wc -l   # must be 0
+```
 
-- ATIF trajectory 转换：Terminal-Bench 以 verifier reward 为准；排障用 Radian
-  原生 JSONL journal（`--session-dir` 指向 agent logs）。需要 token 级可视化时
-  再从 journal 加转换器。
-- MCP/skill：第一版不支持（`capabilities` 全关）；任务若要求 MCP 再议。
+Results land under the jobs dir (`-o`): per-trial `result.json` carries the
+reward (0/1 — task pass rate does not matter for the smoke, only that the
+verifier ran and recorded one), the agent logs carry `radian-binary.json`,
+`radian-stdout.txt`, `radian-stderr.txt` and `radian-sessions/` (radian's
+native JSONL journal — read that when a trial needs debugging, not the
+trajectory converters). Success means the infrastructure works on every chosen
+task: binary uploaded and runs, key reaches radian, radian talks to
+opencode-go, the verifier runs and a reward is recorded, with no agent
+setup/exec exception. Record per task: name, base image, reward, radian exit
+code, model calls, wall time, and any error.

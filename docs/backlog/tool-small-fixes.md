@@ -8,7 +8,7 @@
 
 - `grep` 没有总字节上限，也没有 `files`/`count` 模式（`crates/radian-coding/src/provider.rs:73-75`、`grep.rs:22`）。
 - `patch_ambiguous` 只说"出现 N 次"，不给位置（`patch.rs:104-115`）。
-- 前台 shell 默认每流 64 KiB（`provider.rs:94`）；现在 `shell_output` 能取回全文（ADR 0037 §3a），大上限的理由已弱一半。
+- 前台 shell 默认每流 64 KiB（`provider.rs:94`）；现在 `job read`（`tool-definitions-trim.md` 落地前叫 `shell_output`）能取回全文（ADR 0037 §3a），大上限的理由已弱一半。
 
 ## 决定（已定）
 
@@ -16,8 +16,12 @@
 2. `patch_ambiguous` 列出前 5 处的行号与每处首行内容。
 3. 前台 shell 默认输出上限下调（今天每流 64 KiB；目标 16–32 KiB，值由落地时定），失败时多给尾部。
 
+## 待决问题（未定）
+
+- **`patch` 第 4 层容忍缩进**（报告 P5 下半）：今天到 `LineTrimmed`（只忽略行尾空白）为止，Codex 的 `seek_sequence` 第三档两端 trim。两种做法：只定位、照写 `new`（符合描述里「只定位不发明」的承诺，建议）；或按匹配到的缩进差平移 `new`。定了再并入决定 4。
+
 ## 验收
 
 - 单行超长/匹配超多的仓库里 `grep` 输出有界；`files` 只返回路径与匹配数。
 - 歧义 patch 报错里有 5 处行号与首行。
-- 1 MB 输出的命令：返回有界、可经 `shell_output` 分页读完、内容与原输出一致。
+- 1 MB 输出的命令：返回有界、可经 `job read`（落地前 `shell_output`）分页读完、内容与原输出一致。
