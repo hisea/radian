@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, override
 
@@ -46,9 +45,11 @@ from radian_command import (
     assert_binary_static,
     build_auth_json,
     build_command,
+    derive_turn_timeout_secs,
     redact_base_url,
     select_provider,
     sha256_of_file,
+    summarize_session_usage,
 )
 
 _DEFAULT_REMOTE_BINARY = "/tmp/harbor-radian-bin/radian"
@@ -259,22 +260,29 @@ class RadianAgent(BaseInstalledAgent):
         workdir = (workdir_result.stdout or "").strip() or "/"
         home = self.options.radian_home
         auth_json = build_auth_json(provider, base_url)
-        with tempfile.TemporaryDirectory(prefix="harbor-radian-auth-") as temp_dir:
-            local_path = Path(temp_dir) / "auth.json"
-            local_path.write_text(auth_json)
-            credentials_dir = f"{home}/credentials"
-            await self.exec_as_agent(
-                environment,
-                command=(
-                    f"mkdir -p {shlex.quote(credentials_dir)} && "
-                    f"chmod 700 {shlex.quote(home)} {shlex.quote(credentials_dir)}"
-                ),
-            )
-            await environment.upload_file(str(local_path), f"{credentials_dir}/auth.json")
-            await self.exec_as_agent(
-                environment,
-                command=f"chmod 600 {shlex.quote(f'{credentials_dir}/auth.json')}",
-            )
+        credentials_dir = f"{home}/credentials"
+        remote_auth = f"{credentials_dir}/auth.json"
+        await self.exec_as_agent(
+            environment,
+            command=(
+                f"mkdir -p {shlex.quote(credentials_dir)} && "
+                f"chmod 700 {shlex.quote(home)} {shlex.quote(credentials_dir)}"
+            ),
+        )
+        # The chown path keeps auth.json readable when the image's agent user
+        # is not root. The file still holds only the `$RADIAN_BENCH_API_KEY`
+        # reference, never the value. The chmod keeps today's 0600 posture
+        # when there is no non-root default user to chown to.
+        await self._upload_config_text(
+            environment,
+            content=auth_json,
+            remote_path=remote_auth,
+            filename="auth.json",
+        )
+        await self.exec_as_agent(
+            environment,
+            command=f"chmod 600 {shlex.quote(remote_auth)}",
+        )
         probe = await environment.exec(
             command=f"test -s {shlex.quote(SYSTEM_CA_BUNDLE)}",
             timeout_sec=30,
@@ -290,7 +298,9 @@ class RadianAgent(BaseInstalledAgent):
             workspace=workdir,
             profile=self.options.profile,
             max_model_calls=self.options.max_model_calls,
-            turn_timeout_secs=self.options.turn_timeout_secs,
+            turn_timeout_secs=derive_turn_timeout_secs(
+                self.options.turn_timeout_secs, self.options.timeout_sec
+            ),
             context_window=self.options.context_window,
             offline_catalog=bool(self.options.offline_catalog),
             catalog_provider=self.options.catalog_provider,
@@ -315,18 +325,14 @@ class RadianAgent(BaseInstalledAgent):
             cwd=workdir,
             timeout_sec=self.options.timeout_sec,
         )
-        metadata = dict(context.metadata or {})
-        metadata.update(
-            {
-                "agent": "radian",
-                "radian_version": self.version(),
-                "radian_provider": provider,
-                "radian_model": model_id,
-                "radian_profile": self.options.profile,
-                "return_code": result.return_code,
-            }
-        )
-        context.metadata = metadata
+        # Trial facts for populate_context_post_run: Harbor only calls it
+        # while the context is still empty, so run() leaves the context alone
+        # and the metadata lands there, together with the usage totals.
+        self._last_trial = {
+            "provider": provider,
+            "model": model_id,
+            "return_code": result.return_code,
+        }
         if result.return_code != 0:
             shown_url = redact_base_url(base_url)
             raise NonZeroAgentExitCodeError(
@@ -335,6 +341,42 @@ class RadianAgent(BaseInstalledAgent):
                 f"stdout tail: {self._tail(result.stdout)}\n"
                 f"stderr tail: {self._tail(result.stderr)}"
             )
+
+    @override
+    def populate_context_post_run(self, context: AgentContext) -> None:
+        """Backfill Harbor's token/cost totals from radian's session journals.
+
+        Harbor calls this after the agent logs (including `radian-sessions/`)
+        are synced back to `self.logs_dir`, and only while the context is
+        still empty — which is why `run()` sets neither metadata nor usage.
+        Each model call's `ModelUsageRecorded` event and each summarization
+        call's `CompactionUsageRecorded` event contribute their reported
+        counters; a fee's `micros` become USD. Counters no record reported
+        stay `None` ("not reported", never 0); unparseable lines are skipped.
+        """
+        last = getattr(self, "_last_trial", None) or {}
+        metadata = dict(context.metadata or {})
+        metadata.update(
+            {
+                "agent": "radian",
+                "radian_version": self.version(),
+                "radian_profile": self.options.profile,
+            }
+        )
+        if last:
+            metadata.update(
+                {
+                    "radian_provider": last.get("provider"),
+                    "radian_model": last.get("model"),
+                    "return_code": last.get("return_code"),
+                }
+            )
+        context.metadata = metadata
+        usage = summarize_session_usage(self.logs_dir / self._SESSIONS_DIRNAME)
+        context.n_input_tokens = usage.n_input_tokens
+        context.n_cache_tokens = usage.n_cache_tokens
+        context.n_output_tokens = usage.n_output_tokens
+        context.cost_usd = usage.cost_usd
 
     @staticmethod
     def _tail(output: str | None, limit: int = 2000) -> str:
