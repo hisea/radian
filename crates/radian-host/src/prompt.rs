@@ -498,10 +498,10 @@ mod tests {
     static SOCKETS_OPEN: SocketsBackend = SocketsBackend(false);
 
     /// The `<runtime>` Unix-socket sentence follows the backend's effective answer, not the
-    /// tier: a `workspace` session on a backend that does not restrict Unix sockets (Linux
-    /// bwrap, the `false` half) carries no sentence even with the network on; on one that
-    /// does (macOS seatbelt, the `true` half) the sentence stays exactly as today.
-    /// Setting the flag from the tier again fails the `false` half.
+    /// tier: a `workspace` session on a backend that does not restrict Unix sockets (the
+    /// `false` half) carries no sentence even with the network on; on one that does (the
+    /// `true` half — macOS seatbelt, and Linux bwrap since slice 0) the sentence stays
+    /// exactly as today. Setting the flag from the tier again fails the `false` half.
     #[test]
     fn the_runtime_unix_socket_sentence_follows_the_backend() {
         let dir =

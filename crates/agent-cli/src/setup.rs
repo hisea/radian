@@ -578,6 +578,11 @@ pub(crate) async fn setup(
             for warning in &warnings {
                 eprintln!("[config] {warning}");
             }
+            // Slice 0: on Linux the seccomp filter denies every Unix socket, so a
+            // non-empty list is ignored (warn once here, at startup).
+            if let Some(warning) = radian_host::unix_sockets_ignored_warning(&paths) {
+                eprintln!("[config] {warning}");
+            }
             paths
         },
         allow_env: config.sandbox.allow_env.clone(),
