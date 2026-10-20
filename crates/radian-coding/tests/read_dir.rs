@@ -23,6 +23,29 @@ fn listing_limits() -> Limits {
     }
 }
 
+/// Item 10: the `limit` field says what it does for a directory (caps entries, with the
+/// listing default and maximum), not only what it does for a file.
+#[tokio::test]
+async fn the_limit_field_names_the_directory_entry_cap() {
+    use agent_core::{ToolProvider, ToolSession};
+    let dir = TempDir::new("read-dir-desc");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let session = common::tools(&root).open_session().await.unwrap();
+    let spec = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "read")
+        .expect("the read spec");
+    let field = &spec.input_schema["properties"]["limit"]["description"];
+    assert!(
+        field
+            .as_str()
+            .is_some_and(|text| text.contains("caps entries")),
+        "the `limit` field must name the directory entry cap: {field}"
+    );
+}
+
 /// One line of a listing, split on the tabs `read` separates with.
 fn parse_line(line: &str) -> (&str, &str, &str) {
     let mut parts = line.splitn(3, '\t');

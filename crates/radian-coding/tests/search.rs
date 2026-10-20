@@ -498,6 +498,117 @@ async fn both_search_tools_are_advertised_and_shared() {
     }
 }
 
+// ---------- ignore files above the base (item 1) ----------
+
+/// A repository-root `.gitignore` keeps excluding when the search starts in a subdirectory
+/// (the old code read only the tree at and below the base, so `sub/target/` resurfaced).
+/// A subdirectory `.gitignore` re-includes one file pattern with `!`.
+#[tokio::test]
+async fn ignore_files_above_the_base_apply_with_git_precedence() {
+    let dir = TempDir::new("search-above-base");
+    let root = dir.file("ws");
+    dir.write("ws/.gitignore", "target/\n*.log\n");
+    dir.write("ws/sub/.gitignore", "!keep.log\n");
+    dir.write("ws/sub/keep.rs", "needle");
+    dir.write("ws/sub/target/excluded.rs", "needle");
+    dir.write("ws/sub/keep.log", "needle");
+    dir.write("ws/sub/drop.log", "needle");
+    let tools = tools(&root);
+
+    let out = call(&tools, "glob", json!({"pattern": "**/*.rs", "path": "sub"}))
+        .await
+        .unwrap();
+    assert_eq!(text(&out), "sub/keep.rs\n", "{out:?}");
+
+    let out = call(
+        &tools,
+        "glob",
+        json!({"pattern": "**/*.log", "path": "sub"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text(&out), "sub/keep.log\n", "{out:?}");
+
+    let out = call(&tools, "grep", json!({"pattern": "needle", "path": "sub"}))
+        .await
+        .unwrap();
+    let found = text(&out);
+    assert!(found.contains("sub/keep.rs:1:needle"), "{found}");
+    assert!(found.contains("sub/keep.log:1:needle"), "{found}");
+    assert!(!found.contains("excluded.rs"), "{found}");
+    assert!(!found.contains("drop.log"), "{found}");
+}
+
+/// Item 1's wording is pinned in both tools: `.ignore` applies, the files above the base up
+/// to the workspace root apply, and the global gitignore stays unread.
+#[tokio::test]
+async fn the_search_descriptions_name_above_base_ignores() {
+    let dir = TempDir::new("search-above-desc");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let session = tools(&root).open_session().await.unwrap();
+    for name in ["glob", "grep"] {
+        let spec = session
+            .tool_specs()
+            .iter()
+            .find(|spec| spec.name == name)
+            .unwrap_or_else(|| panic!("the {name} spec"));
+        assert!(
+            spec.description.contains(".ignore"),
+            "{name} must say `.ignore` applies: {}",
+            spec.description
+        );
+        assert!(
+            spec.description.contains("workspace root"),
+            "{name} must say the ignores above the base apply: {}",
+            spec.description
+        );
+        assert!(
+            spec.description.contains("global gitignore is not read"),
+            "{name} must say the global gitignore stays unread: {}",
+            spec.description
+        );
+    }
+}
+
+// ---------- the `output` wording (item 12) ----------
+
+/// Item 12: the three `output` values are defined in the schema field only (the
+/// constraint); the description keeps the usage (which value answers which question) and no
+/// longer defines them a second time.
+#[tokio::test]
+async fn the_output_values_are_defined_in_the_schema_only() {
+    let dir = TempDir::new("grep-output-desc");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let session = tools(&root).open_session().await.unwrap();
+    let spec = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "grep")
+        .expect("the grep spec");
+    assert!(
+        !spec.description.contains("selects `content`"),
+        "the description must not define the values again: {}",
+        spec.description
+    );
+    assert!(
+        spec.description
+            .contains("for which files contain a pattern"),
+        "the description keeps the usage: {}",
+        spec.description
+    );
+    let field = &spec.input_schema["properties"]["output"]["description"];
+    assert!(
+        field
+            .as_str()
+            .is_some_and(|text| text.contains("`content` (default)")
+                && text.contains("`files`")
+                && text.contains("`count`")),
+        "the schema still defines all three values: {field}"
+    );
+}
+
 // ---------- the total byte cap and the output modes ----------
 
 /// Many long matching lines: the output stays within the byte cap, ends with the one

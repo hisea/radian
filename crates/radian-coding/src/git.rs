@@ -31,8 +31,8 @@ pub(crate) fn diff_spec() -> ToolSpec {
         name: "git_diff".into(),
         description: "Run `git diff` (optionally `--cached`) in the workspace for the whole \
                       tree or one workspace-relative path (read-only). With `stat: true`, \
-                      return the working tree status (the short form, untracked files \
-                      included) followed by the `--stat` summary."
+                      return the working tree status (`git status --porcelain=v1 --branch \
+                      --untracked-files=all`) followed by the `--stat` summary."
             .into(),
         input_schema: diff_schema(),
         concurrency: ToolConcurrency::Shared,

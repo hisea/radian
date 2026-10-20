@@ -49,6 +49,40 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
+/// Item 4: the `git_diff` description names the exact status command the code runs
+/// (`--porcelain=v1 --branch --untracked-files=all`), not "the short form".
+#[tokio::test]
+async fn the_git_diff_description_names_the_status_command() {
+    use agent_core::{ToolProvider, ToolSession};
+    let dir = TempDir::new("git-desc");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let session = tools(&root).open_session().await.unwrap();
+    let spec = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "git_diff")
+        .expect("the git_diff spec");
+    assert!(
+        spec.description
+            .contains("--porcelain=v1 --branch --untracked-files=all"),
+        "the description must name the status command: {}",
+        spec.description
+    );
+    assert!(
+        !spec.description.contains("short form"),
+        "the old 'short form' wording must be gone: {}",
+        spec.description
+    );
+    let field = &spec.input_schema["properties"]["stat"]["description"];
+    assert!(
+        field
+            .as_str()
+            .is_some_and(|text| text.contains("--porcelain=v1 --branch")),
+        "the `stat` field must name the status command: {field}"
+    );
+}
+
 /// Every file under `.git`, keyed by relative path, with length, mtime, and content, so a
 /// rewrite of identical bytes is still detected.
 fn snapshot_git(root: &Path) -> BTreeMap<String, (u64, std::time::SystemTime, Vec<u8>)> {

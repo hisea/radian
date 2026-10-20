@@ -355,6 +355,39 @@ async fn every_question_limit_is_an_invalid_arguments_failure() {
     );
 }
 
+/// Item 5: the schema carries no `maxLength` on `header` (a character count would accept a
+/// 9-CJK-character header), so the schema no longer refuses it; the parser enforces the
+/// 16-cell display width and refuses it with `invalid_arguments`. The description still
+/// states the width (a CJK character is 2), so a CJK-writing user does not pay an error round
+/// trip for it.
+#[tokio::test]
+async fn a_nine_cjk_header_passes_the_schema_but_fails_the_width_check() {
+    let prompter: Arc<dyn Prompter> = ScriptedPrompter::failing(PromptError::Gone);
+    let session = AskTools::new(prompter).open_session().await.unwrap();
+    let spec = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "ask_user")
+        .expect("ask_user is advertised when a prompter is set");
+    let header = &spec.input_schema["properties"]["questions"]["items"]["properties"]["header"];
+    assert!(
+        header.get("maxLength").is_none(),
+        "the schema must not count characters on `header`: {header}"
+    );
+    assert!(
+        header["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("16 display cells")),
+        "the width stays in the description: {header}"
+    );
+    // Nine CJK characters are 18 display cells: over the width, refused by the parser.
+    let arguments = args(vec![json!({
+        "id": "q", "header": "一二三四五六七八九", "prompt": "Pick one", "kind": "text"
+    })]);
+    let failure = QuestionRequest::parse(&arguments).expect_err("18 cells over the 16-cell limit");
+    assert_eq!(code(&failure), "invalid_arguments", "{failure:?}");
+}
+
 /// ADR 0024 R4: a note over the limit is `invalid_answer`, and the header defaults
 /// to the id.
 #[tokio::test]
