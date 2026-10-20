@@ -10,6 +10,9 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::error::{ProbeReport, SandboxError};
+use crate::git_exec::{
+    GIT_EXEC_DIRS, GIT_EXEC_FILES, GIT_MODULE_DIRS, GIT_MODULE_FILES, GIT_WORKTREE_FILES,
+};
 use crate::policy::{GitAccess, SandboxMode, SandboxPolicy};
 use crate::{SandboxBackend, SandboxCommand, apply_env, workspace_tmp};
 
@@ -236,9 +239,9 @@ pub(crate) fn profile_text(policy: &SandboxPolicy) -> String {
 }
 
 /// The entries under one discovered git directory that git can execute, denied write under
-/// [`GitAccess::WritableExceptExec`] (ADR 0038): `config`, `config.worktree`, `hooks/`, each
-/// submodule's `config` and `hooks/` (nested submodules included), and a linked worktree's
-/// `gitdir`, `commondir` and `config.worktree`. Everything else under `.git` stays writable.
+/// [`GitAccess::WritableExceptExec`] (ADR 0038). The entry names come from the shared list
+/// (`crate::git_exec`); the permission layer denies the same entries for `write`/`patch`,
+/// so the two cannot drift apart. Everything else under `.git` stays writable.
 ///
 /// A submodule's directory is matched with a regex over `modules/<name>` rather than by
 /// enumerating the names found at discovery time: a submodule the model adds during the
@@ -247,7 +250,7 @@ pub(crate) fn profile_text(policy: &SandboxPolicy) -> String {
 /// A worktree's `.git` is a pointer **file**, not a directory. It has no executable entry of
 /// its own, but writing it would let the model repoint git at a gitdir it controls, whose
 /// hooks then run outside the sandbox when the user next runs git; so it keeps the **full**
-/// deny, exactly as under [`GitAccess::ReadOnly`].
+/// deny, exactly as under [`GitAccess::ReadOnly`]..
 fn git_exec_denies(profile: &mut String, path: &Path) {
     if !path.is_dir() {
         profile.push_str(&format!("(deny file-write* {})\n", target(path)));
@@ -255,42 +258,53 @@ fn git_exec_denies(profile: &mut String, path: &Path) {
     }
     let base = path.to_string_lossy();
     let quoted = |suffix: &str| sbpl_string(&format!("{base}{suffix}"));
-    profile.push_str(&format!(
-        "(deny file-write* (literal {}))\n",
-        quoted("/config")
-    ));
-    profile.push_str(&format!(
-        "(deny file-write* (literal {}))\n",
-        quoted("/config.worktree")
-    ));
+    for file in GIT_EXEC_FILES {
+        profile.push_str(&format!(
+            "(deny file-write* (literal {}))\n",
+            quoted(&format!("/{file}"))
+        ));
+    }
     // `subpath` (not `literal`): the whole hooks directory and everything below it, and it
     // binds a `hooks/` that does not exist yet.
-    profile.push_str(&format!(
-        "(deny file-write* (subpath {}))\n",
-        quoted("/hooks")
-    ));
+    for dir in GIT_EXEC_DIRS {
+        profile.push_str(&format!(
+            "(deny file-write* (subpath {}))\n",
+            quoted(&format!("/{dir}"))
+        ));
+    }
     let escaped = regex_escape(&base);
     // Nested submodules (`modules/<a>/modules/<b>/config`): one or more `modules/<name>`
-    // segments. The top-level `config` and `hooks` are the literal and subpath rules above, so
-    // this needs at least one segment (a `+`, not a `*`).
-    profile.push_str(&format!(
-        "(deny file-write* (regex {}))\n",
-        sbpl_string(&format!("^{escaped}(/modules/[^/]+)+/config$"))
-    ));
-    profile.push_str(&format!(
-        "(deny file-write* (regex {}))\n",
-        sbpl_string(&format!("^{escaped}(/modules/[^/]+)+/hooks(/.*)?$"))
-    ));
-    // A linked worktree of this git dir, or of a nested submodule's: the shared common dir
-    // holds one `worktrees/<name>/` per worktree, and its `gitdir`, `commondir` and
-    // `config.worktree` are executables by the same argument (a repointed link, or a
-    // `core.hooksPath` in the per-worktree config). Matched by name so a worktree added during
-    // the session is covered without re-discovery.
-    for name in ["gitdir", "commondir", "config\\.worktree"] {
+    // segments. The top-level entries are the literal and subpath rules above, so this
+    // needs at least one segment (a `+`, not a `*`).
+    for file in GIT_MODULE_FILES {
         profile.push_str(&format!(
             "(deny file-write* (regex {}))\n",
             sbpl_string(&format!(
-                "^{escaped}(/modules/[^/]+)*/worktrees/[^/]+/{name}$"
+                "^{escaped}(/modules/[^/]+)+/{}$",
+                regex_escape(file)
+            ))
+        ));
+    }
+    for dir in GIT_MODULE_DIRS {
+        profile.push_str(&format!(
+            "(deny file-write* (regex {}))\n",
+            sbpl_string(&format!(
+                "^{escaped}(/modules/[^/]+)+/{}(/.*)?$",
+                regex_escape(dir)
+            ))
+        ));
+    }
+    // A linked worktree of this git dir, or of a nested submodule's: the shared common dir
+    // holds one `worktrees/<name>/` per worktree, and its link files and per-worktree config
+    // are executables by the same argument (a repointed link, or a `core.hooksPath` in the
+    // per-worktree config). Matched by name so a worktree added during the session is
+    // covered without re-discovery.
+    for name in GIT_WORKTREE_FILES {
+        profile.push_str(&format!(
+            "(deny file-write* (regex {}))\n",
+            sbpl_string(&format!(
+                "^{escaped}(/modules/[^/]+)*/worktrees/[^/]+/{}$",
+                regex_escape(name)
             ))
         ));
     }
