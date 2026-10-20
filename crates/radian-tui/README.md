@@ -1134,7 +1134,7 @@ Whatever ended the app, the normal screen now says why, once, after the terminal
 | How it ends | Exit | Reason line (stderr, after restore) |
 |---|---|---|
 | clean quit (Ctrl-C twice / driver ends by request) | 0 | `session <id> saved; resume with `--resume <id>`` |
-| startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 1 | `radian: <the error>` (terminal never entered) |
+| startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 2 | `radian: <the error>` (terminal never entered) |
 | driver task ends with a `RunError` | 1 | `radian: driver: <error>` |
 | driver task panics | 1 | `radian: the driver task ended unexpectedly: <join error>: <redacted panic>` |
 | the app itself panics (`main` thread) | 101 | `radian: the app panicked: <redacted panic> (panic log: <path>)` |
@@ -1279,7 +1279,7 @@ could be built. This is the same wiring `agent-cli` uses:
 
 - The sandbox is built **before** the tools: `workspace` and `full` call
   `radian_sandbox::Sandbox::new`, and a missing backend or a failed probe is an **error**, never
-  a fallback to an unsandboxed run (ADR 0012 decision 2). The app then exits 1 without
+  a fallback to an unsandboxed run (ADR 0012 decision 2). The app then exits 2 without
   entering the terminal. `RADIAN_SANDBOX_PROBE_FAIL=1` is a test seam that can only cause a
   refusal. The one other path is ADR 0016: in the `workspace` tier, when the kernel
   says this process is already confined by an outer sandbox (`sandbox_check`), the outer sandbox
