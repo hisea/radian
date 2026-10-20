@@ -357,14 +357,14 @@ def transcript(b, opt):
     b.blank()
     compaction(b, opt)
     b.blank()
-    notice(b, opt, "task grep-glob finished · radian/t1 @ a1b2c3 · 3 files")
-    notice(b, opt, "task docs stalled · no journal write for 6m", warn=True)
+    notice(b, opt, "background job bg-2 finished · cargo test -p radian-host · exit 0 · 38s")
+    notice(b, opt, "background job bg-3 has printed nothing for 6m", warn=True)
 
 
 # ---- the `/` menu, the modals, the input and the footer ---------------------------------------
 def slash_menu(b, opt):
-    items = [("/model", "switch the model or provider"), ("/mode", "general · lead"),
-             ("/memory", "search, add, edit"), ("/jobs", "background jobs"), ("/tasks", "task agents")]
+    items = [("/model", "switch the model or provider"), ("/fork", "branch this session"),
+             ("/memory", "search, add, edit"), ("/jobs", "background jobs"), ("/sessions", "resume another session")]
     for i, (name, desc) in enumerate(items):
         cur = i == 0
         b.line([("❯ " if cur else "  ", VIOLET, "", None), (f"{name:<10}", TEXT if cur else MUTED, BOLD if cur else "", None),
@@ -384,12 +384,12 @@ def panel_box(b, title, rows, hints):
 def approval_modal(b, opt):
     panel_box(b, "approve tool call?", [
         [("tool: ", MUTED, "", None), ("shell", TEXT, "", None)],
-        [("command: ", MUTED, "", None), ("git push origin radian/integration", TEXT, "", None)],
+        [("command: ", MUTED, "", None), ("git push origin feature/jobs", TEXT, "", None)],
     ], ["[y] allow once", "[a] always this session", "[n] deny", "[!] auto"])
 
 
 def ask_modal(b, opt):
-    panel_box(b, "Ask · lead", [
+    panel_box(b, "Ask", [
         [(" Load ", TEXT, BOLD, None), ("  Scope  Submit", MUTED, "", None)],
         [("How should the UI extension be loaded?", TEXT, "", None)],
         [("❯ ", VIOLET, "", None), ("○ Built-in Rust components", TEXT, "", None)],

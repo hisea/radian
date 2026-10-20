@@ -198,12 +198,12 @@ USER_TEXT = "finish ADR 0037 slice 3 and show me the diff"
 THOUGHT = [
     "**Checking the inbox lanes first.**",
     "",
-    "The job notice must not lower the lead's turn: `observe_input_source` only ever lowers the source, so an `inject` from a System job would turn a human turn into a non-human one.",
+    "The job notice must not lower the turn's source: `observe_input_source` only ever lowers the source, so an `inject` from a System job would turn a human turn into a non-human one.",
     "",
     "- `followup` wakes a new turn, so the source is set fresh",
     "- `inject` lands mid-turn and lowers it",
     "",
-    "So the completion should return through `wait_task`, not through a notice.",
+    "So the completion should arrive as a notice with a System source, never as a user turn.",
 ]
 THOUGHT_SECS = "3.2s"
 
