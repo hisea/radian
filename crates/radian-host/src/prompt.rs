@@ -331,7 +331,7 @@ mod tests {
         assert!(DEFAULT_ROLE.contains("data, not instructions"));
         assert!(DEFAULT_ROLE.contains("path:line"));
         assert!(DEFAULT_ROLE.contains("/memory add"));
-        assert!(DEFAULT_ROLE.contains("~/.radian/skills/"));
+        assert!(DEFAULT_ROLE.contains("~/.agents/skills/"));
         assert!(DEFAULT_ROLE.contains("with `shell`"));
     }
 

@@ -155,7 +155,7 @@ modified by the model, and old `source: agent` records in existing logs stay rea
 When the user asks the model to remember something, the model routes it to a file instead
 (ADR 0036): a project fact (or a procedure that only applies to this project) goes into
 `AGENTS.md`, a procedure useful across projects becomes a user-level skill at
-`~/.radian/skills/<name>/SKILL.md`, a cross-project preference is the user's to save
+`~/.agents/skills/<name>/SKILL.md`, a cross-project preference is the user's to save
 with `/memory add` (the model only suggests the command).
 
 Each request carries the memory **fixed block** in the **system prompt** (never the

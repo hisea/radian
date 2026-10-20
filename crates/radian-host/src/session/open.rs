@@ -16,7 +16,7 @@ use super::local::{DriverTask, LocalSession};
 use super::setup_types::{ApprovalRouting, HostBindings, SessionFacts, SessionQueue, SessionSetup};
 use super::support::{build_coding_tools, memory_notice, open_journal, session_hooks};
 use crate::describe::{describe, sandbox_word};
-use crate::home::{radian_home, skills_dir, user_home};
+use crate::home::{agents_skills_dir, radian_home, skills_dir, user_home};
 use crate::memory::{
     MemoryHooks, MemoryInjection, MemoryService, MemoryTools, ScopeSelection, exceeds_budget,
 };
@@ -258,10 +258,12 @@ pub async fn open_session(
     // section is appended after the memory section, so the tuple below is ((perm, memory),
     // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).
     let skills = {
-        // The user level first, then `[skills] extra_paths` (ADR 0025 slice 4): the first
-        // discovery of a name wins, so `~/.radian/skills` beats an extra root.
-        let discovery = skills::discover_with_extras(
+        // The two user levels first (`$RADIAN_HOME/skills`, then the Agent Skills standard
+        // `$HOME/.agents/skills`), then `[skills] extra_paths` (ADR 0025 S1): the first
+        // discovery of a name wins, so `$RADIAN_HOME/skills` beats `~/.agents/skills`.
+        let discovery = skills::discover_with_user_roots(
             skills_dir().as_deref(),
+            agents_skills_dir().as_deref(),
             &skills_extra_paths,
             skills_builtin,
             &skills_disabled,
