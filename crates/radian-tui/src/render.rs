@@ -24,8 +24,8 @@ pub use approval::{
     APPROVAL_KEYS, MIN_APPROVAL_HEIGHT, approval_body, approval_cap, approval_text,
 };
 use input::{
-    BOX_PROMPT, BoxGlyphs, FIND_BOX_HEIGHT, INPUT_HINT, INPUT_PROMPT, input_height,
-    input_inner_width, input_status_spans, input_visible_rows, prompt_width,
+    BOX_PROMPT, BoxGlyphs, FIND_BOX_HEIGHT, INPUT_HINT, INPUT_HINT_NO_MODEL, INPUT_PROMPT,
+    input_height, input_inner_width, input_status_spans, input_visible_rows, prompt_width,
 };
 pub use input::{COMPLETION_MAX_LINES, InputStyle, completion_rows, completion_visible_rows};
 pub use panels::{
@@ -359,10 +359,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let spin = app.spinner_frame();
             match app.input_style {
                 InputStyle::Lines => {
+                    // ADR 0008 §2: the empty box names `/model` while no model is routed.
+                    let hint = if app.session.has_model {
+                        INPUT_HINT
+                    } else {
+                        INPUT_HINT_NO_MODEL
+                    };
                     let body: Vec<Line> = if empty {
                         vec![Line::from(vec![
                             Span::styled(INPUT_PROMPT, app.theme.hint),
-                            Span::styled(INPUT_HINT, style),
+                            Span::styled(hint, style),
                         ])]
                     } else {
                         rows[offset..]
@@ -442,7 +448,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     };
                     let mut body: Vec<Line> = vec![top];
                     let text_rows: Vec<String> = if empty {
-                        vec![INPUT_HINT.to_string()]
+                        vec![if app.session.has_model {
+                            INPUT_HINT.to_string()
+                        } else {
+                            INPUT_HINT_NO_MODEL.to_string()
+                        }]
                     } else {
                         rows[offset..].to_vec()
                     };

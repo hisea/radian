@@ -45,6 +45,7 @@ impl App {
                 model_name: model_name.into(),
                 model_display: None,
                 provider: None,
+                has_model: true,
                 max_model_calls: radian_host::DEFAULT_MAX_MODEL_CALLS,
                 cwd: None,
                 git_branch: None,
@@ -144,6 +145,12 @@ impl App {
     /// has no sandbox at all (ADR 0012).
     pub fn set_bash_available(&mut self, available: bool) {
         self.session.bash_available = available;
+    }
+
+    /// Whether a model is routed (ADR 0008 §2). False when the session started with no model;
+    /// `/model` sets it when the first route is queued.
+    pub fn set_has_model(&mut self, has_model: bool) {
+        self.session.has_model = has_model;
     }
 
     /// Applies the wired `tui.*` configuration. A bad keymap (a key bound to two actions) is

@@ -59,6 +59,11 @@ impl App {
             // `/compact` is asynchronous: the loop runs it on the runtime between turns and the
             // result comes back as `Input::CompactDone`.
             command::Outcome::Compact(instructions) => {
+                // ADR 0008 §2: compaction needs a model to summarize with.
+                if !self.session.has_model {
+                    self.push_notice("no model is set; choose one with /model before compacting");
+                    return UpdateResult::dirty();
+                }
                 UpdateResult::effect(Effect::Compact { instructions })
             }
             command::Outcome::Sessions(query) => {
@@ -323,6 +328,10 @@ impl App {
     /// Queues the route (D5) and says what happens next. The cache warning is the accepted
     /// cost of a switch (ADR 0026 已接受的代价).
     fn queue_model(&mut self, provider: String, model: String) -> UpdateResult {
+        // ADR 0008 §2: the first route in a session that started with no model unblocks send.
+        self.session.has_model = true;
+        self.session.model_name = model.clone();
+        self.session.provider = Some(provider.clone());
         self.session.next_model = Some(format!("{provider}/{model}"));
         self.push_notice(format!(
             "next turn: {provider}/{model}; the first turn after a switch will not hit the cache"

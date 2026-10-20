@@ -419,6 +419,10 @@ pub struct SessionView {
     pub model_display: Option<String>,
     /// The provider's name for the footer's `{provider}` placeholder. Set once at startup.
     pub provider: Option<String>,
+    /// Whether a model is routed (ADR 0008 §2): false when the session started with no model
+    /// configured (no `--model`, no journaled route, no `model.model`). Submit is blocked until
+    /// `/model` queues one; `/model`'s write-back fires once for such a session.
+    pub has_model: bool,
     /// The per-turn model call limit this session runs under (the CLI flag or its default).
     /// Used for the notice a `BudgetExceeded` turn shows. Set once at startup.
     pub max_model_calls: u32,
