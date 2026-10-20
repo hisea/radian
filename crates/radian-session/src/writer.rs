@@ -1209,9 +1209,9 @@ pub fn session_is_live(path: impl AsRef<Path>) -> bool {
     let Ok(file) = File::open(path.as_ref()) else {
         return false;
     };
-    // Fully qualified: Rust 1.89+ added inherent `File::try_lock_shared`/`unlock`, which would
-    // otherwise shadow the `fs2` trait at the project's 1.88 MSRV and return a different error
-    // type. `fs2` is the writer's own locking implementation.
+    // Fully qualified: the inherent `File::try_lock_shared`/`unlock` (stable since 1.89)
+    // would otherwise shadow the `fs2` trait at the project's 1.99.1 MSRV and return a
+    // different error type. `fs2` is the writer's own locking implementation.
     match fs2::FileExt::try_lock_shared(&file) {
         Ok(()) => {
             let _ = fs2::FileExt::unlock(&file);

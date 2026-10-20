@@ -26,7 +26,7 @@ verified by sha256: `tests/pristine.rs` reverses the edits textually and asserts
 
 - `Cargo.toml` — provenance header above; `[package]` resolves the workspace inheritance to
   concrete values (`version = "0.0.0"`, `edition = "2024"`, `license = "Apache-2.0"`, plus
-  `rust-version = "1.88"`; upstream declares no `rust-version` and builds with edition 2024).
+  `rust-version = "1.99.1"`; upstream declares no `rust-version` and builds with edition 2024).
   `[dependencies]` keeps only `unicode-width = "0.2"` (upstream's other dependency, `ratatui`, is
   removed by edit 1). `[lints.clippy] question_mark = "allow"` — see "Lints" below.
 - `src/lib.rs` — Radian's entry point, [`grok_mermaid::render`]. This is a copy of upstream's own
