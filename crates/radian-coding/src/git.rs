@@ -145,12 +145,25 @@ async fn stat_text(
 
 /// The `git diff` argv for `args`; `stat` asks for `--stat` (with the same `--cached` and
 /// path options, so the summary describes the diff the call asked for).
+///
+/// `--no-ext-diff --no-textconv` ride along on every invocation built here (ADR 0039
+/// decision 3): a `.gitattributes` line the model can write (`*.txt diff=<driver>`) would
+/// otherwise make this host call run `diff.<driver>.command` or `diff.<driver>.textconv`
+/// from the effective git config (or `GIT_EXTERNAL_DIFF` from the environment). They live
+/// in this builder rather than in `run_git` because that helper is shared with
+/// `git status`, which takes no diff flags; every `git diff` in this file goes through
+/// here, so neither the full diff nor the `--stat` one can forget them.
 fn diff_argv(
     root: &WorkspaceRoot,
     args: &DiffArgs,
     stat: bool,
 ) -> Result<Vec<String>, ToolFailure> {
-    let mut argv: Vec<String> = vec!["diff".into(), "--no-color".into()];
+    let mut argv: Vec<String> = vec![
+        "diff".into(),
+        "--no-color".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+    ];
     if stat {
         argv.push("--stat".into());
     }
