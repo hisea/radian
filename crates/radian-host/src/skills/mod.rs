@@ -1035,17 +1035,16 @@ mod tests {
     #[test]
     fn project_roots_for_is_empty_unless_trusted() {
         let scratch = Scratch::new("project-gate");
-        project_skill(&scratch.root, "ws", "greet", &frontmatter("greet", "Secret."));
+        project_skill(
+            &scratch.root,
+            "ws",
+            "greet",
+            &frontmatter("greet", "Secret."),
+        );
         let ws = scratch.root.join("ws");
         assert!(project_roots_for(&ws, false).is_empty());
-        let discovery = discover_with_project(
-            None,
-            None,
-            &[],
-            &project_roots_for(&ws, false),
-            false,
-            &[],
-        );
+        let discovery =
+            discover_with_project(None, None, &[], &project_roots_for(&ws, false), false, &[]);
         assert!(discovery.skills.is_empty());
         assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
     }
@@ -1060,8 +1059,18 @@ mod tests {
         let ws = repo.join("sub/ws");
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::create_dir_all(repo.join(".git")).unwrap();
-        project_skill(&scratch.root, "repo/sub/ws", "near", &frontmatter("near", "Nearest."));
-        project_skill(&scratch.root, "repo", "far", &frontmatter("far", "At the root."));
+        project_skill(
+            &scratch.root,
+            "repo/sub/ws",
+            "near",
+            &frontmatter("near", "Nearest."),
+        );
+        project_skill(
+            &scratch.root,
+            "repo",
+            "far",
+            &frontmatter("far", "At the root."),
+        );
         // Above the repository root: never scanned.
         project_skill(&scratch.root, "", "outer", &frontmatter("outer", "Above."));
         let roots = project_roots_for(&ws, true);
@@ -1084,7 +1093,12 @@ mod tests {
     fn a_user_skill_wins_a_conflict_with_a_project_skill() {
         let scratch = Scratch::new("project-conflict");
         scratch.skill("same", &frontmatter("same", "From the user level."));
-        project_skill(&scratch.root, "ws", "same", &frontmatter("same", "From the project."));
+        project_skill(
+            &scratch.root,
+            "ws",
+            "same",
+            &frontmatter("same", "From the project."),
+        );
         project_skill(
             &scratch.root,
             "ws",
