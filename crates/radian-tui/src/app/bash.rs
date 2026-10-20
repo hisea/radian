@@ -128,7 +128,12 @@ mod tests {
         assert!(result.effects.is_empty());
         assert!(app.session.bash_running.is_none());
         assert!(
-            app.session.entries.last().unwrap().text.contains("no shell"),
+            app.session
+                .entries
+                .last()
+                .unwrap()
+                .text
+                .contains("no shell"),
             "{}",
             app.session.entries.last().unwrap().text
         );

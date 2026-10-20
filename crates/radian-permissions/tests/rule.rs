@@ -152,10 +152,7 @@ fn workspace_asks_for_mcp_where_full_access_allows_it() {
     let full = Profile::full_access(dir.path()).unwrap();
     let write = json!({"path": "a.txt"});
 
-    assert_eq!(
-        action_of(&workspace, "write", write.clone()),
-        Action::Allow
-    );
+    assert_eq!(action_of(&workspace, "write", write.clone()), Action::Allow);
     assert_eq!(
         action_of(&workspace, "shell", json!({"command": "ls"})),
         Action::Ask
@@ -170,14 +167,14 @@ fn workspace_asks_for_mcp_where_full_access_allows_it() {
         action_of(&workspace, "server__tool", json!({})),
         Action::Ask
     );
-    assert_eq!(
-        action_of(&full, "server__tool", json!({})),
-        Action::Allow
-    );
+    assert_eq!(action_of(&full, "server__tool", json!({})), Action::Allow);
     // Read-only built-ins are allowed everywhere.
     assert_eq!(action_of(&workspace, "read", write.clone()), Action::Allow);
     // The preset and the sandbox mode travel together.
-    assert_eq!(workspace.sandbox, radian_sandbox::SandboxMode::WorkspaceWrite);
+    assert_eq!(
+        workspace.sandbox,
+        radian_sandbox::SandboxMode::WorkspaceWrite
+    );
     assert_eq!(full.sandbox, radian_sandbox::SandboxMode::FullAccess);
 }
 

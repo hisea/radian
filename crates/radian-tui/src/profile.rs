@@ -41,9 +41,7 @@ pub fn parse_tier(value: &str) -> Result<Tier, String> {
     match value {
         "workspace" | "workspace-write" => Ok(Tier::WorkspaceWrite),
         "full" | "full-access" => Ok(Tier::FullAccess),
-        other => Err(format!(
-            "--profile {other:?} is not one of workspace, full"
-        )),
+        other => Err(format!("--profile {other:?} is not one of workspace, full")),
     }
 }
 

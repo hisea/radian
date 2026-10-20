@@ -139,18 +139,12 @@ async fn open_switchable_inner(
 
             retries: 0,
             sandbox: Some(
-                radian_sandbox::Sandbox::new(
-                    radian_sandbox::SandboxMode::FullAccess,
-                    &workspace,
-                )
-                .unwrap(),
+                radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::FullAccess, &workspace)
+                    .unwrap(),
             ),
             tier: Preset::FullAccess,
             profile: Profile::full_access(&workspace).unwrap(),
-            access_builder: Some(switchable_builder_inner(
-                workspace.clone(),
-                fail_workspace,
-            )),
+            access_builder: Some(switchable_builder_inner(workspace.clone(), fail_workspace)),
             parent: None,
             subagent: None,
             memory_root: None,
@@ -225,7 +219,9 @@ async fn set_access_swaps_the_profile_and_queues_the_change() {
     );
 
     // Switching back widens again, from the very next call.
-    session.set_access(Preset::FullAccess).expect("full is allowed");
+    session
+        .set_access(Preset::FullAccess)
+        .expect("full is allowed");
     assert_eq!(session.hooks().profile().preset, Preset::FullAccess);
     assert_eq!(session.projection().read().tier(), Some("full"));
     assert_eq!(
