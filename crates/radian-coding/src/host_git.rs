@@ -76,6 +76,7 @@ fn config_pairs(dir: &Path) -> Result<Vec<(String, String)>, String> {
     pairs.extend(diff_pairs(dir)?);
     Ok(pairs)
 }
+
 /// The neutralised diff pairs: `diff.external` (only when the effective config sets it —
 /// a static override would suppress every patch diff, even in repos without one) and, for
 /// each diff driver name in the effective config, the command keys it actually sets
@@ -110,13 +111,6 @@ fn diff_pairs(dir: &Path) -> Result<Vec<(String, String)>, String> {
 /// - every configured `diff.<name>.command` neutralised to `true` and every configured
 ///   `diff.<name>.textconv` neutralised to `cat`, so an attributes file can still *name* a
 ///   driver but no repo-config command runs.
-///
-/// - `core.fsmonitor=false`, `core.hooksPath=/dev/null`: a repo-config command never runs on
-///   `git add`/`commit`/`checkout` (ADR 0039);
-/// - `core.attributesFile=/dev/null`: the global attributes file cannot name a driver either;
-/// - every `filter.<name>.{clean,smudge,process}` emptied, with `filter.<name>.required=false`,
-///   for each name in the effective config — so an attributes file can still *name* a driver but
-///   there is no command left to run.
 ///
 /// The names are read once from the config; the model cannot write it (ADR 0038 keeps
 /// `.git/config` read-only in the sandbox, and the global/system files are the user's), so the
