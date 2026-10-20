@@ -218,6 +218,8 @@ impl OpenAiResponses {
                 retry_after,
             },
             ModelError::ContextOverflow(text) => ModelError::ContextOverflow(scrub(text)),
+            // The core's own fixed string; it carries no provider text to scrub.
+            ModelError::EmptyResponse => ModelError::EmptyResponse,
         }
     }
 }

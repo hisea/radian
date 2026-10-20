@@ -894,6 +894,7 @@ mod tests {
                 retry_after: *retry_after,
             },
             ModelError::ContextOverflow(text) => ModelError::ContextOverflow(text.clone()),
+            ModelError::EmptyResponse => ModelError::EmptyResponse,
         }
     }
 
