@@ -146,11 +146,13 @@ async fn the_read_spec_names_directory_listing() {
         read.description
     );
     // Decision 5's size budget: the file-only `read` serialized to 1601 bytes (measured
-    // 2026-10-20); the directory sentence must fit in 150 bytes on top of that.
+    // 2026-10-20); the directory sentence fits in 150 bytes on top of that, and the `limit`
+    // directory-entry note (item 10) in 67 more; the pin leaves a little room above the
+    // measured 1778.
     let bytes = serde_json::to_vec(read).unwrap().len();
     assert!(
-        bytes <= 1601 + 150,
-        "the read definition grew to {bytes} bytes, past the 1751 budget"
+        bytes <= 1790,
+        "the read definition grew to {bytes} bytes, past the 1790 budget"
     );
     // The `list` alias keeps its old schema (so a stale call still parses) and its
     // description names the rename.
