@@ -1285,3 +1285,343 @@ async fn failing_commands_last_line_is_always_present() {
         "the view is still exactly the budget"
     );
 }
+
+// ---------- 11. slice 1: the sandbox-denial marker and `outside_sandbox` ----------
+
+/// A write outside the workspace fails with the fixed marker (and the structured
+/// category). Removing the marker from the report fails this test, so it is that
+/// mutation's catcher. Skips without a working backend.
+#[tokio::test]
+async fn sandbox_denial_marks_an_outside_write() {
+    let dir = TempDir::new("shell-denied-write");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let outside = sentinel_outside(&dir);
+    let Some(confined) = tools_with(SandboxMode::WorkspaceWrite, &root, &[]) else {
+        return;
+    };
+    let target = outside.join("denied.txt");
+    let output = call(
+        &confined,
+        "shell",
+        json!({"command": format!("echo x > {}", target.display())}),
+    )
+    .await
+    .expect("the tool ran (and the command failed)");
+    let text = output_text(&output);
+    assert!(
+        text.contains("sandbox denied: filesystem-write"),
+        "the marker is missing: {text}"
+    );
+    assert_eq!(
+        structured(&output)["sandbox_denied"],
+        json!("filesystem-write"),
+        "{text}"
+    );
+    assert!(!target.exists(), "the escape must not have landed");
+}
+
+/// A write into a discovered `.git` entry is marked `git`, not plain
+/// `filesystem-write`. Collapsing the two fails this test.
+#[tokio::test]
+async fn sandbox_denial_marks_a_git_write() {
+    let dir = TempDir::new("shell-denied-git");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output();
+    if !init.is_ok_and(|out| out.status.success()) {
+        eprintln!("skipping: git init failed");
+        return;
+    }
+    let Some(confined) = tools_with(SandboxMode::WorkspaceWrite, &root, &[]) else {
+        return;
+    };
+    let hook = root.join(".git").join("hooks").join("evil");
+    let output = call(
+        &confined,
+        "shell",
+        json!({"command": format!("echo x > {}", hook.display())}),
+    )
+    .await
+    .expect("the tool ran (and the command failed)");
+    let text = output_text(&output);
+    assert!(
+        text.contains("sandbox denied: git"),
+        "the git marker is missing: {text}"
+    );
+    assert_eq!(
+        structured(&output)["sandbox_denied"],
+        json!("git"),
+        "{text}"
+    );
+    assert!(!hook.exists(), "the hook must not have landed");
+}
+
+/// A read of a masked deny-read directory fails with ENOENT and is marked
+/// `sensitive-read`. Dropping the deny-list arm fails this test.
+#[tokio::test]
+async fn sandbox_denial_marks_a_masked_sensitive_read() {
+    let dir = TempDir::new("shell-denied-read");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let secret = dir.file("secret");
+    std::fs::create_dir_all(&secret).unwrap();
+    std::fs::write(secret.join("key"), "s3cret").unwrap();
+    let Some(confined) = tools_with(SandboxMode::WorkspaceWrite, &root, &[secret.clone()]) else {
+        return;
+    };
+    let output = call(
+        &confined,
+        "shell",
+        json!({"command": format!("cat {}", secret.join("key").display())}),
+    )
+    .await
+    .expect("the tool ran (and the command failed)");
+    let text = output_text(&output);
+    assert!(
+        text.contains("sandbox denied: sensitive-read"),
+        "the sensitive-read marker is missing: {text}"
+    );
+    assert_eq!(
+        structured(&output)["sandbox_denied"],
+        json!("sensitive-read"),
+        "{text}"
+    );
+}
+
+/// The seccomp filter denies `socket(AF_UNIX, …)` with EPERM: marked `unix-socket`.
+/// Skips without a backend or without python3.
+#[tokio::test]
+async fn sandbox_denial_marks_a_unix_socket() {
+    let dir = TempDir::new("shell-denied-socket");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let Some(confined) = tools_with(SandboxMode::WorkspaceWrite, &root, &[]) else {
+        return;
+    };
+    let probe = call(&confined, "shell", json!({"command": "command -v python3"}))
+        .await
+        .expect("the tool ran");
+    if structured(&probe)["exit_code"] != json!(0) {
+        eprintln!("skipping: no python3 in the sandbox");
+        return;
+    }
+    let output = call(
+        &confined,
+        "shell",
+        json!({"command": "python3 -c 'import socket; socket.socket(socket.AF_UNIX)'"}),
+    )
+    .await
+    .expect("the tool ran (and the command failed)");
+    let text = output_text(&output);
+    assert!(
+        text.contains("sandbox denied: unix-socket"),
+        "the unix-socket marker is missing: {text}"
+    );
+    assert_eq!(
+        structured(&output)["sandbox_denied"],
+        json!("unix-socket"),
+        "{text}"
+    );
+}
+
+/// An ordinary command failure carries no marker: marking everything would teach the
+/// model its own bugs are the sandbox.
+#[tokio::test]
+async fn an_ordinary_failure_carries_no_marker() {
+    let dir = TempDir::new("shell-no-marker");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let Some(confined) = tools_with(SandboxMode::WorkspaceWrite, &root, &[]) else {
+        return;
+    };
+    let output = call(&confined, "shell", json!({"command": "exit 3"}))
+        .await
+        .expect("the tool ran");
+    let text = output_text(&output);
+    assert!(!text.contains("sandbox denied"), "{text}");
+    assert_eq!(structured(&output)["sandbox_denied"], json!(null), "{text}");
+}
+
+/// An approved `outside_sandbox` call runs unsandboxed for that one call: the outside
+/// write lands, and the result names the reason. The permission layer is what forces
+/// the `ask`; the tool's own job is only the single unsandboxed path plus the reason
+/// check below.
+#[tokio::test]
+async fn outside_sandbox_runs_unsandboxed_for_one_call() {
+    let dir = TempDir::new("shell-outside");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let outside = sentinel_outside(&dir);
+    let Some(confined) = tools_with(SandboxMode::WorkspaceWrite, &root, &[]) else {
+        return;
+    };
+    let target = outside.join("outside.txt");
+    let output = call(
+        &confined,
+        "shell",
+        json!({
+            "command": format!("echo OUTSIDE > {}", target.display()),
+            "outside_sandbox": true,
+            "outside_sandbox_reason": "the test writes outside on purpose",
+        }),
+    )
+    .await
+    .expect("the outside call ran");
+    let text = output_text(&output);
+    assert!(
+        structured(&output)["exit_code"] == json!(0),
+        "the outside call must succeed: {text}"
+    );
+    assert!(
+        text.contains("ran outside the sandbox")
+            && text.contains("the test writes outside on purpose"),
+        "the result must name the unsandboxed run and its reason: {text}"
+    );
+    assert!(
+        !text.contains("sandbox denied"),
+        "an unsandboxed run is never blamed on the sandbox: {text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap_or_default().trim(),
+        "OUTSIDE",
+        "the outside write must have landed"
+    );
+    assert_eq!(structured(&output)["outside_sandbox"], json!(true));
+}
+
+/// `outside_sandbox: true` without a reason is refused before anything runs.
+#[tokio::test]
+async fn outside_sandbox_without_a_reason_is_refused() {
+    let dir = TempDir::new("shell-outside-reason");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    for arguments in [
+        json!({"command": "echo hi", "outside_sandbox": true}),
+        json!({"command": "echo hi", "outside_sandbox": true, "outside_sandbox_reason": ""}),
+    ] {
+        let error = call(&tools, "shell", arguments)
+            .await
+            .expect_err("must be refused");
+        assert!(
+            error.contains("outside_sandbox_reason"),
+            "the refusal must name the reason: {error}"
+        );
+    }
+}
+
+/// An unsandboxed background job is refused: the one unsandboxed path is foreground
+/// only, so there is nowhere for such a job to run.
+#[tokio::test]
+async fn outside_sandbox_refuses_background() {
+    let dir = TempDir::new("shell-outside-bg");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let error = call(
+        &tools,
+        "shell",
+        json!({
+            "command": "echo hi",
+            "background": true,
+            "outside_sandbox": true,
+            "outside_sandbox_reason": "test",
+        }),
+    )
+    .await
+    .expect_err("must be refused");
+    assert!(
+        error.contains("foreground only"),
+        "the refusal must say why: {error}"
+    );
+}
+
+/// The `shell` description names `outside_sandbox` in one sentence, in both
+/// `workspace` wordings (`full` has no sandbox to leave).
+#[tokio::test]
+async fn the_shell_description_names_outside_sandbox() {
+    let dir = TempDir::new("shell-spec-outside");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut checked = 0;
+    for tools in [
+        tools_with(SandboxMode::WorkspaceWrite, &root, &[]),
+        Some(transparent_tools(&root)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let session = tools.open_session().await.unwrap();
+        let spec = session
+            .tool_specs()
+            .iter()
+            .find(|spec| spec.name == "shell")
+            .expect("shell is advertised with a sandbox");
+        if spec.description.contains("NOT sandboxed") {
+            assert!(
+                !spec.description.contains("outside_sandbox: true"),
+                "full has no sandbox to leave: {}",
+                spec.description
+            );
+        } else {
+            assert!(
+                spec.description
+                    .contains("`outside_sandbox: true` plus `outside_sandbox_reason`"),
+                "the workspace wording must name outside_sandbox: {}",
+                spec.description
+            );
+            assert!(
+                spec.description.contains("never automatic"),
+                "the wording must say it is never automatic: {}",
+                spec.description
+            );
+        }
+        assert!(
+            spec.input_schema["properties"]
+                .get("outside_sandbox")
+                .is_some()
+                && spec.input_schema["properties"]
+                    .get("outside_sandbox_reason")
+                    .is_some(),
+            "the schema must carry both fields"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 1, "no shell was built to check");
+}
+
+/// Slice 1 size budget (re-measured 2026-10-20): the `outside_sandbox` sentence and the
+/// two schema fields join the `shell` definition. The serialized `workspace` definition
+/// (read-only `.git` wording) is 2666 bytes; the writable carve-out wording is longer,
+/// so the pin covers the larger of the two with a little room, the way the `read`
+/// (1790) and `ask_user` (1630) pins do.
+#[tokio::test]
+async fn the_shell_definition_stays_small() {
+    let dir = TempDir::new("shell-size");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    for backend in [&GIT_WRITABLE as &dyn SandboxBackend, &GIT_READ_ONLY] {
+        let sandbox =
+            Sandbox::from_backend(backend, SandboxMode::WorkspaceWrite, &root).expect("sandbox");
+        let tools = CodingTools::with_sandbox(&root, sandbox).expect("matching workspaces");
+        let spec = tools
+            .open_session()
+            .await
+            .unwrap()
+            .tool_specs()
+            .iter()
+            .find(|spec| spec.name == "shell")
+            .expect("shell is advertised with a sandbox")
+            .clone();
+        let bytes = serde_json::to_vec(&spec).unwrap().len();
+        assert!(
+            bytes <= 2810,
+            "the {} shell definition grew to {bytes} bytes, past the 2810 budget",
+            backend.name(),
+        );
+    }
+}
