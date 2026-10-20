@@ -27,10 +27,7 @@ mod tests {
             .iter()
             .map(|s| s.name.as_str())
             .collect();
-        assert_eq!(
-            names,
-            ["read", "write", "patch", "glob", "grep"]
-        );
+        assert_eq!(names, ["read", "write", "patch", "glob", "grep"]);
 
         let call = agent_core::ToolCall {
             id: "t".into(),

@@ -861,8 +861,8 @@ async fn pty_mounts_only_the_builtin_tools() {
     assert_eq!(
         got,
         [
-            "ask_user", "glob", "grep", "job", "patch", "read", "shell", "skill",
-            "subagent", "write"
+            "ask_user", "glob", "grep", "job", "patch", "read", "shell", "skill", "subagent",
+            "write"
         ],
         "the exact tool set of a fresh TUI session: {names:?}"
     );

@@ -949,9 +949,15 @@ async fn started_jobs_are_visible_in_the_session_registry() {
 
     let listed = session.jobs().list();
     assert_eq!(listed.len(), 2, "{listed:?}");
-    let done = listed.iter().find(|job| job.id == done_id).expect("the done job");
+    let done = listed
+        .iter()
+        .find(|job| job.id == done_id)
+        .expect("the done job");
     assert!(!done.state.is_running(), "{done:?}");
-    let running = listed.iter().find(|job| job.id == run_id).expect("the running job");
+    let running = listed
+        .iter()
+        .find(|job| job.id == run_id)
+        .expect("the running job");
     assert!(running.state.is_running(), "{running:?}");
     // The acknowledgement names the `job` tool where the output path used to be
     // (ADR 0039 decision 1).
@@ -1105,7 +1111,9 @@ async fn a_long_foreground_command_is_adopted_in_place() {
     // Registered and running (there is no list tool; the registry is the source).
     let running = session.jobs().list();
     assert!(
-        running.iter().any(|job| job.id == id && job.state.is_running()),
+        running
+            .iter()
+            .any(|job| job.id == id && job.state.is_running()),
         "the adopted job is registered and running: {running:?}"
     );
 
@@ -1305,7 +1313,9 @@ async fn an_adopted_job_survives_the_turn_cancellation() {
     );
     let running = session.jobs().list();
     assert!(
-        running.iter().any(|job| job.id == id && job.state.is_running()),
+        running
+            .iter()
+            .any(|job| job.id == id && job.state.is_running()),
         "the adopted job is registered and running: {running:?}"
     );
 

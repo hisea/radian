@@ -204,11 +204,7 @@ impl LoopContext<'_> {
                     let result = match sandbox {
                         Some(sandbox) => {
                             radian_coding::run_user_bash(
-                                &workspace,
-                                &sandbox,
-                                &command,
-                                harden_git,
-                                &cancel,
+                                &workspace, &sandbox, &command, harden_git, &cancel,
                             )
                             .await
                         }

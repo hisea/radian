@@ -33,9 +33,7 @@ fn tools(ws: &Path, jobs_dir: &Path, harden_git: bool) -> CodingTools {
     }
     CodingTools::with_sandbox(ws, full_access(ws))
         .expect("matching workspaces")
-        .with_jobs(Arc::new(
-            Jobs::new(jobs_dir).with_git_hardening(harden_git),
-        ))
+        .with_jobs(Arc::new(Jobs::new(jobs_dir).with_git_hardening(harden_git)))
 }
 
 async fn exec(
@@ -120,9 +118,13 @@ async fn untrusted_shell_does_not_run_repo_fsmonitor() {
     // Control: without hardening the trap fires.
     let plain = tools(&ws, &dir.file("sessions/plain.jobs"), false);
     let session = plain.open_session().await.expect("session");
-    let out = exec(&session, "shell", json!({"command": "git status --porcelain --branch"}))
-        .await
-        .unwrap();
+    let out = exec(
+        &session,
+        "shell",
+        json!({"command": "git status --porcelain --branch"}),
+    )
+    .await
+    .unwrap();
     assert!(output_text(&out).contains("## "), "{out:?}");
     assert!(marker.exists(), "the control must fire the hook");
 
@@ -130,9 +132,13 @@ async fn untrusted_shell_does_not_run_repo_fsmonitor() {
     std::fs::remove_file(&marker).unwrap();
     let hardened = tools(&ws, &dir.file("sessions/hardened.jobs"), true);
     let session = hardened.open_session().await.expect("session");
-    let out = exec(&session, "shell", json!({"command": "git status --porcelain --branch"}))
-        .await
-        .unwrap();
+    let out = exec(
+        &session,
+        "shell",
+        json!({"command": "git status --porcelain --branch"}),
+    )
+    .await
+    .unwrap();
     assert!(output_text(&out).contains("## "), "{out:?}");
     assert!(!marker.exists(), "hardened git must not run core.fsmonitor");
 }
@@ -189,7 +195,10 @@ async fn untrusted_background_job_does_not_run_repo_fsmonitor() {
     let session = hardened.open_session().await.expect("session");
     let done = status_in_background(&session).await;
     assert!(done.contains("## "), "{done}");
-    assert!(!marker.exists(), "a hardened job must not run core.fsmonitor");
+    assert!(
+        !marker.exists(),
+        "a hardened job must not run core.fsmonitor"
+    );
     session.shutdown_jobs();
 }
 
@@ -206,7 +215,10 @@ async fn untrusted_shell_empties_repo_filter_commands() {
     let marker = dir.file("marker-filter");
     let clean = ws.join("clean-hook.sh");
     marker_script(&clean, &marker, true);
-    git(&ws, &["config", "filter.evil.clean", &clean.to_string_lossy()]);
+    git(
+        &ws,
+        &["config", "filter.evil.clean", &clean.to_string_lossy()],
+    );
     git(&ws, &["config", "filter.evil.smudge", "cat"]);
     git(&ws, &["config", "filter.evil.required", "true"]);
     std::fs::write(ws.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
@@ -228,7 +240,10 @@ async fn untrusted_shell_empties_repo_filter_commands() {
     exec(&session, "shell", json!({"command": "git add b.txt"}))
         .await
         .unwrap();
-    assert!(!marker.exists(), "hardened git must not run the clean filter");
+    assert!(
+        !marker.exists(),
+        "hardened git must not run the clean filter"
+    );
     let staged = exec(
         &session,
         "shell",
@@ -279,4 +294,3 @@ async fn trusted_shell_runs_the_user_pre_commit_hook() {
         "the commit landed"
     );
 }
-

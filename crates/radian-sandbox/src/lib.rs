@@ -154,9 +154,15 @@ impl SandboxCommand {
             self.command.env(name, value);
             return;
         }
-        let mut args: Vec<OsString> =
-            self.command.get_args().map(|arg| arg.to_os_string()).collect();
-        let at = args.iter().position(|arg| arg == "--").unwrap_or(args.len());
+        let mut args: Vec<OsString> = self
+            .command
+            .get_args()
+            .map(|arg| arg.to_os_string())
+            .collect();
+        let at = args
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(args.len());
         args.splice(
             at..at,
             [
@@ -525,8 +531,13 @@ mod tests {
         let mut command = SandboxCommand::new(Command::new("/bin/sh"));
         command.set_child_env("GIT_CONFIG_COUNT", "1");
         assert_eq!(
-            command.get_envs().find(|(key, _)| *key == "GIT_CONFIG_COUNT"),
-            Some((std::ffi::OsStr::new("GIT_CONFIG_COUNT"), Some(std::ffi::OsStr::new("1"))))
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "GIT_CONFIG_COUNT"),
+            Some((
+                std::ffi::OsStr::new("GIT_CONFIG_COUNT"),
+                Some(std::ffi::OsStr::new("1"))
+            ))
         );
         assert!(!args(&command).contains(&"--setenv".to_owned()));
     }
@@ -542,10 +553,21 @@ mod tests {
         command.set_child_env("GIT_CONFIG_COUNT", "1");
         command.set_child_env("GIT_CONFIG_KEY_0", "core.fsmonitor");
         let args = args(&command);
-        let dash = args.iter().position(|arg| arg == "--").expect("the separator");
+        let dash = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("the separator");
         assert_eq!(
             &args[..dash],
-            ["--clearenv", "--setenv", "GIT_CONFIG_COUNT", "1", "--setenv", "GIT_CONFIG_KEY_0", "core.fsmonitor"]
+            [
+                "--clearenv",
+                "--setenv",
+                "GIT_CONFIG_COUNT",
+                "1",
+                "--setenv",
+                "GIT_CONFIG_KEY_0",
+                "core.fsmonitor"
+            ]
         );
         assert_eq!(&args[dash..], ["--", "/bin/sh", "-c", "true"]);
     }

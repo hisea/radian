@@ -277,11 +277,7 @@ fn diff_frame() -> App {
                 "write",
                 json!({"path": "b.txt", "content": "three\nfour\n"}),
             ),
-            call(
-                "c4",
-                "patch",
-                json!({"path": "src/main.rs"}),
-            ),
+            call("c4", "patch", json!({"path": "src/main.rs"})),
             call("c5", "patch", json!({"path": "notes.txt"})),
         ],
     ));

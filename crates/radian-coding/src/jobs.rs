@@ -1340,7 +1340,6 @@ pub(crate) fn run_kill(
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

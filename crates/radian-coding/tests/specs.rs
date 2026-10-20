@@ -38,10 +38,7 @@ async fn agent_core_accepts_the_built_in_tool_specs() {
         .iter()
         .map(|spec| spec.name.as_str())
         .collect();
-    assert_eq!(
-        names,
-        ["read", "write", "patch", "glob", "grep"]
-    );
+    assert_eq!(names, ["read", "write", "patch", "glob", "grep"]);
 
     // Through the core: `open_session` compiles every schema and refuses duplicates.
     let agent = Arc::new(Agent::new(NeverModel, coding));

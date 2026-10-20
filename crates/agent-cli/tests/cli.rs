@@ -8686,4 +8686,3 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
         "the exact tool set of a fresh headless session: {names:?}"
     );
 }
-
