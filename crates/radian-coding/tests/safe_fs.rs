@@ -28,7 +28,6 @@ fn tool_calls(path: &str) -> Vec<(&'static str, Value)> {
             "patch",
             json!({"path": path, "old": "SENTINEL", "new": "X"}),
         ),
-        ("list", json!({"path": path})),
         ("glob", json!({"pattern": "**/*", "path": path})),
         ("grep", json!({"pattern": "SENTINEL", "path": path})),
         ("git_diff", json!({"path": path})),
@@ -276,7 +275,7 @@ fn list_glob_and_grep_cannot_reach_outside_when_the_base_is_swapped_after_the_ch
         let tools = tools(&root);
 
         for (name, args) in [
-            ("list", json!({"path": "sub"})),
+            ("read", json!({"path": "sub"})),
             ("glob", json!({"pattern": "**/*", "path": "sub"})),
             ("grep", json!({"pattern": "SENTINEL", "path": "sub"})),
         ] {

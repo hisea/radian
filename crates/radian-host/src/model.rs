@@ -186,7 +186,7 @@ impl Model for HostModel {
 }
 
 /// Removes the one-version alias specs (ADR 0043 decision 3) from every request, so the model
-/// is never offered `git_status`, `job_output`, `job_list`, `job_kill` or
+/// is never offered `list`, `git_status`, `job_output`, `job_list`, `job_kill` or
 /// `shell_output`.
 ///
 /// The alias stays in the provider's `tool_specs()` because `agent_core`'s preflight refuses a
@@ -600,8 +600,8 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
 mod tests {
     use super::*;
 
-    /// ADR 0043 decision 3: the renamed tool's old name is never advertised, whatever the
-    /// provider. The alias stays registered in the provider so Core's preflight accepts the
+    /// ADR 0043 decision 3: the renamed tools' old names are never advertised, whatever the
+    /// provider. The aliases stay registered in the provider so Core's preflight accepts the
     /// call.
     #[test]
     fn the_renamed_tool_alias_is_stripped_from_every_request() {
@@ -616,6 +616,7 @@ mod tests {
             messages: Vec::new(),
             tools: vec![
                 spec("read"),
+                spec("list"),
                 spec("git_status"),
                 spec("git_diff"),
                 spec("memory_search"),

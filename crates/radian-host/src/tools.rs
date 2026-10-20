@@ -104,14 +104,13 @@ impl HostTools {
         if self.coding.is_some() {
             push(
                 "read",
-                "read a file; lines are numbered, with offset and limit",
+                "read a file or list a directory; lines are numbered, with offset and limit",
             );
             push(
                 "patch",
                 "replace text in a file (layered match; replace_all for many)",
             );
             push("write", "create or overwrite a file");
-            push("list", "list a directory");
             push("glob", "find files whose path matches a glob");
             push("grep", "search file contents with a regex");
             push(

@@ -1,4 +1,4 @@
-//! ADR 0043: the `explore` subagent is read-only — exactly `read list glob grep` — so
+//! ADR 0043: the `explore` subagent is read-only — exactly `read glob grep` — so
 //! it must not receive the parent's `--mcp-config`, while `general` keeps it.
 //!
 //! The child here is a stub shell script rather than a `radian` binary: the fact each test
@@ -106,7 +106,7 @@ async fn run_child(arguments: Value, coding_root: Option<PathBuf>) -> Vec<String
 }
 
 /// An `explore` child starts without `--mcp-config` even when the parent has one: it mounts
-/// exactly the four read-only tools, and MCP tools are never filtered by `--tools`.
+/// exactly the three read-only tools, and MCP tools are never filtered by `--tools`.
 #[tokio::test]
 async fn the_explore_child_gets_no_mcp_config() {
     let argv = run_child(json!({"agent": "explore", "task": "MCP-TASK"}), None).await;
@@ -117,7 +117,7 @@ async fn the_explore_child_gets_no_mcp_config() {
     // The read-only allow-list is still there.
     assert_eq!(
         flag_value(&argv, "--tools").as_deref(),
-        Some("read,list,glob,grep"),
+        Some("read,glob,grep"),
         "{argv:?}"
     );
 }

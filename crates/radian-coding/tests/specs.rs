@@ -47,9 +47,10 @@ async fn agent_core_accepts_the_built_in_tool_specs() {
             "glob",
             "grep",
             "git_diff",
-            // The one-version alias for the removed `git_status` (ADR 0043 decision 3). It is
-            // registered so a call to the old name passes Core's preflight, and the host strips
-            // it from every model request, so the model never sees it.
+            // The one-version aliases (ADR 0043 decision 3): `list` for `read` on a
+            // directory, `git_status` for `git_diff { stat: true }`. Both are registered
+            // so a call to an old name passes Core's preflight, and the host strips
+            // them from every model request, so the model never sees them.
             "git_status"
         ]
     );
@@ -121,4 +122,118 @@ async fn agent_core_accepts_the_ask_user_spec() {
     let agent = Arc::new(Agent::new(NeverModel, ask));
     let mut chat = agent.open_session().await.unwrap();
     chat.close().await.unwrap();
+}
+
+/// ADR 0043 decision 1: `read` on a directory lists it. The description says so in one
+/// sentence (decision 5's budget: the serialized spec stays within 150 bytes of the
+/// file-only definition it replaced).
+#[tokio::test]
+async fn the_read_spec_names_directory_listing() {
+    let dir = TempDir::new("read-dir-spec");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let coding = tools(&root);
+    let session = coding.open_session().await.unwrap();
+    let specs: std::collections::HashMap<&str, &agent_core::ToolSpec> = session
+        .tool_specs()
+        .iter()
+        .map(|spec| (spec.name.as_str(), spec))
+        .collect();
+    let read = specs["read"];
+    assert!(
+        read.description.contains("A directory path lists it"),
+        "{}",
+        read.description
+    );
+    // Decision 5's size budget: the file-only `read` serialized to 1601 bytes (measured
+    // 2026-10-20); the directory sentence must fit in 150 bytes on top of that.
+    let bytes = serde_json::to_vec(read).unwrap().len();
+    assert!(
+        bytes <= 1601 + 150,
+        "the read definition grew to {bytes} bytes, past the 1751 budget"
+    );
+    // The `list` alias keeps its old schema (so a stale call still parses) and its
+    // description names the rename.
+    let list = specs["list"];
+    assert!(
+        list.description.contains("Deprecated alias for `read`"),
+        "{}",
+        list.description
+    );
+    assert!(
+        list.input_schema["properties"].get("max_entries").is_some(),
+        "the alias keeps the old arguments: {}",
+        list.input_schema
+    );
+}
+
+/// Opens an `AskTools` session (no workspace needed, ADR 0024 Q5) and returns the
+/// advertised `ask_user` spec. Small helper for the description pins below.
+async fn ask_user_spec() -> agent_core::ToolSpec {
+    use futures_util::future::BoxFuture;
+    use radian_coding::{PromptError, Prompter, QuestionAnswer, QuestionRequest};
+
+    struct SilentPrompter;
+
+    impl Prompter for SilentPrompter {
+        fn ask(
+            &self,
+            _request: QuestionRequest,
+        ) -> BoxFuture<'_, Result<QuestionAnswer, PromptError>> {
+            Box::pin(async { Err(PromptError::Gone) })
+        }
+    }
+
+    let ask = radian_coding::AskTools::new(Arc::new(SilentPrompter));
+    let session = ask.open_session().await.unwrap();
+    session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "ask_user")
+        .expect("ask_user is advertised when a prompter is set")
+        .clone()
+}
+
+/// ADR 0024 decision 2 (`ask-user-pass`): the description itself states when to ask —
+/// only a decision that belongs to the user, or a real ambiguity looking cannot
+/// resolve — and tells the model to mark its recommendation.
+#[tokio::test]
+async fn the_ask_user_description_states_when_to_ask() {
+    let spec = ask_user_spec().await;
+    assert!(
+        spec.description.contains("belongs to the user"),
+        "ask only for the user's own decisions: {}",
+        spec.description
+    );
+    assert!(
+        spec.description.contains("do not ask what you can find"),
+        "look before you ask (ADR 0036): {}",
+        spec.description
+    );
+    assert!(
+        spec.description.contains("recommend"),
+        "give a recommendation when asking: {}",
+        spec.description
+    );
+}
+
+/// `ask-user-pass` decision 3: the slimmed definition serializes to 1633 bytes
+/// (measured 2026-10-20: 1584 after slimming, +49 for the header width note restored in
+/// fix round 1); the pin leaves a little room above that. The `header` field names the
+/// width limit so a CJK-writing user does not pay an error round trip for it.
+#[tokio::test]
+async fn the_ask_user_definition_stays_small() {
+    let spec = ask_user_spec().await;
+    let bytes = serde_json::to_vec(&spec).unwrap().len();
+    assert!(
+        bytes <= 1650,
+        "the ask_user definition grew to {bytes} bytes, past the 1650 budget"
+    );
+    let header = &spec.input_schema["properties"]["questions"]["items"]["properties"]["header"];
+    assert!(
+        header["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("16 display cells")),
+        "the header description must name the width limit: {header}"
+    );
 }

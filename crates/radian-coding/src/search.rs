@@ -25,7 +25,7 @@
 //! - symlinks are never followed: a symlinked file is not a match and a symlinked directory is
 //!   not descended, so a link pointing out of the workspace is never read;
 //! - dot-files other than `.git` are included: the model asked for a tree, not for hidden-file
-//!   filtering, and `list` shows them too.
+//!   filtering, and a directory `read` shows them too.
 //!
 //! Precedence inside one directory follows git: `.ignore` beats `.gitignore` beats
 //! `.git/info/exclude`; a deeper directory's rules beat its parents'; the last matching
@@ -44,8 +44,8 @@ use crate::safe_fs::{self, EntryKind, OpenMode};
 
 pub(crate) const SKIPPED_DIR_NAMES: &[&str] = &[".git", RADIAN_WORKTREES];
 
-/// The workspace-local root of one-off git worktrees. The walk prunes it; `list` omits the
-/// entry, so a directory listing is not cluttered by N full checkouts of the same tree.
+/// The workspace-local root of one-off git worktrees. The walk prunes it; a directory
+/// `read` omits the entry, so a listing is not cluttered by N full checkouts of the same tree.
 pub(crate) const RADIAN_WORKTREES: &str = ".radian-worktrees";
 
 /// One regular file the walk found: its workspace-relative path and the open, read-only fd
