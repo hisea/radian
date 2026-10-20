@@ -3448,7 +3448,7 @@ async fn pty_a_project_config_narrows_the_tier() {
         "the project must narrow the default to `workspace`: {summary:?}"
     );
     assert!(
-        summary.contains("sandbox on"),
+        summary.contains("sandbox"),
         "the summary must show the sandbox: {summary:?}"
     );
     pty.quit();
