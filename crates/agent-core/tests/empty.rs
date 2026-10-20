@@ -231,12 +231,10 @@ async fn an_empty_text_with_a_tool_call_still_dispatches() {
     let model = ScriptedModel::new([empty_text_with_call(), text("ok")]);
     let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
     let log = tools.log.clone();
-    let mut chat = Arc::new(
-        Agent::new(model.clone(), tools).with_config(AgentConfig {
-            retries: 3,
-            ..Default::default()
-        }),
-    )
+    let mut chat = Arc::new(Agent::new(model.clone(), tools).with_config(AgentConfig {
+        retries: 3,
+        ..Default::default()
+    }))
     .open_session()
     .await
     .unwrap();
