@@ -163,13 +163,13 @@ pub(super) fn build_session_inputs(
         resume.is_some(),
     );
     // Slice 1 of `sandbox-auto-allow-shell`: the sandbox above is already built, so the
-    // profile takes its effective state (`sandbox.is_some()`) and the `workspace` rule is
+    // profile takes the sandbox itself (`sandbox.as_ref()`) and the `workspace` rule is
     // static for the session.
     let profile = radian_tui::profile::build_profile(
         tier,
         workspace_path,
         &cli.allow_shell_command,
-        sandbox.is_some(),
+        sandbox.as_ref(),
     )?
     .with_approval(startup_approval.policy);
 

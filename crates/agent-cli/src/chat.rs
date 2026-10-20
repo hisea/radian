@@ -54,9 +54,9 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     // of this runs **before** the session file is created (dogfooding D2).
     //
     // Slice 1 of `sandbox-auto-allow-shell`: the sandbox is built first and the profile
-    // after it, so the `workspace` rule is static for the session — `allow` inside the
-    // sandbox (`sandbox.is_some()`: a probed backend, or `inherited`), `ask` without
-    // one. Approval still cannot widen the sandbox (ADR 0012 P1).
+    // after it, so the `workspace` rule is static for the session — `allow` inside an
+    // enforced sandbox (`sandbox.as_ref()`: a probed backend, or `inherited`), `ask`
+    // without one. Approval still cannot widen the sandbox (ADR 0012 P1).
     let profile_arg = setup.profile;
     let workspace_path = setup.workspace.clone();
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
@@ -94,7 +94,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         profile_arg,
         &workspace_path,
         &cli.allow_shell_command,
-        sandbox.is_some(),
+        sandbox.as_ref(),
     )?
     .with_approval(setup.approval.policy);
 
