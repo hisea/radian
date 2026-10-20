@@ -160,6 +160,12 @@ pub struct Inbox {
     state: Mutex<State>,
     /// Woken by `followup`, `steer` and `cancel`; **not** by `inject`.
     wake: Notify,
+    /// How many times the queue changed (every enqueue, claim and requeue). A host that
+    /// checks "is there a turn to run" reads it before and after the check: equal means
+    /// no entry arrived or left in between, so the check saw a consistent queue. In
+    /// particular the driver's claim (which pops silently, with no notification) cannot
+    /// slip between the two reads unnoticed.
+    version: AtomicU64,
     next_seq: AtomicU64,
     next_id: AtomicU64,
     /// A per-process prefix so ids never collide across a restart: the numeric counter
@@ -220,6 +226,7 @@ impl Inbox {
             state: Mutex::new(State::default()),
             wake: Notify::new(),
             next_seq: AtomicU64::new(0),
+            version: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
             id_prefix: format!("inbox-{}-", id_nonce()),
             cancel_calls: AtomicU64::new(0),
@@ -327,6 +334,8 @@ impl Inbox {
             message,
             seq,
         });
+        // Inside the same critical section as the push, so a version read brackets it.
+        self.version.fetch_add(1, Ordering::SeqCst);
         drop(state);
         if wake {
             self.wake.notify_one();
@@ -407,6 +416,11 @@ impl Inbox {
         self.state.lock().await.len()
     }
 
+    /// How many times the queue changed. See the field comment.
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::SeqCst)
+    }
+
     pub async fn is_empty(&self) -> bool {
         self.len().await == 0
     }
@@ -443,15 +457,21 @@ impl Inbox {
     pub async fn claim_next_turn(&self) -> Option<InboxEntry> {
         let mut state = self.state.lock().await;
         if let Some(entry) = state.next_turn.pop_front() {
+            self.version.fetch_add(1, Ordering::SeqCst);
             return Some(entry);
         }
         let index = state.next_step.iter().position(|entry| entry.wake)?;
+        self.version.fetch_add(1, Ordering::SeqCst);
         state.next_step.remove(index)
     }
 
     /// Removes the oldest `next_step` entry, if any. Used by the driver at a safe point.
     pub async fn claim_next_step(&self) -> Option<InboxEntry> {
-        self.state.lock().await.next_step.pop_front()
+        let entry = self.state.lock().await.next_step.pop_front();
+        if entry.is_some() {
+            self.version.fetch_add(1, Ordering::SeqCst);
+        }
+        entry
     }
 
     /// Puts a claimed entry back at the front of its lane (recovery, ADR 0011 L3-2).
@@ -461,6 +481,7 @@ impl Inbox {
             Lane::NextTurn => state.next_turn.push_front(entry),
             Lane::NextStep => state.next_step.push_front(entry),
         }
+        self.version.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Puts recovered entries back, preserving their relative order. The input is in
