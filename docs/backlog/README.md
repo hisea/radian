@@ -39,7 +39,9 @@
 | `tool-small-fixes.md` | decided | （0037 的 64 KiB 默认若改则同步） | 剩余：grep 先丢上下文 + 上限降到 24–32 KiB + 描述指向 files/count；前台 shell 默认上限（等 shell-job）；patch 缩进容忍（待决） |
 | `read-absorbs-list.md` | decided | 0043、0039 | `read` 读目录即列目录，`list` 退为一个版本的别名，`explore` 变三个工具；基于 shell/job 合并后的 main 开分支 |
 | `file-tools-spawn-blocking.md` | decided | 无 | 提示词一句 → 基准 → `spawn_blocking`，让同一批 grep 真正并行 |
+| `full-tier-unrestricted.md` | decided | 0012 主、0043、0016、0038、0031 | `full` 档像 pi：shell `allow`，不弹内建提示，`--yes` 在 `full` 下无作用；启动行写 `no prompts`；三处细节待 owner 确认（用户 deny 仍生效、信任门缺省选 workspace、`always` 保留） |
 | `ask-user-pass.md` | decided | 0024、0036 | 保留 `ask_user`：描述写明只问用户拥有的取舍、能查到的不问；定义瘦身到约 1 KB |
+| `workspace-git-exec-entries-file-tools.md` | idea（bug 待验证） | 0038、0039 | `write`/`patch` 不经沙箱，`workspace` 档能写 `.git/hooks/`，绕过 0038 的只读清单；修法倾向规则层 deny + 与沙箱共用一张清单 |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `post-edit-diagnostics.md` | idea | 新 ADR | 编辑后诊断：tree-sitter 语法层 + 配置的检查命令；先数 dogfood 里 patch→check 序列 |
@@ -65,4 +67,5 @@
 | 持久 todo + `/goal` | idea | 新 ADR（第 19 条） | 目标确定性带过压缩，轮末自动续跑，resume 后一键续跑 |
 | CI 与发布 | idea | 分发 ADR（第 27 条） | Linux/macOS CI、`cargo-deny`、安装方式；前提是公开仓库 |
 | SECURITY.md | idea | 无（第 28 条） | 一页威胁模型 + CVE 对照表 |
+| 7-permissions ③ 复合按段 allow、⑥ 内建只读命令 | 搁置 | 0012 | `full` 不问（`full-tier-unrestricted.md`）加沙箱内放行之后只剩 `approval = always` 受益，不单独做；设计留在报告 §6 |
 | 生态兼容 | idea | 待定（第 31 条） | 读 `.agents/skills`、接受 `mcpServers`、Codex 子集 hook、`radian import claude` |
