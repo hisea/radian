@@ -52,8 +52,10 @@ fn fits(body_len: usize, line_len: usize, byte_cap: usize) -> bool {
         .is_some_and(|n| n <= byte_cap)
 }
 
-/// The one trailing note when the byte cap stopped the output: the limit in bytes, how many
-/// matches in how many files are shown, and how to narrow the search.
+/// The one trailing note when the byte cap stopped the output in `files`/`count` mode:
+/// the limit in bytes, how many matches in how many files are shown, and how to narrow
+/// the search. `content` mode uses [`byte_note_content`], which additionally names what was
+/// dropped (context lines first, then matches).
 fn byte_note(byte_cap: usize, total: usize, files_matched: usize, mode: OutputMode) -> String {
     let narrow = match mode {
         OutputMode::Content => {
@@ -70,6 +72,37 @@ fn byte_note(byte_cap: usize, total: usize, files_matched: usize, mode: OutputMo
     )
 }
 
+/// The one trailing note when the byte cap stopped a `content` result: like [`byte_note`],
+/// plus what was dropped to fit. Context lines go first (every match line is kept), so the
+/// note always names the dropped context lines and additionally the dropped matches when
+/// the match lines alone did not fit.
+fn byte_note_content(
+    byte_cap: usize,
+    shown: usize,
+    files_matched: usize,
+    dropped_context: usize,
+    dropped_matches: usize,
+    mode: OutputMode,
+) -> String {
+    let narrow = match mode {
+        OutputMode::Content => {
+            "narrow with a more specific `pattern`, `path` or `glob`, or `output: \"files\"\""
+        }
+        OutputMode::Files => {
+            "narrow with a more specific `pattern`, `path` or `glob`, or `output: \"count\"\""
+        }
+        OutputMode::Count => "narrow with a more specific `pattern`, `path` or `glob`",
+    };
+    let dropped = if dropped_matches > 0 {
+        format!("dropped {dropped_context} context lines and {dropped_matches} matches; ")
+    } else {
+        format!("dropped {dropped_context} context lines; ")
+    };
+    format!(
+        "[truncated: output hit {byte_cap} byte limit; {dropped}showing the first {shown} matches \
+         in {files_matched} files; {narrow}]\n"
+    )
+}
 #[derive(Deserialize)]
 struct GrepArgs {
     pattern: String,
@@ -139,7 +172,9 @@ pub(crate) fn spec() -> ToolSpec {
                       `case_insensitive` ignores case. Matches are capped per file and in \
                       total, total output is bounded by bytes, each cut named in the text; \
                       `output` selects `content` (default), `files` (one line per matching file) \
-                      or `count` (totals only). An invalid regex is an error."
+                      or `count` (totals only). Use `output: \"files\"` for which files contain \
+                      a pattern and `output: \"count\"` for how many matches there are. \
+                      An invalid regex is an error."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
@@ -258,81 +293,125 @@ pub(crate) async fn run(
     let mut files_matched = 0usize;
     let mut truncated = false;
     let mut byte_truncated = false;
-    for (file, rel) in files {
-        if byte_truncated {
-            break;
+    // `content` mode only: what the byte cap dropped (context lines first, then matches).
+    let mut dropped_context = 0usize;
+    let mut dropped_matches = 0usize;
+    if mode == OutputMode::Content {
+        // Phase 1: scan every file up to the match caps with no byte checks, so the
+        // dropped counts below are exact. `budget` and `truncated` match the old
+        // in-order emit: at most `per_file_cap` matches per file, `cap` in total.
+        struct ScannedFile {
+            rel: String,
+            lines: Vec<(bool, String)>,
+            matches: usize,
+            cut: bool,
         }
-        let rel = &rel;
-        let budget = per_file_cap.min(cap.saturating_sub(total));
-        if budget == 0 {
-            truncated = true;
-            break;
+        let mut scanned: Vec<ScannedFile> = Vec::new();
+        let mut available = 0usize;
+        for (file, rel) in files {
+            let budget = per_file_cap.min(cap.saturating_sub(available));
+            if budget == 0 {
+                truncated = true;
+                break;
+            }
+            let Scan::Matches {
+                lines,
+                matches,
+                cut,
+            } = scan_file(&regex, file, &rel, scan_context, budget)
+            else {
+                continue;
+            };
+            if matches == 0 {
+                continue;
+            }
+            available += matches;
+            if cut || available >= cap {
+                truncated = true;
+            }
+            scanned.push(ScannedFile {
+                rel,
+                lines,
+                matches,
+                cut,
+            });
+            if available >= cap {
+                break;
+            }
         }
-        let Scan::Matches {
-            lines,
-            matches,
-            cut,
-        } = scan_file(&regex, file, rel, scan_context, budget)
-        else {
-            continue;
-        };
-        if matches == 0 {
-            continue;
+        let total_context: usize = scanned
+            .iter()
+            .flat_map(|file| file.lines.iter())
+            .filter(|(is_match, line)| !*is_match && line.as_str() != "--\n")
+            .count();
+        // The full body the old in-order emit would have built (match and context lines
+        // plus the per-file notes in the same positions). When it fits with room for
+        // the notes, emit it untouched so output under the cap is byte-identical.
+        let mut full_len = 0usize;
+        let mut running = 0usize;
+        for file in &scanned {
+            for (_, line) in &file.lines {
+                full_len += line.len();
+            }
+            running += file.matches;
+            if file.cut && running < cap {
+                full_len += format!(
+                    "[{}: more than {} matches in one file]\n",
+                    file.rel, per_file_cap
+                )
+                .len();
+            }
         }
-        match mode {
-            OutputMode::Count => {
-                total += matches;
-                files_matched += 1;
-                if cut || total >= cap {
-                    truncated = true;
+        if full_len
+            .checked_add(BYTE_NOTE_RESERVE)
+            .is_some_and(|n| n <= byte_cap)
+        {
+            for file in &scanned {
+                for (_, line) in &file.lines {
+                    body.push_str(line);
                 }
-                if total >= cap {
-                    break;
+                total += file.matches;
+                files_matched += 1;
+                if file.cut && total < cap {
+                    body.push_str(&format!(
+                        "[{}: more than {} matches in one file]\n",
+                        file.rel, per_file_cap
+                    ));
                 }
             }
-            OutputMode::Files => {
-                let line = format!(
-                    "{rel}: {matches} {}\n",
-                    if matches == 1 { "match" } else { "matches" }
-                );
-                if !fits(body.len(), line.len(), byte_cap) {
-                    byte_truncated = true;
-                    break;
-                }
-                body.push_str(&line);
-                total += matches;
-                files_matched += 1;
-                if cut || total >= cap {
-                    truncated = true;
-                }
-                if total >= cap {
-                    break;
-                }
-            }
-            OutputMode::Content => {
-                let before = body.len();
-                let mut shown = 0usize;
+        } else {
+            // Over the cap: drop every context line first and keep all match lines with
+            // their `--` group separators; only cut matches when they alone do not fit.
+            byte_truncated = true;
+            dropped_context = total_context;
+            for file in &scanned {
+                let mut shown_here = 0usize;
                 let mut complete = true;
-                for (is_match, line) in &lines {
+                for (is_match, line) in &file.lines {
+                    if !*is_match && line.as_str() != "--\n" {
+                        continue;
+                    }
+                    // A separator kept while the body is still empty has no group above
+                    // it; the first match starts the output instead.
+                    if !*is_match && body.is_empty() {
+                        continue;
+                    }
                     if !fits(body.len(), line.len(), byte_cap) {
-                        byte_truncated = true;
                         complete = false;
                         break;
                     }
                     body.push_str(line);
                     if *is_match {
-                        shown += 1;
+                        shown_here += 1;
                     }
                 }
-                if shown == 0 {
-                    // Only context lines fit before the first match (or nothing fit):
-                    // drop the orphan so context is never shown without its match.
-                    body.truncate(before);
+                if shown_here == 0 {
+                    // The first match already misses the cap: nothing to keep from here.
                     break;
                 }
-                total += shown;
+                total += shown_here;
                 files_matched += 1;
-                if byte_truncated {
+                if !complete {
                     // The byte note below covers the cut; no per-file note. Drop a
                     // dangling group separator at the very end.
                     if body.ends_with("--\n") {
@@ -340,30 +419,75 @@ pub(crate) async fn run(
                     }
                     break;
                 }
-                if !complete {
-                    // Unreachable: an incomplete file with a shown match already broke
-                    // above with `byte_truncated` set. Kept so a future edit cannot
-                    // silently count unshown matches.
-                    debug_assert!(false, "a partial file must set byte_truncated");
-                    byte_truncated = true;
-                    break;
-                }
-                if cut {
-                    if total >= cap {
-                        truncated = true;
-                        break;
-                    }
-                    let note = format!("[{rel}: more than {per_file_cap} matches in one file]\n");
+                if file.cut && total < cap {
+                    let note = format!(
+                        "[{}: more than {} matches in one file]\n",
+                        file.rel, per_file_cap
+                    );
                     if !fits(body.len(), note.len(), byte_cap) {
-                        byte_truncated = true;
                         break;
                     }
                     body.push_str(&note);
-                    truncated = true;
                 }
-                if total >= cap {
-                    truncated = true;
-                    break;
+            }
+            dropped_matches = available.saturating_sub(total);
+        }
+    } else {
+        for (file, rel) in files {
+            if byte_truncated {
+                break;
+            }
+            let rel = &rel;
+            let budget = per_file_cap.min(cap.saturating_sub(total));
+            if budget == 0 {
+                truncated = true;
+                break;
+            }
+            let Scan::Matches {
+                lines: _,
+                matches,
+                cut,
+            } = scan_file(&regex, file, rel, scan_context, budget)
+            else {
+                continue;
+            };
+            if matches == 0 {
+                continue;
+            }
+            match mode {
+                OutputMode::Count => {
+                    total += matches;
+                    files_matched += 1;
+                    if cut || total >= cap {
+                        truncated = true;
+                    }
+                    if total >= cap {
+                        break;
+                    }
+                }
+                OutputMode::Files => {
+                    let line = format!(
+                        "{rel}: {matches} {}\n",
+                        if matches == 1 { "match" } else { "matches" }
+                    );
+                    if !fits(body.len(), line.len(), byte_cap) {
+                        byte_truncated = true;
+                        break;
+                    }
+                    body.push_str(&line);
+                    total += matches;
+                    files_matched += 1;
+                    if cut || total >= cap {
+                        truncated = true;
+                    }
+                    if total >= cap {
+                        break;
+                    }
+                }
+                // `content` is handled above; kept so a future mode cannot silently fall
+                // through the match without counting its matches.
+                OutputMode::Content => {
+                    debug_assert!(false, "content mode has its own emit path");
                 }
             }
         }
@@ -397,7 +521,18 @@ pub(crate) async fn run(
         suffix.push_str(&format!("[truncated: showing the first {total} matches]\n"));
     }
     if byte_truncated {
-        suffix.push_str(&byte_note(byte_cap, total, files_matched, mode));
+        if mode == OutputMode::Content {
+            suffix.push_str(&byte_note_content(
+                byte_cap,
+                total,
+                files_matched,
+                dropped_context,
+                dropped_matches,
+                mode,
+            ));
+        } else {
+            suffix.push_str(&byte_note(byte_cap, total, files_matched, mode));
+        }
     }
     if total == 0 && !byte_truncated && mode != OutputMode::Count {
         suffix.push_str(&format!("[no matches for `{}`]\n", args.pattern));
