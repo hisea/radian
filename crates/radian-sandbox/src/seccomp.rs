@@ -120,11 +120,10 @@ pub(crate) fn program() -> Vec<libc::sock_filter> {
 fn program_bytes() -> Vec<u8> {
     let prog = program();
     // SAFETY: `sock_filter` is `#[repr(C)]` (`u16, u8, u8, u32`, 8 bytes, no padding on
-    // either target); the byte view is alive as long as `bytes`, which is returned.
+    // either target); `raw` borrows `prog` and `to_vec` copies the bytes before `prog`
+    // drops at the end of the function.
     let raw = unsafe { std::slice::from_raw_parts(prog.as_ptr().cast::<u8>(), prog.len() * 8) };
-    let bytes = raw.to_vec();
-    std::mem::forget(prog);
-    bytes
+    raw.to_vec()
 }
 
 /// A fresh read end holding one copy of the compiled program, for one sandboxed spawn.
@@ -136,8 +135,10 @@ fn program_bytes() -> Vec<u8> {
 /// `--seccomp` number. Closing is tied to the owning [`crate::SandboxCommand`]: dropping
 /// the command (after spawn, or unspawned) closes the fd, so building commands in a loop
 /// cannot leak fds (a test in `tests/seccomp.rs` pins the fd count). No `pre_exec` hook is
-/// used: `radian-coding`'s shell registers its own `pre_exec` for `setsid` afterwards,
-/// which would replace one set here (measured: the second hook wins). `bwrap` reads the
+/// used to place the fd: clearing `FD_CLOEXEC` already inherits it, so there is nothing
+/// a hook would add (`pre_exec` hooks compose in registration order per the std docs,
+/// so a hook here would not break the `setsid` hook `radian-coding`'s shell registers
+/// later — it is just unnecessary). `bwrap` reads the
 /// program before exec'ing the command and installs it with `PR_SET_NO_NEW_PRIVS`, so the
 /// filter confines only the sandboxed child — never `bwrap`'s own setup, and never this
 /// process (which never installs it).
