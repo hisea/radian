@@ -792,7 +792,11 @@ mod tests {
         assert!(cut.len() <= MAX_RESULT_TEXT_BYTES);
         assert!(cut.contains("[truncated:"));
         let head = &cut[..cut.find("\n[truncated:").unwrap()];
-        assert!(head.len() % 2 == 0, "no split rune: {}", head.len());
+        assert!(
+            head.len().is_multiple_of(2),
+            "no split rune: {}",
+            head.len()
+        );
         assert!(head.chars().all(|c| c == 'é'));
     }
 
