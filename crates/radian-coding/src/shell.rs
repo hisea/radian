@@ -147,7 +147,7 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
              use less context, and run in parallel, while `shell` runs alone. Each stream \
              is capped separately (by default 24 KiB): the start and end are kept, the \
              middle names the discarded bytes. No `timeout_secs`: a command still \
-             running after the auto-background threshold (by default 120 s) moves to the \
+             running after the auto-background threshold (by default 60 s) moves to the \
              background in place — never restarted, never killed for time — returning at \
              once with a job id. `timeout_secs` (by default 60 s, at most 600 s) counts \
              from the command's start and kills the whole process group at the deadline; \

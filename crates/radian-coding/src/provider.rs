@@ -103,7 +103,7 @@ impl Default for Limits {
             max_shell_output_bytes: 1 << 20,
             default_shell_timeout: Duration::from_secs(60),
             max_shell_timeout: Duration::from_secs(600),
-            auto_background_after: Some(Duration::from_secs(120)),
+            auto_background_after: Some(Duration::from_secs(60)),
             // The model-facing view keeps a bounded head+tail (24 KiB per stream by default,
             // split 1/4 : 3/4 on success and 1/8 : 7/8 on failure); the retained file is larger
             // the retained file is larger so the discarded middle can be recovered, but still

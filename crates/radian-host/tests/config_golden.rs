@@ -402,6 +402,29 @@ fn edge_cases() -> Vec<(String, String)> {
             "shell.section_not_a_table",
             "schema_version = 1\nshell = 3\n",
         ),
+        // ---- model.smol (ADR 0008 §1, ADR 0043 §1): carried when both keys are set,
+        // warned and ignored when half-set; unknown keys and wrong types are skipped ----
+        (
+            "model.smol.ok",
+            "schema_version = 1\n[model.smol]\nprovider = \"cheap\"\nmodel = \"m-c\"\n",
+        ),
+        (
+            "model.smol.half",
+            "schema_version = 1\n[model.smol]\nprovider = \"cheap\"\n",
+        ),
+        (
+            "model.smol.wrong_type",
+            "schema_version = 1\n[model.smol]\nprovider = 3\nmodel = \"m-c\"\n",
+        ),
+        (
+            "model.smol.not_a_table",
+            "schema_version = 1\n[model]\nsmol = 3\n",
+        ),
+        // `[subagent.explore]` was never released: now an unknown top-level section.
+        (
+            "unknown.subagent_explore",
+            "schema_version = 1\n[subagent.explore]\nprovider = \"cheap\"\nmodel = \"m-c\"\n",
+        ),
         // ---- tui ----
         ("tui.section_not_a_table", "schema_version = 1\ntui = 3\n"),
         (

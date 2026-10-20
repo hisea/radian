@@ -38,6 +38,7 @@ fn the_reader_matches_the_reference_checker() {
         ("skills-extra-paths.toml", "accept"),
         ("skills-builtin.toml", "accept"),
         ("shell-auto-background.toml", "accept"),
+        ("model-smol.toml", "accept"),
         ("memory-injection.toml", "accept"),
         ("integrations-herdr.toml", "accept"),
         ("control.toml", "accept"),
@@ -222,6 +223,18 @@ fn the_tui_theme_colors_fixture_is_carried_raw() {
     assert_eq!(notice.bold, Some(true));
     // A pi name is carried like any other key; the TUI decides where it lands.
     assert!(get("mdHeading").underline == Some(false));
+}
+
+/// `model-smol.toml` (ADR 0008 §1, ADR 0043 §1): `[model.smol]` carries the cheap route
+/// slot, and nothing is reported as skipped.
+#[test]
+fn the_model_smol_fixture_carries_the_route() {
+    let (path, text) = fixture("model-smol.toml");
+    let config = config::parse(&path, &text).unwrap();
+    let smol = config.model.smol.as_ref().expect("smol is set");
+    assert_eq!(smol.provider.as_str(), "openai-compatible");
+    assert_eq!(smol.model.as_str(), "m-cheap");
+    assert!(config.skipped.is_empty(), "{:?}", config.skipped);
 }
 
 /// `memory-injection.toml` (ADR 0021): the two keys this revision adds

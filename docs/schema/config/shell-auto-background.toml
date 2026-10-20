@@ -2,7 +2,7 @@
 # `auto_background_secs`：前台 `shell` 调用运行超过这么多秒还没结束，就原地转成一个后台
 # job（同一进程组，不重启、不重跑），这次调用立刻返回 job id 与已产生输出的尾部；此后它与
 # `background: true` 启动的 job 完全一样（完成通知、`job` 的读/等/杀、退出
-# 时 `kill_tree`）。缺省 120；`0` 表示关闭（回到只有前台上限的行为）。
+# 时 `kill_tree`）。缺省 60；`0` 表示关闭（回到只有前台上限的行为）。
 schema_version = 1
 
 [shell]

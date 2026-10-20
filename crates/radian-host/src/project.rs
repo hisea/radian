@@ -231,6 +231,27 @@ mod tests {
         );
     }
 
+    /// A project config never sets the cheap route slot (ADR 0031/0043 §1: it reads only
+    /// `permissions.profile`): `[model.smol]` is ignored with a warning, the same way
+    /// other keys are. The mutation (reading it) fails the tier assertion.
+    #[test]
+    fn model_smol_in_a_project_config_is_ignored_with_a_warning() {
+        let scratch = Scratch::new("smol");
+        scratch.write(
+            "[model.smol]\nprovider = \"cheap\"\nmodel = \"m-c\"\n\
+             [permissions]\nprofile = \"workspace\"\n",
+        );
+        let read = read(&scratch.root);
+        assert_eq!(read.tier, Some(Preset::WorkspaceWrite));
+        assert!(
+            read.warnings
+                .iter()
+                .any(|warning| warning.contains("ignoring model")),
+            "the key must be named: {:?}",
+            read.warnings
+        );
+    }
+
     /// Other keys are skipped and named, never adopted; `[sandbox]` is refused by name
     /// (ADR 0034).
     #[test]

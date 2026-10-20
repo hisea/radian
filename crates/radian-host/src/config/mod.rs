@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 
 pub use error::ConfigError;
 pub use hooks::{DEFAULT_HOOK_TIMEOUT_SECS, HookCommand, HookMatcher, HooksConfig};
-pub use model::ModelConfig;
+pub use model::{ModelConfig, SmolConfig};
 pub use sandbox::{SandboxConfig, resolve_allow_unix_sockets, unix_sockets_ignored_warning};
 pub use tui::{
     TuiColorOverride, TuiColorValue, TuiConfig, TuiFooterConfig, TuiFooterItemConfig,
@@ -1389,6 +1389,96 @@ theme = "light"
         assert!(
             error.to_string().contains("openai-compatible|anthropic"),
             "{error}"
+        );
+    }
+
+    /// An unset `auto_background_secs` is the 60 s built-in default, not the old 120 s: a
+    /// mutation back to 120 fails this test.
+    #[test]
+    fn an_unset_auto_background_secs_defaults_to_sixty_seconds() {
+        assert_eq!(
+            radian_coding::Limits::default().auto_background_after,
+            Some(std::time::Duration::from_secs(60))
+        );
+        let config = parse_str("schema_version = 1\n").unwrap();
+        assert_eq!(config.shell.auto_background_secs, None);
+        assert_eq!(
+            config.shell.auto_background_after(),
+            Some(std::time::Duration::from_secs(60))
+        );
+    }
+
+    /// `[model.smol]` (ADR 0008 §1, ADR 0043 §1) carries the cheap route slot: both keys
+    /// set means set; a half-set table warns (`model.smol`) and is ignored.
+    #[test]
+    fn the_model_smol_route_is_carried_and_a_half_set_table_is_ignored() {
+        let config =
+            parse_str("schema_version = 1\n[model.smol]\nprovider = \"cheap\"\nmodel = \"m-c\"\n")
+                .unwrap();
+        let smol = config.model.smol.as_ref().expect("smol is set");
+        assert_eq!(smol.provider.as_str(), "cheap");
+        assert_eq!(smol.model.as_str(), "m-c");
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+
+        // Only one of the two keys: warned and ignored, so `explore` follows the parent.
+        for text in [
+            "schema_version = 1\n[model.smol]\nprovider = \"cheap\"\n",
+            "schema_version = 1\n[model.smol]\nmodel = \"m-c\"\n",
+        ] {
+            let config = parse_str(text).unwrap();
+            assert_eq!(config.model.smol, None, "{text}");
+            assert!(
+                config.skipped.contains(&"model.smol".to_owned()),
+                "{text}: {:?}",
+                config.skipped
+            );
+        }
+
+        // Unset: nothing carried, nothing warned.
+        let config = parse_str("schema_version = 1\n").unwrap();
+        assert_eq!(config.model.smol, None);
+        assert!(config.skipped.is_empty());
+    }
+
+    /// Unknown `[model.smol]` keys and wrong types are skipped, never refused (the
+    /// warn-and-skip style); a wrong-typed key cannot half-set the table.
+    #[test]
+    fn model_smol_unknown_keys_and_wrong_types_are_skipped() {
+        let config = parse_str(
+            "schema_version = 1\n[model]\nfuture = 1\n[model.smol]\nmodel = \"m-c\"\nprovider = 3\n",
+        )
+        .unwrap();
+        assert_eq!(config.model.smol, None);
+        for expected in ["model.future", "model.smol.provider", "model.smol"] {
+            assert!(
+                config.skipped.contains(&expected.to_owned()),
+                "{expected}: {:?}",
+                config.skipped
+            );
+        }
+
+        let config = parse_str("schema_version = 1\n[model]\nsmol = 3\n").unwrap();
+        assert_eq!(config.model.smol, None);
+        assert!(
+            config.skipped.contains(&"model.smol".to_owned()),
+            "{:?}",
+            config.skipped
+        );
+    }
+
+    /// `[subagent.explore]` was never released: it is now an unknown section, skipped and
+    /// warned like any unknown key, never read.
+    #[test]
+    fn subagent_explore_is_now_an_unknown_section() {
+        let config = parse_str(
+            "schema_version = 1\n[subagent.explore]\nprovider = \"cheap\"\nmodel = \"m-c\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.model.smol, None);
+        assert!(
+            config.skipped.contains(&"subagent".to_owned()),
+            "{:?}",
+            config.skipped
         );
     }
 
