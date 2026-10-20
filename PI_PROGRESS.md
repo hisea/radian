@@ -2,16 +2,12 @@
 
 ## Done
 - commit 1: removed ADR revision tables; AGENTS.md now says ADRs are snapshots
-
-## Verified
-- no revision-history references left in ADR bodies (only field names/`revision` labels)
-
-## Done
 - commit 2: ADR 0018 overflow fallback matches current single-stage code (Gain::Half, one retry)
+- commit 3: ADR 0031 project config narrowing applies without trust; propagated to 0008/0020/0038/0043
 
 ## Verified
-- `crates/agent-core/src/turn.rs`: overflow checked after `model_call_with_retries`; `ContextOverflow` is non-transient; one `overflow_retried`; retry not counted in `model_calls`
-- `compaction_overflow.rs::a_fallback_that_cannot_reach_the_target_is_nothing_fits`
+- `crates/radian-host/src/project.rs`: only `[permissions] profile` is read; `full` refused; other keys warned/ignored; no content is trust-gated
+- `crates/radian-host/src/trust.rs`: config.toml is a trust trigger; project skills are the gated resource
 
 ## Next
-- commit 3: ADR 0031 project config narrowing applies without trust
+- run acceptance checks, delete progress note
