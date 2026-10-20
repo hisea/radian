@@ -3363,6 +3363,52 @@ async fn never_turns_ask_into_a_denial() {
     assert!(result.contains("denied"), "{result}");
 }
 
+/// `full` runs shell with no terminal and no `--yes`: nothing asks, so the command runs
+/// and only real output comes back (`42` cannot come from a denial: denials echo the
+/// command, which never contains it). Reverting the tier's blanket shell `allow` denies
+/// the call, so this test is that mutation's end-to-end catcher.
+#[tokio::test]
+async fn full_runs_shell_without_a_terminal_and_without_yes() {
+    let dir = scratch("full-shell-no-yes");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        shell_reply("c1", "echo $((40 + 2))"),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "full",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !stderr.contains("[y/N]"),
+        "nothing may ask in full: {stderr}"
+    );
+    let result = tool_result_for(&server, 1, "c1");
+    assert!(result.contains("42"), "the command ran: {result}");
+    assert!(!result.contains("denied"), "{result}");
+    assert!(!result.contains("not approved"), "{result}");
+}
+
 /// 7: Ctrl-C while waiting for a shell approval cancels the turn; the process does not hang.
 #[tokio::test]
 async fn cancelling_at_the_shell_approval_does_not_hang() {
