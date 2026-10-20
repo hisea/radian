@@ -576,7 +576,7 @@ the rest is sent as an ordinary message.
 | `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
 | `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
-| `/jobs [kill <id\|all>]` | list this session's background `shell` jobs (id, state, elapsed, command) as notices, or stop one/all (ADR 0037 decision 4). `kill` sends SIGTERM to the process group, then SIGKILL after 2 s; the model gets a completion message on the busy/idle lane |
+| `/jobs [kill <id\|all>]` | list this session's running background `shell` jobs (id, state, elapsed, command) as notices, or stop one/all (ADR 0037 decision 4). `kill` sends SIGTERM to the process group, then SIGKILL after 2 s; the model gets a completion message on the busy/idle lane |
 | `/usage` | print the current provider's usage snapshot, **every** window, as notices (ADR 0027). The footer's `usage` line is the short form of the same snapshot; no usage source, or no snapshot yet, is one line saying so |
 
 - Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
@@ -590,7 +590,7 @@ the rest is sent as an ordinary message.
   it between turns, so a running turn finishes first, and the result is a notice. Ctrl-C/Esc
   cancels an in-flight compaction without committing.
 - `/sessions` opens the session picker overlay (the same one `--pick` runs); the event loop loads the rows, because that reads the session directory. It never switches sessions in place — selecting shows `--resume <id>`, and the composer keeps typing until you navigate into the picker. `/export` uses the same
-- `/jobs` lists the session's background `shell` jobs as notices; `/jobs kill <id>` and `/jobs kill all` stop them. A settle the model has not seen arrives as a System message (busy: injected into the running turn; idle: a follow-up turn that wakes it), and after three wake-started turns with no user input it is injected only (ADR 0037 decision 3).
+- `/jobs` lists the session's running background `shell` jobs as notices; `/jobs kill <id>` and `/jobs kill all` stop them. A settle the model has not seen arrives as a System message (busy: injected into the running turn; idle: a follow-up turn that wakes it), and after three wake-started turns with no user input it is injected only (ADR 0037 decision 3).
   `radian-host` renderer as `radian exec --export` (redacted, read-only JSONL), writes atomically,
   and refuses to overwrite without `--force`; a relative path is resolved against the
   workspace, an absolute one may point anywhere the user named.
@@ -622,9 +622,9 @@ the rest is sent as an ordinary message.
   by whether a body is drawn under it (ADR 0035's 2026-10-16 "折叠标记统一" note, option A):
   `◻` when a body is (`errors` preview, error body, `Ctrl-O`), `◼` when the head is all that
   shows an explicitly folded body (`collapsed`'s `· N lines`), and `•` for every other head-only
-  block (a running call, an empty result, or a `read`/`grep`/`glob`/`list` result of **any**
+  block (a running call, an empty result, or a `read`/`grep`/`glob` result of **any**
   size); ascii
-  `-`/`+`/`*`. A small tool (`read`, `grep`, `glob`, `list`) is that one line — a `•`, never a
+  `-`/`+`/`*`. A small tool (`read`, `grep`, `glob`) is that one line — a `•`, never a
   fold — until it errors or `Ctrl-O` expands it. A **multi-line** `shell` command (a heredoc)
   follows its block (ADR 0035's 2026-10-16 "多行命令" note, option A): the fold marker is on the
   first row only, which carries the command's first line, the `… (+N lines)` note (N its
@@ -656,7 +656,7 @@ The transcript owns its scrolling:
 | 9 | approval: allow-once runs the tool, deny is fed back, always skips the next prompt, Ctrl-C cancels, the resolved path is shown, `PermissionResolved` is durable | `tests/pty.rs`, `tests/approval.rs` |
 | 10 | driver task panic: orderly exit, terminal restored, failure reported | `tests/pty.rs` |
 | 11 | a failed sandbox probe refuses instead of running unsandboxed | `tests/pty.rs` |
-| 12 | shell approval shows the whole command; a capped result keeps the truncation marker visible; a compound command always asks | `tests/pty.rs` |
+| 12 | shell approval shows the whole command; a capped result keeps the truncation marker visible; a compound command asks unless every segment is allowed | `tests/pty.rs` |
 | 13 | an over-budget request is still sent and the turn completes; the status bar shows `T / B` and the honest wording; no window says the budget is off | `tests/pty.rs`, `tests/budget.rs` |
 | 14 | `--header` `{session_id}` expands for new and resumed sessions; `authorization` and a malformed header are refused without echoing the value | `tests/pty.rs` |
 | 15 | `--mcp-config` mounts the fixture; its tool runs through the approval dialog; the status bar shows the connected servers/tools; the startup notice names the MCP sandbox gap | `tests/pty.rs` |
@@ -1274,7 +1274,7 @@ and a malformed argument is reported without echoing its value.
 ## Tools, permissions and the approval dialog
 
 `--workspace DIR` mounts the built-in file and read-only git tools (`read`, `write`, `patch`,
-`list`, `git_diff`) rooted at that directory, plus **`shell`** when a sandbox
+`glob`, `grep`, `git_diff`) rooted at that directory, plus **`shell`** and **`job`** when a sandbox
 could be built. This is the same wiring `agent-cli` uses:
 
 - The sandbox is built **before** the tools: `workspace` and `full` call
@@ -1288,8 +1288,9 @@ could be built. This is the same wiring `agent-cli` uses:
 - `shell` exists only when a sandbox does (`radian-coding` does not advertise it otherwise), and
   it never runs without one.
 - `--allow-shell-command "git status"` (repeatable) adds a host `allow` rule. Only a **simple**
-  command matches: any shell metacharacter (`;`, `&`, `|`, `$`, quotes, …) keeps the call at
-  `ask`, so a compound command always prompts. Write these at the subcommand level, never at a
+  command matches: any shell metacharacter (`;`, `&`, `|`, `$`, quotes, …) keeps that segment at
+  `ask`, so a compound command is allowed only when every segment is allowed (a user rule or
+  the built-in read-only table) and otherwise prompts. Write these at the subcommand level, never at a
   bare program name.
 - Two startup notices state what was chosen and what it means. The meaning line follows ADR
   0012 decision 4 and does **not** claim credential isolation: the macOS backend leaves
@@ -1596,7 +1597,7 @@ looked up by name in a compile-time registry with a generic fallback:
 | `patch` | the path (`+N −M` in the meta) | the numbered `-old` / `+new` rows, one hunk per replaced range (the `hunks` structured field), no invented context |
 | `write` | the path (`+N −M` in the meta) | the content written |
 | `git_diff` | the file count and `+N −M`, or the entry count under `stat: true` | git's unified diff with the numbered gutter, or the plain status text under `stat: true` |
-| `list` | the entry count | a small tool: one line (the aligned table on expand) |
+| `list` | the entry count | the one-version alias for `read` on a directory: one line (the aligned table on expand) |
 | `ask_user` | the open `╭─ ask …` frame | one `prompt → answer` line per question, the chosen option marked `◉` |
 | `memory_search` / `_save` / `_revise` | the record id, the ids read, or the query | the tool's record summary |
 | anything else (MCP included) | the name and the arguments' JSON summary | the result text |

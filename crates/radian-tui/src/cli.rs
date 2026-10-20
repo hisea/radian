@@ -76,8 +76,8 @@ struct Cli {
     #[arg(help_heading = "TUI", long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Expose the built-in file tools rooted at this directory (read/write/patch/list,
-    /// glob/grep, git_diff). The `shell` tool is exposed as well: under `workspace` it runs
+    /// Expose the built-in file tools rooted at this directory (read/write/patch,
+    /// glob/grep, git_diff). The `shell` and `job` tools are exposed as well: under `workspace` they run
     /// confined, under `full` (the default) unsandboxed. Omitted, the current directory is
     /// the workspace.
     #[arg(help_heading = "TUI", long, short = 'w', value_name = "DIR")]
@@ -150,10 +150,10 @@ struct Cli {
     #[arg(help_heading = "MCP", long, value_name = "FILE")]
     mcp_config: Option<String>,
 
-    /// The permission tier (ADR 0016): `workspace` allows writes that resolve inside the
-    /// workspace, `full` also allows MCP. Defaults to `full` (ADR 0043); a project's
-    /// `.radian/config.toml` may narrow it, and the config file's `permissions.profile`
-    /// is tried in between.
+    /// The permission tier (ADR 0016): `workspace` (sandboxed: writes confined to the workspace,
+    /// `shell` sandboxed, network on), or `full` (the default since ADR 0043: explicitly
+    /// unsandboxed, no built-in prompts). A project's `.radian/config.toml` may narrow it,
+    /// and the config file's `permissions.profile` is tried in between.
     #[arg(help_heading = "Permissions", long, value_name = "TIER")]
     profile: Option<String>,
 
@@ -177,8 +177,9 @@ struct Cli {
     max_model_calls: u32,
 
     /// Allow a shell command prefix without asking, repeatable (e.g. `--allow-shell-command
-    /// "git status"`). Only a *simple* command matches: any shell metacharacter keeps the
-    /// call at `ask`. Write these at the subcommand level, never at a bare program name.
+    /// "git status"`). Only a *simple* command matches: any shell metacharacter keeps that
+    /// segment at `ask`, so a compound command is allowed only when every segment is allowed.
+    /// Write these at the subcommand level, never at a bare program name.
     #[arg(
         help_heading = "Permissions",
         long = "allow-shell-command",
