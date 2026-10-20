@@ -14,15 +14,36 @@ use tokio::sync::{Notify, mpsc};
 
 use super::approval::{JournalAudit, TerminalApprover};
 use super::events::spawn_signals;
+use super::jsonl;
 use super::profile;
 use super::redact::redact;
 use super::trust::trust_prompt;
-use super::turn::{Run, interactive_loop, one_shot};
+use super::turn::{LoopDone, Run, interactive_loop, one_shot};
 use super::ui::{LineHub, Ui};
 use super::{Cli, Setup, SetupError};
 
-pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
+pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> {
     let interactive = cli.prompt.is_none();
+    // `-p -` reads the prompt from stdin to EOF before anything else starts: the line hub
+    // below takes stdin as soon as it spawns, so reading here first is the only way the
+    // prompt gets the whole pipe.
+    if cli.prompt.as_deref() == Some("-") {
+        let prompt = tokio::task::spawn_blocking(|| jsonl::read_prompt(std::io::stdin()))
+            .await
+            .map_err(|error| SetupError(format!("cannot read the prompt from stdin: {error}")))?
+            .map_err(|error| SetupError(format!("cannot read the prompt from stdin: {error}")))?;
+        cli.prompt = Some(prompt);
+    }
+    let jsonl_mode = cli.output == Some(super::jsonl::OutputMode::Jsonl);
+    // The `--output jsonl` stdout pipeline: durable journal bytes and live delta lines meet
+    // on one channel and one task owns stdout, so a blocked pipe never stalls a journal
+    // write. Created before the session so the UI can hold the live sender from the start.
+    let (jsonl_tx, jsonl_rx) = if jsonl_mode {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
     let lines = LineHub::spawn();
     // One-shot mode with no terminal on stdin has nobody to ask; interactive mode reads its
     // answers from the same line hub as the prompt loop.
@@ -83,7 +104,7 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         let tx = audit_tx.clone();
         Arc::new(move |_journal| JournalAudit::new(tx.clone()) as Arc<dyn AuditSink>)
     };
-    let ui = Arc::new(Ui::new(setup.max_model_calls));
+    let ui = Arc::new(Ui::new(setup.max_model_calls, jsonl_tx.clone()));
     let projection = Arc::new(radian_host::SessionProjection::new());
     let signals = spawn_signals();
     let driver_ended = Arc::new(Notify::new());
@@ -384,6 +405,38 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // The approval prompt and the prompt loop share stdin. While approval may read, the loop
     // must not compete for a line; with `--yes` (or nobody to ask) it may.
     ui.set_approval_may_read(can_ask && !cli.yes);
+    // `--output jsonl`, installed once the journal exists: the tee returns the prefix length,
+    // the prefix is read from the file (the lines written before the tee, e.g.
+    // `SessionCreated`), and the printer owns stdout from here on. Because install and every
+    // write take the same lock, no line is missed or printed twice.
+    let jsonl_printer = if jsonl_mode {
+        let tx = jsonl_tx
+            .clone()
+            .expect("the jsonl channel exists in jsonl mode");
+        let prefix_len = session.journal().set_tee(tx) as usize;
+        let bytes = std::fs::read(session.journal_path()).map_err(|error| {
+            SetupError(format!(
+                "cannot read the session file {}: {error}",
+                session.journal_path().display()
+            ))
+        })?;
+        let end = prefix_len.min(bytes.len());
+        let prefix = bytes[..end]
+            .split_inclusive(|byte: &u8| *byte == b'\n')
+            .map(|line| line.to_vec())
+            .collect::<Vec<_>>();
+        Some(jsonl::spawn_printer(
+            prefix,
+            jsonl_rx.expect("the jsonl channel exists in jsonl mode"),
+        ))
+    } else {
+        None
+    };
+    // What the `Result` record reports. Read before the drops below: the projection lives
+    // with the session.
+    let jsonl_session_id = session.id().as_str().to_owned();
+    let jsonl_journal_path = session.journal_path().to_path_buf();
+    let jsonl_cost_estimated = session.projection().read().cost_estimated();
     let mut run = Run {
         inbox: Arc::clone(session.inbox()),
         hooks: Arc::clone(session.hooks()),
@@ -393,7 +446,7 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         session: Arc::clone(&session),
         secrets: setup.secrets.clone(),
     };
-    let code = if let Some(prompt) = cli.prompt {
+    let done: LoopDone = if let Some(prompt) = cli.prompt {
         one_shot(&mut run, prompt).await
     } else {
         interactive_loop(&mut run, &lines).await
@@ -405,5 +458,15 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     drop(session);
     drop(audit_tx);
     let _ = audit_task.await;
-    Ok(code)
+    // The `Result` line goes after the last durable line: every tee sender is dropped by now
+    // (the UI with its run, the journal with its session and the flushed audit task), so
+    // awaiting the printer drains the whole stream before the summary is folded.
+    if let Some(printer) = jsonl_printer {
+        drop(jsonl_tx);
+        let _ = printer.await;
+        let summary = jsonl::summarize_journal(&jsonl_journal_path);
+        let line = jsonl::result_line(&jsonl_session_id, &done.end, &summary, jsonl_cost_estimated);
+        let _ = std::io::Write::write_all(&mut std::io::stdout().lock(), &line);
+    }
+    Ok(done.code)
 }

@@ -16,6 +16,7 @@ mod command;
 mod error;
 mod events;
 mod inspect;
+mod jsonl;
 /// `radian login` / `radian logout` (ADR 0026 D3).
 mod login;
 mod profile;
@@ -133,9 +134,16 @@ pub struct Cli {
     #[arg(long)]
     yes: bool,
 
-    /// One-shot mode: run this prompt, then exit.
+    /// One-shot mode: run this prompt, then exit. `-p -` reads the prompt from stdin to
+    /// EOF; a literal `-` prompt is not possible.
     #[arg(short, long, conflicts_with = "list")]
     prompt: Option<String>,
+
+    /// Machine-readable output: `--output jsonl` prints every durable journal line, the
+    /// live-only delta lines and a closing `Result` record to stdout, one JSON object per
+    /// line. Omitted, stdout carries only the model text.
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    output: Option<jsonl::OutputMode>,
 
     /// Extra request headers, repeatable: `--header NAME=VALUE`. The value is never
     /// printed; `Authorization` is refused because the key comes only from

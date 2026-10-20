@@ -17,8 +17,16 @@ use super::events::{
     Next, SIGTERM, TurnEnd, force_exit, next_event, report_error, report_task, shutdown, terminate,
     wait_for_turn,
 };
+use super::jsonl::{self, ExecEnd};
 use super::redact::redact;
 use super::ui::{LineHub, Ui};
+
+/// What an input loop finished with: the process exit code and how the run ended, for the
+/// `--output jsonl` `Result` record.
+pub(crate) struct LoopDone {
+    pub(crate) code: i32,
+    pub(crate) end: ExecEnd,
+}
 
 /// The single place a turn's source is decided.
 ///
@@ -70,12 +78,15 @@ async fn enqueue_input(
 }
 
 /// `-p`: send one input, wait for its turn, then shut the driver down.
-pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> i32 {
+pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
     if let Err(error) = enqueue_input(&run.inbox, &run.hooks, prompt, TERMINAL_SOURCE, false).await
     {
         eprintln!("radian: {}", redact(&error.to_string(), &run.secrets));
         let _ = shutdown(&run.inbox, &run.ui, &run.session).await;
-        return 1;
+        return LoopDone {
+            code: 1,
+            end: ExecEnd::NotStarted,
+        };
     }
     let mut cancelling = false;
     match wait_for_turn(
@@ -88,28 +99,62 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> i32 {
     .await
     {
         TurnEnd::Terminated => {
-            return terminate(&run.inbox, &run.session, &run.secrets, SIGTERM).await;
+            let code = terminate(&run.inbox, &run.session, &run.secrets, SIGTERM).await;
+            return LoopDone {
+                code,
+                end: ExecEnd::Terminated,
+            };
         }
-        TurnEnd::Forced => return force_exit(&run.session).await,
-        TurnEnd::DriverEnded => return report_task(&run.session, &run.secrets).await,
+        TurnEnd::Forced => {
+            let code = force_exit(&run.session).await;
+            return LoopDone {
+                code,
+                end: ExecEnd::Forced,
+            };
+        }
+        TurnEnd::DriverEnded => {
+            let (code, ok) = report_task(&run.session, &run.secrets).await;
+            return LoopDone {
+                code,
+                end: ExecEnd::DriverEnded { code, ok },
+            };
+        }
         TurnEnd::Done => {}
     }
     if let Some(code) = report_error(
         &shutdown(&run.inbox, &run.ui, &run.session).await,
         &run.secrets,
     ) {
-        return code;
+        return LoopDone {
+            code,
+            end: ExecEnd::Status(run.ui.last_status()),
+        };
     }
+    // The exit code follows the turn's outcome in every exec mode (ADR 0044); the stderr
+    // lines stay exactly what they were.
     match run.ui.last_status() {
-        Some(RunStatus::Completed) => 0,
+        Some(RunStatus::Completed) => LoopDone {
+            code: 0,
+            end: ExecEnd::Status(Some(RunStatus::Completed)),
+        },
         // The `RunFinished` sink already printed the budget line (it names the limit and the
         // flag), so this does not repeat it; the exit code is still a failed turn.
-        Some(RunStatus::BudgetExceeded) => 1,
+        Some(RunStatus::BudgetExceeded) => LoopDone {
+            code: 3,
+            end: ExecEnd::Status(Some(RunStatus::BudgetExceeded)),
+        },
         Some(status) => {
             eprintln!("radian: the turn ended as {status:?}");
-            1
+            let code = jsonl::exit_code_for_status(&status);
+            LoopDone {
+                code,
+                end: ExecEnd::Status(Some(status)),
+            }
         }
-        None => 1,
+        None => LoopDone {
+            code: 1,
+            end: ExecEnd::Status(None),
+        },
     }
 }
 
@@ -159,7 +204,7 @@ async fn run_compact(run: &mut Run, instructions: Option<String>) -> Option<i32>
     stop
 }
 
-pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
+pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> LoopDone {
     // True once the first Ctrl-C of a wind-down has been seen: the second one forces exit.
     let mut cancelling = false;
     loop {
@@ -180,10 +225,26 @@ pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
         {
             Next::Leave => break,
             Next::Terminated => {
-                return terminate(&run.inbox, &run.session, &run.secrets, SIGTERM).await;
+                let code = terminate(&run.inbox, &run.session, &run.secrets, SIGTERM).await;
+                return LoopDone {
+                    code,
+                    end: ExecEnd::Terminated,
+                };
             }
-            Next::Forced => return force_exit(&run.session).await,
-            Next::DriverEnded => return report_task(&run.session, &run.secrets).await,
+            Next::Forced => {
+                let code = force_exit(&run.session).await;
+                return LoopDone {
+                    code,
+                    end: ExecEnd::Forced,
+                };
+            }
+            Next::DriverEnded => {
+                let (code, ok) = report_task(&run.session, &run.secrets).await;
+                return LoopDone {
+                    code,
+                    end: ExecEnd::DriverEnded { code, ok },
+                };
+            }
             Next::Again => continue,
             Next::Line(line) => {
                 let line = line.trim();
@@ -198,7 +259,11 @@ pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
                 // has no such command.
                 if let Some(instructions) = compact_request(line) {
                     if let Some(signal) = run_compact(run, instructions).await {
-                        return terminate(&run.inbox, &run.session, &run.secrets, signal).await;
+                        let code = terminate(&run.inbox, &run.session, &run.secrets, signal).await;
+                        return LoopDone {
+                            code,
+                            end: ExecEnd::Terminated,
+                        };
                     }
                     continue;
                 }
@@ -238,7 +303,16 @@ pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
         &shutdown(&run.inbox, &run.ui, &run.session).await,
         &run.secrets,
     ) {
-        return code;
+        return LoopDone {
+            code,
+            end: ExecEnd::Status(run.ui.last_status()),
+        };
     }
-    0
+    // A clean leave ends the session; the `Result` outcome is the last turn's status, or a
+    // plain completion when no turn ran.
+    let end = match run.ui.last_status() {
+        Some(status) => ExecEnd::Status(Some(status)),
+        None => ExecEnd::NoTurns,
+    };
+    LoopDone { code: 0, end }
 }
