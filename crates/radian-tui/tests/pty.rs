@@ -2616,8 +2616,9 @@ fn wait_for_bang_file(pty: &mut Pty, path: &Path) -> bool {
 #[cfg(target_os = "macos")]
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
-/// The shell approval shows the whole command, and a capped result keeps the truncation
-/// marker visible. Runs under `--profile workspace`, the tier that still asks.
+/// A capped shell result keeps the truncation marker visible. Runs under `--profile
+/// workspace`: since slice 1 of `sandbox-auto-allow-shell` the sandboxed shell runs
+/// with no prompt, so the turn goes straight to the marker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
 #[allow(clippy::await_holding_lock)]
@@ -2660,30 +2661,21 @@ async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
         "{}",
         pty.screen()
     );
+    // No approval: the sandboxed shell runs at once.
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("approve tool call?", wait_positive()),
-        "a shell command must ask:\n{}",
-        pty.screen()
-    );
-    // The prompt shows the whole command, not a truncated preview.
-    let prompt_screen = pty.screen();
-    assert!(prompt_screen.contains("command:"), "{prompt_screen}");
-    assert!(
-        prompt_screen.contains("while [ $i -lt 20000 ]"),
-        "the full command is not shown:\n{prompt_screen}"
-    );
-
-    pty.send(b"y");
-    assert!(
         pty.wait_for_screen("SHELL-DONE", wait_positive()),
-        "the approved shell command did not finish:\n{}",
+        "the shell command did not finish:\n{}",
         pty.screen()
     );
     let screen = pty.screen();
     assert!(
         screen.contains("bytes discarded"),
         "the truncation marker must be visible:\n{screen}"
+    );
+    assert!(
+        !screen.contains("approve tool call?"),
+        "the sandboxed shell must not ask:\n{screen}"
     );
 
     pty.quit();
@@ -10487,7 +10479,19 @@ async fn pty_herdr_reports_metadata_changes() {
     let sessions = dir.path().join("sessions");
     let secret = "echo HERDR-METADATA-SECRET";
     let server = MockServer::start(vec![
-        tool_reply("call_1", "shell", &json!({"command": secret}).to_string()),
+        // An `outside_sandbox` call, so the approval this watches still waits: a
+        // sandboxed `workspace` shell no longer asks since slice 1 of
+        // `sandbox-auto-allow-shell`.
+        tool_reply(
+            "call_1",
+            "shell",
+            &json!({
+                "command": secret,
+                "outside_sandbox": true,
+                "outside_sandbox_reason": "herdr metadata probe",
+            })
+            .to_string(),
+        ),
         text_reply("HERDR-META-DONE"),
     ])
     .await;
@@ -10774,7 +10778,19 @@ async fn pty_herdr_reports_blocked_without_the_command_text() {
     let sessions = dir.path().join("sessions");
     let command = "echo HERDR-SECRET-COMMAND";
     let server = MockServer::start(vec![
-        tool_reply("call_1", "shell", &json!({"command": command}).to_string()),
+        // An `outside_sandbox` call, so the approval the herdr report watches still
+        // waits: a sandboxed `workspace` shell no longer asks since slice 1 of
+        // `sandbox-auto-allow-shell`.
+        tool_reply(
+            "call_1",
+            "shell",
+            &json!({
+                "command": command,
+                "outside_sandbox": true,
+                "outside_sandbox_reason": "herdr blocked-state probe",
+            })
+            .to_string(),
+        ),
         text_reply("HERDR-DONE"),
     ])
     .await;

@@ -3601,7 +3601,10 @@ async fn every_decision_is_audited_once_with_the_right_approver() {
                 {"index": 0, "id": "r1", "type": "function",
                  "function": {"name": "read", "arguments": "{\"path\":\"f.txt\"}"}},
                 {"index": 1, "id": "s1", "type": "function",
-                 "function": {"name": "shell", "arguments": "{\"command\":\"echo hi\"}"}},
+                 "function": {"name": "shell", "arguments": json!({
+                     "command": "echo hi",
+                     "outside_sandbox": true,
+                     "outside_sandbox_reason": "the test leaves the sandbox on purpose"}).to_string()}},
                 {"index": 2, "id": "w1", "type": "function",
                  "function": {"name": "write",
                               "arguments": format!("{{\"path\":{},\"content\":\"x\"}}", json!(outside_file.to_string_lossy()))}}
@@ -3630,8 +3633,9 @@ async fn every_decision_is_audited_once_with_the_right_approver() {
         &[],
     );
     child.write("go\n").await;
-    // `read` is allowed by a rule (no prompt); `shell` asks; `write` outside the workspace
-    // has no rule and falls to ask.
+    // `read` is allowed by a rule (no prompt); a sandboxed `shell` no longer asks either
+    // (slice 1 of `sandbox-auto-allow-shell`), so the audited `ask` is the
+    // `outside_sandbox` call; `write` outside the workspace has no rule and falls to ask.
     child.wait_for_stderr_count("[y/N]", 1).await;
     child.write("y\n").await;
     child.wait_for_stderr_count("[y/N]", 2).await;
@@ -3717,6 +3721,10 @@ async fn shell_cannot_write_outside_the_workspace() {
     assert_ne!(
         exit, "0",
         "the sandboxed command must fail (a redirection denied): {result}"
+    );
+    assert!(
+        result.contains("sandbox denied: filesystem-write"),
+        "the failure must carry the sandbox marker: {result}"
     );
     assert!(
         !target.exists(),

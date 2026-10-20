@@ -92,15 +92,13 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "outside_sandbox": {
                 "type": "boolean",
-                "description": "Run this one call outside the sandbox (default false). \
-                                Needs `outside_sandbox_reason`, goes through approval, and only \
-                                runs unsandboxed when approved — never automatic. Refused with \
-                                `background: true`."
+                "description": "One call outside the sandbox (default false): needs a \
+                                reason and approval; never automatic, never in the background."
             },
             "outside_sandbox_reason": {
                 "type": "string",
-                "description": "Why this call must leave the sandbox. Required when \
-                                `outside_sandbox` is true; ignored otherwise."
+                "description": "Why the call leaves the sandbox; required with \
+                                `outside_sandbox`."
             }
         },
         "required": ["command"],
@@ -124,15 +122,15 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
              confined to the workspace, the repository's `.git` is writable so native \
              `git commit` works (only `.git/config`, `.git/config.worktree` and \
              `.git/hooks/` stay read-only), `~/.ssh` is not readable, and the network is \
-             **on**. `outside_sandbox: true` plus `outside_sandbox_reason` asks approval \
-             to run one call unsandboxed (never automatic)."
+             **on**. Set `outside_sandbox: true` with `outside_sandbox_reason` to ask \
+             approval for one unsandboxed call."
         }
         SandboxMode::WorkspaceWrite => {
             "The command runs under the OS sandbox in `workspace` mode: writes are \
              confined to the workspace, the repository's `.git` is read-only (so is \
              `git commit`, by design), `~/.ssh` is not readable, and the network is **on**. \
-             `outside_sandbox: true` plus `outside_sandbox_reason` asks approval \
-             to run one call unsandboxed (never automatic)."
+             Set `outside_sandbox: true` with `outside_sandbox_reason` to ask approval \
+             for one unsandboxed call."
         }
         SandboxMode::FullAccess => {
             "**The command is NOT sandboxed** (`full`): it can read and write \
@@ -1811,6 +1809,11 @@ mod tests {
         // ADR 0037 decision 4: the two definitions stay small enough for the cached prefix.
         // Compact `{"name","description","input_schema"}` JSON, UTF-8 bytes. Both
         // sandbox modes (the longest confinement text wins) and the one `job` tool.
+        // Re-measured 2026-10-20 (slice 1 of `sandbox-auto-allow-shell`): the
+        // `outside_sandbox`/`outside_sandbox_reason` fields and the one sentence naming
+        // them joined the `shell` definition — FullAccess 2351 B, workspace 2580 B at
+        // most — so the cap moves from 2,200 B with a little room, the way the `read`
+        // and `ask_user` pins were re-measured when they grew.
         let size = |spec: &agent_core::ToolSpec| {
             serde_json::to_string(&serde_json::json!({
                 "name": spec.name,
@@ -1827,8 +1830,8 @@ mod tests {
         ] {
             let bytes = size(&spec(mode, git_writable));
             assert!(
-                bytes <= 2200,
-                "shell ({mode:?}, git {git_writable}) is {bytes} B, over the 2,200 B cap"
+                bytes <= 2600,
+                "shell ({mode:?}, git {git_writable}) is {bytes} B, over the 2,600 B cap"
             );
         }
         let bytes = size(&crate::jobs::job_spec());

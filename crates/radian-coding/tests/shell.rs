@@ -1370,7 +1370,11 @@ async fn sandbox_denial_marks_a_masked_sensitive_read() {
     let secret = dir.file("secret");
     std::fs::create_dir_all(&secret).unwrap();
     std::fs::write(secret.join("key"), "s3cret").unwrap();
-    let Some(confined) = tools_with(SandboxMode::WorkspaceWrite, &root, &[secret.clone()]) else {
+    let Some(confined) = tools_with(
+        SandboxMode::WorkspaceWrite,
+        &root,
+        std::slice::from_ref(&secret),
+    ) else {
         return;
     };
     let output = call(
@@ -1570,13 +1574,14 @@ async fn the_shell_description_names_outside_sandbox() {
         } else {
             assert!(
                 spec.description
-                    .contains("`outside_sandbox: true` plus `outside_sandbox_reason`"),
+                    .contains("`outside_sandbox: true` with `outside_sandbox_reason`"),
                 "the workspace wording must name outside_sandbox: {}",
                 spec.description
             );
             assert!(
-                spec.description.contains("never automatic"),
-                "the wording must say it is never automatic: {}",
+                spec.description
+                    .contains("ask approval for one unsandboxed call"),
+                "the wording must say the call needs approval: {}",
                 spec.description
             );
         }
@@ -1596,9 +1601,9 @@ async fn the_shell_description_names_outside_sandbox() {
 
 /// Slice 1 size budget (re-measured 2026-10-20): the `outside_sandbox` sentence and the
 /// two schema fields join the `shell` definition. The serialized `workspace` definition
-/// (read-only `.git` wording) is 2666 bytes; the writable carve-out wording is longer,
-/// so the pin covers the larger of the two with a little room, the way the `read`
-/// (1790) and `ask_user` (1630) pins do.
+/// is 2532 bytes with the read-only `.git` wording and 2606 with the writable carve-out
+/// wording, so the pin covers the larger of the two with a little room, the way the
+/// `read` (1790) and `ask_user` (1630) pins do.
 #[tokio::test]
 async fn the_shell_definition_stays_small() {
     let dir = TempDir::new("shell-size");
@@ -1619,8 +1624,8 @@ async fn the_shell_definition_stays_small() {
             .clone();
         let bytes = serde_json::to_vec(&spec).unwrap().len();
         assert!(
-            bytes <= 2810,
-            "the {} shell definition grew to {bytes} bytes, past the 2810 budget",
+            bytes <= 2630,
+            "the {} shell definition grew to {bytes} bytes, past the 2630 budget",
             backend.name(),
         );
     }
