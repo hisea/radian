@@ -244,6 +244,20 @@ pub async fn open_session(
         &jobs_dir,
         shell_auto_background,
     )?;
+    // ADR 0037 §6: a resumed session clears its jobs directory. The registry is built empty
+    // above, so at this point no file in the directory can belong to it and nothing is
+    // running (the resume path holds the session's exclusive writer lock, so no other live
+    // process can own these files either). Only the resume path sweeps; a failure warns
+    // once and never fails the open.
+    if resume && let Some(jobs) = jobs.as_ref() {
+        let summary = jobs.sweep_unregistered();
+        if let Some(error) = summary.first_error.as_deref() {
+            memory_warning(&format!(
+                "could not sweep the jobs directory {}: {error}",
+                jobs_dir.display()
+            ));
+        }
+    }
 
     // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line
     // prompt answers them directly.

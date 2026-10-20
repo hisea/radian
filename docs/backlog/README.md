@@ -44,7 +44,6 @@
 | `tui-inspector-panel.md` | decided（mcp 页等 mcp-servers-json） | 0023、0035、0037、0043、0045、0027 | 一个带标签页的 Overlay：`jobs | tools | mcp | hooks`，`/panel` 总入口，只读除杀 job，文本形式保留 |
 | `sandbox-token-profile.md` | decided | 0012、0016、0043 | 沙箱档 profile 构造收 `&Sandbox` 而不是 `bool`，拿不到实例造不出放行 profile（外部审核 P1-1） |
 | `exec-result-run-usage.md` | decided | 0044、0007 | `Result` 加 `run_turns`/`run_usage`/`run_cost`，以 tee 的 `written_len` 为本次运行边界；累计字段不变（外部审核 P2-2） |
-| `foreground-orphan-sweep.md` | decided | 0037、0039、0020 | resume 时清扫 `.jobs/` 里无登记项的输出文件；删会话时删目录（外部审核第四节） |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |

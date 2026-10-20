@@ -200,6 +200,130 @@ impl PrivateDir {
             .create_new(true)
             .open(self.path.join(name))
     }
+
+    /// Clears the directory on resume (ADR 0037 §6): every regular file and every symlink
+    /// is unlinked (the link itself, never its target); anything else (a subdirectory, a
+    /// socket, …) is left in place and counted as skipped. The listing goes through the
+    /// directory fd (`fdopendir` on a duplicate), so a swapped parent cannot redirect it.
+    /// The first I/O failure is kept in [`SweepSummary::first_error`]; the sweep continues
+    /// past it. Nothing is logged here: the host warns once.
+    #[cfg(unix)]
+    pub(crate) fn sweep(&self) -> SweepSummary {
+        let entries = match crate::safe_fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                return SweepSummary {
+                    removed: 0,
+                    skipped: 0,
+                    first_error: Some(error.to_string()),
+                };
+            }
+        };
+        let mut summary = SweepSummary::default();
+        for entry in entries {
+            match entry.kind {
+                crate::safe_fs::EntryKind::File | crate::safe_fs::EntryKind::Symlink => {
+                    match unlink(&self.dir, &entry.name) {
+                        Ok(()) => summary.removed += 1,
+                        Err(error) => {
+                            if summary.first_error.is_none() {
+                                summary.first_error =
+                                    Some(format!("{}: {error}", entry.name.to_string_lossy()));
+                            }
+                        }
+                    }
+                }
+                _ => summary.skipped += 1,
+            }
+        }
+        summary
+    }
+
+    /// The non-Unix sweep: the same rule (regular files and symlinks are removed as links,
+    /// anything else is left and counted as skipped) over a path-based listing. The coding
+    /// tools run on Unix hosts; like [`PrivateDir::open`]/`create` above this keeps the
+    /// crate compiling elsewhere with no symlink defence.
+    #[cfg(not(unix))]
+    pub(crate) fn sweep(&self) -> SweepSummary {
+        let listing = match std::fs::read_dir(&self.path) {
+            Ok(listing) => listing,
+            Err(error) => {
+                return SweepSummary {
+                    removed: 0,
+                    skipped: 0,
+                    first_error: Some(error.to_string()),
+                };
+            }
+        };
+        let mut summary = SweepSummary::default();
+        for entry in listing {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    if summary.first_error.is_none() {
+                        summary.first_error = Some(error.to_string());
+                    }
+                    continue;
+                }
+            };
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) => {
+                    if summary.first_error.is_none() {
+                        summary.first_error =
+                            Some(format!("{}: {error}", entry.file_name().to_string_lossy()));
+                    }
+                    continue;
+                }
+            };
+            // `DirEntry::file_type` never follows a symlink, and `remove_file` removes the
+            // link itself, so a link's target is never touched here either.
+            if kind.is_file() || kind.is_symlink() {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => summary.removed += 1,
+                    Err(error) => {
+                        if summary.first_error.is_none() {
+                            summary.first_error =
+                                Some(format!("{}: {error}", entry.file_name().to_string_lossy()));
+                        }
+                    }
+                }
+            } else {
+                summary.skipped += 1;
+            }
+        }
+        summary
+    }
+}
+
+/// What a resume sweep removed, skipped and failed on (ADR 0037 §6). `first_error` is the
+/// first I/O failure; the sweep continues past it. The host warns once on `Some`, never
+/// failing the open.
+#[derive(Debug, Default)]
+pub struct SweepSummary {
+    /// Regular files and symlinks unlinked.
+    pub removed: usize,
+    /// Subdirectories and anything else left in place.
+    pub skipped: usize,
+    /// The first I/O failure, if any.
+    pub first_error: Option<String>,
+}
+
+/// `unlinkat(dirfd, name, 0)`: removes a regular file or a symlink itself, never a link's
+/// target. Directories are never passed here (the caller counts them as skipped).
+#[cfg(unix)]
+fn unlink(dir: &File, name: &OsStr) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::AsRawFd;
+    let c = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in name"))?;
+    // SAFETY: `dir` is an open directory fd and `c` a NUL-terminated name; flags 0 means
+    // unlink the entry itself (no `AT_REMOVEDIR`), so a symlink's target is untouched.
+    let rc = unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), 0) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// The shared file-read arguments of `job` (and the one-version aliases).
