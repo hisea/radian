@@ -18,6 +18,7 @@
 | `tui-brand.toml` | ADR 0027：`tui.brand` 是品牌文字（≤ 4 显示宽度），footer 的 `brand` 条目与启动画面一行回退共用；不写时用 glyphs 档默认；超出是配置错误。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0027 |
 | `tui-spinner.toml` | ADR 0027：`tui.spinner = "pulse" | "arc" | "quadrant" | "braille"`（默认 pulse；未知值警告回退）。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0027 |
 | `tui-input-style.toml` | ADR 0035 与 2026-10-16 补充：`tui.input_style = "lines" | "box"`（默认 `lines`；`box` 是半包框）。`bar` 已移除：写下它与其他未知值一样警告回退 `lines`。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0035 |
+| `tui-bell.toml` | 终端提醒：`tui.bell = "off"（默认） | "attention"（审批/`ask_user` 打开、回合结束各一个 BEL）| "all"（另加后台 job 完成）`。每个事件最多一个 BEL，同一帧合并；未知值警告回落 `off`。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 |
 | `tui-footer.toml` | ADR 0027 C2：`[tui.footer]` 的 preset/separator/glyphs/context_line/transparent 与 `[[tui.footer.rows]]` 的 left/right（字符串或表两种条目写法、icon/format/style/priority/thresholds 与条目专属参数）。 | **接受**，0 拒绝；未知条目 id 由 TUI 原样显示并警告，不拒绝文件。 | §2 / ADR 0027 |
 | `tui-footer-items.toml` | ADR 0027：`[tui.footer.items.<id>]` 的 symbol/style/symbol_style/format/disabled，`separator_style`（角色或 starship 颜色），`tui.usage_period_secs`。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
 | `tui-footer-command.toml` | ADR 0027：`[tui.footer.items.<id>] command = "<可执行文件或命令行>"` 与 `period = <秒>`（15–3600；`0` = 只在启动时跑一次）。读取器把两者作为条目参数原样携带；v1 只有一个配置层，由用户选定（`--config` > `RADIAN_CONFIG` > `~/.radian/config/config.toml`），因此所有 `command` 都被接受（v1 无项目级配置，ADR 0031；将来加入时 `command` 必须在那里被拒绝，该切片拥有其测试）。 | **接受**，0 拒绝。 | §2 / ADR 0027 |

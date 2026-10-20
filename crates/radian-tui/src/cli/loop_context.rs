@@ -39,6 +39,9 @@ pub(super) struct LoopContext<'a> {
     /// How a selection copy reaches the clipboard (`tui.clipboard`), read once from the app
     /// when the context is built: the mode cannot change mid-run.
     pub(super) clipboard: ClipboardMode,
+    /// Whether a `Bell` already rang in this frame: bell-class events that share a frame
+    /// merge into one ring, and the loop re-arms the flag for the next frame.
+    pub(super) bell_rang: bool,
     /// The herdr reporter (ADR 0034), when running inside a herdr pane.
     pub(super) herdr: Option<HerdrReporter>,
     /// The sandbox the user's `!`/`!!` commands run in (ADR 0033): the coding tools' own,
@@ -812,6 +815,16 @@ impl LoopContext<'_> {
                     },
                 };
                 self.send(AppInput::ClipboardDone(notice));
+                Ok(())
+            }
+            // One `\x07` per frame: bell-class events that share a frame (an approval
+            // arriving as a turn ends) ring once — the first `Bell` of the frame wins and
+            // the loop re-arms the flag for the next one.
+            Effect::Bell => {
+                if !self.bell_rang {
+                    self.bell_rang = true;
+                    write_bel();
+                }
                 Ok(())
             }
         }

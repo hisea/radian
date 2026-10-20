@@ -13138,3 +13138,518 @@ async fn pty_a_model_switch_never_writes_when_a_model_was_configured() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
+
+/// A text reply streamed slowly: `pause` between SSE pieces, so the turn stays running for a
+/// few seconds while the test queues behind it.
+fn slow_text_reply(text: &str, pause: Duration) -> Reply {
+    let pieces = vec![
+        format!(
+            "data: {}\n\n",
+            chunk(json!({"role": "assistant", "content": text}), None)
+        )
+        .into_bytes(),
+        format!("data: {}\n\n", chunk(json!({}), Some("stop"))).into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    Reply::Sse {
+        pieces,
+        pause,
+        headers: Vec::new(),
+    }
+}
+
+/// `/queue <text>` while a turn runs: the running turn is untouched, and each queued message
+/// opens its own turn in order when it ends (ADR 0011 L4 FIFO). The footer's `queued` item
+/// shows the waiting count (2, then 1) and hides when drained.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_queue_during_a_running_turn_runs_queued_turns_in_order() {
+    let _serial = pty_guard();
+    let pause = Duration::from_secs(2);
+    let server = MockServer::start(vec![
+        slow_text_reply("FIRST-REPLY-OK", pause),
+        slow_text_reply("SECOND-REPLY-OK", pause),
+        slow_text_reply("THIRD-REPLY-OK", pause),
+    ])
+    .await;
+    let dir = TempDir::new("queue");
+    // The real defaults: the `deck` footer carries `queued` (the suite's `classic` does not).
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "queue",
+        ],
+        &[],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"start\r");
+    // Wait until the request reached the mock: the turn is running now.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server.requests().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !server.requests().is_empty(),
+        "the turn never started:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/queue alpha\r");
+    pty.send(b"/queue beta\r");
+    assert!(
+        pty.wait_for_screen("2 queued", wait_positive()),
+        "the queue count did not reach 2:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("FIRST-REPLY-OK", wait_positive()),
+        "the first turn did not answer:\n{}",
+        pty.screen()
+    );
+    // Alpha's turn admitted it: one waits while it streams.
+    assert!(
+        pty.wait_for_screen("1 queued", wait_positive()),
+        "the count did not drop to 1:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("SECOND-REPLY-OK", wait_positive()),
+        "alpha's turn did not answer:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("THIRD-REPLY-OK", wait_positive()),
+        "beta's turn did not answer:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_until_gone("queued", wait_positive()),
+        "the item did not hide after the drain:\n{}",
+        pty.screen()
+    );
+
+    // Three turns, in order: the running turn never saw the queued text, and each queued
+    // message opened its own turn carrying its own text.
+    let bodies = server.requests();
+    assert_eq!(bodies.len(), 3, "three turns ran");
+    assert!(
+        last_user_text(&server, 0).contains("start")
+            && !last_user_text(&server, 0).contains("alpha"),
+        "the running turn is untouched: {:?}",
+        bodies[0].json()
+    );
+    assert!(
+        last_user_text(&server, 1).contains("alpha"),
+        "alpha opened the second turn: {:?}",
+        bodies[1].json()
+    );
+    assert!(
+        last_user_text(&server, 2).contains("beta"),
+        "beta opened the third turn: {:?}",
+        bodies[2].json()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `/queue <text>` while idle opens a turn at once, carrying the queued text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_queue_while_idle_starts_a_turn_at_once() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("IDLE-QUEUE-REPLY-OK")]).await;
+    let dir = TempDir::new("queue-idle");
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "queue-idle",
+        ],
+        &[],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/queue do it now\r");
+    assert!(
+        pty.wait_for_screen("IDLE-QUEUE-REPLY-OK", wait_positive()),
+        "the queued turn did not answer:\n{}",
+        pty.screen()
+    );
+    let bodies = server.requests();
+    assert_eq!(bodies.len(), 1, "one turn ran");
+    assert!(
+        last_user_text(&server, 0).contains("do it now"),
+        "the turn carries the queued text: {:?}",
+        bodies[0].json()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `/copy` copies the last committed assistant message through the clipboard backend, and
+/// `/copy code` copies only its last fenced block: the loop's honest `copied N chars`
+/// notice names what was copied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_copy_copies_the_last_message_and_its_code_block() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        text_reply("COPY-OK"),
+        text_reply("```rust\nlet x = 1;\n```"),
+    ])
+    .await;
+    let dir = TempDir::new("copy");
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "copy",
+        ],
+        &[],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"first\r");
+    assert!(
+        pty.wait_for_screen("COPY-OK", wait_positive()),
+        "the reply did not arrive:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/copy\r");
+    assert!(
+        pty.wait_for_screen("copied 7 chars", wait_positive()),
+        "the copy notice did not arrive:\n{}",
+        pty.screen()
+    );
+    pty.send(b"second\r");
+    assert!(
+        pty.wait_for_screen("let x = 1;", wait_positive()),
+        "the code reply did not arrive:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/copy code\r");
+    assert!(
+        pty.wait_for_screen("copied 10 chars", wait_positive()),
+        "the code copy notice did not arrive:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// BELs in the raw pty bytes. The bell tests set `clipboard = "off"`, so no OSC 52 sequence
+/// (which also ends in `\x07`) can confound the count: every BEL here is a bell ring.
+fn bel_count(pty: &Pty) -> usize {
+    String::from_utf8_lossy(&pty.raw()).matches('\x07').count()
+}
+
+/// `tui.bell = "attention"`: an approval prompt rings exactly once — no second ring for the
+/// same prompt, and no ring for anything before it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bell_attention_rings_once_for_an_approval() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("bell-approval");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "write",
+            r#"{"path":"out.txt","content":"approved"}"#,
+        ),
+        text_reply("WROTE-IT"),
+    ])
+    .await;
+    let config =
+        "schema_version = 1\n[tui]\nbell = \"attention\"\nclipboard = \"off\"\n".to_string();
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "bell-approval",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        &[],
+        &config,
+        30,
+        140,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"please write\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", wait_positive()),
+        "no approval prompt:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        bel_count(&pty),
+        1,
+        "one prompt rings exactly once:\n{}",
+        pty.screen()
+    );
+    // Answering and quitting rings nothing more (a cancel needs no ring).
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("WROTE-IT", wait_positive()),
+        "the approved call did not complete:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_eq!(
+        bel_count(&pty),
+        2,
+        "the prompt and the completed turn each rang once, nothing more"
+    );
+}
+
+/// `tui.bell = "off"`: the same approval prompt stays silent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bell_off_stays_silent() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("bell-off");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "write",
+            r#"{"path":"out.txt","content":"approved"}"#,
+        ),
+        text_reply("WROTE-IT"),
+    ])
+    .await;
+    let config = "schema_version = 1\n[tui]\nbell = \"off\"\nclipboard = \"off\"\n".to_string();
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "bell-off",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        &[],
+        &config,
+        30,
+        140,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"please write\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", wait_positive()),
+        "no approval prompt:\n{}",
+        pty.screen()
+    );
+    // The prompt is the positive sync; a ring would have fired with it. One beat for
+    // scheduling slop, then silence.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(bel_count(&pty), 0, "off rings nothing");
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("WROTE-IT", wait_positive()),
+        "the approved call did not complete:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_eq!(bel_count(&pty), 0, "the turn end rang nothing either");
+}
+
+/// `tui.bell = "all"`: a background job's settle rings — on top of the turn-end ring, so
+/// at least two BELs have fired once the settle's followup turn answers. The job sleeps
+/// first, so its settle lands in a later frame than the turn end: the two rings can never
+/// merge into one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bell_all_rings_for_a_background_job_settle() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("bell-job");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            r#"{"command":"sleep 5","background":true}"#,
+        ),
+        text_reply("TURN1-OK"),
+        text_reply("JOB-DONE-OK"),
+    ])
+    .await;
+    let config = "schema_version = 1\n[tui]\nbell = \"all\"\nclipboard = \"off\"\n".to_string();
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "bell-job",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "auto",
+        ],
+        &[],
+        &config,
+        30,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"run it in the background\r");
+    assert!(
+        pty.wait_for_screen("TURN1-OK", wait_positive()),
+        "the first turn did not answer:\n{}",
+        pty.screen()
+    );
+    // The first turn ended (one ring) while the job still sleeps; the settle follows in a
+    // later frame (the second ring), then its followup turn answers.
+    assert!(
+        pty.wait_for_screen("JOB-DONE-OK", wait_positive()),
+        "the settle never cycled through a turn:\n{}",
+        pty.screen()
+    );
+    assert!(
+        bel_count(&pty) >= 2,
+        "the turn end and the settle both rang:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+/// message matches the first one's, and the transcript gains a second user message without
+/// rewriting anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_retry_after_a_model_error_resends_the_same_text() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        Reply::status(
+            400,
+            r#"{"error": {"message": "bad request", "type": "invalid_request_error"}}"#,
+        ),
+        text_reply("RETRY-REPLY-OK"),
+    ])
+    .await;
+    let dir = TempDir::new("retry");
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "retry",
+        ],
+        &[],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"say it again\r");
+    assert!(
+        pty.wait_for_screen("turn failed", wait_positive()),
+        "the failure was not shown:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("/retry to resend", wait_positive()),
+        "the retry hint was not shown:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/retry\r");
+    assert!(
+        pty.wait_for_screen("RETRY-REPLY-OK", wait_positive()),
+        "the retried turn did not answer:\n{}",
+        pty.screen()
+    );
+    // The same text twice: the retry resent the failed turn's input verbatim.
+    assert_eq!(
+        last_user_text(&server, 0),
+        last_user_text(&server, 1),
+        "both requests carry the same user text"
+    );
+    assert!(
+        last_user_text(&server, 0).contains("say it again"),
+        "the text is the typed message"
+    );
+    // The transcript gained a second user message; nothing was rewritten.
+    assert!(
+        pty.screen().matches("say it again").count() >= 2,
+        "two user messages on screen:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

@@ -98,12 +98,50 @@ impl App {
 
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
     pub(super) fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
-        if let RuntimeEvent::TurnFinished { .. } = event {
+        if let RuntimeEvent::InboxEnqueued {
+            lane, message_id, ..
+        } = event
+        {
+            // The `queued` footer item: a `next_turn` input the runtime has not admitted
+            // yet. The set dedupes by id (a re-enqueue of the same input cannot
+            // double-count); a `NextStep` enqueue (`steer`, `inject`) never enters it.
+            if *lane == radian_session::InboxLane::NextTurn
+                && self.session.queued.insert(message_id.clone())
+            {
+                return UpdateResult::dirty();
+            }
+        }
+        if let RuntimeEvent::InputAdmitted { message_id, .. } = event {
+            // Only a tracked id leaves the set: a `steer` admission carries an id that
+            // was never queued here, so it cannot move the count.
+            if self.session.queued.remove(message_id) {
+                return UpdateResult::dirty();
+            }
+        }
+        if let RuntimeEvent::TurnFinished { outcome, .. } = event {
             // The turn boundary is on disk: a `/fork` that was waiting for it can run now.
             self.session.turn_committed = true;
-            if self.session.pending_fork.take().is_some() {
-                return UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork));
+            let mut result = match self.session.pending_fork.take() {
+                Some(_) => UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork)),
+                None => UpdateResult::none(),
+            };
+            // A completed or failed turn rings the bell in every mode but `off`: the user
+            // may be looking at another window. A cancel needs no ring — the user pressed
+            // the key themselves.
+            if matches!(outcome, TurnOutcome::Completed | TurnOutcome::Failed)
+                && self.bell != BellMode::Off
+            {
+                result.effects.push(Effect::Bell);
+                result.dirty = true;
             }
+            if result.dirty || !result.effects.is_empty() {
+                return result;
+            }
+        }
+        // A new turn started: the previous turn's failure (if any) is no longer retryable —
+        // `/retry` is only for the turn that just failed.
+        if let RuntimeEvent::TurnStarted { .. } = event {
+            self.session.last_turn_failed = false;
         }
         if let RuntimeEvent::ConfigChanged { change, .. } = event {
             // The driver applied the queued change: the status bar's `next:` promise is done.
@@ -134,13 +172,20 @@ impl App {
         }
         if let RuntimeEvent::BackgroundJobSettled { job_id, .. } = event {
             self.session.running_jobs.retain(|job| job.id != *job_id);
+            // The job's completion notice arrived: `all` rings for it, `attention` does not.
+            if self.bell.rings_for_job_settle() {
+                return UpdateResult::effect(Effect::Bell);
+            }
             return UpdateResult::dirty();
         }
         if let RuntimeEvent::TurnFailed { message, .. } = event {
             self.session.entries.push(Entry::new(
                 EntryKind::Notice,
-                format!("turn failed: {message}"),
+                format!("turn failed: {message}\n/retry to resend"),
             ));
+            // `/retry` resends the last user message, but only while this flag stands: the
+            // next turn's start clears it.
+            self.session.last_turn_failed = true;
             // ADR 0018's fallback: a recognizable context overflow gets one extra line, since
             // automatic compaction did not keep the request inside the window. The host only
             // has the text, so the prefix is what identifies it.

@@ -269,6 +269,30 @@ fn the_tui_mouse_preference_is_read_from_the_minimal_fixture() {
     assert_eq!(config.tui.mouse, Some(false));
 }
 
+/// `tui-bell.toml` (terminal bell): `bell = "attention"` is carried raw; the TUI parses it.
+/// An unknown spelling is skipped with a warning (the `tui.*` display-field rule), and the
+/// TUI falls back to `off`.
+#[test]
+fn the_tui_bell_preference_is_carried_and_unknown_falls_back() {
+    let (path, text) = fixture("tui-bell.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.tui.bell.as_deref(), Some("attention"));
+    assert!(
+        !config.skipped.iter().any(|key| key == "tui.bell"),
+        "{:?}",
+        config.skipped
+    );
+
+    let path = PathBuf::from("bell-unknown");
+    let config = config::parse(&path, "schema_version = 1\n[tui]\nbell = \"loud\"\n").unwrap();
+    assert_eq!(config.tui.bell, None);
+    assert!(
+        config.skipped.contains(&"tui.bell".to_string()),
+        "{:?}",
+        config.skipped
+    );
+}
+
 /// The refusal messages never echo a value that could be a secret.
 #[test]
 fn the_refusal_messages_never_echo_a_value() {

@@ -13,6 +13,9 @@ use radian_host::memory::commands::{self, CommandOutput, MemoryCommand};
 /// The `/help` text. Kept short; the full grammar is `radian_host::memory::commands`.
 pub const HELP: &str = "\
 /help                 list the commands
+/queue <text>          queue a message for the next turn, even while one runs
+/retry                resend the last message after a model error
+/copy [code]          copy the last assistant message (or its last code block)
 /compact [note]       summarize the history now and keep the recent part (ADR 0018)
 /sessions [query]     list this workspace's recent sessions, or search their text
 /fork                 fork this session at its last turn boundary (ADR 0022)
@@ -70,6 +73,15 @@ pub enum JobsRequest {
 pub enum Outcome {
     /// Show these lines as notices and keep the line out of the conversation.
     Notices(Vec<String>),
+    /// `/queue <text>`: like a send, but always a followup — even while a turn runs
+    /// (Enter steers then). The loop expands the `@` references first, like a send.
+    Queue(String),
+    /// `/retry`: resend the last user message after a model-error turn. The app decides
+    /// (idle and the last turn failed); the text goes as-is, with no `@` expansion.
+    Retry,
+    /// `/copy [code]`: copy the last committed assistant message — or its last fenced code
+    /// block — through the configured clipboard backend.
+    Copy { code_only: bool },
     /// A `/memory` command to run through the shared executor.
     Memory(MemoryCommand),
     /// A manual `/compact` (ADR 0018): the host runs it on the runtime, between turns, and
@@ -208,6 +220,21 @@ pub fn tree() -> &'static [Command] {
             name: "help",
             description: "list the commands",
             levels: &[],
+        },
+        Command {
+            name: "queue",
+            description: "queue a message for the next turn, even while one runs",
+            levels: &[free_level],
+        },
+        Command {
+            name: "retry",
+            description: "resend the last message after a model error",
+            levels: &[],
+        },
+        Command {
+            name: "copy",
+            description: "copy the last assistant message (or its last code block)",
+            levels: &[copy_level],
         },
         Command {
             name: "compact",
@@ -507,6 +534,19 @@ fn access_level(_typed: &[&str], _partial: &str) -> Level {
             current: false,
         },
     ])
+}
+
+/// `/copy [code]`: the only argument is the `code` selector; past it, free text (nothing).
+fn copy_level(typed: &[&str], _partial: &str) -> Level {
+    if typed.is_empty() {
+        Level::Ready(vec![Candidate {
+            insert: "code".to_owned(),
+            description: "only the last code block, without the fences".to_owned(),
+            current: false,
+        }])
+    } else {
+        Level::Free
+    }
 }
 
 /// `/export`: the format, then the path (with `--force` offered as a candidate).
@@ -913,6 +953,10 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
     };
     match tokens.first().map(String::as_str) {
         Some("/help") => Outcome::Notices(vec![HELP.to_owned()]),
+        Some("/queue") => queue_text(&tokens[1..]),
+        Some("/retry") if tokens.len() == 1 => Outcome::Retry,
+        Some("/retry") => Outcome::Notices(vec!["usage: /retry (no arguments)".to_owned()]),
+        Some("/copy") => copy_request(&tokens[1..]),
         Some("/memory") => memory_command(&tokens[1..], memory_enabled),
         Some("/compact") => Outcome::Compact(compact_instructions(&tokens[1..])),
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
@@ -1110,6 +1154,27 @@ fn export_request(args: &[String]) -> Outcome {
     })
 }
 
+/// `/queue <text>`: the arguments joined with spaces, like `/compact`'s note. Empty is a
+/// usage notice.
+fn queue_text(args: &[String]) -> Outcome {
+    let joined = args.join(" ");
+    let joined = joined.trim();
+    if joined.is_empty() {
+        return Outcome::Notices(vec!["usage: /queue <text>".to_owned()]);
+    }
+    Outcome::Queue(joined.to_owned())
+}
+
+/// `/copy [code]`: no argument copies the whole message, `code` only its last fenced block.
+/// Anything else is a usage notice.
+fn copy_request(args: &[String]) -> Outcome {
+    match args {
+        [] => Outcome::Copy { code_only: false },
+        [one] if one == "code" => Outcome::Copy { code_only: true },
+        _ => Outcome::Notices(vec!["usage: /copy [code]".to_owned()]),
+    }
+}
+
 fn memory_command(args: &[String], memory_enabled: bool) -> Outcome {
     if !memory_enabled {
         return Outcome::Notices(vec![
@@ -1262,6 +1327,67 @@ mod tests {
             Outcome::Compact(Some(note)) => assert_eq!(note, "focus on the parser"),
             other => panic!("expected a compact request, got {other:?}"),
         }
+    }
+
+    /// `/queue <text>` parses to the queued text (arguments joined, like `/compact`'s note);
+    /// empty is a usage notice. It is a command, and it is in `/help`.
+    #[test]
+    fn queue_parses_to_its_text_and_rejects_an_empty_line() {
+        match parse("/queue do this next", false) {
+            Outcome::Queue(text) => assert_eq!(text, "do this next"),
+            other => panic!("expected the queued text, got {other:?}"),
+        }
+        match parse("/queue \"quoted  words\"", false) {
+            Outcome::Queue(text) => assert_eq!(text, "quoted  words"),
+            other => panic!("expected the queued text, got {other:?}"),
+        }
+        for line in ["/queue", "/queue   "] {
+            match parse(line, false) {
+                Outcome::Notices(notices) => {
+                    assert!(notices[0].contains("usage: /queue"), "{line}: {notices:?}")
+                }
+                other => panic!("{line}: expected notices, got {other:?}"),
+            }
+        }
+        assert!(HELP.contains("/queue"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "queue"));
+    }
+
+    /// `/retry` takes no argument; anything after it is a usage notice. It is a command,
+    /// and it is in `/help`.
+    #[test]
+    fn retry_takes_no_arguments() {
+        assert!(matches!(parse("/retry", false), Outcome::Retry));
+        match parse("/retry now", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /retry"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/retry"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "retry"));
+    }
+
+    /// `/copy` copies the whole message, `/copy code` only its last block; anything else is
+    /// a usage notice. It is a command, and it is in `/help`.
+    #[test]
+    fn copy_parses_its_optional_code_selector() {
+        assert!(matches!(
+            parse("/copy", false),
+            Outcome::Copy { code_only: false }
+        ));
+        assert!(matches!(
+            parse("/copy code", false),
+            Outcome::Copy { code_only: true }
+        ));
+        match parse("/copy everything please", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /copy"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/copy"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "copy"));
     }
 
     /// The completion table and the clap grammar must name the same subcommands, in both

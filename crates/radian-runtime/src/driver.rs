@@ -390,7 +390,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// Installs the host listener for the runtime events this driver writes (ADR 0017). The
     /// driver calls it for `TurnFailed` so a host can show the error without reading the
     /// journal. Set it before `run()`; the last one wins.
+    ///
+    /// The sink also hears `InboxEnqueued` (forwarded by the inbox, after the journal
+    /// write) and `InputAdmitted` (forwarded here, once per input): a host that shows the
+    /// queue — the TUI's `queued` footer item — reads them live instead of polling.
     pub fn set_runtime_events(&mut self, sink: Arc<dyn RuntimeEvents>) {
+        self.inbox.set_runtime_events(Arc::clone(&sink));
         self.runtime_events = Some(sink);
     }
 
@@ -586,7 +591,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                     }
                 }
             };
-            admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
+            admit_seen(&journal, &claimed, &mut admitted, &tap, &runtime_events).await?;
             match result {
                 Ok(Step::Continue) => {
                     drain_steering(
@@ -606,7 +611,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             }
         };
         drop(run);
-        admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
+        admit_seen(&journal, &claimed, &mut admitted, &tap, &runtime_events).await?;
         // A steer Core accepted but never applied (the turn ended first) goes back to the
         // inbox front, in order, so the next turn uses it (ADR 0011). This covers both the
         // normal finish and the model-error finish (ADR 0017).
@@ -844,24 +849,28 @@ async fn requeue_unadmitted(inbox: &Inbox, claimed: &[InboxEntry], admitted: &Ha
     }
 }
 
-/// Writes `InputAdmitted` for every claimed id the transcript has actually taken.
+/// Writes `InputAdmitted` for every claimed id the transcript has actually taken, and
+/// forwards each one to the host sink (a host that shows the queue hears the admission live).
 async fn admit_seen(
     journal: &SessionJournal,
     claimed: &[MessageId],
     admitted: &mut HashSet<MessageId>,
     tap: &Tap<'_>,
+    sink: &Option<Arc<dyn RuntimeEvents>>,
 ) -> Result<(), DriverError> {
     for id in claimed {
         if admitted.contains(id) {
             continue;
         }
         if let Some(index) = tap.index_of(id) {
-            journal
-                .append_runtime_event(RuntimeEvent::InputAdmitted {
-                    message_id: id.clone(),
-                    transcript_index: index,
-                })
-                .await?;
+            let event = RuntimeEvent::InputAdmitted {
+                message_id: id.clone(),
+                transcript_index: index,
+            };
+            journal.append_runtime_event(event.clone()).await?;
+            if let Some(sink) = sink {
+                sink.on_runtime_event(&event);
+            }
             // Record it, or the next call would write the same admission again.
             admitted.insert(id.clone());
         }
