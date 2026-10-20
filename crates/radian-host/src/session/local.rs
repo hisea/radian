@@ -144,8 +144,8 @@ impl LocalSession {
         &self.hooks
     }
 
-    /// The sandbox mode in force right now (ADR 0038 slice 2). `None` is the `safe` tier (no
-    /// shell). A host reads this after a `/access` switch; the tools read the slot themselves.
+    /// The sandbox mode in force right now (ADR 0038 slice 2). `None` means no shell.
+    /// A host reads this after a `/access` switch; the tools read the slot themselves.
     pub fn sandbox_mode(&self) -> Option<radian_sandbox::SandboxMode> {
         self.sandbox_slot.mode()
     }

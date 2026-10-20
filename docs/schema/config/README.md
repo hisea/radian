@@ -2,7 +2,7 @@
 
 每个文件一个场景。**本表是给人读的；脚本的期望写在 `../check-config-fixtures.sh` 的 `EXPECT` 字典里，脚本不读本表**——改动任何一处必须同步改另一处（同 `docs/schema/fixtures/` 的做法）。读取方 = 支持 `schema_version = 1` 的 v1 实现（ADR 0008 §5）。
 
-这里的 fixtures 都是**用户级**配置。项目级 `<workspace>/.radian/config.toml` 是另一个更小的文件（ADR 0043 决定 2）：只读 `[permissions] profile = "workspace" | "safe"`，`full` 是警告并忽略，`[sandbox]` 键按名字拒绝，其余键跳过并点名；它没有 fixture 表。
+这里的 fixtures 都是**用户级**配置。项目级 `<workspace>/.radian/config.toml` 是另一个更小的文件（ADR 0043 决定 2）：只读 `[permissions] profile = "workspace"`，`full` 是警告并忽略，`[sandbox]` 键按名字拒绝，其余键跳过并点名；它没有 fixture 表。
 
 **评审补充（合并时追加）**：评审者验证过这条漂移风险是真的——只把本表里的「拒绝」改成「接受」，脚本仍然通过（它读自己的 `EXPECT`）。两处必须手工同步。
 

@@ -202,8 +202,8 @@ async fn the_child_runs_the_parents_live_model_route() {
             compaction_settings_for: None,
             retries: 0,
             sandbox: None,
-            tier: Preset::Safe,
-            profile: Profile::safe(&workspace)
+            tier: Preset::FullAccess,
+            profile: Profile::full_access(&workspace)
                 .unwrap()
                 .with_approval(ApprovalPolicy::Auto),
             access_builder: None,

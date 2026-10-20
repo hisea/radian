@@ -62,14 +62,13 @@ impl Case {
         }
     }
 
-    /// Whether this case is one of the two Unix-socket denial cases Linux cannot enforce
+    /// Whether this case is the Unix-socket denial case Linux cannot enforce
     /// (the accepted gap, decision 4): bwrap reaches pathname sockets
-    /// through the shared root in both tiers, so on `linux-bwrap` they are reported as a
-    /// known limitation rather than a regression. Every other case — and these two cases
+    /// through the shared root, so on `linux-bwrap` it is reported as a
+    /// known limitation rather than a regression. Every other case — and this case
     /// on any other backend — stays strict.
     pub fn is_accepted_linux_limit(&self) -> bool {
-        self.group == "unix_socket"
-            && matches!(self.name.as_str(), "workspace_denied" | "safe_denied")
+        self.group == "unix_socket" && self.name == "workspace_denied"
     }
 
     /// The reason reported with a [`Verdict::KnownLimit`].
@@ -84,7 +83,7 @@ impl Case {
 
     /// The verdict under `backend`: a skipped case is [`Verdict::Skip`] on every backend —
     /// without a working control it proves nothing, so it never counts as a failure. A
-    /// passing case is [`Verdict::Pass`]; one of the two accepted Linux limits is
+    /// passing case is [`Verdict::Pass`]; the accepted Linux limit is
     /// [`Verdict::KnownLimit`] on `linux-bwrap` (and still [`Verdict::Fail`] anywhere
     /// else, so macOS stays strict); anything else that did not pass is [`Verdict::Fail`].
     pub fn verdict(&self, backend: &str) -> Verdict {
@@ -313,9 +312,8 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     let inside_policy =
         radian_deny(SandboxPolicy::workspace_write(&ws)?).deny_read(&inside_sessions);
     let denied_inside = Sandbox::from_policy(inside_policy)?;
-    // ADR 0016: the network cases are asserted against `safe` (off) and `workspace` (on),
-    // so the rig needs both enforced sandboxes as well as the transparent control.
-    let safe = Sandbox::from_policy(radian_deny(SandboxPolicy::safe(&ws)?))?;
+    // ADR 0016: the network cases are asserted against `workspace` (on),
+    // so the rig needs the enforced sandbox as well as the transparent control.
     // ADR 0016: a listener outside the workspace, and a `workspace` sandbox that
     // whitelists exactly that socket. The listener stays bound (connect fills its backlog).
     // The AF_UNIX path limit (~104 bytes) is why this lives under `/tmp` and not the test
@@ -352,8 +350,8 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     };
     rig.escape_writes(&sandbox, &control);
     rig.symlink_escapes(&sandbox, &control);
-    rig.network(&safe, &sandbox, &control);
-    rig.unix_socket(&safe, &sandbox, &whitelisted, &control, &unix_listener_path);
+    rig.network(&sandbox, &control);
+    rig.unix_socket(&sandbox, &whitelisted, &control, &unix_listener_path);
     rig.pty_ok(&sandbox, &control);
     rig.tiocsti_outside_terminal(&sandbox, &control);
     rig.environment(&sandbox, &control, &secret_name, &secret_value);
@@ -475,28 +473,12 @@ impl Rig {
         );
     }
 
-    fn network(&mut self, safe: &Sandbox, workspace: &Sandbox, control: &Sandbox) {
+    fn network(&mut self, workspace: &Sandbox, control: &Sandbox) {
         let connect_script = |port: u16| {
             format!(
                 "python3 -c 'import socket,sys; s=socket.create_connection((\"127.0.0.1\",{port}),2); s.close(); sys.exit(0)'"
             )
         };
-        // `safe` still has no network: the control connects to a listener this test owns.
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
-        let port = listener.local_addr().unwrap().port();
-        let script = connect_script(port);
-        let sb = run_shell(safe, &script);
-        let ct = run_shell(control, &script);
-        drop(listener);
-        self.record(
-            "network_safe",
-            "connect_local_port",
-            Expect::MustFail,
-            sb,
-            ct,
-            "safe has no network; the control connects to a listener this test owns",
-        );
-
         // `workspace` (ADR 0016) can connect to loopback, bind/listen, and reach out.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
         let port = listener.local_addr().unwrap().port();
@@ -531,11 +513,10 @@ impl Rig {
     }
 
     /// ADR 0016: the `workspace` tier denies outbound Unix sockets except the
-    /// whitelist; `safe` (no network) denies all of them. DNS still resolves through the
+    /// whitelist. DNS still resolves through the
     /// always-allowed mDNSResponder socket.
     fn unix_socket(
         &mut self,
-        safe: &Sandbox,
         workspace: &Sandbox,
         whitelisted: &Sandbox,
         control: &Sandbox,
@@ -561,15 +542,6 @@ impl Rig {
             "unix_socket",
             "whitelisted_allowed",
             Expect::MustSucceed,
-            &connect,
-        );
-        // `safe` has no network at all.
-        self.sh_case(
-            safe,
-            control,
-            "unix_socket",
-            "safe_denied",
-            Expect::MustFail,
             &connect,
         );
         // DNS resolution uses mDNSResponder, which stays allowed when the network is on.
@@ -1564,24 +1536,22 @@ mod tests {
         }
     }
 
-    /// The two denial cases are a known limitation on Linux (neither PASS nor FAIL, with
-    /// the reason), and stay strict failures on macOS: a FAIL must still be possible there.
-    /// `workspace_denied` is shown; `safe_denied` takes the same branch by name.
+    /// The denial case is a known limitation on Linux (neither PASS nor FAIL, with
+    /// the reason), and stays a strict failure on macOS: a FAIL must still be possible there.
     #[test]
-    fn the_two_unix_socket_denials_are_a_known_limit_on_linux_and_fail_on_macos() {
-        for name in ["workspace_denied", "safe_denied"] {
-            let case = connected_unix_case(name);
-            assert!(!case.passed(), "{name}");
-            assert_eq!(case.verdict("linux-bwrap"), Verdict::KnownLimit, "{name}");
-            assert_eq!(case.verdict("macos-seatbelt"), Verdict::Fail, "{name}");
-            assert!(
-                !case.known_limit_reason().is_empty(),
-                "a KNOWN-LIMIT carries its reason: {name}"
-            );
-        }
+    fn the_unix_socket_denial_is_a_known_limit_on_linux_and_fails_on_macos() {
+        let name = "workspace_denied";
+        let case = connected_unix_case(name);
+        assert!(!case.passed(), "{name}");
+        assert_eq!(case.verdict("linux-bwrap"), Verdict::KnownLimit, "{name}");
+        assert_eq!(case.verdict("macos-seatbelt"), Verdict::Fail, "{name}");
+        assert!(
+            !case.known_limit_reason().is_empty(),
+            "a KNOWN-LIMIT carries its reason: {name}"
+        );
     }
 
-    /// Only the two denial cases take the branch: the whitelisted/dns siblings and every
+    /// Only the denial case takes the branch: the whitelisted/dns siblings and every
     /// other group fail on Linux exactly as before.
     #[test]
     fn only_the_two_denial_cases_are_a_known_limit() {

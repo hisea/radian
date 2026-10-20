@@ -12,7 +12,7 @@
 //! Unix sockets are **not** restricted by this backend (the accepted gap, ADR 0016 revision
 //! 1 as decided for Linux): pathname sockets stay reachable through the shared read-only
 //! `--ro-bind / /`, and abstract sockets through the shared network namespace in the
-//! `workspace` tier (only `safe` unshares it). `[sandbox] allow_unix_sockets` therefore has
+//! `workspace` tier. `[sandbox] allow_unix_sockets` therefore has
 //! no effect on Linux; only macOS's seatbelt backend reads it.
 
 use std::ffi::{OsStr, OsString};

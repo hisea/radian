@@ -20,7 +20,7 @@ pub const DEFAULT_ROLE: &str = include_str!("../prompts/default.md");
 pub struct Runtime<'a> {
     /// The mounted tools: `(name, one-line purpose)`.
     pub tools: &'a [(String, String)],
-    /// The tier name (`safe` / `workspace` / `full-access`).
+    /// The tier name (`workspace` / `full`).
     pub tier: &'a str,
     /// The sandbox facts line (the host's `describe`).
     pub sandbox: &'a str,

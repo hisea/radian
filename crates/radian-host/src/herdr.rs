@@ -972,7 +972,7 @@ mod tests {
     fn only_the_changed_token_keys_are_sent() {
         let mut last = BTreeMap::new();
         last.insert("model".to_owned(), "gpt-5".to_owned());
-        last.insert("tier".to_owned(), "safe".to_owned());
+        last.insert("tier".to_owned(), "full".to_owned());
         let mut now: BTreeMap<String, Option<String>> = BTreeMap::new();
         now.insert("model".to_owned(), Some("gpt-5".to_owned()));
         now.insert("tier".to_owned(), Some("workspace".to_owned()));

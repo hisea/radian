@@ -92,16 +92,16 @@ Base `63fafba` · 工作树 `.radian-worktrees/orch-s5`。改前把 `src/profile
 `always_allowed()` 只剩 `ask_user` 与 `skill`，被它测的 `mermaid_check_is_allowed_in_every_tier`
 也一并删除，没有新的变异可跑。
 
-## ADR 0043 slice ⓪a：`subagent` 的三档 allow（2026-10-17）
+## ADR 0043 slice ⓪a：`subagent` 的两档 allow（2026-10-17）
 
-`subagent` 自己不写文件、不跑工作区命令，它起的子会话由子自己的档位与审批决定，所以三档都
+`subagent` 自己不写文件、不跑工作区命令，它起的子会话由子自己的档位与审批决定，所以两档都
 `allow`；否则无头父会话会落到默认 `ask` 而无终端可问、被直接拒绝。变异把 `always_allowed()`
 还原成 `["ask_user", "skill"]`（`cp` 到 `.radian/scratch/mut/`，改后 `cp` 还原并 `cmp` 一致）。
 命令：`cargo test -p radian-permissions --locked --lib subagent_is_allowed --no-fail-fast`。
 
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
-| SP-1 | `always_allowed()` 去掉 `subagent` | ✅ 1 failed（`safe` 档 `left: Ask`，`right: Allow`） | `profile::tests::subagent_is_allowed_in_every_tier` |
+| SP-1 | `always_allowed()` 去掉 `subagent` | ✅ 1 failed（`workspace` 档 `left: Ask`，`right: Allow`） | `profile::tests::subagent_is_allowed_in_every_tier` |
 
 ## ADR 0043 slice ③: a renamed tool is judged under its new name (2026-10-17)
 

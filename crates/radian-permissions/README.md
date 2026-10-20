@@ -25,7 +25,7 @@ A rule is `(tool matcher, resource matcher) -> allow | ask | deny`.
 **Priority: `deny` > `ask` > `allow`; no rule matching means `ask`.** So an `ask` rule beats
 an `allow` rule when both match, and the default is conservative.
 
-The memory tool (ADR 0021 D5) follows this rule: `memory_search` is `allow` in all three tiers.
+The memory tool (ADR 0021 D5) follows this rule: `memory_search` is `allow` in both tiers.
 There is deliberately no agent tool for archive/forget/purge/confirm/save/revise (D5: the
 model has no write path).
 
@@ -134,9 +134,9 @@ transcript record, so it never appears in `journal_records`/`replay`.
 | 7 | internal error denies | `tests/hooks.rs` |
 | 8 | one `PermissionResolved` per decision, right approver | `tests/hooks.rs` |
 | 9 | `PermissionResolved` round trip, not replayed | `radian-session/tests/permission_event.rs` |
-| 10 | preset behaviour (safe denies writes, full allows) | `tests/rule.rs` |
+| 10 | preset behaviour (workspace asks MCP, full allows) | `tests/rule.rs` |
 | 11 | resolved-path matching (`..`, symlinks) | `tests/rule.rs` |
-| 12 | `ask_user` is fixed `allow` in all three tiers (ADR 0024 Q6) | `src/profile.rs` |
+| 12 | `ask_user` is fixed `allow` in both tiers (ADR 0024 Q6) | `src/profile.rs` |
 
 ## Not verified / limits
 

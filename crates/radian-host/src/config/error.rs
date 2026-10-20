@@ -113,7 +113,7 @@ impl fmt::Display for ConfigError {
             } => write!(f, "{}: `{key}` must be {expected}", path.display()),
             ConfigError::UnknownProfile { path, value } => write!(
                 f,
-                "{}: permissions.profile = {value:?} is not one of safe|workspace|full \
+                "{}: permissions.profile = {value:?} is not one of workspace|full \
                  (or the aliases); refusing rather than guessing",
                 path.display()
             ),

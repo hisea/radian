@@ -185,6 +185,11 @@ fn edge_cases() -> Vec<(String, String)> {
             "permissions.profile.unknown",
             "schema_version = 1\n[permissions]\nprofile = \"future\"\n",
         ),
+        // The removed tier is unknown too: it takes the same refusal branch as any typo.
+        (
+            "permissions.profile.removed_safe",
+            "schema_version = 1\n[permissions]\nprofile = \"safe\"\n",
+        ),
         (
             "permissions.profile.unknown_read_only",
             "schema_version = 99\n[permissions]\nprofile = \"future\"\n",

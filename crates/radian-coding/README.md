@@ -87,7 +87,7 @@ a limit that is exceeded keeps its semantic code (`read_limit_exceeded`, `glob_l
 ## Search (`glob`, `grep`)
 
 `glob` and `grep` are `Shared`, so a batch of searches overlaps instead of queueing behind one
-another (the reason they exist: `shell` is `Exclusive`, and the safe tier has no shell at all).
+another (the reason they exist: `shell` is `Exclusive`).
 Both walk from a base (`path`, default the workspace root) opened through the workspace root's
 directory fd (ADR 0039 decision 2: every component `openat(O_NOFOLLOW | O_DIRECTORY)`), and the
 walk itself descends by fd and hands matched files back as open fds; nothing is re-opened by

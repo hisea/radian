@@ -325,7 +325,7 @@ pub(crate) async fn setup(
     if access_source != "default" {
         eprintln!("[access] {} (from {access_source})", profile.as_str());
     }
-    // ADR 0026 D9: the journal's last in-session switch restores auto on `safe`/`workspace`
+    // ADR 0026 D9: the journal's last in-session switch restores auto on `workspace`
     // when the command line was silent. The precedence is `resolve_startup`'s, shared with
     // the TUI.
     let journal_path = session_dir(cli)?.join(format!("{session_id}.jsonl"));

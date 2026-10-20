@@ -103,7 +103,7 @@ mod tests {
     /// CLI wins over everything, fresh or resumed, and backfills a record (D9, like D8).
     #[test]
     fn an_explicit_cli_choice_wins_and_backfills() {
-        for tier in [Preset::Safe, Preset::WorkspaceWrite, Preset::FullAccess] {
+        for tier in [Preset::WorkspaceWrite, Preset::FullAccess] {
             for resume in [false, true] {
                 let startup = resolve_startup(
                     Some(ApprovalPolicy::Auto),
@@ -124,7 +124,7 @@ mod tests {
         }
     }
 
-    /// `safe`/`workspace` restore the journal's last in-session state over the config.
+    /// `workspace` restores the journal's last in-session state over the config.
     #[test]
     fn resume_restores_the_journaled_state_over_the_config() {
         let startup = resolve_startup(

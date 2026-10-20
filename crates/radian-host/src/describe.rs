@@ -12,21 +12,17 @@ use radian_sandbox::{Sandbox, SandboxMode};
 /// two in the tree; a host may pass its own.
 #[derive(Debug, Clone, Copy)]
 pub struct Wording {
-    /// Appended to the `safe` label after "no command execution" (e.g. `, no MCP tools`).
-    pub safe_note: &'static str,
     /// Subject of the confined-mode sentence (e.g. `commands and built-in tools`).
     pub confined_subject: &'static str,
 }
 
 /// `agent-cli`'s wording: the line prompt has MCP tools, so it names them.
 pub const CLI_WORDING: Wording = Wording {
-    safe_note: ", no MCP tools",
     confined_subject: "commands and built-in tools",
 };
 
 /// `radian-tui`'s wording: the full-screen host talks about its shell.
 pub const TUI_WORDING: Wording = Wording {
-    safe_note: "",
     confined_subject: "shell and the built-in tools",
 };
 
@@ -50,15 +46,6 @@ pub fn describe(
     wording: Wording,
 ) -> (String, String) {
     match (mode, sandbox) {
-        (SandboxMode::Safe, _) => (
-            format!(
-                "safe (no sandbox needed: no command execution{})",
-                wording.safe_note
-            ),
-            "writes and command execution are denied; the read/list/git tools are confined to \
-             the workspace by the tools themselves"
-                .into(),
-        ),
         (SandboxMode::WorkspaceWrite, Some(sandbox)) if sandbox.backend_name() == "inherited" => (
             INHERITED_PROFILE_LINE.to_string(),
             INHERITED_FACTS.to_string(),
@@ -115,11 +102,9 @@ fn workspace_sandbox_facts(wording: Wording, git_writable: bool) -> String {
 /// The startup summary's word for the sandbox. `workspace` names the **real** backend in
 /// plain words — `macOS sandbox` for `macos-seatbelt`, `Linux sandbox` for `linux-bwrap`, and
 /// the backend's own name for one it does not know — so it can never be read as "no sandbox".
-/// The exact backend name is still in the expanded `profile:` line. `safe` has nothing to
-/// sandbox (`no exec`: no command execution at all); `full` is `no sandbox`.
+/// The exact backend name is still in the expanded `profile:` line. `full` is `no sandbox`.
 pub fn sandbox_word(mode: SandboxMode, backend: Option<&str>) -> String {
     match mode {
-        SandboxMode::Safe => "no exec".to_string(),
         SandboxMode::WorkspaceWrite => match backend {
             Some("macos-seatbelt") => "macOS sandbox".to_string(),
             Some("linux-bwrap") => "Linux sandbox".to_string(),
@@ -171,11 +156,10 @@ mod tests {
         );
     }
 
-    /// `safe` is "no exec" (there is no command execution to sandbox), `full` is
+    /// `workspace` means a sandbox, `full` is
     /// "no sandbox" (the built-in default since ADR 0043).
     #[test]
     fn the_summary_word_names_what_the_tier_means() {
-        assert_eq!(sandbox_word(SandboxMode::Safe, None), "no exec");
         assert_eq!(sandbox_word(SandboxMode::FullAccess, None), "no sandbox");
     }
 

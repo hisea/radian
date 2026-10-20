@@ -190,7 +190,7 @@ impl CodingTools {
     /// The same tools over a **shared** sandbox slot (ADR 0038 slice 2): the host keeps a
     /// clone and swaps it on `/access`, so `shell`/jobs read the current tier. `shell` is
     /// advertised whenever the slot currently holds a sandbox; the tool set is fixed at
-    /// `open_session`, so a session that starts in `safe` does not gain `shell` mid-session
+    /// `open_session`, so a session that starts without `shell` does not gain it mid-session
     /// (switching to a *narrower* tier still denies it through the permission rules).
     pub fn with_sandbox_slot(
         root: impl AsRef<std::path::Path>,

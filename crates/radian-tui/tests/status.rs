@@ -64,7 +64,7 @@ fn the_status_bar_shows_the_tier_reported_usage_and_mcp_counts() {
 fn a_session_without_reports_says_none_and_never_invents_a_zero() {
     let mut app = App::new("mock", "s");
     classic_footer(&mut app);
-    app.set_tier("safe");
+    app.set_tier("workspace");
     app.set_mcp(0, None);
     // One response with no usage at all, then one that reports only input. A response without
     // usage writes no fact at all.

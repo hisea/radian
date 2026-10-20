@@ -135,7 +135,7 @@ async fn open_with_records(
             thinking_budget: None,
         },
     );
-    let profile = Profile::safe(&workspace).unwrap();
+    let profile = Profile::full_access(&workspace).unwrap();
     let session = open_session(
         SessionSetup {
             session_id: SessionId::new(label),
@@ -156,7 +156,7 @@ async fn open_with_records(
             compaction_settings_for: None,
             retries: 0,
             sandbox: None,
-            tier: Preset::Safe,
+            tier: Preset::FullAccess,
             profile,
             access_builder: None,
             parent: None,
@@ -264,7 +264,7 @@ async fn a_local_session_accepts_a_declared_command() {
             thinking_budget: None,
         },
     );
-    let profile = Profile::safe(&workspace).unwrap();
+    let profile = Profile::full_access(&workspace).unwrap();
     let session = open_session(
         SessionSetup {
             session_id: SessionId::new("can-send"),
@@ -285,7 +285,7 @@ async fn a_local_session_accepts_a_declared_command() {
             compaction_settings_for: None,
             retries: 0,
             sandbox: None,
-            tier: Preset::Safe,
+            tier: Preset::FullAccess,
             profile,
             access_builder: None,
             parent: None,

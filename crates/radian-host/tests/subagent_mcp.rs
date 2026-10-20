@@ -64,7 +64,7 @@ async fn run_child(arguments: Value, coding_root: Option<PathBuf>) -> Vec<String
 
     static SINK: NoopSink = NoopSink;
     let permissions = Arc::new(radian_permissions::PermissionHooks::new(
-        Profile::safe(&workspace)
+        Profile::workspace_write(&workspace)
             .unwrap()
             .with_approval(ApprovalPolicy::Auto),
         None,

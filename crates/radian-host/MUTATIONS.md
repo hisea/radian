@@ -1157,7 +1157,7 @@ restored file with `diff -q`; afterwards `git diff` shows only the intended file
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
 | PJ-1 | `project::apply_profile` 接受 `full`（`out.tier = Some(Preset::FullAccess)`） | ✅ 1 failed（`cannot widen` 警告缺失） | `agent-cli::cli::a_project_config_cannot_widen_the_tier`；单元 `project::tests::full_in_a_project_config_is_refused_with_a_warning` |
-| PJ-2 | `project::narrow` 取更宽者（`rank(a) >= rank(b)`） | ✅ 1 failed（记住的 `workspace` 没有被项目的 `safe` 收窄） | `agent-cli::cli::a_remembered_tier_is_narrowed_by_the_project`；单元 `project::tests::the_narrower_tier_wins` |
+| PJ-2 | `project::narrow` 取更宽者（`rank(a) >= rank(b)`） | ✅ 1 failed（记住的 `full` 没有被项目的 `workspace` 收窄） | `agent-cli::cli::a_remembered_tier_is_narrowed_by_the_project`；单元 `project::tests::the_narrower_tier_wins` |
 | TS-1 | `trust::apply` 的 `TrustHereSandbox` 不写 `access::remember_for` | ✅ 1 failed（`access/access.json` 不存在） | `radian-tui::pty::pty_trust_sandbox_choice_writes_the_access_record` |
 
 3/3 抓住。
