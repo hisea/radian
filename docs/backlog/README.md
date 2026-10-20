@@ -48,7 +48,6 @@
 | `herdr-prompt-radian.md` | idea | 0034 | `herdr agent prompt` 拒认运行中的 radian TUI，原因未查明 |
 | `shell-auto-background-60s.md` | idea | 0037、0036、0011 | 转后台阈值 120 s → 60 s，提示词要求独立调用放同一条回复 |
 | `file-tools-spawn-blocking.md` | idea | 无 | 文件工具同步 IO 可能串行；先基准，再 `spawn_blocking` |
-| `remember-routing-sandbox.md` | idea | 0021、0036、0039、0016 | 文件工具写不到 `~/.radian/skills/`；全局 skill 路由要定沙箱下的收口（round 1 输入） |
 
 只占索引行（暂无文件；来源都是总报告 `docs/research/2026-10-18-area-deep-dive/README.md`）：
 
