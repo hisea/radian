@@ -32,6 +32,7 @@
 //! with `EPERM` reads as `unix-socket` on Linux, where the seccomp filter is the only
 //! thing in the sandbox that produces it.
 
+#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
 
 use crate::policy::SandboxPolicy;
@@ -127,6 +128,7 @@ fn classify_linux(policy: &SandboxPolicy, command: &str, stderr: &str) -> Option
 /// command is ambiguous and unmarked. The policy's paths disambiguate: `stderr` is matched
 /// as well as `command`, because native git names the denied `.git` entry (`.../.git/
 /// index.lock`) in its own error while the command never spells it.
+#[cfg(target_os = "macos")]
 fn classify_macos(policy: &SandboxPolicy, command: &str, stderr: &str) -> Option<DenialCategory> {
     if mentions_listed_path(&policy.deny_read, command, stderr) && looks_like_errno(stderr) {
         return Some(DenialCategory::SensitiveRead);
@@ -193,6 +195,7 @@ fn mentions_any(command: &str, paths: &[std::path::PathBuf]) -> bool {
 /// every denial on macOS. Each absolute-path token in the text is resolved through its
 /// nearest existing ancestor and compared by components, so neither side needs spelling
 /// the alias the other used.
+#[cfg(target_os = "macos")]
 fn mentions_listed_path(paths: &[PathBuf], command: &str, stderr: &str) -> bool {
     paths.iter().any(|listed| {
         let spelled = listed.display().to_string();
@@ -204,6 +207,7 @@ fn mentions_listed_path(paths: &[PathBuf], command: &str, stderr: &str) -> bool 
 }
 
 /// Whether any absolute-path token in `text` resolves to `listed` or under it.
+#[cfg(target_os = "macos")]
 fn text_names_resolved(listed: &Path, text: &str) -> bool {
     absolute_tokens(text).any(|token| resolved_is_listed_or_under(listed, token))
 }
@@ -211,6 +215,7 @@ fn text_names_resolved(listed: &Path, text: &str) -> bool {
 /// Whether the resolved form of the absolute-path token `token` is `listed` or lives under
 /// it. Resolution is through the nearest existing ancestor, so a denied target that does
 /// not exist yet (a redirect creating a new file) still matches the listed directory.
+#[cfg(target_os = "macos")]
 fn resolved_is_listed_or_under(listed: &Path, token: &str) -> bool {
     let path = Path::new(token);
     let resolved =
@@ -225,6 +230,7 @@ fn resolved_is_listed_or_under(listed: &Path, token: &str) -> bool {
 /// it can never be the denied target. Only the command is scanned, never `stderr`: a
 /// Python traceback embeds its stdlib paths, which resolve outside the workspace without
 /// naming any target at all.
+#[cfg(target_os = "macos")]
 fn mentions_path_outside_workspace(policy: &SandboxPolicy, command: &str) -> bool {
     if absolute_tokens(command).any(|token| {
         if token == "/dev/null" {
@@ -254,6 +260,7 @@ fn mentions_path_outside_workspace(policy: &SandboxPolicy, command: &str) -> boo
 /// Whether `command` is a native git invocation failing on a `.git/` entry it never
 /// spells: the word `git` in the command, a `.git/` path in `stderr`, and an `EPERM`.
 /// (The discovered-path arm above already covers commands that spell the entry.)
+#[cfg(target_os = "macos")]
 fn is_native_git_denied_on_dot_git(command: &str, stderr: &str) -> bool {
     if !stderr.contains("Operation not permitted") || !stderr.contains(".git/") {
         return false;
@@ -272,6 +279,7 @@ fn is_native_git_denied_on_dot_git(command: &str, stderr: &str) -> bool {
 /// be in a printed path. The shell and Python tracebacks quote and punctuate paths
 /// (`'…/.git/index.lock':`, `s.connect("/tmp/x")`), so quotes, brackets, commas and the
 /// colon all terminate a token.
+#[cfg(target_os = "macos")]
 fn absolute_tokens(text: &str) -> impl Iterator<Item = &str> {
     let bytes = text.as_bytes();
     let mut tokens = Vec::new();
@@ -315,6 +323,7 @@ fn absolute_tokens(text: &str) -> impl Iterator<Item = &str> {
 /// Relative-path tokens in a command: whitespace- and operator-separated words that name
 /// a path below or beside the working directory (`../outside/x`, `sub/file`). A bare
 /// `..` (a directory change, not a write target) does not count.
+#[cfg(target_os = "macos")]
 fn relative_tokens(command: &str) -> impl Iterator<Item = &str> {
     command
         .split(|c: char| {
@@ -348,6 +357,7 @@ fn relative_tokens(command: &str) -> impl Iterator<Item = &str> {
 /// The lexical form of `path` with `.` removed and `..` applied, without touching the
 /// filesystem (the target may not exist, and resolving symlinks would answer a different
 /// question: where the shell *spelled* the target, not where it leads).
+#[cfg(target_os = "macos")]
 fn lexical_normalize(path: &Path) -> PathBuf {
     use std::path::Component::{CurDir, Normal, ParentDir, Prefix, RootDir};
     let mut out = PathBuf::new();
