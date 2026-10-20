@@ -199,12 +199,13 @@ impl PermissionHooks {
         // approver call (a `std` read guard is not `Send`, and the hook's future is). A
         // `/access` swap between this read and the approver is not visible to this call,
         // which is exactly the "next call takes effect" rule.
-        let (evaluated, workspace, preset, rules) = {
+        let (evaluated, workspace, preset, sandboxed, rules) = {
             let profile = self.profile.read().unwrap_or_else(|e| e.into_inner());
             (
                 evaluate(profile.rules(), &profile.workspace, call),
                 profile.workspace.clone(),
                 profile.preset,
+                profile.sandboxed,
                 profile.rules().to_vec(),
             )
         };
@@ -227,18 +228,63 @@ impl PermissionHooks {
             );
             return Ok(ToolDecision::Deny { reason });
         }
+        // Slice 1 of `sandbox-auto-allow-shell`: a shell call that asks to leave the
+        // sandbox (`outside_sandbox: true` plus a required reason) always goes through
+        // `ask` — no blanket `allow`, no compound-segment allow and no read-only-table
+        // hit may answer it. A rule denial above still wins first, and a missing reason
+        // is a denial, not a question (fail closed: the approver must see why). The
+        // tool runs that one call unsandboxed only after this `ask` is approved; the
+        // layer itself never re-runs anything outside the sandbox.
+        let leaving_sandbox = outside_sandbox(call);
+        if let Some(reason) = &leaving_sandbox {
+            if reason.trim().is_empty() {
+                let deny = "`outside_sandbox: true` needs an `outside_sandbox_reason`: \
+                     leaving the sandbox without saying why is denied"
+                    .to_string();
+                self.record(
+                    &request_id,
+                    &call_id,
+                    ResolvedDecision::Deny,
+                    AuditApprover::Policy,
+                    Some(deny.clone()),
+                );
+                return Ok(ToolDecision::Deny { reason: deny });
+            }
+            evaluated = Evaluated {
+                action: Action::Ask,
+                reason: Some(format!("outside the sandbox: {reason}")),
+            };
+            action = self.apply_policy(evaluated.action);
+        }
         // A compound shell command (`a && b`, `cd x && cargo test`) is allowed only
         // when **every** segment is allowed — by a user `allow` rule or by the
         // read-only table. A rule denial already won above and still runs first.
         // `split_compound` is `None` for anything outside the four separators
         // (`;` aside) or with a non-simple segment, which falls through to the
-        // ordinary path below (`ask`). A simple command is one segment, so it
-        // takes the same path, plus the wrapper and `cd` restrictions.
+        // ordinary path below (`ask`). A simple command is one segment, so it takes
+        // the ordinary path too — except `cd` and runs-its-arguments programs,
+        // which always need the segment check (a `cd` target must resolve inside
+        // the workspace; no prefix rule or table entry may see what a wrapper
+        // runs). In a sandboxed `workspace` session the tier's blanket `allow`
+        // answers an ordinary single command there, while a compound still needs
+        // every segment covered.
         if call.name == "shell"
             && let Some(command) = call.arguments.get("command").and_then(|v| v.as_str())
             && let Some((segments, separators)) = shell::split_compound(command)
+            && (segments.len() > 1 || needs_single_segment_check(preset, command, &segments))
         {
-            match self.decide_segments(&rules, &workspace, preset, &segments, &separators) {
+            match self.decide_segments(
+                &rules,
+                &workspace,
+                preset,
+                sandboxed,
+                &segments,
+                &separators,
+            ) {
+                // Leaving the sandbox stays an `ask` for the whole command (set above):
+                // no segment allow or rewrite may answer it.
+                SegmentsOutcome::Allow { .. } | SegmentsOutcome::Rewrite { .. }
+                    if leaving_sandbox.is_some() => {}
                 SegmentsOutcome::Allow { reason } => {
                     self.record(
                         &request_id,
@@ -355,9 +401,12 @@ impl PermissionHooks {
             return Ok(ToolDecision::Allow);
         }
 
-        // `ask`: a human-answered grant can satisfy it, but only for a human turn.
+        // `ask`: a human-answered grant can satisfy it, but only for a human turn. A
+        // grant for a sandboxed command never covers leaving the sandbox (and vice
+        // versa): the key carries the kind, so borrowing a narrower grant to leave is
+        // impossible.
         let human = self.turn_source() == Some(InputSource::User);
-        let key = (call.name.clone(), resource_key(&resource, &workspace));
+        let key = grant_key(call, &resource, &workspace, leaving_sandbox.is_some());
         let granted = human && self.grants.lock().unwrap().contains(&key);
         if granted {
             self.record(
@@ -479,6 +528,7 @@ impl PermissionHooks {
         rules: &[crate::rule::Rule],
         workspace: &std::path::Path,
         preset: Preset,
+        sandboxed: bool,
         segments: &[String],
         separators: &[String],
     ) -> SegmentsOutcome {
@@ -546,14 +596,25 @@ impl PermissionHooks {
             }
             // A user `allow` rule covers the segment. Its reason is kept for the
             // `always` review below, the way a single allowed command shows the
-            // rule's reason when it is turned into a question.
-            if judged.action == Action::Allow {
+            // rule's reason when it is turned into a question. In a sandboxed
+            // `workspace` session the tier's blanket `allow` is deliberately
+            // reason-less, so a segment matched only by it is **not** covered here:
+            // it falls through to the read-only table below, and then to `ask`.
+            // Only a named user `allow` rule covers a segment — a compound still
+            // asks (slice 2's prefix grants are a later item). `full` keeps judging
+            // every segment like any other.
+            if judged.action == Action::Allow
+                && !(preset == Preset::WorkspaceWrite && sandboxed && judged.reason.is_none())
+            {
                 any_rule_allow = true;
                 if rule_reason.is_none() {
                     rule_reason = judged.reason.clone();
                 }
                 continue;
             }
+            // A sandboxed `workspace` segment matched only by the blanket rule falls
+            // through to the named-`ask`/table path below with no reason: only the
+            // table may still allow it, otherwise the whole command asks.
             // A named `ask` rule is an explicit user rule and outranks the table;
             // the tier's blanket `ask` and the no-match default carry no reason,
             // so they still fall through to it. The named reason reaches the
@@ -703,6 +764,63 @@ fn rank(source: Option<InputSource>) -> u8 {
         Some(InputSource::User) => 2,
         Some(_) => 1,
     }
+}
+
+/// A shell call that asks to leave the sandbox (slice 1 of
+/// `sandbox-auto-allow-shell`): `outside_sandbox: true` plus a required
+/// `outside_sandbox_reason`. `None` for an ordinary sandboxed call (or any other tool);
+/// `Some(reason)` — possibly empty, which the caller denies — when the flag is set.
+fn outside_sandbox(call: &ToolCall) -> Option<String> {
+    if call.name != "shell" {
+        return None;
+    }
+    if call
+        .arguments
+        .get("outside_sandbox")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    Some(
+        call.arguments
+            .get("outside_sandbox_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+    )
+}
+
+/// The grant key for one call: [`resource_key`], plus the sandbox kind, so a grant for a
+/// sandboxed command never covers leaving the sandbox with the same command line (and
+/// vice versa). `AllowForSession` for an `outside_sandbox` call therefore covers only
+/// later `outside_sandbox` calls with the same command.
+fn grant_key(
+    call: &ToolCall,
+    resource: &Resource,
+    workspace: &std::path::Path,
+    leaving_sandbox: bool,
+) -> GrantKey {
+    let resource = resource_key(resource, workspace);
+    if leaving_sandbox {
+        (
+            call.name.clone(),
+            format!("{resource}\0outside the sandbox"),
+        )
+    } else {
+        (call.name.clone(), resource)
+    }
+}
+/// Whether a single-segment command still needs the segment check: `cd` (its target
+/// must resolve inside the workspace for the allow to hold) and runs-its-arguments
+/// programs (no prefix rule or table entry may see what they will run). Multi-segment
+/// commands always need it; `full` judges every segment like any other, so it never
+/// does. Without this, a lone `cd ..` covered by a `cd` allow rule would be answered
+/// from the ordinary path and never contained.
+fn needs_single_segment_check(preset: Preset, command: &str, segments: &[String]) -> bool {
+    preset != Preset::FullAccess
+        && segments.len() == 1
+        && (shell::cd_target(command).is_some() || shell::starts_with_wrapper(&segments[0]))
 }
 
 /// The key a session grant is stored under. A path is keyed by its **resolved** form, so a

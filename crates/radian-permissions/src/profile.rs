@@ -84,16 +84,28 @@ pub enum ProfileError {
 }
 
 /// One permission profile: a preset's rule set plus its approval policy and sandbox mode.
+///
+/// `sandboxed` is the sandbox's effective state for the session (slice 1 of
+/// `sandbox-auto-allow-shell`): `true` when the session's `workspace` shell calls run
+/// inside a sandbox (a local backend whose probe succeeded, or ADR 0016's `inherited`),
+/// in which case the tier's blanket shell rule is `allow`. It is static for the session —
+/// the host builds the profile after the sandbox, so the rule never depends on a live
+/// probe — and `false` keeps the fail-closed `ask` (a failed probe never becomes an
+/// allow). Approval still cannot widen the sandbox (ADR 0012 P1): this only stops asking
+/// for what the sandbox already confines.
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub preset: Preset,
     pub sandbox: SandboxMode,
     pub approval: ApprovalPolicy,
     pub workspace: PathBuf,
+    pub sandboxed: bool,
     rules: Vec<Rule>,
 }
 
 impl Profile {
+    /// The `workspace` tier without a sandbox (or before the probe): shell asks.
+    /// A failed probe never becomes an allow — fail closed.
     pub fn workspace_write(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
         Self::build(Preset::WorkspaceWrite, workspace, |ws| {
             let mut rules = read_only();
@@ -110,6 +122,36 @@ impl Profile {
             ]);
             rules
         })
+    }
+
+    /// The `workspace` tier with a sandbox in force: shell inside the sandbox is `allow`
+    /// (a `deny` rule still wins first, and MCP stays `ask`). The caller must have built
+    /// the sandbox already — a local backend whose probe succeeded, or `inherited` — and
+    /// passes no proof here: the host's build order (sandbox first, then this) is what
+    /// makes the rule mean "inside the sandbox". Using this without one is the mutation
+    /// `workspace_sandboxed_shell_is_allowed_only_with_a_sandbox` catches.
+    pub fn workspace_write_sandboxed(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
+        let mut profile = Self::build(Preset::WorkspaceWrite, workspace, |ws| {
+            let mut rules = read_only();
+            rules.extend(memory_rules());
+            rules.extend(always_allowed());
+            rules.extend(write_under(ws));
+            rules.extend([
+                // Inside the sandbox: the OS boundary, not the prompt, is what confines
+                // the command. Deliberately reason-less, so a compound segment matched
+                // only by this rule still falls through to the read-only table and then
+                // to `ask` (only a named user `allow` rule covers a segment).
+                Rule::new(
+                    ToolMatcher::Name("shell".into()),
+                    ResourceMatcher::Any,
+                    Action::Allow,
+                ),
+                Rule::new(ToolMatcher::Mcp, ResourceMatcher::Any, Action::Ask),
+            ]);
+            rules
+        })?;
+        profile.sandboxed = true;
+        Ok(profile)
     }
 
     pub fn full_access(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
@@ -145,12 +187,28 @@ impl Profile {
             sandbox: preset.sandbox_mode(),
             approval,
             workspace,
+            sandboxed: false,
             rules,
         })
     }
 
     pub fn rules(&self) -> &[Rule] {
         &self.rules
+    }
+
+    /// Marks the profile as sandboxed after the fact (hosts that add their own rules
+    /// with [`Profile::custom`] on top of a sandboxed session). Only ever narrows the
+    /// question, never the boundary: approval still cannot widen the sandbox.
+    pub fn with_sandboxed(mut self, sandboxed: bool) -> Self {
+        self.sandboxed = sandboxed;
+        self
+    }
+
+    /// Whether this session's `workspace` shell calls run inside a sandbox (slice 1 of
+    /// `sandbox-auto-allow-shell`): the compound-segment check reads it, so a segment
+    /// matched only by the tier's blanket `allow` still falls through to `ask`.
+    pub fn is_sandboxed(&self) -> bool {
+        self.sandboxed
     }
 
     /// Allows these tool names in **every** tier, with the normal rule priority: tools such as
@@ -207,6 +265,7 @@ impl Profile {
             sandbox: preset.sandbox_mode(),
             approval: ApprovalPolicy::OnAsk,
             workspace,
+            sandboxed: false,
             rules,
         })
     }

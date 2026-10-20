@@ -19,6 +19,7 @@
 
 #[cfg(target_os = "linux")]
 mod bwrap;
+mod deny;
 mod error;
 mod inherited;
 mod policy;
@@ -35,6 +36,7 @@ use std::ffi::{OsStr, OsString};
 use std::ops::{Deref, DerefMut};
 use std::process::Command;
 
+pub use deny::{DenialCategory, MARKER_PREFIX, classify_denial};
 pub use error::{ProbeReport, SandboxError};
 pub use policy::{DEFAULT_ALLOW_ENV, DEFAULT_DENY_READ, GitAccess, SandboxMode, SandboxPolicy};
 pub use slot::SandboxSlot;
