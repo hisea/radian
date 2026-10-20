@@ -60,7 +60,7 @@
 | `shell-auto-background-60s.md` | idea | 0037、0036、0011 | 转后台阈值 120 s → 60 s，提示词要求独立调用放同一条回复 |
 | `prompt-deliver-first.md` | idea | 0036 | 提示词：先交付能跑的版本再迭代、用参照物差分；cobol smoke 是现成复现 |
 | `runtime-resource-limits.md` | idea | 0036 | `<runtime>` 写实际可用 CPU/内存（cgroup），避免 `make -j16` 跑在 2 核容器 |
-| `bundled-user-docs.md` | idea | 0039 §4、0020、0036、0013 | 用户文档（`docs/user/`）编进二进制、落到 `~/.radian/docs/`、成为第三个只读根，`<runtime>` 给路径与索引，用户直接问 radian 自己的功能（照 pi；语言、目录名、版本戳待定） |
+| `bundled-user-docs.md` | idea | 0039 §4、0036、0013 | 用户文档（`docs/user/`）编进二进制，`read`/`list` 认 `radian://docs/<page>.md` 虚拟只读根、不落盘，`<runtime>` 给索引，用户直接问 radian 自己的功能（照 pi 的索引；owner 否决落盘；语言、`radian docs` 子命令待定） |
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
 | `acp-server.md` | idea（暂定不做） | 新 ADR；0032、0009、0024、0011、0010、0043 | ACP 服务端：先做外部适配器验证需求；审批→`request_permission`、inbox→`session/prompt`、live→`session/update`；在 exec jsonl 与控制口客户端之后 |
 
