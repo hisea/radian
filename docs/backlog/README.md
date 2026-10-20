@@ -32,7 +32,6 @@
 
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
-| `sandbox-auto-allow-shell.md` | decided | 0012、0016、0043 | 片 0 Linux seccomp 堵 Unix socket；片 1 workspace 沙箱内 shell `allow`、越界显式请求再 `ask`；片 2 会话授权按前缀 |
 | `file-tools-spawn-blocking.md` | decided（`grep`/`glob` 已落地；剩 `read`） | 无 | 提示词一句 → 基准（串 3.1×→并 ~1×）→ `spawn_blocking`，`grep`/`glob` 已并行，`read` 待做 |
 | `remove-git-diff.md` | decided（`shell-readonly-allow` 之后） | 0043、0039、0028、0012 | 删 `git_diff`（模型 12:1 走 shell），留一个版本的别名；shell 里的 git 要不要注入加固配置待决 |
 | `exec-waits-for-jobs.md` | idea | 0037、0044、0032 | `radian exec -p` 一轮结束就退出，后台 job 随之被杀（夜间 LXC worker 的 Verify 因此中断）；候选：等 job 并按 0037 唤醒、`-p` 禁后台、只改提示 |
