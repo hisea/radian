@@ -4495,6 +4495,51 @@ async fn both_mcp_config_forms_are_refused_before_any_session() {
     assert_session_dir_empty(&session_dir);
 }
 
+/// `--no-config-mcp` (the `explore` subagent child's flag) ignores the config file's
+/// `[mcp]`: the fixture server never starts, so the model is told there is no such
+/// tool. The same config without the flag starts the server (the control, so the test
+/// cannot pass for the wrong reason: a broken fixture path would fail the control, not
+/// silently pass the flag case).
+#[tokio::test]
+async fn no_config_mcp_ignores_the_config_mcp_section() {
+    for (name, no_config_mcp) in [("flag", true), ("control", false)] {
+        let dir = scratch(&format!("no-config-mcp-{name}"));
+        let log = dir.join("fixture.log");
+        let config = mcp_user_config(&dir, "servers", &log);
+        let server = MockServer::start(echo_then("done")).await;
+        let mut args = vec![
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "-p",
+            "go",
+            "--yes",
+        ];
+        if no_config_mcp {
+            args.push("--no-config-mcp");
+        }
+
+        let (code, _, stderr) = feed_and_wait(spawn_radian(&args, &[]), "").await;
+
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let started = !std::fs::read_to_string(&log).unwrap_or_default().is_empty();
+        if no_config_mcp {
+            assert!(!started, "{name}: the config server must never start");
+            assert_ne!(
+                tool_result_content(&server, 1),
+                r#"{"hello":"mcp"}"#,
+                "{name}: no MCP tool may be offered"
+            );
+        } else {
+            assert!(started, "{name}: the control must start the config server");
+            assert_eq!(tool_result_content(&server, 1), r#"{"hello":"mcp"}"#);
+        }
+    }
+}
+
 // ---------- provider selection: anthropic (Phase 7 / anthost) ----------
 
 /// One Anthropic text reply: the minimal end_turn event stream (wire notes §4).
