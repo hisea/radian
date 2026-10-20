@@ -18,7 +18,7 @@
 - `subagent` 子会话继承 `full` 就等于不限（0043 1a 不宽于父，仍成立）。
 - 启动行与 footer 改成明说：`full · no sandbox · no prompts`；`/access` 切到 `full` 的确认面板（0038 决定 1）文案加一句"full 不开沙箱也不弹审批"。
 - 文档：`crates/radian-permissions/README.md` 删"full-access is not run anything silently"；`docs/sandbox.md` 与 README 加一段像 pi `docs/security.md` 的声明：`full` 信任你的环境，想要边界就用 `workspace`、容器或专用 OS 用户。
-- 顺带搁置的事项：7-permissions ③（复合命令按段 allow）与 ⑥（内建只读命令），`full` 不问之后它们只对 `approval = always` 的用户有用，不单独做；"`full` 档 `.git/hooks` 写要问"的提议也不做（`workspace` 档的同类问题见 `workspace-git-exec-entries-file-tools.md`）。
+- 相关事项的归属：7-permissions ③（`shell-compound-allow.md`）与 ⑥（`shell-readonly-allow.md`）照做，它们在 `full` 下被整体 allow 覆盖，实际作用在 `workspace` 档与 `approval = always`；"`full` 档 `.git/hooks` 写要问"的提议不做（`workspace` 档的同类问题见 `workspace-git-exec-entries-file-tools.md`）。
 
 ## 待 owner 确认的三处细节
 
