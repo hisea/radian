@@ -537,7 +537,7 @@ fn runtime_event_threads_the_optional_policy_name() {
 }
 
 /// ADR 0038 slice 2: `/access` swaps the profile in place. A `write` under the workspace is
-/// allowed in `workspace`, denied in `safe`, and allowed again when swapped back — from the
+/// allowed, denied through a deny-only gate, and allowed again when swapped back — from the
 /// very next call, with no new hooks instance.
 #[tokio::test]
 async fn switching_the_profile_changes_the_next_decision() {
@@ -557,7 +557,11 @@ async fn switching_the_profile_changes_the_next_decision() {
         ToolDecision::Allow
     ));
 
-    hooks.set_profile(Profile::safe(workspace).unwrap());
+    hooks.set_profile(
+        Profile::workspace_write(workspace)
+            .unwrap()
+            .with_denied_tools(["write"]),
+    );
     assert!(matches!(
         decide(&hooks, &cx, &write).await.unwrap(),
         ToolDecision::Deny { .. }

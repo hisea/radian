@@ -16,13 +16,11 @@ fn linux_escape_matrix() {
     }
     let matrix = radian_sandbox::harness::run_matrix().expect("the bwrap backend must probe");
     eprintln!("{}", matrix.render_text());
-    // The two Unix-socket denial cases describe the accepted Linux gap (
-    // decision 4): bwrap reaches pathname sockets through the shared root in both tiers, so
-    // they report KNOWN-LIMIT — neither PASS nor FAIL — while the matrix as a whole passes.
+    // The Unix-socket denial case describes the accepted Linux gap (
+    // decision 4): bwrap reaches pathname sockets through the shared root, so
+    // it reports KNOWN-LIMIT — neither PASS nor FAIL — while the matrix as a whole passes.
     for case in &matrix.cases {
-        if case.group == "unix_socket"
-            && (case.name == "workspace_denied" || case.name == "safe_denied")
-        {
+        if case.group == "unix_socket" && case.name == "workspace_denied" {
             assert_eq!(
                 case.verdict(&matrix.backend),
                 radian_sandbox::harness::Verdict::KnownLimit,

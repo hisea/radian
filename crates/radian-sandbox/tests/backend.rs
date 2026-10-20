@@ -123,13 +123,13 @@ fn full_access_is_transparent_and_unprobed() {
         probes: AtomicUsize::new(0),
     }));
     // Enforced modes fail...
-    assert!(Sandbox::from_backend(backend, SandboxMode::Safe, dir.path()).is_err());
+    assert!(Sandbox::from_backend(backend, SandboxMode::WorkspaceWrite, dir.path()).is_err());
     // ... FullAccess does not even need the backend's probe.
     let sandbox = Sandbox::from_backend(backend, SandboxMode::FullAccess, dir.path()).unwrap();
     assert_eq!(
         backend.probes.load(Ordering::SeqCst),
         1,
-        "only the Safe call probed"
+        "only the WorkspaceWrite call probed"
     );
     let cmd = sandbox.command("echo", ["hi"]).unwrap();
     assert_eq!(cmd.get_program(), OsStr::new("echo"));

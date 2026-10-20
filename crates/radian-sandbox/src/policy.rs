@@ -12,8 +12,6 @@ use crate::error::SandboxError;
 /// into `FullAccess`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxMode {
-    /// Read-only: the workspace is not writable, and no network unless requested.
-    Safe,
     /// The workspace is writable; repository metadata and sensitive directories are not. The
     /// network is **on** (ADR 0016): outbound and local-loopback connect/bind/listen are
     /// allowed, because an agent that cannot run the project's own tests is not useful.
@@ -25,7 +23,6 @@ pub enum SandboxMode {
 impl SandboxMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Safe => "safe",
             Self::WorkspaceWrite => "workspace",
             Self::FullAccess => "full",
         }
@@ -33,7 +30,7 @@ impl SandboxMode {
 
     /// Whether this mode requires an enforcing backend.
     pub fn is_enforced(self) -> bool {
-        matches!(self, Self::Safe | Self::WorkspaceWrite)
+        matches!(self, Self::WorkspaceWrite)
     }
 }
 
@@ -63,8 +60,8 @@ pub struct SandboxPolicy {
     pub mode: SandboxMode,
     /// Canonical workspace root. The only writable place in `workspace-write`.
     pub workspace: PathBuf,
-    /// `true` allows network; the default follows the mode: **off for `safe`, on for
-    /// `workspace`** (ADR 0016). A caller can still override it with [`SandboxPolicy::network`].
+    /// `true` allows network; the default follows the mode: **on for `workspace`**
+    /// (ADR 0016). A caller can still override it with [`SandboxPolicy::network`].
     pub network: bool,
     /// The git metadata discovered under the workspace (`.git` directories, a worktree pointer
     /// file and its shared common dir). [`SandboxPolicy::git_access`] decides whether each entry
@@ -133,11 +130,6 @@ impl SandboxPolicy {
         Self::new(SandboxMode::WorkspaceWrite, workspace)
     }
 
-    /// A `safe` (read-only, network off) policy.
-    pub fn safe(workspace: impl AsRef<Path>) -> Result<Self, SandboxError> {
-        Self::new(SandboxMode::Safe, workspace)
-    }
-
     pub fn new(mode: SandboxMode, workspace: impl AsRef<Path>) -> Result<Self, SandboxError> {
         let workspace = canonical_dir(workspace.as_ref())?;
         let read_only = discover_git_metadata(&workspace);
@@ -145,7 +137,7 @@ impl SandboxPolicy {
         Ok(Self {
             mode,
             workspace,
-            // ADR 0016: the workspace tier opens the network; safe keeps it off.
+            // ADR 0016: the workspace tier opens the network.
             network: matches!(mode, SandboxMode::WorkspaceWrite),
             read_only,
             git_access: GitAccess::default(),
