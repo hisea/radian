@@ -12,8 +12,12 @@
 //! 1. The command is a simple command ([`crate::shell`]: no metacharacters, so `~`,
 //!    quotes, `$`, globs and `;` already fall through to `ask`).
 //! 2. Every non-option token resolves inside the workspace ([`crate::rule::resolve`]:
-//!    no `..` escape, no leading `/`, no symlink out). A token that is not a path at
-//!    all (a pattern, a count, a revision) still has to satisfy this; resolving it
+//!    no `..` escape, no leading `/`, no symlink out). For one segment of a compound
+//!    command the resolution starts at the segment's effective directory (the
+//!    workspace, or a `cd` target the earlier segments moved to) and must still land
+//!    inside the workspace — otherwise `cd sub && cat link/passwd` with
+//!    `sub/link` pointing out would judge `link/passwd` from the workspace root. A
+//!    token that is not a path at all (a pattern, a count, a revision) still has to satisfy this; resolving it
 //!    just joins it to the workspace, so plain words pass and only real escapes fail.
 //!    Over-asking is the intended failure mode.
 //! 3. No executable, long-lived or file-writing option, and no unknown option. Each
@@ -54,27 +58,38 @@ pub fn match_command(workspace: &Path, call: &ToolCall) -> Option<ReadOnlyHit> {
         return None;
     }
     let command = call.arguments.get("command")?.as_str()?;
+    match_str(workspace, workspace, command)
+}
+
+/// The table's verdict for one compound-command segment: the segment's paths resolve
+/// against `effective` (the workspace, or a `cd` target the earlier segments moved to)
+/// and must still land inside `workspace`. A `cd` segment itself is never a table hit.
+pub fn match_segment(workspace: &Path, effective: &Path, segment: &str) -> Option<ReadOnlyHit> {
+    match_str(workspace, effective, segment)
+}
+
+fn match_str(workspace: &Path, effective: &Path, command: &str) -> Option<ReadOnlyHit> {
     if !shell::is_simple(command) {
         return None;
     }
     let tokens = shell::tokens(command);
     let program = tokens.first()?.as_str();
     match program {
-        "git" => match_git(workspace, &tokens),
-        "cargo" => match_cargo(workspace, &tokens),
-        "ls" => match_plain(workspace, &tokens, &LS),
-        "pwd" => match_plain(workspace, &tokens, &PWD),
-        "wc" => match_plain(workspace, &tokens, &WC),
-        "cat" => match_plain(workspace, &tokens, &CAT),
-        "head" => match_plain(workspace, &tokens, &HEAD),
-        "tail" => match_plain(workspace, &tokens, &TAIL),
-        "stat" => match_plain(workspace, &tokens, &STAT),
-        "file" => match_plain(workspace, &tokens, &FILE),
-        "du" => match_plain(workspace, &tokens, &DU),
-        "tree" => match_plain(workspace, &tokens, &TREE),
-        "rg" => match_plain(workspace, &tokens, &RG),
-        "grep" => match_plain(workspace, &tokens, &GREP),
-        "find" => match_plain(workspace, &tokens, &FIND),
+        "git" => match_git(workspace, effective, &tokens),
+        "cargo" => match_cargo(workspace, effective, &tokens),
+        "ls" => match_plain(workspace, effective, &tokens, &LS),
+        "pwd" => match_plain(workspace, effective, &tokens, &PWD),
+        "wc" => match_plain(workspace, effective, &tokens, &WC),
+        "cat" => match_plain(workspace, effective, &tokens, &CAT),
+        "head" => match_plain(workspace, effective, &tokens, &HEAD),
+        "tail" => match_plain(workspace, effective, &tokens, &TAIL),
+        "stat" => match_plain(workspace, effective, &tokens, &STAT),
+        "file" => match_plain(workspace, effective, &tokens, &FILE),
+        "du" => match_plain(workspace, effective, &tokens, &DU),
+        "tree" => match_plain(workspace, effective, &tokens, &TREE),
+        "rg" => match_plain(workspace, effective, &tokens, &RG),
+        "grep" => match_plain(workspace, effective, &tokens, &GREP),
+        "find" => match_plain(workspace, effective, &tokens, &FIND),
         _ => None,
     }
 }
@@ -363,9 +378,14 @@ const FIND: Spec = Spec {
 
 /// Generic program: every token after the program name is either a safe option or a
 /// path that resolves inside the workspace.
-fn match_plain(workspace: &Path, tokens: &[String], spec: &Spec) -> Option<ReadOnlyHit> {
+fn match_plain(
+    workspace: &Path,
+    effective: &Path,
+    tokens: &[String],
+    spec: &Spec,
+) -> Option<ReadOnlyHit> {
     for token in &tokens[1..] {
-        if !token_ok(workspace, token, spec) {
+        if !token_ok(workspace, effective, token, spec) {
             return None;
         }
     }
@@ -376,7 +396,7 @@ fn match_plain(workspace: &Path, tokens: &[String], spec: &Spec) -> Option<ReadO
 /// second token; the rest is the generic shape. Not installed on the dev box; from
 /// the documented options. Neither subcommand builds or writes: `--manifest-path`
 /// and friends are plain paths through the normal check.
-fn match_cargo(workspace: &Path, tokens: &[String]) -> Option<ReadOnlyHit> {
+fn match_cargo(workspace: &Path, effective: &Path, tokens: &[String]) -> Option<ReadOnlyHit> {
     let subcommand = tokens.get(1)?.as_str();
     let spec = match subcommand {
         "metadata" => &CARGO_METADATA,
@@ -384,7 +404,7 @@ fn match_cargo(workspace: &Path, tokens: &[String]) -> Option<ReadOnlyHit> {
         _ => return None,
     };
     for token in &tokens[2..] {
-        if !token_ok(workspace, token, spec) {
+        if !token_ok(workspace, effective, token, spec) {
             return None;
         }
     }
@@ -444,7 +464,7 @@ const CARGO_TREE: Spec = Spec {
 /// `core.sshCommand`), `--exec-path`/`--git-dir`/`--work-tree` re-root the
 /// repository, and global `-p`/`--paginate` executes the pager; all fall through
 /// to `ask`.
-fn match_git(workspace: &Path, tokens: &[String]) -> Option<ReadOnlyHit> {
+fn match_git(workspace: &Path, effective: &Path, tokens: &[String]) -> Option<ReadOnlyHit> {
     let mut index = 1;
     while index < tokens.len() && tokens[index].starts_with('-') {
         if !global_ok(&tokens[index]) {
@@ -456,11 +476,11 @@ fn match_git(workspace: &Path, tokens: &[String]) -> Option<ReadOnlyHit> {
     let rest = &tokens[index + 1..];
     match subcommand {
         "status" => {
-            each_token(workspace, rest, &GIT_STATUS)?;
+            each_token(workspace, effective, rest, &GIT_STATUS)?;
             Some(ReadOnlyHit::Allow)
         }
         "rev-parse" => {
-            each_token(workspace, rest, &GIT_REV_PARSE)?;
+            each_token(workspace, effective, rest, &GIT_REV_PARSE)?;
             Some(ReadOnlyHit::Allow)
         }
         "branch" => {
@@ -485,7 +505,7 @@ fn match_git(workspace: &Path, tokens: &[String]) -> Option<ReadOnlyHit> {
             }
         }
         "diff" | "log" | "show" => {
-            each_token(workspace, rest, &GIT_DIFFISH)?;
+            each_token(workspace, effective, rest, &GIT_DIFFISH)?;
             Some(ReadOnlyHit::Rewrite {
                 command: rewrite_git(&tokens[..=index], rest),
             })
@@ -611,9 +631,9 @@ fn global_ok(token: &str) -> bool {
     token == "--no-pager"
 }
 
-fn each_token(workspace: &Path, tokens: &[String], spec: &Spec) -> Option<()> {
+fn each_token(workspace: &Path, effective: &Path, tokens: &[String], spec: &Spec) -> Option<()> {
     for token in tokens {
-        if !token_ok(workspace, token, spec) {
+        if !token_ok(workspace, effective, token, spec) {
             return None;
         }
     }
@@ -622,7 +642,7 @@ fn each_token(workspace: &Path, tokens: &[String], spec: &Spec) -> Option<()> {
 
 /// One token is either a safe option (a `--word=value` value must itself resolve
 /// inside the workspace) or a path that does.
-fn token_ok(workspace: &Path, token: &str, spec: &Spec) -> bool {
+fn token_ok(workspace: &Path, effective: &Path, token: &str, spec: &Spec) -> bool {
     if token == "-" {
         // Explicit stdin: not an option, and always inside.
         return true;
@@ -640,7 +660,7 @@ fn token_ok(workspace: &Path, token: &str, spec: &Spec) -> bool {
         }
         if spec.longs.contains(&name) {
             return match value {
-                Some(value) => path_inside(workspace, value),
+                Some(value) => path_inside(workspace, effective, value),
                 None => true,
             };
         }
@@ -661,7 +681,7 @@ fn token_ok(workspace: &Path, token: &str, spec: &Spec) -> bool {
             && word.chars().all(|c| spec.shorts.contains(c))
             && !word.chars().any(|c| spec.forbid_shorts.contains(c));
     }
-    path_inside(workspace, token)
+    path_inside(workspace, effective, token)
 }
 
 /// The flags go right after the subcommand; the rest keeps its order.
@@ -673,8 +693,8 @@ fn rewrite_git(head: &[String], rest: &[String]) -> String {
     out.join(" ")
 }
 
-fn path_inside(workspace: &Path, raw: &str) -> bool {
-    rule::resolve(workspace, raw).starts_with(workspace)
+fn path_inside(workspace: &Path, effective: &Path, raw: &str) -> bool {
+    rule::resolve(effective, raw).starts_with(workspace)
 }
 
 #[cfg(test)]

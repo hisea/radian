@@ -59,6 +59,28 @@ This is a deliberate conservative approximation, **not a shell parser**.
   command is split on separators and the contents of quotes/backticks/subshells, and any
   segment whose token matches (or whose file name matches, so `/bin/rm` counts) denies the
   whole command.
+- A compound command (`cargo fmt && cargo test`, `cd sub && cargo test`) is allowed
+  only when **every** segment is allowed — by a user `allow` rule or by the read-only
+  table below. Any segment without one falls through to `ask`. The command is split
+  only at unquoted `&&`, `||`, `;` and `|` (`shell::segments`); any other metacharacter
+  or a non-simple segment leaves the whole command at `ask`, exactly as before.
+- A segment that starts with a runs-its-arguments program (`xargs`, `env`, `sudo`,
+  `nohup`, `time`, `timeout`, `watch`, `sh`, `bash`, `zsh`, `eval`, `exec`, `command`,
+  `builtin`, `nice`, `stdbuf` — `shell::WRAPPER_PROGRAMS`) is never allowed by a
+  prefix rule or by the table: the rule only sees the wrapper's own tokens, never what
+  it will run. `ls | xargs rm` therefore asks. `deny` matching is unaffected and still
+  runs first.
+- `cd <path>` as a segment is allowed only in the `workspace` tier, only with a user
+  `allow` rule, and only when the target resolves inside the workspace (no `..` escape,
+  no symlink out) and is an existing directory. In the `full` tier a `cd` segment
+  always asks (git runs the target directory's hooks, and there is no sandbox wall
+  around that). Paths after a `cd` resolve from the `cd` target, not from the workspace
+  root: the effective directory is carried through the segments, so `cd sub && cat
+  link/passwd` with `sub/link` pointing out asks.
+- When a table segment of a compound command would be rewritten (`git diff`/`git
+  log`/`git show`), the whole command is rebuilt with that segment rewritten and every
+  separator as it was — one `Rewrite` for the whole call (`cargo fmt && git log -p`
+  keeps `cargo fmt` byte-for-byte and gains the flags on the `git log` segment).
 
 **What this cannot see, and does not claim to:** shell aliases, `eval`, `.`/`source`, a
 called program that starts its own shell, and a nested command inside quotes (the outer
@@ -97,7 +119,10 @@ A hit needs all three at once:
 1. The command is simple (see above): `~`, quotes, `$`, globs and `;` already fall
    through to `ask`.
 2. Every non-option token resolves inside the workspace (the same `resolve` as path
-   rules: no `..` escape, no leading `/`, no symlink out). A token that is not a path
+   rules: no `..` escape, no leading `/`, no symlink out). For one segment of a
+   compound command the resolution starts at that segment's effective directory (the
+   workspace, or a `cd` target the earlier segments moved to) and must still land
+   inside the workspace. A token that is not a path
    (a pattern, a count, a revision) just has to survive the same check, so plain words
    pass and only real escapes fail.
 3. No executable, long-lived or file-writing option, and no unknown option. Each program
@@ -193,6 +218,10 @@ transcript record, so it never appears in `journal_records`/`replay`.
 | 14 | paths, options and subcommand shapes outside the table still ask | `tests/readonly.rs` |
 | 15 | `git diff`/`log`/`show` rewritten with `--no-ext-diff --no-textconv`, audited as a policy rewrite | `tests/readonly.rs` |
 | 16 | `deny` and named user-`ask` outrank the table; user `allow` keeps the git rewrite | `tests/readonly.rs` |
+| 17 | compound shell allows only when every segment is allowed (`a && b` asks when `b` has no rule) | `tests/compound.rs` |
+| 18 | a wrapper segment (`ls \| xargs rm`) is never allowed by a prefix rule or the table | `tests/compound.rs` |
+| 19 | quoted separators do not split; `cd` needs the workspace tier and an inside target; later paths resolve from the `cd` target | `tests/compound.rs` |
+| 20 | a table segment in a compound command is rewritten in place, separators kept | `tests/compound.rs` |
 
 ## Not verified / limits
 
