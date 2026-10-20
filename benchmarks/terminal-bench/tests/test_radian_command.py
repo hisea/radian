@@ -17,9 +17,11 @@ from radian_command import (  # noqa: E402
     assert_binary_static,
     build_auth_json,
     build_command,
+    derive_turn_timeout_secs,
     redact_base_url,
     select_provider,
     sha256_of_file,
+    summarize_session_usage,
 )
 
 
@@ -191,6 +193,94 @@ class BuildCommandTest(unittest.TestCase):
         # The caller must never interpolate the real instruction with a secret;
         # the builder itself adds no secret material either.
         self.assertNotIn(CREDENTIAL_ENV_NAME + "=", command)
+
+
+class SummarizeUsageTest(unittest.TestCase):
+    def write_sessions(self, directory, files):
+        sessions = Path(directory) / "radian-sessions"
+        sessions.mkdir(parents=True, exist_ok=True)
+        for name, lines in files.items():
+            (sessions / name).write_text("".join(lines), encoding="utf-8")
+        return sessions
+
+    def test_sums_both_usage_events_and_converts_fees(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = self.write_sessions(tmp, {
+                "a.jsonl": [
+                    # A conversation call with a fee.
+                    '{"event": "ModelUsageRecorded", "data": {"usage": '
+                    '{"input": 1000, "output": 200, "cache_read": 800}, '
+                    '"fee": {"micros": 1500}}}\n',
+                    # A summarizer call is real money too and must be counted.
+                    '{"event": "CompactionUsageRecorded", "data": {"revision": 3, '
+                    '"model": "m", "usage": {"input": 500, "output": 100}, '
+                    '"fee": {"micros": 500}}}\n',
+                    # Anything else is ignored.
+                    '{"event": "TurnFinished", "data": {"turn_id": "t"}}\n',
+                ],
+                "b.jsonl": [
+                    '{"event": "ModelUsageRecorded", "data": {"usage": '
+                    '{"input": 300, "output": 50}}}\n',
+                ],
+            })
+            usage = summarize_session_usage(sessions)
+            self.assertEqual(usage.n_input_tokens, 1800)
+            self.assertEqual(usage.n_output_tokens, 350)
+            self.assertEqual(usage.n_cache_tokens, 800)
+            self.assertAlmostEqual(usage.cost_usd, 0.002)
+
+    def test_missing_fields_stay_none_never_zero(self):
+        # No record mentions cache_read and none carries a fee: unknown, not 0.
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = self.write_sessions(tmp, {
+                "a.jsonl": [
+                    '{"event": "ModelUsageRecorded", "data": {"usage": '
+                    '{"input": 100, "output": 10}}}\n',
+                ],
+            })
+            usage = summarize_session_usage(sessions)
+            self.assertEqual(usage.n_input_tokens, 100)
+            self.assertEqual(usage.n_output_tokens, 10)
+            self.assertIsNone(usage.n_cache_tokens)
+            self.assertIsNone(usage.cost_usd)
+
+    def test_corrupt_lines_are_skipped_not_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = self.write_sessions(tmp, {
+                "a.jsonl": [
+                    "this is not json\n",
+                    "[1, 2]\n",
+                    '{"event": "ModelUsageRecorded"}\n',
+                    '{"event": "ModelUsageRecorded", "data": {"usage": "junk"}}\n',
+                    '{"event": "ModelUsageRecorded", "data": {"usage": {"input": 7}}}\n',
+                ],
+            })
+            usage = summarize_session_usage(sessions)
+            self.assertEqual(usage.n_input_tokens, 7)
+            self.assertIsNone(usage.n_output_tokens)
+            self.assertIsNone(usage.cost_usd)
+
+    def test_missing_directory_reports_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            usage = summarize_session_usage(Path(tmp) / "no-such-dir")
+            self.assertIsNone(usage.n_input_tokens)
+            self.assertIsNone(usage.n_output_tokens)
+            self.assertIsNone(usage.n_cache_tokens)
+            self.assertIsNone(usage.cost_usd)
+
+
+class DeriveTurnTimeoutTest(unittest.TestCase):
+    def test_explicit_option_wins_over_exec_timeout(self):
+        self.assertEqual(derive_turn_timeout_secs(100, 600), 100)
+
+    def test_unset_derives_exec_timeout_minus_margin(self):
+        self.assertEqual(derive_turn_timeout_secs(None, 600), 540)
+
+    def test_derived_timeout_floors_at_sixty(self):
+        self.assertEqual(derive_turn_timeout_secs(None, 100), 60)
+
+    def test_no_deadline_means_no_flag(self):
+        self.assertIsNone(derive_turn_timeout_secs(None, None))
 
 
 class RedactBaseUrlTest(unittest.TestCase):

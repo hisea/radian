@@ -49,7 +49,8 @@ def _elf64(*, dynamic):
 class FakeEnvironment:
     """Records exec/upload calls; serves programmed results by substring match."""
 
-    def __init__(self):
+    def __init__(self, default_user=None):
+        self.default_user = default_user
         self.exec_calls = []
         self.uploads = []
         self.stubs = []
@@ -106,6 +107,16 @@ def write_ca_bundle(tmp):
     ca_bundle = Path(tmp) / "ca-certificates.crt"
     ca_bundle.write_bytes(b"fake-pem-bundle")
     return ca_bundle
+
+
+def write_sessions(logs_dir, files):
+    """Lay a fake `radian-sessions/` dir under the agent logs dir, as the
+    synced-back trial logs would after Harbor downloads them."""
+    sessions = Path(logs_dir) / "radian-sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    for name, lines in files.items():
+        (sessions / name).write_text("".join(lines), encoding="utf-8")
+    return sessions
 
 
 class InstallTest(unittest.TestCase):
@@ -200,6 +211,8 @@ class RunTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, scrub_host_key():
             agent, env, context = self.run_trial(tmp)
             asyncio.run(agent.run("Fix the failing test.", env, context))
+            # Harbor syncs the logs, then backfills while the context is empty.
+            agent.populate_context_post_run(context)
             main = env.last_exec()
             command = main["command"]
             for flag in ("--yes", "--no-trust", "--offline-catalog",
@@ -304,6 +317,100 @@ class RunTest(unittest.TestCase):
             agent, env, context = self.run_trial(tmp, extra_env={})
             with self.assertRaises(ValueError):
                 asyncio.run(agent.run("Do it.", env, context))
+
+    def test_run_leaves_the_context_empty_for_the_post_run_backfill(self):
+        # Harbor only calls populate_context_post_run while the context is
+        # empty; metadata and usage land there, not in run().
+        with tempfile.TemporaryDirectory() as tmp, scrub_host_key():
+            agent, env, context = self.run_trial(tmp)
+            asyncio.run(agent.run("Do it.", env, context))
+            self.assertTrue(context.is_empty())
+
+    def test_populate_backfills_usage_cost_and_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp, scrub_host_key():
+            agent, env, context = self.run_trial(tmp)
+            asyncio.run(agent.run("Fix the failing test.", env, context))
+            write_sessions(agent.logs_dir, {
+                "s1.jsonl": [
+                    '{"event": "ModelUsageRecorded", "data": {"usage": '
+                    '{"input": 1000, "output": 200, "cache_read": 800}, '
+                    '"fee": {"micros": 1500}}}\n',
+                    '{"event": "CompactionUsageRecorded", "data": {"revision": 3, '
+                    '"model": "m", "usage": {"input": 500, "output": 100}, '
+                    '"fee": {"micros": 500}}}\n',
+                ],
+            })
+            agent.populate_context_post_run(context)
+            self.assertEqual(context.n_input_tokens, 1500)
+            self.assertEqual(context.n_output_tokens, 300)
+            self.assertEqual(context.n_cache_tokens, 800)
+            self.assertAlmostEqual(context.cost_usd, 0.002)
+            self.assertEqual(context.metadata["agent"], "radian")
+            self.assertEqual(context.metadata["radian_version"], "radian 0.1.0")
+            self.assertEqual(context.metadata["radian_provider"], "opencode-go")
+            self.assertEqual(context.metadata["radian_model"], "deepseek-v4.1-flash")
+            self.assertEqual(context.metadata["radian_profile"], "full")
+            self.assertEqual(context.metadata["return_code"], 0)
+
+    def test_populate_leaves_unreported_counters_none(self):
+        with tempfile.TemporaryDirectory() as tmp, scrub_host_key():
+            agent, env, context = self.run_trial(tmp)
+            asyncio.run(agent.run("Do it.", env, context))
+            write_sessions(agent.logs_dir, {
+                "s1.jsonl": [
+                    "not json\n",
+                    '{"event": "ModelUsageRecorded", "data": {"usage": '
+                    '{"input": 100, "output": 10}}}\n',
+                ],
+            })
+            agent.populate_context_post_run(context)
+            self.assertEqual(context.n_input_tokens, 100)
+            self.assertEqual(context.n_output_tokens, 10)
+            self.assertIsNone(context.n_cache_tokens)
+            self.assertIsNone(context.cost_usd)
+
+    def test_populate_without_sessions_still_sets_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp, scrub_host_key():
+            agent, env, context = self.run_trial(tmp)
+            asyncio.run(agent.run("Do it.", env, context))
+            agent.populate_context_post_run(context)
+            self.assertIsNone(context.n_input_tokens)
+            self.assertIsNone(context.cost_usd)
+            self.assertEqual(context.metadata["return_code"], 0)
+
+    def test_auth_json_upload_chowns_to_non_root_default_user(self):
+        with tempfile.TemporaryDirectory() as tmp, scrub_host_key():
+            agent, env, context = self.run_trial(tmp)
+            env.default_user = "tbench-agent"
+            asyncio.run(agent.run("Do it.", env, context))
+            auth = next(
+                u for u in env.uploads if u["target"].endswith("credentials/auth.json"))
+            entry = json.loads(auth["content"])["opencode-go"]
+            self.assertEqual(entry["key"], f"${CREDENTIAL_ENV_NAME}")
+            self.assertNotIn(TEST_KEY.encode(), auth["content"])
+            chowns = [c for c in env.exec_calls
+                      if c["user"] == "root" and "chown" in c["command"]]
+            self.assertEqual(len(chowns), 1)
+            self.assertIn("tbench-agent", chowns[0]["command"])
+            self.assertIn("credentials/auth.json", chowns[0]["command"])
+            self.assertIn("chmod 600", chowns[0]["command"])
+
+    def test_unset_turn_timeout_derives_from_exec_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp, scrub_host_key():
+            agent, env, context = self.run_trial(tmp, timeout_sec=600)
+            asyncio.run(agent.run("Do it.", env, context))
+            command = env.last_exec()["command"]
+            self.assertIn("--turn-timeout-secs 540", command)
+            self.assertEqual(env.last_exec()["timeout_sec"], 600)
+
+    def test_explicit_turn_timeout_wins_over_exec_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp, scrub_host_key():
+            agent, env, context = self.run_trial(
+                tmp, timeout_sec=600, turn_timeout_secs=100)
+            asyncio.run(agent.run("Do it.", env, context))
+            command = env.last_exec()["command"]
+            self.assertIn("--turn-timeout-secs 100", command)
+            self.assertNotIn("540", command)
 
 
 if __name__ == "__main__":
