@@ -48,8 +48,9 @@ pub struct Limits {
     pub max_git_output_bytes: usize,
     /// How long a git invocation may run.
     pub git_timeout: Duration,
-    /// `shell`'s output budget **per stream** when the model does not give one. Aligned with
-    /// `default_read_bytes`: one tool result should not be able to dominate the context.
+    /// `shell`'s output budget **per stream** when the model does not give one. Smaller than
+    /// `default_read_bytes`: a shell result competes with the rest of the turn, and a truncated
+    /// foreground result stays retrievable through `job` (ADR 0037 decision 3a).
     pub default_shell_output_bytes: usize,
     /// Hard cap on a model-supplied `shell` `max_output_bytes`, per stream.
     pub max_shell_output_bytes: usize,
@@ -94,16 +95,21 @@ impl Default for Limits {
             max_grep_output_bytes: 64 << 10, // 64 KiB, aligned with `read`'s default
             max_git_output_bytes: 1 << 20,   // 1 MiB
             git_timeout: Duration::from_secs(10),
-            // Per stream, and aligned with `read`'s default budget: 64 KiB is enough for the
-            // interesting part of a build or test log, and a truncated run can be repeated
-            // with a narrower command or a larger `max_output_bytes`.
-            default_shell_output_bytes: 64 << 10,
+            // Per stream. 24 KiB sits inside the brief's 16-32 KiB band and below what other
+            // agents show inline (30k chars, 50 KB, ~10k tokens ≈ 40 KiB): it halves the
+            // previous 64 KiB per stream, still fits a typical failure tail, is divisible by 8
+            // for the 1/8 failure head, and matches the grep cap (24-32 KiB) from the same
+            // backlog item so the two truncated tools budget alike. A truncated run stays
+            // recoverable through `job` (ADR 0037 decision 3a), or repeatable with a larger
+            // `max_output_bytes`.
+            default_shell_output_bytes: 24 << 10,
             // The model may ask for more, up to `read`'s own hard cap.
             max_shell_output_bytes: 1 << 20,
             default_shell_timeout: Duration::from_secs(60),
             max_shell_timeout: Duration::from_secs(600),
             auto_background_after: Some(Duration::from_secs(120)),
-            // The model-facing view keeps a bounded head+tail (64 KiB per stream by default);
+            // The model-facing view keeps a bounded head+tail (24 KiB per stream by default,
+            // split 1/4 : 3/4 on success and 1/8 : 7/8 on failure); the retained file is larger
             // the retained file is larger so the discarded middle can be recovered, but still
             // bounded per item and per session. 8 MiB per item covers a large build log's
             // middle; 32 MiB per session keeps four such items, and eviction drops the oldest.
