@@ -3,10 +3,11 @@
 //!
 //! Only three events exist — `PreToolUse`, `PostToolUse`, `Stop` — each a list of
 //! `{ matcher, hooks }` entries, each hook a `{ type = "command", command, timeout }`
-//! table. `matcher` names **Radian** tool names (`shell`, `write`, `patch`, `read`, …)
-//! as exact names joined by `|`; a missing or empty matcher matches every tool. There is
-//! no runtime aliasing of Claude's tool names: an import renames them once, never the
-//! reader.
+//! table. `matcher` is Claude's case-sensitive pattern over **Radian** tool names
+//! (`shell`, `write`, `patch`, `read`, …): `*` or a missing/empty matcher matches every
+//! tool, otherwise the pattern is a regular expression anchored to the whole tool name
+//! (`^(?:<matcher>)$`). There is no runtime aliasing of Claude's tool names: an import
+//! renames them once, never the reader.
 //!
 //! Anything outside the subset never refuses the file. An unknown event name, a malformed
 //! entry, a hook whose `type` is not `"command"`, or an entry carrying one of the
@@ -44,8 +45,8 @@ impl HookCommand {
 /// One `{ matcher, hooks }` entry under an event name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookMatcher {
-    /// The tool-name filter (`shell|write`, …). `None`/empty matches every tool; `Stop`
-    /// ignores it.
+    /// The tool-name filter (Claude's pattern: `*`/empty matches all, otherwise a regex
+    /// anchored to the whole name). `None`/empty/`*` matches every tool; `Stop` ignores it.
     pub matcher: Option<String>,
     pub hooks: Vec<HookCommand>,
 }

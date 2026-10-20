@@ -18,9 +18,12 @@
 //!   Exit 2 starts another turn with the hook's stderr as a `System` `followup` through
 //!   the inbox, at most [`STOP_MAX_CONTINUATIONS`] consecutive continuations.
 //!
-//! The matcher names **Radian** tool names as exact names joined by `|` (a missing or
-//! empty matcher matches every tool); `Stop` ignores it. There is no runtime aliasing of
-//! Claude's tool names.
+//! The matcher is Claude's case-sensitive pattern over **Radian** tool names: `*` or a
+//! missing/empty matcher matches every tool, otherwise the pattern is a regular
+//! expression matched against the whole tool name (`^(?:<matcher>)$`, so `Edit|Write`
+//! and `Notebook.*` work and `sh` does not match `shell`). An invalid pattern is skipped
+//! with one warning at load time and never runs. `Stop` ignores it. There is no runtime
+//! aliasing of Claude's tool names.
 //!
 //! Hook commands run inside the same OS sandbox the `shell` tool uses when the session has
 //! one (enforced or not, with the same environment rules as `shell`); with no sandbox in
@@ -55,11 +58,29 @@ pub const REASON_CHAR_LIMIT: usize = 2000;
 /// lines (the CLI prints it, the TUI shows it as a notice).
 pub type HooksWarning = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// One compiled `{ matcher, hooks }` entry: the regex is built once at load time, so an
+/// invalid pattern warns once there and never runs (never per call).
+#[derive(Clone, Debug)]
+struct CompiledEntry {
+    hooks: Vec<HookCommand>,
+    matcher: CompiledMatcher,
+}
+
+/// Claude's case-sensitive matcher: `*`/empty/missing matches every tool, otherwise a
+/// regular expression anchored to the whole tool name. `Never` is an invalid pattern:
+/// warned once at load, never runs.
+#[derive(Clone, Debug)]
+enum CompiledMatcher {
+    All,
+    Regex(regex::Regex),
+    Never,
+}
+
 /// The user-level command hooks: one [`Hooks`] implementation for all three events.
 #[derive(Clone)]
 pub struct CommandHooks {
-    pre: Vec<HookMatcher>,
-    post: Vec<HookMatcher>,
+    pre: Vec<CompiledEntry>,
+    post: Vec<CompiledEntry>,
     stop: Vec<HookMatcher>,
     workspace: PathBuf,
     session_id: String,
@@ -84,8 +105,8 @@ impl CommandHooks {
         warn: HooksWarning,
     ) -> Self {
         Self {
-            pre: config.pre_tool_use.clone(),
-            post: config.post_tool_use.clone(),
+            pre: compile_entries(&config.pre_tool_use, "PreToolUse", &warn),
+            post: compile_entries(&config.post_tool_use, "PostToolUse", &warn),
             stop: config.stop.clone(),
             workspace: workspace.to_path_buf(),
             session_id: session_id.to_owned(),
@@ -113,13 +134,12 @@ impl CommandHooks {
         self.stop_wakes.load(Ordering::SeqCst)
     }
 
-    /// The matcher: exact Radian tool names joined by `|` (Claude's regex-ish matcher
-    /// reduced to what this slice promises). A missing or empty matcher matches everything.
-    fn matches(matcher: &Option<String>, tool: &str) -> bool {
+    /// Whether a compiled matcher matches a Radian tool name.
+    fn matches(matcher: &CompiledMatcher, tool: &str) -> bool {
         match matcher {
-            None => true,
-            Some(pattern) if pattern.trim().is_empty() => true,
-            Some(pattern) => pattern.split('|').any(|name| name.trim() == tool),
+            CompiledMatcher::All => true,
+            CompiledMatcher::Never => false,
+            CompiledMatcher::Regex(regex) => regex.is_match(tool),
         }
     }
 
@@ -476,6 +496,41 @@ fn kill_tree(pid: u32) {
     {
         let _ = pid;
     }
+}
+
+/// Compiles one event's entries once at load time. An invalid pattern warns once here
+/// (not per call) and the entry never runs.
+fn compile_entries(
+    entries: &[HookMatcher],
+    event: &str,
+    warn: &HooksWarning,
+) -> Vec<CompiledEntry> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let matcher = match &entry.matcher {
+                None => CompiledMatcher::All,
+                Some(pattern) if pattern.trim().is_empty() || pattern.trim() == "*" => {
+                    CompiledMatcher::All
+                }
+                Some(pattern) => match regex::Regex::new(&format!("^(?:{pattern})$")) {
+                    Ok(regex) => CompiledMatcher::Regex(regex),
+                    Err(error) => {
+                        (warn)(&format!(
+                            "{event}[{index}] matcher {pattern:?} is not a valid regex ({error}); \
+                             the entry will never run"
+                        ));
+                        CompiledMatcher::Never
+                    }
+                },
+            };
+            CompiledEntry {
+                hooks: entry.hooks.clone(),
+                matcher,
+            }
+        })
+        .collect()
 }
 
 /// Bounds hook stderr before it enters the transcript.
@@ -875,6 +930,74 @@ mod tests {
         assert!(
             matches!(decision, ToolDecision::Allow),
             "an unmatched hook must not decide: {decision:?}"
+        );
+    }
+
+    /// `*` matches every tool.
+    #[tokio::test]
+    async fn star_matcher_matches_every_tool() {
+        let fixture = plain(&pre_config("*", "exit 2"));
+        let decision = fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, ToolDecision::Deny { .. }),
+            "`*` must match `shell`: {decision:?}"
+        );
+    }
+
+    /// A regex matcher matches the tool it describes.
+    #[tokio::test]
+    async fn regex_matcher_matches_the_tool_it_describes() {
+        let fixture = plain(&pre_config("wri.*", "exit 2"));
+        let decision = fixture
+            .hooks
+            .before_tool_call(&cx(), &call("write", serde_json::json!({})))
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, ToolDecision::Deny { .. }),
+            "`wri.*` must match `write`: {decision:?}"
+        );
+    }
+
+    /// The match is anchored to the whole tool name: `sh` does not match `shell`.
+    #[tokio::test]
+    async fn an_unanchored_matcher_does_not_match_a_prefix() {
+        let fixture = plain(&pre_config("sh", "exit 2"));
+        let decision = fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, ToolDecision::Allow),
+            "`sh` must not match `shell` (anchored): {decision:?}"
+        );
+    }
+
+    /// An invalid pattern warns once at load time and the hook never runs.
+    #[tokio::test]
+    async fn an_invalid_matcher_warns_once_and_never_runs() {
+        let config = pre_config("shell(", "exit 2");
+        let fixture = plain(&config);
+        assert!(
+            warned(&fixture.warnings)
+                .iter()
+                .any(|warning| warning.contains("not a valid regex") && warning.contains("shell(")),
+            "an invalid pattern must warn at load: {:?}",
+            warned(&fixture.warnings)
+        );
+        let decision = fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, ToolDecision::Allow),
+            "an invalid matcher must never run: {decision:?}"
         );
     }
 
