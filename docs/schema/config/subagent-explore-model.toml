@@ -1,0 +1,8 @@
+# ADR 0043 §1：`[subagent.explore]` 给 `explore` 子会话更便宜的模型。
+# 未设置时 `explore` 与 `general` 一样跟父会话的当前路由；`general` 永远跟父。
+# 半设（只有其中一个键）是配置警告并被忽略；项目级配置里出现同样被忽略。
+schema_version = 1
+
+[subagent.explore]
+provider = "openai-compatible"
+model = "m-cheap"

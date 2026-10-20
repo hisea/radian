@@ -38,6 +38,7 @@ EXPECT = {
     "compaction-thinking.toml": dict(outcome="accept"),
     "model-retries.toml": dict(outcome="accept"),
     "shell-auto-background.toml": dict(outcome="accept"),
+    "subagent-explore-model.toml": dict(outcome="accept"),
     "permissions-approval.toml": dict(outcome="accept"),
     "skills-extra-paths.toml": dict(outcome="accept"),
     "skills-builtin.toml": dict(outcome="accept"),

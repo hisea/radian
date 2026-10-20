@@ -38,6 +38,7 @@ fn the_reader_matches_the_reference_checker() {
         ("skills-extra-paths.toml", "accept"),
         ("skills-builtin.toml", "accept"),
         ("shell-auto-background.toml", "accept"),
+        ("subagent-explore-model.toml", "accept"),
         ("memory-injection.toml", "accept"),
         ("integrations-herdr.toml", "accept"),
         ("control.toml", "accept"),
@@ -222,6 +223,20 @@ fn the_tui_theme_colors_fixture_is_carried_raw() {
     assert_eq!(notice.bold, Some(true));
     // A pi name is carried like any other key; the TUI decides where it lands.
     assert!(get("mdHeading").underline == Some(false));
+}
+
+/// `subagent-explore-model.toml` (ADR 0043 §1): `[subagent.explore]` carries the `explore`
+/// child's route, and nothing is reported as skipped.
+#[test]
+fn the_subagent_explore_fixture_carries_the_route() {
+    let (path, text) = fixture("subagent-explore-model.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(
+        config.subagent.explore_provider.as_deref(),
+        Some("openai-compatible")
+    );
+    assert_eq!(config.subagent.explore_model.as_deref(), Some("m-cheap"));
+    assert!(config.skipped.is_empty(), "{:?}", config.skipped);
 }
 
 /// `memory-injection.toml` (ADR 0021): the two keys this revision adds

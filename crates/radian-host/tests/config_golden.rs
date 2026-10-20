@@ -402,6 +402,28 @@ fn edge_cases() -> Vec<(String, String)> {
             "shell.section_not_a_table",
             "schema_version = 1\nshell = 3\n",
         ),
+        // ---- subagent (ADR 0043 §1): carried when both keys are set, warned and
+        // ignored when half-set; unknown keys and wrong types are skipped ----
+        (
+            "unknown.subagent",
+            "schema_version = 1\n[subagent]\nfuture = 1\n",
+        ),
+        (
+            "subagent.explore.ok",
+            "schema_version = 1\n[subagent.explore]\nprovider = \"cheap\"\nmodel = \"m-c\"\n",
+        ),
+        (
+            "subagent.explore.half",
+            "schema_version = 1\n[subagent.explore]\nprovider = \"cheap\"\n",
+        ),
+        (
+            "subagent.explore.wrong_type",
+            "schema_version = 1\n[subagent.explore]\nprovider = 3\nmodel = \"m-c\"\n",
+        ),
+        (
+            "subagent.explore.not_a_table",
+            "schema_version = 1\n[subagent]\nexplore = 3\n",
+        ),
         // ---- tui ----
         ("tui.section_not_a_table", "schema_version = 1\ntui = 3\n"),
         (

@@ -127,6 +127,16 @@ pub struct SkillsConfig {
     pub disabled: Vec<String>,
 }
 
+/// `[subagent.explore]` (ADR 0043 §1): the model an `explore` child runs on. Both keys
+/// carry the same meaning as the `[model]` route keys; the host passes them as the child's
+/// `--provider`/`--model`. `None` on both when the table is unset — and when it is half-set
+/// (only one key): a half-set table is a config warning and is ignored, like any unknown key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubagentConfig {
+    pub explore_provider: Option<String>,
+    pub explore_model: Option<String>,
+}
+
 /// `[memory]` (ADR 0021). Only the two keys this revision adds are read;
 /// the rest of the D6 injection table (`enabled`, `max_tokens`, `global_budget`,
 /// `project_budget`, `overflow`) is still the documented default and is named in
@@ -207,6 +217,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     /// `[shell]` (ADR 0037): the shell tool's limits.
     pub shell: ShellConfig,
+    /// `[subagent]` (ADR 0043 §1): the `explore` child's model route.
+    pub subagent: SubagentConfig,
     pub tui: TuiConfig,
     /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
     /// resolve them through `radian_host::provider::resolve_provider`.
@@ -316,6 +328,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "skills" => parse_skills(value, path, &mut config)?,
             "memory" => parse_memory(value, path, &mut config)?,
             "shell" => parse_shell(value, &mut config)?,
+            "subagent" => parse_subagent(value, &mut config)?,
             "tui" => tui::parse_tui(value, path, &mut config)?,
             "providers" => model::parse_providers(value, path, &mut config)?,
             // Known by the ADR, not wired in this slice: the hosts take MCP servers from
@@ -484,6 +497,50 @@ fn parse_shell(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
                 config.skipped.push("shell.auto_background_secs".into());
             }
             (other, _) => config.skipped.push(format!("shell.{other}")),
+        }
+    }
+    Ok(())
+}
+
+/// Parses `[subagent]` (ADR 0043 §1). Only `[subagent.explore]` with `provider` and
+/// `model` exists (the same meaning as the `[model]` route keys, carried verbatim). A
+/// half-set table warns and is ignored; anything else under `[subagent]` is skipped and
+/// named on the startup line, like every other unknown key (the warn-and-skip style).
+fn parse_subagent(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        config.skipped.push("subagent".into());
+        return Ok(());
+    };
+    for (key, value) in table {
+        match key.as_str() {
+            "explore" => {
+                let Some(explore) = value.as_table() else {
+                    config.skipped.push("subagent.explore".into());
+                    continue;
+                };
+                let mut provider = None;
+                let mut model = None;
+                for (key, value) in explore {
+                    match (key.as_str(), value) {
+                        ("provider", Value::String(provider_name)) => {
+                            provider = Some(provider_name.clone());
+                        }
+                        ("model", Value::String(model_name)) => {
+                            model = Some(model_name.clone());
+                        }
+                        (other, _) => config.skipped.push(format!("subagent.explore.{other}")),
+                    }
+                }
+                match (provider, model) {
+                    (Some(provider), Some(model)) => {
+                        config.subagent.explore_provider = Some(provider);
+                        config.subagent.explore_model = Some(model);
+                    }
+                    (None, None) => {}
+                    _ => config.skipped.push("subagent.explore".into()),
+                }
+            }
+            other => config.skipped.push(format!("subagent.{other}")),
         }
     }
     Ok(())
@@ -1404,6 +1461,70 @@ theme = "light"
         assert_eq!(
             config.shell.auto_background_after(),
             Some(std::time::Duration::from_secs(60))
+        );
+    }
+
+    /// `[subagent.explore]` (ADR 0043 §1) carries the `explore` child's route: both keys
+    /// set means set; a half-set table warns (`subagent.explore`) and is ignored.
+    #[test]
+    fn the_subagent_explore_route_is_carried_and_a_half_set_table_is_ignored() {
+        let config = parse_str(
+            "schema_version = 1\n[subagent.explore]\nprovider = \"cheap\"\nmodel = \"m-c\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.subagent.explore_provider.as_deref(), Some("cheap"));
+        assert_eq!(config.subagent.explore_model.as_deref(), Some("m-c"));
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+
+        // Only one of the two keys: warned and ignored, so `explore` follows the parent.
+        for text in [
+            "schema_version = 1\n[subagent.explore]\nprovider = \"cheap\"\n",
+            "schema_version = 1\n[subagent.explore]\nmodel = \"m-c\"\n",
+        ] {
+            let config = parse_str(text).unwrap();
+            assert_eq!(config.subagent.explore_provider, None, "{text}");
+            assert_eq!(config.subagent.explore_model, None, "{text}");
+            assert!(
+                config.skipped.contains(&"subagent.explore".to_owned()),
+                "{text}: {:?}",
+                config.skipped
+            );
+        }
+
+        // Unset: nothing carried, nothing warned.
+        let config = parse_str("schema_version = 1\n").unwrap();
+        assert_eq!(config.subagent, super::SubagentConfig::default());
+        assert!(config.skipped.is_empty());
+    }
+
+    /// Unknown `[subagent]` keys and wrong types are skipped, never refused (the
+    /// warn-and-skip style); a wrong-typed key cannot half-set the table.
+    #[test]
+    fn subagent_explore_unknown_keys_and_wrong_types_are_skipped() {
+        let config = parse_str(
+            "schema_version = 1\n[subagent]\nfuture = 1\n[subagent.explore]\nmodel = \"m-c\"\nprovider = 3\n",
+        )
+        .unwrap();
+        assert_eq!(config.subagent.explore_provider, None);
+        assert_eq!(config.subagent.explore_model, None);
+        for expected in [
+            "subagent.future",
+            "subagent.explore.provider",
+            "subagent.explore",
+        ] {
+            assert!(
+                config.skipped.contains(&expected.to_owned()),
+                "{expected}: {:?}",
+                config.skipped
+            );
+        }
+
+        let config = parse_str("schema_version = 1\n[subagent]\nexplore = 3\n").unwrap();
+        assert_eq!(config.subagent, super::SubagentConfig::default());
+        assert!(
+            config.skipped.contains(&"subagent.explore".to_owned()),
+            "{:?}",
+            config.skipped
         );
     }
 
