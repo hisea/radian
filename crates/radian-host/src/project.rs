@@ -273,7 +273,9 @@ mod tests {
         let read = read(&scratch.root);
         assert_eq!(read.tier, None, "no tier was asked for: {read:?}");
         assert!(
-            read.warnings.iter().any(|warning| warning.contains("ignoring mcp")),
+            read.warnings
+                .iter()
+                .any(|warning| warning.contains("ignoring mcp")),
             "the project [mcp] must be named and ignored: {:?}",
             read.warnings
         );

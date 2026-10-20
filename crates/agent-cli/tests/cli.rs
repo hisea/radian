@@ -4443,7 +4443,9 @@ async fn an_mcp_id_collision_uses_the_command_line_with_one_warning() {
         "the winning server must log its methods"
     );
     assert!(
-        std::fs::read_to_string(&config_log).unwrap_or_default().is_empty(),
+        std::fs::read_to_string(&config_log)
+            .unwrap_or_default()
+            .is_empty(),
         "the config's colliding server must never start"
     );
     let collisions: Vec<&str> = stderr

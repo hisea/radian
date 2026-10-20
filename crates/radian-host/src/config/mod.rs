@@ -1596,12 +1596,16 @@ future_option = "alpha"
         assert!(error.to_string().contains("cannot be combined"), "{error}");
         let error = parse_str("schema_version = 1\n[mcp]\nfuture = 1\n").unwrap_err();
         assert!(
-            error.to_string().contains("expected `servers` or `mcpServers`"),
+            error
+                .to_string()
+                .contains("expected `servers` or `mcpServers`"),
             "{error}"
         );
         let error = parse_str("schema_version = 1\n[mcp]\n").unwrap_err();
         assert!(
-            error.to_string().contains("expected `servers` or `mcpServers`"),
+            error
+                .to_string()
+                .contains("expected `servers` or `mcpServers`"),
             "{error}"
         );
     }
@@ -1610,7 +1614,10 @@ future_option = "alpha"
     #[test]
     fn a_non_table_mcp_and_a_duplicate_mcp_id_are_refused() {
         let error = parse_str("schema_version = 1\nmcp = 3\n").unwrap_err();
-        assert!(error.to_string().contains("`mcp` must be a table"), "{error}");
+        assert!(
+            error.to_string().contains("`mcp` must be a table"),
+            "{error}"
+        );
         let error = parse_str(
             "schema_version = 1\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n",
         )

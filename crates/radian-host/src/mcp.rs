@@ -651,7 +651,10 @@ mod tests {
     #[test]
     fn on_a_collision_the_command_line_wins_with_one_warning_naming_the_id() {
         let config = McpLoad {
-            servers: vec![server("shared", "from-config"), server("only-config", "true")],
+            servers: vec![
+                server("shared", "from-config"),
+                server("only-config", "true"),
+            ],
             warnings: vec!["config warning".to_owned()],
         };
         let file = McpLoad {
@@ -705,10 +708,8 @@ mod tests {
     /// normalises with the `HOME` default, and both forms at once is an error.
     #[test]
     fn the_toml_section_runs_through_the_same_loader_as_the_file() {
-        let value: toml::Value = toml::from_str(
-            "[mcpServers.files]\ncommand = \"/work/example/mcp-files\"\n",
-        )
-        .unwrap();
+        let value: toml::Value =
+            toml::from_str("[mcpServers.files]\ncommand = \"/work/example/mcp-files\"\n").unwrap();
         let load = load_mcp_from_toml(&value, "test-config [mcp]").unwrap();
         assert_eq!(load.servers.len(), 1);
         assert_eq!(load.servers[0].id, "files");
@@ -716,10 +717,8 @@ mod tests {
             load.servers[0].inherit_env,
             vec![std::ffi::OsString::from("HOME")]
         );
-        let both: toml::Value = toml::from_str(
-            "[[servers]]\nid = \"a\"\ncommand = \"true\"\n[mcpServers]\n",
-        )
-        .unwrap();
+        let both: toml::Value =
+            toml::from_str("[[servers]]\nid = \"a\"\ncommand = \"true\"\n[mcpServers]\n").unwrap();
         let error = load_mcp_from_toml(&both, "test-config [mcp]").unwrap_err();
         assert!(error.contains("cannot be combined"), "{error}");
         assert!(error.starts_with("test-config [mcp]:"), "{error}");
