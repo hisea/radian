@@ -34,12 +34,12 @@ Renamed tools (ADR 0043 decision 3) are judged under their **new** name
 written against an old name therefore never matches; the alias can never bypass a `deny` on
 the new tool.
 
-`ask_user` (ADR 0024 Q6) is `allow` in **all three** tiers: it writes nothing and runs
+`ask_user` (ADR 0024 Q6) is `allow` in **both** tiers: it writes nothing and runs
 nothing, so it never prompts. It still goes through the ordinary hook path, and its answer is
 data — it grants no permission for the tool calls the model makes afterwards.
 (`ask_user_is_allowed_in_every_tier` in `src/profile.rs`.)
 
-`skill` (ADR 0025 S3) is `allow` in **all three** tiers for the same reason: it only reads a
+`skill` (ADR 0025 S3) is `allow` in **both** tiers for the same reason: it only reads a
 `SKILL.md` that discovery already accepted, so **a skill is not a permission** — reading one
 grants nothing. (`skill_is_allowed_in_every_tier` in `src/profile.rs`.)
 

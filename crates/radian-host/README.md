@@ -93,7 +93,7 @@ also kills every running group on `close()` and on drop (the panic path, `killpg
 `subagent { agent?, task }` runs one task in a **fresh, blocking child `radian exec`** — the
 current executable, so there is only one binary (ADR 0032) — and returns its last assistant text
 (its journal, cut at 4 000 characters with a visible marker), the child session id and the usage
-and denials its journal recorded. `explore` mounts only `read list glob grep`;
+and denials its journal recorded. `explore` mounts only `read glob grep`;
 `general` (the default) mounts the child's ordinary headless set, which is this session's tools
 minus `subagent`. A user-level cheaper model for `explore` is not implemented.
 
@@ -243,7 +243,7 @@ line's skipped list.
 | `memory_search` mounts only past the budget; a `memory_save` call is an unknown tool and the turn still succeeds | `memory_search_mounts_only_past_the_injection_budget`, `a_model_call_to_memory_save_is_an_unknown_tool_and_the_turn_succeeds` | `agent-cli/tests/cli.rs` |
 | A single-turn run (`-p`) appends nothing; a resume ranks by the session's first user message | `exec_p_ranks_the_block_by_its_prompt_and_appends_nothing`, `a_resumed_session_ranks_the_block_by_its_first_user_message` | `agent-cli/tests/cli.rs` |
 | `[memory.injection]` carries `additions`/`addition_budget`; the rest is reported as skipped | `the_memory_injection_keys_are_read_and_the_rest_is_reported` | `tests/config_fixtures.rs` |
-| `memory_search` is `allow` in all three tiers; no memory tool asks | `memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks` | `radian-permissions/src/profile.rs` |
+| `memory_search` is `allow` in both tiers; no memory tool asks | `memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks` | `radian-permissions/src/profile.rs` |
 
 ## The startup description
 
