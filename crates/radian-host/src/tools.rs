@@ -134,8 +134,6 @@ impl HostTools {
                 "memory_search",
                 "search durable memory, or read records in full by id",
             );
-            push("memory_save", "save a memory record");
-            push("memory_revise", "revise a memory record");
         }
         if self.ask.is_some() {
             push("ask_user", "ask the user a structured question");

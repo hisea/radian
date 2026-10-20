@@ -51,6 +51,10 @@ pub(super) const BOX_PROMPT: &str = "❯ ";
 /// The placeholder shown while the input is empty.
 pub(super) const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)";
 
+/// The placeholder while the input is empty and no model is routed (ADR 0008 §2).
+pub(super) const INPUT_HINT_NO_MODEL: &str =
+    "(no model set — choose one with /model, Enter to send)";
+
 /// The `box` style's thin half frame (ADR 0035, the 2026-10-16 note): the
 /// same open frame a code block draws — a top rule, a `│ ` rail on every row and a `╰──` tail —
 /// chosen from the terminal's glyph set (`ascii` uses `+`, `-`, `| `, `+--`).

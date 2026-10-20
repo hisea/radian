@@ -27,6 +27,10 @@ pub(super) struct SessionHost {
     /// The reader's read-only verdict (a newer `schema_version`): `/theme` applies in the
     /// session but never writes.
     pub(super) config_read_only: bool,
+    /// True when the session started with no model configured (ADR 0008 §2): the first
+    /// `/model` writes `[model] provider`/`model` back to the config file. A session that
+    /// already had a configured model never writes (ADR 0026 D5).
+    pub(super) started_without_model: bool,
 }
 
 /// Runs one `/sessions`, `/export` or `/fork` request and returns the notices to show. Pure

@@ -36,6 +36,15 @@ impl Component for Model {
     }
 
     fn data(&self, app: &App, _item: &Item) -> Option<ItemData> {
+        // ADR 0008 §2: a session that started with no model shows that instead of an empty id.
+        if !app.session.has_model {
+            return Some(
+                ItemData::new("{display_name}")
+                    .value("display_name", "no model".to_owned())
+                    .value("id", String::new())
+                    .value("provider", String::new()),
+            );
+        }
         Some(
             ItemData::new("{display_name}")
                 .value(

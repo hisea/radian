@@ -9,6 +9,9 @@ use super::*;
 /// session-opening phases need. One struct so `run()` threads a name, not fifteen locals.
 pub(super) struct ResolvedModel {
     pub(super) model_name: String,
+    /// False when no model is configured anywhere (no `--model`, no journaled route, no
+    /// `model.model`): the session opens anyway and `/model` is the way in (ADR 0008 §2).
+    pub(super) has_model: bool,
     pub(super) tier: radian_tui::profile::Tier,
     pub(super) access_source: radian_tui::profile::AccessSource,
     pub(super) provider_name: String,
@@ -52,14 +55,16 @@ pub(super) fn resolve_model(
         Some(id) => radian_host::resumed_model_route(dir, id),
         None => None,
     };
-    let model_name = cli
+    // ADR 0008 §2: no model anywhere is not a refusal in the TUI. The session opens with no
+    // model selected; submit is blocked until `/model` queues a route, and the first `/model`
+    // writes back to the config file. Resuming keeps the journaled route as today.
+    let model_opt = cli
         .model
         .clone()
         .or_else(|| resumed_route.as_ref().map(|route| route.model.clone()))
-        .or_else(|| config.model.model.clone())
-        .ok_or_else(|| {
-            "no model: pass --model, or set model.model in the config file".to_string()
-        })?;
+        .or_else(|| config.model.model.clone());
+    let has_model = model_opt.is_some();
+    let model_name = model_opt.unwrap_or_default();
     // `-m/--model` takes a bare model name; the form is `--provider <p>
     // --model <m>`. A value that looks like a known provider's `<provider>/<model>` with no
     // `--provider` gets one startup hint (never a refusal, never a change in meaning).
@@ -132,6 +137,44 @@ pub(super) fn resolve_model(
                 access_source = radian_tui::profile::AccessSource::ProjectConfig;
             }
         }
+    }
+    // ADR 0008 §2: with no model configured, the dummy route below carries the session
+    // until `/model` queues a real one. No credential, no protocol lookup that can fail, no
+    // network: `complete` is never reached because submit is blocked while `has_model` is
+    // false. The tier above still resolves (sandbox, profile) so the session opens normally.
+    if !has_model {
+        let provider_name = radian_host::GENERIC_ID.to_owned();
+        let (provider_ref, _) =
+            radian_host::resolve_provider(&provider_name, &config.providers, None)
+                .map_err(|e| e.to_string())?;
+        let key_id = provider_ref.key_id().to_owned();
+        let catalog = radian_host::protocol_catalog();
+        let protocol = provider_ref
+            .resolve_protocol(Some(&catalog), &model_name)
+            .unwrap_or(radian_host::Protocol::OpenAiCompatible);
+        let provider = protocol.adapter();
+        let thinking = radian_host::DEFAULT_THINKING_LEVEL.to_owned();
+        return Ok(ResolvedModel {
+            model_name,
+            has_model: false,
+            tier,
+            access_source,
+            provider_name,
+            provider_ref,
+            key_id,
+            protocol,
+            provider,
+            chatgpt_oauth: false,
+            thinking_for_footer: thinking.clone(),
+            thinking,
+            thinking_budget: None,
+            credential: None,
+            base_url_override: None,
+            header_args: Vec::new(),
+            catalog,
+            resumed_tier,
+            cli_tier,
+        });
     }
     // ADR 0026 D0/D10: `--provider`/config `model.provider` names a provider — a built-in
     // descriptor or a named one (`[providers.<name>]` in the config, or the auth.json
@@ -252,6 +295,7 @@ pub(super) fn resolve_model(
     header_args.extend(cli.header.iter().cloned());
     Ok(ResolvedModel {
         model_name,
+        has_model: true,
         tier,
         access_source,
         provider_name,

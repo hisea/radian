@@ -41,8 +41,8 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
   by the sandbox; `sessions/` and `memory/` are denied. `RADIAN_HOME` overrides the
   root. (`--session-dir` / `RADIAN_SESSION_DIR` still override only the sessions directory.)
 - **Memory M1 (ADR 0021)** is implemented: the `radian memory` CLI commands, the TUI `/memory`
-  slash command (same commands), the agent's `memory_search` (search by keyword, or read records
-  by id) / `memory_save` / `memory_revise` tools (writes always ask), and deterministic injection
+  slash command (same commands), the agent's `memory_search` tool (search by keyword, or read
+  records by id; mounted only past the injection budget), and deterministic injection
   with the `MemoryInjected` audit event.
 - **The configuration file (ADR 0008)** is implemented read-only: `--config`/`RADIAN_CONFIG`/
   `~/.radian/config/config.toml`, with `model.*`, `permissions.profile` and `compaction.auto`

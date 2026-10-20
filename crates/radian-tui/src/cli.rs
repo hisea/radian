@@ -807,6 +807,7 @@ fn run(
 
     let run_resolve::ResolvedModel {
         model_name,
+        has_model,
         tier,
         access_source,
         provider_name,
@@ -837,6 +838,7 @@ fn run(
     // `run()` keeps its names.
     let resolved_model = run_resolve::ResolvedModel {
         model_name,
+        has_model,
         tier,
         access_source,
         provider_name,
@@ -877,6 +879,7 @@ fn run(
     )?;
     let run_resolve::ResolvedModel {
         model_name,
+        has_model,
         tier,
         access_source,
         provider_name,
@@ -906,7 +909,6 @@ fn run(
             driver_stopped,
             before_driver,
             memory_warning,
-            memory_notice_line,
             trust_setup,
             memory_root,
         },
@@ -948,7 +950,6 @@ fn run(
             driver_stopped,
             before_driver,
             memory_warning,
-            memory_notice_line,
             trust_setup,
             memory_root,
             access_builder,
@@ -1029,6 +1030,7 @@ fn run(
         &workspace_path,
         &window,
         &model_name,
+        has_model,
         tier,
         access_source,
         &config,
@@ -1062,6 +1064,7 @@ fn run(
         &session_id,
         &secrets,
         provider,
+        has_model,
     )
 }
 

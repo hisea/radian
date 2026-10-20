@@ -37,7 +37,7 @@ pub const MAX_DESCRIPTION_CHARS: usize = 1024;
 /// user-level or `extra_paths` skill of the same name wins over a built-in one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSource {
-    /// `<RADIAN_HOME>/skills/`.
+    /// `$RADIAN_HOME/skills/` or `$HOME/.agents/skills/` (the Agent Skills standard location).
     User,
     /// A `[skills] extra_paths` root.
     Extra,
@@ -94,16 +94,21 @@ pub fn discover(root: &Path) -> Discovery {
     discover_with_extras(Some(root), &[], false, &[])
 }
 
-/// Scans the user-level skills directory (`primary`, usually `<RADIAN_HOME>/skills`) **and** the
-/// configured `[skills] extra_paths` roots, in that order (ADR 0025 slice 4 / ruling 2). The
-/// user level is discovered first, so its skill wins a name conflict. An extra path that is not
+/// Scans the two user-level skills directories (`primary`, usually `<RADIAN_HOME>/skills`,
+/// then `secondary`, usually `$HOME/.agents/skills`) **and** the configured `[skills]
+/// extra_paths` roots, in that order (ADR 0025 S1). Both user levels are
+/// [`SkillSource::User`]: radian's own directory is first, so its skill wins a name conflict
+/// with the Agent Skills standard directory. A missing user-level directory is an empty
+/// discovery, not an error (ADR 0025 S1: nothing blocks startup) — in particular a missing
+/// `~/.agents/skills` is silent, never a warning. An extra path that is not
 /// a directory is one warning, never an error; an extra root that holds a `SKILL.md` directly is
 /// itself one skill (the same rule as a subdirectory of the primary root).
 /// The built-in skills are discovered **last** (ADR 0025): a user-level or
 /// `extra_paths` skill of the same name wins. `builtin` is `[skills] builtin` (default true),
 /// `disabled` is `[skills] disabled`.
-pub fn discover_with_extras(
+pub fn discover_with_user_roots(
     primary: Option<&Path>,
+    secondary: Option<&Path>,
     extras: &[PathBuf],
     builtin: bool,
     disabled: &[String],
@@ -114,6 +119,9 @@ pub fn discover_with_extras(
     let mut by_name: BTreeMap<String, PathBuf> = BTreeMap::new();
     if let Some(primary) = primary {
         collect_from(primary, SkillSource::User, &mut discovery, &mut by_name);
+    }
+    if let Some(secondary) = secondary {
+        collect_from(secondary, SkillSource::User, &mut discovery, &mut by_name);
     }
     for extra in extras {
         if !extra.is_dir() {
@@ -129,6 +137,18 @@ pub fn discover_with_extras(
         collect_builtin(&mut discovery, &mut by_name, disabled);
     }
     discovery
+}
+
+/// Scans one user-level skills directory plus `[skills] extra_paths`: this is
+/// [`discover_with_user_roots`] with no secondary root. `open_session` uses
+/// `discover_with_user_roots` so the Agent Skills standard directory is read too.
+pub fn discover_with_extras(
+    primary: Option<&Path>,
+    extras: &[PathBuf],
+    builtin: bool,
+    disabled: &[String],
+) -> Discovery {
+    discover_with_user_roots(primary, None, extras, builtin, disabled)
 }
 
 /// Keeps only the discovered skills the session's skill allow-list names, in discovery order.
@@ -653,7 +673,7 @@ pub fn completion_candidates(skills: &[Skill]) -> Vec<(String, String)> {
 /// cannot auto-invoke (they are still user-invocable via `/skill:`).
 pub fn notices(skills: &[Skill]) -> Vec<String> {
     if skills.is_empty() {
-        return vec!["no skills found under ~/.radian/skills".to_owned()];
+        return vec!["no skills found under ~/.radian/skills or ~/.agents/skills".to_owned()];
     }
     skills
         .iter()
@@ -866,6 +886,110 @@ mod tests {
             "{:?}",
             discovery.warnings
         );
+    }
+
+    /// Fix round 3 (catches: dropping the `~/.agents/skills` root): a skill that lives only
+    /// in the Agent Skills standard directory is discovered, listed, and readable by the
+    /// `skill` tool. `HOME` and `RADIAN_HOME` are isolated in temp dirs — the real home is
+    /// never read; the roots are derived with the same pure helpers the session uses.
+    #[test]
+    fn a_skill_only_in_the_agents_standard_dir_is_discovered_and_readable() {
+        let home = Scratch::new("agents-home");
+        let radian_home = Scratch::new("agents-radian-home");
+        let primary = crate::home::skills_dir_for(&radian_home.root);
+        std::fs::create_dir_all(&primary).unwrap();
+        let agents = crate::home::agents_skills_dir_for(Some(home.root.as_path()))
+            .expect("an absolute fake HOME names the standard dir");
+        std::fs::create_dir_all(agents.join("shared")).unwrap();
+        std::fs::write(
+            agents.join("shared").join(SKILL_FILE_NAME),
+            frontmatter("shared", "Shared across projects."),
+        )
+        .unwrap();
+
+        let discovery = discover_with_user_roots(Some(&primary), Some(&agents), &[], false, &[]);
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["shared"], "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills[0].source, SkillSource::User);
+        // Listed: the prompt section and `/skills` both name it.
+        let section = prompt_section(&discovery.skills, SECTION_BUDGET_TOKENS, 4);
+        assert!(section.contains("- shared:"), "{section}");
+        assert!(
+            notices(&discovery.skills)
+                .iter()
+                .any(|line| line.contains("shared")),
+            "{:?}",
+            notices(&discovery.skills)
+        );
+        // Readable: the `skill` tool's expand reads the body from the standard dir.
+        let expanded = expand(&discovery.skills[0], "").unwrap();
+        assert!(expanded.contains("Body line."), "{expanded}");
+    }
+
+    /// Fix round 3 (catches: swapping the two user-level roots): the same name in both
+    /// roots resolves to `$RADIAN_HOME/skills`, with one warning naming the shadowed
+    /// `~/.agents/skills` path.
+    #[test]
+    fn the_radian_home_level_wins_a_conflict_with_the_agents_standard_dir() {
+        let home = Scratch::new("agents-clash-home");
+        let radian_home = Scratch::new("agents-clash-radian-home");
+        let primary = crate::home::skills_dir_for(&radian_home.root);
+        std::fs::create_dir_all(primary.join("same")).unwrap();
+        std::fs::write(
+            primary.join("same").join(SKILL_FILE_NAME),
+            frontmatter("same", "From radian's own directory."),
+        )
+        .unwrap();
+        let agents = crate::home::agents_skills_dir_for(Some(home.root.as_path()))
+            .expect("an absolute fake HOME names the standard dir");
+        std::fs::create_dir_all(agents.join("same")).unwrap();
+        std::fs::write(
+            agents.join("same").join(SKILL_FILE_NAME),
+            frontmatter("same", "From the standard directory."),
+        )
+        .unwrap();
+
+        let discovery = discover_with_user_roots(Some(&primary), Some(&agents), &[], false, &[]);
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(
+            discovery.skills[0].description,
+            "From radian's own directory."
+        );
+        assert_eq!(discovery.warnings.len(), 1, "{:?}", discovery.warnings);
+        assert!(
+            discovery.warnings[0].contains("shadows"),
+            "{:?}",
+            discovery.warnings
+        );
+        assert!(
+            discovery.warnings[0].contains(agents.join("same").to_str().unwrap()),
+            "{:?}",
+            discovery.warnings
+        );
+    }
+
+    /// Fix round 3 (catches: warning on a missing `~/.agents/skills`): no standard directory
+    /// means no warning — the radian-owned root is still discovered on its own.
+    #[test]
+    fn a_missing_agents_standard_dir_is_silent() {
+        let home = Scratch::new("agents-absent-home");
+        let radian_home = Scratch::new("agents-absent-radian-home");
+        let primary = crate::home::skills_dir_for(&radian_home.root);
+        std::fs::create_dir_all(primary.join("own")).unwrap();
+        std::fs::write(
+            primary.join("own").join(SKILL_FILE_NAME),
+            frontmatter("own", "Own."),
+        )
+        .unwrap();
+        // Never created: the standard dir is absent.
+        let agents = crate::home::agents_skills_dir_for(Some(home.root.as_path()))
+            .expect("an absolute fake HOME names the standard dir");
+
+        let discovery = discover_with_user_roots(Some(&primary), Some(&agents), &[], false, &[]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["own"], "{:?}", discovery.warnings);
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
     }
 
     /// A configured extra path that is not a directory is one warning, never an error, and the
@@ -1215,8 +1339,11 @@ mod tests {
                 "secret: Only the user. (model-invocation off)"
             ]
         );
-        // No skills at all: one line says so.
-        assert_eq!(notices(&[]), vec!["no skills found under ~/.radian/skills"]);
+        // No skills at all: one line names both user-level roots.
+        assert_eq!(
+            notices(&[]),
+            vec!["no skills found under ~/.radian/skills or ~/.agents/skills"]
+        );
     }
 
     /// ADR 0025 S3: `expand` reads the body, strips the frontmatter, names the base directory and

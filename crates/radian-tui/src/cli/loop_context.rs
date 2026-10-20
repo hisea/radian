@@ -52,6 +52,9 @@ pub(super) struct LoopContext<'a> {
     /// The chatgpt usage gate (ADR 0026), same mechanism, flipped to
     /// `route.provider == "chatgpt"` instead.
     pub(super) chatgpt_usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    /// Whether the first-launch model write-back already ran (ADR 0008 §2): set after the
+    /// first `/model` in a session that started without one, so later switches never write.
+    pub(super) model_writeback_done: bool,
 }
 
 impl LoopContext<'_> {
@@ -641,7 +644,37 @@ impl LoopContext<'_> {
             Effect::QueueModel { provider, model } => {
                 // D5: the route is the whole change — no key, no header values.
                 self.session
-                    .queue_config(radian_host::ModelRoute::new(provider, model).to_value());
+                    .queue_config(radian_host::ModelRoute::new(&provider, &model).to_value());
+                // ADR 0008 §2: the first `/model` in a session that started without one
+                // writes `[model] provider`/`model` back to the config file (same rules as
+                // `/theme`, including the read-only refusal). A later switch never writes.
+                // A failed write still uses the chosen model: the notice says so.
+                if self.host.started_without_model && !self.model_writeback_done {
+                    self.model_writeback_done = true;
+                    match self.host.theme_write_path.as_deref() {
+                        Some(path) => {
+                            match radian_host::write_model_route(
+                                path,
+                                self.host.config_read_only,
+                                &provider,
+                                &model,
+                            ) {
+                                Ok(saved) => self.send(AppInput::SessionDone(vec![format!(
+                                    "model saved to {}",
+                                    saved.display()
+                                )])),
+                                Err(error) => self.send(AppInput::SessionDone(vec![format!(
+                                    "model applies for this session; could not save: {error}"
+                                )])),
+                            }
+                        }
+                        None => self.send(AppInput::SessionDone(vec![
+                            "model applies for this session; there is no configuration file \
+                             location to save it"
+                                .to_owned(),
+                        ])),
+                    }
+                }
                 Ok(())
             }
             Effect::Session(request) => {

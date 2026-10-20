@@ -597,3 +597,79 @@ fn an_app_only_command_still_runs_after_the_session_ended() {
         notices(&app)
     );
 }
+
+/// ADR 0008 §2: with no model routed, a submit sends nothing and keeps the draft, pointing at
+/// `/model` (and `/login`).
+#[test]
+fn a_submit_with_no_model_sends_nothing_and_keeps_the_draft() {
+    let mut app = App::new("", "sess-nm");
+    app.set_has_model(false);
+    let effects = submit(&mut app, "hello there");
+    assert!(effects.is_empty(), "no model call may start: {effects:?}");
+    assert_eq!(app.input, "hello there", "the message is kept, not lost");
+    let all = notices(&app);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(
+        all[0].contains("no model is set") && all[0].contains("/model"),
+        "{}",
+        all[0]
+    );
+}
+
+/// ADR 0008 §2: the first `/model` queue unblocks send and records the route for the footer.
+#[test]
+fn the_first_model_queue_unblocks_send() {
+    let mut app = App::new("", "sess-nm");
+    app.set_has_model(false);
+    let effects = submit(&mut app, "/model anthropic/m-1");
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::ModelSwitch { provider, model }]
+            if provider == "anthropic" && model == "m-1"
+        ),
+        "{effects:?}"
+    );
+    // The loop vets the target, then the app queues it.
+    let result = app.update(Input::ModelChecked {
+        provider: "anthropic".to_owned(),
+        model: "m-1".to_owned(),
+        tokens: None,
+        budget: None,
+    });
+    assert!(
+        result.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::QueueModel { provider, model }
+            if provider == "anthropic" && model == "m-1"
+        )),
+        "{:?}",
+        result.effects
+    );
+    assert!(
+        app.session.has_model,
+        "send is unblocked after the first queue"
+    );
+    assert_eq!(app.session.model_name, "m-1");
+    assert_eq!(app.session.provider.as_deref(), Some("anthropic"));
+    // A message now expands (the loop's mention step), not refused.
+    let effects = submit(&mut app, "hello");
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ExpandMentions { .. })),
+        "a message sends once a model is queued: {effects:?}"
+    );
+}
+
+/// ADR 0008 §2: `/compact` needs a model to summarize with.
+#[test]
+fn compact_with_no_model_says_so_and_compacts_nothing() {
+    let mut app = App::new("", "sess-nm");
+    app.set_has_model(false);
+    let effects = submit(&mut app, "/compact");
+    assert!(effects.is_empty(), "{effects:?}");
+    let all = notices(&app);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(all[0].contains("no model is set"), "{}", all[0]);
+}

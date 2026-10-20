@@ -94,7 +94,9 @@ pub use command_footer::{
     COMMAND_TIMEOUT, CommandContributor, CommandSpec, FooterContext, FooterSnapshot,
     MAX_OUTPUT_BYTES, command_specs, parse_command as parse_footer_command,
 };
+pub use config::default::{DEFAULT_CONFIG_TEMPLATE, ensure_default_config};
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
+pub use config::model_write::{ModelWriteError, write_model_route};
 pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{
     CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ControlConfig, ModelConfig,
@@ -190,8 +192,8 @@ pub use sessions::{
 };
 pub use skills::{
     BUILTIN, Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillSource, SkillsHooks,
-    completion_candidates, discover, discover_with_extras, expand, has_skill_file, notices,
-    prompt_section,
+    completion_candidates, discover, discover_with_extras, discover_with_user_roots, expand,
+    has_skill_file, notices, prompt_section,
 };
 pub use startup::{
     LeadSetup, ListError, SessionSettings, is_local_base_url, list_sessions,

@@ -1295,12 +1295,11 @@ could be built. This is the same wiring `agent-cli` uses:
   `mach-lookup` open, so the IPC boundary is not tightened.
 - A `[memory]` startup notice names the project state (the linked project id, or "no project
   linked" with the `radian memory project new`/`relink` hint) and the injection budget
-  (ADR 0021 D2/D6). The agent's three memory tools are mounted and the current memory is
-  injected into the system prompt each turn; `memory_search` is allowed and
-  `memory_save`/`memory_revise` ask. A default-scope `memory_save` or `/memory add` that
-  **registers** this workspace as a project (ADR 0021) is shown as a `Notice`
-  transcript entry — one line naming the new project and its identity key — because stderr
-  would be drawn over by the fullscreen UI. Tested by
+  (ADR 0021 D2/D6). The current memory is injected into the system prompt each turn;
+  `memory_search` (allowed) mounts only past the injection budget (ADR 0021 D7), and a
+  default-scope `/memory add` that **registers** this workspace as a project (ADR 0021
+  revision 1) is shown as a `Notice` transcript entry — one line naming the new project and
+  its identity key — because stderr would be drawn over by the fullscreen UI. Tested by
   `pty_the_memory_notice_names_the_project_state_and_the_budget` and
   `pty_a_memory_add_shows_the_created_project_notice`.
 

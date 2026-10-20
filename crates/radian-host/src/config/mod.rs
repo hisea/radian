@@ -20,7 +20,10 @@
 //! No error message ever carries a value that could be a secret: the plaintext and heuristic
 //! errors name the key path and nothing else.
 
+pub mod default;
 pub mod migrate_pi;
+pub mod model_write;
+pub mod preserve;
 pub mod theme_write;
 
 mod error;

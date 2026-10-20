@@ -6,8 +6,10 @@
 
 ## 背景
 
+2026-10-20：这一项是 `compaction-threshold.md` 和 `context-pruning.md` 的前提，两项的收益都是每次调用的延迟，只能在固定任务集上改前改后比。指标至少要有：每次调用延迟 p50/p90（按 prompt 大小分桶）、任务总墙钟、压缩次数、压缩后前 5 轮重复 `read` 次数、缓存命中率、成功率。本机 journal 已能算出前几项（见 `context-pruning.md` 与 `compaction-threshold.md` 的数据）。
+
 Radian 完全没有评测，改进收益量不出来。journal 已有时间戳、工具起止、每次调用的 usage 和费用，可直接算指标。
 
 ## 待决方向
 
-写 journal 指标提取器（成功率、耗时、token、缓存命中率、工具调用数、单次成功成本），搭最小评测集：15 道 Terminal-Bench 2.0 子集题 + 5 道 dogfood 提炼的真实任务，Radian 和 pi 各跑 3 次。Terminal-Bench 适配器正在 Linux 盒子上做（分支 `remote/tbench-lxc`，不在 `main`）。
+写 journal 指标提取器（成功率、耗时、token、缓存命中率、工具调用数、单次成功成本），搭最小评测集：15 道 Terminal-Bench 2.0 子集题 + 5 道 dogfood 提炼的真实任务，Radian 和 pi 各跑 3 次。Terminal-Bench 适配器已在 `main`（`benchmarks/terminal-bench/`，Harbor 0.24.0，静态 musl 二进制）；2026-10-20 的 4 题 smoke 在 LXC 上跑通（2 题得分，2 题超时），后续修补见 `bench-adapter-followups.md`。第一步：15–20 题子集 × 3 次，与 pi 用同一模型对比。
