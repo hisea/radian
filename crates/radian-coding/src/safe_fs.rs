@@ -197,8 +197,7 @@ static AFTER_OPEN_HOOK: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>> =
 /// re-opened by path here would follow it. Only built with the `testing` feature.
 #[cfg(feature = "testing")]
 pub fn after_open_hook(hook: Option<Box<dyn Fn() + Send + Sync>>) {
-    *AFTER_OPEN_HOOK.lock().unwrap_or_else(|e| e.into_inner()) =
-        hook.map(Arc::from);
+    *AFTER_OPEN_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook.map(Arc::from);
 }
 
 pub(crate) fn run_after_open_hook() {

@@ -143,7 +143,9 @@ async fn perf_grep_single_vs_batch_this_repo() {
         batches.push(
             timed_batch(
                 &tools,
-                [needle('x'), needle('y'), needle('z')].each_ref().map(String::as_str),
+                [needle('x'), needle('y'), needle('z')]
+                    .each_ref()
+                    .map(String::as_str),
                 path,
             )
             .await
@@ -174,7 +176,9 @@ async fn perf_grep_single_vs_batch_registry() {
         batches.push(
             timed_batch(
                 &tools,
-                [needle('x'), needle('y'), needle('z')].each_ref().map(String::as_str),
+                [needle('x'), needle('y'), needle('z')]
+                    .each_ref()
+                    .map(String::as_str),
                 &path,
             )
             .await
