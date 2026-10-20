@@ -210,6 +210,11 @@ pub enum JobEvent {
 /// The registry, per session.
 pub struct Jobs {
     inner: Arc<JobsInner>,
+    /// Harden git in every shell child this registry starts (ADR 0039 decision 5): the
+    /// session's project is not trusted, so repository configuration must not run commands
+    /// through a shell git. Set once at session setup; a trusted session leaves it off so
+    /// the user's own hooks run.
+    harden_git: bool,
 }
 
 struct JobsInner {
@@ -241,7 +246,21 @@ impl Jobs {
                 state: Mutex::new(JobsState::default()),
                 events,
             }),
+            harden_git: false,
         }
+    }
+
+    /// Harden git in every shell child this registry starts (ADR 0039 decision 5). The host
+    /// sets it from the session's trust decision: an untrusted project hardens, a trusted
+    /// one does not.
+    pub fn with_git_hardening(mut self, on: bool) -> Self {
+        self.harden_git = on;
+        self
+    }
+
+    /// Whether shell children carry the host git hardening (ADR 0039 decision 5).
+    pub(crate) fn git_hardening(&self) -> bool {
+        self.harden_git
     }
 
     /// The directory this registry writes its output files to.
@@ -305,7 +324,7 @@ impl Jobs {
             )
         })?;
 
-        let mut process = sandboxed_command(sandbox, cwd, command)?;
+        let mut process = sandboxed_command(sandbox, cwd, command, self.harden_git)?;
         configure_group(&mut process);
         let mut child = process.spawn().map_err(|e| {
             fail(

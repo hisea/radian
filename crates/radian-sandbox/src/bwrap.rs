@@ -217,7 +217,7 @@ impl SandboxBackend for Bwrap {
         command.arg("--").arg(program).args(args);
         match seccomp_filter {
             Some(filter) => Ok(SandboxCommand::with_seccomp_filter(command, filter)),
-            None => Ok(SandboxCommand::new(command)),
+            None => Ok(SandboxCommand::with_cleared_child_env(command)),
         }
     }
 }

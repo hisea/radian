@@ -97,6 +97,7 @@ pub(super) fn build_coding_tools(
     sandbox: SandboxSlot,
     jobs_dir: &Path,
     shell_auto_background: Option<Duration>,
+    harden_git: bool,
 ) -> Result<(Option<CodingTools>, Option<Arc<radian_coding::Jobs>>), SessionError> {
     match workspace {
         Some(dir) => {
@@ -130,8 +131,12 @@ pub(super) fn build_coding_tools(
                 ))
             })?;
             // The host creates the registry so it can subscribe to job lifecycle notices and
-            // write the durable start/settle records (ADR 0037).
-            let jobs = Arc::new(radian_coding::Jobs::new(jobs_dir));
+            // write the durable start/settle records (ADR 0037). `harden_git` is the
+            // session's trust decision (ADR 0039 decision 5): an untrusted project hardens
+            // git in every shell child, a trusted one does not.
+            let jobs = Arc::new(
+                radian_coding::Jobs::new(jobs_dir).with_git_hardening(harden_git),
+            );
             Ok((Some(tools.with_jobs(Arc::clone(&jobs))), Some(jobs)))
         }
         None => Ok((None, None)),
@@ -226,7 +231,8 @@ mod tests {
         let jobs_dir = root.join("sessions/sid.jobs");
 
         let slot = SandboxSlot::from_option(Some(full_access(&ws)));
-        let (_coding, jobs) = build_coding_tools(Some(&ws), slot, &jobs_dir, None).expect("tools");
+        let (_coding, jobs) =
+            build_coding_tools(Some(&ws), slot, &jobs_dir, None, false).expect("tools");
         let jobs = jobs.expect("a registry");
 
         assert_eq!(

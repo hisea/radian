@@ -882,6 +882,7 @@ async fn a_user_bash_runs_through_the_sandbox_and_reports_output() {
         &root,
         &sandbox,
         "printf 'hello'; printf 'oops' >&2; exit 3",
+        false,
         &CancellationToken::new(),
     )
     .await
@@ -909,6 +910,7 @@ async fn a_user_bash_is_confined_in_a_workspace_write_sandbox() {
         &root,
         &sandbox,
         &format!("echo x > {}", target.display()),
+        false,
         &CancellationToken::new(),
     )
     .await
@@ -930,7 +932,7 @@ async fn a_user_bash_honours_cancellation() {
     let sandbox = sandbox(SandboxMode::FullAccess, &root, &[]).expect("full access");
     let token = CancellationToken::new();
     token.cancel();
-    let out = radian_coding::run_user_bash(&root, &sandbox, "sleep 30", &token)
+    let out = radian_coding::run_user_bash(&root, &sandbox, "sleep 30", false, &token)
         .await
         .expect("the run reported a cancellation");
     assert!(out.cancelled, "{out:?}");
