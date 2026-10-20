@@ -126,7 +126,17 @@ documented options.
 `PathUnder` matches the **resolved** path: relative paths are joined to the permission
 workspace, symlinks in the existing part are resolved, and `.`/`..` are removed lexically. A
 link or a `..` therefore cannot move a call from one rule to another
-(`rules_match_resolved_paths_so_dotdot_and_symlinks_cannot_bypass`).
+(`rules_match_resolved_paths_so_dotdot_and_symlinks_cannot_bypass`). A `PathUnder` prefix
+matches by path components, so denying `.git/config` never spills onto `.git/config-other`.
+
+**Git executable entries (ADR 0038 decision 3).** In the `workspace` tier, `write`/`patch`
+deny the `.git` entries git can execute: `config`, `config.worktree`, `hooks/...`, each
+submodule's `config` and `hooks/...`, and a linked worktree's `gitdir`/`commondir`/
+`config.worktree` — one `deny` rule per discovered git directory
+(`ResourceMatcher::GitExec`), or a `PathUnder` deny on a worktree pointer file (rewriting
+it would repoint git at a gitdir the model controls). The entry list lives in
+`radian-sandbox` (`git_exec`) and is shared with the sandbox profile, so the two cannot
+drift apart. The rest of `.git` stays writable, and `full` has no such rules by design.
 
 ## Approval, grants, and sources
 

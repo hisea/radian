@@ -41,7 +41,6 @@
 | `mcp-servers-json.md` | decided（生态 2/4） | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门、按内容哈希确认，确认即批准其 server（一道门）；缺省 `inherit_env=["HOME"]`；环境白名单不变；MCP 文本结果套 `read` 的 64 KiB 上限并带截断标记 |
 | `command-hooks-claude-subset.md` | decided（生态 3/4） | 新 ADR；0012、0031、0011、0017、0016 | 外部命令 hook 只做 `PreToolUse`/`PostToolUse`/`Stop`，配置与 stdin 用 Claude/Codex 的子集，`allow`/`ask` 拒收，用户级 `[hooks]`、项目级 `.radian/hooks.json` 进信任门，工具名只在导入时翻译；吸收总报告第 17 条；编辑后检查是项目级 `PostToolUse`：配了才跑、同步每次、不批处理不延后、不内置不自动启用（本机数据：92% 的编辑消息只有一次编辑、跨轮段平均 1.83） |
 | `import-claude.md` | decided（生态 4/4） | 新 ADR；0029、0008、0025、0031 | `radian config import-claude` 一次性翻译，来源哪一级产物落哪一级， commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话与 memory；依赖前两条与 project-skills |
-| `workspace-git-exec-entries-file-tools.md` | idea（bug 待验证） | 0038、0039 | `write`/`patch` 不经沙箱，`workspace` 档能写 `.git/hooks/`，绕过 0038 的只读清单；修法倾向规则层 deny + 与沙箱共用一张清单 |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `subagent-ask-forwarding.md` | idea | 0043、0010、0024 | 子会话仍要问的 ask 转回父会话；缺 durable `PermissionRequested` 与 control 收审批；依赖沙箱内放行 |
