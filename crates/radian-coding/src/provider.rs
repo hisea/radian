@@ -9,7 +9,7 @@ use radian_sandbox::{Sandbox, SandboxMode, SandboxSlot};
 
 use crate::read_roots::ReadRoots;
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
-use crate::{fail, foreground, git, glob, grep, jobs, list, patch, read, shell, write};
+use crate::{fail, foreground, glob, grep, jobs, patch, read, shell, write};
 
 /// Resource bounds, all overridable with [`CodingTools::with_limits`]. Defaults are chosen
 /// so a single tool call cannot blow up the model context or the session file.
@@ -46,10 +46,6 @@ pub struct Limits {
     /// the data shows large results come mainly from context lines, and 32 KiB still
     /// holds about two hundred short match lines while that context bloat is cut.
     pub max_grep_output_bytes: usize,
-    /// Output cap for `git_diff`.
-    pub max_git_output_bytes: usize,
-    /// How long a git invocation may run.
-    pub git_timeout: Duration,
     /// `shell`'s output budget **per stream** when the model does not give one. Smaller than
     /// `default_read_bytes`: a shell result competes with the rest of the turn, and a truncated
     /// foreground result stays retrievable through `job` (ADR 0037 decision 3a).
@@ -66,14 +62,14 @@ pub struct Limits {
     /// cap applies, as before). `Some(ZERO)` is treated as off. A host sets it from
     /// `[shell] auto_background_secs`.
     pub auto_background_after: Option<Duration>,
-    /// The bytes of a **foreground** command's output retained for `shell_output` after its
+    /// The bytes of a **foreground** command's output retained after its
     /// model-facing view was truncated. The head+tail in the result is bounded by
     /// `default_shell_output_bytes`/`max_shell_output_bytes`; this is the larger private file
     /// the middle can be recovered from. A result that hits this cap says so (the bytes past
     /// it are not recoverable).
     pub max_foreground_retained_bytes: usize,
     /// The bytes every retained foreground output together may hold per session. Keeping a new
-    /// one past this evicts the oldest, whose handle then reads as unknown.
+    /// one past this evicts the oldest, whose id then reads as unknown.
     pub max_foreground_session_bytes: usize,
     /// The number of retained foreground outputs per session, evicting the oldest past it.
     pub max_foreground_items: usize,
@@ -95,8 +91,6 @@ impl Default for Limits {
             default_grep_matches_per_file: 50,
             max_grep_context: 30,
             max_grep_output_bytes: 32 << 10, // 32 KiB, half of `read`'s default
-            max_git_output_bytes: 1 << 20,   // 1 MiB
-            git_timeout: Duration::from_secs(10),
             // Per stream. 24 KiB sits inside the brief's 16-32 KiB band and below what other
             // agents show inline (30k chars, 50 KB, ~10k tokens ≈ 40 KiB): it halves the
             // previous 64 KiB per stream, still fits a typical failure tail, is divisible by 8
@@ -259,10 +253,11 @@ impl ToolProvider for CodingTools {
                 (jobs, Some(foreground))
             }
             // A provider built without a caller-supplied private directory (a test, an embedded
-            // tool set) falls back to a per-workspace jobs directory for `job_output` — but a
+            // tool set) falls back to a per-workspace jobs directory — but a
             // workspace directory is readable by the model's `read`, so foreground retention is
-            // **off**: there is nowhere safe to put it. No handle is created and `shell_output`
-            // is not advertised; the ordinary truncation notice still says bytes were discarded.
+            // **off**: there is nowhere safe to put it. No id is registered for an
+            // untruncated result's middle; the ordinary truncation notice still says bytes
+            // were discarded.
             None => (
                 Arc::new(jobs::Jobs::new(
                     self.root.root().join(".radian").join("jobs"),
@@ -282,7 +277,7 @@ impl ToolProvider for CodingTools {
             root: Arc::clone(&self.root),
             limits: self.limits,
             sandbox: self.sandbox.clone(),
-            specs: specs(shell, foreground.is_some()),
+            specs: specs(shell),
             jobs,
             foreground,
         })
@@ -297,9 +292,10 @@ pub struct CodingSession {
     sandbox: SandboxSlot,
     specs: Vec<ToolSpec>,
     jobs: Arc<jobs::Jobs>,
-    /// Retained foreground `shell` output, read by `shell_output`. `None` when the provider has
+    /// Retained foreground `shell` output, read back through the `job` tool by id
+    /// (ADR 0037 decision 3a: one id space). `None` when the provider has
     /// no caller-supplied private directory (see [`CodingTools::open_session`]), in which case
-    /// neither a handle nor the tool exists.
+    /// a truncated result's middle is not recoverable.
     foreground: Option<Arc<foreground::ForegroundOutputs>>,
 }
 
@@ -325,31 +321,18 @@ impl CodingSession {
     }
 }
 
-fn specs(shell: Option<(SandboxMode, bool)>, foreground: bool) -> Vec<ToolSpec> {
+fn specs(shell: Option<(SandboxMode, bool)>) -> Vec<ToolSpec> {
     let mut specs = vec![
         read::spec(),
         write::spec(),
         patch::spec(),
-        list::alias_spec(),
         glob::spec(),
         grep::spec(),
-        git::diff_spec(),
-        git::status_alias_spec(),
     ];
     if let Some((mode, git_writable)) = shell {
         specs.push(shell::spec(mode, git_writable));
-        // The job tool exists only with `shell`: without a sandbox there are no jobs. The
-        // four old names stay registered as one-version aliases (ADR 0043 decision 3): the
-        // host strips them from every model request, so the model never sees them.
+        // The job tool exists only with `shell`: without a sandbox there are no jobs.
         specs.push(jobs::job_spec());
-        specs.push(jobs::output_alias_spec());
-        specs.push(jobs::list_alias_spec());
-        specs.push(jobs::kill_alias_spec());
-        // Only a `shell` call produces retained foreground output, and only when there is a
-        // caller-supplied private directory to keep it in.
-        if foreground {
-            specs.push(foreground::alias_spec());
-        }
     }
     specs
 }
@@ -368,11 +351,8 @@ impl ToolSession for CodingSession {
             "read" => read::run(&self.root, &self.limits, &call.arguments).await,
             "write" => write::run(&self.root, &self.limits, &call.arguments).await,
             "patch" => patch::run(&self.root, &self.limits, &call.arguments).await,
-            "list" => list::run_alias(&self.root, &self.limits, &call.arguments).await,
             "glob" => glob::run(&self.root, &self.limits, &call.arguments).await,
             "grep" => grep::run(&self.root, &self.limits, &call.arguments).await,
-            "git_status" => git::status(&self.root, &self.limits, &call.arguments).await,
-            "git_diff" => git::diff(&self.root, &self.limits, &call.arguments).await,
             "shell" => match self.sandbox.get() {
                 Some(sandbox) => {
                     shell::run(
@@ -394,12 +374,6 @@ impl ToolSession for CodingSession {
                 )),
             },
             "job" => jobs::run_job(&self.jobs, &self.limits, &call.arguments, &cx).await,
-            "job_output" => {
-                jobs::run_output_alias(&self.jobs, &self.limits, &call.arguments, &cx).await
-            }
-            "job_list" => jobs::run_list_alias(&self.jobs),
-            "job_kill" => jobs::run_kill_alias(&self.jobs, &call.arguments),
-            "shell_output" => foreground::run_alias(&self.jobs, &self.limits, &call.arguments),
             other => Err(fail(
                 "unknown_tool",
                 format!("`{other}` is not one of the built-in coding tools"),

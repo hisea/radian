@@ -181,31 +181,24 @@ async fn offset_and_max_bytes_are_ignored_for_a_directory_and_said_once() {
     }
 }
 
-/// The `list` alias runs the same listing and opens with the rename line.
+/// The removed `list` name is an unknown tool; `read` lists directories.
 #[tokio::test]
-async fn the_list_alias_answers_with_the_rename_line_on_the_same_listing() {
+async fn the_removed_list_name_is_unknown() {
     let dir = TempDir::new("read-dir-alias");
     let root = dir.file("ws");
     std::fs::create_dir_all(root.join("sub")).unwrap();
     std::fs::write(root.join("a.txt"), "a").unwrap();
     let tools = common::tools(&root);
 
-    let listed = text(&call(&tools, "list", json!({"path": "."})).await.unwrap());
-    let read = text(&call(&tools, "read", json!({"path": "."})).await.unwrap());
-    assert!(
-        listed.starts_with("`list` was renamed: use `read` to list a directory.\n"),
-        "{listed}"
-    );
-    assert_eq!(&listed[listed.find('\n').unwrap() + 1..], read.as_str());
-
-    // The old arguments still work, including the default root.
-    let output = call(&tools, "list", json!({"max_entries": 1}))
+    let failure = call(&tools, "list", json!({"path": "."}))
         .await
-        .unwrap();
-    let body = text(&output);
-    assert_eq!(body.lines().count(), 3, "{body}");
-    assert_eq!(structured(&output)["entries"], 1);
-    assert_eq!(structured(&output)["truncated"], true);
+        .expect_err("the removed name is unknown");
+    assert_eq!(failure.code, "unknown_tool", "{failure:?}");
+
+    // `read` still lists the directory.
+    let read = text(&call(&tools, "read", json!({"path": "."})).await.unwrap());
+    assert!(read.contains("a.txt"), "{read}");
+    assert!(read.contains("sub"), "{read}");
 }
 
 /// Files still read as files: the directory branch only fires on directories.

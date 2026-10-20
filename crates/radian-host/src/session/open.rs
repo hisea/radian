@@ -237,12 +237,15 @@ pub async fn open_session(
     }
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
-    // The built-in coding tools are built here.
+    // The built-in coding tools are built here. `harden_git` is the trust decision
+    // (ADR 0039 decision 5): an untrusted project hardens git in every shell child.
+    let harden_git = !trust.resolved.decision.as_bool();
     let (coding, jobs) = build_coding_tools(
         coding_root.as_deref(),
         sandbox_slot.clone(),
         &jobs_dir,
         shell_auto_background,
+        harden_git,
     )?;
     // ADR 0037 §6: a resumed session clears its jobs directory. The registry is built empty
     // above, so at this point no file in the directory can belong to it and nothing is

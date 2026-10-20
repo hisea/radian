@@ -8,7 +8,8 @@ use std::sync::Arc;
 use agent_core::{
     Agent, Model, ModelContext, ModelError, ModelRequest, ModelResponse, ToolProvider, ToolSession,
 };
-use common::{TempDir, tools};
+use common::{TempDir, call, tools};
+use radian_coding::CodingTools;
 
 /// Never called: opening a session only needs the trait to be implemented.
 struct NeverModel;
@@ -37,23 +38,7 @@ async fn agent_core_accepts_the_built_in_tool_specs() {
         .iter()
         .map(|spec| spec.name.as_str())
         .collect();
-    assert_eq!(
-        names,
-        [
-            "read",
-            "write",
-            "patch",
-            "list",
-            "glob",
-            "grep",
-            "git_diff",
-            // The one-version aliases (ADR 0043 decision 3): `list` for `read` on a
-            // directory, `git_status` for `git_diff { stat: true }`. Both are registered
-            // so a call to an old name passes Core's preflight, and the host strips
-            // them from every model request, so the model never sees them.
-            "git_status"
-        ]
-    );
+    assert_eq!(names, ["read", "write", "patch", "glob", "grep"]);
 
     // Through the core: `open_session` compiles every schema and refuses duplicates.
     let agent = Arc::new(Agent::new(NeverModel, coding));
@@ -154,19 +139,21 @@ async fn the_read_spec_names_directory_listing() {
         bytes <= 1790,
         "the read definition grew to {bytes} bytes, past the 1790 budget"
     );
-    // The `list` alias keeps its old schema (so a stale call still parses) and its
-    // description names the rename.
-    let list = specs["list"];
-    assert!(
-        list.description.contains("Deprecated alias for `read`"),
-        "{}",
-        list.description
-    );
-    assert!(
-        list.input_schema["properties"].get("max_entries").is_some(),
-        "the alias keeps the old arguments: {}",
-        list.input_schema
-    );
+    // No removed name is advertised: a call to one is an unknown tool.
+    for name in [
+        "git_diff",
+        "list",
+        "git_status",
+        "job_output",
+        "job_list",
+        "job_kill",
+        "shell_output",
+    ] {
+        assert!(
+            session.tool_specs().iter().all(|spec| spec.name != name),
+            "{name} must not be advertised"
+        );
+    }
 }
 
 /// Opens an `AskTools` session (no workspace needed, ADR 0024 Q5) and returns the
@@ -239,4 +226,48 @@ async fn the_ask_user_definition_stays_small() {
             .is_some_and(|text| text.contains("16 display cells")),
         "the header description must name the width limit: {header}"
     );
+}
+
+/// The seven removed names are unknown tools in every session shape: `git_diff` outright,
+/// and the six old names (`list`, `git_status`, `job_output`, `job_list`, `job_kill`,
+/// `shell_output`). Neither the plain session nor the one with `shell`+`job` advertises
+/// them, and calling one returns the normal unknown-tool error.
+#[tokio::test]
+async fn removed_tool_names_are_unknown_in_every_session_shape() {
+    use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
+
+    let dir = TempDir::new("removed-names");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let jobs_dir = dir.file("sessions/sid.jobs");
+    std::fs::create_dir_all(jobs_dir.parent().unwrap()).unwrap();
+
+    let plain = tools(&root);
+    let policy = SandboxPolicy::new(SandboxMode::FullAccess, &root).expect("full-access policy");
+    let sandbox = Sandbox::from_policy(policy).expect("full-access needs no backend");
+    let with_shell = CodingTools::with_sandbox(&root, sandbox)
+        .expect("matching workspaces")
+        .with_jobs(std::sync::Arc::new(radian_coding::Jobs::new(&jobs_dir)));
+
+    for name in [
+        "git_diff",
+        "list",
+        "git_status",
+        "job_output",
+        "job_list",
+        "job_kill",
+        "shell_output",
+    ] {
+        for coding in [&plain, &with_shell] {
+            let session = coding.open_session().await.unwrap();
+            assert!(
+                session.tool_specs().iter().all(|spec| spec.name != name),
+                "{name} must not be advertised"
+            );
+            let failure = call(coding, name, serde_json::json!({}))
+                .await
+                .expect_err("a removed name is unknown");
+            assert_eq!(failure.code, "unknown_tool", "{name}: {failure:?}");
+        }
+    }
 }

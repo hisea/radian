@@ -201,15 +201,6 @@ impl PermissionHooks {
     async fn decide(&self, cx: &HookContext, call: &ToolCall) -> Result<ToolDecision, HookError> {
         let request_id = format!("perm-{}", self.next_id.fetch_add(1, Ordering::SeqCst) + 1);
         let call_id = call.id.clone();
-        // ADR 0043 decision 3: a call to a renamed tool's old name is judged under the **new**
-        // name, so the alias can never bypass a deny on the new tool. The transcript still
-        // holds the name the model sent; only this check, the record and the grant key use the
-        // canonical one.
-        let canonical = ToolCall {
-            name: crate::rule::canonical_tool_name(&call.name).to_owned(),
-            ..call.clone()
-        };
-        let call = &canonical;
         // The host's name gate is deny-only and outranks everything (the host tool gate): a rule,
         // a grant or the approver can never widen it.
         if let Some(reason) = self.gate(&call.name) {

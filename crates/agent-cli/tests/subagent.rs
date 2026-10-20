@@ -251,7 +251,7 @@ fn sigint(child: &Child) {
 
 // ---------- the tests ----------
 
-/// ADR 0043 1a: `explore` is exactly the four read-only tools, so a `write` call is an unknown
+/// ADR 0043 1a: `explore` is exactly the three read-only tools, so a `write` call is an unknown
 /// tool rather than a permission decision. The mutation (mounting the general set for
 /// `explore`, e.g. by dropping the hidden `--tools`) fails the exact-list assertion.
 #[tokio::test]

@@ -29,10 +29,9 @@ The memory tool (ADR 0021 D5) follows this rule: `memory_search` is `allow` in b
 There is deliberately no agent tool for archive/forget/purge/confirm/save/revise (D5: the
 model has no write path).
 
-Renamed tools (ADR 0043 decision 3) are judged under their **new** name
-(`rule::canonical_tool_name`): a call to `git_status` is checked as `git_diff`. A config rule
-written against an old name therefore never matches; the alias can never bypass a `deny` on
-the new tool.
+Removed tool names are refused as unknown tools: there is no alias mapping, so a rule
+written against `git_diff`, `list` or another removed name matches only that literal name
+and never affects a live tool.
 
 `ask_user` (ADR 0024 Q6) is `allow` in **both** tiers: it writes nothing and runs
 nothing, so it never prompts. It still goes through the ordinary hook path, and its answer is

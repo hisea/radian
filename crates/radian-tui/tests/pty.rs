@@ -851,10 +851,9 @@ async fn pty_mounts_only_the_builtin_tools() {
             "`{gone}` must not be mounted: {names:?}"
         );
     }
-    // The built-ins a workspace session mounts are exactly these, and nothing else. ADR 0043
-    // decision 3: `git_status` and `list` are renamed; their old names are registered for one
-    // version but never advertised. ADR 0037 decision 4: the four job readers are one
-    // `job` tool; `job_output`, `job_list`, `job_kill` and `shell_output` are never advertised.
+    // The built-ins a workspace session mounts are exactly these, and nothing else. The
+    // removed names (`git_diff`, `list`, `git_status`, `job_output`, `job_list`,
+    // `job_kill`, `shell_output`) are never advertised: a call to one is an unknown tool.
     // `memory_search` mounts only past the injection budget (ADR 0021 D7),
     // so this workspace — with an empty memory — does not list it.
     let mut got = names.clone();
@@ -862,12 +861,13 @@ async fn pty_mounts_only_the_builtin_tools() {
     assert_eq!(
         got,
         [
-            "ask_user", "git_diff", "glob", "grep", "job", "patch", "read", "shell", "skill",
-            "subagent", "write"
+            "ask_user", "glob", "grep", "job", "patch", "read", "shell", "skill", "subagent",
+            "write"
         ],
         "the exact tool set of a fresh TUI session: {names:?}"
     );
     for gone in [
+        "git_diff",
         "list",
         "git_status",
         "job_output",
@@ -3631,7 +3631,7 @@ async fn pty_max_model_calls_limits_the_turn() {
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![
-        tool_reply("call_1", "list", &json!({"path": "."}).to_string()),
+        tool_reply("call_1", "read", &json!({"path": "."}).to_string()),
         text_reply("SECOND-CALL"),
     ])
     .await;

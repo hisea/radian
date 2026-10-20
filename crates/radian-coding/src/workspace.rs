@@ -338,9 +338,7 @@ impl WorkspaceRoot {
     }
 
     /// A workspace-relative path whose parents exist and hold no symlink (walked by fd) and
-    /// whose leaf, if it exists, is not a symlink (`lstat`, never opened). For `git_diff`'s
-    /// pathspec: the path is handed to git relative to the root, so the
-    /// check is what keeps a link out of the pathspec.
+    /// whose leaf, if it exists, is not a symlink (`lstat`, never opened).
     pub(crate) fn relative_checked(&self, user: &str) -> Result<PathBuf, ToolFailure> {
         let relative = self.checked_relative(user)?;
         if relative.as_os_str().is_empty() {

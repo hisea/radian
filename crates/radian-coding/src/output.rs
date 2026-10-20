@@ -1,5 +1,5 @@
-//! Reading and creating **session-owned command output files**, shared by `job_output`
-//! (background jobs) and `shell_output` (a foreground command's retained output).
+//! Reading and creating **session-owned command output files**, shared by background jobs
+//! and a foreground command's retained output (both read back through the `job` tool).
 //!
 //! The file is always created by [`open_output_file`] — `O_CREAT|O_EXCL|O_NOFOLLOW`, mode
 //! 0600, in a caller-owned 0700 directory (ADR 0039 decision 1) — and read only through
@@ -57,7 +57,7 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
 /// `create_new` already refuses an existing path, and a symlink is an existing path, so
 /// `O_NOFOLLOW` is defence in depth here: when the destination is a symlink the two are
 /// equivalent, which `job_output_security` pins. The pair is what the ADR asks for, and both
-/// `job_output`'s file and `shell_output`'s retained file go through this one creator.
+/// a background job's file and a retained foreground file go through this one creator.
 pub(crate) fn open_output_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.append(true).create_new(true);
@@ -326,7 +326,7 @@ fn unlink(dir: &File, name: &OsStr) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The shared file-read arguments of `job` (and the one-version aliases).
+/// The shared file-read arguments of the `job` tool.
 #[derive(Deserialize)]
 pub(crate) struct FileArgs {
     /// 1-based line of the output file to start at.
@@ -528,7 +528,7 @@ pub(crate) fn read_failure(code: &str, error: &std::io::Error) -> ToolFailure {
 }
 
 /// Which part of the output file a call asks for. `None` is the incremental ring read, which
-/// only `job_output` has.
+/// only `job` with `op: read` and no range has.
 pub(crate) enum FileMode {
     Range {
         from_line: u64,

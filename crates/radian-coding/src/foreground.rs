@@ -20,11 +20,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use agent_core::{ToolConcurrency, ToolFailure, ToolOutput, ToolSpec};
-use serde::Deserialize;
-use serde_json::{Value, json};
-
-use crate::args;
 use crate::jobs::{JobState, Jobs, Ring};
 use crate::output::PrivateDir;
 use crate::provider::Limits;
@@ -308,86 +303,4 @@ fn tail_of(path: &Path, max: usize) -> Vec<u8> {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-// ---------- the `shell_output` one-version alias (ADR 0043 decision 3) ----------
-
-/// The read arguments: the old opaque handle (now a job id) plus the shared file reads.
-/// A handle from before the rename never resolves; a current job id does.
-#[derive(Deserialize)]
-pub(crate) struct ReadArgs {
-    pub(crate) handle: String,
-    #[serde(flatten)]
-    pub(crate) file: crate::output::FileArgs,
-}
-
-/// The argument shape the alias parses (the old `shell_output` schema).
-pub(crate) fn schema() -> serde_json::Value {
-    let mut properties = serde_json::Map::new();
-    properties.insert(
-        "handle".into(),
-        json!({
-            "type": "string",
-            "description": "The opaque `output_handle` a truncated foreground `shell` result \
-                            returned. It is not a path; a path or a handle from another \
-                            session is refused."
-        }),
-    );
-    if let Some(fields) = crate::output::file_properties().as_object() {
-        for (key, value) in fields {
-            properties.insert(key.clone(), value.clone());
-        }
-    }
-    properties.insert(
-        "mode".into(),
-        json!({
-            "type": "string",
-            "enum": ["tail", "range", "pattern"],
-            "description": "Which read this is: `tail` (`tail_lines`), `range` \
-                            (`from_line`/`max_lines`) or `pattern` (`pattern`). With `mode`, \
-                            the other reads' fields are ignored; without it, give at most one \
-                            of them."
-        }),
-    );
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": ["handle"],
-        "additionalProperties": false
-    })
-}
-
-pub(crate) fn alias_spec() -> ToolSpec {
-    ToolSpec {
-        name: "shell_output".into(),
-        description: "Deprecated alias for `job` with `{\"op\": \"read\"}`; kept for one \
-                      version."
-            .into(),
-        input_schema: schema(),
-        concurrency: ToolConcurrency::Shared,
-    }
-}
-
-/// `shell_output`, the one-version alias for `job { op: read }` (ADR 0043 decision 3). The
-/// old arguments read the same full-file modes; the `handle` is looked up in the job registry
-/// (a current job id resolves, a pre-rename handle does not). The result opens with the
-/// rename line.
-pub(crate) fn run_alias(
-    jobs: &Jobs,
-    limits: &Limits,
-    arguments: &Value,
-) -> Result<ToolOutput, ToolFailure> {
-    use crate::jobs::{SHELL_OUTPUT_RENAME, read_output_file, rename_failure, renamed};
-    let args: ReadArgs = args::parse("shell_output", &schema(), arguments)?;
-    let mode = crate::output::FileMode::from_args("shell_output", &args.file, arguments)?
-        .ok_or_else(|| {
-            args::invalid(
-                "shell_output",
-                arguments,
-                ["give `tail_lines`, `from_line`/`max_lines` or `pattern`"],
-            )
-        })?;
-    read_output_file(jobs, &args.handle, mode, limits)
-        .map(|output| renamed(SHELL_OUTPUT_RENAME, output))
-        .map_err(|failure| rename_failure(SHELL_OUTPUT_RENAME, failure))
 }

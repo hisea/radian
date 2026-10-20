@@ -12,8 +12,8 @@ const NEEDLE: &str = "Command::new(\"git\")";
 /// modules (a `#[cfg(test)]` line and everything after it) are ignored, so their setup helpers
 /// need no entry here.
 const ALLOWED: &[(&str, usize)] = &[
-    // The helper itself: the two command builders and the config read.
-    ("crates/radian-coding/src/host_git.rs", 3),
+    // The helper itself: the two command builders and the two config reads.
+    ("crates/radian-coding/src/host_git.rs", 4),
     // The sandbox escape-matrix harness, not a host runtime path; it only creates test repos.
     ("crates/radian-sandbox/src/harness.rs", 1),
 ];

@@ -461,7 +461,7 @@ async fn perf_tool_round_trip() {
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let server = MockServer::start(vec![
-            tool_reply("call_1", "list", r#"{"path":"."}"#),
+            tool_reply("call_1", "read", r#"{"path":"."}"#),
             text_reply("TOOL-ROUND-TRIP-DONE"),
         ])
         .await;

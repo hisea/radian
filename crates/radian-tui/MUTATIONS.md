@@ -723,13 +723,13 @@ Base `106a4d6` · 一次性 worktree `/tmp/tools2-mut`（`git worktree add` 自�
 |---|---|---|---|---|
 | U1 | 审查 T1：结果按 call_id 配对 | 配对条件恒真（配给最后一张卡片） | `a_batch_of_calls_pairs_its_results_by_id_in_any_order` | ✅ |
 | U2 | 审查 T2：`collapsed` 与 `errors` 不同 | `collapsed` 恢复成与 `errors` 相同 | `collapsed_and_errors_differ_for_a_successful_card` | ✅ |
-| U3 | diff 行按角色着色 | `diff_body` 全部用 `Normal` | `a_git_diff_body_colors_its_line_kinds` | ✅ |
+| U3 | diff 行按角色着色 | `diff_body` 全部用 `Normal` | `a_patch_body_colors_its_line_kinds` | ✅ |
 | U4 | patch 的加/删方向 | `old`/`new` 的前缀对调 | `a_patch_card_shows_the_replacement_with_diff_roles` | ✅ |
-| U5 | `@@` 与上下文不同 | `@@` 归为 context | `a_git_diff_body_colors_its_line_kinds` | ✅ |
-| U6 | 记忆工具有自己的渲染器 | 四个 memory 渲染器不注册（回落通用） | `the_list_and_memory_cards_have_their_own_heads` | ✅ |
+| U5 | `@@` 与上下文不同 | `@@` 归为 context | `a_patch_body_colors_its_line_kinds` | ✅ |
+| U6 | 记忆工具有自己的渲染器 | 四个 memory 渲染器不注册（回落通用） | `the_ask_and_memory_cards_have_their_own_heads` | ✅ |
 
-6/6 抓住。**过程记录（U6 的第一轮）**：`run_mut` 那一次给了两个位置参数（`--test render the_list_and_memory --lib tools`），
-cargo 只认第一个，跑出来"没抓住"是假象；改成单个过滤器 `--test render the_list_and_memory` 后立刻抓住。
+6/6 抓住。**过程记录（U6 的第一轮）**：`run_mut` 那一次给了两个位置参数（`--test render the_ask_and_memory --lib tools`），
+cargo 只认第一个，跑出来"没抓住"是假象；改成单个过滤器 `--test render the_ask_and_memory` 后立刻抓住。
 另：本片实现时发现 `base_name` 按单个 `_` 切分，导致 `git_status`/`ask_user`/`memory_*` 全部落到通用渲染器
 （已修：只有 `__` 或 `mcp__` 前缀才算命名空间），这一条由头部的单测与渲染测试共同钉住。
 ## skills 片 3：`/skill:` 展开（2026-10-14）
@@ -1571,8 +1571,8 @@ Base：本片 HEAD（`dogfood/thin-diff`）· 就地变异：每个变异先把�
 
 | # | 需求 | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|---|
-| D1 | `+` 与上下文行用新文件行号、`-` 行用旧文件行号 | `DiffKind::Added` 改用 `old` 计数 | `diff::a_patch_body_numbers_its_rows_once_per_hunk`、`tools::tests::a_git_diff_body_numbers_from_its_own_hunk_headers` | ✅ |
-| D2 | `@@` 与文件头是弱一级（`frame`），不是强调色 | `diff_role` 的结构行返回 `LineRole::Accent` | `diff::a_diff_row_colors_its_gutter_sign_and_code`、`render::a_git_diff_body_colors_its_line_kinds` | ✅ |
+| D1 | `+` 与上下文行用新文件行号、`-` 行用旧文件行号 | `DiffKind::Added` 改用 `old` 计数 | `diff::a_patch_body_numbers_its_rows_once_per_hunk`、`tools::tests::a_patch_body_numbers_from_hunk_headers_in_the_text` | ✅ |
+| D2 | `@@` 与文件头是弱一级（`frame`），不是强调色 | `diff_role` 的结构行返回 `LineRole::Accent` | `diff::a_diff_row_colors_its_gutter_sign_and_code`、`render::a_patch_body_colors_its_line_kinds` | ✅ |
 | D3 | diff 的代码按文件后缀高亮 | `diff_line` 的 highlight 恒为 `None`（`Some` 分支不可达） | `diff::a_diff_row_colors_its_gutter_sign_and_code`（`.rs` 的 `let` 是 `syntax_keyword`） | ✅ |
 | D4 | `patch` 结构化结果的起始行 | `patch.rs::line_of_offset` 的 `+ 1` 改成 `+ 2` | `radian-coding tests/patch.rs` 的四条 hunk 测试（一/多区间、CRLF、首行与末行） | ✅ |
 
@@ -1858,7 +1858,7 @@ source backed up under `.radian/scratch/backup/`, the mutated file restored with
 | FM-2 | a drawn body makes the head `◻`, never `◼` | `blocks.rs::head_marker`: the `body_follows` branch returns `Folded` | `card::the_head_line_is_the_name_the_title_the_meta_and_the_status`, `card::a_failed_call_ends_the_head_with_a_cross_and_shows_the_error_body`, `card::a_cjk_command_and_output_keep_the_marker_column`, `card::the_ascii_glyph_set_draws_ascii_markers_and_status`, `card::a_small_tool_is_one_line_until_it_is_expanded`, `card::the_tool_head_fold_marker_follows_the_drawn_body`, `card::the_fold_modes_decide_the_body_and_the_collapsed_meta`, `card::a_patch_block_shows_its_diff_body`, `card::an_overwrite_write_head_shows_the_removed_count`, `card::a_new_file_write_numbers_each_content_line` | ✅ (10 FAILED) |
 | FM-3 | the ascii one-liner is `* `, not the expanded `- ` | `blocks.rs::HeadMarker::glyph`: `Ascii => "* "` -> `"- "` | `card::the_tool_head_fold_marker_follows_the_drawn_body` | ✅ (1 FAILED) |
 | FM-4 | the expanded thinking header is `◻` (the shared pair), not `▼` | `render.rs`: `REASONING_MARKER` back to `"▼ "` and `reasoning_marker` back to `v`/`▼ ` | `thinking::the_thinking_fold_marker_is_the_shared_pair`, `thinking::the_expanded_thinking_has_a_header_and_a_rail`, `thinking::the_duration_is_shown_for_a_live_entry_and_absent_for_a_resumed_one`, `thinking::streaming_shows_the_spinner_not_the_duration`, `thinking::the_thinking_markers_follow_the_ascii_glyph_tier` | ✅ (5 FAILED) |
-| FM-5 | a compact tool's head is a `•` whatever its result hides (reviewer fix 1) | `blocks.rs::head_marker`: the compact early-return removed and the old `hidden > 1` fold restored, so a `read` hiding 100 lines folds to `◼` | `card::the_tool_head_fold_marker_follows_the_drawn_body` (the 100-line read row: `◼ read a.rs ✓`), `render::the_block_layout_snapshot` (the `list` head) | ✅ (2 FAILED) |
+| FM-5 | a compact tool's head is a `•` whatever its result hides (reviewer fix 1) | `blocks.rs::head_marker`: the compact early-return removed and the old `hidden > 1` fold restored, so a `read` hiding 100 lines folds to `◼` | `card::the_tool_head_fold_marker_follows_the_drawn_body` (the 100-line read row: `◼ read a.rs ✓`), `render::the_block_layout_snapshot` (the `read` head) | ✅ (2 FAILED) |
 
 5/5 caught, no misses and no equivalent mutants. FM-3 is pinned by exactly one test (the ascii row
 of the table); FM-1's one-line-fold mutant also trips the cancelled-call head, which shares the

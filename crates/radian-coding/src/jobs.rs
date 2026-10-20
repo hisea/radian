@@ -3,7 +3,7 @@
 //! A background command runs under the **same sandbox and environment** as a foreground one
 //! ([`crate::shell::sandboxed_command`]), in its own session and process group (`setsid`), but
 //! the tool returns at once. Its output streams to `<id>.out` in the registry's jobs
-//! directory (the full history) and into a bounded in-memory ring (`job_output`'s increments).
+//! directory (the full history) and into a bounded in-memory ring (the `job` read increments).
 //! The registry is per session, owned by [`crate::provider::CodingSession`]; at most
 //! [`MAX_RUNNING_JOBS`] run at once.
 //!
@@ -12,13 +12,13 @@
 //! 0700, on the sandbox's deny-read list), so a model that can write the workspace cannot
 //! pre-plant a symlink the host would follow. The output file is opened
 //! `O_CREAT|O_EXCL|O_NOFOLLOW` with mode 0600, and the model reads it only through
-//! `job_output`; the fields that used to carry a path carry [`OUTPUT_HINT`] instead.
+//! the `job` tool; the fields that used to carry a path carry [`OUTPUT_HINT`] instead.
 //!
 //! The session invariant is the same one [`crate::shell`] uses: the leader is kept
 //! **unreaped** while its session is reserved, and every signal is sent under the `reaped`
 //! mutex, so a session id can never be reused under a kill. A stop signals the leader's whole
 //! **session**, not only its process group (a child that calls `setpgid`, like GNU `timeout`,
-//! leaves the group but keeps the session): `job_kill` sends SIGTERM, then SIGKILL after
+//! leaves the group but keeps the session): stopping a job sends SIGTERM, then SIGKILL after
 //! [`KILL_GRACE`]; a natural exit, a timeout or a session-end cleanup stops the whole session
 //! the same way. Killing never touches the `.out` file.
 //!
@@ -57,16 +57,16 @@ use crate::shell::{
 /// and keeps the cost bounded.
 pub const MAX_RUNNING_JOBS: usize = 4;
 
-/// The in-memory ring per job, in bytes, for `job_output` increments. 64 KiB is enough for the
+/// The in-memory ring per job, in bytes, for the `job` read increments. 64 KiB is enough for the
 /// interesting tail of a build log between two tool calls; four jobs hold at most 256 KiB. The
 /// `.out` file keeps the full history for the host, but the model reads only through
-/// `job_output`, so the ring is the read window and only has to cover one read gap.
+/// the `job` tool, so the ring is the read window and only has to cover one read gap.
 pub const JOB_RING_BYTES: usize = 64 << 10;
 
 /// SIGTERM, then SIGKILL after this grace (ADR 0037 decision 2).
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
-/// `job_output`'s default wait, and its hard cap (dsh's numbers).
+/// The `job` wait's default, and its hard cap (dsh's numbers).
 const DEFAULT_WAIT_MS: u64 = 30_000;
 const MAX_WAIT_MS: u64 = 600_000;
 
@@ -103,9 +103,9 @@ pub enum JobState {
     Exited(i32),
     /// The leader was killed by this signal (not a requested kill).
     Signaled(i32),
-    /// `job_kill` (or a session-end cleanup) stopped it.
+    /// Stopping a job (or a session-end cleanup) stopped it.
     Killed,
-    /// Its deadline elapsed (the `job_kill`-style stop). Only an adopted foreground call's
+    /// Its deadline elapsed (the adopted-job stop below). Only an adopted foreground call's
     /// `timeout_secs` sets one now (ADR 0037; revision 2 for explicit
     /// background jobs).
     TimedOut,
@@ -145,37 +145,37 @@ pub(crate) struct JobCell {
     /// `true` for a retained foreground result (ADR 0037 decision 3a): a settled entry the
     /// model reads like any job, evicted with the foreground bounds, never counted as running.
     retained: bool,
-    /// Set by `job_kill`/the timeout before the session is signalled, so the supervisor can
+    /// Set by a `job` kill/the timeout before the session is signalled, so the supervisor can
     /// label the settle. `None` means the leader exited on its own.
     termination: Option<Termination>,
     ring: Ring,
     /// The model's read cursor: an absolute byte offset into everything the job produced.
     read_offset: u64,
-    /// The registry-computed output file (ADR 0039 decision 1). `job_output`'s file arguments
+    /// The registry-computed output file (ADR 0039 decision 1). The `job` read's file arguments
     /// read this path; it is never built from a model-supplied string.
     output: PathBuf,
     /// The session id, which is also the process group id: the leader's pid, since it called
     /// `setsid` (this is what a stop signals, see [`crate::shell::signal_session`]).
     sid: u32,
-    /// How many `job_output wait=true` calls are blocked on this job right now. A settle with
+    /// How many `job` waits are blocked on this job right now. A settle with
     /// a waiter is one the model already gets through the wait, so it is not notified again.
     waiters: usize,
     /// Shared with the supervisor: `true` once the leader has been reaped. Every signal is
     /// sent while holding this, so a reused session id can never be signalled.
     reaped: Arc<Mutex<bool>>,
-    /// Flipped to `true` when the job settles; `job_output`'s `wait` awaits it.
+    /// Flipped to `true` when the job settles; a `job` wait awaits it.
     settled: tokio::sync::watch::Sender<bool>,
 }
 
 impl JobCell {
-    /// Appends post-adoption bytes to the job's `job_output` ring. Used by a promoted
+    /// Appends post-adoption bytes to the job's output ring. Used by a promoted
     /// foreground stream (ADR 0037); the ring itself stays private to this module.
     pub(crate) fn push_ring(&mut self, bytes: &[u8]) {
         self.ring.push(bytes);
     }
 }
 
-/// A job as `job_list` shows it.
+/// A job as shown in a listing (the host's job list, the TUI footer).
 #[derive(Debug, Clone)]
 pub struct JobSummary {
     pub id: String,
@@ -202,8 +202,8 @@ pub enum JobEvent {
         id: String,
         state: JobState,
         duration_ms: u64,
-        /// Whether the model should be told: `false` for `job_kill`/a session-exit settle and
-        /// for a settle a `job_output wait` already returned (ADR 0037 decisions 2 and 4).
+        /// Whether the model should be told: `false` for a `job` kill/a session-exit settle and
+        /// for a settle a `job` wait already returned (ADR 0037 decisions 2 and 4).
         notify: bool,
     },
 }
@@ -211,6 +211,11 @@ pub enum JobEvent {
 /// The registry, per session.
 pub struct Jobs {
     inner: Arc<JobsInner>,
+    /// Harden git in every shell child this registry starts (ADR 0039 decision 5): the
+    /// session's project is not trusted, so repository configuration must not run commands
+    /// through a shell git. Set once at session setup; a trusted session leaves it off so
+    /// the user's own hooks run.
+    harden_git: bool,
 }
 
 struct JobsInner {
@@ -223,7 +228,7 @@ struct JobsInner {
 
 #[derive(Default)]
 struct JobsState {
-    /// Start order, for `job_list`.
+    /// Start order, for listings.
     order: Vec<String>,
     jobs: HashMap<String, Arc<Mutex<JobCell>>>,
     /// How many background settles this registry has published. Bumped in the same
@@ -246,7 +251,21 @@ impl Jobs {
                 state: Mutex::new(JobsState::default()),
                 events,
             }),
+            harden_git: false,
         }
+    }
+
+    /// Harden git in every shell child this registry starts (ADR 0039 decision 5). The host
+    /// sets it from the session's trust decision: an untrusted project hardens, a trusted
+    /// one does not.
+    pub fn with_git_hardening(mut self, on: bool) -> Self {
+        self.harden_git = on;
+        self
+    }
+
+    /// Whether shell children carry the host git hardening (ADR 0039 decision 5).
+    pub(crate) fn git_hardening(&self) -> bool {
+        self.harden_git
     }
 
     /// The directory this registry writes its output files to.
@@ -310,7 +329,7 @@ impl Jobs {
             )
         })?;
 
-        let mut process = sandboxed_command(sandbox, cwd, command)?;
+        let mut process = sandboxed_command(sandbox, cwd, command, self.harden_git)?;
         configure_group(&mut process);
         let mut child = process.spawn().map_err(|e| {
             fail(
@@ -394,7 +413,7 @@ impl Jobs {
     /// `crate::shell`) settles the job once it reaps. Nothing is restarted.
     ///
     /// `remaining_timeout` is the explicit `timeout_secs` still to run, measured from the
-    /// command's start; the job is killed like `job_kill` and settles as timed out then.
+    /// command's start; the job is killed like a `job` kill and settles as timed out then.
     /// `None` means no deadline after adoption.
     ///
     /// Returns [`AdoptInfo`] with the job id and the pre-adoption output. When all
@@ -460,8 +479,8 @@ impl Jobs {
             read_offset: 0,
             output: output.clone(),
             sid: supervised.pid,
-            // The **same** reaped flag as the foreground supervisor, so `job_kill`/
-            // `kill_all` signal under the exact lock the reaping holds (the one kill path).
+            // The **same** reaped flag as the foreground supervisor, so a `job` kill or
+            // `kill_all` signals under the exact lock the reaping holds (the one kill path).
             reaped: Arc::clone(&supervised.reaped),
             waiters: 0,
             settled,
@@ -537,7 +556,7 @@ impl Jobs {
         })
     }
 
-    /// `job { op: read }` without a range, or the old `job_output` without a file mode: the
+    /// `job` with `op: read` and no range: the
     /// increment since the last call, plus the state. Never waits.
     pub(crate) fn read_increment(&self, id: &str) -> Result<OutputResult, ToolFailure> {
         let cell = self.get(id)?;
@@ -545,7 +564,7 @@ impl Jobs {
         Ok(Self::take_increment(&mut cell, false, false))
     }
 
-    /// `job_output`: the increment since the last call, plus the state. `wait` blocks until
+    /// `job` with `op: wait`: the increment since the last call, plus the state. `wait` blocks until
     /// the job settles, `timeout` elapses or the turn is cancelled; a wait timeout never kills
     /// the job, and neither does a cancellation (ADR 0037 decision 6).
     pub(crate) async fn output(
@@ -650,7 +669,7 @@ impl Jobs {
         }
     }
 
-    /// `job_kill`: SIGTERM the session, SIGKILL after the grace. A settled job is a no-op.
+    /// Stops the job: SIGTERM the session, SIGKILL after the grace. A settled job is a no-op.
     pub(crate) fn kill(&self, id: &str) -> Result<KillResult, ToolFailure> {
         let cell = self.get(id)?;
         let settled = {
@@ -808,7 +827,7 @@ impl Drop for Jobs {
 #[derive(Debug)]
 pub struct StartInfo {
     pub id: String,
-    /// [`OUTPUT_HINT`]: the model reads the output through `job_output` (ADR 0039 decision 1).
+    /// [`OUTPUT_HINT`]: the model reads the output through the `job` tool (ADR 0039 decision 1).
     pub output: String,
 }
 
@@ -843,7 +862,7 @@ impl AdoptedHandle {
     }
 }
 
-/// What `job_output` returns.
+/// What a `job` read or wait returns.
 pub(crate) struct OutputResult {
     pub state: JobState,
     /// Bytes the ring had to drop before the caller's cursor.
@@ -858,7 +877,7 @@ pub(crate) struct OutputResult {
     pub output: String,
 }
 
-/// What `job_kill` returns.
+/// What a `job` kill returns.
 pub(crate) enum KillResult {
     Requested,
     AlreadySettled(JobState),
@@ -962,7 +981,7 @@ fn configure_group(process: &mut Command) {
 
 /// Waits for the leader without reaping it, kills the whole session, reaps, drains the readers,
 /// then records the settle. The `reaped` lock is held across the kill and the reap, so a
-/// concurrent `job_kill` can never signal a reused session id.
+/// concurrent kill can never signal a reused session id.
 fn supervise(
     pid: u32,
     mut child: Child,
@@ -1005,7 +1024,7 @@ fn settle(inner: &JobsInner, cell: &Arc<Mutex<JobCell>>, id: String, status: Opt
             None => exit_state(status),
         };
         let duration_ms = cell.started.elapsed().as_millis() as u64;
-        // `job_kill` and a session-exit settle are not notified; a settle a waiter is already
+        // A `job` kill and a session-exit settle are not notified; a settle a waiter is already
         // blocked on is not notified again (ADR 0037 decisions 2 and 4). A timeout **is**
         // notified: the model set the timeout but did not ask to kill the job, so it may be
         // waiting on it.
@@ -1030,11 +1049,11 @@ fn settle(inner: &JobsInner, cell: &Arc<Mutex<JobCell>>, id: String, status: Opt
     // `send_replace`, not `send`: tokio's `send` returns `Err` **without storing** the value
     // when the channel has no receiver, and the receiver from `watch::channel(false)` is
     // dropped at once, so a job that settles while nobody waits would leave the watched
-    // value `false` and a later `job_output wait=true` would sleep to its timeout.
+    // value `false` and a later `job` wait would sleep to its timeout.
     lock(cell).settled.send_replace(true);
 }
 
-/// Decrements a job's waiter count on drop, so a cancelled or panicked `job_output wait`
+/// Decrements a job's waiter count on drop, so a cancelled or panicked `job` wait
 /// cannot leave a job marked as "already waited" forever.
 struct WaiterGuard(Arc<Mutex<JobCell>>);
 
@@ -1188,99 +1207,7 @@ pub(crate) fn job_spec() -> ToolSpec {
     }
 }
 
-/// The one-version alias specs (ADR 0043 decision 3): registered so Core's preflight
-/// accepts a call to an old name, stripped from every model request by the host, and
-/// answered with a rename line. Their mount conditions mirror the tools they replace:
-/// the `job_*` aliases need `shell`, the `shell_output` alias needs the private directory.
-pub(crate) fn output_alias_spec() -> ToolSpec {
-    ToolSpec {
-        name: "job_output".into(),
-        description: "Deprecated alias for `job` with `{\"op\": \"read\"}`; kept for one version."
-            .into(),
-        input_schema: output_schema(),
-        concurrency: ToolConcurrency::Shared,
-    }
-}
-
-pub(crate) fn list_alias_spec() -> ToolSpec {
-    ToolSpec {
-        name: "job_list".into(),
-        description: "Deprecated alias; kept for one version. Job ids are already in \
-                      your context, so there is no list tool."
-            .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        }),
-        concurrency: ToolConcurrency::Shared,
-    }
-}
-
-pub(crate) fn kill_alias_spec() -> ToolSpec {
-    ToolSpec {
-        name: "job_kill".into(),
-        description: "Deprecated alias for `job` with `{\"op\": \"kill\"}`; kept for one version."
-            .into(),
-        input_schema: kill_schema(),
-        concurrency: ToolConcurrency::Shared,
-    }
-}
-
-/// The `job_output` spec (argument shape only now: the alias parses the old call).
-pub(crate) fn output_schema() -> serde_json::Value {
-    let mut properties = serde_json::Map::new();
-    properties.insert(
-        "job_id".into(),
-        json!({
-            "type": "string",
-            "description": "The id `shell` returned when the job started."
-        }),
-    );
-    properties.insert(
-        "wait".into(),
-        json!({
-            "type": "boolean",
-            "description": "Block until the job ends (or timeout_ms elapses). Default \
-                            false: return the output so far at once. Ignored by the file \
-                            arguments below."
-        }),
-    );
-    properties.insert(
-        "timeout_ms".into(),
-        json!({
-            "type": "integer",
-            "minimum": 1,
-            "description": "How long `wait` may block, in milliseconds (default 30000, \
-                            maximum 600000). On timeout the job keeps running."
-        }),
-    );
-    // The full-file read arguments, shared with `shell_output` (crate::output).
-    if let Some(fields) = crate::output::file_properties().as_object() {
-        for (key, value) in fields {
-            properties.insert(key.clone(), value.clone());
-        }
-    }
-    properties.insert(
-        "mode".into(),
-        json!({
-            "type": "string",
-            "enum": ["new", "tail", "range", "pattern"],
-            "description": "Which read this is: `new` (the output since your last call; \
-                            `wait`/`timeout_ms` apply), `tail` (`tail_lines`), `range` \
-                            (`from_line`/`max_lines`) or `pattern` (`pattern`). With `mode`, \
-                            the other reads' fields are ignored; without it, give at most one \
-                            of them."
-        }),
-    );
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": ["job_id"],
-        "additionalProperties": false
-    })
-}
-
+/// The `job_id` schema `job` with `op: kill` parses.
 pub(crate) fn kill_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -1295,21 +1222,11 @@ pub(crate) fn kill_schema() -> serde_json::Value {
     })
 }
 
-/// The `job_kill` argument shape (used by the alias now).
+/// The `job` argument shape for `op: kill` (just the id).
 
 #[derive(Deserialize)]
 struct JobIdArgs {
     job_id: String,
-}
-
-#[derive(Deserialize)]
-struct OutputArgs {
-    job_id: String,
-    wait: Option<bool>,
-    timeout_ms: Option<u64>,
-    /// The full-file read arguments, shared with `shell_output` ([`crate::output::FileArgs`]).
-    #[serde(flatten)]
-    file: crate::output::FileArgs,
 }
 
 /// The `job` arguments: which job, and which of the three operations.
@@ -1347,9 +1264,8 @@ pub(crate) async fn run_job(
         JobOp::Kill => run_kill(jobs, &kill_args(&args.id)),
         JobOp::Wait => {
             if let Some(mode) = crate::output::FileMode::from_args("job", &args.file, arguments)? {
-                // A range names a file read even with `op: wait`: the old `job_output`
-                // treated the file arguments the same way, so an old transcript's
-                // `wait: true` + range still reads.
+                // A range names a file read even with `op: wait`: the file arguments always
+                // worked this way, so an old transcript's `wait: true` + range still reads.
                 return read_output_file(jobs, &args.id, mode, limits);
             }
             let timeout = clamp_wait(args.timeout_ms);
@@ -1377,7 +1293,7 @@ fn clamp_wait(timeout_ms: Option<u64>) -> Duration {
 }
 
 /// Renders an incremental or waited read: the increment, the dropped-bytes note, the
-/// timeout/cancel note, then `[status]`. Shared by `job` and the `job_output` alias.
+/// timeout/cancel note, then `[status]`.
 fn render_output(id: &str, result: &OutputResult, timeout: Duration) -> ToolOutput {
     let mut text = String::new();
     if result.increment.is_empty() {
@@ -1421,89 +1337,8 @@ fn render_output(id: &str, result: &OutputResult, timeout: Duration) -> ToolOutp
     }
 }
 
-// ---------- one-version aliases (ADR 0043 decision 3) ----------
-
-/// The line every `job_output` alias result starts with.
-const JOB_OUTPUT_RENAME: &str = "`job_output` was renamed: call `job` with `{\"id\": ..., \"op\": \"read\"}` (`wait` to wait, `tail_lines`/`from_line`/`max_lines`/`pattern` to page) for the same output.";
-
-/// The line every `job_list` alias result starts with. There is no new list call: job ids
-/// are already in the model's context, so the alias shows the current list once.
-const JOB_LIST_RENAME: &str = "`job_list` was renamed: there is no list tool — the job ids are already in your context. This is the current list, shown once.";
-
-/// The line every `job_kill` alias result starts with.
-const JOB_KILL_RENAME: &str =
-    "`job_kill` was renamed: call `job` with `{\"id\": ..., \"op\": \"kill\"}` to stop it.";
-
-/// The line every `shell_output` alias result starts with.
-pub(crate) const SHELL_OUTPUT_RENAME: &str = "`shell_output` was renamed: call `job` with `{\"id\": ..., \"op\": \"read\"}` for the same output; a truncated `shell` result now carries a job id, not a handle.";
-
-/// Prefixes a rename line to a tool result's text, for the one-version aliases.
-pub(crate) fn renamed(rename: &str, mut output: ToolOutput) -> ToolOutput {
-    for part in &mut output.content {
-        if let ContentPart::Text { text, .. } = part {
-            *text = format!("{rename}\n{text}");
-            break;
-        }
-    }
-    output
-}
-
-/// Prefixes a rename line to a tool failure, keeping its code.
-pub(crate) fn rename_failure(rename: &str, failure: ToolFailure) -> ToolFailure {
-    ToolFailure::new(failure.code, format!("{rename}\n{}", failure.message))
-}
-
-/// `job_output`, the one-version alias for `job { op: read | wait }` (ADR 0043 decision 3).
-/// The old arguments run the same reads `job` runs; the result opens with the rename line.
-pub(crate) async fn run_output_alias(
-    jobs: &Jobs,
-    limits: &Limits,
-    arguments: &serde_json::Value,
-    cx: &ToolContext<'_>,
-) -> Result<ToolOutput, ToolFailure> {
-    let args: OutputArgs = args::parse("job_output", &output_schema(), arguments)?;
-    if let Some(mode) = crate::output::FileMode::from_args("job_output", &args.file, arguments)? {
-        return read_output_file(jobs, &args.job_id, mode, limits)
-            .map(|output| renamed(JOB_OUTPUT_RENAME, output))
-            .map_err(|failure| rename_failure(JOB_OUTPUT_RENAME, failure));
-    }
-    let timeout = clamp_wait(args.timeout_ms);
-    let result = jobs
-        .output(
-            &args.job_id,
-            args.wait.unwrap_or(false),
-            timeout,
-            &cx.cancellation,
-        )
-        .await
-        .map_err(|failure| rename_failure(JOB_OUTPUT_RENAME, failure))?;
-    Ok(renamed(
-        JOB_OUTPUT_RENAME,
-        render_output(&args.job_id, &result, timeout),
-    ))
-}
-
-/// `job_list`, the one-version alias (ADR 0043 decision 3). The list itself is unchanged;
-/// the result opens with the rename line.
-pub(crate) fn run_list_alias(jobs: &Jobs) -> Result<ToolOutput, ToolFailure> {
-    run_list(jobs).map(|output| renamed(JOB_LIST_RENAME, output))
-}
-
-/// `job_kill`, the one-version alias for `job { op: kill }` (ADR 0043 decision 3).
-pub(crate) fn run_kill_alias(
-    jobs: &Jobs,
-    arguments: &serde_json::Value,
-) -> Result<ToolOutput, ToolFailure> {
-    let args: JobIdArgs = args::parse("job_kill", &kill_schema(), arguments)?;
-    run_kill(jobs, &kill_args(&args.job_id))
-        .map(|output| renamed(JOB_KILL_RENAME, output))
-        .map_err(|failure| rename_failure(JOB_KILL_RENAME, failure))
-}
-
-// ---------- reading the full output file ----------
-
-/// Reads a job's own output file in the requested [`crate::output::FileMode`], shared with
-/// the alias (ADR 0039 decision 1: the model reads the whole output through the tools). The
+/// Reads a job's own output file in the requested [`crate::output::FileMode`]
+/// (ADR 0039 decision 1: the model reads the whole output through the tools). The
 /// id must be a real registry key; a path-like id is an unknown job, never a path.
 pub(crate) fn read_output_file(
     jobs: &Jobs,
@@ -1526,46 +1361,13 @@ pub(crate) fn read_output_file(
     )
 }
 
-pub(crate) fn run_list(jobs: &Jobs) -> Result<ToolOutput, ToolFailure> {
-    let jobs = jobs.list();
-    let mut text = String::new();
-    if jobs.is_empty() {
-        text.push_str("no background jobs in this session\n");
-    }
-    for job in &jobs {
-        text.push_str(&format!(
-            "{}  {}  {}  {}\n  output: {}\n",
-            job.id,
-            job.state.label(),
-            human_elapsed(job.elapsed),
-            job.command,
-            job.output
-        ));
-    }
-    Ok(ToolOutput {
-        content: vec![ContentPart::text(text)],
-        structured: Some(json!({
-            "count": jobs.len(),
-            "jobs": jobs
-                .iter()
-                .map(|job| json!({
-                    "job_id": job.id,
-                    "state": job.state.label(),
-                    "running": job.state.is_running(),
-                    "elapsed_ms": job.elapsed.as_millis() as u64,
-                    "command": job.command,
-                    "output": job.output,
-                }))
-                .collect::<Vec<_>>(),
-        })),
-    })
-}
-
+/// Stops a job (`job` with `op: kill`): SIGTERM the session, SIGKILL after the grace.
+/// A settled job is a no-op.
 pub(crate) fn run_kill(
     jobs: &Jobs,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: JobIdArgs = args::parse("job_kill", &kill_schema(), arguments)?;
+    let args: JobIdArgs = args::parse("job", &kill_schema(), arguments)?;
     let (text, state) = match jobs.kill(&args.job_id)? {
         KillResult::Requested => (
             format!(
@@ -1587,17 +1389,6 @@ pub(crate) fn run_kill(
             "state": state,
         })),
     })
-}
-
-fn human_elapsed(elapsed: Duration) -> String {
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    }
 }
 
 #[cfg(test)]

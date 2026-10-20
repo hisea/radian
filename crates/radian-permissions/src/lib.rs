@@ -45,6 +45,5 @@ pub use audit::{
 pub use hooks::{PermissionHooks, ToolGate, policy_change_event, runtime_event};
 pub use profile::{ApprovalPolicy, Preset, Profile, ProfileError};
 pub use rule::{
-    Action, Evaluated, Resource, ResourceMatcher, Rule, ToolMatcher, canonical_tool_name, evaluate,
-    resource_of,
+    Action, Evaluated, Resource, ResourceMatcher, Rule, ToolMatcher, evaluate, resource_of,
 };

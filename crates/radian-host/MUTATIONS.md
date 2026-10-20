@@ -837,7 +837,7 @@ Base `b63ac20`（本 worktree，dogfood/memory-r2）· 变异直接做在本 wor
 | SG-M2 | `lfs` 从仓库配置读 `filter.lfs.clean` 命令串并用 `sh -c` 运行，而不是 Radian 自己的固定 `git-lfs clean -- <path>` | `lfs_runs_radians_own_command_and_never_the_configured_one`（配置的脚本跑了，提交的是脚本输出而不是固定命令的指针） | ✅ 1 FAILED |
 | SG-M3 | `dirty()` 与 task 的 `create_worktree`/`remove_worktree` 去掉 no-filter 覆盖（`git status` / `git worktree add\|remove` 直接跑 filter） | `a_driver_in_info_attributes_never_runs`、`a_driver_in_core_attributes_file_never_runs`（`dirty` 跑了 clean），`creating_and_removing_a_worktree_runs_no_filter`（`worktree add` 跑了 smudge） | ✅ 3 FAILED |
 
-3/3 全抓。SG-M1 由 lfs 那条确定性抓住：`git add` 对 `filter=lfs` 的文件会执行仓库配置里的
+1/1 全抓（M2、M3 的行为测试随 `git_diff` 工具一并删除，见 `remove-git-diff`；M1 的页脚测试仍在）。SG-M1 由 lfs 那条确定性抓住：`git add` 对 `filter=lfs` 的文件会执行仓库配置里的
 命令，而 lfs 是唯一「被允许、因而不会被 `plan_path` 提前拒绝」的驱动，所以「退回 git add」在这条
 路径上必然跑配置命令。`a_gitattributes_flip_during_commit_never_runs_a_filter` 是并发断言
 （断言「标记永不出现」），在 SG-M1 下 8 次提交里没有恰好撞上 check-attr 与 git add 之间的窗口，
@@ -857,18 +857,13 @@ SG-M3 证明它们确实区分「关掉命令」与「没关」。
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | SG-F1-M1 | 页脚的 `background_git` 退回裸 `Command::new("git") -C dir`（丢掉 no-filter 覆盖） | `contrib::tests::the_git_contributor_never_runs_a_repository_filter`（页脚读跑了 clean filter）；守卫 `every_host_git_call_is_built_from_the_shared_helper`（`contrib.rs` 出现生产裸 git 调用） | ✅ 2 FAILED |
-| SG-F1-M2 | `radian-coding` 的 `git_status`/`git_diff` 退回裸 git（丢掉覆盖） | `the_git_tools_never_run_a_repository_filter`（工具跑了 clean filter） | ✅ 1 FAILED |
-| SG-F1-M3 | gitlink 用 100644 而不是 160000 暂存 | `a_moved_submodule_is_staged_as_a_gitlink_without_running_a_filter`（模式不对） | ✅ 1 FAILED |
 
-3/3 全抓。守卫测试（`crates/radian-coding/tests/host_git.rs`）遍历 `crates/*/src` 里 `#[cfg(test)]`
+1/1 全抓（M2、M3 的行为测试随 `git_diff` 工具一并删除，见 `remove-git-diff`；M1 的页脚测试仍在）。守卫测试（`crates/radian-coding/tests/host_git.rs`）遍历 `crates/*/src` 里 `#[cfg(test)]`
 之前的部分，`Command::new("git")` 只允许出现在 helper 自己（`host_git.rs`）与沙箱测试 harness
 （`radian-sandbox/src/harness.rs`，其唯一的裸 git 只建测试仓库）；新增一个生产裸 git 调用会让它
 失败，SG-F1-M1 的守卫那条就是证明。
 
-**如实记录（测试的触发条件）**：`git status` 只在**大小相同**的 stat-dirty 文件上才哈希内容、
-从而跑 clean filter；内容大小不同时 git 直接按 stat 判为改动，不跑 filter。所以三个行为测试都用
-「与 index blob 同大小」的改动（`one\n` → `two\n`）。第一次写测试时用了不同大小（`one\ntwo\n`），
-SG-F1-M1 的行为测试假绿（只有守卫抓住）；改成同大小后行为测试也抓住。
+**如实记录（测试的触发条件）**：`git status` 只在**大小相同**的 stat-dirty 文件上才哈希内容、从而跑 clean filter；内容大小不同时 git 直接按 stat 判为改动，不跑 filter。所以 M1 的页脚行为测试用「与 index blob 同大小」的改动（`one\n` → `two\n`）。第一次写测试时用了不同大小（`one\ntwo\n`），SG-F1-M1 的行为测试假绿（只有守卫抓住）；改成同大小后行为测试也抓住。（M2、M3 删除前也是同大小改动；两行随 `git_diff` 工具一并删除。）
 ## ADR 0030 切片 7 part a 复核修订 1：`tools` 卸载与 `skills` 允许名单（2026-10-16）
 
 工作树 `.radian-worktrees/orch-s7a`（分支 `oc/orch-s7a`，基 `5625f6f`）。每条变异就地改，跑单个测试，
@@ -1143,7 +1138,7 @@ restored file with `diff -q`; afterwards `git diff` shows only the intended file
 | SA-3 | `subagent.rs`：`subagent` 的 `ToolConcurrency` 从 `Shared` 改 `Exclusive` | ✅ 1 failed（barrier 记录的并发峰值 `left: 1`，`right: 3`；耗时 21.6 s，两个 10 s 超时） | `three_subagent_calls_in_one_reply_run_at_the_same_time` |
 | SA-4 | `subagent.rs`：删掉 `tokio::select!` 的取消分支（只 `child.wait()`，不传播取消） | ✅ 1 failed（3 s 内子进程还在；restore 后手动 kill 了日志里的 pid） | `a_cancelled_parent_turn_kills_the_child` |
 | SA-5 | `subagent.rs`：父非 auto 也给子 `--yes`（`if true`） | ✅ 1 failed（结果里没有 `denied:` 行） | `a_non_auto_parent_denies_the_childs_ask_and_says_so` |
-| SA-6 | `subagent.rs`：`explore` 不再传隐藏 `--tools`（挂子会话的普通工具集） | ✅ 1 failed（`left: [...17 个...]`，`right: ["glob","grep","list","read"]`） | `an_explore_child_has_only_the_four_read_tools_and_write_is_refused` |
+| SA-6 | `subagent.rs`：`explore` 不再传隐藏 `--tools`（挂子会话的普通工具集） | ✅ 1 failed（工具表里出现 `write` 等读写工具） | `an_explore_child_has_only_the_three_read_tools_and_write_is_refused`（`explore` 工具表恰为 `["glob", "grep", "read"]`） |
 
 6/6 抓住。SA-4 说明取消必须**主动**杀死子会话：只靠 future 被 drop 时的
 `kill_on_drop`（5 s grace 之后）不足以让「父取消 → 子进程立刻消失」成立，测试的 3 s
@@ -1174,12 +1169,10 @@ stale one).
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| GV-1 | `strip_renamed_tool_aliases` is a no-op (the old names are advertised again) | ✅ 1 failed (`right: ["memory_revise","memory_save","memory_search","skill","subagent"]`, `left` carries `memory_get`) | `agent-cli::cli::a_headless_exec_mounts_no_orchestration_tools` (also `pty_mounts_only_the_builtin_tools`, `the_renamed_git_name_is_accepted_but_never_advertised`) |
 | GV-2 | the `ids` arm of `memory_search` is ignored (it returns an empty result) | ✅ 1 failed (`No matching memory records.` instead of the two records) | `memory::tools::tests::memory_search_with_ids_returns_the_full_records` |
 
-Commands: `timeout 300 cargo test -p agent-cli --locked --test cli a_headless_exec_mounts_no_orchestration_tools`
-(GV-1); `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast memory_search_with_ids_returns_the_full_records`
-(GV-2).
+Command: `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast memory_search_with_ids_returns_the_full_records`
+(GV-2). (GV-1's `strip_renamed_tool_aliases` is deleted with `remove-git-diff`; the row is dropped.)
 
 ## ADR 0043 decision 1a gaps: `--header` forwarding, the live route, the drop guard (2026-10-17)
 

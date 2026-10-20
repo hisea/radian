@@ -126,15 +126,6 @@ async fn a_truncated_command_exposes_a_retrievable_job_id() {
     let tools = host_tools(&ws, &jobs, small_view());
     let session = tools.open_session().await.expect("session");
 
-    // The old name stays registered as a one-version alias (ADR 0043 decision 3).
-    assert!(
-        session
-            .tool_specs()
-            .iter()
-            .any(|spec| spec.name == "shell_output"),
-        "the shell_output alias is registered with shell and a private root"
-    );
-
     let output = exec(&session, "shell", json!({"command": "seq 1 5000"}))
         .await
         .unwrap();
@@ -218,8 +209,8 @@ async fn an_id_from_another_session_is_unknown() {
     let second = other.open_session().await.expect("second session");
     let failure = exec(
         &second,
-        "shell_output",
-        json!({"handle": id, "tail_lines": 1}),
+        "job",
+        json!({"id": id, "op": "read", "tail_lines": 1}),
     )
     .await
     .expect_err("another session's id must be refused");
@@ -243,8 +234,8 @@ async fn a_path_like_id_cannot_open_a_file() {
     for bad in [absolute.as_str(), "../outside.txt", "out-1.out", "job-1-1"] {
         let failure = exec(
             &session,
-            "shell_output",
-            json!({"handle": bad, "tail_lines": 1}),
+            "job",
+            json!({"id": bad, "op": "read", "tail_lines": 1}),
         )
         .await
         .expect_err("a path is not an id");
@@ -428,10 +419,10 @@ async fn a_non_truncated_command_leaves_no_entry_or_file() {
     );
 }
 
-/// `job` read needs no range (it reads the increment); `shell_output` without one is still
-/// an argument error, not an empty read.
+/// `job` read without a range reads the increment (plus `[status]`); no read mode is
+/// required.
 #[tokio::test]
-async fn a_read_is_required() {
+async fn a_plain_read_returns_the_increment() {
     let dir = TempDir::new("shell-output-no-read");
     let ws = dir.file("ws");
     let jobs = dir.file("sessions/sid.jobs");
@@ -446,10 +437,14 @@ async fn a_read_is_required() {
         .expect("a job id")
         .to_owned();
 
-    let failure = exec(&session, "shell_output", json!({"handle": id}))
+    let found = exec(&session, "job", json!({"id": id, "op": "read"}))
         .await
-        .expect_err("no read");
-    assert_eq!(failure.code, "invalid_arguments", "{failure:?}");
+        .expect("a plain read returns the increment");
+    assert!(
+        output_text(&found).contains("[status:"),
+        "{}",
+        output_text(&found)
+    );
 }
 
 /// Session shutdown drops the registry and removes the retained files.
@@ -480,8 +475,8 @@ async fn shutdown_removes_the_retained_files() {
 // ---------- the no-host provider: there is no safe private root ----------
 
 /// `CodingTools::with_sandbox` without a caller-supplied private directory must not retain
-/// anything under the workspace (the model's `read` could reach it) and must not advertise
-/// `shell_output`. The ordinary truncation notice still tells the model bytes were discarded.
+/// anything under the workspace (the model's `read` could reach it). The ordinary
+/// truncation notice still tells the model bytes were discarded.
 #[tokio::test]
 async fn the_no_host_provider_retains_nothing_in_the_workspace() {
     let dir = TempDir::new("shell-output-no-host");
@@ -490,13 +485,11 @@ async fn the_no_host_provider_retains_nothing_in_the_workspace() {
     let tools = no_host_tools(&ws, small_view());
     let session = tools.open_session().await.expect("session");
 
-    assert!(
-        !session
-            .tool_specs()
-            .iter()
-            .any(|spec| spec.name == "shell_output"),
-        "shell_output must not be advertised without a private root"
-    );
+    // A hand-built call to the removed name is an unknown tool, never a path open.
+    let failure = exec(&session, "shell_output", json!({"handle": "out-0-1"}))
+        .await
+        .expect_err("the removed name is unknown");
+    assert_eq!(failure.code, "unknown_tool", "{failure:?}");
 
     let output = exec(&session, "shell", json!({"command": "seq 1 5000"}))
         .await
@@ -510,21 +503,6 @@ async fn the_no_host_provider_retains_nothing_in_the_workspace() {
     assert!(
         out_files_under(&ws).is_empty(),
         "a no-host provider must not leave a readable output file under the workspace"
-    );
-
-    // A hand-built call resolves in the job registry instead: an unknown id with the
-    // rename line, never a path open.
-    let failure = exec(
-        &session,
-        "shell_output",
-        json!({"handle": "out-0-1", "tail_lines": 1}),
-    )
-    .await
-    .expect_err("an old handle resolves to nothing");
-    assert_eq!(failure.code, "unknown_job", "{failure:?}");
-    assert!(
-        failure.message.starts_with("`shell_output` was renamed"),
-        "{failure:?}"
     );
 }
 

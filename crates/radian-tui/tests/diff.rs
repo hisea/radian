@@ -130,10 +130,10 @@ fn a_patch_body_numbers_its_rows_once_per_hunk() {
     assert!(text.contains("  43 + let c = 3;"), "{text}");
 }
 
-/// `git_diff`: the numbers come from the text's own `@@` headers, and the row's own side picks
-/// which file's counter moves.
+/// A unified diff text: the numbers come from the text's own `@@` headers, and the row's
+/// own side picks which file's counter moves.
 #[test]
-fn a_git_diff_body_numbers_from_its_hunk_headers() {
+fn a_patch_body_numbers_unified_text_from_its_hunk_headers() {
     let mut app = App::new("m", "s");
     let diff = "diff --git a/src/main.rs b/src/main.rs\n\
                 index 1..2 100644\n\
@@ -145,8 +145,8 @@ fn a_git_diff_body_numbers_from_its_hunk_headers() {
                 +let b = 3;\n";
     card(
         &mut app,
-        "git_diff",
-        serde_json::json!({}),
+        "patch",
+        serde_json::json!({"path": "src/main.rs"}),
         diff,
         serde_json::json!(null),
     );
@@ -175,8 +175,8 @@ fn a_diff_row_colors_its_gutter_sign_and_code() {
                 +let b = 3;\n";
     card(
         &mut app,
-        "git_diff",
-        serde_json::json!({}),
+        "patch",
+        serde_json::json!({"path": "src/main.rs"}),
         diff,
         serde_json::json!(null),
     );
@@ -233,8 +233,8 @@ fn a_diff_without_start_lines_draws_no_gutter() {
     let mut app = App::new("m", "s");
     card(
         &mut app,
-        "git_diff",
-        serde_json::json!({}),
+        "patch",
+        serde_json::json!({"path": "notes.txt"}),
         "-gone\n+added\n same\n",
         serde_json::json!(null),
     );
@@ -268,8 +268,8 @@ fn a_diff_row_copies_its_own_text_without_the_gutter() {
                 +let a = 2;\n";
     card(
         &mut app,
-        "git_diff",
-        serde_json::json!({}),
+        "patch",
+        serde_json::json!({"path": "src/main.rs"}),
         diff,
         serde_json::json!(null),
     );
@@ -412,8 +412,8 @@ fn a_diff_body_line_count_matches_its_layout() {
                 +let a = 2;\n";
     card(
         &mut app,
-        "git_diff",
-        serde_json::json!({}),
+        "patch",
+        serde_json::json!({"path": "src/main.rs"}),
         diff,
         serde_json::json!(null),
     );
@@ -444,8 +444,8 @@ fn a_long_diff_row_truncates_instead_of_wrapping() {
                 +let a = 2; let b = 3; let c = 4; let d = 5; let e = 6; let f = 7; let g = 8;\n";
     card(
         &mut app,
-        "git_diff",
-        serde_json::json!({}),
+        "patch",
+        serde_json::json!({"path": "src/main.rs"}),
         diff,
         serde_json::json!(null),
     );

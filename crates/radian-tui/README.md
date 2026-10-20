@@ -883,8 +883,7 @@ Run a general `workspace` session in a throwaway terminal and get the model to c
 8. **`write`, new and overwrite**: write a new file, then overwrite an existing one. *Expect*
    `◻ write <path> · +N ✓` for a new file and `+N −M` when the result carries `previous_lines`
    (the overwrite). *Look*: does the `−M` show only for the overwrite?
-9. **`git_diff` multi-hunk and the no-start-line fallback**: run `git_diff` on a change with
-   two hunks in one file. *Expect* each hunk's `@@` (weak `frame` colour, **not** the accent)
+9. **`patch` multi-hunk and the no-start-line fallback**: run `patch` with two hunks in one file. *Expect* each hunk's `@@` (weak `frame` colour, **not** the accent)
    and the numbered rows; then, for a diff text **without** `@@` (a resumed older entry, an MCP
    tool), the numberless fallback: the signs and the code with **no** gutter. *Look*: does the
    numbering restart at each `@@`, and does the fallback keep the sign column without a gutter?
@@ -1093,7 +1092,7 @@ the terminal). The cost: `RUST_BACKTRACE` is not honoured.
 
 Slice A's panic hook restored the terminal and then called `process::exit(101)`, which skips
 every `Drop`. That was safe only while the TUI owned no child processes. Slice B wires the
-built-in file tools, whose `git_diff` spawns `git`, so the precondition no longer
+built-in tools, whose `shell` spawns children, so the precondition no longer
 holds.
 
 `main` now keeps the runtime outside `run`, catches the panic with `catch_unwind`, shuts the
@@ -1283,9 +1282,10 @@ and a malformed argument is reported without echoing its value.
 
 ## Tools, permissions and the approval dialog
 
-`--workspace DIR` mounts the built-in file and read-only git tools (`read`, `write`, `patch`,
-`glob`, `grep`, `git_diff`) rooted at that directory, plus **`shell`** and **`job`** when a sandbox
-could be built. This is the same wiring `agent-cli` uses:
+`--workspace DIR` mounts the built-in file tools (`read`, `write`, `patch`,
+`glob`, `grep`) rooted at that directory, plus **`shell`** and **`job`** when a sandbox
+could be built. The model runs git through `shell` (hardened via `GIT_CONFIG_*` in
+untrusted projects, ADR 0039 decision 5). This is the same wiring `agent-cli` uses:
 
 - The sandbox is built **before** the tools: `workspace` and `full` call
   `radian_sandbox::Sandbox::new`, and a missing backend or a failed probe is an **error**, never
@@ -1606,8 +1606,6 @@ looked up by name in a compile-time registry with a generic fallback:
 | `read` | the path and the line range | a small tool: one line, the text only when expanded or on error |
 | `patch` | the path (`+N −M` in the meta) | the numbered `-old` / `+new` rows, one hunk per replaced range (the `hunks` structured field), no invented context |
 | `write` | the path (`+N −M` in the meta) | the content written |
-| `git_diff` | the file count and `+N −M`, or the entry count under `stat: true` | git's unified diff with the numbered gutter, or the plain status text under `stat: true` |
-| `list` | the entry count | the one-version alias for `read` on a directory: one line (the aligned table on expand) |
 | `ask_user` | the open `╭─ ask …` frame | one `prompt → answer` line per question, the chosen option marked `◉` |
 | `memory_search` / `_save` / `_revise` | the record id, the ids read, or the query | the tool's record summary |
 | anything else (MCP included) | the name and the arguments' JSON summary | the result text |

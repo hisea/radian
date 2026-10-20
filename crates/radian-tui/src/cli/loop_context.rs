@@ -197,13 +197,19 @@ impl LoopContext<'_> {
                 let tx = self.tx.clone();
                 let sandbox = self.bash_sandbox.clone();
                 let workspace = self.workspace.to_path_buf();
+                // ADR 0039 decision 5: a `!` command hardens git exactly like the `shell`
+                // tool when the project is not trusted. Read at call time: `/trust` can
+                // change the decision mid-session.
+                let harden_git = !self.session.trust().resolved.decision.as_bool();
                 let cancel = agent_core::CancellationToken::new();
                 self.bash_cancel = Some(cancel.clone());
                 self.runtime.spawn(async move {
                     let result = match sandbox {
                         Some(sandbox) => {
-                            radian_coding::run_user_bash(&workspace, &sandbox, &command, &cancel)
-                                .await
+                            radian_coding::run_user_bash(
+                                &workspace, &sandbox, &command, harden_git, &cancel,
+                            )
+                            .await
                         }
                         None => Err("this session has no shell; `!` needs a \
                                      shell-capable tier"

@@ -185,6 +185,7 @@ pub async fn run_user_bash(
     root: &Path,
     sandbox: &Sandbox,
     command: &str,
+    harden_git: bool,
     cancel: &CancellationToken,
 ) -> Result<UserBash, String> {
     let limits = Limits::default();
@@ -195,11 +196,11 @@ pub async fn run_user_bash(
         command,
         limits.default_shell_timeout,
         limits.default_shell_output_bytes,
+        harden_git,
         cancel,
         // ADR 0037: `!`/`!!` never turn into a background job.
         None,
-        // A user `!` command's output is shown and forgotten; nothing is retained for
-        // `shell_output`.
+        // A user `!` command's output is shown and forgotten; nothing is retained for it.
         None,
     )
     .await
@@ -267,7 +268,10 @@ pub(crate) async fn run(
     // when approved, runs **unsandboxed for that one call** below. The reason is
     // re-checked here (fail closed for callers without the layer), a background
     // outside call is refused outright, and nothing ever re-runs a command outside
-    // automatically.
+    // automatically. In a project the user has not trusted the call still carries the
+    // git hardening: approval names the exact command, but the repository's
+    // `core.fsmonitor` is not what the user approved (ADR 0039 decision 5).
+    let harden_git = jobs.git_hardening();
     if args.outside_sandbox.unwrap_or(false) {
         let reason = args.outside_sandbox_reason.as_deref().unwrap_or("").trim();
         if reason.is_empty() {
@@ -287,7 +291,8 @@ pub(crate) async fn run(
                 ],
             ));
         }
-        return run_outside_sandbox(root, sandbox, limits, &cwd, &args, reason, cx).await;
+        return run_outside_sandbox(root, sandbox, limits, &cwd, &args, reason, harden_git, cx)
+            .await;
     }
 
     if args.background.unwrap_or(false) {
@@ -327,6 +332,7 @@ pub(crate) async fn run(
         &args.command,
         wait,
         output_cap,
+        harden_git,
         &cx.cancellation,
         adopt_threshold.map(|_| Adopt {
             jobs,
@@ -493,10 +499,16 @@ fn clamp_output(requested: Option<usize>, limits: &Limits) -> (usize, bool) {
 /// backend) the environment filtered to the policy whitelist. Shared by the foreground
 /// executor and background jobs (ADR 0037): a job runs under exactly the same sandbox and
 /// environment rules as a foreground command.
+///
+/// `harden_git` carries the host git hardening ([`crate::host_git::hardening_env`]) into the
+/// child's environment (ADR 0039 decision 5): set in an untrusted project, so repository
+/// configuration cannot run commands through a shell git; unset in a trusted one, so the
+/// user's own hooks run. Every shell child is hardened the same way, sandboxed or not.
 pub(crate) fn sandboxed_command(
     sandbox: &Sandbox,
     cwd: &Path,
     command: &str,
+    harden_git: bool,
 ) -> Result<SandboxCommand, ToolFailure> {
     let mut process = sandbox
         .command_str("/bin/sh", &["-c", command])
@@ -519,6 +531,11 @@ pub(crate) fn sandboxed_command(
             }
         }
     }
+    if harden_git {
+        for (name, value) in crate::host_git::hardening_env(cwd) {
+            process.set_child_env(&name, &value);
+        }
+    }
     Ok(process)
 }
 
@@ -528,11 +545,14 @@ pub(crate) fn sandboxed_command(
 /// and this function has no other caller — so there is exactly one code path that
 /// runs a command without the sandbox, and it is reachable only from there. The
 /// environment whitelist still applies, exactly as for `FullAccess`: a
-/// model-controlled shell never inherits the host's keys, sandbox or not.
+/// model-controlled shell never inherits the host's keys, sandbox or not. In a project
+/// the user has not trusted it also carries the git hardening (ADR 0039 decision 5), exactly
+/// like a sandboxed child: the approval names the command, not the repository's config.
 fn unsandboxed_command(
     sandbox: &Sandbox,
     cwd: &Path,
     command: &str,
+    harden_git: bool,
 ) -> Result<Command, ToolFailure> {
     let mut process = Command::new("/bin/sh");
     process.arg("-c").arg(command);
@@ -541,6 +561,11 @@ fn unsandboxed_command(
     for name in &sandbox.policy().allow_env {
         if let Some(value) = std::env::var_os(name) {
             process.env(name, value);
+        }
+    }
+    if harden_git {
+        for (name, value) in crate::host_git::hardening_env(cwd) {
+            process.env(&name, &value);
         }
     }
     Ok(process)
@@ -559,11 +584,12 @@ async fn run_outside_sandbox(
     cwd: &Path,
     args: &ShellArgs,
     reason: &str,
+    harden_git: bool,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
     let (deadline, clamped) = clamp_timeout(args.timeout_secs, limits);
     let (output_cap, output_clamped) = clamp_output(args.max_output_bytes, limits);
-    let mut process = unsandboxed_command(sandbox, cwd, &args.command)?;
+    let mut process = unsandboxed_command(sandbox, cwd, &args.command, harden_git)?;
     let outcome = execute_built(
         &mut process,
         deadline,
@@ -628,11 +654,12 @@ async fn execute(
     command: &str,
     timeout: Duration,
     output_cap: usize,
+    harden_git: bool,
     cancel: &CancellationToken,
     adopt: Option<Adopt<'_>>,
     retain: Option<Retention>,
 ) -> Result<ExecOutcome, ToolFailure> {
-    let mut process = sandboxed_command(sandbox, cwd, command)?;
+    let mut process = sandboxed_command(sandbox, cwd, command, harden_git)?;
     execute_built(&mut process, timeout, output_cap, cancel, adopt, retain).await
 }
 

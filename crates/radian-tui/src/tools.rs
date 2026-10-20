@@ -216,7 +216,7 @@ pub struct DiffRow {
     /// highlight (the code then draws unhighlighted).
     pub lang: Option<&'static str>,
     /// Whether `source` begins with the row's sign character. A unified diff's own text carries
-    /// the sign column (`patch`, `git_diff`); `write`'s entry text is the file's content with
+    /// the sign column (`patch`); `write`'s entry text is the file's content with
     /// no signs, so its sign is synthesized and `source` is the code only (ADR 0028
     /// decision 5).
     pub signed: bool,
@@ -254,8 +254,8 @@ pub struct Rendered {
 
 /// The header of a card, **without** width: the layout truncates it like a code line, so the
 /// same string is the entry's copyable text and the displayed line. `text` is the tool's
-/// result text when it is known (the `git_diff` counts are parsed from it; a call-time head
-/// has none and stays terse - the pairing refreshes it when the result arrives).
+/// result text when it is known (a call-time head has none and stays terse - the pairing
+/// refreshes it when the result arrives).
 pub fn head_text(card: &ToolCard, text: &str) -> String {
     renderer_for(&card.name).head(card, text)
 }
@@ -321,7 +321,7 @@ pub struct ToolRender {
     head: fn(&ToolCard, &str) -> String,
     body: BodyFn,
     /// A **small** tool (ADR 0028, kept by revision 5's decision 1):
-    /// `read`, `grep`, `glob`, `list` and any other whose body is not worth showing by
+    /// `read`, `grep`, `glob` and any other whose body is not worth showing by
     /// default. A successful call draws its head line only; an error or `Ctrl-O` gives it
     /// rows.
     pub compact: bool,
@@ -366,23 +366,6 @@ pub fn renderer_for(name: &str) -> ToolRender {
             head: write_head,
             body: write_body,
             compact: false,
-        },
-        "git_diff" => ToolRender {
-            head: git_diff_card_head,
-            body: git_diff_card_body,
-            compact: false,
-        },
-        // The one-version alias (ADR 0043 decision 3): a transcript that already holds a
-        // `git_status` call keeps the card it had — the status + `--stat` shape.
-        "git_status" => ToolRender {
-            head: list_head,
-            body: plain_body,
-            compact: false,
-        },
-        "list" => ToolRender {
-            head: list_head,
-            body: list_body,
-            compact: true,
         },
         // `grep` / `glob`: the search tools, whose successful call is one line naming what was
         // searched (ADR 0028's small tools).
@@ -656,10 +639,6 @@ mod tests {
                 "@@ -1,1 +1,1 @@\n-a\n+b\n",
             ),
             ("write", json!({"path": "a", "content": "x\n"}), "x\n"),
-            ("list", json!({"path": "."}), "dir\t0\tsrc\n"),
-            ("git_status", json!({}), "M a.rs\n"),
-            ("git_diff", json!({"stat": true}), "M a.rs\n"),
-            ("git_diff", json!({}), "diff --git a/x b/x\n+x\n"),
             ("grep", json!({"pattern": "x"}), "a.rs:1:x\n"),
             ("glob", json!({"pattern": "*"}), "a.rs\n"),
             ("mcp__s__t", json!({}), "one\ntwo"),
@@ -762,52 +741,19 @@ mod tests {
         assert_eq!(meta_parts(&measured, false), vec!["exit 0", "12.4s"]);
     }
 
-    /// ADR 0043 decision 3: `git_diff { stat: true }` draws the card the old `git_status` drew —
-    /// the status/list head and a plain body, not the diff renderer.
+    /// A removed tool's old journal entry falls back to the generic renderer: the head is
+    /// the arguments' JSON summary and the body is the plain text. This is the path an old
+    /// `git_diff` call takes now that its renderer is gone.
     #[test]
-    fn the_git_diff_stat_card_looks_like_the_old_git_status_card() {
-        let text = "## main\n M a.rs\n?? b.rs\n a.rs | 2 +-\n";
-        let mut stat = card("git_diff", json!({"stat": true}));
-        stat.structured = Some(json!({"entries": 2}));
-        let mut status = card("git_status", json!({}));
-        status.structured = Some(json!({"entries": 2}));
-        assert_eq!(
-            renderer_for("git_diff").head(&stat, text),
-            renderer_for("git_status").head(&status, text)
-        );
-        assert_eq!(renderer_for("git_diff").head(&stat, text), "2 entries");
-        let rows = renderer_for("git_diff").body(&stat, text);
-        assert_eq!(rows.len(), 4);
-        assert!(
-            rows.iter().all(|line| matches!(
-                line,
-                BodyLine::Text {
-                    role: LineRole::Normal,
-                    ..
-                }
-            )),
-            "the status text is plain, not a diff: {rows:?}"
-        );
-        // Without `stat`, `git_diff` keeps the diff head: the counts come from the text.
-        let diff = card("git_diff", json!({}));
-        assert_eq!(
-            renderer_for("git_diff").head(&diff, text),
-            "0 files +0 −0",
-            "the diff head parses the diff counts, and this text has none"
-        );
-    }
-
-    #[test]
-    fn the_git_diff_head_counts_from_the_text() {
-        let text =
-            "diff --git a/x b/x\nindex 1..2\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n+another";
-        assert_eq!(
-            git_diff_head(&card("git_diff", json!({})), text),
-            "1 files +2 −1"
-        );
-        // No text yet (the call-time head): the counts are not claimed.
-        assert_eq!(git_diff_head(&card("git_diff", json!({})), ""), "");
-        assert_eq!(call_text(&card("git_diff", json!({})), ""), "git_diff");
+    fn a_removed_tool_renders_with_the_generic_card() {
+        let generic = renderer_for("something_unknown");
+        let card = card("git_diff", json!({}));
+        let text = "diff --git a/x b/x\n+x\n";
+        let renderer = renderer_for("git_diff");
+        assert_eq!(renderer.head(&card, text), generic.head(&card, text));
+        assert_eq!(renderer.head(&card, text), "{}");
+        assert_eq!(renderer.body(&card, text), generic.body(&card, text));
+        assert_eq!(call_text(&card, text), "git_diff {}");
     }
 
     /// The classifier for the numberless fallback: `@@` and file headers are structure (the
@@ -839,16 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_git_status_ask_and_memory_heads() {
-        let list = card("list", json!({"path": "src"}));
-        let mut list = list;
-        list.structured = Some(json!({"path": "src", "entries": 3, "total_entries": 9}));
-        assert_eq!(list_head(&list, ""), "src (3 of 9 entries)");
-        let status = card("git_status", json!({}));
-        assert_eq!(list_head(&status, ""), "");
-        let mut status = status;
-        status.structured = Some(json!({"entries": 2}));
-        assert_eq!(list_head(&status, ""), "2 entries");
+    fn the_ask_and_memory_heads() {
         let ask = card(
             "ask_user",
             json!({"questions": [{"id": "q1"}, {"id": "q2"}]}),
@@ -985,10 +922,10 @@ mod tests {
         );
     }
 
-    /// `git_diff`: the numbers come from the text's own `@@` headers, file headers and `@@` are
-    /// structure, and a second hunk's counters start from its own header.
+    /// A unified diff's numbers come from the text's own `@@` headers: file headers and `@@`
+    /// are structure, and a second hunk's counters start from its own header.
     #[test]
-    fn a_git_diff_body_numbers_from_its_own_hunk_headers() {
+    fn a_patch_body_numbers_from_hunk_headers_in_the_text() {
         let text = "diff --git a/src/main.rs b/src/main.rs\n\
                     index 1..2 100644\n\
                     --- a/src/main.rs\n\
@@ -1003,7 +940,8 @@ mod tests {
                     -old tail\n\
                     +new tail\n\
                     \x20end\n";
-        let body = diff_body(&card("git_diff", json!({})), text);
+        let patch = card("patch", json!({"path": "src/main.rs"}));
+        let body = diff_body(&patch, text);
         assert_eq!(
             diff_rows(&body),
             vec![
@@ -1029,7 +967,7 @@ mod tests {
                 LineRole::Frame,
             ]
         );
-        // `git_diff` names the file per file header, so the rows highlight as Rust.
+        // The file header names the file, so the rows highlight as Rust.
         assert!(
             body.iter()
                 .all(|line| !matches!(line, BodyLine::Diff(row) if row.lang != Some("rs"))),
@@ -1041,7 +979,8 @@ mod tests {
     /// keeps today's numberless form: the sign column, no gutter, the diff roles on the row.
     #[test]
     fn a_diff_without_hunk_headers_keeps_the_sign_column() {
-        let body = diff_body(&card("git_diff", json!({})), "-gone\n+added\n context\n");
+        let patch = card("patch", json!({"path": "a.txt"}));
+        let body = diff_body(&patch, "-gone\n+added\n context\n");
         assert!(diff_rows(&body).is_empty(), "{body:?}");
         assert_eq!(
             text_role(&body),
@@ -1052,7 +991,7 @@ mod tests {
             ]
         );
         // A `+`/`+`-in-a-header pair without a hunk is still structure.
-        let body = diff_body(&card("git_diff", json!({})), "--- a/x\n+++ b/x\n");
+        let body = diff_body(&patch, "--- a/x\n+++ b/x\n");
         assert!(body.iter().all(|line| matches!(
             line,
             BodyLine::Text {
@@ -1077,8 +1016,9 @@ mod tests {
         assert_eq!(parse_hunk_header("+not a header"), None);
     }
 
-    /// The language a diff row highlights with is the file's suffix: from the call for `patch`,
-    /// from the file header for `git_diff`, and nothing when the suffix names no language.
+    /// The language a diff row highlights with is the file's suffix: from the call for `patch`
+    /// (a `+++` file header in the text overrides it per file), and nothing when the suffix
+    /// names no language.
     #[test]
     fn a_diff_row_takes_the_language_from_the_files_suffix() {
         let mut patch = card(
@@ -1098,9 +1038,9 @@ mod tests {
             ),
             "`txt` is not a language we highlight: {body:?}"
         );
-        // `git_diff` reads the path out of the file header instead.
+        // A `+++` file header in the text overrides the call's path instead.
         let text = "diff --git a/x.md b/x.md\n+++ b/x.md\n@@ -1,1 +1,1 @@\n-# t\n+# T\n";
-        let body = diff_body(&card("git_diff", json!({})), text);
+        let body = diff_body(&patch, text);
         assert!(
             body.iter().all(
                 |line| matches!(line, BodyLine::Diff(row) if row.lang == Some("md"))
@@ -1141,51 +1081,6 @@ mod tests {
         // An empty write is one empty row, like a code block (the count mirror needs it).
         let empty = card("write", json!({"path": "a", "content": ""}));
         assert_eq!(write_body(&empty, "").len(), 1);
-    }
-
-    #[test]
-    fn a_list_result_becomes_an_aligned_table_with_directories_first() {
-        let text = "file\t512\tb.md\ndir\t4096\tsrc\nfile\t1693\tCargo.toml\nsymlink\t0\tlatest\n";
-        let table = list_table(text);
-        let lines: Vec<&str> = table.lines().collect();
-        assert_eq!(lines.len(), 4, "{table}");
-        // Directories first, then files by name, then the symlink.
-        assert!(
-            lines[0].starts_with("d ") && lines[0].ends_with("src"),
-            "{table}"
-        );
-        assert!(lines[1].ends_with("Cargo.toml"), "{table}");
-        assert!(lines[2].ends_with("b.md"), "{table}");
-        assert!(
-            lines[3].starts_with("l ") && lines[3].ends_with("latest"),
-            "{table}"
-        );
-        // The size column is right-aligned and human-readable.
-        assert!(lines[0].contains("4.0K"), "{table}");
-        assert!(lines[1].contains("1.7K"), "{table}");
-        assert!(lines[2].contains("512 B"), "{table}");
-        assert!(lines[3].contains("0 B"), "{table}");
-        // The size field is right-aligned, so the NAME column is what lines up.
-        let name_columns: Vec<usize> = lines
-            .iter()
-            .map(|line| {
-                line.find(|c: char| c.is_alphabetic() && !c.is_ascii_digit())
-                    .unwrap_or(0)
-            })
-            .collect();
-        assert!(
-            name_columns.windows(2).all(|pair| pair[0] == pair[1]),
-            "the names align: {table} {name_columns:?}"
-        );
-        // No tab survives.
-        assert!(!table.contains('\t'), "{table}");
-    }
-
-    #[test]
-    fn a_list_line_without_the_tool_shape_passes_through() {
-        let table = list_table("dir\t4096\tsrc\nnot a list line\n");
-        assert!(table.contains("not a list line"), "{table}");
-        assert!(table.starts_with("d "), "{table}");
     }
 
     #[test]

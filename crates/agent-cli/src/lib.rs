@@ -103,7 +103,7 @@ pub struct Cli {
     mcp_config: Option<String>,
 
     /// Expose the built-in file tools rooted at this directory (read/write/patch,
-    /// glob/grep, git_diff). The `shell` and `job` tools are exposed as well: `workspace` confines them,
+    /// glob/grep). The `shell` and `job` tools are exposed as well: `workspace` confines them,
     /// `full` (the default) is unsandboxed.
     #[arg(long)]
     workspace: Option<String>,
