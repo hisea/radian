@@ -1,6 +1,7 @@
 # 上下文文件的 `@path` 导入
 
 - 状态：decided＼�
+- 顺序：生态兼容四件事的第 1/4＼�按 `context-at-imports` → `mcp-servers-json` → `command-hooks-claude-subset` → `import-claude` 做；ACP 暂定不做）
 - 涉及 ADR：0036（上下文文件的发现、上限、不可信、仓库外不读）
 - 来源：`docs/research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` §5.4、§6 ⑤
 

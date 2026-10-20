@@ -1,6 +1,7 @@
 # MCP 配置接受 `mcpServers` 结构
 
 - 状态：decided＼�
+- 顺序：生态兼容四件事的第 2/4＼�按 `context-at-imports` → `mcp-servers-json` → `command-hooks-claude-subset` → `import-claude` 做；ACP 暂定不做）
 - 涉及 ADR：0008（MCP 配置节与 `[mcp]`）、0031（项目级 `.mcp.json` 进信任门）、0012（子进程环境白名单、凭据不外泄）、0043（MCP 不进沙箱）
 - 来源：`docs/research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` §5.3、§6 ②；总报告 README 第 31 条
 

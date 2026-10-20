@@ -1,6 +1,7 @@
 # 外部命令 hook：与 Claude Code / Codex 同构的子集
 
 - 状态：decided＼�
+- 顺序：生态兼容四件事的第 3/4＼�按 `context-at-imports` → `mcp-servers-json` → `command-hooks-claude-subset` → `import-claude` 做；ACP 暂定不做）
 - 涉及 ADR：新 ADR（命令 hook）；0012（hook 不能放宽权限）、0031（项目级 hook 进信任门）、0011（`stop` 钩子续跑走 inbox）、0017（hook 出错结束回合）、0016（`workspace` 档下 hook 进沙箱）
 - 来源：总报告 `docs/research/2026-10-18-area-deep-dive/README.md` 第 17 条（两个外部命令 hook）；`11-ecosystem-compat.md` §5.5、§6 ③（字段对齐）
 
