@@ -217,17 +217,18 @@ async fn the_ask_user_description_states_when_to_ask() {
     );
 }
 
-/// `ask-user-pass` decision 3: the slimmed definition serializes to 1633 bytes
+/// `ask-user-pass` decision 3: the slimmed definition serializes to 1618 bytes
 /// (measured 2026-10-20: 1584 after slimming, +49 for the header width note restored in
-/// fix round 1); the pin leaves a little room above that. The `header` field names the
-/// width limit so a CJK-writing user does not pay an error round trip for it.
+/// fix round 1, -15 for dropping the `header` `maxLength` that counted characters instead
+/// of display cells); the pin leaves a little room above that. The `header` field names
+/// the width limit so a CJK-writing user does not pay an error round trip for it.
 #[tokio::test]
 async fn the_ask_user_definition_stays_small() {
     let spec = ask_user_spec().await;
     let bytes = serde_json::to_vec(&spec).unwrap().len();
     assert!(
-        bytes <= 1650,
-        "the ask_user definition grew to {bytes} bytes, past the 1650 budget"
+        bytes <= 1630,
+        "the ask_user definition grew to {bytes} bytes, past the 1630 budget"
     );
     let header = &spec.input_schema["properties"]["questions"]["items"]["properties"]["header"];
     assert!(
