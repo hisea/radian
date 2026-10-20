@@ -2,6 +2,7 @@
 
 import json
 import shlex
+import struct
 import sys
 import tempfile
 import unittest
@@ -10,8 +11,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from radian_command import (  # noqa: E402
+    BUILTIN_PROVIDER_IDS,
     CREDENTIAL_ENV_NAME,
     RadianInvocation,
+    assert_binary_static,
     build_auth_json,
     build_command,
     redact_base_url,
@@ -31,52 +34,89 @@ def base_invocation(**overrides):
     return RadianInvocation(**args)
 
 
+def _elf64(*, dynamic):
+    ident = b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\x00" * 8
+    segments = [1]  # PT_LOAD
+    if dynamic:
+        segments.append(3)  # PT_INTERP
+    header = ident + struct.pack(
+        "<HHIQQQIHHHHHH", 2, 62, 1, 0, 64, 0, 0, 64, 56, len(segments), 0, 0, 0
+    )
+    body = b"".join(
+        struct.pack("<IIQQQQQQ", kind, 5, 0, 0, 0, 0, 0, 0x1000)
+        for kind in segments
+    )
+    return header + body
+
+
+def _write_temp(data):
+    handle = tempfile.NamedTemporaryFile(delete=False)
+    try:
+        handle.write(data)
+    finally:
+        handle.close()
+    return handle.name
+
+
 class SelectProviderTest(unittest.TestCase):
-    def test_openai_format_with_custom_endpoint_uses_generic(self):
-        provider, base_url = select_provider(
-            model_api_format="openai_chat_completions",
-            user_supplied_base_url="https://proxy.example/v1",
-            resolved_base_url="https://proxy.example/v1",
-            provider="openai",
-        )
-        self.assertEqual((provider, base_url), ("openai-compatible", "https://proxy.example/v1"))
+    def test_builtin_prefix_runs_without_base_url(self):
+        for slug in BUILTIN_PROVIDER_IDS:
+            with self.subTest(provider=slug):
+                provider, base_url = select_provider(
+                    provider=slug,
+                    configured_base_url=None,
+                    base_url=None,
+                )
+                self.assertEqual((provider, base_url), (slug, None))
 
-    def test_unset_format_with_custom_endpoint_uses_generic(self):
+    def test_opencode_go_model_uses_own_endpoint(self):
         provider, base_url = select_provider(
-            model_api_format=None,
-            user_supplied_base_url="https://proxy.example/v1",
-            resolved_base_url="https://proxy.example/v1",
-            provider="openai",
+            provider="opencode-go",
+            configured_base_url=None,
+            base_url=None,
         )
-        self.assertEqual((provider, base_url), ("openai-compatible", "https://proxy.example/v1"))
+        self.assertEqual((provider, base_url), ("opencode-go", None))
 
-    def test_anthropic_value_routes_to_anthropic_without_base_url(self):
-        # Harbor's StrEnum serializes to the lowercase value.
+    def test_configured_endpoint_wins_over_builtin_prefix(self):
+        # A proxy in front of a built-in provider still runs as the generic
+        # provider: built-in descriptors use their own endpoints.
         provider, base_url = select_provider(
-            model_api_format="anthropic_messages",
-            user_supplied_base_url=None,
-            resolved_base_url="https://api.anthropic.com",
+            provider="opencode-go",
+            configured_base_url="https://proxy.example/v1",
+            base_url="https://proxy.example/v1",
+        )
+        self.assertEqual(
+            (provider, base_url), ("openai-compatible", "https://proxy.example/v1")
+        )
+
+    def test_proxied_anthropic_traffic_uses_generic(self):
+        provider, base_url = select_provider(
             provider="anthropic",
+            configured_base_url="https://proxy.example/anthropic",
+            base_url="https://proxy.example/anthropic",
         )
-        self.assertEqual((provider, base_url), ("anthropic", None))
+        self.assertEqual(
+            (provider, base_url),
+            ("openai-compatible", "https://proxy.example/anthropic"),
+        )
 
-    def test_anthropic_name_routes_to_anthropic_without_base_url(self):
+    def test_unknown_provider_falls_back_to_generic(self):
         provider, base_url = select_provider(
-            model_api_format="ANTHROPIC_MESSAGES",
-            user_supplied_base_url=None,
-            resolved_base_url="https://api.anthropic.com",
-            provider="anthropic",
+            provider="no-such-provider",
+            configured_base_url=None,
+            base_url="https://proxy.example/v1",
         )
-        self.assertEqual((provider, base_url), ("anthropic", None))
+        self.assertEqual(
+            (provider, base_url), ("openai-compatible", "https://proxy.example/v1")
+        )
 
-    def test_anthropic_format_with_custom_endpoint_is_refused(self):
-        with self.assertRaises(ValueError):
-            select_provider(
-                model_api_format="anthropic_messages",
-                user_supplied_base_url="https://proxy.example/anthropic",
-                resolved_base_url="https://proxy.example/anthropic",
-                provider="anthropic",
-            )
+    def test_unknown_provider_without_endpoint_uses_generic_default(self):
+        provider, base_url = select_provider(
+            provider=None,
+            configured_base_url=None,
+            base_url=None,
+        )
+        self.assertEqual((provider, base_url), ("openai-compatible", None))
 
 
 class BuildAuthJsonTest(unittest.TestCase):
@@ -87,11 +127,19 @@ class BuildAuthJsonTest(unittest.TestCase):
         self.assertEqual(entry["env"]["RADIAN_BASE_URL"], "https://proxy.example/v1")
         self.assertNotIn("sk-", content)
 
-    def test_anthropic_entry_has_no_endpoint(self):
-        content = build_auth_json("anthropic", None)
-        entry = json.loads(content)["anthropic"]
-        self.assertEqual(entry["key"], f"${CREDENTIAL_ENV_NAME}")
-        self.assertNotIn("env", entry)
+    def test_builtin_entry_has_no_endpoint(self):
+        for slug in ("opencode-go", "anthropic", "openai"):
+            with self.subTest(provider=slug):
+                content = build_auth_json(slug, None)
+                entry = json.loads(content)[slug]
+                self.assertEqual(entry["key"], f"${CREDENTIAL_ENV_NAME}")
+                self.assertNotIn("env", entry)
+                self.assertNotIn("sk-", content)
+
+    def test_auth_json_never_contains_a_secret_value(self):
+        content = build_auth_json("openai-compatible", "https://proxy.example/v1")
+        self.assertNotIn("sk-live", content)
+        self.assertIn(CREDENTIAL_ENV_NAME, content)
 
 
 class BuildCommandTest(unittest.TestCase):
@@ -120,9 +168,10 @@ class BuildCommandTest(unittest.TestCase):
         self.assertIn(shlex.quote("/tmp/my radian"), command)
         self.assertIn(shlex.quote("/work/my task"), command)
 
-    def test_anthropic_invocation_has_no_base_url(self):
-        invocation = base_invocation(provider="anthropic", model="claude-x", base_url=None)
+    def test_builtin_invocation_has_no_base_url(self):
+        invocation = base_invocation(provider="opencode-go", model="x", base_url=None)
         command = build_command("/tmp/radian", invocation, "hi", "/o", "/e")
+        self.assertIn("--provider opencode-go", command)
         self.assertNotIn("--base-url", command)
 
     def test_optional_limits_are_passed_through(self):
@@ -163,6 +212,33 @@ class Sha256Test(unittest.TestCase):
             handle.write(b"radian-binary-bytes")
             path = handle.name
         self.assertEqual(sha256_of_file(path), hashlib.sha256(b"radian-binary-bytes").hexdigest())
+
+
+class AssertBinaryStaticTest(unittest.TestCase):
+    def test_static_elf_passes(self):
+        path = _write_temp(_elf64(dynamic=False))
+        try:
+            assert_binary_static(path)
+        finally:
+            Path(path).unlink()
+
+    def test_dynamic_elf_is_refused(self):
+        path = _write_temp(_elf64(dynamic=True))
+        try:
+            with self.assertRaises(ValueError) as raised:
+                assert_binary_static(path)
+            self.assertIn("dynamically linked", str(raised.exception))
+        finally:
+            Path(path).unlink()
+
+    def test_non_elf_is_refused(self):
+        path = _write_temp(b"#!/bin/sh\necho hi\n")
+        try:
+            with self.assertRaises(ValueError) as raised:
+                assert_binary_static(path)
+            self.assertIn("not an ELF", str(raised.exception))
+        finally:
+            Path(path).unlink()
 
 
 if __name__ == "__main__":
