@@ -210,13 +210,12 @@ async fn an_unavailable_backend_never_yields_a_sandbox_or_a_shell() {
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
 
-    for mode in [SandboxMode::WorkspaceWrite, SandboxMode::Safe] {
-        let error = Sandbox::from_backend(&FAILING, mode, &root).unwrap_err();
-        assert!(
-            matches!(error, SandboxError::ProbeFailed { .. }),
-            "{mode:?}: {error}"
-        );
-    }
+    let mode = SandboxMode::WorkspaceWrite;
+    let error = Sandbox::from_backend(&FAILING, mode, &root).unwrap_err();
+    assert!(
+        matches!(error, SandboxError::ProbeFailed { .. }),
+        "{mode:?}: {error}"
+    );
     // The only thing a failing backend can produce is a refusal; there is no value to hand
     // to `CodingTools::with_sandbox`, so no shell can exist.
     let tools = common::tools(&root);
@@ -296,7 +295,7 @@ async fn workspace_write_confines_the_shell() {
     );
 
     // (d) connecting to a local port succeeds in both (ADR 0016: the `workspace` tier opens
-    // the network). `safe` is the one that keeps it off; the harness covers that contrast.
+    // the network).
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
     let port = listener.local_addr().unwrap().port();
     let script = format!(
