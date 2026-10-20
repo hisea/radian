@@ -45,6 +45,7 @@
 | `tui-copy-command.md` | decided（第一档） | 0027、0028 | `/copy` 复制最近一条已提交 assistant 的 markdown 源；`/copy code` 取最后一个代码块 |
 | `tui-retry-command.md` | decided（第一档） | 0017、0011、0003 | `/retry` 在模型错误结束后重发上一条用户消息 |
 | `tui-bell.md` | decided（第一档） | 0027、0024、0008、0037 | `tui.bell = off|attention|all`（缺省 off）：审批/提问/回合结束发 BEL |
+| `skill-init-review.md` | decided | 0025、0036、0043 | 内建 skill `init`（核实命令后写 AGENTS.md）与 `review`（shell 取 diff、并行 `general` 子会话、P0–P3 合并）；只走 `/skill:` 形式 |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `subagent-ask-forwarding.md` | idea | 0043、0010、0024 | 子会话仍要问的 ask 转回父会话；缺 durable `PermissionRequested` 与 control 收审批；依赖沙箱内放行 |
