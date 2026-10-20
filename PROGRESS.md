@@ -9,7 +9,7 @@
 - [x] 6. size test (step 6)
 - [x] 7. docs + delete backlog item (step 7)
 - [x] 8. migrate tests (step 8)
-- [ ] 9. mutations (a-e)
+- [x] 9. mutations (a-e)
 - [ ] 10. merge origin/main + full Verify + report to w8:p7
 
 Verified: (none yet)

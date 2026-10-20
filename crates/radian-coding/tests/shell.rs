@@ -988,9 +988,6 @@ async fn the_shell_description_follows_the_effective_git_access() {
         read_only.contains("the repository's `.git` is read-only"),
         "{read_only}"
     );
-    assert!(
-        read_only.contains("`git commit`, by design"),
-        "{read_only}"
-    );
+    assert!(read_only.contains("`git commit`, by design"), "{read_only}");
     assert!(!read_only.contains("is writable"), "{read_only}");
 }

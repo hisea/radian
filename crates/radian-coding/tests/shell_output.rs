@@ -272,10 +272,7 @@ async fn the_retained_path_is_never_revealed() {
         .await
         .unwrap();
     let value = structured(&output);
-    let id = value["job_id"]
-        .as_str()
-        .expect("a job id")
-        .to_owned();
+    let id = value["job_id"].as_str().expect("a job id").to_owned();
 
     let private = jobs.to_string_lossy().into_owned();
     assert!(!value.to_string().contains(&private), "{value}");

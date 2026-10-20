@@ -233,7 +233,8 @@ async fn a_background_job_returns_at_once_and_job_returns_increments() {
     let done = output_text(
         &exec(
             &session,
-            "job", json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
         )
         .await
         .unwrap(),
@@ -262,7 +263,8 @@ async fn a_waited_settle_is_not_notified() {
     let (id, _) = start(&session, "sleep 0.3; echo done", None).await;
     let wait = exec(
         &session,
-        "job", json!({"id": id, "op": "wait", "timeout_ms": 60_000}),
+        "job",
+        json!({"id": id, "op": "wait", "timeout_ms": 60_000}),
     );
     let settle = async {
         loop {
@@ -324,7 +326,8 @@ async fn a_wait_on_a_settled_job_returns_at_once() {
     let text = output_text(
         &exec(
             &session,
-            "job", json!({"id": id, "op": "wait", "timeout_ms": 30_000}),
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 30_000}),
         )
         .await
         .unwrap(),
@@ -376,7 +379,8 @@ async fn a_wait_on_a_settled_adopted_job_returns_at_once() {
     let text = output_text(
         &exec(
             &session,
-            "job", json!({"id": id, "op": "wait", "timeout_ms": 30_000}),
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 30_000}),
         )
         .await
         .unwrap(),
@@ -505,7 +509,8 @@ async fn a_wait_timeout_returns_running_and_leaves_the_job_alive() {
     let text = output_text(
         &exec(
             &session,
-            "job", json!({"id": id, "op": "wait", "timeout_ms": 300}),
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 300}),
         )
         .await
         .unwrap(),
@@ -570,7 +575,8 @@ async fn a_background_timeout_secs_is_ignored() {
     let status = output_text(
         &exec(
             &session,
-            "job", json!({"id": id, "op": "wait", "timeout_ms": 2000}),
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 2000}),
         )
         .await
         .unwrap(),
@@ -595,7 +601,8 @@ async fn a_background_timeout_secs_is_ignored() {
     let killed = output_text(
         &exec(
             &session,
-            "job", json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
         )
         .await
         .unwrap(),
@@ -675,7 +682,8 @@ async fn job_kill_op_kills_the_whole_process_group() {
     let done = output_text(
         &exec(
             &session,
-            "job", json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
         )
         .await
         .unwrap(),
@@ -713,7 +721,8 @@ async fn a_natural_exit_kills_a_background_grandchild() {
     let text = output_text(
         &exec(
             &session,
-            "job", json!({"id": id, "op": "wait", "timeout_ms": 15_000}),
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 15_000}),
         )
         .await
         .unwrap(),
@@ -757,7 +766,11 @@ async fn the_fifth_running_job_is_refused() {
         "{}",
         failure.message
     );
-    assert!(failure.message.contains("`op: \"kill\"`"), "{}", failure.message);
+    assert!(
+        failure.message.contains("`op: \"kill\"`"),
+        "{}",
+        failure.message
+    );
     assert!(!failure.message.contains("job_list"), "{}", failure.message);
 
     // Settle one, then the next start succeeds.
@@ -766,7 +779,8 @@ async fn the_fifth_running_job_is_refused() {
         .unwrap();
     exec(
         &session,
-        "job", json!({"id": ids[0], "op": "wait", "timeout_ms": 10_000}),
+        "job",
+        json!({"id": ids[0], "op": "wait", "timeout_ms": 10_000}),
     )
     .await
     .unwrap();
@@ -794,7 +808,8 @@ async fn a_cancelled_turn_leaves_the_job_running() {
     let token = CancellationToken::new();
     let wait = exec_cancel(
         &session,
-        "job", json!({"id": id, "op": "wait", "timeout_ms": 60_000}),
+        "job",
+        json!({"id": id, "op": "wait", "timeout_ms": 60_000}),
         token.clone(),
     );
     let cancel = async {
@@ -879,7 +894,8 @@ async fn the_job_list_alias_reports_the_states() {
     let done = output_text(
         &exec(
             &session,
-            "job", json!({"id": done_id, "op": "wait", "timeout_ms": 10_000}),
+            "job",
+            json!({"id": done_id, "op": "wait", "timeout_ms": 10_000}),
         )
         .await
         .unwrap(),
@@ -1079,7 +1095,8 @@ async fn a_long_foreground_command_is_adopted_in_place() {
     let done = output_text(
         &exec(
             &session,
-            "job", json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
         )
         .await
         .unwrap(),
@@ -1156,7 +1173,8 @@ async fn an_adopted_job_is_killed_by_the_original_timeout() {
     let settled = output_text(
         &exec(
             &session,
-            "job", json!({"id": id, "op": "wait", "timeout_ms": 15_000}),
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 15_000}),
         )
         .await
         .unwrap(),

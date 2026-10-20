@@ -583,27 +583,23 @@ impl Jobs {
         Ok(Self::take_increment(&mut cell, waited_out, wait_cancelled))
     }
 
-/// Reads the ring increment under the cell lock and advances the cursor. Shared by the wait
-/// path and the plain incremental read.
-fn take_increment(
-    cell: &mut JobCell,
-    waited_out: bool,
-    wait_cancelled: bool,
-) -> OutputResult {
-    let (dropped, increment) = cell.ring.since(cell.read_offset);
-    cell.read_offset = cell.ring.total;
-    OutputResult {
-        state: cell.state.clone(),
-        dropped,
-        increment,
-        waited_out,
-        wait_cancelled,
-        output: OUTPUT_HINT.to_owned(),
+    /// Reads the ring increment under the cell lock and advances the cursor. Shared by the wait
+    /// path and the plain incremental read.
+    fn take_increment(cell: &mut JobCell, waited_out: bool, wait_cancelled: bool) -> OutputResult {
+        let (dropped, increment) = cell.ring.since(cell.read_offset);
+        cell.read_offset = cell.ring.total;
+        OutputResult {
+            state: cell.state.clone(),
+            dropped,
+            increment,
+            waited_out,
+            wait_cancelled,
+            output: OUTPUT_HINT.to_owned(),
+        }
     }
-}
 
-/// Every job of this session, in start order: background jobs and retained foreground
-/// results (ADR 0037 decision 3a). The TUI `/jobs` command reads this, not a tool.
+    /// Every job of this session, in start order: background jobs and retained foreground
+    /// results (ADR 0037 decision 3a). The TUI `/jobs` command reads this, not a tool.
     pub fn list(&self) -> Vec<JobSummary> {
         let state = self.lock_state();
         state
@@ -742,7 +738,9 @@ fn take_increment(
         state.jobs.get(id).cloned().ok_or_else(|| {
             fail(
                 "unknown_job",
-                format!("no job `{id}` in this session; a truncated `shell` result carries its job id"),
+                format!(
+                    "no job `{id}` in this session; a truncated `shell` result carries its job id"
+                ),
             )
         })
     }
@@ -1297,9 +1295,7 @@ pub(crate) async fn run_job(
     match args.op {
         JobOp::Kill => run_kill(jobs, &kill_args(&args.id)),
         JobOp::Wait => {
-            if let Some(mode) =
-                crate::output::FileMode::from_args("job", &args.file, arguments)?
-            {
+            if let Some(mode) = crate::output::FileMode::from_args("job", &args.file, arguments)? {
                 // A range names a file read even with `op: wait`: the old `job_output`
                 // treated the file arguments the same way, so an old transcript's
                 // `wait: true` + range still reads.
@@ -1312,9 +1308,7 @@ pub(crate) async fn run_job(
             Ok(render_output(&args.id, &result, timeout))
         }
         JobOp::Read => {
-            if let Some(mode) =
-                crate::output::FileMode::from_args("job", &args.file, arguments)?
-            {
+            if let Some(mode) = crate::output::FileMode::from_args("job", &args.file, arguments)? {
                 return read_output_file(jobs, &args.id, mode, limits);
             }
             let result = jobs.read_increment(&args.id)?;
@@ -1417,8 +1411,7 @@ pub(crate) async fn run_output_alias(
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
     let args: OutputArgs = args::parse("job_output", &output_schema(), arguments)?;
-    if let Some(mode) = crate::output::FileMode::from_args("job_output", &args.file, arguments)?
-    {
+    if let Some(mode) = crate::output::FileMode::from_args("job_output", &args.file, arguments)? {
         return read_output_file(jobs, &args.job_id, mode, limits)
             .map(|output| renamed(JOB_OUTPUT_RENAME, output))
             .map_err(|failure| rename_failure(JOB_OUTPUT_RENAME, failure));

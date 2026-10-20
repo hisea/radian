@@ -385,9 +385,7 @@ impl ToolSession for CodingSession {
             }
             "job_list" => jobs::run_list_alias(&self.jobs),
             "job_kill" => jobs::run_kill_alias(&self.jobs, &call.arguments),
-            "shell_output" => {
-                foreground::run_alias(&self.jobs, &self.limits, &call.arguments)
-            }
+            "shell_output" => foreground::run_alias(&self.jobs, &self.limits, &call.arguments),
             other => Err(fail(
                 "unknown_tool",
                 format!("`{other}` is not one of the built-in coding tools"),

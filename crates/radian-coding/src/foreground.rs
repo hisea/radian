@@ -117,11 +117,7 @@ impl ForegroundOutputs {
     /// as a settled entry (evicting the oldest retained entries to stay inside the session
     /// bounds) and returns its job id; otherwise the file is removed and no id exists.
     /// An evicted or shut-down entry's id reads as unknown.
-    pub(crate) fn finish(
-        &self,
-        retention: &Retention,
-        keep: Option<JobState>,
-    ) -> Option<String> {
+    pub(crate) fn finish(&self, retention: &Retention, keep: Option<JobState>) -> Option<String> {
         // Stop the `Drop` guard first: it must not remove a file this method is about to keep,
         // and it must not race the explicit removal below.
         retention.inner.finished.store(true, Ordering::SeqCst);
@@ -141,10 +137,7 @@ impl ForegroundOutputs {
         }
         // The entry's increment starts at byte 0, bounded by the ring (ADR 0037 decision 4).
         let ring = Ring::seeded(
-            tail_of(
-                &path,
-                (retained as usize).min(crate::jobs::JOB_RING_BYTES),
-            ),
+            tail_of(&path, (retained as usize).min(crate::jobs::JOB_RING_BYTES)),
             total,
         );
         self.inner.jobs.insert_settled(
@@ -159,11 +152,14 @@ impl ForegroundOutputs {
         {
             let mut state = lock(&self.inner.state);
             state.order.push_back(id.clone());
-            state.items.insert(id.clone(), Item {
-                id: id.clone(),
-                path,
-                retained,
-            });
+            state.items.insert(
+                id.clone(),
+                Item {
+                    id: id.clone(),
+                    path,
+                    retained,
+                },
+            );
             state.total += retained;
             // Keep at least the item just committed, even if it alone exceeds the session cap;
             // its own per-item cap is the hard bound.
@@ -300,7 +296,10 @@ fn tail_of(path: &Path, max: usize) -> Vec<u8> {
     let Ok(end) = file.seek(SeekFrom::End(0)) else {
         return bytes;
     };
-    if file.seek(SeekFrom::Start(end.saturating_sub(max as u64))).is_err() {
+    if file
+        .seek(SeekFrom::Start(end.saturating_sub(max as u64)))
+        .is_err()
+    {
         return Vec::new();
     }
     let _ = file.read_to_end(&mut bytes);
@@ -378,7 +377,7 @@ pub(crate) fn run_alias(
     limits: &Limits,
     arguments: &Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    use crate::jobs::{SHELL_OUTPUT_RENAME, rename_failure, renamed, read_output_file};
+    use crate::jobs::{SHELL_OUTPUT_RENAME, read_output_file, rename_failure, renamed};
     let args: ReadArgs = args::parse("shell_output", &schema(), arguments)?;
     let mode = crate::output::FileMode::from_args("shell_output", &args.file, arguments)?
         .ok_or_else(|| {
