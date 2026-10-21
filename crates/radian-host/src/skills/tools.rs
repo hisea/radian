@@ -181,8 +181,7 @@ fn specs() -> Vec<ToolSpec> {
         description: format!(
             "Read the full body of one skill. Pass the skill name that the system prompt \
              lists. The body comes back with its directory. That directory is the base for \
-             relative paths. Optional `args` fill the `$ARGUMENTS` placeholder in the body. \
-             Without the placeholder, the tool appends them verbatim. The body is limited to {SKILL_BODY_LIMIT_BYTES} bytes."
+             relative paths. The body is limited to {SKILL_BODY_LIMIT_BYTES} bytes."
         ),
         input_schema: serde_json::json!({
             "type": "object",
@@ -445,5 +444,40 @@ mod tests {
         );
         assert_eq!(strip_frontmatter("Body.\n"), None);
         assert_eq!(strip_frontmatter("---\nname: a\nBody.\n"), None);
+    }
+
+    /// Say-each-fact-once: no parameter description repeats a sentence of the `skill`
+    /// description. Fragments under 24 characters are too short to be a repeated fact.
+    #[tokio::test]
+    async fn no_parameter_description_repeats_a_sentence_of_the_description() {
+        use agent_core::{ToolProvider, ToolSession};
+        let session = SkillTools::new(Arc::new(Vec::new()))
+            .open_session()
+            .await
+            .unwrap();
+        let spec = session
+            .tool_specs()
+            .iter()
+            .find(|spec| spec.name == "skill")
+            .expect("the skill spec");
+        let sentences: Vec<&str> = spec
+            .description
+            .split(". ")
+            .map(str::trim)
+            .filter(|sentence| sentence.len() >= 24)
+            .collect();
+        let properties = spec.input_schema["properties"]
+            .as_object()
+            .expect("the skill properties");
+        for sentence in sentences {
+            for (name, property) in properties {
+                if let Some(text) = property["description"].as_str() {
+                    assert!(
+                        !text.contains(sentence),
+                        "the `{name}` field repeats {sentence:?}: {text:?}"
+                    );
+                }
+            }
+        }
     }
 }

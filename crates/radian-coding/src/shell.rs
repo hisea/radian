@@ -58,6 +58,23 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// immediate; the bound only covers thread scheduling.
 const REAP_GRACE: Duration = Duration::from_secs(10);
 
+/// The `shell` input schema for `mode`. `FullAccess` has no sandbox, so the advertised
+/// schema leaves out `outside_sandbox` and `outside_sandbox_reason`; both `WorkspaceWrite`
+/// variants keep them. [`run`] still parses with the full [`schema`], so a call that sends
+/// them in `full` parses and behaves exactly as before.
+pub(crate) fn spec_schema(mode: SandboxMode) -> serde_json::Value {
+    let mut schema = schema();
+    if mode == SandboxMode::FullAccess
+        && let Some(properties) = schema
+            .get_mut("properties")
+            .and_then(|properties| properties.as_object_mut())
+    {
+        properties.remove("outside_sandbox");
+        properties.remove("outside_sandbox_reason");
+    }
+    schema
+}
+
 pub(crate) fn schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -69,9 +86,9 @@ pub(crate) fn schema() -> serde_json::Value {
             "timeout_secs": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Seconds a foreground command may run. Default: 60. Maximum: \
-                                600. At the deadline, the tool kills the whole process group. \
-                                `background: true` ignores this field."
+                "description": "Seconds a foreground command may run, counted from the \
+                                command's start. Default: 60. Maximum: 600. `background: true` \
+                                ignores this field."
             },
             "cwd": {
                 "type": "string",
@@ -86,13 +103,15 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "background": {
                 "type": "boolean",
-                "description": "Run in the background and return at once with a job id. \
-                                Default: false. Read the job with `job`."
+                "description": "Run in the background and return at once with a job id. A \
+                                background command has no deadline. Default: false. Read the \
+                                job with `job`."
             },
             "outside_sandbox": {
                 "type": "boolean",
                 "description": "Run one call outside the sandbox. Default: false. The call \
-                                needs a reason and approval. Never automatic. Never in the background."
+                                needs a reason and approval. It never runs automatically or in \
+                                the background."
             },
             "outside_sandbox_reason": {
                 "type": "string",
@@ -142,19 +161,13 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
              and list files. Use `grep` and `glob` to search files. Do not use `cat`, \
              `sed`, `ls`, or `find` through `shell`. `grep` and `glob` report \
              truncation. They use less context. They run in parallel. `shell` runs \
-             alone. Each stream has its own cap. The default cap is 24 KiB. A timeout \
-             or a cancellation kills the whole process group. Without `timeout_secs`, \
-             a command that still runs after the threshold moves to the background. \
-             The default threshold is 60 s. The move keeps the same process. After the \
-             move, the command is never killed for time. The call returns at once with \
-             a job id. `timeout_secs` sets a deadline. The default is 60 s. The \
-             maximum is 600 s. The timeout counts from the command's start. At the \
-             deadline, the tool kills the whole process group. `background: true` \
-             starts the command in the background. `background: true` ignores \
-             `timeout_secs`. A background command has no deadline. You will be notified when the command finishes. Do not sleep or \
-             poll. If you have nothing else to do, end your reply."
+             alone. A timeout or a cancellation kills the whole process group. Without \
+             `timeout_secs`, a command that still runs after the threshold moves to the \
+             background. The default threshold is 60 s. The move keeps the same \
+             process. After the move, the command is never killed for time. The call \
+             returns at once with a job id. You will be notified when the command finishes."
         ),
-        input_schema: schema(),
+        input_schema: spec_schema(mode),
         // A shell command has side effects and is not safe to overlap with other calls.
         concurrency: ToolConcurrency::Exclusive,
     }

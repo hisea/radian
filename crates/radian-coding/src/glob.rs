@@ -46,9 +46,10 @@ pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "glob".into(),
         description: "Find files with a glob. `*` stops at `/`. `**` crosses `/`. \
-                      Results are sorted. `.gitignore` and `.ignore` files apply from the \
-                      workspace root down to the search directory. The global gitignore is \
-                      not read. `.git` is skipped. A symlink is never followed."
+                      The tool sorts the results. `.gitignore` and `.ignore` files apply \
+                      from the workspace root down to the search directory, and the global \
+                      gitignore is not read. The tool skips `.git`. The tool never follows \
+                      a symlink."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,

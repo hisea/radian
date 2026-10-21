@@ -140,7 +140,7 @@ pub(crate) fn schema() -> serde_json::Value {
             "context": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Lines to show before and after each match. Default: 0. Values above 30 are cut to 30."
+                "description": "Lines to show before and after each match. Default: 0. The tool cuts values above 30 to 30."
             },
             "max_matches": {
                 "type": "integer",
@@ -163,10 +163,10 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "grep".into(),
-        description: "Search file contents with a Rust regex. Each match is reported as \
-                      `path:line:text`. `.gitignore` and `.ignore` files apply from the \
-                      workspace root down to the search directory. The global gitignore is \
-                      not read. `.git`, symlinks, and binary files are skipped. Use \
+        description: "Search file contents with a Rust regex. The tool reports each match \
+                      as `path:line:text`. `.gitignore` and `.ignore` files apply from the \
+                      workspace root down to the search directory, and the global gitignore \
+                      is not read. The tool skips `.git`, symlinks, and binary files. Use \
                       `output: \"files\"` for which files contain a pattern. Use `output: \
                       \"count\"` for how many matches there are."
             .into(),

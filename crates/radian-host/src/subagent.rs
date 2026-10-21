@@ -199,7 +199,7 @@ fn spec() -> ToolSpec {
                 "agent": {
                     "type": "string",
                     "enum": ["explore", "general"],
-                    "description": "Subagent to run. Use `explore` or `general`. Default: `general`."
+                    "description": "Which subagent to run."
                 },
                 "task": {
                     "type": "string",
@@ -742,7 +742,8 @@ mod tests {
     }
 
     /// Item 14: `explore`/`general` differ in the description only (the usage); the `agent`
-    /// field names the two values and the default (the constraint) and no longer repeats it.
+    /// field only names which subagent to run (the constraint lives in the `enum` and the
+    /// default in the description) and no longer repeats either in prose.
     #[test]
     fn the_agent_field_does_not_repeat_the_explore_general_difference() {
         let spec = spec();
@@ -758,19 +759,22 @@ mod tests {
             "the description keeps what `general` is: {}",
             spec.description
         );
-        let field = &spec.input_schema["properties"]["agent"]["description"];
-        assert!(
-            field
-                .as_str()
-                .is_some_and(|text| text.contains("`explore`") && text.contains("`general`")),
-            "the field still names the values and the default: {field}"
+        let field = &spec.input_schema["properties"]["agent"];
+        assert_eq!(
+            field["enum"],
+            serde_json::json!(["explore", "general"]),
+            "the `enum` still constrains the values: {field}"
         );
         assert!(
-            field
+            field["description"]
                 .as_str()
-                .is_some_and(|text| !text.contains("minus `subagent`"))
-                && !spec.description.contains("Which subagent to run"),
-            "the difference lives in one place only: {field}"
+                .is_some_and(|text| !text.contains("`explore`") && !text.contains("`general`")),
+            "the field prose must not repeat the values or the default: {field}"
+        );
+        assert!(
+            !spec.description.contains("Which subagent to run"),
+            "the field's own question lives in one place only: {}",
+            spec.description
         );
     }
 
