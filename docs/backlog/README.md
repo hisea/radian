@@ -36,6 +36,7 @@
 | `adr-english-ste.md` | decided | 全部 | 44 篇 ADR 改写为英文 ASD-STE100，只写现行决定，编号与小节编号不变，逐篇对照原文审查 |
 | `history-rewrite.md` | decided（依赖上两条） | 无 | filter-repo：历史里去掉旧 ADR、替换内网地址与本机路径、去掉决策记录（含提交信息）；gitleaks 前后各扫一次；force-push 前确认 |
 | `import-claude.md` | decided（生态 4/4） | 新 ADR；0029、0008、0025、0031 | `radian config import-claude` 一次性翻译，来源哪一级产物落哪一级， commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话与 memory；依赖前两条与 project-skills |
+| `turn-end-continuation.md` | decided（A、B 两个切片） | 0036、0037、0008、0045、0011、0021、0034、0005、0017 | 轮末「只说不做」（`Now X.` 后无工具调用）：A 提示词与通知文案（删 `End your turn only when …`、取消自动转后台、`job` 描述中性化、工作区外可见加任务文本例外、转后台返回文本与通知按 opencode/omp 形状、查 lead 记忆漏进 worker、前台缺省 300 s / 上限 600 s）；B `Stop` 路径内建续跑（保守规则粗筛 + 一条 System 续跑交模型判断，每回合一次、连续两次后 herdr `blocked`，计入唤醒闸门，stdin 加 `last_assistant_message`）；研究笔记 `docs/research/2026-10-21-intent-stop.md` |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
