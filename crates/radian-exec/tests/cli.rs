@@ -119,7 +119,8 @@ fn echo_then(final_text: &str) -> Vec<Reply> {
 /// explicitly, which overrides this.
 fn fresh_session_dir() -> PathBuf {
     static SESSION_DIRS: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    // /tmp, not $TMPDIR: on macOS the latter can push <home>/run/<pid>.sock past SUN_LEN (104).
+    let dir = PathBuf::from("/tmp").join(format!(
         "radian-exec-sessions-{}-{}",
         std::process::id(),
         SESSION_DIRS.fetch_add(1, Ordering::SeqCst)
@@ -374,7 +375,8 @@ fn scratch(name: &str) -> ScratchDir {
     // share a directory, and `remove_dir_all` below would delete a running test's files.
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("radian-exec-{name}-{n}-{}", std::process::id()));
+    // /tmp, not $TMPDIR: on macOS the latter can push <home>/run/<pid>.sock past SUN_LEN (104).
+    let dir = PathBuf::from("/tmp").join(format!("radian-exec-{name}-{n}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     ScratchDir(dir)

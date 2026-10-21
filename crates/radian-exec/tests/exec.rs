@@ -24,7 +24,8 @@ const EXIT_WATCHDOG: Duration = Duration::from_secs(120);
 /// credentials.
 fn fresh_dir(prefix: &str) -> PathBuf {
     static DIRS: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    // /tmp, not $TMPDIR: on macOS the latter can push <home>/run/<pid>.sock past SUN_LEN (104).
+    let dir = PathBuf::from("/tmp").join(format!(
         "radian-exec-exec-{prefix}-{}-{}",
         std::process::id(),
         DIRS.fetch_add(1, Ordering::SeqCst)

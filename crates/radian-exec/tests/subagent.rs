@@ -29,8 +29,9 @@ const STATE_WATCHDOG: Duration = Duration::from_secs(60);
 
 fn scratch(name: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
+    // Short prefix: on macOS $TMPDIR can push the child's <home>/run/<pid>.sock past SUN_LEN (104).
     let dir = std::env::temp_dir().join(format!(
-        "radian-exec-subagent-{name}-{}-{}",
+        "rx-sub-{name}-{}-{}",
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     ));
