@@ -19,8 +19,13 @@ pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// The total size the diagnostics directory may keep.
 pub const MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
 
-/// The suffix of the panic log, the only diagnostic file kind today.
+/// The suffix of the panic log, the first diagnostic file kind.
 const PANIC_LOG_SUFFIX: &str = ".panic.log";
+
+/// The suffix of a lost job-notice record (ADR 0037 decision 5's failure rule): one line
+/// naming the job and the enqueue error, written best-effort when a completion notice
+/// cannot be delivered. Disk-full is the likely cause, so the write itself may fail too.
+const JOB_NOTICE_LOG_SUFFIX: &str = ".job-notice.log";
 
 /// The cache root for this process (`~/.radian/cache`, ADR 0020), created 0700. `None` when
 /// neither `RADIAN_HOME` nor `HOME` is usable.
@@ -47,10 +52,21 @@ pub fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
-/// True for a file name this program wrote: `<session-id>-<digits>.panic.log`. Cleanup uses
-/// this so a user's own file in the directory is never removed.
+/// The file name for one session's lost job-notice record:
+/// `<session-id>-<unix-millis>.job-notice.log`. Same shape as the panic log, so one
+/// cleanup rule covers both.
+pub fn job_notice_log_name(session_id: &str, unix_millis: u128) -> String {
+    format!("{session_id}-{unix_millis}{JOB_NOTICE_LOG_SUFFIX}")
+}
+
+/// True for a file name this program wrote: `<session-id>-<digits>.panic.log` or
+/// `<session-id>-<digits>.job-notice.log`. Cleanup uses this so a user's own file in
+/// the directory is never removed.
 pub fn is_diagnostic_file(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(PANIC_LOG_SUFFIX) else {
+    let Some(stem) = name
+        .strip_suffix(PANIC_LOG_SUFFIX)
+        .or_else(|| name.strip_suffix(JOB_NOTICE_LOG_SUFFIX))
+    else {
         return false;
     };
     let Some((_, millis)) = stem.rsplit_once('-') else {
@@ -234,7 +250,10 @@ mod tests {
     fn only_our_own_file_names_are_diagnostics() {
         assert!(is_diagnostic_file("abc-1700000000000.panic.log"));
         assert!(is_diagnostic_file("a-b-c-42.panic.log"));
+        assert!(is_diagnostic_file("abc-1700000000000.job-notice.log"));
+        assert!(is_diagnostic_file("a-b-c-42.job-notice.log"));
         assert!(!is_diagnostic_file("abc.panic.log"), "no timestamp");
+        assert!(!is_diagnostic_file("abc.job-notice.log"), "no timestamp");
         assert!(!is_diagnostic_file("abc-12.panic.log.bak"));
         assert!(!is_diagnostic_file("notes.txt"));
         assert!(!is_diagnostic_file("important.json"));
@@ -242,6 +261,10 @@ mod tests {
         assert_eq!(
             panic_log_name("sess-1", 1_700_000_000_000),
             "sess-1-1700000000000.panic.log"
+        );
+        assert_eq!(
+            job_notice_log_name("sess-1", 1_700_000_000_000),
+            "sess-1-1700000000000.job-notice.log"
         );
     }
 

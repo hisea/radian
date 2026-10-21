@@ -49,6 +49,10 @@ pub(crate) enum ExecEnd {
     /// family (ADR 0044). `unhandled` counts degraded job notices, `unhandled_stop`
     /// counts degraded Stop verdicts.
     WakeBudget { unhandled: u64, unhandled_stop: u64 },
+    /// A job completion notice's enqueue failed every attempt (ADR 0037 decision 5's
+    /// failure rule): exit 3, the budget family (ADR 0044). `lost` counts the notices
+    /// no turn will ever run for. Never 0: `lost_end` only builds it when one was lost.
+    NoticeLost { lost: u64 },
 }
 
 /// The exit code for a Core turn status (all `exec` modes, not only jsonl). `RunStatus` is
@@ -127,6 +131,8 @@ impl ExecEnd {
             }
             // The wake budget is used up: budget outcome, budget exit, its own reason.
             ExecEnd::WakeBudget { .. } => ("budget_exceeded", 3, "wake_budget".to_owned()),
+            // A lost completion notice: budget outcome, budget exit, its own reason.
+            ExecEnd::NoticeLost { .. } => ("budget_exceeded", 3, "job_notice_lost".to_owned()),
         }
     }
 
@@ -136,6 +142,16 @@ impl ExecEnd {
     pub(crate) fn unhandled_job_notices(&self) -> Option<u64> {
         match self {
             ExecEnd::WakeBudget { unhandled, .. } => Some(*unhandled),
+            _ => None,
+        }
+    }
+
+    /// How many completion notices were lost to failed enqueues, for the `Result`
+    /// record. `Some` only on the lost-notice path; every other ending serializes
+    /// without the field, so their lines are unchanged.
+    pub(crate) fn lost_notices(&self) -> Option<u64> {
+        match self {
+            ExecEnd::NoticeLost { lost } => Some(*lost),
             _ => None,
         }
     }
@@ -351,6 +367,9 @@ pub(crate) fn result_line(
     });
     if let Some(unhandled) = end.unhandled_job_notices() {
         result["unhandled_job_notices"] = unhandled.into();
+    }
+    if let Some(lost) = end.lost_notices() {
+        result["lost_notices"] = lost.into();
     }
     if let Some(unhandled_stop) = end.unhandled_stop_notices() {
         result["unhandled_stop_notices"] = unhandled_stop.into();
@@ -689,6 +708,33 @@ mod tests {
                 "text": "stuck",
                 "unhandled_job_notices": 2,
             })
+        );
+
+        // A lost notice ends with exit 3, the budget outcome, its own reason and
+        // count — and neither of the wake-budget fields.
+        let end = ExecEnd::NoticeLost { lost: 1 };
+        let (outcome, code, reason) = end.result_fields();
+        assert_eq!(outcome, "budget_exceeded");
+        assert_eq!(code, 3);
+        assert_eq!(reason, "job_notice_lost");
+        assert_eq!(end.lost_notices(), Some(1));
+        assert_eq!(end.unhandled_job_notices(), None);
+        assert_eq!(end.unhandled_stop_notices(), None);
+        let line = result_line("sid", &end, &summary, &JournalSummary::default(), false);
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(
+            value.get("lost_notices"),
+            Some(&serde_json::json!(1)),
+            "{value}"
+        );
+        assert_eq!(
+            value.get("stop_reason"),
+            Some(&serde_json::json!("job_notice_lost")),
+            "{value}"
+        );
+        assert!(
+            value.get("unhandled_job_notices").is_none(),
+            "the wake-budget field stays out: {value}"
         );
 
         // A nonzero Stop count adds its own optional field.

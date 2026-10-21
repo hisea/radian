@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use radian_coding::{JobEvent, JobState, Jobs, OUTPUT_HINT};
-use radian_host::job_notify::{JobNotifier, orphan_jobs};
+use radian_host::job_notify::{JobNotifier, NOTICE_ATTEMPTS, job_notice_lost_line, orphan_jobs};
 use radian_host::wake_gate::{MAX_WAKES_PER_WINDOW, WAKE_WINDOW};
 use radian_runtime::{Inbox, InboxEntry, Lane};
 use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
@@ -55,6 +55,8 @@ fn notifier(dir: &Path) -> (Arc<JobNotifier>, Arc<Jobs>, Arc<Inbox>, Arc<AtomicB
         Arc::new(|_: &RuntimeEvent| {}),
         // The wake-budget notice: most tests below do not read it.
         Arc::new(|_: &str| {}),
+        // The lost-notice line: the lost tests below read it.
+        Arc::new(|_: &str| {}),
     );
     (notifier, jobs, inbox, turn_running)
 }
@@ -96,6 +98,7 @@ async fn start_and_settle_reach_the_live_runtime_sink() {
                 .unwrap_or_else(|e| e.into_inner())
                 .push((event.name().to_string(), job_id_of(event)));
         }),
+        Arc::new(|_: &str| {}),
         Arc::new(|_: &str| {}),
     );
     notifier
@@ -348,6 +351,7 @@ async fn a_gate_full_busy_settle_degrades_without_pending_wake() {
         journal,
         Arc::clone(&turn_running),
         Arc::new(|_: &RuntimeEvent| {}),
+        Arc::new(|_: &str| {}),
         Arc::new(|_: &str| {}),
     );
 
@@ -650,6 +654,7 @@ async fn an_ended_session_releases_its_journal() {
         // The live runtime-event sink: this test only watches the registry drop.
         Arc::new(|_: &RuntimeEvent| {}),
         Arc::new(|_: &str| {}),
+        Arc::new(|_: &str| {}),
     );
     notifier.spawn(&tokio::runtime::Handle::current());
     // The session ends: the host drops its notifier and its registry.
@@ -715,6 +720,7 @@ async fn a_degraded_notice_writes_the_marked_record_and_announces_it() {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(line.to_owned());
         }),
+        Arc::new(|_: &str| {}),
     );
 
     tokio::time::pause();
@@ -757,4 +763,235 @@ async fn a_degraded_notice_writes_the_marked_record_and_announces_it() {
     // A user message restarts the count with the budget.
     notifier.reset_wakes();
     assert_eq!(notifier.degraded(), 0);
+}
+
+// ---------- ADR 0037 decision 5's failure rule: an enqueue that cannot be delivered ----------
+
+/// A notifier over a durable inbox whose journal appends can be failed on demand (the
+/// `fail_next_write` seam, keyed by session id), with the lost-notice lines captured
+/// and the diagnostics record redirected to a scratch directory. One session id per
+/// test: armed failures are keyed by it, so parallel tests never consume each other's.
+#[allow(clippy::type_complexity)]
+fn lossy_notifier(
+    dir: &Path,
+    sid: &str,
+) -> (
+    Arc<JobNotifier>,
+    Arc<Inbox>,
+    Arc<AtomicBool>,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    PathBuf,
+) {
+    let journal = Arc::new(
+        SessionJournal::create(
+            dir.join(format!("{sid}.jsonl")),
+            sid,
+            SessionCreatedData::new(
+                "/work/example",
+                json!({"provider": "example", "model": "m-1"}),
+            ),
+        )
+        .unwrap(),
+    );
+    let inbox = Inbox::durable(64, Arc::clone(&journal));
+    let jobs = Arc::new(Jobs::new(dir.join(format!("{sid}-jobs"))));
+    let turn_running = Arc::new(AtomicBool::new(false));
+    let lost: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let lost_in = Arc::clone(&lost);
+    let notifier = JobNotifier::new(
+        Arc::clone(&jobs),
+        Arc::clone(&inbox),
+        journal,
+        Arc::clone(&turn_running),
+        Arc::new(|_: &RuntimeEvent| {}),
+        Arc::new(|_: &str| {}),
+        Arc::new(move |line: &str| {
+            lost_in
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(line.to_owned());
+        }),
+    );
+    let diag = dir.join(format!("{sid}-diag"));
+    std::fs::create_dir_all(&diag).unwrap();
+    notifier.set_diagnostics_dir(diag.clone());
+    (notifier, inbox, turn_running, lost, diag)
+}
+
+fn lost_lines(lost: &Arc<std::sync::Mutex<Vec<String>>>) -> Vec<String> {
+    lost.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The injected journal failure's text, as the visible line carries it.
+const INJECTED_WRITE_FAILURE: &str = "injected: the write failed";
+
+/// An idle settle whose `followup` fails on every attempt is not silently idle: the
+/// notice line names the job and the reason and says how to continue, the loss is
+/// counted, and the diagnostics record names both. The settle still counts as handled,
+/// so `exec -p` does not wait for a delivery that cannot come.
+/// Mutation: do nothing on `Err` in the idle path → the line, the count and the record
+/// assertions fail.
+#[tokio::test]
+async fn an_idle_notice_lost_on_every_attempt_ends_in_the_visible_stop() {
+    let dir = scratch("lost-idle");
+    let (notifier, inbox, _turn, lost, diag) = lossy_notifier(&dir, "lost-idle");
+    for _ in 0..NOTICE_ATTEMPTS {
+        radian_session::fail_next_write("lost-idle", "InboxEnqueued");
+    }
+    notifier.deliver(settled("job-7", true)).await;
+
+    assert!(
+        inbox.is_empty().await,
+        "no notice was delivered: {:?}",
+        inbox.snapshot().await
+    );
+    assert_eq!(notifier.wakes(), 0, "no wake was counted for a lost notice");
+    assert_eq!(notifier.lost(), 1);
+    assert_eq!(notifier.lost_pending(), 1);
+    assert_eq!(
+        notifier.settled_handled(),
+        1,
+        "a lost settle is still handled"
+    );
+
+    let lines = lost_lines(&lost);
+    assert_eq!(lines.len(), 1, "one live line per lost settle: {lines:?}");
+    assert!(
+        lines[0].contains("job-7"),
+        "the line names the job: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains(INJECTED_WRITE_FAILURE),
+        "the line carries the reason: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("send any message to continue"),
+        "the line says how to continue: {}",
+        lines[0]
+    );
+
+    let records: Vec<PathBuf> = std::fs::read_dir(&diag)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(records.len(), 1, "one diagnostics record: {records:?}");
+    let body = std::fs::read_to_string(&records[0]).unwrap();
+    assert!(body.contains("job-7"), "the record names the job: {body}");
+    assert!(
+        body.contains(INJECTED_WRITE_FAILURE),
+        "the record carries the reason: {body}"
+    );
+}
+
+/// An idle settle whose `followup` fails once and then succeeds is retried: the notice
+/// is delivered, a wake is counted, and no visible stop is shown.
+/// Mutation: a single attempt (no retry) → the inbox stays empty and this fails.
+#[tokio::test]
+async fn an_idle_notice_failing_once_is_retried_and_delivered() {
+    let dir = scratch("lost-idle-retry");
+    let (notifier, inbox, _turn, lost, _diag) = lossy_notifier(&dir, "lost-idle-retry");
+    radian_session::fail_next_write("lost-idle-retry", "InboxEnqueued");
+    notifier.deliver(settled("job-7", true)).await;
+
+    assert_eq!(lanes(&inbox).await, vec![Lane::NextTurn], "idle: followup");
+    assert_eq!(notifier.wakes(), 1, "the delivered wake counts");
+    assert_eq!(notifier.lost(), 0, "a recovered notice is no loss");
+    assert!(lost_lines(&lost).is_empty(), "no visible stop on recovery");
+}
+
+/// A busy settle whose `inject_pending_wake` fails on every attempt ends in the same
+/// visible stop: the line names the job and the reason, and the loss is counted.
+/// Mutation: do nothing on `Err` in the busy path → this fails.
+#[tokio::test]
+async fn a_busy_notice_lost_on_every_attempt_ends_in_the_visible_stop() {
+    let dir = scratch("lost-busy");
+    let (notifier, inbox, turn_running, lost, _diag) = lossy_notifier(&dir, "lost-busy");
+    turn_running.store(true, Ordering::SeqCst);
+    for _ in 0..NOTICE_ATTEMPTS {
+        radian_session::fail_next_write("lost-busy", "InboxEnqueued");
+    }
+    notifier.deliver(settled("job-7", true)).await;
+
+    assert!(
+        inbox.is_empty().await,
+        "no notice was delivered: {:?}",
+        inbox.snapshot().await
+    );
+    assert_eq!(notifier.lost(), 1);
+    assert_eq!(notifier.lost_pending(), 1);
+    let lines = lost_lines(&lost);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("job-7"), "{}", lines[0]);
+    assert!(lines[0].contains(INJECTED_WRITE_FAILURE), "{}", lines[0]);
+    assert!(
+        lines[0].contains("send any message to continue"),
+        "{}",
+        lines[0]
+    );
+}
+
+/// A busy settle whose notice fails once and then succeeds is retried: the pending-wake
+/// entry waits for the turn boundary, no wake is counted yet, and no stop is shown.
+/// Mutation: a single attempt (no retry) → the inbox stays empty and this fails.
+#[tokio::test]
+async fn a_busy_notice_failing_once_is_retried_and_delivered() {
+    let dir = scratch("lost-busy-retry");
+    let (notifier, inbox, turn_running, lost, _diag) = lossy_notifier(&dir, "lost-busy-retry");
+    turn_running.store(true, Ordering::SeqCst);
+    radian_session::fail_next_write("lost-busy-retry", "InboxEnqueued");
+    notifier.deliver(settled("job-7", true)).await;
+
+    let entries: Vec<InboxEntry> = inbox.snapshot().await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].lane, Lane::NextStep);
+    assert!(
+        entries[0].pending_wake,
+        "a busy notice carries the pending wake"
+    );
+    assert_eq!(notifier.wakes(), 0, "enqueueing counts no wake");
+    assert_eq!(notifier.lost(), 0);
+    assert!(lost_lines(&lost).is_empty(), "no visible stop on recovery");
+}
+
+/// Past the gate an idle settle whose `inject_degraded` fails on every attempt is lost
+/// the same way: no silent idle, the line and the count. (The busy degrade shares the
+/// same helper.)
+#[tokio::test]
+async fn a_degraded_notice_lost_on_every_attempt_ends_in_the_visible_stop() {
+    let dir = scratch("lost-degraded");
+    let (notifier, inbox, _turn, lost, _diag) = lossy_notifier(&dir, "lost-degraded");
+    // Ten rapid wakes fill the gate with no clock manipulation: the 11th settle takes
+    // the degrade lane.
+    for i in 0..MAX_WAKES_PER_WINDOW {
+        notifier.deliver(settled(&format!("job-{i}"), true)).await;
+        assert!(inbox.claim_next_turn().await.is_some());
+    }
+    assert_eq!(notifier.wakes(), MAX_WAKES_PER_WINDOW);
+    for _ in 0..NOTICE_ATTEMPTS {
+        radian_session::fail_next_write("lost-degraded", "InboxEnqueued");
+    }
+    notifier.deliver(settled("job-past-the-gate", true)).await;
+
+    assert_eq!(notifier.degraded(), 0, "a failed degrade counts no degrade");
+    assert_eq!(notifier.lost(), 1);
+    let lines = lost_lines(&lost);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("job-past-the-gate"), "{}", lines[0]);
+    assert!(lines[0].contains(INJECTED_WRITE_FAILURE), "{}", lines[0]);
+    assert!(
+        lines[0].contains("send any message to continue"),
+        "{}",
+        lines[0]
+    );
+}
+
+/// The lost line's shape, pinned without a journal: the job, the reason, and the way out.
+#[test]
+fn the_lost_line_names_the_job_and_the_reason_and_how_to_continue() {
+    let line = job_notice_lost_line("job-7", "disk full");
+    assert!(line.contains("job-7"), "{line}");
+    assert!(line.contains("disk full"), "{line}");
+    assert!(line.contains("send any message to continue"), "{line}");
 }

@@ -25,6 +25,7 @@ use agent_core::{InputSource, Message};
 use radian_coding::{JobEvent, Jobs};
 use radian_runtime::{Inbox, RuntimeEvents};
 use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};
+use std::path::PathBuf;
 use tokio::sync::Notify;
 
 use super::wake_gate::WakeGate;
@@ -42,6 +43,41 @@ pub fn wake_budget_line(degraded: u32) -> String {
     format!(
         "wake budget used up: {degraded} job notices are waiting — send any message to continue"
     )
+}
+
+/// The one live notice line a lost completion notice shows: it names the job and the
+/// enqueue error, so the reason survives even when the diagnostics write below fails
+/// (disk-full is the likely cause). Like the wake-budget line it says how to continue.
+pub fn job_notice_lost_line(job_id: &str, reason: &str) -> String {
+    format!(
+        "job {job_id} finished but its completion notice was lost ({reason}) — send any message to continue"
+    )
+}
+
+/// How many times a settle's inbox enqueue is attempted, and the pauses between them
+/// (ADR 0037 decision 5's failure rule): a failed journal append (for example ENOSPC)
+/// leaves the journal usable — `write_locked` advances `next_seq` only on success — so
+/// a later attempt can still land once space is free. A full inbox drains the same way.
+/// Bounded so one stuck settle cannot hold the subscriber (and every other settle)
+/// longer than about 1.2 s.
+pub const NOTICE_ATTEMPTS: u32 = 3;
+/// The pauses before the second and third attempts (about 0.2 s and 1 s apart).
+pub const NOTICE_RETRY_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_secs(1),
+];
+
+/// Which inbox lane a settle's completion notice takes. One settle, one lane: a failed
+/// `followup` never falls back to `inject` — every enqueue writes the journal first
+/// (ADR 0001 S1), so it fails the same way when the disk is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeLane {
+    /// Idle and the gate is open: wake a turn.
+    Followup,
+    /// Busy and the gate is open: context now, a turn of its own when stranded.
+    PendingWake,
+    /// The gate is full, busy or idle: wait for a turn without ever opening one.
+    Degraded,
 }
 
 /// The per-session job notifier. One per session; the host holds it for `reset_wakes`.
@@ -70,6 +106,18 @@ pub struct JobNotifier {
     /// The wake-budget notice line (the TUI shows it as a transcript notice, the CLI
     /// prints it). Fired on every degrade; the TUI shows one line per burst.
     wake: HooksWarning,
+    /// A lost completion notice's line (the same display path as `wake`, one live
+    /// notice). Fired once per settle whose enqueue failed every attempt; the TUI
+    /// reports `blocked` with the `job notice lost` label until the next turn starts.
+    notice_lost: HooksWarning,
+    /// Settles whose notice failed every enqueue attempt (ADR 0037 decision 5's failure
+    /// rule). Unlike a degrade, a lost notice is gone: no later wake absorbs it, so the
+    /// count never clears on a wake — only a user message (`reset_wakes`) starts over.
+    /// `exec -p` ends the run on these (exit 3) instead of waiting for a turn.
+    lost: AtomicU64,
+    /// Overrides the diagnostics directory the lost-notice record goes to (tests): the
+    /// production path is the real cache directory, which tests must not touch.
+    diagnostics_dir: std::sync::Mutex<Option<PathBuf>>,
     /// How many settles this notifier has fully handled (journaled, then injected or
     /// followed up). `exec -p` waits until this catches up with the registry's settle
     /// total, so a settle recorded just before the check is never missed.
@@ -86,6 +134,7 @@ impl JobNotifier {
         turn_running: Arc<AtomicBool>,
         events: Arc<dyn RuntimeEvents>,
         wake: HooksWarning,
+        notice_lost: HooksWarning,
     ) -> Arc<Self> {
         Arc::new(Self {
             jobs: Arc::downgrade(&jobs),
@@ -96,6 +145,9 @@ impl JobNotifier {
             gate: WakeGate::new(),
             degraded: AtomicU32::new(0),
             wake,
+            notice_lost,
+            lost: AtomicU64::new(0),
+            diagnostics_dir: std::sync::Mutex::new(None),
             settled_handled: AtomicU64::new(0),
             settled_signal: Arc::new(Notify::new()),
         })
@@ -132,9 +184,11 @@ impl JobNotifier {
 
     /// A user message resets the wake budget (ADR 0037 decision 3's reset survives the
     /// rate gate: the window recovers on its own, and a user message clears it at once).
+    /// The lost count starts over too: the user saw the stop and continued anyway.
     pub fn reset_wakes(&self) {
         self.gate.reset_wakes();
         self.degraded.store(0, Ordering::SeqCst);
+        self.lost.store(0, Ordering::SeqCst);
     }
 
     /// Wakes inside the window right now (tests).
@@ -167,11 +221,92 @@ impl JobNotifier {
         u64::from(self.degraded.load(Ordering::SeqCst))
     }
 
+    /// How many settles lost their notice to a failed enqueue (tests).
+    pub fn lost(&self) -> u64 {
+        self.lost.load(Ordering::SeqCst)
+    }
+
+    /// How many lost notices no turn will ever run for. `exec -p` ends the session on
+    /// these (exit 3) instead of waiting for a wake that cannot come.
+    pub fn lost_pending(&self) -> u64 {
+        self.lost.load(Ordering::SeqCst)
+    }
+
+    /// Overrides the diagnostics directory the lost-notice record goes to. The
+    /// production path is the real cache directory; tests point it at a scratch
+    /// directory so they never touch it.
+    pub fn set_diagnostics_dir(&self, dir: PathBuf) {
+        *self
+            .diagnostics_dir
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(dir);
+    }
+
     /// Marks one settle fully handled: the journal write and the inject/followup have
     /// both returned. Called for every settle, notified or not.
     fn note_handled(&self) {
         self.settled_handled.fetch_add(1, Ordering::SeqCst);
         self.settled_signal.notify_one();
+    }
+
+    /// Enqueues one completion notice on its lane, retrying a few times with growing
+    /// pauses (ADR 0037 decision 5's failure rule). `Ok` means the notice is durable
+    /// and visible to the driver; `Err` is the last attempt's error text.
+    async fn enqueue_notice(
+        &self,
+        text: String,
+        source: InputSource,
+        lane: NoticeLane,
+    ) -> Result<(), String> {
+        let mut last_error = String::new();
+        for attempt in 0..NOTICE_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(NOTICE_RETRY_DELAYS[(attempt - 1) as usize]).await;
+            }
+            let result = match lane {
+                NoticeLane::Followup => self.inbox.followup(text.clone(), source).await.map(|_| ()),
+                NoticeLane::PendingWake => self
+                    .inbox
+                    .inject_pending_wake(text.clone(), source)
+                    .await
+                    .map(|_| ()),
+                NoticeLane::Degraded => self
+                    .inbox
+                    .inject_degraded(text.clone(), source)
+                    .await
+                    .map(|_| ()),
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) => last_error = error.to_string(),
+            }
+        }
+        Err(last_error)
+    }
+
+    /// Every enqueue attempt for `job_id`'s notice failed: the session must not wait
+    /// silently for a wake that cannot come (ADR 0037 decision 5's failure rule). Counts
+    /// the loss, records the reason best-effort in the diagnostics directory (which may
+    /// itself fail when the disk is full), and shows the live stop: one notice line
+    /// naming the job and the reason, herdr `blocked` with the `job notice lost` label
+    /// until the next turn starts, exit 3 in `exec -p`.
+    fn note_lost(&self, job_id: &str, reason: &str) {
+        let line = job_notice_lost_line(job_id, reason);
+        let dir = self
+            .diagnostics_dir
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .or_else(crate::diagnostics::diagnostics_dir);
+        if let Some(dir) = dir {
+            let name = crate::diagnostics::job_notice_log_name(
+                self.journal.session_id(),
+                crate::diagnostics::now_millis(),
+            );
+            let _ = crate::diagnostics::append(&dir.join(name), &format!("{line}\n"));
+        }
+        self.lost.fetch_add(1, Ordering::SeqCst);
+        (self.notice_lost)(&line);
     }
 
     /// Handles one lifecycle event: write the durable record, forward it on the live
@@ -218,19 +353,38 @@ impl JobNotifier {
                     // and that opening counts one wake (see `note_promoted_wake`). Past the
                     // gate it degrades to a plain `inject` with no pending wake.
                     if self.gate.wake_allowed() {
-                        let _ = self.inbox.inject_pending_wake(text, source).await;
-                    } else if self.inbox.inject_degraded(text, source).await.is_ok() {
-                        let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
-                        (self.wake)(&wake_budget_line(degraded));
+                        if let Err(reason) = self
+                            .enqueue_notice(text, source, NoticeLane::PendingWake)
+                            .await
+                        {
+                            self.note_lost(&id, &reason);
+                        }
+                    } else {
+                        match self
+                            .enqueue_notice(text, source, NoticeLane::Degraded)
+                            .await
+                        {
+                            Ok(()) => {
+                                let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
+                                (self.wake)(&wake_budget_line(degraded));
+                            }
+                            Err(reason) => self.note_lost(&id, &reason),
+                        }
                     }
                 } else if self.gate.wake_allowed() {
                     // Idle: wake a turn, up to the rate gate. The woken turn absorbs the
                     // waiting injects, so a wake also ends the degrade burst: the count
                     // (and the herdr `wake budget` label, cleared at turn start) does not
                     // wait for a user message.
-                    if self.inbox.followup(text, source).await.is_ok() {
-                        self.gate.note_wake();
-                        self.degraded.store(0, Ordering::SeqCst);
+                    match self
+                        .enqueue_notice(text, source, NoticeLane::Followup)
+                        .await
+                    {
+                        Ok(()) => {
+                            self.gate.note_wake();
+                            self.degraded.store(0, Ordering::SeqCst);
+                        }
+                        Err(reason) => self.note_lost(&id, &reason),
                     }
                 } else {
                     // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): the rate gate is
@@ -240,9 +394,15 @@ impl JobNotifier {
                     // keep its shape (gate check above, marked `inject` here). `exec -p`
                     // ends the session on these (exit 3) instead of waiting for a turn
                     // that cannot come.
-                    if self.inbox.inject_degraded(text, source).await.is_ok() {
-                        let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
-                        (self.wake)(&wake_budget_line(degraded));
+                    match self
+                        .enqueue_notice(text, source, NoticeLane::Degraded)
+                        .await
+                    {
+                        Ok(()) => {
+                            let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
+                            (self.wake)(&wake_budget_line(degraded));
+                        }
+                        Err(reason) => self.note_lost(&id, &reason),
                     }
                 }
                 self.note_handled();

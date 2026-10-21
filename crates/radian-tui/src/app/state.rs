@@ -362,6 +362,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::ContextReady { .. }
         | Input::GoalDone { .. }
         | Input::WakeBudgetNotice(_)
+        | Input::JobNoticeLost(_)
         | Input::TrustResolved(_)
         | Input::AccessApplied { .. }
         | Input::CommandRefused(_)

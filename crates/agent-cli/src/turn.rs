@@ -181,6 +181,21 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
                 },
             };
         }
+        // A lost notice never opens a turn either (its enqueue failed every attempt, ADR
+        // 0037 decision 5's failure rule): end the session the same way — exit 3 and one
+        // stderr line — instead of waiting for a wake that cannot come.
+        let lost = run
+            .session
+            .job_notifier()
+            .map(|notifier| notifier.lost_pending())
+            .unwrap_or(0);
+        if let Some((end, message)) = lost_end(lost) {
+            eprintln!("{message}");
+            if let Err(error) = close_and_join(&run.inbox, &run.session).await {
+                eprintln!("radian: {}", redact(&error, &run.secrets));
+            }
+            return LoopDone { code: 3, end };
+        }
         if jobs_quiescent(run).await {
             break;
         }
@@ -253,6 +268,21 @@ pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
             end: ExecEnd::Status(None),
         },
     }
+}
+
+/// The lost-notice exit, pure for testing: `-p` ends the run with exit 3 and one stderr
+/// line when any settle lost its completion notice (every enqueue attempt failed, ADR
+/// 0037 decision 5's failure rule), instead of waiting for a wake that cannot come.
+/// `None` while nothing was lost.
+fn lost_end(lost: u64) -> Option<(ExecEnd, String)> {
+    (lost > 0).then(|| {
+        let end = ExecEnd::NoticeLost { lost };
+        let message = format!(
+            "radian: a job completion notice was lost \
+             ({lost} notice(s) could not be delivered); ending the run"
+        );
+        (end, message)
+    })
 }
 
 /// The quiescence predicate, pure for testing: `-p` may exit only when no job is running,
@@ -565,6 +595,27 @@ pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> LoopDone
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lost notice ends `-p` with exit 3 and one stderr line naming the loss, and the
+    /// `Result` record carries the budget outcome with the lost-notice reason and
+    /// count. No loss means no ending. Mutation: exit 0 instead of 3, or drop the
+    /// line → this fails.
+    #[test]
+    fn a_lost_notice_ends_the_run_with_exit_three_and_the_stderr_line() {
+        assert!(lost_end(0).is_none(), "no loss means no ending");
+        let (end, message) = lost_end(2).expect("a loss ends the run");
+        let (outcome, code, reason) = end.result_fields();
+        assert_eq!(code, 3, "a lost notice exits 3");
+        assert_eq!(outcome, "budget_exceeded");
+        assert_eq!(reason, "job_notice_lost");
+        assert_eq!(end.lost_notices(), Some(2));
+        assert_eq!(end.unhandled_job_notices(), None);
+        assert_eq!(end.unhandled_stop_notices(), None);
+        assert!(
+            message.contains("a job completion notice was lost") && message.contains('2'),
+            "the stderr line names the loss: {message}"
+        );
+    }
 
     /// The exit predicate, one row per reason to stay: a running job, an unhandled
     /// settle, a queued wake entry, an active driver, or a running Stop hook each blocks

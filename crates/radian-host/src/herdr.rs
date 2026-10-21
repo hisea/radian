@@ -115,17 +115,22 @@ pub enum Blocked {
     /// The wake budget is used up and degraded notices wait; the session is idle until a
     /// user message wakes it. The count is not reported, only the category.
     WakeBudget,
-    /// A `/goal` budget cap stopped the goal (ADR 0047); the session is idle until the user
+    /// A `/goal` budget cap stopped the goal; the session is idle until the user
     /// raises the budget or sets a new goal. The cap is not reported, only the category.
     GoalBudget,
+    /// A job completion notice's enqueue failed every attempt, so the settle's wake is
+    /// gone; the session is idle until a user message wakes it. The job id, command
+    /// and error text never leave the process — only the category.
+    JobNoticeLost,
 }
 
 /// The pure state function (ADR H2): trust and pending `blocked` wins over `working`; a
 /// running turn reads `working`; background jobs keep an idle session `working` too — even
-/// past a used-up wake budget, whose degraded notices wait for a turn that may never come
-/// (ADR 0037 decision 5), so herdr does not read idle while jobs still run; a used-up wake
-/// budget blocks only while idle and jobless — a started turn reads `working` again, so
-/// the report is back to normal on the next turn start.
+/// past an idle block, whose waiting notices wait for a turn that may never come, so herdr
+/// does not read idle while jobs still run; an idle block — a used-up wake budget, a `/goal`
+/// budget stop, or a lost job notice (the TUI folds all three into the one bit) — blocks
+/// only while idle and jobless — a started turn reads `working` again, so the report is back
+/// to normal on the next turn start.
 ///
 /// `jobs` is this session's running background-job count (never the ids, commands or
 /// durations, ADR H7). It only matters while no turn runs: a running turn is plain
@@ -140,8 +145,8 @@ pub fn state(
     if trust_modal || pending > 0 {
         State::Blocked
     } else if turn == TurnState::Running || jobs > 0 {
-        // A running turn, or background jobs keeping an idle session working — even past a
-        // used-up wake budget, whose degraded notices wait for a turn that may never come.
+        // A running turn, or background jobs keeping an idle session working — even past an
+        // idle block, whose waiting notices wait for a turn that may never come.
         State::Working
     } else if wake_waiting {
         State::Blocked
@@ -160,6 +165,7 @@ pub fn blocked_message(blocked: Option<&Blocked>, trust_modal: bool) -> String {
         Some(Blocked::Question) => "question".to_owned(),
         Some(Blocked::WakeBudget) => "wake budget".to_owned(),
         Some(Blocked::GoalBudget) => "goal budget".to_owned(),
+        Some(Blocked::JobNoticeLost) => "job notice lost".to_owned(),
         None => "blocked".to_owned(),
     }
 }
@@ -332,6 +338,7 @@ pub fn blocked_label(blocked: Option<&Blocked>, trust_modal: bool) -> Option<Str
         Some(Blocked::Question) => Some("question".to_owned()),
         Some(Blocked::WakeBudget) => Some("wake budget".to_owned()),
         Some(Blocked::GoalBudget) => Some("goal budget".to_owned()),
+        Some(Blocked::JobNoticeLost) => Some("job notice lost".to_owned()),
         None => None,
     }
 }
@@ -748,6 +755,10 @@ mod tests {
             blocked_message(Some(&Blocked::GoalBudget), false),
             "goal budget"
         );
+        assert_eq!(
+            blocked_message(Some(&Blocked::JobNoticeLost), false),
+            "job notice lost"
+        );
     }
 
     /// A used-up wake budget blocks an idle session, and the next turn start reads
@@ -763,6 +774,30 @@ mod tests {
             state(TurnState::Running, 0, false, true, 0),
             State::Working,
             "a started turn is back to normal"
+        );
+        assert_eq!(state(TurnState::Idle, 0, false, false, 0), State::Idle);
+    }
+
+    /// The shared idle-block bit blocks an idle session no matter which stop set it —
+    /// a used-up wake budget, a `/goal` budget stop, or a lost job notice all feed the
+    /// one bit, so a lost notice follows the same jobs rule. A started turn reads
+    /// working again, and running jobs keep the session working.
+    #[test]
+    fn a_lost_job_notice_blocks_only_while_idle_and_jobless() {
+        assert_eq!(state(TurnState::Idle, 0, false, true, 0), State::Blocked);
+        assert_eq!(
+            state(TurnState::Cancelled, 0, false, true, 0),
+            State::Blocked
+        );
+        assert_eq!(
+            state(TurnState::Running, 0, false, true, 0),
+            State::Working,
+            "a started turn is back to normal"
+        );
+        assert_eq!(
+            state(TurnState::Idle, 0, false, true, 2),
+            State::Working,
+            "running jobs keep the session working"
         );
         assert_eq!(state(TurnState::Idle, 0, false, false, 0), State::Idle);
     }
@@ -1160,6 +1195,10 @@ mod tests {
         assert_eq!(
             blocked_label(Some(&Blocked::GoalBudget), false),
             Some("goal budget".to_owned())
+        );
+        assert_eq!(
+            blocked_label(Some(&Blocked::JobNoticeLost), false),
+            Some("job notice lost".to_owned())
         );
         assert_eq!(blocked_label(None, true), Some("trust".to_owned()));
         assert_eq!(blocked_label(None, false), None);

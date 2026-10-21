@@ -244,12 +244,33 @@ impl App {
             .push(Entry::new(EntryKind::Notice, text));
     }
 
+    /// A job completion notice was lost (every enqueue attempt failed): the burst's
+    /// visible stop, on the same notice slot as [`App::wake_budget_notice`]. The first
+    /// notice of a burst pushes the line; a later one rewrites it, so two stops still
+    /// show one line. The next turn start clears the burst (the line stays as plain
+    /// history) and herdr reports normal again.
+    pub fn job_notice_lost(&mut self, text: impl Into<String>) -> UpdateResult {
+        let result = self.push_stop_line(text.into());
+        // The slot holds one line: the latest stop owns it, so its flag stands alone.
+        self.session.notice_lost_waiting = true;
+        self.session.wake_waiting = false;
+        result
+    }
+
     /// A wake-gate degrade fired: one visible notice line per burst. The first degrade of
     /// a burst pushes the line; a later one rewrites it with the latest count, so two
     /// degraded notices still show one line. The next turn start clears the burst (the
     /// line stays as plain history) and herdr reports normal again.
     pub fn wake_budget_notice(&mut self, text: impl Into<String>) -> UpdateResult {
-        let text = text.into();
+        let result = self.push_stop_line(text.into());
+        self.session.wake_waiting = true;
+        self.session.notice_lost_waiting = false;
+        result
+    }
+
+    /// The burst's one visible line, shared by the wake-budget stop and the lost-notice
+    /// stop: the first stop of a burst pushes the line, a later one rewrites it.
+    fn push_stop_line(&mut self, text: String) -> UpdateResult {
         match self.session.wake_notice {
             Some(index)
                 if self
@@ -267,7 +288,6 @@ impl App {
                 self.session.wake_notice = Some(self.session.entries.len() - 1);
             }
         }
-        self.session.wake_waiting = true;
         UpdateResult::dirty()
     }
 
@@ -288,6 +308,9 @@ impl App {
                 // stays as plain history) and herdr stops reporting `wake budget`.
                 self.session.wake_notice = None;
                 self.session.wake_waiting = false;
+                // A lost notice's stop ends the same way: the next turn is running, so
+                // herdr reports normal again (ADR 0037 decision 5's failure rule).
+                self.session.notice_lost_waiting = false;
             }
             // ADR 0027: the local turn timer starts with the model request and
             // stops with its response. The token count is the model's reported output.
@@ -990,5 +1013,151 @@ mod tests {
             duration_ms: 3_000,
         }));
         assert_eq!(app.herdr_state_inputs().4, 0);
+    }
+
+    /// A lost job notice is the same visible stop as the wake-budget one, with its own
+    /// herdr label: one notice line naming the job and the reason, `blocked` with
+    /// `job notice lost` until the next turn starts, which clears it.
+    /// Mutation: the visible stop never sets the herdr label → the label assertions fail.
+    #[test]
+    fn a_lost_notice_shows_one_line_and_the_herdr_label_until_the_next_turn() {
+        let mut app = App::new("m", "s");
+        let line = radian_host::job_notify::job_notice_lost_line(
+            "job-7",
+            "the enqueue could not be made durable: disk full",
+        );
+        let _ = app.update(Input::JobNoticeLost(line));
+        assert_eq!(app.session.entries.len(), 1, "one line for the stop");
+        assert_eq!(app.session.entries[0].kind, EntryKind::Notice);
+        assert!(
+            app.session.entries[0].text.contains("job-7"),
+            "the line names the job: {}",
+            app.session.entries[0].text
+        );
+        assert!(
+            app.session.entries[0].text.contains("disk full"),
+            "the line carries the reason: {}",
+            app.session.entries[0].text
+        );
+        assert!(
+            app.session.entries[0]
+                .text
+                .contains("send any message to continue"),
+            "the line says how to continue: {}",
+            app.session.entries[0].text
+        );
+        assert!(app.session.notice_lost_waiting);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::JobNoticeLost)
+        );
+        assert!(app.herdr_state_inputs().3);
+        assert_eq!(
+            radian_host::herdr::blocked_message(app.herdr_blocked().as_ref(), false),
+            "job notice lost"
+        );
+        assert_eq!(
+            radian_host::herdr::blocked_label(app.herdr_blocked().as_ref(), false),
+            Some("job notice lost".to_owned())
+        );
+
+        // The next turn start ends the stop but keeps the line as history.
+        app.apply_event(&AgentEvent::TurnStarted);
+        assert!(!app.session.notice_lost_waiting);
+        assert!(!app.session.wake_waiting);
+        assert_eq!(app.session.wake_notice, None);
+        assert_eq!(
+            app.herdr_blocked(),
+            None,
+            "herdr is back to normal on the next turn start"
+        );
+        assert!(!app.herdr_state_inputs().3);
+        assert_eq!(app.session.entries.len(), 1, "the line stays as history");
+    }
+
+    /// The latest stop owns the burst's one line: a lost notice after a wake-budget
+    /// notice rewrites the line and moves the herdr label with it.
+    #[test]
+    fn a_lost_notice_after_a_wake_budget_notice_rewrites_the_line() {
+        let mut app = App::new("m", "s");
+        app.wake_budget_notice(
+            "wake budget used up: 1 job notices are waiting — send any message to continue",
+        );
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::WakeBudget)
+        );
+        app.job_notice_lost(radian_host::job_notify::job_notice_lost_line(
+            "job-7",
+            "disk full",
+        ));
+        assert_eq!(app.session.entries.len(), 1, "one line per burst");
+        assert!(
+            app.session.entries[0].text.contains("job-7"),
+            "the latest stop owns the line: {}",
+            app.session.entries[0].text
+        );
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::JobNoticeLost)
+        );
+        assert!(!app.session.wake_waiting);
+    }
+
+    /// Label priority across the three idle blocks: a lost notice owns the burst's one
+    /// line, so it reports first; then the goal stop; then the wake budget.
+    #[test]
+    fn idle_block_labels_report_lost_notice_first_then_goal_then_wake() {
+        let mut app = App::new("m", "s");
+        app.session.wake_waiting = true;
+        app.session.goal_mode.blocked = true;
+        app.session.notice_lost_waiting = true;
+        assert!(app.herdr_state_inputs().3);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::JobNoticeLost)
+        );
+        app.session.notice_lost_waiting = false;
+        assert!(app.herdr_state_inputs().3);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::GoalBudget)
+        );
+        app.session.goal_mode.blocked = false;
+        assert!(app.herdr_state_inputs().3);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::WakeBudget)
+        );
+        app.session.wake_waiting = false;
+        assert!(!app.herdr_state_inputs().3);
+        assert_eq!(app.herdr_blocked(), None);
+    }
+
+    /// A lost notice follows the same jobs rule as the other idle blocks: with a
+    /// background job running the session reports `working` with the `jobs` label,
+    /// not `blocked`.
+    #[test]
+    fn a_lost_notice_with_running_jobs_reports_working_with_the_jobs_label() {
+        let mut app = App::new("m", "s");
+        let line = radian_host::job_notify::job_notice_lost_line("job-7", "disk full");
+        let _ = app.update(Input::JobNoticeLost(line));
+        assert!(app.herdr_state_inputs().3);
+        let _ = app.update(Input::Runtime(RuntimeEvent::BackgroundJobStarted {
+            job_id: "job-1".to_owned(),
+            command: "sleep 3".to_owned(),
+            output: "available through job".to_owned(),
+        }));
+        let (turn, pending, trust, idle_block, jobs) = app.herdr_state_inputs();
+        assert!(idle_block);
+        assert_eq!(jobs, 1);
+        assert_eq!(
+            radian_host::herdr::state(turn, pending, trust, idle_block, jobs),
+            radian_host::herdr::State::Working
+        );
+        assert_eq!(
+            radian_host::herdr::working_label(radian_host::herdr::State::Working, turn, jobs),
+            Some("jobs".to_owned())
+        );
     }
 }

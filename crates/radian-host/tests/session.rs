@@ -194,6 +194,7 @@ async fn open_with_records(
             memory_warning: Arc::new(|_message: &str| {}),
             hooks_warning: Arc::new(|_message: &str| {}),
             wake_warning: Arc::new(|_message: &str| {}),
+            notice_lost_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await
@@ -328,6 +329,7 @@ async fn a_local_session_accepts_a_declared_command() {
             memory_warning: Arc::new(|_message: &str| {}),
             hooks_warning: Arc::new(|_message: &str| {}),
             wake_warning: Arc::new(|_message: &str| {}),
+            notice_lost_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await

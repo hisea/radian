@@ -124,7 +124,7 @@ pub use control::{ControlServer, ControlTarget, SUBSCRIBER_BUFFER, SocketGuard};
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, budget_exceeded_line, describe};
 pub use diagnostics::{
     CleanReport, MAX_TOTAL_BYTES, RETENTION, append, cache_dir, clean, clean_startup, clean_with,
-    diagnostics_dir, is_diagnostic_file, now_millis, panic_log_name,
+    diagnostics_dir, is_diagnostic_file, job_notice_log_name, now_millis, panic_log_name,
 };
 pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_overflow};
 pub use headers::{
