@@ -266,31 +266,17 @@ impl GoalSession {
 }
 
 /// The `<goal>` block for one goal, or `None` when no block belongs on the request (no
-/// goal, or a finished one). The block carries the latest progress — the tool writes it
-/// straight into the shared state, so the very next request sees it.
+/// goal, or a finished one). The block carries the objective only: never the latest
+/// progress nor the budget use. The system prompt is the front of
+/// the cache prefix, and anything that changes every turn there invalidates the whole
+/// prefix. The latest progress rides the turn-end continuation message instead, rebuilt
+/// from the durable records each time at the end of the request.
 pub fn goal_block(goal: &GoalState) -> Option<String> {
     if !matches!(goal.status, GoalStatus::Active | GoalStatus::Paused) {
         return None;
     }
     let mut out = String::from("<goal>\n");
     out.push_str(&format!("Objective: {}\n", goal.objective));
-    out.push_str(&format!(
-        "Status: {}\n",
-        match goal.status {
-            GoalStatus::Active => "active",
-            _ => "paused",
-        }
-    ));
-    out.push_str(&format!(
-        "Progress: {}\n",
-        goal.progress.as_deref().unwrap_or("none yet")
-    ));
-    out.push_str(&format!(
-        "Budget: {} · {} · {}\n",
-        budget_turns(goal),
-        budget_duration(goal),
-        budget_tokens(goal),
-    ));
     out.push_str(
         "When the objective is met, call the `goal` tool with `op: \"done\"`; \
          use `op: \"progress\"` to record what changed.\n</goal>",
@@ -298,45 +284,9 @@ pub fn goal_block(goal: &GoalState) -> Option<String> {
     Some(out)
 }
 
-fn budget_turns(goal: &GoalState) -> String {
-    match goal.budget.max_turns {
-        Some(max) => format!("{} / {max} turns used", goal.turns_used),
-        None => format!("{} turns used (no cap)", goal.turns_used),
-    }
-}
-
-fn budget_duration(goal: &GoalState) -> String {
-    match goal.budget.max_duration_secs {
-        Some(max) => format!(
-            "{} / {} active",
-            format_secs(goal.active_secs),
-            format_secs(max)
-        ),
-        None => format!("{} active (no cap)", format_secs(goal.active_secs)),
-    }
-}
-
-fn budget_tokens(goal: &GoalState) -> String {
-    match goal.budget.max_tokens {
-        Some(max) => format!("{} / {max} tokens used", goal.tokens_used),
-        None => format!("{} tokens used (no cap)", goal.tokens_used),
-    }
-}
-
-/// A compact duration: `45s` under a minute, `3m` under an hour, `2h` above.
-fn format_secs(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{}h", secs / 3600)
-    }
-}
-
 /// The hook that appends the `<goal>` block **after** skills and memory (ADR 0047, the
 /// context area of ADR 0036) and before the volatile `<session>` facts, so the static
-/// prefix stays cacheable. Deterministic on every request, from the live shared state —
+/// prefix stays cacheable. While the goal is unchanged the block bytes do not change;
 /// compaction never sees it (it only consumes transcript messages), so it can neither
 /// summarize the goal away nor drop it.
 pub struct GoalHooks {
@@ -489,11 +439,20 @@ mod tests {
         }
     }
 
-    /// `progress` journals first and replaces the latest note; the hook sees it at once.
+    /// `progress` journals first and replaces the latest note for the continuation
+    /// message; the `<goal>` block bytes do not change.
     #[tokio::test]
-    async fn progress_records_a_note_and_the_hook_sees_it() {
+    async fn progress_records_a_note_and_leaves_the_block_bytes_unchanged() {
         let temp = TempJournal::new("progress");
         let share = active_share();
+        let before = goal_block(
+            share
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .expect("still a goal"),
+        )
+        .expect("a block");
         let session = GoalTools::new(Arc::clone(&share), Arc::clone(&temp.journal))
             .open_session()
             .await
@@ -507,15 +466,14 @@ mod tests {
             ContentPart::Text { text, .. } => text.contains("half there"),
             _ => false,
         }));
-        let block = goal_block(
-            share
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .expect("still a goal"),
-        )
-        .expect("a block");
-        assert!(block.contains("Progress: half there"), "{block}");
+        let guard = share.lock().unwrap_or_else(|e| e.into_inner());
+        let goal = guard.as_ref().expect("still a goal");
+        assert_eq!(goal.progress.as_deref(), Some("half there"));
+        let after = goal_block(goal).expect("a block");
+        assert_eq!(before, after, "a progress note must not touch the block");
+        assert!(!after.contains("half there"), "{after}");
+        assert!(!after.contains("Progress:"), "{after}");
+        assert!(!after.contains("Budget:"), "{after}");
     }
 
     /// `done` ends the goal: the block goes quiet and the tool refuses afterwards.
@@ -618,16 +576,25 @@ mod tests {
     }
 
     #[test]
-    fn the_block_carries_the_objective_and_the_latest_progress() {
+    fn the_block_carries_only_the_objective() {
         let mut goal = GoalState::fresh("ship it".into(), GoalState::default_budget());
         goal.progress = Some("half there".into());
         goal.turns_used = 3;
+        goal.active_secs = 90;
+        goal.tokens_used = 150;
         let block = goal_block(&goal).expect("an active goal has a block");
         assert!(block.starts_with("<goal>"), "{block}");
         assert!(block.contains("Objective: ship it"), "{block}");
-        assert!(block.contains("Progress: half there"), "{block}");
-        assert!(block.contains("3 / 30 turns used"), "{block}");
+        assert!(block.contains("op: \"done\""), "{block}");
+        assert!(!block.contains("half there"), "{block}");
+        assert!(!block.contains("Progress:"), "{block}");
+        assert!(!block.contains("Budget:"), "{block}");
+        assert!(!block.contains("Status:"), "{block}");
         assert!(block.ends_with("</goal>"), "{block}");
+        // Paused keeps the very same bytes: nothing in the block moves but the objective.
+        let mut paused = goal.clone();
+        paused.status = GoalStatus::Paused;
+        assert_eq!(goal_block(&paused).as_deref(), Some(block.as_str()));
         // A finished goal has no block: the transcript already says it ended.
         let mut done = goal.clone();
         done.status = GoalStatus::Done;
@@ -677,5 +644,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(request.system_prompt.unwrap(), "base");
+    }
+
+    /// Renders the full system prompt the hook produces for one shared goal.
+    async fn rendered_prompt(share: &SharedGoal) -> String {
+        let hooks = GoalHooks::new(Arc::clone(share));
+        let mut request = ModelRequest {
+            system_prompt: Some("base".into()),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            settings: json!({}),
+        };
+        hooks
+            .before_model_call(
+                &HookContext {
+                    cancellation: CancellationToken::new(),
+                    model_calls: 1,
+                },
+                &mut request,
+            )
+            .await
+            .unwrap();
+        request.system_prompt.unwrap()
+    }
+
+    /// Acceptance: after `goal progress` the system prompt bytes are
+    /// unchanged \u2014 the block holds the objective only \u2014 while the shared state
+    /// carries the new progress for the turn-end continuation message (the TUI half,
+    /// pinned by `an_unfinished_turn_continues_with_the_latest_progress`).
+    /// Mutation: put the progress back into the block and this fails.
+    #[tokio::test]
+    async fn progress_leaves_the_system_prompt_bytes_unchanged() {
+        let temp = TempJournal::new("stable");
+        let share = active_share();
+        let before = rendered_prompt(&share).await;
+        assert!(before.contains("Objective: ship it"), "{before}");
+        let session = GoalTools::new(Arc::clone(&share), Arc::clone(&temp.journal))
+            .open_session()
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        session
+            .execute(&call("progress", Some("half there"), None), cx(&cancel))
+            .await
+            .unwrap();
+        let after = rendered_prompt(&share).await;
+        assert_eq!(
+            before, after,
+            "a progress note must not touch the system prompt"
+        );
+        assert!(!after.contains("half there"), "{after}");
     }
 }
