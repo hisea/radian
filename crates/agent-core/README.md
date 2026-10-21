@@ -149,7 +149,7 @@ message identity and `replace_transcript`) · 0006 (session JSONL v1 — the for
 content) · 0015 (context budget estimation) · 0018
 (computed input budget `B = min(I, C − R)`).
 
-## ADR 0026 D7: per-turn context budget (2026-10-13)
+## ADR 0026 D7: per-turn context budget
 
 `TurnOptions.context_budget: Option<ContextBudget>` overrides
 `AgentConfig.context_budget` for one turn, and `AgentSession::compact_now` takes the same

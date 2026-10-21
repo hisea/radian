@@ -1068,7 +1068,7 @@ theme = "light"
         assert!(parse_str("schema_version = 1\n[model]\nretries = \"3\"\n").is_err());
     }
 
-    /// ADR 0015 (2026-10-16): `[model] context_window` is a non-negative integer, and `0` means
+    /// ADR 0015: `[model] context_window` is a non-negative integer, and `0` means
     /// **unset** — a valid "off" in the same shape as `retries = 0`, never a zero-token window.
     /// A negative or non-integer value is refused rather than guessed (fail-closed).
     #[test]

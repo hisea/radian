@@ -776,7 +776,7 @@ impl LoopContext<'_> {
                     .map_err(|error| error.to_string());
                 if result.is_ok() {
                     // The session's redaction list must know the new key from now on
-                    //: the panic log and an export read it live.
+                    // : the panic log and an export read it live.
                     refresh_secrets(&self.host.secrets);
                 }
                 self.send(AppInput::LoginSaved { name, result });

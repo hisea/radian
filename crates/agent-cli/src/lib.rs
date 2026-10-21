@@ -47,7 +47,7 @@ const USAGE_ERROR: i32 = 2;
 #[derive(Parser, Default)]
 #[command(
     // The command is `radian exec` now: its help, usage and `--version` name the program the
-    // user actually ran (ADR 0032 direction; the `agent` binary is gone).
+    // user actually ran (ADR 0032; the `agent` binary is gone).
     name = "radian",
     version,
     about = "Chat with a model, with optional MCP tools",
@@ -309,7 +309,7 @@ pub struct Cli {
 impl Cli {
     /// A `Cli` carrying only one management command, everything else at its default. The
     /// top-level `radian memory`/`login`/`config` build this so they run the **same** dispatch
-    /// the parser feeds (ADR 0032 direction).
+    /// the parser feeds (ADR 0032).
     pub fn for_command(command: Command) -> Self {
         Self {
             command: Some(command),
@@ -435,7 +435,7 @@ mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
 
-    /// decision 2026-10-17: `radian exec`'s per-turn model call limit defaults to the
+    /// `radian exec`'s per-turn model call limit defaults to the
     /// value both hosts share (1000), **not** agent-core's own `DEFAULT_MAX_MODEL_CALLS` (32).
     /// Mutation: point the field's `default_value_t` at `agent_core::DEFAULT_MAX_MODEL_CALLS`
     /// → this fails.

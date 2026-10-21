@@ -688,7 +688,7 @@ fn a_chinese_selection_copies_the_source() {
 
 /// Every laid-out line fits its width in **display columns**, not chars: a Chinese list item,
 /// heading, quote or table at 80/40/20 columns wraps instead of overflowing the right edge
-/// (the truncation the owner saw; the layout already measures display columns).
+/// (the observed truncation; the layout already measures display columns).
 #[test]
 fn every_chinese_line_fits_the_width() {
     let bodies = [
@@ -718,7 +718,7 @@ fn every_chinese_line_fits_the_width() {
     }
 }
 
-/// The owner's truncation report (2026-10-14): a long ordered-list item in a wide window
+/// The truncation report (2026-10-14): a long ordered-list item in a wide window
 /// (~160-200 columns) looked cut at the right edge. This is the message's **structure**
 /// (anonymized): `##` headings, a bullet list with inline code, and long ordered-list items
 /// with bold and inline code. Every line wraps in display columns and the whole text reaches

@@ -55,7 +55,7 @@ pub enum Glyphs {
     /// Unicode box/geometric glyphs (the default).
     #[default]
     Unicode,
-    /// Nerd Font code points (the owner's pi footer).
+    /// Nerd Font code points (the pi footer).
     Nerd,
     /// Pure ASCII.
     Ascii,
@@ -123,7 +123,7 @@ impl Glyphs {
     /// The marker column's **folded** spelling (ADR 0035's 2026-10-16 "折叠标记统一" note): the
     /// thinking channel's folded one-liner and an expandable tool head that shows only its head
     /// both take it. `◼ ` on the unicode, nerd and emoji tiers, `+ ` under `ascii`. `◼`/`◻`
-    /// miss four of the six reference fonts: the owner chose the pair anyway, a documented
+    /// miss four of the six reference fonts: the pair was chosen anyway, a documented
     /// exception like the ask record's `◉`/`○`.
     pub fn fold_marker(self) -> &'static str {
         match self {
@@ -398,16 +398,16 @@ mod tests {
     use super::*;
 
     /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027 and 6, plus
-    /// ADR 0035's band half cells and the owner's 2026-10-16 glyph note: `×` for a
+    /// ADR 0035's band half cells and the glyph note; `×` for a
     /// failed tool head, `•` for a one-line tool head). Each one is checked against the six
     /// fonts by `scripts/check-glyph-coverage.py` and listed in the README's coverage table. A
     /// new glyph makes this test fail until it is re-checked and added here.
     const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓•╭╰…▄▀·";
 
     /// The documented exceptions to the coverage rule (ADR 0027/10 and ADR 0035's
-    /// 2026-10-16 notes): the owner picked the arc and the pulse after seeing them, braille is
+    /// 2026-10-16 notes): the arc and the pulse were picked after review, braille is
     /// an opt-in, and the fold marker pair `◼`/`◻` is the same kind of choice (four of the six
-    /// reference fonts lack them; the owner chose them after seeing the set), so these may fall
+    /// reference fonts lack them; they were chosen after review), so these may fall
     /// back to another font. Kept separate so the rest of the check is not loosened.
     const DOCUMENTED_EXCEPTIONS: &str = "◼◻▨◜◝◞◟⏺⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 
@@ -482,7 +482,7 @@ mod tests {
     }
 
     /// The fold marker pair `◼`/`◻` is a documented exception (ADR 0035's 2026-10-16 note): the
-    /// owner chose it knowing four of the six reference fonts lack it. The `ascii` tier and the
+    /// Chosen knowing four of the six reference fonts lack it. The `ascii` tier and the
     /// one-line head marker are ASCII and stay covered.
     #[test]
     fn the_fold_markers_are_documented_exceptions() {

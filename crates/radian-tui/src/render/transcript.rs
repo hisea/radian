@@ -297,7 +297,7 @@ fn render_row(
     } else {
         " ".repeat(prefix.width())
     };
-    // A notice's content is the secondary level (the owner's assignment: its value is 次,
+    // A notice's content is the secondary level (the assignment: its value is 次,
     // only its label is 强调); the marker's own role stays `notice`.
     let body = if placeholder {
         theme.reasoning
@@ -717,8 +717,7 @@ fn body_spans(
 ) -> Vec<Span<'static>> {
     let mut out = Vec::with_capacity(4);
     // A structured notice's **first** line (`profile: …`, `[memory] …`) steps the label up
-    // with the accent role and keeps the body on pi's secondary level (ADR 0028, owner
-    // decision). Only the first: a wrapped continuation that happens to contain a colon
+    // with the accent role and keeps the body on pi's secondary level (ADR 0028). Only the first: a wrapped continuation that happens to contain a colon
     // (`https://…`, `12:30`, a `path:line`) is prose, not a label.
     if first_text
         && matches!(

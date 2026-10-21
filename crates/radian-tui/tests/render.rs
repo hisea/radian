@@ -244,7 +244,7 @@ fn the_note_clears_when_the_tools_finish() {
 /// The note must name a tool that is **still running**. `ToolFinished` is emitted in completion
 /// order, "which may differ from the transcript order" (agent-core's own event contract), so the
 /// call the note names can settle while another call of the same batch is still running. A note
-/// naming a settled tool is the same defect as the owner's stuck "tool shell running".
+/// naming a settled tool is the same defect as the stuck "tool shell running".
 #[test]
 fn the_note_names_a_tool_that_is_still_running() {
     let mut app = App::new("m", "s");
@@ -570,7 +570,7 @@ fn description_column(row: &str, label: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(&row[..after_label]) + marker + spaces
 }
 
-/// a completion menu marks the item in effect with ` ✓` right after its name
+// a completion menu marks the item in effect with ` ✓` right after its name
 /// (never in the description), so every row's description starts in the same column. `/theme`,
 /// `/model` and `/thinking` all draw through the shared list.
 fn assert_menu_marks_current(app: &mut App, labels: &[&str], current: usize) {
@@ -3189,7 +3189,7 @@ fn ask_panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> St
     ))
 }
 
-/// The chosen option's marker is drawn in its own span and is never bold: the owner's font
+/// The chosen option's marker is drawn in its own span and is never bold: the font
 /// draws a glyph missing from its bold face at a smaller size (ADR 0024 note; the
 /// circle pair of ADR 0028 is used for the same reason).
 #[test]

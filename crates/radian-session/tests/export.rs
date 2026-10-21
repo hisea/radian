@@ -207,7 +207,7 @@ fn export_never_modifies_the_session_file() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
-/// ADR 0014, decision 2026-10-12: reasoning is opt-in per export, like the raw payload,
+/// ADR 0014, decision: reasoning is opt-in per export, like the raw payload,
 /// and **both formats agree**. Before this, JSON carried reasoning while Markdown silently
 /// dropped it -- neither by decision.
 #[test]

@@ -8,7 +8,7 @@
 
 use unicode_width::UnicodeWidthStr;
 
-/// The wordmark, three rows, exactly as the owner's ADR 0027 §标志 chose. Any terminal font
+/// The wordmark, three rows, exactly as the ADR 0027 §标志 chose. Any terminal font
 /// can draw these box-drawing characters. The right column (version / model / path) is
 /// appended at build time.
 pub const BANNER_WIDE: [&str; 3] = [

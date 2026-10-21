@@ -44,4 +44,4 @@
 - 没有复现 T4 的确切历史形态（那次会话没有留下可读的错误记录）。
 - 未测其它 `deepseek-v4*` 模型、其它 opencode-go 路由或 deepseek 官方端点。
 - 因此实现仍按 ADR 修订 1 的保守形态：目录（或 `[providers.<id>]`）要求回传时才回传，缺推理的
-  assistant 消息补 `""`。是否据此修订 ADR Q3，由 决定。
+  assistant 消息补 `""`。是否据此修订 ADR Q3，由 。

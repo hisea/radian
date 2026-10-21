@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "The headless command behind `radian exec` (ADR 0032)"
 publish = false
 
-# No binary: `radian exec` is the only entry point now (ADR 0032 direction: the `agent`
+# No binary: `radian exec` is the only entry point now (ADR 0032: the `agent`
 # binary is deleted). This crate is the library the `radian` binary links.
 [dependencies]
 futures-util.workspace = true

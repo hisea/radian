@@ -886,7 +886,7 @@ mod tests {
 
     /// A non-array `provider_payload` from a foreign turn is a protocol error, not a silent
     /// drop — dropping a real `thinking` block would make the provider reject the request
-    /// (D6: pin today's behavior; a change to "drop and log" is the owner's call).
+    /// (D6: pin today's behavior; a change to "drop and log" is the call).
     #[test]
     fn a_non_array_payload_is_a_protocol_error() {
         let history = vec![

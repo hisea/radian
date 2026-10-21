@@ -212,7 +212,7 @@ fn a_diff_row_colors_its_gutter_sign_and_code() {
     assert_ne!(hunk.fg, theme.notice_label.fg, "`@@` is not the accent");
     let header = style_of(&terminal, "diff --git").expect("the file header");
     assert_eq!(header.fg, theme.frame.fg, "file headers are structure too");
-    // No row of the diff carries a background **of its own**:
+    // No row of the diff carries a background **of its own** (no diff tint):
     // an added row, a removed row and a structure row all sit on the card's own band, which is
     // the revision-4 card's (slice ① removes that band, not this slice).
     let added = style_of(&terminal, "+ let a = 2;").expect("the added sign");

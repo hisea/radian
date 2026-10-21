@@ -71,7 +71,7 @@ use ui::*;
 )]
 struct Cli {
     // The TUI's own setup flags come first: the default mode is the full-screen TUI, and the
-    // `--help` groups read in the order the owner asked for (TUI, session, model, mcp,
+    // `--help` groups read in the order (TUI, session, model, mcp,
     // permissions).
     /// The configuration file. Overrides `RADIAN_CONFIG` and
     /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
@@ -434,7 +434,7 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
             ) as u8)
         }
         // The management commands build the same `Cli` the `agent` parser would and run the
-        // same dispatch (ADR 0032 direction): `radian login` and `radian exec login` are
+        // same dispatch (ADR 0032): `radian login` and `radian exec login` are
         // one code path, not two.
         RadianCommand::Login { provider } => {
             run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Login {
@@ -783,8 +783,7 @@ fn print_exit_line(message: &str) {
 /// rule). `--pick` (and a valueless `--resume`) enter the alternate screen *before* the session
 /// exists, so from then until the session's first frame every startup diagnostic would land on
 /// the alternate screen — and the renderer's frame diff skips the cells that did not change, so
-/// the text stays drawn where the cursor happened to be (the input box) and never clears (owner
-/// 2026-10-17). On that path the lines are collected here and appended to the transcript's
+/// the text stays drawn where the cursor happened to be (the input box) and never clears. On that path the lines are collected here and appended to the transcript's
 /// startup block, which is where the trust status line already goes (ADR 0031 T3).
 struct StartupLog {
     /// `None` before the alternate screen is up (print); `Some` once it is (collect).
@@ -1427,7 +1426,7 @@ mod tests {
         }
     }
 
-    /// The short aliases shorthand") are the long flags: each
+    /// The short aliases ("常用命令都有 shorthand") are the long flags: each
     /// short parses to the same field as its long form, so nothing else about the surface moves.
     #[test]
     fn the_short_flags_parse_to_the_same_fields_as_the_long_ones() {

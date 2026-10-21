@@ -1086,7 +1086,7 @@ mod tests {
         assert_eq!(theme.tool_success_bg.bg, Some(Color::Rgb(0x2B, 0x33, 0x28)));
         assert_eq!(theme.tool_error_bg.bg, Some(Color::Rgb(0x43, 0x24, 0x2B)));
         // The notice's two halves: the label takes `accent` (#957FB8), the body `muted`
-        // (`fg_dim` = #C8C093), per the owner's text-level decision.
+        // (`fg_dim` = #C8C093), per the text-level decision.
         assert_eq!(theme.notice_label.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
         assert_eq!(theme.notice_body.fg, Some(Color::Rgb(0xC8, 0xC0, 0x93)));
         // The unified-diff roles (ADR 0028 R4): the fixture's own toolDiff* values —

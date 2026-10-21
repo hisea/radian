@@ -37,8 +37,7 @@ use std::time::Duration;
 use agent_extensions::McpServerConfig;
 use serde::Deserialize;
 
-/// Credential variables blanked in project `.mcp.json` entries (
-/// revised round 1: the table protects the user's shell keys from project servers,
+/// Credential variables blanked in project `.mcp.json` entries (/// revised round 1: the table protects the user's shell keys from project servers,
 /// built-in or not): each built-in provider's customary key variable, plus the common
 /// third-party provider keys. A fixed table, never a `*_API_KEY` pattern; synced when a
 /// built-in provider is added. The exact list was meant to come from models.dev's

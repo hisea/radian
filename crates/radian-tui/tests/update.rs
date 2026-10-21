@@ -385,7 +385,7 @@ fn the_slash_completion_walks_the_command_tree() {
     assert_eq!(app.input, "/memory ", "and keeps the text");
 }
 
-/// Owner bug report 2026-10-17 (`pty_model_switches_to_chatgpt_with_an_oauth_login` flaked
+/// (`pty_model_switches_to_chatgpt_with_an_oauth_login` flaked
 /// under load): the `/model` answer for an **exact** route must never arm the menu, even when a
 /// longer model id shares its prefix (`gpt-5.4` vs. `gpt-5.4-mini`, `radian-host`'s descriptor).
 /// Armed, Enter accepts the highlighted row instead of submitting the finished line — the switch

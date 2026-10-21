@@ -7,7 +7,7 @@ use super::markdown::{code_line_layout, md_chars, prose_lines};
 use super::*;
 use unicode_width::UnicodeWidthChar;
 
-/// The tool head's fold marker (ADR 0035's 2026-10-16 "折叠标记统一" note, the owner's option A):
+/// The tool head's fold marker (ADR 0035's 2026-10-16 "折叠标记统一" note, option A):
 /// the head row's marker is decided **only** by whether a body is drawn under it. The thinking
 /// header carries the same pair ([`crate::footer::Glyphs::open_marker`] /
 /// [`crate::footer::Glyphs::fold_marker`]).
@@ -80,7 +80,7 @@ pub fn head_marker(entry: &Entry, modes: DisplayModes, body_follows: bool) -> He
     }
 }
 /// The head row(s) of a tool block (ADR 0028, ADR 0035's 2026-10-16
-/// "多行命令" note, the owner's option A): `• <tool name> <title> · <meta> <status>`. The
+/// "多行命令" note, option A): `• <tool name> <title> · <meta> <status>`. The
 /// entry's text is the `<name> <title>` part (the call entry's text, set at push time from the
 /// same function) so those characters copy; the name's own style, the meta, the status glyph,
 /// the `… (+N lines)` note and the `│ ` markers are synthesized cells (no source).
@@ -261,7 +261,7 @@ fn head_status(entry: &Entry, card: Option<&tools::ToolCard>) -> HeadStatus {
     }
 }
 
-/// The status glyphs `✓`/`×` (ADR 0028 with the owner's 2026-10-16 glyph
+/// The status glyphs `✓`/`×` (ADR 0028 with the glyph
 /// note: `×` replaces the crossed mark U+2717, which misses Cascadia Code, Fira Code and Source
 /// Code Pro). `ascii` draws `+`/`x`; the `nerd` tier keeps the footer's Font Awesome pair. The
 /// **running** state draws the live spinner frame instead ([`running_glyph`] is the

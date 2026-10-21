@@ -160,7 +160,7 @@ This is a summary of the earlier conversation. Continue the work from it.";
 /// `origin`, never parsed out of the body.
 pub const USER_MESSAGES_HEADING: &str = "\n\n---\nUser messages kept verbatim (oldest first):";
 
-/// The summary length ceiling for an input budget `B`:
+/// The summary length ceiling for an input budget `B` (dogfood9):
 /// `min(K, max(8192, ⌊B/8⌋))` with `K = keep_target(B)`. The old fixed [`DEFAULT_SUMMARY_MAX_TOKENS`]
 /// was too small for a large window: the rolling summary grows with every compaction, and at
 /// 120K (`B = 103616`) the shortening retry still produced 8725 tokens, over 8192, and failed
@@ -870,8 +870,7 @@ pub fn select_user_messages_tracked(
     let mut used = 0u64;
     // From the newest backwards: the newest is always placed, truncated into `U` when it alone
     // is larger. The walk **stops** at the first message that does not fit, so what is kept is
-    // the contiguous newest run and everything older is omitted (ADR 0018, owner
-    // 2026-10-13) — never a newer message plus an older short one with a gap between them.
+    // the contiguous newest run and everything older is omitted (ADR 0018) — never a newer message plus an older short one with a gap between them.
     for (index, text) in texts[1..].iter().enumerate().rev() {
         let tokens = text_tokens(text);
         let entry = if tokens > u {

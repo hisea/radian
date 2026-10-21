@@ -564,7 +564,7 @@ pub fn effective_thinking_level(
 
 /// `/thinking`'s completion rows (ADR 0026 D11): only the levels the route supports, each with
 /// the wire value it sends (`enabled:4096` for Anthropic, `high` for openai-compatible); the
-/// applied level carries `current` (drawn as ` ✓` after its name, ).
+/// applied level carries `current` (drawn as ` ✓` after its name).
 pub fn thinking_candidates(
     provider: &radian_host::ProviderRef,
     model: &str,
@@ -2376,7 +2376,7 @@ mod tests {
         assert!(complete_in(tree(), "hello", 5).is_none());
     }
 
-    /// A later command (the owner's `/model`/`/login`) is one entry in the same tree, and its
+    /// A later command (the `/model`/`/login`) is one entry in the same tree, and its
     /// level sources are ordinary pure functions: this fake one proves the structure carries it.
     #[test]
     fn a_future_command_hangs_on_the_same_tree() {

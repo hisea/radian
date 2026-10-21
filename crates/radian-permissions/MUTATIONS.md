@@ -47,7 +47,7 @@ Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）·
 | PM-A1 | `apply_policy` 的 auto 臂改成 `(Auto, _) => Allow`（deny 也放行） | deny 规则在 auto 下照样拒绝 | `hooks.rs::auto_still_honors_deny_rules` FAILED |
 | PM-A2 | `set_approval` 去掉 `audit.record_policy_change` | 每次开关写一条审计 | `hooks.rs::set_approval_switches_in_place_and_audits_each_switch` FAILED |
 
-2/2 抓住。owner 的更正把"自动批准键不经确认直接开启"这条变异换成"`Y` 开启了 auto"，
+2/2 抓住。"自动批准键不经确认直接开启"这条变异已换成"`Y` 开启了 auto"，
 那条变异改的是 `radian-tui` 的键位映射，记录在 `crates/radian-tui/MUTATIONS.md`（TM-A1）。
 
 ## ADR 0028 R8：`mermaid_check` 三档 allow（2026-10-14）

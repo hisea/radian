@@ -286,7 +286,7 @@ fn ask_wrap(text: &str, width: usize) -> Vec<String> {
 /// decision 1): the marker column `│ ` in columns 1-2, `prefix` (the marker or indent, at
 /// column 3), and the value wrapped to whatever the prefix leaves of the body width (CJK by
 /// display width). A continuation row repeats the prefix's cells so the value's column holds.
-/// There is no right border and no trailing padding - the owner's picture leaves the body rows
+/// There is no right border and no trailing padding - the picture leaves the body rows
 /// open (a banded theme pads them on screen, which is slice ①'s concern, not this one).
 fn ask_body(
     g: &AskGlyphs,
@@ -394,7 +394,7 @@ mod tests {
             "{declined:?}"
         );
 
-        // The ascii fallback: `+-`/`|`/`+--` and `( )`/`(*)`.
+        // The ascii fallback: `+-`/`|`/`+--` and `()`/`(*)`.
         let ascii = texts(&card, false, crate::footer::Glyphs::Ascii);
         assert!(ascii[0].starts_with("+- ask "), "{ascii:?}");
         assert_eq!(
@@ -538,7 +538,7 @@ mod tests {
     }
 
     /// ADR 0028: single, multi and `Other` share one marker pair - the
-    /// circle `○`/`◉` under unicode, `( )`/`(*)` under ascii.
+    /// circle `○`/`◉` under unicode, `()`/`(*)` under ascii.
     #[test]
     fn the_ask_glyphs_use_one_circle_pair() {
         let g = AskGlyphs::for_glyphs(crate::footer::Glyphs::Unicode);

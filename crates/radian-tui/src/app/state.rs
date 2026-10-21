@@ -81,7 +81,7 @@ pub enum EntryKind {
     ToolCall,
     ToolResult,
     Notice,
-    /// The startup screen's wordmark (; ADR 0027 §标志: the primary text
+    /// The startup screen's wordmark (ADR 0027 §标志: the primary text
     /// color). It is the first entry in a session.
     Banner,
     /// The startup information's collapsed/expanded lines. Their `label: value` first lines

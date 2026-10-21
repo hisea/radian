@@ -440,7 +440,7 @@ mod tests {
     }
 
     /// A request that cannot connect names the cause, not only reqwest's "error sending
-    /// request".
+    /// request" (that line alone said nothing about why).
     #[tokio::test]
     async fn a_failed_request_names_its_cause() {
         let addr = {

@@ -135,10 +135,10 @@ Notes:
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
 | M14 | 交互模式不带 `--model` 也能启动（去掉 clap 的 `required_unless_present_any` 并让 `model_name` 默认成 `"m"`） | ✅ failed | `a_conversation_still_requires_a_model`（不再有 clap 的 `Usage:` 行；实际是后面的 “no API key” 退出 2） |
-| M15 | `--search` 的缓存写成 `.jsonl` 名（`index.db` → `search.jsonl`），即看起来像新建了一个会话文件 | ✅ failed | `session_commands_do_not_touch_the_session_directory`（`created or modified a .jsonl file`，`index.db` 也不再出现） |
+| M15 | `--search` 的缓存写成 `.jsonl` 名（`index.db` → `search.jsonl`），即看起来像新建了一个会话文件 | ✅ failed | `session_commands_do_not_touch_the_session_directory`（`created or modified a.jsonl file`，`index.db` 也不再出现） |
 
 M14 的断言特意包含 clap 的 `Usage:` 行：只断言 `--model` 字样的话，后面的 setup 错误也含它，变异就抓不住
-了（第一次写测试时正是这个洞）。M15 覆盖 brief 要求的「search 写进了一个新的 .jsonl」。
+了（第一次写测试时正是这个洞）。M15 覆盖 brief 要求的「search 写进了一个新的.jsonl」。
 
 ## 第三轮：--export 的 session id 校验（2026-10-13）
 
@@ -262,7 +262,7 @@ Base `79f60cb` · 一次性 worktree `/tmp/config2-mut` · 独立 `CARGO_TARGET_
 ## Phase 5：`agent config import-pi`
 
 Base `5aa84b6` · 一次性 worktree `/tmp/pimig-mut` · 独立 `CARGO_TARGET_DIR` ·
-每个变异 `git checkout -- .` 还原、`git status --short` 为空。宿主侧的同一批变异见
+每个变异 `git checkout --.` 还原、`git status --short` 为空。宿主侧的同一批变异见
 `crates/radian-host/MUTATIONS.md` 的 M15–M21。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -285,7 +285,7 @@ Base `23149f4` · 就地变异，每个变异 `git checkout -- <file>` 还原、
 
 ## Slice: `agent login` / `agent logout`,具名 provider(ADR 0026 D3/D10)
 
-Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git checkout -- .` 还原后跑对应
+Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git checkout --.` 还原后跑对应
 测试,`git status --short` 为空。L1(TUI 侧)见 `crates/radian-tui/MUTATIONS.md`。
 
 | # | 变异 | 应体现 | 抓住它的测试 |
@@ -304,7 +304,7 @@ Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git check
 
 ## ADR 0013 脱敏复审跟进：CLI 运行期错误也只装启动 key（2026-10-14）
 
-Base `3d014a5` · 一次性 worktree `/tmp/radian-pi-priv-mut2`，跑完 `git checkout -- .`。
+Base `3d014a5` · 一次性 worktree `/tmp/radian-pi-priv-mut2`，跑完 `git checkout --.`。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -316,7 +316,7 @@ Base `3d014a5` · 一次性 worktree `/tmp/radian-pi-priv-mut2`，跑完 `git ch
 
 Base `ce5dfa2` · 一次性 worktree `/tmp/exec-mut`（从 HEAD 建，跑完删）· 每个变异先打补丁
 （补丁自带锚点断言），再 `cargo build -p radian-tui --bin radian`（测试用的是**新编的**
-radian，不是上一次构建的），然后 `cargo test -p agent-cli --test exec`；跑完 `git checkout -- .`，
+radian，不是上一次构建的），然后 `cargo test -p agent-cli --test exec`；跑完 `git checkout --.`，
 `git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -335,7 +335,7 @@ Base `bf6ccf8` · 一次性 worktree `/tmp/e2-mut`（从 HEAD 建，跑完删）
 （补丁自带锚点断言），再 `cargo build -p radian-tui --bin radian` 与
 `cargo build -p agent-extensions --bin mcp-fixture`（测试用的是新编的二进制；陈旧检测会
 拒绝旧二进制），然后按**单个**测试过滤跑（cargo 只接受一个位置参数）；跑完
-`git checkout -- .`，`git status --short` 为空。
+`git checkout --.`，`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|

@@ -88,7 +88,7 @@ fn a_keymap_conflict_is_a_startup_error() {
     );
 }
 
-/// a printable single character bound in the main view would swallow that
+// a printable single character bound in the main view would swallow that
 /// character in the composer, so the config application returns a warning for it (the binding is
 /// kept; only the warning is added). A Ctrl/Alt binding is not a typed character, so it is silent.
 #[test]

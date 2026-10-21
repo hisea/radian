@@ -881,7 +881,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         events: &dyn EventSink,
         deterministic_allowed: bool,
     ) -> Result<SummarizeOutcome, CompactionFailure> {
-        // The summary ceiling scales with the window; no window
+        // The summary ceiling scales with the window (dogfood9); no window
         // falls back to the fixed default.
         let summary_max = summary_budget
             .map(compaction::summary_max_tokens)

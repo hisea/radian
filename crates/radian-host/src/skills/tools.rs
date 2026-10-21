@@ -3,8 +3,7 @@
 //! The body is the `SKILL.md` text without its frontmatter, followed by one line naming the
 //! skill's directory as the base for relative paths (the same base the `bash` tool's working
 //! directory rules point at; ADR 0025 S3's "相对路径以 skill 目录为基准"). The name is looked
-//! up in the discovered table — **a path is never built from the name** (ADR 0025 S3, owner
-//! ruling: a `../` in the argument must not escape). Unknown names, read failures and bodies
+//! up in the discovered table — **a path is never built from the name** (ADR 0025 S3). Unknown names, read failures and bodies
 //! over the output cap are tool-result errors, never turn failures.
 
 use std::sync::Arc;

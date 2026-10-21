@@ -704,7 +704,7 @@ pub fn gap_at(entries: &[Entry], index: usize) -> usize {
     block_gap(prev, next)
 }
 
-/// The entries the startup block is made of (ADR 0027 §标志 / the owner's 2026-10-14 startup
+/// The entries the startup block is made of (ADR 0027 §标志 / the startup
 /// screen): one visual block, so the container inserts no gaps between them.
 fn is_startup_block(kind: EntryKind) -> bool {
     matches!(

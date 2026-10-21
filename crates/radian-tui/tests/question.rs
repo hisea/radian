@@ -459,10 +459,7 @@ fn the_panel_shows_the_tabs_the_options_and_the_hints() {
     assert!(text.contains("❯ ○ A (Recommended)"), "{text}");
     assert!(text.contains("↳ the second"), "{text}");
     assert!(text.contains("Other (type your own)"), "{text}");
-    assert!(
-        text.contains("space select"),
-        "the only select key: {text}"
-    );
+    assert!(text.contains("space select"), "the only select key: {text}");
     assert!(text.contains("⏎ next"), "the confirm key: {text}");
     assert!(text.contains("alt-h"), "{text}");
 
@@ -541,7 +538,7 @@ fn a_long_tab_label_is_truncated() {
     assert!(labels[1].0 == "Submit", "{labels:?}");
 }
 
-/// feedback 2026-10-16: with the cursor on `Other`, Up/Down still move between the
+/// With the cursor on `Other`, Up/Down still move between the
 /// options and the typed text is kept; typing goes into `Other`, and `Enter` confirms.
 #[test]
 fn other_keeps_its_text_while_moving_with_arrows() {
@@ -580,7 +577,7 @@ fn other_keeps_its_text_while_moving_with_arrows() {
     assert_eq!(answer.answers[0].other.as_deref(), Some("custom"));
 }
 
-/// `Enter` only confirms and advances, it never selects; `Space` selects
+// `Enter` only confirms and advances, it never selects; `Space` selects
 /// without advancing. A question with nothing chosen still moves on.
 #[test]
 fn enter_advances_without_selecting_and_space_selects_without_advancing() {
@@ -616,7 +613,7 @@ fn enter_advances_without_selecting_and_space_selects_without_advancing() {
     assert_eq!(form(&spaced).current, Some(0), "Space does not advance");
 }
 
-/// on a `multi` question `Space` toggles and `Enter` only advances (it does
+// on a `multi` question `Space` toggles and `Enter` only advances (it does
 /// **not** toggle).
 #[test]
 fn a_multi_question_toggles_with_space_and_enter_only_advances() {
@@ -645,7 +642,7 @@ fn a_multi_question_toggles_with_space_and_enter_only_advances() {
     assert_eq!(form(&app).current, Some(1), "Enter advances");
 }
 
-/// `Space` on the `Other` row selects it and starts typing at once — the
+// `Space` on the `Other` row selects it and starts typing at once — the
 /// cursor is visible on that row, the next keys land in its text, a following `Space` is a
 /// space (the field takes the space), and switching to another option and back keeps the text.
 #[test]
@@ -697,7 +694,7 @@ fn space_on_other_starts_typing_and_the_cursor_is_visible() {
     );
 }
 
-/// the inline `Other` cursor sits at the composer's cursor, so `←`/`→` move
+// the inline `Other` cursor sits at the composer's cursor, so `←`/`→` move
 /// it within the typed text.
 #[test]
 fn the_other_cursor_follows_the_text_cursor() {
@@ -718,7 +715,7 @@ fn the_other_cursor_follows_the_text_cursor() {
     );
 }
 
-/// `Enter` with nothing chosen still advances; the question counts as
+// `Enter` with nothing chosen still advances; the question counts as
 /// unanswered and the overview marks it.
 #[test]
 fn an_unanswered_question_is_marked_in_the_overview() {
@@ -772,7 +769,7 @@ fn the_transcript_follows_after_the_panel_closes() {
     );
 }
 
-// ---------- feedback: Other typing and question switching (ADR 0024) ----------
+// ---------- Other typing and question switching (ADR 0024) ----------
 
 /// The `Other` row is a free-text field: moving to it with Down and typing keeps the text and
 /// chooses `Other`. Also checked: a `text` question keeps its typed text.

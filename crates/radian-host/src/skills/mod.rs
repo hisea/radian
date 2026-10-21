@@ -20,7 +20,7 @@ use agent_core::{HookContext, HookError, Hooks, ModelRequest, RequestSize};
 /// The one file name discovery recognizes (ADR 0025 S1, like pi).
 pub const SKILL_FILE_NAME: &str = "SKILL.md";
 
-/// The section's soft token budget (ADR 0025 S2 / owner ruling 6).
+/// The section's soft token budget (ADR 0025 S2 / ruling 6).
 pub const SECTION_BUDGET_TOKENS: u64 = 1000;
 
 /// Directories discovery never descends into (the same names `mention` ignores; ADR 0025 S1).
@@ -439,7 +439,7 @@ fn load_text(
             dir.display()
         ));
     }
-    // Owner ruling 4: `allowed-tools` is never wired to permissions (that would let a skill
+    // Ruling 4: `allowed-tools` is never wired to permissions (that would let a skill
     // grant itself tools); it is read as text and ignored. The caller warns once per discovery.
     let declares_allowed_tools = front.contains_key("allowed-tools");
     let disable_model_invocation = front
@@ -609,7 +609,7 @@ pub fn valid_description(description: &str) -> bool {
 
 /// The system-prompt section: one line per listable skill (name, description, absolute path),
 /// truncated to `budget_tokens` in discovery order with a trailing count of what is left out
-/// (ADR 0025 S2, owner ruling 6). `disable-model-invocation: true` skills are not listed.
+/// (ADR 0025 S2, ruling 6). `disable-model-invocation: true` skills are not listed.
 ///
 /// Pure and deterministic: the same skills and budget always give byte-identical text.
 pub fn prompt_section(skills: &[Skill], budget_tokens: u64, bytes_per_token: u32) -> String {

@@ -428,7 +428,7 @@ impl App {
             }
             // ←/→ switch questions while no free-text field has focus (the hint row says so);
             // with the `Other` row, a `text` question or a note focused they fall through to
-            // the composer's cursor actions below. feedback: ←/→ used to do nothing
+            // the composer's cursor actions below. ←/→ used to do nothing
             // outside a field.
             let field_focused = form.note_focused() || form.text_focused();
             if !field_focused && key.modifiers.is_empty() {
@@ -609,7 +609,7 @@ impl App {
                 KeyCode::Up => Some(Input::TrustMove(-1)),
                 KeyCode::Down => Some(Input::TrustMove(1)),
                 KeyCode::Enter => Some(Input::TrustChosen(wizard.selected())),
-                // Esc is "do not trust, this session only": it must not
+                // Esc is "do not trust, this session only" : it must not
                 // write `trust.json`, so the next start asks again. Enter takes the
                 // highlighted default, which is the persistent "do not trust this directory".
                 KeyCode::Esc => Some(Input::TrustChosen(
@@ -725,7 +725,7 @@ impl App {
     }
 
     /// Ctrl-C (the `cancel` action), the one action whose meaning depends on the clock
-    ///:
+    /// :
     /// - a turn is running: cancel it (unchanged);
     /// - idle, the input has text: clear it into the history (the same clearing `Esc` does,
     ///   so `Up` finds it);

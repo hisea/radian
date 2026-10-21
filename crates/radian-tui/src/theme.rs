@@ -180,7 +180,7 @@ pub enum Role {
     StatusOk,
     /// A tool head's warning marker (ADR 0029). pi's `warning`.
     StatusWarn,
-    /// A tool head's `×` (ADR 0029; `✗` was replaced, ). pi's `error`.
+    /// A tool head's `×` (ADR 0029; `✗` was replaced). pi's `error`.
     StatusError,
     /// The `/context` grid's per-category cell colors (spec `tui-context-grid`,
     /// ADR 0035): one role per estimated category, plus the free space and the
@@ -633,8 +633,7 @@ pub struct Theme {
     pub syntax_type: Style,
     pub syntax_operator: Style,
     pub syntax_punctuation: Style,
-    /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028 owner
-    /// decision: 强调 = 名字、标签).
+    /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028 decision: 强调 = 名字、标签).
     pub notice_label: Style,
     /// The rest of a structured notice — pi's `muted` (次). In the built-in themes it stays
     /// the terminal's default foreground, the ui-r1 readability fix; a theme file's `muted`
@@ -657,8 +656,7 @@ fn style(color: Option<Color>, modifiers: Modifier) -> Style {
     style
 }
 
-/// A built-in role's foreground from one of pi's own color specs (the owner's 2026-10-14
-/// decision: the built-ins take pi's OKHSL values through the ADR 0029 conversion). Without
+/// A built-in role's foreground from one of pi's own color specs (the /// decision: the built-ins take pi's OKHSL values through the ADR 0029 conversion). Without
 /// truecolor, RGB becomes the nearest 256-color entry, exactly like a theme file's color.
 fn spec(spec: &str, modifiers: Modifier, truecolor: bool) -> Style {
     let color = crate::theme::color::parse_color_value(spec)
@@ -695,7 +693,7 @@ mod pi_dark {
     pub const TOOL_SUCCESS_BG: &str = "okhsl(158 46% 25%)";
     pub const TOOL_ERROR_BG: &str = "okhsl(19 54% 25%)";
     /// pi's `selectedBg` is the same as `userMessageBg`; Radian lifts it a step so a
-    /// selection over a user block stays visible (the owner's acceptance), a deliberate
+    /// selection over a user block stays visible (the acceptance), a deliberate
     /// deviation from pi's file.
     pub const SELECTION_BG: &str = "okhsl(233 41% 34%)";
 }
@@ -1077,8 +1075,8 @@ impl Theme {
             md_quote_border: style(None, Modifier::DIM),
             md_hr: style(None, Modifier::DIM),
             md_list_bullet: style(None, Modifier::BOLD),
-            // `mono` uses no color: the syntax roles are plain, except a comment, which the
-            // owner allows one modifier (italic).
+            // `mono` uses no color: the syntax roles are plain, except a comment, which allows
+            // one modifier (italic).
             syntax_comment: style(None, Modifier::ITALIC),
             syntax_keyword: style(None, Modifier::empty()),
             syntax_function: style(None, Modifier::empty()),
@@ -1320,8 +1318,7 @@ mod tests {
         assert_eq!(ThemeName::parse("future"), None);
     }
 
-    /// The built-in dark palette is **pi's**, through the ADR 0029 OKHSL conversion (owner
-    /// decision 2026-10-14, replacing ADR 0029's "dark stays byte-identical"): the three text
+    /// The built-in dark palette is **pi's**, through the ADR 0029 OKHSL conversion (replacing ADR 0029's "dark stays byte-identical"): the three text
     /// levels are pi's brightness gradient (89% / 67% / 56%), pinned here by their RGB
     /// values, and every semantic color sits at the 67% level.
     #[test]

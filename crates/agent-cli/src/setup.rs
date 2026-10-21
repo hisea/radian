@@ -516,7 +516,7 @@ pub(crate) async fn setup(
     };
     // The key and every header value are secrets: no error this program prints may contain
     // any of them, and they are never written to the session file. "The key" is **every**
-    // login in `auth.json`, not only this route's (ADR 0013 T4, ): a provider
+    // login in `auth.json`, not only this route's (ADR 0013 T4): a provider
     // error body can echo a key that the adapter does not know to mask, and a session can
     // mention another login. `resolved_keys` is the same list the TUI and the exports use.
     // A value registered after this line (a `chatgpt` token refreshed mid-session) is merged

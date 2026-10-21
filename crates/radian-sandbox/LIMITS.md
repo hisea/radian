@@ -4,13 +4,13 @@
 `bubblewrap`。它只提供一件事——**受约束地启动一个子进程**；审批（`ApprovalPolicy`）与规则集
 （`ToolRuleSet`）不在本 crate，也**没有**接进 `agent-cli`。
 
-**`full` 的安全声明＼�：** `full` 信任你的环境，不弹任何内建审批，也不防陌生仓库里的提示注入——恶意的 skill、配置与上下文文件里的指令在 `full` 下畅通无阻。想要边界就用 `workspace`、容器或专用 OS 用户。
+**`full` 的安全声明：** `full` 信任你的环境，不弹任何内建审批，也不防陌生仓库里的提示注入——恶意的 skill、配置与上下文文件里的指令在 `full` 下畅通无阻。想要边界就用 `workspace`、容器或专用 OS 用户。
 
 **消费者（2026-10-12，Phase 3 shell 切片）：** `radian-coding` 的 `shell` 工具是第一个消费者
 （`CodingTools::with_sandbox`）；没有 `Sandbox` 时它根本不注册。三点值得记在这里：① `FullAccess`
 下后端是透明的（不探测、不包裹），但 shell 工具仍自己按 `allow_env` 清环境——**full 是
 "文件系统/网络不设限"，不是"把宿主环境交给模型控制的 shell"**；**full 不放开环境变量白名单**
-＼�。② 进程组清理：shell 工具用 `setsid` 让子进程自成会话与进程组
+（-10-12）。② 进程组清理：shell 工具用 `setsid` 让子进程自成会话与进程组
 （没有控制终端），超时/取消/leader 退出都杀整组。
 ③ 输出截断也是 shell 工具自己的策略：每流独立预算、保留头尾（尾部更大，因为失败命令的错误在
 末尾）、边读边丢，沙箱不参与。
@@ -41,7 +41,7 @@ controlling-terminal 检查堵住 `TIOCSTI`（矩阵新增 `tiocsti_outside_term
 `Sandbox::new(mode, workspace)` 与 `Sandbox::from_policy` 对 `WorkspaceWrite` **先探测
 后端**（跑一个真子进程，证明 deny 与 workspace allow 都生效），探测失败就返回 `SandboxError`。
 **没有任何路径**把受约束档位变成无沙箱运行；`FullAccess` 只有调用方点名才会用到，且不探测。
-＼�失败必须明确报错，绝不降级。）测试：`an_unavailable_backend_is_an_error_and_never_a_downgrade`、
+（失败必须明确报错，绝不降级。）测试：`an_unavailable_backend_is_an_error_and_never_a_downgrade`、
 `a_failed_probe_is_an_error_not_a_downgrade`、`full_access_is_transparent_and_unprobed`。
 
 探测为什么必须是"跑探针"而不是"二进制存在"：`sandbox-exec` 已弃用，SBPL 操作名是私有接口并会随
@@ -175,7 +175,7 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
 | git_readonly | `ReadOnly`（默认，任务 agent 与未点名放宽的宿主）：写 `.git/hooks`、`.git/config`、`.git/info`、`git config core.hooksPath`、`git add`、worktree 指针、共享 gitdir、经符号链接写共享 `.git` 全部被拒；`git status`/`git log` 可用 | 8 拒 + 2 可 | 8 拒 + 2 可 |
 | sensitive_read | 假 `~/.ssh/id_ed25519` 打开失败（只断言 exit，不读内容）；普通文件可读 | ✅ | ✅ |
 | radian_home | `~/.radian/sessions/<file>`、`~/.radian/memory/<file>`、`~/.radian/credentials/auth.json` 与 `~/.radian/trust/trust.json` 读失败；`config/<file>`、`cache/<file>` 与 `skills/<dir>/SKILL.md` 可读；`--session-dir` 指向的目录也读失败 | 5 拒 + 3 可 | 4 拒 + 2 可（`skills_readable`/`trust_unreadable` 待 VM 恢复后补跑） |
-| deny_inside_workspace | 会话目录在工作区**里面**（如 `--session-dir ./sessions`）允许构建；该子目录读失败，工作区其余部分可读可写 | 1 拒 + 2 可 | 1 拒 + 2 可 |
+| deny_inside_workspace | 会话目录在工作区**里面**（如 `--session-dir./sessions`）允许构建；该子目录读失败，工作区其余部分可读可写 | 1 拒 + 2 可 | 1 拒 + 2 可 |
 | mcp_stdio | 最小 stdio MCP（initialize / tools/list / tools/call echo）可用 | ✅ | ✅ |
 | signals | 给自己的子进程、孙进程发信号可以；给沙箱外同用户进程发信号被拒 | 2 可 + 1 拒 | 2 可 + 1 拒 |
 
@@ -317,7 +317,7 @@ Linux、整块 `--ro-bind` 只读，文案也随之保持只读。忘了接线�
 
 （20 次采样，warmup 2 次。Linux 数字经 ssh 在 VM 上测得；macOS 数字本机测得。）
 
-## 表述约束（硬要求，决定第 4 条）
+## 表述约束（硬要求，）
 
 macOS 后端**全开 `mach-lookup`**，`mach-lookup` 最小化排到 Phase 7。因此 **IPC 边界尚未收紧**，
 任何面向用户的文案、文档或 UI **不得**把"敏感目录禁读"表述成完整的凭据隔离保证。允许的说法只有：
@@ -336,7 +336,7 @@ seatbelt 追加 `(deny network-outbound (remote unix-socket))`，只放行固定
 ## 复现 Linux 运行（VM）
 
 ```sh
-# 第一步必须确认是 Linux；返回 Darwin 立即停止（那是 owner 的 Mac）。
+# 第一步必须确认是 Linux；返回 Darwin 立即停止。
 ssh <user>@<linux-host> 'uname -s'          # Linux
 
 SYS=$(rustc --print sysroot)
@@ -357,7 +357,7 @@ VM 上只写 `/tmp` 下自建目录，不碰 `~/.ssh` 或任何真实凭据。�
 **环境**：`ssh <user>@<linux-host>`，Arch Linux ARM（aarch64，内核 7.2.6，bwrap 0.12.0，git 2.55.0）。
 第一条命令确认 `uname -s` = Linux。为了跑**真正的测试套件**（而不是交叉编译的驱动），在 VM 里装了
 Rust：下载 `rustup-init`（static.rust-lang.org，aarch64）后用
-`RUSTUP_HOME=/tmp/radian-rust/rustup CARGO_HOME=/tmp/radian-rust/cargo ./rustup-init -y --profile
+`RUSTUP_HOME=/tmp/radian-rust/rustup CARGO_HOME=/tmp/radian-rust/cargo./rustup-init -y --profile
 minimal --default-toolchain 1.88.0 --no-modify-path` 安装，全部落在 `/tmp`，**未动系统文件、未动
 `~/.ssh` 或任何凭据**。仓库用 tar 同步到 `/tmp/radian-linux/src`；因 `/tmp` 是 3.9G tmpfs，构建加
 `CARGO_PROFILE_DEV_DEBUG=0` 只为缩小目标目录。
@@ -442,7 +442,7 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 1. **复现步骤里的文件名错了，已改。** 二进制叫 `sandbox-escape`（`Cargo.toml` 的 `[[bin]] name`），`scp … /tmp/` 后它在 `/tmp/sandbox-escape`，而原文下一行运行的是 `/tmp/radian-sandbox-escape`——照原文复现会直接失败。评审者按原文执行时撞上，已改成 `/tmp/sandbox-escape`。
 2. **"真实 `cargo build` 能跑"的覆盖范围比测试本身更宽，但要说准。** 仓库里的兼容性测试验的是一个**零依赖**的 hello-world（`--offline`）。评审者另外在本机（macOS）沙箱里做了一次**带依赖的真实构建**：一个依赖 `serde_json` 的项目（共 11 个包，依赖从本机 cargo 缓存读取、`--offline`、网络关闭、`Cargo.lock` 在沙箱外预先生成），`cargo build` **成功**，用时约 8 秒。该探针依赖本机缓存状态，因此没有提交成测试。**未验证**：需要联网拉依赖的构建（这次探针是显式关网跑的；`workspace` 默认**开网**，关网时这类构建按设计会失败）、带 build script 写工作区外路径的 crate、其他构建系统。
 3. **Linux 结果本轮评审未能独立重跑。**（**后续已补**：2026-10-12 评审者在 VM 上独立重跑，26/26，零差异；见文末“Linux 独立复核”节。） 驱动可以按文档交叉编译（得到静态链接的 aarch64 ELF），但评审时 VM 已不可达（`ssh: … No route to host`）。所以 Linux 的 26/26 目前**以本文作者提交的证据为准**（`tests/data/escape-linux.{txt,json}`），评审者核对了证据文件格式与"每条失败都带关沙箱对照"的列，但没有在 VM 上再跑一次。上一轮 Linux spike 的 26 条中的同类用例评审者是独立复现过的（见 `spikes/linux-sandbox/README.md`）。
-4. **本切片在 owner 的 Mac 上装了 rustup target `aarch64-unknown-linux-musl`**（用于交叉编译 VM 上跑的驱动）。这是一次开发环境改动，不影响仓库，但值得知道。
+4. **本切片在开发机（Mac）上装了 rustup target `aarch64-unknown-linux-musl`**（用于交叉编译 VM 上跑的驱动）。这是一次开发环境改动，不影响仓库，但值得知道。
 5. **`git add`/`git commit` 在旧版 `workspace-write` 下失败曾是设计结果**（`.git` 整块只读）。现在，通用会话在该档位下 `.git` 可写、可直接提交（`config`/`hooks` 等执行入口仍只读）；当前没有 task agent 的整体只读规则。
 
 ## Linux 复验（2026-10-13，开网之后）
@@ -497,7 +497,7 @@ assertion `left == right` failed: run 16: a gap before the tail
 `service.rs:1711`）而响应直接在主循环投递（`:1727`），所以调用可以在通知被路由前结算；慢 VM
 上 `intervalMs: 10` 不足以让通知互不重叠，**乱序**到达时 `ProgressMonotone` 会按设计丢掉较
 早的那条 → 出现"尾部之前有缺口"。这是**测试断言过强**（"尾部之前不丢"也不是 rmcp 保证的），
-不是产品丢数据。未改测试（属 flake 切片，需 定）。
+不是产品丢数据。未改测试（属 flake 切片，需 ）。
 
 **8. 沙箱内跑测试（证明 D12/D13 在 Linux 上解决）**：用编译出的 `agent` 的 `shell` 工具
 （`--profile workspace-write --yes`）跑预编译好的测试二进制，`TMPDIR` 指到工作区内
@@ -584,7 +584,7 @@ Rust **1.88.0**（`/tmp/radian-rust`）。源码为分支 `pi/linux3`（base `bc
    同样把工作区放在会话目录里，但它们的断言恰好能在**命令文本**里匹配到（如 `YES-RAN`），
    所以之前是"空过"；本次未改它们。
 
-### 未修的问题（报告给 owner）
+### 未修的问题
 
 - **Rust 1.88 的 clippy 在 `radian-memory/tests/split.rs:61` 失败**：
   `let _ = file.unlock();` 触发 rustc 的 `unstable_name_collisions`（std 正在加 `File::unlock`），

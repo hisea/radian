@@ -22,7 +22,7 @@ enforced. The source is written into `message.meta.source` and into `InboxEnqueu
 
 The queue is bounded. When full, the three inputs return `InboxError::Full` **carrying the
 rejected message** so the host can keep it and retry — nothing is ever silently dropped.
-`cancel` is exempt, and a repeated `cancel` before the next turn begins
+`cancel` is exempt (decision 3), and a repeated `cancel` before the next turn begins
 has no second effect.
 
 ## Durability

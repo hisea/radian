@@ -326,7 +326,7 @@ struct Pty {
     parser: Parser,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     /// The pty master, kept so a test can change the window size (`TIOCSWINSZ`) without
-    /// sending any input (the owner's bare-resize bug).
+    /// sending any input (the bare-resize bug).
     master: Box<dyn portable_pty::MasterPty + Send>,
     processed: usize,
     /// A private `HOME` for the app: its catalog cache lives here, never in the user's real
@@ -604,7 +604,7 @@ impl Pty {
     }
 
     /// Ctrl-C cancels a running turn and quits when idle, so press it until the app exits.
-    /// Expands the startup information block (Ctrl-P). the block is folded
+    /// Expands the startup information block (Ctrl-P). The block is folded
     /// by default, so a test that asserts one of the full startup lines expands it first. A
     /// lost keypress is retried; the wait after each send means a successful toggle is never
     /// pressed twice. One attempt's 1 s is the loop's rhythm, not a failure bound.
@@ -627,7 +627,7 @@ impl Pty {
 
     fn quit(&mut self) {
         // The first idle Ctrl-C arms the 2 s quit window and the second inside it quits
-        //, so a quit is a **pair** of presses; a running turn needs a
+        // so a quit is a **pair** of presses; a running turn needs a
         // cancel first, which the retries cover (the next pair then arms and quits). One pair's
         // 3 s is the loop's rhythm, not a failure bound.
         for _ in 0..4 {
@@ -1066,7 +1066,7 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
         30,
         110,
     );
-    // review (small-fixes 2): p3 saw this test time out once inside a loaded full suite
+    // (small-fixes 2): p3 saw this test time out once inside a loaded full suite
     // and never standalone. It could not be reproduced here either (0/50 standalone, 0/3 full
     // suites, 0/20 after the closed-master fix), and every wait below is already a **state**
     // wait (`wait_for_screen` blocks until the text is on screen), so there is no race to
@@ -1632,7 +1632,7 @@ async fn pty_trust_modal_lists_the_project_mcp_servers() {
     );
 }
 
-/// decision 2026-10-20: a project with no trusted decision shows
+/// decision: a project with no trusted decision shows
 /// `untrusted project · /trust to trust it` under the wordmark (no modal when there
 /// are no project resources); a trusted project shows no hint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2379,7 +2379,7 @@ async fn pty_approval_always_skips_the_next_prompt() {
     pty.quit();
 }
 
-/// The owner's exact report: a tool is running (the input is empty), Esc must cancel the
+/// The exact report: a tool is running (the input is empty), Esc must cancel the
 /// turn. The command runs long, so the turn is still running when Esc arrives.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -2432,7 +2432,7 @@ async fn pty_escape_cancels_a_running_tool_turn() {
     );
 }
 
-/// with an empty input and a turn running, Esc must cancel the turn (the
+// with an empty input and a turn running, Esc must cancel the turn (the
 /// README says so). The dogfood build (2b55c50) did not; this pins the behaviour. The reply
 /// never finishes, so the turn stays running until the cancel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3611,7 +3611,7 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
 
 /// ADR 0027: the startup summary's sandbox word is the **real** sandbox, never `none`. The
 /// bug was searching the `workspace` tier's description text, which does not name the backend,
-/// so macOS showed `workspace · none`. the summary says the plain words
+/// so macOS showed `workspace · none`.: the summary says the plain words
 /// ("macOS sandbox" / "Linux sandbox") and the expanded `profile:` line keeps the exact
 /// backend name.
 ///
@@ -4400,7 +4400,7 @@ async fn pty_clean_exit_prints_one_reason_line() {
         .rsplit_once("\u{1b}[?1049l")
         .map(|(_, rest)| rest.to_string())
         .unwrap_or_default();
-    // The owner's UI review: the line carries a paste-ready command, not just the flag.
+    // The UI review: the line carries a paste-ready command, not just the flag.
     let reason = "session exit-reason saved; resume: radian --resume exit-reason";
     let start = after
         .find(reason)
@@ -5571,8 +5571,7 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
         "the draft is not in the input box:\n{}",
         pty.screen()
     );
-    // Exit by signal, not Ctrl-C: an idle Ctrl-C clears a non-empty input first (owner
-    // 2026-10-14), which would discard the draft. A signal exit takes the same exit path
+    // Exit by signal, not Ctrl-C: an idle Ctrl-C clears a non-empty input first, which would discard the draft. A signal exit takes the same exit path
     // (the draft is written, the resume line printed) without clearing the input.
     let pid = app_pid(&pty);
     let status = std::process::Command::new("kill")
@@ -7255,7 +7254,7 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
             panic!(
                 "the app did not exit within 5 s of its terminal closing: the input POLLHUP \
                  path did not fire, and drawing is frozen (--freeze-draw) so the draw path \
-                 cannot rescue it either. Exit trace (review: a trace whose last point is \
+                 cannot rescue it either. Exit trace (a trace whose last point is \
                  `poll-idle` means the input thread is inside crossterm's reader and its read \
                  is looping on EOF):\n{steps}"
             );
@@ -7856,7 +7855,7 @@ fn pty_a_flooding_producer_still_draws_and_answers_keys() {
 // ---------- the mouse wheel (ADR 0023 U2, plan B) ----------
 
 /// The SGR report for one wheel notch: `ESC[<64;x;yM` is up, `ESC[<65;x;yM` is down.
-/// crossterm's `parse_csi` (`b'<'` at :171) dispatches these to `parse_csi_sgr_mouse`
+/// crossterm's `parse_csi` (`b'<'` at:171) dispatches these to `parse_csi_sgr_mouse`
 /// (:718), and `parse_cb` (:776) maps button 4/5 to `ScrollUp`/`ScrollDown` (:789-790).
 fn wheel(up: bool) -> Vec<u8> {
     if up {
@@ -8360,7 +8359,7 @@ async fn pty_pick_resumes_the_selected_id_and_enters_once() {
     );
 }
 
-/// (screenshot): `--pick` enters the alternate screen **before** the session
+///  (screenshot): `--pick` enters the alternate screen **before** the session
 /// exists, so every startup diagnostic printed with `eprintln!` between the picker and the
 /// session lands on the alternate screen. The renderer diffs a frame against the *previous*
 /// frame's cells and skips the ones that did not change, so those bytes stay where they were
@@ -8896,7 +8895,7 @@ async fn pty_ask_user_alt_h_hides_and_shows() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// ADR 0024 R3 + feedback: `esc` twice declines, and the turn continues.
+/// ADR 0024 R3 + `esc` twice declines, and the turn continues.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_ask_user_esc_declines() {
@@ -8950,7 +8949,7 @@ async fn pty_ask_user_esc_declines() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// ADR 0024 R2/R3 + feedback: the `Other` row keeps its text while Up/Down
+/// ADR 0024 R2/R3 + the `Other` row keeps its text while Up/Down
 /// move between the options, and the answer carries it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -9188,7 +9187,7 @@ async fn pty_two_approvals_are_shown_in_order() {
 }
 
 /// A long command's approval still shows `[y] allow once` (the keys are the box's own last
-/// row), and answering `y` runs the whole command (approval-fit, owner acceptance).
+/// row), and answering `y` runs the whole command (approval-fit).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_a_long_command_keeps_the_approval_keys_visible() {
@@ -9312,7 +9311,7 @@ async fn pty_a_model_switch_sends_the_next_turn_to_the_new_provider() {
         pty.screen()
     );
     // The switch: the anthropic descriptor's endpoint comes from the credential's env. The
-    // first Enter accepts the slash completion (the owner's rule: Enter picks, never runs);
+    // first Enter accepts the slash completion (the rule: Enter picks, never runs);
     // the second submits the line.
     pty.send(b"/model anthropic/claude-x\r\r");
     assert!(
@@ -9450,8 +9449,7 @@ async fn pty_model_lists_chatgpt_once_it_is_logged_in() {
 
 /// ADR 0026: switching to a `chatgpt` model with `/model` is accepted once there is
 /// a `chatgpt` login. The login is an `oauth` entry, which `resolve_key` (api keys only) does
-/// not see; the switch's credential check must also accept `has_login` (owner report
-/// 2026-10-16: "no credential for `chatgpt`: run /login chatgpt" right after logging in).
+/// not see; the switch's credential check must also accept `has_login` ("no credential for `chatgpt`: run /login chatgpt" right after logging in).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_model_switches_to_chatgpt_with_an_oauth_login() {
@@ -9846,7 +9844,7 @@ async fn pty_ask_user_is_registered_without_a_workspace() {
         body.contains("ask_user"),
         "the request's tool list must offer ask_user without --workspace: {body}"
     );
-    // The owner's UI review changed this: the current directory is the coding root now, so a
+    // The UI review changed this: the current directory is the coding root now, so a
     // session without `--workspace` does have the file tools.
     assert!(
         body.contains("\"name\":\"read\""),
@@ -9911,7 +9909,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-// ---------- the default workspace ----------
+// ---------- the default workspace  ----------
 
 /// Without `--workspace` the current directory is the coding root, so the first request carries
 /// the file tools (before this, a session without `--workspace` had none).
@@ -10978,7 +10976,7 @@ fn sgr(code: u8, col: u16, row: u16, press: bool) -> Vec<u8> {
     .into_bytes()
 }
 
-/// The owner's ask: hold the left button, drag across transcript text, release — the
+/// The ask: hold the left button, drag across transcript text, release — the
 /// selection's logical text reaches the clipboard as OSC 52 (`ESC]52;c;<base64>BEL`), and the
 /// status bar says what actually happened ("via OSC 52"), never that the clipboard holds it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -11738,7 +11736,7 @@ async fn pty_herdr_reports_blocked_without_the_command_text() {
     pty.quit();
 }
 
-/// The jobs item (decided ): a background job keeps an idle session
+/// The jobs item (decided): a background job keeps an idle session
 /// `working` with the `jobs` label; the followup turn its settle wakes is plain `working`,
 /// then `idle` again. The command text never leaves the process.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -11988,7 +11986,7 @@ async fn pty_herdr_is_silent_when_disabled() {
     pty.quit();
 }
 
-// ---------- Ctrl-C: clear first, then press twice to quit ----------
+// ---------- Ctrl-C: clear first, then press twice to quit  ----------
 
 /// Idle and empty, Ctrl-C asks twice: the first press only shows the hint and never exits;
 /// the second inside the window exits 0 with the copyable resume line.
@@ -12186,7 +12184,7 @@ async fn pty_slash_theme_switches_and_writes_the_config() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// review (small-fixes 1): a key `/login` saves **mid-session** joins this session's
+/// (small-fixes 1): a key `/login` saves **mid-session** joins this session's
 /// redaction list, so an export of the same session hides it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -12591,7 +12589,7 @@ fn longest_run(screen: &str, ch: char) -> usize {
         .unwrap_or(0)
 }
 
-/// changing the window size with **no other input** must re-lay out. The
+// changing the window size with **no other input** must re-lay out. The
 /// old bug: crossterm only drains its SIGWINCH pipe while reading stdin, so an idle app stayed
 /// at the old width until a key or wheel arrived ("scroll once and it fixes itself"). The app
 /// now polls `TIOCGWINSZ` on its idle tick.
@@ -12640,7 +12638,7 @@ async fn pty_a_bare_resize_re_lays_out() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// The keyboard-enhancement flags (kitty protocol, ): when the terminal
+/// The keyboard-enhancement flags (kitty protocol): when the terminal
 /// supports them, `DISAMBIGUATE_ESCAPE_CODES` is pushed so Shift+Enter arrives as
 /// Enter+SHIFT instead of a plain Enter, and the flags are popped on **every** exit path.
 ///

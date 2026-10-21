@@ -1719,7 +1719,7 @@ fn the_context_fill_without_a_budget_is_spaces() {
     assert!(!row(&terminal, 7).contains('─'), "no budget, no gauge");
 }
 
-/// Owner addendum (ADR 0027 slice ①): after a `/model` switch the driver emits a
+/// after a `/model` switch the driver emits a
 /// model `ConfigChanged`. The footer's `model` item must then show the new model, so the
 /// session's model facts follow the applied route the way startup leaves them: the model id
 /// (`cli.rs` sets `app.session.model_name`), the provider from the applied route, and

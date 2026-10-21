@@ -486,8 +486,7 @@ impl Keymap {
                 match KeyPress::parse(key) {
                     Ok(press) => {
                         // A bare printable character bound in the main view swallows that
-                        // character for the composer, so the user must be told (owner
-                        // 2026-10-17). The binding is kept — README allows it — it is only
+                        // character for the composer, so the user must be told. The binding is kept — README allows it — it is only
                         // warned about. Never for the find/form layers, whose keys do not
                         // reach the composer, and never for a Ctrl/Alt/Shift binding, which
                         // is not a character the input box would have typed.
@@ -723,7 +722,7 @@ mod tests {
         assert!(!press.matches(&event(KeyCode::Char('a'), KeyModifiers::CONTROL)));
     }
 
-    /// a printable single character bound in the **main** view swallows that
+    // a printable single character bound in the **main** view swallows that
     /// character for the composer, so startup warns about it. The binding is kept (README allows
     /// it); a Ctrl/Alt/Shift binding, a non-character key, and a character in another layer do
     /// not warn.

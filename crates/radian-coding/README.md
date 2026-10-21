@@ -179,8 +179,8 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
   workspace-relative path (``docs/current` is a symlink to `docs/v2`; use that path`), so the
   model retries in one step; a link that leaves the workspace, or whose target cannot be
   resolved, is `path_outside_workspace` and the message never prints the outside path. The
-  target is read with `readlinkat` on the same fd and never opened. **Behaviour change
-  (2026-10-16): a symlink inside the workspace is no longer followed by the file tools; use the
+  target is read with `readlinkat` on the same fd and never opened. **Behaviour change:
+  a symlink inside the workspace is no longer followed by the file tools; use the
   target path.**
 - a symlinked workspace root works (the root is canonicalized once, then held as an fd);
 - `write`/`patch` check the open fd to be a regular file with one hard link **before**

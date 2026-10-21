@@ -140,7 +140,7 @@ impl AccessChoice {
 }
 
 /// The `/access full` confirmation's state: the highlighted option. The default is `cancel`
-/// (owner rule: opening the sandbox's absence must never be the pre-selected answer, so Enter
+/// (opening the sandbox's absence must never be the pre-selected answer, so Enter
 /// cannot do it).
 pub struct AccessWizard {
     pub cursor: usize,
@@ -173,9 +173,9 @@ impl Default for AccessWizard {
 
 /// The startup trust modal's state (ADR 0031 T3): the workspace and the highlighted option.
 /// The default highlight is "trust this directory, and use the sandbox for this project"
-/// (decision 2026-10-20: for a project with no trusted decision the sandbox choice
+/// (decision: for a project with no trusted decision the sandbox choice
 /// comes first and is pre-selected, so Enter trusts with the sandbox). This keeps the
-/// owner rule below the access wizard: opening the sandbox's absence is never the
+/// rule below the access wizard: opening the sandbox's absence is never the
 /// pre-selected answer.
 ///
 /// Slice B2: `mcp` carries the project `.mcp.json` preview the modal lists (one line per

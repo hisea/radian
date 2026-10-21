@@ -164,7 +164,7 @@ impl App {
             // The driver applied the queued change: the status bar's `next:` promise is done.
             self.session.next_model = None;
             self.session.next_thinking = None;
-            // Owner addendum (ADR 0027 slice ①): an applied model switch must follow
+            // an applied model switch must follow
             // through to the footer's `model` item, or it keeps showing the startup model. The
             // session's model facts follow the applied route the way startup leaves them: the
             // model id, the provider from the route, and `model_display = None` so

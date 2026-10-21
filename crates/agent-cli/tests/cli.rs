@@ -177,7 +177,7 @@ fn spawn_radian(args: &[&str], envs: &[(&str, &str)]) -> Child {
 
 /// Spawns `radian <args>` (no `exec`): the top-level management commands (`radian memory`,
 /// `radian login`, `radian logout`, `radian config`), which run the same code as
-/// `radian exec <command>` (ADR 0032 direction).
+/// `radian exec <command>` (ADR 0032).
 fn spawn_radian_top(args: &[&str], envs: &[(&str, &str)]) -> Child {
     spawn_radian_command(false, args, envs)
 }
@@ -565,7 +565,7 @@ async fn a_model_error_exits_one() {
     assert!(stderr.contains("HTTP 401"), "{stderr}");
 }
 
-/// ADR 0032 direction: the diagnostics say `radian: …`, not `agent: …` (the binary is
+/// ADR 0032: the diagnostics say `radian: …`, not `agent: …` (the binary is
 /// gone; `radian exec` is the headless command). Every failure line carries the prefix.
 #[tokio::test]
 async fn diagnostics_carry_the_radian_prefix() {
@@ -3103,7 +3103,7 @@ async fn the_startup_text_does_not_claim_credential_isolation() {
     }
     // The honest limit is stated instead.
     assert!(stderr.contains("not tightened"), "{stderr}");
-    // ADR 0012, decision 2026-10-12 (option B): MCP servers keep running unsandboxed
+    // ADR 0012, decision (option B): MCP servers keep running unsandboxed
     // under workspace-write, and the notice is what tells the user so. With that choice this
     // sentence is the only safeguard, so a test has to hold it in place.
     assert!(
@@ -4590,7 +4590,7 @@ async fn no_config_mcp_ignores_the_config_mcp_section() {
     }
 }
 
-// ---------- project .mcp.json (slice B2) ----------
+// ---------- project.mcp.json (slice B2) ----------
 
 /// Writes `<ws>/.mcp.json` pointing one `fx` server at the fixture, in the shared
 /// `mcpServers` form, with `extra_env` merged into the server's `env`.
@@ -6966,7 +6966,7 @@ impl MemoryEnv {
         args: &[&str],
         input: &str,
     ) -> (i32, String, String) {
-        // The top-level `radian memory --workspace … <command>` (ADR 0032 direction:
+        // The top-level `radian memory --workspace … <command>` (ADR 0032:
         // `radian memory` and `radian exec memory` run the same code).
         let mut full: Vec<String> = vec![
             "memory".into(),

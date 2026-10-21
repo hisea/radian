@@ -75,8 +75,7 @@ fn a_multiline_input_grows_the_box_and_a_long_one_scrolls_to_the_cursor() {
 }
 
 /// The `box` style's cursor: the `│ ` body rail (two cells) plus the `❯ ` prompt's **two
-/// display cells** (owner hand test 2026-10-14: the prompt's byte length used to shift it two
-/// cells right, because `❯` is three bytes).
+/// display cells**.
 #[test]
 fn the_box_cursor_counts_the_prompts_display_width() {
     use radian_tui::render::InputStyle;

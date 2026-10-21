@@ -43,7 +43,7 @@ fn with_startup() -> App {
     app
 }
 
-/// decision 2026-10-20: the wordmark carries `untrusted project · /trust to trust
+/// decision: the wordmark carries `untrusted project · /trust to trust
 /// it` under it while the project has no trusted decision, and nothing once it is
 /// trusted. Showing it always (or never) fails this test, so it is the mutation catcher
 /// for both directions.

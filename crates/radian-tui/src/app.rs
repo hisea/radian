@@ -89,8 +89,7 @@ pub use radian_host::projection::TurnState;
 // tests build the expected followups with them, the unit tests cover the round trip.
 pub use loop_mode::{loop_iteration, loop_message};
 
-/// How long the first idle Ctrl-C arms "press again to quit" (ADR 0023 U4, owner
-/// 2026-10-14). A second Ctrl-C inside the window quits; the window closing, or any other
+/// How long the first idle Ctrl-C arms "press again to quit" (ADR 0023 U4). A second Ctrl-C inside the window quits; the window closing, or any other
 /// key, disarms it and the hint disappears.
 pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
 
@@ -687,7 +686,7 @@ pub struct App {
     pub new_session: bool,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
-    /// When the first idle Ctrl-C armed "press again to quit": the
+    /// When the first idle Ctrl-C armed "press again to quit" : the
     /// deadline a second Ctrl-C must beat. `None` means not armed. Pure state; the wall clock
     /// arrives on [`Input::Cancel`], so `update` never reads the clock.
     pub quit_pending: Option<Instant>,

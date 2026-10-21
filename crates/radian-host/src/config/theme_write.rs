@@ -1,4 +1,4 @@
-//! The `/theme` write-back (ADR 0008 revision, ).
+//! The `/theme` write-back (ADR 0008 revision).
 //!
 //! The first place a program writes the configuration file. It changes **only** `tui.theme`
 //! through the shared [`super::preserve`] helper, so every other byte — comments, blank lines,

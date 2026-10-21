@@ -73,7 +73,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.find,
         });
     }
-    // The first idle Ctrl-C armed "press again to quit": the hint sits
+    // The first idle Ctrl-C armed "press again to quit" : the hint sits
     // high, right after the turn state, because it is a mode the user just entered.
     if app.quit_pending.is_some() {
         segments.push(Segment {
@@ -193,7 +193,7 @@ pub(super) fn status_height(app: &App, width: usize) -> u16 {
 /// The status area's lines: the `classic` one-liner, or the `pi` footer's rows plus the
 /// **chrome** line when a mode is active (a queued switch, the find status, the armed quit
 /// hint, the AUTO marker, a transient note). Those are not configurable items: they are states
-/// the UI must show regardless of the footer layout (ADR 0026 D9, review).
+/// the UI must show regardless of the footer layout (ADR 0026 D9).
 pub(super) fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     match app.footer.preset() {
         crate::footer::Preset::Classic => vec![status_line(app, width)],

@@ -34,11 +34,11 @@
 //!
 //! The queue is bounded. When it is full, `followup`/`steer`/`inject` **refuse** the input
 //! and return [`InboxError::Full`] **carrying the rejected message**, so the host can keep
-//! it and retry. Nothing is ever silently dropped. `cancel` is exempt.
+//! it and retry. Nothing is ever silently dropped. `cancel` is exempt (decision 3).
 //!
 //! # Source is required at this boundary
 //!
-//! ADR 0011 requires `followup`/`steer`/`inject` to take an
+//! ADR 0011  requires `followup`/`steer`/`inject` to take an
 //! explicit [`InputSource`]: the core keeps `source: Option` (ADR 0005 G2, `None` means "the
 //! host did not say"), and the runtime is where "you must say" is enforced. The inbox writes
 //! the source into the message's `meta.source` and into `InboxEnqueued.source`, so the
@@ -201,7 +201,7 @@ pub struct Inbox {
     /// Number of `cancel` calls (all of them), for observability.
     cancel_calls: AtomicU64,
     /// Increments on the first `cancel` of the current episode; a repeated `cancel` before
-    /// the driver begins the next turn changes nothing.
+    /// the driver begins the next turn changes nothing (decision 3).
     cancel_generation: AtomicU64,
     cancelled: AtomicBool,
     last_cause: std::sync::Mutex<Option<CancelCause>>,

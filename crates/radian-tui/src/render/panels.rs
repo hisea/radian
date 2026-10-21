@@ -503,7 +503,7 @@ fn option_line(
         ""
     };
     // The cursor and the marker are drawn in their own spans and are never bold: the font's
-    // bold face can lack the glyph and fall back to a different size (the owner's report). The
+    // bold face can lack the glyph and fall back to a different size (the report). The
     // marker keeps its label's role (the chosen accent / the weak body), just not the weight.
     let label_style = if chosen {
         theme.notice_label

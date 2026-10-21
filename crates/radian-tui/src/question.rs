@@ -253,7 +253,7 @@ impl QuestionForm {
         tabs
     }
 
-    /// The bottom-border key hints, which change with the current tab (R2/R3; 
+    /// The bottom-border key hints, which change with the current tab (R2/R3; :
     /// `space select · ⏎ next`). `Space` is the only select key, so it is advertised on a row it
     /// actually selects; a free-text field (`text`, a chosen `Other`, a note) takes the space as
     /// text and only advertises `⏎ next` (the note's `⏎` saves it).
@@ -274,7 +274,7 @@ impl QuestionForm {
         }
         hints.push(Hint::new("↑/↓", "move"));
         // With a free-text field focused, ←/→ move the text cursor, so the question switch is
-        // `⇥`/`⇤` alone.
+        // `⇥`/`⇤` alone (the hint advertised ←/→ which did not switch).
         if self.note_focused() || self.text_focused() {
             hints.push(Hint::new("⇥/⇤", "question"));
             hints.push(Hint::new("←/→", "cursor"));
@@ -363,7 +363,7 @@ impl QuestionForm {
             }
             // `Enter`: save a note, otherwise **only** confirm and advance to the next question
             // (the last question advances to `Submit`; on `Submit` it submits). It never selects
-            //: a question with nothing chosen still moves on and counts as
+            // : a question with nothing chosen still moves on and counts as
             // unanswered, marked in the overview. Reaching `Submit` still blocks a missing
             // required answer.
             Action::FormSubmit => {

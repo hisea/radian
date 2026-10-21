@@ -485,7 +485,7 @@ Seven dogfood calls failed schema validation on `context` 12-30 against `maximum
 | GC-1 | the schema keeps `"maximum": 10` (the old schema) | caught (rc=101) | `grep_schema_does_not_cap_context_below_the_cut` |
 | GC-2 | the cut is silent (no `[context cut ...]` line) | caught (rc=101) | `grep_caps_the_context_argument` |
 
-## job_output: `mode` names the read
+## job_output: `mode` names the read (choice A)
 
 GPT fills every optional field (`tail_lines: 1`, `from_line: 1`, `max_lines: 300`, ...), which the "at most one read" rule refused six times in one lead session. An optional `mode` (`new` / `tail` / `range` / `pattern`) now names the read and the other reads' fields are ignored; without `mode` the old rule holds. Run: `cargo test -p radian-coding --test job_output_file`.
 

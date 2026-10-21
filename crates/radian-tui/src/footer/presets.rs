@@ -14,8 +14,7 @@ pub enum Preset {
     /// the identity row, and the numbers row.
     #[default]
     Deck,
-    /// The revision-1 two-row preset: the identity row and the numbers row (owner
-    /// 2026-10-17: `full` also shows `jobs`, this session's running background jobs).
+    /// The revision-1 two-row preset: the identity row and the numbers row (`full` also shows `jobs`, this session's running background jobs).
     Full,
     /// The earlier two-row preset: model/cwd/branch/context bar/reasoning, then tokens/cost.
     Pi,

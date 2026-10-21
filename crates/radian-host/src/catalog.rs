@@ -61,7 +61,7 @@ pub fn protocol_catalog() -> Catalog {
 }
 
 /// The hostname→provider map for deriving the catalog provider from `--base-url`. Matched by
-/// hostname only (ADR 0018): a provider's `api` field and the owner's base URL differ in path.
+/// hostname only (ADR 0018): a provider's `api` field and the base URL differ in path.
 pub fn provider_for_host(host: &str) -> Option<&'static str> {
     match host.trim_end_matches('.').to_ascii_lowercase().as_str() {
         "opencode.ai" => Some("opencode"),
@@ -1138,10 +1138,10 @@ mod tests {
     }
 
     /// The hostname is what maps a base URL to a catalog provider (ADR 0018); the path the
-    /// owner uses (`/zen/go/v1`) and the catalog's own `api` path are irrelevant.
+    /// user configures (`/zen/go/v1`) and the catalog's own `api` path are irrelevant.
     #[test]
     fn the_catalog_host_ignores_the_path_the_owner_uses() {
-        // The owner's base URL is `/zen/go/v1` while the catalog's `api` is `/inference/v1`;
+        // The base URL is `/zen/go/v1` while the catalog's `api` is `/inference/v1`;
         // the hostname is what matches.
         assert_eq!(
             host_of("https://opencode.ai/zen/go/v1").as_deref(),
