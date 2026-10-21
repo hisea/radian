@@ -110,7 +110,7 @@ Radian 的 `Hooks` trait 已经具备 Claude Code `PreToolUse`/`PostToolUse` 的
 - **验证。** 已信任时项目 skill 被列出；未信任时不列，并在启动行写明（`trust.rs` 已经有触发器）。变异测试：去掉信任检查，"未信任时不加载"的测试应该失败。
 
 ### ④ 修 subagent 的 MCP：`explore` 不挂 MCP，`general` 显式选择（收益中，成本低）
-- **做什么。** `Kind::Explore` 不再传 `--mcp-config`（`subagent.rs:390`）。`general` 维持现状，但要测一下启动开销，结果写进 `docs/perf-baseline.md`。
+- **做什么。** `Kind::Explore` 不再传 `--mcp-config`（`subagent.rs:390`）。`general` 维持现状，但要测一下启动开销，结果写进 `benchmarks/perf-baseline.md`。
 - **为什么。** 一是兑现 ADR 0043 1a.2 的"只读"，二是省掉每次 `explore` 都要重启 N 个 server 的时间。`explore` 正是模型最常并行起多个的那一种。
 - **ADR。** 这只是让实现符合 0043 1a 的原意，不需要新决定；补一条验收即可。
 - **验证。** `explore` 子会话的 `SessionCreated` 或者工具表里没有任何 `server__*`。变异测试：恢复传参，测试应该失败。

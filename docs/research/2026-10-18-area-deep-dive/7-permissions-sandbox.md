@@ -26,7 +26,7 @@ Radian 最该做的五件事都不削弱现有的不变量：
 | 允许的粒度 | 规则：`CommandPrefix` 逐 token 匹配（`shell.rs:44-50`）；会话授权：完整命令串（`hooks.rs:238`、`408-413`） | — | execpolicy 前缀规则；模型可以提议 `prefix_rule`，有禁止清单（`exec_policy.rs:57-…`、`977-996`） | `Bash(npm test *)`；提示框给出 "don't ask again for: npm test *"（permissions#permission-system） | 每个工具 allow/prompt/deny，加 bash 模式规则（`src/tools/bash.ts:504-560`） | 按 ARITY 表推导前缀，例如 `cargo add *`、`git status *`（`core/src/shell/parse.ts:23-…`、`375-381`） |
 | 持久化 | 只有 `--allow-shell-command` 命令行参数，不进配置；授权不跨 resume（`radian-permissions/README.md`） | — | 追加到 `~/.codex/rules/default.rules`（`exec_policy.rs:54-56,875`） | 写进仓库根目录的 `.claude/settings.local.json`，按仓库生效（permissions#permission-system） | 写进设置文件（未细核） | 存进 SQLite，按 `projectID` 区分（`core/src/permission.ts:147-155,298-305`） |
 | 复合命令 | 出现任何元字符就不算简单命令 → ask（`shell.rs:22-35`）；deny 会拆开逐段查（`shell.rs:52-94`） | — | tree-sitter 解析，只接受由 `&& \|\| ; \|` 连起来的纯单词命令，逐段判断（`shell-command/src/bash.rs:22-60`） | 识别 `&& \|\| ; \| \|& &` 和换行，每段都要命中 allow；剥掉 `timeout`/`nice` 等包装（permissions#compound-commands） | 只接受 `&&` 连接的纯 argv，可选开启、缺省关（`src/exec/settings.ts:94-97`、`shell-tokenize.ts:233-243`） | tree-sitter 逐个 `command` 节点生成资源，每段各自评估（`parse.ts:174-200`） |
-| 网络 | `safe` 关；`workspace` 全开，只能全开或全关（ADR 0016；`docs/sandbox.md` 未验证一节） | — | `workspace-write` 缺省关网（`protocol.rs:1208-1219`）；有 HTTP/SOCKS 代理做域名策略（`network-proxy/README.md`） | 全部走本机代理，allowlist 起始为空，未知域名按模式决定是问人还是拒绝（sandboxing#hosts-outside-your-allowed-domains） | 不限 | 不限 |
+| 网络 | `safe` 关；`workspace` 全开，只能全开或全关（ADR 0016；`crates/radian-sandbox/LIMITS.md` 未验证一节） | — | `workspace-write` 缺省关网（`protocol.rs:1208-1219`）；有 HTTP/SOCKS 代理做域名策略（`network-proxy/README.md`） | 全部走本机代理，allowlist 起始为空，未知域名按模式决定是问人还是拒绝（sandboxing#hosts-outside-your-allowed-domains） | 不限 | 不限 |
 | 一次打断的选项 | `[y]` 一次、`[a]` 本会话、`[n]` 拒绝、`[!]` 本会话转 auto（`radian-tui/src/render/approval.rs:13-14`） | — | 批准、批准并写入前缀规则 | 一次 / 前缀永久 / 转 auto / 拒绝；拒绝时可以附一句话（permissions#add-a-comment…） | 未细核 | 一次 / always（按项目）/ 拒绝；拒绝可附反馈，会**整批**拒掉同会话的其余请求（`permission.ts:276-296`），always 会顺手放行其他待决请求（`308-321`） |
 | 无头缺省 | `exec -p` 无终端时 ask → 拒绝，并提示加 `--yes`（`agent-cli/src/approval.rs:35-40`）；config 里的 `auto` 在 `full` 档被忽略（`radian-host/src/approval.rs:59-68`） | 不问 | `exec` 固定 `Never`：命令在沙箱里跑，失败原样还给模型（`exec/src/lib.rs:588-591`、`exec_policy.rs:816-820`） | `dontAsk` 拒绝所有需要提示的调用；`--allowedTools` 做精确白名单（permission-modes#common-setups） | yolo | `run` 不带 auto 时拒绝，并给模型反馈"继续，不做这一步"（`cli/src/run/noninteractive.ts:73-74,158-185`） |
 | 子 agent 继承 | 继承档位；只有父会话是 auto 时才传 `--yes`；不传 allow 规则，也不传授权（`radian-host/src/subagent.rs:390-405`） | 不内建 | 继承父会话的 `approval_policy` 和 permission profile（`core/src/agent/child_config.rs:178-201`） | auto 模式下分类器在三个时点检查子 agent（permission-modes#how-auto-mode-handles-subagents）；后台子 agent 的提示转回主会话（sub-agents） | 进程内 | 子会话的请求沿 `parentID` 归给根会话，由根会话应答（`noninteractive.ts:144-156`） |
@@ -65,8 +65,8 @@ Radian 最该做的五件事都不削弱现有的不变量：
 2. **非人来源只降不升**（ADR 0012 决定 5；`hooks.rs:236-264`）。后台通知（`InputSource::System`，`radian-host/src/job_notify.rs:149`）和控制口消息（缺省 `Scheduler`，`control.rs:715`）拿不到人的授权。opencode 和 omp 都没有这一层。
 3. **deny 匹配很保守**：拆开分隔符、引号和子 shell 逐段查，`/bin/rm` 也算 `rm`（`shell.rs:52-103`）。README 把 shell matcher 看不到的东西写得很清楚，例如 `git -c core.fsmonitor=…`、`cargo build` 会执行 build.rs（`radian-permissions/README.md`）。
 4. **`.git` 执行入口只读**（ADR 0038 决定 4），`deny_read` 覆盖会话、记忆、凭据和信任库（`chat.rs:39-60`）。Claude Code 把同类内容叫作 protected paths，但那是权限层的检查；Radian 是 OS 层强制。
-5. **按项目记住的档位存在宿主侧，并且沙箱禁读**（`~/.radian/access/access.json`，`docs/sandbox.md` 运行中切换一节）。仓库里的文件只能收窄（ADR 0043 决定 2.3）。Claude Code 把永久授权写进仓库目录下的 `.claude/settings.local.json`，再靠 protected-path 检查挡住模型改它。Radian 的做法更硬。
-6. **沙箱开销小**：每条命令约 5.9 ms（macOS）和 8.0 ms（Linux）（`docs/sandbox.md` 启动开销一节）。拿它来代替一次人工审批（秒到分钟级）几乎不要钱。
+5. **按项目记住的档位存在宿主侧，并且沙箱禁读**（`~/.radian/access/access.json`，`crates/radian-sandbox/LIMITS.md` 运行中切换一节）。仓库里的文件只能收窄（ADR 0043 决定 2.3）。Claude Code 把永久授权写进仓库目录下的 `.claude/settings.local.json`，再靠 protected-path 检查挡住模型改它。Radian 的做法更硬。
+6. **沙箱开销小**：每条命令约 5.9 ms（macOS）和 8.0 ms（Linux）（`crates/radian-sandbox/LIMITS.md` 启动开销一节）。拿它来代替一次人工审批（秒到分钟级）几乎不要钱。
 
 ## 5. 劣势和缺口（4-architecture 之外的部分）
 
@@ -77,7 +77,7 @@ Radian 最该做的五件事都不削弱现有的不变量：
 5. **沙箱拒绝和普通失败分不开**：`radian-coding` 没有对 EPERM、只读文件系统这类失败做分类。模型看到的只是一个失败，可能反复重试同一条命令，也没有一个"请求越界"的正规通道。
 6. **非人来源的回合碰到 ask 只能拒绝**：后台任务完成通知（ADR 0037）和 herdr 控制口驱动的回合，只要不在 auto 下就不能跑任何 shell（`hooks.rs:250-264`）。人就在 TUI 前面，也没有机会回答。
 7. **subagent 拿到的权限比父会话少**：子进程只拿到 `--profile` 和（父会话为 auto 时的）`--yes`。父会话的 `--allow-shell-command`、会话授权和档位都**不传**（`subagent.rs:390-405`，文件里 `allow_shell` 出现 0 次）。所以父会话里已经放行的 `cargo test`，在子会话里也会被拒。
-8. **Linux `workspace` 档有一个和"免审批"直接冲突的洞**：bwrap 共享主机网络命名空间，路径 Unix socket 经只读根挂载可达，抽象 socket 也可达（`docs/sandbox.md` 未验证一节的表），`[sandbox] allow_unix_sockets` 在 Linux 上不生效。也就是说，沙箱里的命令能连 `/var/run/docker.sock`，这等于主机 root。今天这个洞被"每条 shell 都问人"挡着；一旦做沙箱内免审批，它就成了真正的逃逸路径。macOS 那边 `mach-lookup` 全开，是 ADR 0012 决定 4 已经接受的风险，但接受的时候前提是还有人工审批这一层。
+8. **Linux `workspace` 档有一个和"免审批"直接冲突的洞**：bwrap 共享主机网络命名空间，路径 Unix socket 经只读根挂载可达，抽象 socket 也可达（`crates/radian-sandbox/LIMITS.md` 未验证一节的表），`[sandbox] allow_unix_sockets` 在 Linux 上不生效。也就是说，沙箱里的命令能连 `/var/run/docker.sock`，这等于主机 root。今天这个洞被"每条 shell 都问人"挡着；一旦做沙箱内免审批，它就成了真正的逃逸路径。macOS 那边 `mach-lookup` 全开，是 ADR 0012 决定 4 已经接受的风险，但接受的时候前提是还有人工审批这一层。
 9. **网络只能全开或全关**：`workspace` 开网（ADR 0016），所以沙箱挡不住"读工作区里的 `.env` 再 curl 出去"。Codex 缺省关网，Claude Code 走 allowlist 代理。
 
 ## 6. 改进方案（按收益/成本排序）

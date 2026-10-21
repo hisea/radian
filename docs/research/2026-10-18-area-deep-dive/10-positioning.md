@@ -70,10 +70,10 @@
 
 ## 4. Radian 的优势（独特底子，都已在代码里）
 
-1. **单个 Rust 二进制，资源占用小**：TUI 启动约 98 ms，空会话 RSS 11.3 MB（`docs/perf-baseline.md:44,163`）；一个二进制同时提供 TUI 和 `radian exec`（ADR 0032 A1）。对比 opencode TUI 约 1 GB（[wren.wtf](https://wren.wtf/shower-thoughts/stop-using-opencode/)），以及 Codex 每份二进制约 300 MB、旧版本累计 12 GB（HN 50060694）。
+1. **单个 Rust 二进制，资源占用小**：TUI 启动约 98 ms，空会话 RSS 11.3 MB（`benchmarks/perf-baseline.md:44,163`）；一个二进制同时提供 TUI 和 `radian exec`（ADR 0032 A1）。对比 opencode TUI 约 1 GB（[wren.wtf](https://wren.wtf/shower-thoughts/stop-using-opencode/)），以及 Codex 每份二进制约 300 MB、旧版本累计 12 GB（HN 50060694）。
 2. **可嵌入的运行时，不是 CLI 外面包一层**：`agent-core` 不依赖 CLI、UI、HTTP 或数据库；Model、ToolSession、Hooks 都是注入的，静态分发（设计文档 §3）。Claude Agent SDK 实际上是在起 Claude Code 二进制；Codex 的 SDK 走 app-server 协议。**一个能直接链进 Rust 进程的 agent 内核**，五家里只有 Radian 有（Codex 的 crate 理论上也能用，但它们不是为嵌入设计的，推断）。
 3. **journal 可以回放校验**：每次 transcript 写入都进 JSONL journal（ADR 0001、0006）；`journal-selfcheck` 特性（`agent-core/Cargo.toml:27`）在测试里把每个会话的 journal 和 transcript 对照回放；`docs/schema/check-fixtures.sh` 校验格式。工具执行标记区分"结果未知"和"没开始"（ADR 0002）。在此基础上已经有 resume、fork（ADR 0022）和只读的 `radian attach --follow`（ADR 0043 §8）。pi 的 Durable 还是实验性的。
-4. **沙箱宁可拒绝也不降级**：后端必须先跑探针证明有效，否则直接报错，没有任何路径会悄悄退回无沙箱（`docs/sandbox.md` "硬规则"）；有禁读清单（会话、记忆、凭据），按项目保存，项目配置只能收窄（ADR 0043 §2）。对比 opencode 那种能被绕过的文本过滤，以及 pi 的默认无权限。
+4. **沙箱宁可拒绝也不降级**：后端必须先跑探针证明有效，否则直接报错，没有任何路径会悄悄退回无沙箱（`crates/radian-sandbox/LIMITS.md` "硬规则"）；有禁读清单（会话、记忆、凭据），按项目保存，项目配置只能收窄（ADR 0043 §2）。对比 opencode 那种能被绕过的文本过滤，以及 pi 的默认无权限。
 5. **"默认不出网"可以机械验证**：唯一的出网白名单是 provider 请求（ADR 0013 T1，`0013:13-15`），而且 T5 要求用测试断言，而不是写一句承诺（`0013:48-58`）。对比：Codex 和 Claude Code 默认后台自动更新（HN 50060694、[overview](https://code.claude.com/docs/en/overview)），opencode 默认连远端（wren.wtf）。
 6. **多 provider 有契约测试**：Chat Completions、Anthropic Messages、Responses 三个适配器（`crates/agent-provider-*`），都要通过同一套 `agent-provider-contract`；规则写明"Never invent a wire value"（AGENTS.md）。另外有 ChatGPT 订阅 OAuth，这条路 OpenAI 是允许的。
 7. **herdr 一等公民**：上报状态、元数据、`state_labels`、会话身份；`HERDR_*` 环境变量在所有档位放行；仓库里带 herdr 插件（`integrations/herdr/herdr-plugin.toml`，有 start、start-worktree 和 sessions、attach 两个 pane）（ADR 0034）。herdr 本身是 Rust 写的 agent 多路复用器，2026-07 时超过 1 万星（[tecmint](https://tecmint.com/herdr-run-ai-coding-agents-in-linux-terminal)）。
@@ -87,7 +87,7 @@
 3. **默认 `full`，削弱了"安全"故事**：ADR 0043 §2 把默认改成不沙箱，理由是 dogfood 现实（开了沙箱 shell 仍然每次都问，见分报告 7）。所以"安全"只能讲成"需要时一个参数就打开"，而不是"默认安全"。
 4. **生态是零**：没有用户 hook，没有插件，项目级 skill 还没接上（分报告 8）。pi 有 5,337 个包，Claude Code 有官方插件市场。
 5. **单人项目**：ADR 节奏很快（43 个，0043 刚把 0030 整个搁置），说明方向还在变。外部用户和嵌入方需要的是稳定的 API 和文件格式承诺。
-6. **界面只有终端**：没有 IDE 插件、桌面版或 Web 版；Windows 没有沙箱后端（`docs/sandbox.md` 只有 macOS 和 Linux），能不能在 Windows 上构建未核实。
+6. **界面只有终端**：没有 IDE 插件、桌面版或 Web 版；Windows 没有沙箱后端（`crates/radian-sandbox/LIMITS.md` 只有 macOS 和 Linux），能不能在 Windows 上构建未核实。
 7. **Anthropic 订阅用不了**：这是 Anthropic 条款决定的（[SDK 文档的 Note](https://code.claude.com/docs/en/agent-sdk/overview)），所有第三方 harness 都一样，不是 Radian 自己的缺陷，但"用 Claude 订阅的人"这块用户永远拿不到。
 
 ## 6. 可选的定位方向（按"对整体价值的收益/成本"排序）

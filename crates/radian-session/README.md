@@ -153,7 +153,7 @@ Mutation records: `MUTATIONS.md` (writer/reader/crash/fuzz/privacy) and `MUTATIO
   The group-commit tests (`tests/group_commit.rs`, `radian-runtime/tests/group_commit.rs`)
   instead pin *when* the fsync happens — the per-step count and the crash-at-every-record
   traversal fail if a sync point stops syncing. The measured cost it buys is ~4 ms per fsync
-  on this machine (ADR 0006 §15.2; the per-step numbers are in `docs/perf-baseline.md`).
+  on this machine (ADR 0006 §15.2; the per-step numbers are in `benchmarks/perf-baseline.md`).
 - **Space cost, accepted:** `ToolExecutionSettled` carries the full result and the following
   `MessageAppended` carries the same result message again, so a large tool output is stored
   **twice** (ADR 0006 §15.1). v1 does not change this.

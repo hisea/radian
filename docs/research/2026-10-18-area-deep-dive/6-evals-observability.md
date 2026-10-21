@@ -10,7 +10,7 @@ Radian 的 journal 已经比五家里任何一家的会话文件都更适合做�
 
 | 维度 | Radian | pi | Codex CLI | Claude Code | omp | opencode |
 |---|---|---|---|---|---|---|
-| 自有评测体系 | 没有任务成功率评测；只有 `#[ignore]` 的性能测试（`docs/perf-baseline.md` “测量代码位置”） | 有：`packages/evals`，基于 vitest-evals 和 Docker 隔离，做 with/without docs 的配对比较（`pi-mono/packages/evals/README.md:1-25`） | 仓库里没有评测目录（`find -iname '*eval*'` 无结果）；有 250 个 core 集成测试文件（`codex-rs/core/tests/suite/`） | 闭源，未公开评测集 | 有基准命令：`omp bench`（TTFT、tok/s、缓存）、`omp if-bench`（指令遵循）（`src/commands/bench.ts:25-29`、`src/if-bench/index.ts:1-9`） | 没有评测集；core 有 266 个测试文件，cli 有 49 个，另有 `simulation` 包 |
+| 自有评测体系 | 没有任务成功率评测；只有 `#[ignore]` 的性能测试（`benchmarks/perf-baseline.md` “测量代码位置”） | 有：`packages/evals`，基于 vitest-evals 和 Docker 隔离，做 with/without docs 的配对比较（`pi-mono/packages/evals/README.md:1-25`） | 仓库里没有评测目录（`find -iname '*eval*'` 无结果）；有 250 个 core 集成测试文件（`codex-rs/core/tests/suite/`） | 闭源，未公开评测集 | 有基准命令：`omp bench`（TTFT、tok/s、缓存）、`omp if-bench`（指令遵循）（`src/commands/bench.ts:25-29`、`src/if-bench/index.ts:1-9`） | 没有评测集；core 有 266 个测试文件，cli 有 49 个，另有 `simulation` 包 |
 | 测什么 | harness 延迟：启动、fsync、渲染、resume | 文档带来的提升、冒烟测试、文档与实现是否一致（`evals/documentation-audit.eval.ts`） | 协议和行为的正确性：mock SSE 加上下文快照（`core/tests/common/responses.rs:753`、`context_snapshot.rs:1-5`） | — | provider 吞吐、缓存前缀、多轮工作记忆 | 用真实 HTTP 录制回放（`http-recorder`）测 runner（`core/test/session-runner-recorded.test.ts`） |
 | Terminal-Bench 2.0 | 无 | 榜上没有条目 | GPT-5.5 82.2%（第 4 名，2026-04-23） | Opus 4.6 58.0%（2026-02-07） | 无 | Opus 4.5 51.7%（2026-01-12） |
 | 会话日志格式 | JSONL v1，有信封、`seq`、`ts`、`critical`（ADR 0006 §3） | JSONL v3 树形结构，每条 assistant 消息自带 usage 和 cost（`coding-agent/docs/session-format.md:45-121`） | rollout JSONL，持久化 `TokenCount`、`TurnStarted`、`TurnComplete`（`codex-rs/rollout/src/policy.rs:127-139`） | `~/.claude/projects/` 下的 JSONL（[headless 文档](https://code.claude.com/docs/en/headless)，属于文档） | 沿用 pi 系 JSONL，由 `omp stats` 导入（推断） | SQLite，消息数据存在 JSON 列里（`core/src/session/stats.ts:136-141`） |
@@ -143,7 +143,7 @@ radian exec -p "<instruction>" --workspace <task dir> --profile full --yes \
 ```
 
 - `--session-id` 固定会话文件名，journal 就是 `<session-dir>/<run id>.jsonl`（`radian-host/src/session/open.rs:160`）。subagent 子会话也写在同一目录，靠 `SessionCreated.parent` 关联，指标要把它们一起算进去。
-- `--profile full`：Harbor 容器本身就是隔离边界；Radian 套在沙箱里时会继承沙箱（ADR 0016）。如果用 `workspace`，要单独记录沙箱探针的开销（约 25 ms，`docs/perf-baseline.md` §1）。
+- `--profile full`：Harbor 容器本身就是隔离边界；Radian 套在沙箱里时会继承沙箱（ADR 0016）。如果用 `workspace`，要单独记录沙箱探针的开销（约 25 ms，`benchmarks/perf-baseline.md` §1）。
 - 退出码 0 表示回合完成，1 表示失败（agent-cli README）。这只是辅助信号，判分仍以验证器为准。
 - **Harbor 适配层**：写一个 `BaseInstalledAgent`。`setup` 往容器里装一个静态的 release 二进制；`run` 执行上面的命令；结束后把 journal 下载到 `logs_dir`，用提取器（#1）把 tokens 和成本填进 `AgentContext`。ATIF 转换可选，最小可行版本不做。
 - **dogfood 题**不走 Harbor，用一个本地 runner 处理：为每题 `git worktree add` 到 base commit，跑同一条命令，然后执行判分脚本。worktree 放在 `.radian-worktrees/` 或 scratchpad，与 AGENTS.md 的规则一致。

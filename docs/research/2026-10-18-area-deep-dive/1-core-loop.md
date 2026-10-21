@@ -67,7 +67,7 @@ Radian 的循环在**持久化和恢复**上比五家都严格。每步宿主开
 ## 4. Radian 的优势
 
 1. **崩溃语义最严**：调用的副作用发生之前，`ToolExecutionStarted` 一定已经落盘（ADR 0002 E3，ADR 0040）。恢复时能区分"没开始"和"结果未知"，别家没有这样的纯函数恢复规则。
-2. **固定开销已经很低**：进程内一轮 16.7 ms，一次工具往返 26.1 ms（release，ADR 0040 之后，`docs/perf-baseline.md` §2）。真实会话里模型时间占 24.6%，工具时间占 65.5%（`2026-10-15-tool-concurrency-measurement.md` §5），宿主开销可以忽略。
+2. **固定开销已经很低**：进程内一轮 16.7 ms，一次工具往返 26.1 ms（release，ADR 0040 之后，`benchmarks/perf-baseline.md` §2）。真实会话里模型时间占 24.6%，工具时间占 65.5%（`2026-10-15-tool-concurrency-measurement.md` §5），宿主开销可以忽略。
 3. **重试有上限、不白等**：合计 ≤60 s，尊重 Retry-After；`usage_limit_reached` 不重试（ADR 0017 补记：此前实测白等了 58 分钟）。opencode 的 Retry-After 上限是 15 分钟，一次调用可能挂很久。
 4. **工具结果按调用顺序提交**，并发不改变 transcript 的顺序（`Batch::commit_ready`），对 prompt cache 友好。
 5. **`max_tokens` + 工具调用**的处理和 pi 相同，而且更细：`content_filtered` 不执行，`PauseTurn` 继续。

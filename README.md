@@ -8,7 +8,7 @@ tools, durable memory and the host plumbing, and two hosts ship as binaries: the
 the runtime does is journalled to a
 per-session JSONL file, so a session can be resumed by either host.
 
-The design of record is `docs/minimal-headless-rust-agent-runtime-design.md`. Decisions that
+The design of record is `ARCHITECTURE.md`. Decisions that
 constrain the code live under `docs/adr/` (see the index at the end of this file). Read
 `AGENTS.md` before you change code. How to contribute is in [CONTRIBUTING.md](CONTRIBUTING.md).
 To report a security problem, see [SECURITY.md](SECURITY.md).
@@ -25,7 +25,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 | `radian-session` | Session JSONL v1 storage: the durable `TranscriptJournal` seam, the reader/replay path, the disposable SQLite index and the export renderers. | `crates/radian-session/README.md` |
 | `radian-runtime` | The layer above the turn loop: a durable, bounded inbox (`followup`/`steer`/`inject`/`cancel`) and the per-session driver. | `crates/radian-runtime/README.md` |
 | `radian-permissions` | The permission layer: `ApprovalPolicy` + `ToolRuleSet` as one `Hooks` implementation; decides allow / ask / deny. It does not enforce anything. | `crates/radian-permissions/README.md` |
-| `radian-sandbox` | OS sandbox backends (macOS `sandbox-exec`, Linux `bubblewrap`) that build a command under a policy and **refuse to run** without a proven backend. | `docs/sandbox.md` |
+| `radian-sandbox` | OS sandbox backends (macOS `sandbox-exec`, Linux `bubblewrap`) that build a command under a policy and **refuse to run** without a proven backend. | `crates/radian-sandbox/LIMITS.md` |
 | `radian-coding` | Built-in coding tools — `read` (files and directories), `write`, `patch` (single or atomic multi-edit), `glob`, `grep`, when the host supplies a workspace; `shell` and the `job` tool additionally require a sandbox. The model runs git through `shell` (hardened via `GIT_CONFIG_*` in untrusted projects). A truncated foreground result registers under a normal job id; retention additionally requires a session-private output directory. Workspace path confinement applies throughout. | `crates/radian-coding/README.md` |
 | `radian-memory` | The memory storage layer: Global/Project scope logs with replay, the source rules (an agent cannot touch a user record), Forget/Purge, the `projects.jsonl` registry and the Markdown import/export view. Host-free: the caller passes `~/.radian/memory/`. | `crates/radian-memory/README.md` |
 | `radian-host` | Host plumbing shared by the TUI and the headless command so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, the "built-in tools + MCP" provider, the `~/.radian/` layout and diagnostics, the model catalog, and the memory layer (`MemoryService`, project identity, the agent memory tools, injection, and the shared `radian memory` / `/memory` commands). | `crates/radian-host/README.md` |
@@ -52,7 +52,7 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
   <pi-agent-dir>` drafts a Radian configuration (stdout) plus a mapping report (stderr). It
   reads only the directory you name, never `auth.json`, never a secret value, and writes
   nothing without `--write` (which refuses an existing file). Radian does **not** promise
-  compatibility with Pi's file format: see [`docs/pi-migration.md`](docs/pi-migration.md).
+  compatibility with Pi's file format: see [`docs/user/pi-migration.md`](docs/user/pi-migration.md).
 - **Session fork** is implemented: `radian exec --fork <parent> [--at <seq>]
   [--session-id <child>]` and the TUI `/fork`. The fork point is a parent turn boundary; the
   child materializes the parent's effective history there (a committed compaction in effect, an
@@ -270,13 +270,13 @@ silently on a broken pipe.
 
 | What | Where |
 |---|---|
-| Design of record | `docs/minimal-headless-rust-agent-runtime-design.md` |
+| Design of record | `ARCHITECTURE.md` |
 | Decisions (read before changing code) | `docs/adr/` |
-| Sandbox backends: what they really enforce | `docs/sandbox.md` (spikes: `docs/spikes/macos-sandbox.md`, `docs/spikes/linux-sandbox.md`) |
+| Sandbox backends: what they really enforce | `crates/radian-sandbox/LIMITS.md` (spikes: `docs/spikes/macos-sandbox.md`, `docs/spikes/linux-sandbox.md`) |
 | Provider contract and its escape hatches | `crates/agent-provider-contract/README.md`, wire notes in `crates/agent-provider-anthropic/WIRE.md` |
 | Session format fixtures and their checkers | `docs/schema/` (`check-fixtures.sh`, `check-config-fixtures.sh`, `fixtures/`, `config/`) |
 | Dogfooding findings (radian run on radian) | `docs/findings/2026-10-12-radian-tui-dogfooding.md`, `docs/findings/2026-10-12-opencode-zen-dogfooding.md` |
-| Performance baseline and its reproduction commands | `docs/perf-baseline.md` |
+| Performance baseline and its reproduction commands | `benchmarks/perf-baseline.md` |
 | Spike reports (sandbox, TUI, OAuth) | `docs/spikes/` |
 | Agent instructions (verify suite, delegation) | `AGENTS.md` |
 

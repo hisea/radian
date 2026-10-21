@@ -56,7 +56,7 @@ Radian 的骨架本身就快：单个 Rust 二进制，单进程，不需要 dae
 
 ## 4. Radian 的优势
 
-1. **启动和每轮开销已经很低。** TUI 启动到出现输入框约 98 ms，`radian exec` 启动到提示符 32–55 ms（`docs/perf-baseline.md` §1）。组提交之后，进程内一轮 17 ms，一次工具往返 26 ms（同文 §2）。读 JSONL 每个事件约 1.2 µs（§3）。pi、omp、opencode 都要先启动 Node 或 Bun 的运行时，它们的启动时间这次没有测（未核实），但 Radian 至少在结构上没有运行时预热，也没有 daemon 握手。
+1. **启动和每轮开销已经很低。** TUI 启动到出现输入框约 98 ms，`radian exec` 启动到提示符 32–55 ms（`benchmarks/perf-baseline.md` §1）。组提交之后，进程内一轮 17 ms，一次工具往返 26 ms（同文 §2）。读 JSONL 每个事件约 1.2 µs（§3）。pi、omp、opencode 都要先启动 Node 或 Bun 的运行时，它们的启动时间这次没有测（未核实），但 Radian 至少在结构上没有运行时预热，也没有 daemon 握手。
 2. **只有一个进程，一个文件。** 没有 opencode 那样的托管 service 和版本替换，也没有 Codex 那层 app-server 协议。外部要驱动会话，用每会话一个的控制 socket（`control.rs:1-24`）；要旁观，用 `radian attach` 只读 tail journal（ADR 0043 §8）。herdr 需要的能力都齐了，代价很小。
 3. **分层干净，可以嵌入。** `agent-core` 不做任何 I/O，`ToolProvider`、`ToolSession` 和 `Hooks` 都是静态分发（设计文档 §3）。journal seam 加上工具执行标记（ADR 0001/0002）提供了崩溃恢复，而 pi 要靠还在实验阶段的 `pi-durable` 才有这种能力。
 4. **规模受控。** 产品代码约 9.3 万行，和 pi 核心包的 12.5 万行 TS 是同一量级，大约是 omp 的 1/5、Codex 的 1/12；锁定依赖 426 个，Codex 有 1473 个。ADR 0043 删掉了约两万行编排代码，拆分之后最大的文件是 2363 行，omp 和 Codex 都有超过一万行的单个文件。
@@ -124,7 +124,7 @@ Radian 的骨架本身就快：单个 Rust 二进制，单进程，不需要 dae
 
 方案的修正：
 
-- ① 的前提是先用 seccomp 堵上 Linux bwrap 的 Unix socket（`docs/sandbox.md`，决定 4），前缀授权受 shell 匹配器看不见复合命令的限制；成本中高。它同时解决无头 `radian exec` 不带 `--yes` 跑不了 shell 的问题。
+- ① 的前提是先用 seccomp 堵上 Linux bwrap 的 Unix socket（`crates/radian-sandbox/LIMITS.md`，决定 4），前缀授权受 shell 匹配器看不见复合命令的限制；成本中高。它同时解决无头 `radian exec` 不带 `--yes` 跑不了 shell 的问题。
 - ② 不只是修订 0043 1a.7：缺 durable 的 `PermissionRequested`，`control` 还拒绝审批答复；成本中高，依赖 ①。
 - ④ 由 `docs/backlog/command-hooks-claude-subset.md` 的项目级 `PostToolUse` 替代（编辑后检查：配了才跑、每次同步，不内置）。
 - ⑤ 的测试二进制合并要单独立 ADR（`set_var` 与全局状态已实测），release 调优先不做。

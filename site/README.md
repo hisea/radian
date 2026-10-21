@@ -22,5 +22,5 @@ The two numbers are the theme's accent RGB; the script maps it to the page's `va
 
 - `brew install radian` is a placeholder (marked "soon"); fix the formula name or remove the row.
 - The frame's model name, costs and quota are invented by the prototype script.
-- The two speed numbers come from `docs/perf-baseline.md` (Apple M4, before ADR 0040); re-measure.
+- The two speed numbers come from `benchmarks/perf-baseline.md` (Apple M4, before ADR 0040); re-measure.
 - Deployment (host, `CNAME`) is not decided.

@@ -18,5 +18,5 @@ vulnerability, and do not post a reproduction publicly.
 
 ## Documented limits
 
-`docs/sandbox.md` describes what the sandbox enforces on each backend.
+`crates/radian-sandbox/LIMITS.md` describes what the sandbox enforces on each backend.
 Check it first so that a documented limit is not reported as an escape.

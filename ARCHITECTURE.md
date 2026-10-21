@@ -1,3 +1,5 @@
+The ADRs in `docs/adr/` are the authority where this document differs.
+
 # Minimal Headless Rust Agent Runtime
 
 **架构研究与实施设计 · 2026-10-12（Toronto）**

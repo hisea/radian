@@ -1,3 +1,7 @@
+---
+description: Draft a Radian configuration from a Pi agent directory.
+---
+
 # Migrating from Pi
 
 `radian config import-pi` drafts a Radian configuration from a Pi agent directory. It is a

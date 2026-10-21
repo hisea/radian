@@ -1,7 +1,7 @@
 //! One `grep` vs three `grep`s in one batch, on this repo and on one large tree.
 //!
 //! All `#[ignore]`: `cargo test` never runs them; the medians are printed for
-//! `docs/perf-baseline.md`. The batch polls three `session.execute` futures in **one**
+//! `benchmarks/perf-baseline.md`. The batch polls three `session.execute` futures in **one**
 //! task (`tokio::join!`), the same shape as Core's `FuturesUnordered` batch: a scan
 //! that never yields runs the three one after another.
 //!

@@ -37,7 +37,7 @@ Radian 现在只能在 macOS 和 Linux 上从源码构建，没有 CI，也没�
 **pi 和 opencode：Node 系，不做沙箱，选 shell 的逻辑短小清楚**
 - pi 依次找 `shellPath`、Git Bash、PATH 上的 `bash.exe`，都找不到就列出找过的路径，并提示安装 Git for Windows（`utils/shell.ts:64-105`）。PowerShell 是可选工具，带 `-NoProfile -NonInteractive -ExecutionPolicy Bypass`（`:122-135`）。`!` 命令始终走 Bash（`docs/windows.md`）。
 - opencode 按 `pwsh`、`powershell`、Git Bash、`%COMSPEC%` 的顺序找（`select.ts:95-107`），并且用 tree-sitter-powershell 解析 PowerShell 命令，给权限判断用（`target.ts` 中的 `shellParserWasmAssets`）。
-- 这两家杀进程树都靠 `taskkill /T /F`。它沿着父子关系往下走，碰到 leader 已经退出的孤儿进程就够不着了。Radian 的设计文档也承认这一点（`docs/minimal-headless-rust-agent-runtime-design.md:296`）。
+- 这两家杀进程树都靠 `taskkill /T /F`。它沿着父子关系往下走，碰到 leader 已经退出的孤儿进程就够不着了。Radian 的设计文档也承认这一点（`ARCHITECTURE.md:296`）。
 
 **omp：内嵌 shell，绕开 Windows 的 shell 碎片化**
 - 用 brush-core 原生绑定直接执行 bash 语法（`src/exec/bash-executor.ts:4`），Windows 上也不读用户的 `$SHELL`（`:424`）。代价是要自己实现 coreutils：CHANGELOG 里有 `du`、`rmdir dir/.`、`dd` 在 Windows 上的行为修复（`CHANGELOG.md:42-44`）。
@@ -83,7 +83,7 @@ Radian 现在只能在 macOS 和 Linux 上从源码构建，没有 CI，也没�
 
 ### 4.3 文档里已经承认的事实
 
-- 设计文档原计划在 Windows 上用 Job Object，以 `TerminateJobObject` 作为 drop 时的兜底；现在只有 `taskkill`，并注明“尚未在 Windows 上测试”（`docs/minimal-headless-rust-agent-runtime-design.md:256`、`:296`、`:345`）。
+- 设计文档原计划在 Windows 上用 Job Object，以 `TerminateJobObject` 作为 drop 时的兜底；现在只有 `taskkill`，并注明“尚未在 Windows 上测试”（`ARCHITECTURE.md:256`、`:296`、`:345`）。
 - ADR 0012 把 Windows 排在 “Phase 7 Job Object/CI”（`docs/adr/0012-permission-sources.md:58`）。
 - AGENTS.md 规定：不要把本机测不了的代码交给 pi，例如 Windows 进程控制（`AGENTS.md:52`）。
 - crate 的 README 里各自写了 “Not verified here: Windows”（`agent-core/README.md:140`、`radian-host/README.md:348`、`radian-tui/README.md:1209`）。
@@ -92,7 +92,7 @@ Radian 现在只能在 macOS 和 Linux 上从源码构建，没有 CI，也没�
 
 1. **核心层与平台无关**：agent-core、runtime、permissions 和三个 provider 没有一行平台代码。原生 Windows 的改动集中在 coding、host、tui、session 四个外围 crate，不碰 journal 语义（ADR 0001、0006、0040）。
 2. **兜底分支大多已经写好**：src 里有 133 处 `cfg(unix)` 守卫，大多有对应的 `not(unix)` 分支，所以主要工作是“把空操作补成实现”，而不是重构。
-3. **缺省是 `full`（ADR 0043 决定 1）**：原生 Windows 不开沙箱，在体验上和 macOS、Linux 的缺省一样。`workspace` 档在 Windows 上明确报错，不会悄悄降级（`docs/sandbox.md` 的硬规则），这与 Claude Code 的做法一致。
+3. **缺省是 `full`（ADR 0043 决定 1）**：原生 Windows 不开沙箱，在体验上和 macOS、Linux 的缺省一样。`workspace` 档在 Windows 上明确报错，不会悄悄降级（`crates/radian-sandbox/LIMITS.md` 的硬规则），这与 Claude Code 的做法一致。
 4. **单个静态 Rust 二进制**：Codex 已经证明 Rust 工作区可以同时发 msvc、musl 和 arm64。Radian 的依赖（crossterm、ratatui、tokio、reqwest+rustls、fs2、portable-pty）都支持 Windows。不需要像 pi、opencode 那样处理 Node、Bun 和原生 `.node` 资产，也不需要像 omp 那样维护一份内嵌 coreutils。
 5. **CRLF 已经处理**，`grep` 和 `glob` 是内置工具，不依赖系统的 `find`/`grep`，Windows 上少了一类问题（对照 Claude Code 在 Windows 上把 Glob/Grep 设为缺省工具）。
 
@@ -109,10 +109,10 @@ Radian 现在只能在 macOS 和 Linux 上从源码构建，没有 CI，也没�
 ## 7. 改进方案（按对 Radian 整体价值的收益/成本排序）
 
 ### 第 0 步：把 WSL2 写进文档并实测（约 1 人日）
-- **做什么**：在 README 加一节 “Platforms”：macOS 和 Linux 是一级支持，WSL2 按 Linux 对待，原生 Windows 不支持。在 WSL2（Ubuntu 24.04）上跑一遍 Verify 和 `escape_linux`、`compat_linux` 矩阵，结果写进 `docs/sandbox.md`。重点看三件事：bwrap 的 user namespace 能不能用、`/mnt/c` 下的仓库性能（9P 很慢，推断）、herdr 能否运行。
+- **做什么**：在 README 加一节 “Platforms”：macOS 和 Linux 是一级支持，WSL2 按 Linux 对待，原生 Windows 不支持。在 WSL2（Ubuntu 24.04）上跑一遍 Verify 和 `escape_linux`、`compat_linux` 矩阵，结果写进 `crates/radian-sandbox/LIMITS.md`。重点看三件事：bwrap 的 user namespace 能不能用、`/mnt/c` 下的仓库性能（9P 很慢，推断）、herdr 能否运行。
 - **收益**：Windows 用户（约占开发者一半）立刻就有一条明确能走的路，而且在 WSL2 里沙箱照样可用，这一点和 Claude Code 一样。可信度也会提高，因为文档说清楚了支持什么、不支持什么。
 - **风险**：几乎没有。如果 bwrap 在 WSL2 上探测失败，按现有规则会报错，不会降级。
-- **ADR**：不推翻任何 ADR，只更新 `docs/sandbox.md`。
+- **ADR**：不推翻任何 ADR，只更新 `crates/radian-sandbox/LIMITS.md`。
 - **验证**：在 WSL2 上，Verify 的 7 条命令和两份沙箱矩阵都通过。
 
 ### 第 1 步：建 CI，先让 Windows 编译通过（约 3–5 人日）

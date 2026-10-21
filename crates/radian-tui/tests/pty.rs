@@ -7544,7 +7544,7 @@ fn settled_frame_count(pty: &mut Pty) -> usize {
 }
 
 /// ADR 0023 U2's zero-redraw rule: an idle screen is not redrawn at all. Before the
-/// event-driven loop the app drew ~19 frames/s while nothing happened (`docs/perf-baseline.md`
+/// event-driven loop the app drew ~19 frames/s while nothing happened (`benchmarks/perf-baseline.md`
 /// §7); now the frame count over an idle window must not move.
 #[test]
 fn pty_an_idle_screen_is_not_redrawn() {

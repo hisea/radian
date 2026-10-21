@@ -139,7 +139,7 @@ Radian 的骨架已经适合分发：一个只依赖 glibc 的 Rust 二进制，
 - 收益：用户量从 0 到可能有。这是本区域收益最大的一项，前提一旦满足就排第一。
 - 成本：中（一套 CI，再在 macOS 上做一次签名或公证的评估）。
 - ADR：需要一份新的“分发”ADR，写清发布目标、平台、签名、安装位置，以及安装器不联网做别的事（对齐 ADR 0013）。
-- 验证：在干净容器里 `curl | sh` 后能跑 `radian --version`；体积进 `docs/perf-baseline.md`；每次发布做一次 smoke test，可以照 Codex 的 `scripts/codex_package/smoke_tests/`。
+- 验证：在干净容器里 `curl | sh` 后能跑 `radian --version`；体积进 `benchmarks/perf-baseline.md`；每次发布做一次 smoke test，可以照 Codex 的 `scripts/codex_package/smoke_tests/`。
 
 **4. `radian doctor`（只读，`--json`）**
 - 做什么：

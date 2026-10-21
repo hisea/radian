@@ -100,7 +100,7 @@ Radian 的 provider 层正确性好（三个 adapter 都过契约套件，用量
 5. **没有 Responses 增量和 WebSocket**：每轮把全部历史序列化后上传（`Anthropic::complete` 和 Responses 的 `build_body(...).to_string()`）。
    - 200k token 上下文大约 0.8 MB（按 4 字节/token 估）。上行 10 Mbps 时光上传就约 0.6 s（**推断**）。
    - Codex、pi、opencode 三家在 OpenAI 路由上都做了 WebSocket 增量。
-6. **看不到缓存**：footer 和 `/usage` 只显示费用，没有命中率和 miss 原因；也没有每次调用的首 token 延迟。`docs/perf-baseline.md:207` 写明真实 provider 的首 token 未测。没有这些数据，上面几项改进都无法验证。
+6. **看不到缓存**：footer 和 `/usage` 只显示费用，没有命中率和 miss 原因；也没有每次调用的首 token 延迟。`benchmarks/perf-baseline.md:207` 写明真实 provider 的首 token 未测。没有这些数据，上面几项改进都无法验证。
 7. **没有小模型分流**：子 agent 只能用父模型，`subagent` 的 schema 只有 `agent` 和 `task`（`subagent.rs:189-203`）。`explore` 只读、只搜索，却按主模型的价格跑。
 8. **子 agent 不和父会话共享缓存**：`general` 子 agent 的工具表是「父工具表去掉 `subagent`」，所以从 tools 层就和父会话前缀不同（`subagent.rs:183`）。OpenAI 路由上，子进程用自己的会话 id（`subagent.rs:279`）。Codex 让子会话沿用父会话的缓存键，omp 修复过 `/tan` 工具表不一致造成的 miss（`CHANGELOG.md:292`）。
 9. **只有 5 分钟 TTL，没有保温**：用户离开超过 5 分钟回来，第一轮要整段重写缓存。Anthropic 缓存写入是 1.25 倍价，按官方价格表，**未在本文复核**。
