@@ -136,6 +136,7 @@ async fn build_base(dir: &TempDir) -> Base {
             source: InputSource::User,
             wake: true,
             degraded: false,
+            pending_wake: false,
         },
         RuntimeEvent::InputClaimed {
             message_ids: vec![MessageId("m-1".into())],

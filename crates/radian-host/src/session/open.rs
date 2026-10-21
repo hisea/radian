@@ -527,6 +527,15 @@ pub async fn open_session(
             Arc::clone(&runtime_events),
             wake_warning,
         );
+        // ADR 0011: a stranded notice that opens the next turn counts one
+        // wake. The inbox fires the callback without holding its lock, and the `Weak`
+        // keeps the inbox from owning the session's notifier (which owns the inbox).
+        let weak = Arc::downgrade(&notifier);
+        inbox.set_pending_wake_callback(Some(Arc::new(move |_| {
+            if let Some(notifier) = weak.upgrade() {
+                notifier.note_promoted_wake();
+            }
+        })));
         notifier.spawn(&runtime);
         notifier
     });

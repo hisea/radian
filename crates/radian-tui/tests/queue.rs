@@ -150,6 +150,7 @@ fn enqueued(id: &str, lane: InboxLane) -> Input {
         source: InputSource::User,
         wake: true,
         degraded: false,
+        pending_wake: false,
     })
 }
 

@@ -790,6 +790,7 @@ async fn drain_steering(
             id,
             lane,
             wake,
+            pending_wake,
             source,
             message,
             seq,
@@ -804,6 +805,7 @@ async fn drain_steering(
                     id,
                     lane,
                     wake,
+                    pending_wake,
                     source,
                     message,
                     seq,
@@ -817,6 +819,7 @@ async fn drain_steering(
                         id,
                         lane,
                         wake,
+                        pending_wake,
                         source,
                         message,
                         seq,
@@ -839,7 +842,9 @@ async fn drain_steering(
 ///
 /// A requeued **steer** keeps `wake = true`, so the loop iteration right after this — before
 /// the driver waits — claims it and opens the next turn with it as its first input (ADR 0011
-/// revision 1 decisions 2 and 3). A requeued `inject` keeps `wake = false` and waits.
+/// revision 1 decisions 2 and 3). A requeued `inject` keeps `wake = false` and waits. A
+/// requeued pending-wake notice keeps its flag, so the next claim opens the next turn with
+/// it (ADR 0011).
 async fn requeue_unadmitted(inbox: &Inbox, claimed: &[InboxEntry], admitted: &HashSet<MessageId>) {
     // Front-most last: a single front-push per entry restores the original order.
     for entry in claimed.iter().rev() {
@@ -998,9 +1003,10 @@ fn lane_of(lane: InboxLane) -> Lane {
 /// 2. every other accepted input goes back to the front of its original lane, in enqueue
 ///    order — this covers "claimed but not admitted" (L3-2) and, because the inbox is
 ///    durable, inputs that were enqueued but never claimed before the restart; each keeps its
-///    durable `wake`, so a pending steering entry opens a turn as soon as the driver runs
-///    (ADR 0011). An old journal has no `wake`: the reader derives it from the lane
-///    (ADR 0006 §5.5);
+///    durable `wake` and `pending_wake`, so a pending steering entry opens a turn as soon
+///    as the driver runs (ADR 0011) and a stranded job notice does too
+///    (revision 2). An old journal has neither field: the reader derives `wake` from the lane
+///    and defaults `pending_wake` to `false` (ADR 0006 §5.5);
 /// 3. unpaired tool calls go through the core's `repair` (ADR 0002), and the repaired
 ///    messages are written back before the session is reopened (ADR 0002 E9).
 ///
@@ -1064,7 +1070,7 @@ async fn recover(
         }
     }
 
-    let mut enqueued: Vec<(MessageId, InboxLane, Message, u64, bool)> = Vec::new();
+    let mut enqueued: Vec<(MessageId, InboxLane, Message, u64, bool, bool)> = Vec::new();
     let mut admitted: HashSet<MessageId> = HashSet::new();
     let mut recorded_admitted: HashSet<MessageId> = HashSet::new();
     let mut next_turn = 1u64;
@@ -1080,8 +1086,16 @@ async fn recover(
                 message_id,
                 lane,
                 wake,
+                pending_wake,
                 ..
-            } => enqueued.push((message_id.clone(), *lane, message.clone(), event.seq, *wake)),
+            } => enqueued.push((
+                message_id.clone(),
+                *lane,
+                message.clone(),
+                event.seq,
+                *wake,
+                *pending_wake,
+            )),
             EventData::InputAdmitted { message_id, .. } => {
                 recorded_admitted.insert(message_id.clone());
                 admitted.insert(message_id.clone());
@@ -1101,7 +1115,7 @@ async fn recover(
 
     // Catch the admission record up for anything the transcript already holds, so the
     // journal and the transcript agree before the session is reopened.
-    for (id, _, _, _, _) in &enqueued {
+    for (id, _, _, _, _, _) in &enqueued {
         if recorded_admitted.contains(id) {
             continue;
         }
@@ -1118,12 +1132,13 @@ async fn recover(
 
     // Front-most last, so a single front-push per entry restores the enqueue order.
     let mut requeue = Vec::new();
-    for (id, lane, message, seq, wake) in enqueued.into_iter().rev() {
+    for (id, lane, message, seq, wake, pending_wake) in enqueued.into_iter().rev() {
         if !admitted.contains(&id) {
             requeue.push(InboxEntry {
                 id,
                 lane: lane_of(lane),
                 wake,
+                pending_wake,
                 source: source_of(&message),
                 message,
                 seq,

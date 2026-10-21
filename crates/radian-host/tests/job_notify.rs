@@ -10,7 +10,7 @@ use std::time::Duration;
 use radian_coding::{JobEvent, JobState, Jobs, OUTPUT_HINT};
 use radian_host::job_notify::{JobNotifier, orphan_jobs};
 use radian_host::wake_gate::{MAX_WAKES_PER_WINDOW, WAKE_WINDOW};
-use radian_runtime::{Inbox, Lane};
+use radian_runtime::{Inbox, InboxEntry, Lane};
 use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
 use radian_session::{EventData, RuntimeEvent, Session, SessionCreatedData, SessionJournal};
 use serde_json::json;
@@ -299,6 +299,140 @@ async fn a_user_message_still_resets_the_budget() {
         "a user message restarts the wake budget"
     );
     assert_eq!(notifier.wakes(), 1);
+}
+
+/// Busy chooses the pending-wake lane (`next_step`, no `wake`, `pending_wake` set);
+/// idle still chooses `followup` (`next_turn`, waking). The busy enqueue counts no wake
+/// yet: the count lands only when a stranded notice actually opens a turn.
+#[tokio::test]
+async fn busy_uses_pending_wake_and_counts_nothing_yet() {
+    let dir = scratch("pending-lanes");
+    let (notifier, _jobs, inbox, turn_running) = notifier(&dir);
+
+    turn_running.store(true, Ordering::SeqCst);
+    notifier.deliver(settled("job-1", true)).await;
+    let entries: Vec<InboxEntry> = inbox.snapshot().await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].lane, Lane::NextStep);
+    assert!(!entries[0].wake);
+    assert!(
+        entries[0].pending_wake,
+        "a busy notice carries the pending wake"
+    );
+    assert_eq!(notifier.wakes(), 0, "enqueueing counts no wake");
+
+    turn_running.store(false, Ordering::SeqCst);
+    notifier.deliver(settled("job-2", true)).await;
+    // `snapshot` lists the `next_turn` lane first, then `next_step`.
+    let entries: Vec<InboxEntry> = inbox.snapshot().await;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].lane, Lane::NextTurn);
+    assert!(entries[0].wake);
+    assert!(!entries[0].pending_wake);
+    assert_eq!(notifier.wakes(), 1, "an idle wake counts at once");
+}
+
+/// Past the gate a busy settle degrades to a plain `inject`: no pending wake, and the
+/// durable record agrees.
+#[tokio::test]
+async fn a_gate_full_busy_settle_degrades_without_pending_wake() {
+    tokio::time::pause();
+    let dir = scratch("pending-gated");
+    let journal = journal(&dir);
+    let inbox = Inbox::durable(64, Arc::clone(&journal));
+    let jobs = Arc::new(Jobs::new(dir.join("jobs")));
+    let turn_running = Arc::new(AtomicBool::new(false));
+    let notifier = JobNotifier::new(
+        Arc::clone(&jobs),
+        Arc::clone(&inbox),
+        journal,
+        Arc::clone(&turn_running),
+        Arc::new(|_: &RuntimeEvent| {}),
+        Arc::new(|_: &str| {}),
+    );
+
+    for i in 0..MAX_WAKES_PER_WINDOW {
+        notifier.deliver(settled(&format!("job-{i}"), true)).await;
+        assert!(inbox.claim_next_turn().await.is_some());
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    assert_eq!(notifier.wakes(), MAX_WAKES_PER_WINDOW);
+
+    turn_running.store(true, Ordering::SeqCst);
+    notifier.deliver(settled("job-busy-capped", true)).await;
+    let entries: Vec<InboxEntry> = inbox.snapshot().await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].lane, Lane::NextStep);
+    assert!(
+        !entries[0].pending_wake,
+        "past the gate: no pending wake on a busy notice"
+    );
+    assert_eq!(notifier.degraded(), 1);
+    assert_eq!(notifier.wakes(), MAX_WAKES_PER_WINDOW);
+
+    let session = Session::open(dir.join("s.jsonl")).unwrap();
+    let marked: Vec<(bool, bool)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::InboxEnqueued {
+                degraded,
+                pending_wake,
+                ..
+            } => Some((*degraded, *pending_wake)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        &marked[..MAX_WAKES_PER_WINDOW as usize],
+        &vec![(false, false); MAX_WAKES_PER_WINDOW as usize][..],
+        "the idle wakes are plain followups: {marked:?}"
+    );
+    // The last record is the degraded busy notice.
+    assert_eq!(
+        marked.last(),
+        Some(&(true, false)),
+        "the gated busy notice is a plain degrade"
+    );
+}
+
+/// The promotion signal is the gate count: a stranded notice that opens the next turn
+/// counts one wake (through the same inbox callback `open_session` wires); a notice
+/// absorbed mid-turn counts none.
+/// Mutation: count every busy notice at enqueue time → the `wakes() == 0` assertion fails.
+#[tokio::test]
+async fn a_promoted_notice_counts_one_wake_and_an_absorbed_one_counts_none() {
+    let dir = scratch("promote-counts");
+    let (notifier, _jobs, inbox, turn_running) = notifier(&dir);
+    // The `open_session` wiring: the inbox promotion fires the notifier's gate count.
+    let weak = Arc::downgrade(&notifier);
+    inbox.set_pending_wake_callback(Some(Arc::new(move |_| {
+        if let Some(notifier) = weak.upgrade() {
+            notifier.note_promoted_wake();
+        }
+    })));
+
+    turn_running.store(true, Ordering::SeqCst);
+    notifier.deliver(settled("job-1", true)).await;
+    assert_eq!(notifier.wakes(), 0, "enqueueing counts no wake");
+    assert!(
+        inbox.claim_next_turn().await.is_some(),
+        "the stranded notice opens the next turn"
+    );
+    assert_eq!(notifier.wakes(), 1, "the opening counts one wake");
+
+    // A second notice, absorbed mid-turn, counts nothing and opens nothing.
+    notifier.deliver(settled("job-2", true)).await;
+    assert_eq!(notifier.wakes(), 1);
+    assert!(
+        inbox.claim_next_step().await.is_some(),
+        "the running turn absorbs the notice"
+    );
+    assert!(
+        inbox.claim_next_turn().await.is_none(),
+        "an absorbed notice opens no turn"
+    );
+    assert_eq!(notifier.wakes(), 1, "an absorbed notice counts no wake");
 }
 
 /// A settle the model already has (`notify: false`: a `job` wait, a `job` kill, a

@@ -581,3 +581,36 @@ fn the_degraded_fixture_reads_back_the_degrade_mark() {
         recover(&session.journal_records()).unwrap()
     );
 }
+
+/// The pending-wake fixture: a stranded notice reads back `pending_wake: true`, an old
+/// record without the field reads back `false`. Rust half of the differential check with
+/// `docs/schema/check-fixtures.sh`.
+#[test]
+fn the_pending_wake_fixture_reads_back_the_pending_wake_mark() {
+    let session = Session::open(fixture("inbox-pending-wake.jsonl")).unwrap();
+    assert!(session.skipped().is_empty());
+    assert_eq!(session.events().len(), 3);
+
+    let marked: Vec<(bool, bool)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::InboxEnqueued {
+                wake, pending_wake, ..
+            } => Some((*wake, *pending_wake)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        vec![(false, true), (false, false)],
+        "the stranded notice is marked; the old record reads as no pending wake"
+    );
+
+    // Audit only: nothing enters the transcript.
+    assert!(session.history().unwrap().is_empty());
+    assert_eq!(
+        session.history().unwrap(),
+        recover(&session.journal_records()).unwrap()
+    );
+}

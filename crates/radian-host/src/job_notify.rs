@@ -5,8 +5,9 @@
 //! sees a job start and settle. For each event it writes the durable record
 //! ([`RuntimeEvent::BackgroundJobStarted`] / [`RuntimeEvent::BackgroundJobSettled`]); on a
 //! settle the model should hear about it sends **one System message**: while a turn is in
-//! flight it uses the `inject` lane (context for the next step, no wake), and while the driver
-//! is idle the `followup` lane (which wakes a turn). At most `MAX_WAKES_PER_WINDOW` wakes fit
+//! flight it uses the pending-wake `next_step` lane (context for the next step, opening the
+//! next turn itself when stranded past the turn end — ADR 0011), and while the
+//! driver is idle the `followup` lane (which wakes a turn). At most `MAX_WAKES_PER_WINDOW` wakes fit
 //! in any `WAKE_WINDOW` (the [`WakeGate`] rate gate, ADR 0037 decision 5); past the gate a
 //! settle degrades to `inject` only, so a job that starts another job cannot wake the session
 //! forever, while a normal worker chain (wake gaps of minutes) never fills the budget.
@@ -211,8 +212,17 @@ impl JobNotifier {
                 let text = self.completion_message(&id, &state, duration_ms);
                 let source = InputSource::System;
                 if self.turn_running.load(Ordering::SeqCst) {
-                    // Busy: context for the running turn, no wake (ADR 0037 decision 3).
-                    let _ = self.inbox.inject(text, source).await;
+                    // Busy: a pending-wake notice (ADR 0011). Absorbed by the
+                    // running turn it is context for the next step, exactly like an
+                    // `inject`; stranded past the turn end it opens the next turn itself,
+                    // and that opening counts one wake (see `note_promoted_wake`). Past the
+                    // gate it degrades to a plain `inject` with no pending wake.
+                    if self.gate.wake_allowed() {
+                        let _ = self.inbox.inject_pending_wake(text, source).await;
+                    } else if self.inbox.inject_degraded(text, source).await.is_ok() {
+                        let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
+                        (self.wake)(&wake_budget_line(degraded));
+                    }
                 } else if self.gate.wake_allowed() {
                     // Idle: wake a turn, up to the rate gate. The woken turn absorbs the
                     // waiting injects, so a wake also ends the degrade burst: the count
@@ -238,6 +248,16 @@ impl JobNotifier {
                 self.note_handled();
             }
         }
+    }
+
+    /// A pending-wake notice opened the next turn (ADR 0011, ADR 0037 decision
+    /// 5): the inbox fires it once per entry, only for a notice that actually opened a
+    /// turn. Counts one wake and ends the degrade burst, like an idle `followup` wake;
+    /// a notice absorbed by its running turn never fires, so it is never counted.
+    /// Wired in `open_session` through [`Inbox::set_pending_wake_callback`](radian_runtime::Inbox::set_pending_wake_callback).
+    pub fn note_promoted_wake(&self) {
+        self.gate.note_wake();
+        self.degraded.store(0, Ordering::SeqCst);
     }
 
     /// The one System message a settle sends: id, state, duration and the tail of
