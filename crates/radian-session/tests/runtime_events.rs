@@ -4,10 +4,10 @@
 
 mod common;
 
-use agent_core::{
+use common::{TempDir, created};
+use radian_core::{
     InputSource, JournalRecord, Message, MessageId, TranscriptJournal, recover, replay,
 };
-use common::{TempDir, created};
 use radian_session::{
     EventData, ExportOptions, InboxLane, Index, MemoryInjectedRecord, RuntimeEvent, Session,
     SessionJournal, TurnOutcome, TurnReason, WriteError,
@@ -481,7 +481,7 @@ async fn concurrent_runtime_and_core_appends_keep_seq_in_file_order() {
                         // without needing a declaring assistant message.
                         journal
                             .append(JournalRecord::ModelUsage {
-                                usage: agent_core::ModelUsage::default(),
+                                usage: radian_core::ModelUsage::default(),
                             })
                             .await
                             .unwrap();

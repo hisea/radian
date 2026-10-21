@@ -21,7 +21,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use agent_core::{BudgetReport, ModelUsage};
+use radian_core::{BudgetReport, ModelUsage};
 use radian_session::UsageFee;
 
 use crate::ModelPrice;

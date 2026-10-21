@@ -15,7 +15,7 @@ Status: accepted
 
 ### S2 Context: names plus descriptions stay, bodies load on call
 
-- The system prompt gains **one section** (not a message), assembled by the host: `## Skills` plus each skill `name`, `description`, and **absolute path**. The implementation is an `agent_core::Hooks` that touches only `request.system_prompt`. Core knows no skill.
+- The system prompt gains **one section** (not a message), assembled by the host: `## Skills` plus each skill `name`, `description`, and **absolute path**. The implementation is an `radian_core::Hooks` that touches only `request.system_prompt`. Core knows no skill.
 - **Budget**: soft default **1000 tokens** (ADR 0015 conservative estimate). On exceed it truncates in discovery order and states in the prompt "N more unlisted, use `/skills`". It counts into ADR 0018 `T`.
 - **Deterministic**: the same skill set (same files, same order) must produce a byte-identical section.
 - **Bodies do not stay resident**: only a call reads them. A `/skill:` expanded user message counts as a normal message under `B` and compaction.
@@ -35,7 +35,7 @@ Status: accepted
 
 ### S5 Boundary with Core
 
-**Core knows no skill**: it sees only one section in the system prompt string and one normal tool named `skill`. Discovery, parsing, body reads, prompt assembly, and budget all live in `radian-host`. Changes to `agent-core`: none.
+**Core knows no skill**: it sees only one section in the system prompt string and one normal tool named `skill`. Discovery, parsing, body reads, prompt assembly, and budget all live in `radian-host`. Changes to `radian-core`: none.
 
 ### S6 Relation with memory, `B`, compaction, and fork
 

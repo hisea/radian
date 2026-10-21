@@ -6,7 +6,7 @@
 //! the SSE `event:` field, but the event `type` is also in the `data` JSON, so ignoring the
 //! name field is safe (see `crates/agent-provider-anthropic/WIRE.md` §4).
 
-use agent_core::ModelError;
+use radian_core::ModelError;
 
 /// One line may not be longer than this. A server that never ends a line cannot grow memory.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;

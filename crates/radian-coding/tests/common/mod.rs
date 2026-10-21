@@ -3,10 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use agent_core::{
+use radian_coding::{CodingTools, ReadRoots};
+use radian_core::{
     NoopSink, ToolCall, ToolContext, ToolFailure, ToolOutput, ToolProvider, ToolSession,
 };
-use radian_coding::{CodingTools, ReadRoots};
 use serde_json::{Value, json};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -86,7 +86,7 @@ pub async fn call(
     };
     let sink = NoopSink;
     let cx = ToolContext {
-        cancellation: agent_core::CancellationToken::new(),
+        cancellation: radian_core::CancellationToken::new(),
         events: &sink,
         index: 0,
     };
@@ -98,7 +98,7 @@ pub fn text(output: &ToolOutput) -> String {
         .content
         .iter()
         .filter_map(|p| match p {
-            agent_core::ContentPart::Text { text, .. } => Some(text.as_str()),
+            radian_core::ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect()

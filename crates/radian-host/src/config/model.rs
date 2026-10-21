@@ -26,7 +26,7 @@ pub struct ModelConfig {
     pub context_window: Option<u64>,
     /// `[model] retries` (ADR 0017): how many times a transient model failure is
     /// retried inside one model call. `None` means the host's default
-    /// ([`agent_core::DEFAULT_MODEL_RETRIES`]); `0` disables retrying.
+    /// ([`radian_core::DEFAULT_MODEL_RETRIES`]); `0` disables retrying.
     pub retries: Option<u32>,
 }
 

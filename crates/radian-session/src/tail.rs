@@ -3,7 +3,7 @@
 //! [`Session::open`](crate::Session::open) reads and folds a whole file. A long-lived observer
 //! (the TUI's projections) instead wants to notice appended events without re-parsing the
 //! prefix. [`JournalTail`] keeps the per-line parser state (expected `seq`, the
-//! [`TranscriptFold`](agent_core::TranscriptFold), the schema/session id, the skipped list)
+//! [`TranscriptFold`](radian_core::TranscriptFold), the schema/session id, the skipped list)
 //! and reads only the bytes appended since the last poll.
 //!
 //! It never takes the writer's lock and never writes: no torn-tail truncation, no
@@ -19,7 +19,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use agent_core::Message;
+use radian_core::Message;
 
 use crate::error::ReadError;
 use crate::reader::{EventData, LineScanner, MAX_LINE_BYTES, SessionEvent};

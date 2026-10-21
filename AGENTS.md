@@ -1,6 +1,6 @@
 # radian agent instructions
 
-This repository holds a minimal headless Rust agent runtime and the coding agent built on it. `agent-core` is the runtime (turn loop, tools, hooks, steering, the journal seam); `agent-extensions` adds MCP stdio tools; `radian-session`, `radian-runtime`, `radian-permissions`, `radian-sandbox`, `radian-coding`, `radian-memory` and `radian-host` are the layers around it (durable sessions, the inbox and driver, allow/ask/deny, the OS sandbox, the built-in tools, durable memory, host plumbing); the two provider adapters are checked by the `agent-provider-contract` suite; and `agent-cli` and `radian-tui` are the headless command (`radian exec`) and the `radian` binary (`rad` is an alias). The crate-by-crate table with each one's docs is `README.md`. The design is in `ARCHITECTURE.md`. Read this file before you change code.
+This repository holds a minimal headless Rust agent runtime and the coding agent built on it. `radian-core` is the runtime (turn loop, tools, hooks, steering, the journal seam); `agent-extensions` adds MCP stdio tools; `radian-session`, `radian-runtime`, `radian-permissions`, `radian-sandbox`, `radian-coding`, `radian-memory` and `radian-host` are the layers around it (durable sessions, the inbox and driver, allow/ask/deny, the OS sandbox, the built-in tools, durable memory, host plumbing); the two provider adapters are checked by the `agent-provider-contract` suite; and `radian-exec` and `radian-tui` are the headless command (`radian exec`) and the `radian` binary (`rad` is an alias). The crate-by-crate table with each one's docs is `README.md`. The design is in `ARCHITECTURE.md`. Read this file before you change code.
 
 ## Decisions are in `docs/adr/`
 
@@ -16,8 +16,8 @@ Run these before you say a change is done. All of them must pass. The `journal-s
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
-cargo test -p agent-core --locked --features journal-selfcheck
-cargo clippy -p agent-core --all-targets --features journal-selfcheck -- -D warnings
+cargo test -p radian-core --locked --features journal-selfcheck
+cargo clippy -p radian-core --all-targets --features journal-selfcheck -- -D warnings
 bash docs/schema/check-fixtures.sh
 bash docs/schema/check-config-fixtures.sh
 ```

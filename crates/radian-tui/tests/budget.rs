@@ -1,7 +1,7 @@
 //! The context-budget projection in the status bar (ADR 0015 wording, ADR 0018 `T / B`).
 //! Pure `App` state plus the formatting functions, so it runs everywhere.
 
-use agent_core::{AgentEvent, BudgetReport, EventSink, UsageSource};
+use radian_core::{AgentEvent, BudgetReport, EventSink, UsageSource};
 use radian_tui::App;
 use radian_tui::app::{budget_status_text, budget_text};
 

@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use agent_core::{Message, TranscriptJournal};
+use radian_core::{Message, TranscriptJournal};
 use radian_session::{SessionCreatedData, SessionJournal};
 use serde_json::json;
 
@@ -43,7 +43,7 @@ async fn write_session(dir: &std::path::Path, id: &str, workspace: &std::path::P
     )
     .expect("create the session file");
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 0,
             message: Message::user("hello"),
         })
@@ -88,7 +88,7 @@ async fn list_prints_this_workspaces_sessions_and_exits() {
         !out.contains("elsewhere"),
         "a session from another workspace must not be listed: {out}"
     );
-    // Four tab-separated columns, like `agent-cli --list`.
+    // Four tab-separated columns, like `radian-exec --list`.
     let line = out.lines().find(|l| l.contains("list-me")).unwrap();
     assert_eq!(line.split('\t').count(), 4, "{line:?}");
 }

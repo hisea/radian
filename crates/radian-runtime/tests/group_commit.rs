@@ -14,8 +14,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_core::{Agent, InputSource, Message, TurnOptions};
 use common::{MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, text};
+use radian_core::{Agent, InputSource, Message, TurnOptions};
 use radian_runtime::{Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
 use serde_json::json;
@@ -23,7 +23,7 @@ use serde_json::json;
 const SID: &str = "group-commit-sid";
 
 /// Two calls, each with an observable side effect (a written file), then a final answer.
-fn two_write_calls(effects: [&PathBuf; 2]) -> Vec<agent_core::ModelResponse> {
+fn two_write_calls(effects: [&PathBuf; 2]) -> Vec<radian_core::ModelResponse> {
     vec![
         calls(vec![call(
             "c1",
@@ -64,7 +64,7 @@ async fn run_turn(dir: &TempDir, effects: [&PathBuf; 2], crash_at: Option<u64>) 
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
-        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&recorder) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await
@@ -135,7 +135,7 @@ fn settled_on_disk(session: &Session) -> HashSet<String> {
 
 /// The result recorded for `call_id` in the folded history, or `None` if the call was not
 /// declared yet.
-fn recorded_result(history: &[Message], call_id: &str) -> Option<agent_core::ToolResult> {
+fn recorded_result(history: &[Message], call_id: &str) -> Option<radian_core::ToolResult> {
     history.iter().find_map(|message| match message {
         Message::Tool { result, .. } if result.call_id == call_id => Some(result.clone()),
         _ => None,

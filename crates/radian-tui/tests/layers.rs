@@ -1,7 +1,7 @@
 //! ADR 0023 U4: the layer stack, its two invariants, and the tier rule. Pure `App` state, so
 //! these run without a terminal.
 
-use agent_core::{AgentEvent, CancelReason, RunStatus};
+use radian_core::{AgentEvent, CancelReason, RunStatus};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_tui::TurnState;
 use radian_tui::app::{App, Effect, Input, Layer, Modal, Overlay, Tier};
@@ -192,7 +192,7 @@ fn a_rebound_escape_still_reaches_the_transcript() {
 fn the_find_overlay_passes_navigation_to_the_transcript() {
     let mut app = App::new("m", "s");
     for index in 0..80 {
-        app.push_message(&agent_core::Message::user(format!("line {index}")));
+        app.push_message(&radian_core::Message::user(format!("line {index}")));
     }
     app.set_viewport(10, 80);
     app.scroll_to_bottom();

@@ -9,7 +9,7 @@
 //!   boundary;
 //! - the **filesystem root** is refused outright.
 //!
-//! An explicit `--workspace` is used exactly as given (including `~`), and `agent-cli` keeps the
+//! An explicit `--workspace` is used exactly as given (including `~`), and `radian-exec` keeps the
 //! old behaviour on purpose: it is the unattended entry point and should not gain write access
 //! by default.
 

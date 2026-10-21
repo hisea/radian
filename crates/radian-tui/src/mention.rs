@@ -27,7 +27,7 @@
 
 use std::borrow::Cow;
 
-use agent_core::{ContentPart, Message, MessageMeta};
+use radian_core::{ContentPart, Message, MessageMeta};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 

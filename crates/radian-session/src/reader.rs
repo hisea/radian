@@ -1,5 +1,5 @@
 //! The read side: streaming parse with the ADR 0006 §7 unknown-content policy, and
-//! transcript folding through `agent_core`'s own `replay`/`repair`/`recover`.
+//! transcript folding through `radian_core`'s own `replay`/`repair`/`recover`.
 //!
 //! [`scan_stream`] is the single parser. [`Session::open`] uses it to retain every event;
 //! the index cache (ADR 0006 §10) uses the same function to fold rows without retaining the
@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use agent_core::{
+use radian_core::{
     InputSource, JournalRecord, Message, MessageId, ModelUsage, ReplacementEnd, ToolResult,
     TranscriptFold, UsageSource, recover,
 };
@@ -1045,7 +1045,7 @@ impl Session {
     }
 
     /// Maps the parsed events back to core records. This is the only place that knows the
-    /// disk-event shape; folding then reuses `agent_core::{replay, repair, recover}`.
+    /// disk-event shape; folding then reuses `radian_core::{replay, repair, recover}`.
     pub fn journal_records(&self) -> Vec<JournalRecord> {
         self.journal_records_through(u64::MAX)
     }
@@ -1438,7 +1438,7 @@ fn fold_push(
     line: u64,
 ) -> Result<(), ReadError> {
     fold.push(&record).map_err(|error| match error {
-        agent_core::ReplayError::NotContiguous { expected, found } => ReadError::BadIndex {
+        radian_core::ReplayError::NotContiguous { expected, found } => ReadError::BadIndex {
             path: path.to_path_buf(),
             line,
             expected: expected as u64,

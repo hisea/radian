@@ -18,7 +18,7 @@
 
 - 这不是格式兼容，是一套新的宿主面：审批（ADR 0024 的 `ask_user` 与权限询问）映射到 ACP 的 `request_permission`；用户输入与 steer（ADR 0011）映射到 `session/prompt`；live 事件（ADR 0010）映射到 `session/update`；durable 事件照旧只进 journal。
 - 报告建议**先像 pi 那样做一个外部适配器**验证需求，不进主二进制；需求坐实后再决定是否成为 `radian acp`（或占用预留的 `serve`）。
-- 不改 `agent-core`：ACP 服务端是 `radian-host` 之上的又一个宿主，与 TUI、`exec` 并列（ADR 0023 的分层本来就是为了加前端）。
+- 不改 `radian-core`：ACP 服务端是 `radian-host` 之上的又一个宿主，与 TUI、`exec` 并列（ADR 0023 的分层本来就是为了加前端）。
 
 ## 待决问题
 

@@ -156,7 +156,7 @@ fn the_approval_keys_cannot_be_taken_over_by_the_keymap() {
 #[test]
 fn the_find_layer_is_rebindable() {
     let mut app = App::new("m", "s");
-    app.push_message(&agent_core::Message::user("alpha"));
+    app.push_message(&radian_core::Message::user("alpha"));
     app.input.set_text("draft");
     app.apply_config(
         &config(
@@ -249,7 +249,7 @@ fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines() {
 #[test]
 fn the_dark_theme_keeps_the_original_colors() {
     let mut app = App::new("m", "s");
-    app.push_message(&agent_core::Message::user("hello"));
+    app.push_message(&radian_core::Message::user("hello"));
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
     terminal
         .draw(|frame| render::draw(frame, &mut app))
@@ -277,7 +277,7 @@ fn the_dark_theme_keeps_the_original_colors() {
 fn the_mono_theme_renders_without_color() {
     let mut app = App::new("m", "s");
     app.theme = theme::Theme::mono();
-    app.push_message(&agent_core::Message::user("hello"));
+    app.push_message(&radian_core::Message::user("hello"));
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
     terminal
         .draw(|frame| render::draw(frame, &mut app))

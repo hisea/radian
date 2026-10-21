@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{Read, Write};
 
-use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec};
+use radian_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec};
 use serde::Deserialize;
 use serde_json::json;
 

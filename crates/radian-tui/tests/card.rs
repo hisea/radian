@@ -5,7 +5,7 @@
 //! `⟦…⟧` meta row — the meta is on the head line — and no marker or status glyph ever reaches the
 //! text a copy takes.
 
-use agent_core::{ContentPart, Message, ToolCall, ToolResult};
+use radian_core::{ContentPart, Message, ToolCall, ToolResult};
 use radian_tui::app::{App, Effect, EntryKind, Input, UpdateResult};
 use radian_tui::render;
 use radian_tui::theme::Theme;

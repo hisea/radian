@@ -5,8 +5,8 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_core::{Hooks, InputSource, ToolDecision};
 use common::{ScriptedApprover, TempDir, call, ctx};
+use radian_core::{Hooks, InputSource, ToolDecision};
 use radian_permissions::*;
 use serde_json::json;
 
@@ -43,7 +43,7 @@ impl Drop for Ws {
 }
 
 /// A host-style profile: the tier's blanket shell `ask` replaced by the allowlist
-/// (see `agent-cli/src/profile.rs`), plus any named rules the test needs.
+/// (see `radian-exec/src/profile.rs`), plus any named rules the test needs.
 fn profile_with_allow(
     ws: &Path,
     preset: Preset,
@@ -105,7 +105,7 @@ fn hooks_with(
 async fn decide(
     hooks: &PermissionHooks,
     command: &str,
-) -> Result<ToolDecision, agent_core::HookError> {
+) -> Result<ToolDecision, radian_core::HookError> {
     let call = call("shell", json!({ "command": command }));
     Hooks::before_tool_call(hooks, &ctx(), &call).await
 }

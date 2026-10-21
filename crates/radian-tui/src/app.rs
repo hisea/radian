@@ -15,10 +15,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agent_core::{
+use radian_coding::PromptError;
+use radian_core::{
     AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, MessageId, UsageSource,
 };
-use radian_coding::PromptError;
 use radian_host::memory::commands::MemoryCommand;
 use radian_host::{PendingRequest, PendingResponse, PendingView};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
@@ -534,7 +534,7 @@ pub struct SessionView {
     /// it can never name a tool that is not running (ADR 0027).
     pub note: Option<String>,
     /// The tools running right now, in start order: `(call_id, name)`. A batch can run several,
-    /// and they settle in **completion order**, which may differ from start order (agent-core's
+    /// and they settle in **completion order**, which may differ from start order (radian-core's
     /// `ToolFinished` contract), so the list — not a single name — is what the note follows: it
     /// names the last call that is still running.
     running_tools: Vec<(String, String)>,

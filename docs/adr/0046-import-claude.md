@@ -8,7 +8,7 @@ Radian owns two one-shot translation precedents (`radian config import-pi`, `rad
 
 ## Decisions
 
-The command is `radian config import-claude`, symmetric with `import-pi` (`ConfigCommand::ImportClaude`, same dispatch). The `radian` binary shares the same grammar through `agent_cli::ConfigCommand` (ADR 0032). Sources land at their own level. Explicit sources: `--claude-home <dir>` (user-level `~/.claude/` tree) with `--project <dir>` (project dir). Defaults never read. At least one is required. Unnamed user dirs never read.
+The command is `radian config import-claude`, symmetric with `import-pi` (`ConfigCommand::ImportClaude`, same dispatch). The `radian` binary shares the same grammar through `radian_exec::ConfigCommand` (ADR 0032). Sources land at their own level. Explicit sources: `--claude-home <dir>` (user-level `~/.claude/` tree) with `--project <dir>` (project dir). Defaults never read. At least one is required. Unnamed user dirs never read.
 
 ### Mappings (only fidelity-safe ones)
 
@@ -48,7 +48,7 @@ Project level (`--project`):
 
 ## Verification
 
-`crates/radian-host/tests/claude_migrate.rs`: user-level plus project-level fixture dirs (mode-0000 credential files, one plaintext secret, hooks with `async`/`if`/`type: "http"`/`context: fork`, unknown events). Built drafts pass formal readers (config parsers, `[hooks]`, skill discovery). Reports list each non-portable item. Read records hold no credential file names. Plaintext appears only as refs. Merge write-back tests: existing configs (comments, unknown keys, existing hook entries) stay byte for byte with imported entries appended (whole-file-write mutations fail). Double imports add nothing the second time (dedup-dropped mutations fail). Existing `AGENTS.md`/`SKILL.md` skip with row-by-row reports, other targets write as usual (overwrite mutations fail). Read-only configs fail whole writes with nothing written. Three more named tests: credential reads (`credential_files_are_never_read`), literal copies (`a_literal_secret_is_never_shown_and_becomes_a_reference`), missed `async` reports (`the_drop_report_names_every_non_portable_item`). `crates/agent-cli/tests/cli.rs` owns end-to-end tests: dry runs, `--write` merges, second `--write` idempotence, `--force` refused as unknown flags.
+`crates/radian-host/tests/claude_migrate.rs`: user-level plus project-level fixture dirs (mode-0000 credential files, one plaintext secret, hooks with `async`/`if`/`type: "http"`/`context: fork`, unknown events). Built drafts pass formal readers (config parsers, `[hooks]`, skill discovery). Reports list each non-portable item. Read records hold no credential file names. Plaintext appears only as refs. Merge write-back tests: existing configs (comments, unknown keys, existing hook entries) stay byte for byte with imported entries appended (whole-file-write mutations fail). Double imports add nothing the second time (dedup-dropped mutations fail). Existing `AGENTS.md`/`SKILL.md` skip with row-by-row reports, other targets write as usual (overwrite mutations fail). Read-only configs fail whole writes with nothing written. Three more named tests: credential reads (`credential_files_are_never_read`), literal copies (`a_literal_secret_is_never_shown_and_becomes_a_reference`), missed `async` reports (`the_drop_report_names_every_non_portable_item`). `crates/radian-exec/tests/cli.rs` owns end-to-end tests: dry runs, `--write` merges, second `--write` idempotence, `--force` refused as unknown flags.
 
 ## Constraints and Costs
 

@@ -27,7 +27,7 @@ fn listing_limits() -> Limits {
 /// listing default and maximum), not only what it does for a file.
 #[tokio::test]
 async fn the_limit_field_names_the_directory_entry_cap() {
-    use agent_core::{ToolProvider, ToolSession};
+    use radian_core::{ToolProvider, ToolSession};
     let dir = TempDir::new("read-dir-desc");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();

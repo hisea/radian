@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use agent_core::{Message, OpaqueJson};
+use radian_core::{Message, OpaqueJson};
 use radian_session::{RuntimeEvent, TurnOutcome};
 
 use super::*;
@@ -558,7 +558,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use agent_core::InputSource;
+    use radian_core::InputSource;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use crate::mention::Expansion;

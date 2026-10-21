@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_core::{NoopSink, TurnOptions};
+use radian_core::{NoopSink, TurnOptions};
 use radian_host::{
     ApprovalRouting, HostBindings, LocalSession, SessionCapability, SessionFacade, SessionId,
     SessionSetup, build_model, open_session,

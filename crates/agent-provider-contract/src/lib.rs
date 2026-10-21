@@ -7,7 +7,7 @@
 //! implements the same harness against its event stream and reuses every check.
 //!
 //! The checks drive [`Model::complete`] directly (not through `Agent`): the contract is
-//! about the adapter, and the round trip through the turn loop is `agent-core`'s own tests'
+//! about the adapter, and the round trip through the turn loop is `radian-core`'s own tests'
 //! job. Each adapter crate holds one test file that implements the harness and calls these
 //! checks (see `agent-provider-openai-compatible/tests/contract.rs` for the reference
 //! implementation). A check that a mutation does not catch means the contract is describing
@@ -16,7 +16,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use agent_core::*;
+use radian_core::*;
 use serde_json::Value;
 
 /// One tool call in contract terms. The harness decides how `arguments` are carried on the

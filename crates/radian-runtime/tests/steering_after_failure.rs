@@ -13,13 +13,13 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_core::{Agent, AgentEvent, EventSink, InputSource, RunStatus, TurnOptions};
 use agent_provider_anthropic::testing::{
     MockServer, Reply, block_stop, input_json_delta, message_delta, message_start, message_stop,
     text_delta, text_start, tool_start,
 };
 use agent_provider_anthropic::{Anthropic, AnthropicConfig, ApiKey};
 use common::{MemTools, Recorder, TempDir, created};
+use radian_core::{Agent, AgentEvent, EventSink, InputSource, RunStatus, TurnOptions};
 use radian_runtime::{Driver, Inbox};
 use radian_session::{Session, SessionJournal};
 use serde_json::json;
@@ -108,10 +108,10 @@ async fn run_scenario(
         config.idle_timeout = timeout;
     }
     let agent = Arc::new(
-        Agent::new(Anthropic::new(config).unwrap(), tools).with_config(agent_core::AgentConfig {
+        Agent::new(Anthropic::new(config).unwrap(), tools).with_config(radian_core::AgentConfig {
             // The scenario drives a failing turn (a transient idle timeout); pin the
             // pre-revision one-shot behaviour so the retry does not consume the next scripted
-            // reply (ADR 0017's retry is covered in agent-core's `retry` tests).
+            // reply (ADR 0017's retry is covered in radian-core's `retry` tests).
             retries: 0,
             ..Default::default()
         }),

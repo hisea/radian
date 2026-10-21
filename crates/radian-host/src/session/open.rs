@@ -5,8 +5,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use agent_core::{Agent, AgentConfig, ModelUsage};
 use agent_extensions::McpToolProvider;
+use radian_core::{Agent, AgentConfig, ModelUsage};
 use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{Driver, Inbox, ModelRoute};
 use radian_sandbox::{Sandbox, SandboxSlot};
@@ -357,7 +357,7 @@ pub async fn open_session(
     );
     let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
-    let spec_sink: std::sync::Arc<std::sync::Mutex<Option<Vec<agent_core::ToolSpec>>>> =
+    let spec_sink: std::sync::Arc<std::sync::Mutex<Option<Vec<radian_core::ToolSpec>>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let mut tools = HostTools::new(coding, memory_tools, mcp.clone())
         .with_tool_allow(tools_allow)
@@ -472,7 +472,7 @@ pub async fn open_session(
     //
     // Today an abort does not change the **fold**: an uncommitted segment at end of file and an
     // aborted one both drop the segment and leave the history and the declared calls alone
-    // (`agent_core::TranscriptFold`; `an_aborted_segment_and_one_at_end_of_file_fold_identically`
+    // (`radian_core::TranscriptFold`; `an_aborted_segment_and_one_at_end_of_file_fold_identically`
     // pins that). So this re-parse is a no-op for the recovered transcript and no test can tell
     // it apart from reusing the parse. It is kept deliberately: the parse is the host's view of
     // the file, and if the abort ever gains an effect on the fold, the driver must see it.
@@ -572,7 +572,7 @@ pub async fn open_session(
             let _ = inbox
                 .inject(
                     crate::job_notify::orphan_message(&id, &command),
-                    agent_core::InputSource::System,
+                    radian_core::InputSource::System,
                 )
                 .await;
         }

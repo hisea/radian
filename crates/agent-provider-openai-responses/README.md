@@ -1,6 +1,6 @@
 # agent-provider-openai-responses
 
-A model adapter for the OpenAI **Responses** API, implementing `agent_core::Model` with
+A model adapter for the OpenAI **Responses** API, implementing `radian_core::Model` with
 streaming. This is the protocol ChatGPT-subscription (Codex) turns use
 (`chatgpt.com/backend-api/codex/responses`), not Chat Completions. Since ADR 0026 it
 is also the protocol of a built-in descriptor's `@ai-sdk/openai` model (e.g. `opencode-go`'s

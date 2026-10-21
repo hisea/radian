@@ -5,7 +5,7 @@
 //! Results are low-trust data (invariant 4): every text result starts with
 //! [`LOW_TRUST_NOTE`], and each record carries its `scope`, `source` and `verification`.
 
-use agent_core::{
+use radian_core::{
     ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider,
     ToolSession, ToolSpec,
 };
@@ -315,7 +315,7 @@ fn specs() -> Vec<ToolSpec> {
 mod tests {
     use super::super::service::WriteScope;
     use super::*;
-    use agent_core::{CancellationToken, ContentPart, NoopSink, ToolContext};
+    use radian_core::{CancellationToken, ContentPart, NoopSink, ToolContext};
     use radian_memory::{Kind, Source};
 
     fn scratch(label: &str) -> std::path::PathBuf {

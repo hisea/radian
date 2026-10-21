@@ -102,7 +102,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use agent_core::{InputSource, Message, OpaqueJson};
+    use radian_core::{InputSource, Message, OpaqueJson};
     use radian_runtime::Inbox;
     use radian_session::{InboxLane, RuntimeEvent};
 

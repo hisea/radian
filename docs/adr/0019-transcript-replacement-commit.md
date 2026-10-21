@@ -67,6 +67,6 @@ Schema stays v1. `critical: true` forces readers that do not know the event to r
 
 ## Verification
 
-- `agent-core/tests/replace.rs`: pending segment at file end recovers old history, aborted segment recovers old history with normal append after, committed segment recovers new history, commit or second marker or mismatched commit without segment are replay errors, failed commit append keeps memory and requires recovery, index resets after replacement with one event only.
+- `radian-core/tests/replace.rs`: pending segment at file end recovers old history, aborted segment recovers old history with normal append after, committed segment recovers new history, commit or second marker or mismatched commit without segment are replay errors, failed commit append keeps memory and requires recovery, index resets after replacement with one event only.
 - `radian-session/tests/replace.rs`: normal growth after commit, commit again after abort, resume writes abort without repeat, torn abort truncates and rewrites, four corruption classes, uncommitted segments stay out of export and index, three consecutive commits fold to the last.
 - `docs/schema/check-fixtures.sh` checks all replacement fixtures through an independent state machine. Its conclusions agree with Rust.

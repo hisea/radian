@@ -6,12 +6,12 @@
 //!
 //! Everything runs against a local mock; no test touches `chatgpt.com` or `opencode.ai`.
 
-use agent_core::{
-    CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink, StopReason,
-};
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, function_call_added, function_call_arguments_done, message_item,
     output_item_done, text_delta, usage,
+};
+use radian_core::{
+    CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink, StopReason,
 };
 use radian_host::{ModelArgs, Provider, Thinking, build_model};
 use serde_json::Value;
@@ -50,7 +50,7 @@ fn request(messages: Vec<Message>) -> ModelRequest {
 async fn complete(
     model: &radian_host::HostModel,
     request: ModelRequest,
-) -> agent_core::ModelResponse {
+) -> radian_core::ModelResponse {
     model
         .complete(
             request,
@@ -128,7 +128,7 @@ async fn a_text_turn_and_a_tool_turn_run_over_the_api_key_responses_route() {
     assert_eq!(text.stop_reason, StopReason::EndTurn);
     assert_eq!(
         text.content,
-        vec![agent_core::ContentPart::text("Hello")],
+        vec![radian_core::ContentPart::text("Hello")],
         "the streamed deltas assemble into the answer"
     );
     assert_eq!(text.usage.map(|usage| usage.input), Some(Some(10)));

@@ -1,6 +1,6 @@
 //! The permission profile and the sandbox: what may run, and what the OS enforces (ADR 0012).
 //!
-//! This mirrors `agent-cli`'s wiring on purpose — the same presets from `radian-permissions`,
+//! This mirrors `radian-exec`'s wiring on purpose — the same presets from `radian-permissions`,
 //! the same sandbox construction from `radian-sandbox`, the same two invariants:
 //!
 //! - **`full-access` is the default** (ADR 0043): [`parse_tier`] and the CLI default pick
@@ -137,7 +137,7 @@ pub fn build_access(
 /// Slice 1 of `sandbox-auto-allow-shell`: `sandbox` is the sandbox itself — the caller
 /// built it first and passes `sandbox.as_ref()` — so the `workspace` rule is static for
 /// the session (`allow` inside an enforced sandbox, `ask` without one; fail closed).
-/// See `agent-cli`'s identical wiring; the two must not drift.
+/// See `radian-exec`'s identical wiring; the two must not drift.
 pub fn build_profile(
     tier: Tier,
     workspace: &Path,

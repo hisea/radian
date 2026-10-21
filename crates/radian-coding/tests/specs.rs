@@ -1,15 +1,15 @@
-//! The tool specs must be accepted by `agent-core`'s preflight (`ToolRegistry::new` compiles
+//! The tool specs must be accepted by `radian-core`'s preflight (`ToolRegistry::new` compiles
 //! every `input_schema` and rejects duplicate names).
 
 mod common;
 
 use std::sync::Arc;
 
-use agent_core::{
-    Agent, Model, ModelContext, ModelError, ModelRequest, ModelResponse, ToolProvider, ToolSession,
-};
 use common::{TempDir, call, tools};
 use radian_coding::CodingTools;
+use radian_core::{
+    Agent, Model, ModelContext, ModelError, ModelRequest, ModelResponse, ToolProvider, ToolSession,
+};
 
 /// Never called: opening a session only needs the trait to be implemented.
 struct NeverModel;
@@ -25,7 +25,7 @@ impl Model for NeverModel {
 }
 
 #[tokio::test]
-async fn agent_core_accepts_the_built_in_tool_specs() {
+async fn radian_core_accepts_the_built_in_tool_specs() {
     let dir = TempDir::new("specs");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -84,7 +84,7 @@ async fn the_read_spec_offers_offset_and_limit() {
 /// ADR 0024 Q1: with a prompter, `ask_user` is appended and its schema passes the same
 /// preflight (`ToolRegistry::new` compiles every `input_schema` and rejects duplicates).
 #[tokio::test]
-async fn agent_core_accepts_the_ask_user_spec() {
+async fn radian_core_accepts_the_ask_user_spec() {
     use futures_util::future::BoxFuture;
     use radian_coding::{PromptError, Prompter, QuestionAnswer, QuestionRequest};
 
@@ -126,7 +126,7 @@ async fn the_read_spec_names_directory_listing() {
     std::fs::create_dir_all(&root).unwrap();
     let coding = tools(&root);
     let session = coding.open_session().await.unwrap();
-    let specs: std::collections::HashMap<&str, &agent_core::ToolSpec> = session
+    let specs: std::collections::HashMap<&str, &radian_core::ToolSpec> = session
         .tool_specs()
         .iter()
         .map(|spec| (spec.name.as_str(), spec))
@@ -163,7 +163,7 @@ async fn the_read_spec_names_directory_listing() {
 
 /// Opens an `AskTools` session (no workspace needed, ADR 0024 Q5) and returns the
 /// advertised `ask_user` spec. Small helper for the description pins below.
-async fn ask_user_spec() -> agent_core::ToolSpec {
+async fn ask_user_spec() -> radian_core::ToolSpec {
     use futures_util::future::BoxFuture;
     use radian_coding::{PromptError, Prompter, QuestionAnswer, QuestionRequest};
 

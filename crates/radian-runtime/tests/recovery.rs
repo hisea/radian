@@ -6,8 +6,8 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_core::{Agent, InputSource, Message, TurnOptions};
 use common::{MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, text};
+use radian_core::{Agent, InputSource, Message, TurnOptions};
 use radian_runtime::{Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
 use serde_json::json;
@@ -40,7 +40,7 @@ fn truncate_to(path: &Path, k: usize) {
 
 /// Runs one full turn with a real driver and returns the journal path (and the tools, so a
 /// test can watch for replays).
-async fn reference_run(dir: &TempDir, script: Vec<agent_core::ModelResponse>) -> PathBuf {
+async fn reference_run(dir: &TempDir, script: Vec<radian_core::ModelResponse>) -> PathBuf {
     let path = dir.file("s.jsonl");
     let model = ScriptedModel::new(script);
     let tools = MemTools::new();
@@ -52,7 +52,7 @@ async fn reference_run(dir: &TempDir, script: Vec<agent_core::ModelResponse>) ->
         &agent,
         journal,
         Arc::clone(&inbox),
-        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&recorder) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await
@@ -72,7 +72,7 @@ async fn reference_run(dir: &TempDir, script: Vec<agent_core::ModelResponse>) ->
 async fn reopen(
     path: &Path,
     tools: MemTools,
-    script: Vec<agent_core::ModelResponse>,
+    script: Vec<radian_core::ModelResponse>,
 ) -> (
     Driver<Arc<ScriptedModel>, MemTools, ()>,
     Arc<Inbox>,
@@ -88,7 +88,7 @@ async fn reopen(
         &agent,
         journal,
         Arc::clone(&inbox),
-        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&recorder) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await
@@ -349,7 +349,7 @@ fn a_genuinely_half_written_line_is_treated_as_a_torn_tail() {
         journal
             .append_runtime_event(radian_session::RuntimeEvent::InboxEnqueued {
                 message: Message::user("half"),
-                message_id: agent_core::MessageId("inbox-1".into()),
+                message_id: radian_core::MessageId("inbox-1".into()),
                 lane: radian_session::InboxLane::NextTurn,
                 source: InputSource::User,
                 wake: true,

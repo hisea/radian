@@ -14,8 +14,8 @@ mod common;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agent_core::{Agent, InputSource, ModelResponse, TurnOptions};
 use common::{MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, text};
+use radian_core::{Agent, InputSource, ModelResponse, TurnOptions};
 use radian_runtime::{Driver, Inbox};
 use radian_session::SessionJournal;
 use serde_json::json;
@@ -42,7 +42,7 @@ async fn open(
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
-        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&recorder) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use agent_core::{
+use radian_core::{
     ContentPart, Model, ModelContext, ModelError, ModelRequest, ModelResponse, StopReason,
     ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider,
     ToolSession, ToolSpec,

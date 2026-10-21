@@ -19,8 +19,8 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agent_core::{JournalRecord, Message, TranscriptJournal};
 use common::{TempDir, created};
+use radian_core::{JournalRecord, Message, TranscriptJournal};
 use radian_session::{Index, Session, SessionJournal};
 use serde_json::json;
 

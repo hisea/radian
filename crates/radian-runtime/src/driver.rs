@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use agent_core::{
+use radian_core::{
     Agent, AgentEvent, AgentSession, CancelReason, CancellationToken, CompactionFailure,
     ContextBudget, EventSink, Hooks, IncompleteReason, InputSource, JournalError, JournalRecord,
     Message, MessageId, Model, RunError, RunOutcome, RunStatus, SessionError, SteeringHandle, Step,
@@ -71,11 +71,11 @@ pub enum DriverError {
     #[error("reading the session file: {0}")]
     Read(#[from] ReadError),
     #[error("folding the session file: {0}")]
-    Replay(#[from] agent_core::ReplayError),
+    Replay(#[from] radian_core::ReplayError),
 }
 
 /// A host callback for the runtime events the driver writes, so a host can react to a
-/// `TurnFailed` (ADR 0017) without polling the journal. `agent_core::AgentEvent` is left
+/// `TurnFailed` (ADR 0017) without polling the journal. `radian_core::AgentEvent` is left
 /// unchanged: a new variant there would be a Core public-API change, and the failure is a
 /// runtime event, not a core one.
 ///
@@ -365,7 +365,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// The context budget's last computation for this session (ADR 0015 C1), for a status
     /// bar: `Disabled` means no number is claimed (no window configured yet), otherwise the
     /// report's `source` says provider-reported vs. estimated.
-    pub fn context_budget_status(&self) -> &agent_core::BudgetStatus {
+    pub fn context_budget_status(&self) -> &radian_core::BudgetStatus {
         self.session.context_budget_status()
     }
 
@@ -811,7 +811,7 @@ async fn drain_steering(
                     seq,
                 });
             }
-            Err(agent_core::SteerError::RunFinished(message)) => {
+            Err(radian_core::SteerError::RunFinished(message)) => {
                 // The turn is winding down: put it back so it is not lost. The claim above
                 // stays truthful until recovery requeues it (ADR 0011 L3-2).
                 inbox
@@ -826,7 +826,7 @@ async fn drain_steering(
                     })
                     .await;
             }
-            Err(agent_core::SteerError::NotUserMessage(_)) => {
+            Err(radian_core::SteerError::NotUserMessage(_)) => {
                 // The inbox only accepts user messages, so this cannot happen.
             }
         }
@@ -1040,10 +1040,10 @@ async fn recover(
     let records = parsed.journal_records();
     radian_session::trace::took("recover/open", t0);
     let t1 = std::time::Instant::now();
-    let replayed = agent_core::replay(&records)?;
+    let replayed = radian_core::replay(&records)?;
     radian_session::trace::took("recover/replay", t1);
     let t2 = std::time::Instant::now();
-    let history = agent_core::recover(&records)?;
+    let history = radian_core::recover(&records)?;
     radian_session::trace::took("recover/recover", t2);
     let t3 = std::time::Instant::now();
 
@@ -1201,13 +1201,13 @@ fn reported_baseline(session: &Session) -> Option<(usize, u64)> {
 /// The source is recorded on the message when it is enqueued; a message without one never
 /// came through the durable inbox. `System` is the safe fallback: it is never `User`, so it
 /// cannot be mistaken for human input (ADR 0011 L2).
-fn source_of(message: &Message) -> agent_core::InputSource {
+fn source_of(message: &Message) -> radian_core::InputSource {
     let meta = match message {
         Message::User { meta, .. }
         | Message::Assistant { meta, .. }
         | Message::Tool { meta, .. } => meta,
     };
-    meta.source.unwrap_or(agent_core::InputSource::System)
+    meta.source.unwrap_or(radian_core::InputSource::System)
 }
 
 fn turn_number(turn_id: &str) -> u64 {
@@ -1220,7 +1220,7 @@ fn turn_number(turn_id: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{
+    use radian_core::{
         CompactionError, HookError, HookPoint, Message, ModelError, ModelUsage, SessionError,
     };
 
@@ -1255,7 +1255,7 @@ mod tests {
     /// both ignored.
     #[tokio::test]
     async fn the_baseline_ignores_usage_before_a_replacement() {
-        use agent_core::{JournalRecord, TranscriptJournal};
+        use radian_core::{JournalRecord, TranscriptJournal};
         use radian_session::{SessionCreatedData, SessionJournal};
 
         let dir = std::env::temp_dir().join(format!("radian-baseline-{}", std::process::id()));
@@ -1336,7 +1336,7 @@ mod tests {
     /// there the cache hit is already inside it. An unmarked old record is taken at face value.
     #[tokio::test]
     async fn the_restored_baseline_is_the_prompt_total_not_the_uncached_input() {
-        use agent_core::{JournalRecord, TranscriptJournal};
+        use radian_core::{JournalRecord, TranscriptJournal};
         use radian_session::{SessionCreatedData, SessionJournal};
 
         let dir = std::env::temp_dir().join(format!("radian-prompt-total-{}", std::process::id()));
@@ -1407,7 +1407,7 @@ mod tests {
     /// 10 000 that `input` alone would give (the deviation ADR 0007 asks to fix).
     #[tokio::test]
     async fn an_anthropic_shaped_report_restores_the_whole_prompt_as_its_baseline() {
-        use agent_core::{JournalRecord, TranscriptJournal};
+        use radian_core::{JournalRecord, TranscriptJournal};
         use radian_session::{SessionCreatedData, SessionJournal};
 
         let dir = std::env::temp_dir().join(format!("radian-prompt-cache-{}", std::process::id()));

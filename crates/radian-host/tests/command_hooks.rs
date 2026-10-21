@@ -8,8 +8,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use agent_core::{CancellationToken, HookContext, Hooks, InputSource, ToolCall, ToolDecision};
 use futures_util::future::BoxFuture;
+use radian_core::{CancellationToken, HookContext, Hooks, InputSource, ToolCall, ToolDecision};
 use radian_host::memory::InjectionConfig;
 use radian_host::{CommandHooks, session_hooks};
 use radian_permissions::{

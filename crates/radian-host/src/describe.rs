@@ -16,7 +16,7 @@ pub struct Wording {
     pub confined_subject: &'static str,
 }
 
-/// `agent-cli`'s wording: the line prompt has MCP tools, so it names them.
+/// `radian-exec`'s wording: the line prompt has MCP tools, so it names them.
 pub const CLI_WORDING: Wording = Wording {
     confined_subject: "commands and built-in tools",
 };

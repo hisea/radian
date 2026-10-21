@@ -53,7 +53,7 @@ pub(super) struct LoopContext<'a> {
     /// cloned. `None` when the session mounts no `shell`.
     pub(super) bash_sandbox: Option<radian_sandbox::Sandbox>,
     /// The running `!` command's cancellation token (Esc, ADR 0033).
-    pub(super) bash_cancel: Option<agent_core::CancellationToken>,
+    pub(super) bash_cancel: Option<radian_core::CancellationToken>,
     /// The in-flight `/btw` side question's cancel handle (Esc on its overlay).
     /// `None` when no side question runs; the app's own flag is the authority
     /// for refusals, this only stops the request.
@@ -221,7 +221,7 @@ impl LoopContext<'_> {
                 // tool when the project is not trusted. Read at call time: `/trust` can
                 // change the decision mid-session.
                 let harden_git = !self.session.trust().resolved.decision.as_bool();
-                let cancel = agent_core::CancellationToken::new();
+                let cancel = radian_core::CancellationToken::new();
                 self.bash_cancel = Some(cancel.clone());
                 self.runtime.spawn(async move {
                     let result = match sandbox {
@@ -1026,7 +1026,7 @@ mod tests {
         fn compact(
             &self,
             _instructions: Option<String>,
-            _on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+            _on_done: Box<dyn FnOnce(Result<radian_core::CompactionOutcome, String>) + Send>,
         ) {
             todo!()
         }
@@ -1034,7 +1034,7 @@ mod tests {
             &self,
             _instructions: Option<String>,
             _budget_tokens: Option<u64>,
-            _on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+            _on_done: Box<dyn FnOnce(Result<radian_core::CompactionOutcome, String>) + Send>,
         ) {
             todo!()
         }
@@ -1086,7 +1086,7 @@ mod tests {
         fn kill_all_jobs(&self) {
             todo!()
         }
-        fn tool_specs(&self) -> Vec<agent_core::ToolSpec> {
+        fn tool_specs(&self) -> Vec<radian_core::ToolSpec> {
             todo!()
         }
         fn mcp_servers(&self) -> Vec<agent_extensions::McpServerConfig> {
@@ -1107,7 +1107,7 @@ mod tests {
         fn context_report(&self) -> Result<radian_host::context_estimate::ContextReport, String> {
             todo!()
         }
-        fn next_request_shape(&self) -> Result<agent_core::ModelRequest, String> {
+        fn next_request_shape(&self) -> Result<radian_core::ModelRequest, String> {
             todo!()
         }
         fn start_side_question(

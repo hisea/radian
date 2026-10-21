@@ -1,12 +1,12 @@
 //! Host wording for a failed turn (ADR 0017) that was a context overflow (ADR 0018).
 //!
 //! A host receives a failed turn as text over `RuntimeEvent::TurnFailed.message`, not as an
-//! `agent_core::ModelError`, so it recognizes the overflow case by the prefix
-//! [`agent_core::ModelError::ContextOverflow`]'s `Display` writes. `agent-core` pins that
+//! `radian_core::ModelError`, so it recognizes the overflow case by the prefix
+//! [`radian_core::ModelError::ContextOverflow`]'s `Display` writes. `radian-core` pins that
 //! prefix with its own test; this module is the only host-side reader of it.
 
-/// The prefix `agent_core::ModelError::ContextOverflow` prints.
-pub const CONTEXT_OVERFLOW_PREFIX: &str = agent_core::CONTEXT_OVERFLOW_PREFIX;
+/// The prefix `radian_core::ModelError::ContextOverflow` prints.
+pub const CONTEXT_OVERFLOW_PREFIX: &str = radian_core::CONTEXT_OVERFLOW_PREFIX;
 
 /// The one-line help a host adds when a turn failed because the input was over the model's
 /// context window. Compaction (ADR 0018) normally keeps the request inside the window —

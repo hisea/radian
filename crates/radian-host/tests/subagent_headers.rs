@@ -5,13 +5,13 @@
 //! pins — the argv the tool built carries no header value, and the environment it set does — are
 //! exactly the child's own two inputs, and a stub makes both observable without a provider. The
 //! end-to-end half (the child's request carries the header; its journal and the parent's output
-//! do not) is `agent-cli`'s `the_parents_header_reaches_the_child_and_nothing_else_writes_it`.
+//! do not) is `radian-exec`'s `the_parents_header_reaches_the_child_and_nothing_else_writes_it`.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_core::{CancellationToken, NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
+use radian_core::{CancellationToken, NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
 use radian_host::{SubagentParts, SubagentTools};
 use radian_permissions::{ApprovalPolicy, NoopAudit, Profile};
 use radian_sandbox::SandboxSlot;

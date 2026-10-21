@@ -155,7 +155,7 @@ mod tests {
         // the same.
         app.session.projection.set_turn(TurnState::Idle);
         let effects = app.apply_event(&AgentEvent::RunFinished {
-            status: agent_core::RunStatus::Completed,
+            status: radian_core::RunStatus::Completed,
         });
         assert!(
             matches!(effects.as_slice(), [Effect::RunBash { command, .. }] if command == "echo hi"),

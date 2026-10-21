@@ -4,7 +4,7 @@ Status: accepted
 
 ## Background
 
-`agent-core` owns only in-process `Hooks` traits (`before_tool_call` refuses/rewrites/answers directly, errors fail closed, ADR 0012 P2/P3, ADR 0017 §4). Users and projects mount no outer commands. Claude Code hook JSON is a de-facto standard (event names, `matcher`, `hooks[{type:"command",command,timeout}]`, exit 2, `hookSpecificOutput`), Codex adopts it unchanged. Its importer takes only a fidelity-safe subset (`type` must be `command`, `allow`/`ask` always refused). Radian tool and parameter names differ from Claude (`shell`/`write`/`patch`/`read` versus `Bash`/`Write`/`Edit`/`Read`). No runtime aliases exist. Translation runs once in import commands only.
+`radian-core` owns only in-process `Hooks` traits (`before_tool_call` refuses/rewrites/answers directly, errors fail closed, ADR 0012 P2/P3, ADR 0017 §4). Users and projects mount no outer commands. Claude Code hook JSON is a de-facto standard (event names, `matcher`, `hooks[{type:"command",command,timeout}]`, exit 2, `hookSpecificOutput`), Codex adopts it unchanged. Its importer takes only a fidelity-safe subset (`type` must be `command`, `allow`/`ask` always refused). Radian tool and parameter names differ from Claude (`shell`/`write`/`patch`/`read` versus `Bash`/`Write`/`Edit`/`Read`). No runtime aliases exist. Translation runs once in import commands only.
 
 ## Decisions
 
@@ -48,7 +48,7 @@ Hits merge with hook exit 2 into one continuation: max one per turn. Causes merg
 
 `workspace`-tier hook children take the same sandbox build and env rules as `shell` tools. Builds use `command_str("/bin/sh", ["-c", …])`. Non-forced backends pass env allowlists the same. `full` owns no sandbox (slots with no sandbox run `/bin/sh -c` directly, inheriting host env).
 
-The implementation is one `radian-host` `Hooks` (`CommandHooks`), never changing `agent-core` traits. It orders **after rights** in `session_hooks` (`role → permissions → commands → memory → skills → facts`). Rights-refused calls stay invisible to hooks. Hooks only narrow rights-passed calls. **Hooks are no safety bound**. Invalid config entries skip instead of refusing files (decision 1). Misspelled `PreToolUse` rows never run. Forced policy lives only in rights rules (ADR 0012) and sandboxes (ADR 0016). Hooks only narrow above them. `Rewrite` semantics hold through tuple composition: earlier `Rewrite` rows are the parameters later rows see.
+The implementation is one `radian-host` `Hooks` (`CommandHooks`), never changing `radian-core` traits. It orders **after rights** in `session_hooks` (`role → permissions → commands → memory → skills → facts`). Rights-refused calls stay invisible to hooks. Hooks only narrow rights-passed calls. **Hooks are no safety bound**. Invalid config entries skip instead of refusing files (decision 1). Misspelled `PreToolUse` rows never run. Forced policy lives only in rights rules (ADR 0012) and sandboxes (ADR 0016). Hooks only narrow above them. `Rewrite` semantics hold through tuple composition: earlier `Rewrite` rows are the parameters later rows see.
 
 ### 5. Where hook output enters context, and when
 
@@ -57,7 +57,7 @@ The implementation is one `radian-host` `Hooks` (`CommandHooks`), never changing
 ## Constraints and Costs
 
 - Non-JSON hook output only warns, never fails closed. Exit-0 hooks succeed by definition. Fail-closed belongs to "unfinished" (non-zero/timeout), never "misspoken".
-- `Stop` "once per turn" rests on Core `on_turn_end` calls. Core skipping those calls some day disables continuations. Chain-order tests with Stop count tests guard the host side, and `agent-core` own tests guard Core-side calls.
+- `Stop` "once per turn" rests on Core `on_turn_end` calls. Core skipping those calls some day disables continuations. Chain-order tests with Stop count tests guard the host side, and `radian-core` own tests guard Core-side calls.
 - Sandboxes read most of `$HOME` (ADR 0012 P4). Hook-readable things stay out of model reach this turn. Hook stdout/stderr enters transcripts. Never print sensitive-dir content into hook output.
 - User-level hooks take effect directly (user own commands). Project-level hooks load and run only in trusted directories (ADR 0031 T1). Untrusted directories never read files and never start processes.
 

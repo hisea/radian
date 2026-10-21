@@ -10,10 +10,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use agent_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink};
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, message_item, output_item_done,
 };
+use radian_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink};
 use radian_host::{Provider, RouteContext, build_model};
 use serde_json::Value;
 
@@ -119,7 +119,7 @@ async fn a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_rou
         .expect("the mock answers");
     assert_eq!(
         response.content,
-        vec![agent_core::ContentPart::text("route-ok")]
+        vec![radian_core::ContentPart::text("route-ok")]
     );
     let recorded = &server.requests()[0];
     assert_eq!(

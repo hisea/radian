@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/agent-core",
+    "crates/radian-core",
     "crates/agent-extensions",
     "crates/agent-provider-openai-compatible",
     "crates/agent-provider-openai-responses",
     "crates/agent-provider-anthropic",
-    "crates/agent-cli",
+    "crates/radian-exec",
     "crates/radian-host",
     "crates/agent-provider-contract",
     "crates/radian-session",
@@ -23,6 +23,7 @@ members = [
 edition = "2024"
 rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/hisea/radian"
 
 [workspace.dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

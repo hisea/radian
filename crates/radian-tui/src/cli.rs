@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
-use agent_core::{AgentEvent, ContextBudget, EventSink, TurnOptions};
 use clap::Parser;
+use radian_core::{AgentEvent, ContextBudget, EventSink, TurnOptions};
 use radian_host::memory::MemoryService;
 use radian_host::{
     DEFAULT_MAX_TOKENS, ModelArgs, Provider, SessionFacade, Thinking, build_model,
@@ -117,7 +117,7 @@ struct Cli {
     header: Vec<String>,
 
     /// Where session files live. Defaults to `RADIAN_SESSION_DIR`, then `~/.radian/sessions`
-    /// (`$RADIAN_HOME/sessions` when that is set). The same rule as `agent-cli`.
+    /// (`$RADIAN_HOME/sessions` when that is set). The same rule as `radian-exec`.
     #[arg(help_heading = "Session", long, value_name = "DIR")]
     session_dir: Option<PathBuf>,
 
@@ -147,7 +147,7 @@ struct Cli {
     pick: bool,
 
     /// A JSON file listing MCP stdio servers to start (`{"servers": [...]}`), the same format
-    /// `agent-cli` reads. Under `workspace` their tools ask before running and the
+    /// `radian-exec` reads. Under `workspace` their tools ask before running and the
     /// servers themselves are **not** sandboxed.
     #[arg(help_heading = "MCP", long, value_name = "FILE")]
     mcp_config: Option<String>,
@@ -290,7 +290,7 @@ struct Cli {
 }
 
 /// The subcommands that are not the TUI. `exec` is today's `agent` command, run
-/// through the `agent-cli` library so the two entries cannot drift; the management commands
+/// through the `radian-exec` library so the two entries cannot drift; the management commands
 /// follow in the same shape.
 #[derive(clap::Subcommand, Debug)]
 enum RadianCommand {
@@ -335,7 +335,7 @@ enum RadianCommand {
     /// `radian exec config` runs.
     Config {
         #[command(subcommand)]
-        command: agent_cli::ConfigCommand,
+        command: radian_exec::ConfigCommand,
     },
 
     /// Theme tools: `radian theme import <pi-theme.json>`
@@ -429,7 +429,7 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
             // inside clap for those, exactly as the `agent` binary does.
             // The program name clap shows in usage and errors: `radian exec`, the command
             // the user ran.
-            ExitCode::from(agent_cli::parse_and_run(
+            ExitCode::from(radian_exec::parse_and_run(
                 std::iter::once("radian exec".to_string()).chain(args),
             ) as u8)
         }
@@ -437,24 +437,22 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
         // same dispatch (ADR 0032): `radian login` and `radian exec login` are
         // one code path, not two.
         RadianCommand::Login { provider } => {
-            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Login {
+            run_radian_exec(radian_exec::Cli::for_command(radian_exec::Command::Login {
                 provider,
             }))
         }
-        RadianCommand::Logout { provider } => {
-            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Logout {
-                provider,
-            }))
-        }
-        RadianCommand::Memory { workspace, command } => run_agent_cli(agent_cli::Cli::for_memory(
-            workspace.map(|path| path.to_string_lossy().into_owned()),
-            command,
+        RadianCommand::Logout { provider } => run_radian_exec(radian_exec::Cli::for_command(
+            radian_exec::Command::Logout { provider },
         )),
-        RadianCommand::Config { command } => {
-            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Config {
+        RadianCommand::Memory { workspace, command } => {
+            run_radian_exec(radian_exec::Cli::for_memory(
+                workspace.map(|path| path.to_string_lossy().into_owned()),
                 command,
-            }))
+            ))
         }
+        RadianCommand::Config { command } => run_radian_exec(radian_exec::Cli::for_command(
+            radian_exec::Command::Config { command },
+        )),
         RadianCommand::Theme { command } => run_theme(command),
         RadianCommand::Footer { command } => run_footer(command),
         RadianCommand::Docs { topic } => run_docs(topic.as_deref()),
@@ -579,9 +577,9 @@ fn reserved(name: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// Runs one management command through the `agent-cli` dispatch and returns its exit code.
-fn run_agent_cli(cli: agent_cli::Cli) -> ExitCode {
-    ExitCode::from(agent_cli::run_blocking(cli) as u8)
+/// Runs one management command through the `radian-exec` dispatch and returns its exit code.
+fn run_radian_exec(cli: radian_exec::Cli) -> ExitCode {
+    ExitCode::from(radian_exec::run_blocking(cli) as u8)
 }
 
 /// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision

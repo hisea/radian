@@ -1,4 +1,4 @@
-//! A model adapter for the OpenAI **Responses** API, implementing `agent_core::Model` with
+//! A model adapter for the OpenAI **Responses** API, implementing `radian_core::Model` with
 //! streaming.
 //!
 //! This is the protocol ChatGPT-subscription (Codex) turns use
@@ -19,7 +19,7 @@
 //! its source line in `crates/agent-provider-openai-responses/WIRE.md`.
 //!
 //! Rate-limit headers (`x-codex-primary-*`, `x-codex-secondary-*`) are kept raw on
-//! [`agent_core::ModelResponse::limits`] without being parsed (ADR 0026;
+//! [`radian_core::ModelResponse::limits`] without being parsed (ADR 0026;
 //! ADR 0027 slice ④ parses them later).
 
 mod config;

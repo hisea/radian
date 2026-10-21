@@ -136,7 +136,7 @@ fn a_double_slash_sends_the_message_with_one_slash() {
         submit(&mut app, &service, "//hi"),
         vec![
             Effect::ExpandMentions { text: "/hi".into() },
-            Effect::SendFollowup(agent_core::Message::user("/hi"))
+            Effect::SendFollowup(radian_core::Message::user("/hi"))
         ]
     );
     app.session.projection.set_turn(TurnState::Running);
@@ -146,7 +146,7 @@ fn a_double_slash_sends_the_message_with_one_slash() {
             Effect::ExpandMentions {
                 text: "/steer me".into()
             },
-            Effect::Steer(agent_core::Message::user("/steer me"))
+            Effect::Steer(radian_core::Message::user("/steer me"))
         ]
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -299,7 +299,7 @@ fn a_skill_command_expands_through_the_host_then_sends() {
     });
     assert_eq!(
         update.effects,
-        vec![Effect::SendFollowup(agent_core::Message::user(expanded))]
+        vec![Effect::SendFollowup(radian_core::Message::user(expanded))]
     );
 
     // While a turn runs the same command steers.
@@ -353,7 +353,7 @@ fn skill_init_and_review_commands_expand_through_the_host_then_send() {
     });
     assert_eq!(
         update.effects,
-        vec![Effect::SendFollowup(agent_core::Message::user(expanded))]
+        vec![Effect::SendFollowup(radian_core::Message::user(expanded))]
     );
 
     // With a target: it travels as the args (`$ARGUMENTS` in the `review` body).
@@ -372,7 +372,7 @@ fn skill_init_and_review_commands_expand_through_the_host_then_send() {
     });
     assert_eq!(
         update.effects,
-        vec![Effect::SendFollowup(agent_core::Message::user(expanded))]
+        vec![Effect::SendFollowup(radian_core::Message::user(expanded))]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

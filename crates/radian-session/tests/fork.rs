@@ -5,8 +5,8 @@ mod common;
 
 use std::path::Path;
 
-use agent_core::{JournalRecord, Message, TranscriptJournal};
 use common::{TempDir, created};
+use radian_core::{JournalRecord, Message, TranscriptJournal};
 use radian_session::{
     EventData, ForkError, ForkRequest, RuntimeEvent, Session, SessionJournal, TurnOutcome, fork,
     fork_point_history, fork_with_journal, last_fork_point,
@@ -114,7 +114,7 @@ async fn the_materialized_history_equals_recover_at_the_same_point() {
     let (parent, _) = ids("equal");
     let (parent_path, boundary) = two_turn_parent(&dir, &parent).await;
     let session = Session::open(&parent_path).unwrap();
-    let expected = agent_core::recover(&session.journal_records_through(boundary)).unwrap();
+    let expected = radian_core::recover(&session.journal_records_through(boundary)).unwrap();
     assert_eq!(fork_point_history(&session, boundary).unwrap(), expected);
     assert_eq!(last_fork_point(&session), boundary);
 }

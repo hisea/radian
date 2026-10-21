@@ -6,13 +6,13 @@
 
 use std::sync::OnceLock;
 
-use agent_core::{
-    CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink, StopReason,
-};
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, message_item, output_item_done,
 };
 use agent_provider_openai_responses::{OpenAiResponsesConfig, build_client};
+use radian_core::{
+    CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink, StopReason,
+};
 use radian_host::oauth_chatgpt::Endpoints;
 use radian_host::{AuthStore, ChatGptModel, OAuthEntry};
 use serde_json::Value;

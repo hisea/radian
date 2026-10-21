@@ -2,8 +2,8 @@
 //!
 //! Providers without a usage endpoint (`anthropic`, `openai`) report their windows on every
 //! model response instead: the adapter keeps the raw headers on
-//! [`agent_core::ModelResponse::limits`], the turn hands them to the host on
-//! [`agent_core::AgentEvent::ModelResponseReceived`], and this module parses them into the
+//! [`radian_core::ModelResponse::limits`], the turn hands them to the host on
+//! [`radian_core::AgentEvent::ModelResponseReceived`], and this module parses them into the
 //! same [`UsageSnapshot`] the footer `usage` component and `/usage` read for the endpoint
 //! sources — same rendering rules, same one-line-per-window form.
 //!
@@ -16,7 +16,7 @@
 
 use std::time::SystemTime;
 
-use agent_core::RateLimits;
+use radian_core::RateLimits;
 
 use crate::usage::{Remaining, UsageSnapshot, UsageWindow};
 

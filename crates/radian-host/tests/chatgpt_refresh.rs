@@ -5,11 +5,11 @@
 
 use std::sync::OnceLock;
 
-use agent_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink};
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, message_item, output_item_done,
 };
 use agent_provider_openai_responses::{OpenAiResponsesConfig, build_client};
+use radian_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink};
 use radian_host::oauth_chatgpt::Endpoints;
 use radian_host::{AuthStore, ChatGptModel, OAuthEntry};
 use serde_json::Value;
@@ -89,7 +89,7 @@ fn request() -> ModelRequest {
 
 async fn complete(
     model: &ChatGptModel,
-) -> Result<agent_core::ModelResponse, agent_core::ModelError> {
+) -> Result<radian_core::ModelResponse, radian_core::ModelError> {
     model
         .complete(
             request(),

@@ -12,7 +12,7 @@ each mutation run with `--no-fail-fast`; the file was restored from a copy after
 | M4 | the snapshot names the real provider | hardcode `"provider": "openai-compatible"` in `open_journal` | ✅ caught (`the_session_snapshot_names_the_real_provider`) |
 
 The shared `describe` (item 2) is a pure text move; the two startup-text tests that pin it
-are `the_startup_text_does_not_claim_credential_isolation` (agent-cli) and
+are `the_startup_text_does_not_claim_credential_isolation` (radian-exec) and
 `pty_the_workspace_write_notice_names_the_mcp_sandbox_gap` (radian-tui); both were run and
 pass, and there is no separate behavior to mutate beyond the wording those tests already fix.
 
@@ -85,7 +85,7 @@ M7 里的单元测试 `window_tokens_is_min_of_input_and_context_and_zero_is_unk
 ## ADR 0021 第二片：项目身份与 `MemoryService`（2026-10-13）
 
 Base `5d80946` · 一次性 worktree `/tmp/memsvc-mut`（从 HEAD 建，做完删掉）· **独立 `CARGO_TARGET_DIR`**
-· 每个变异跑 `cargo test -p radian-host memory` 与 `cargo test -p agent-cli --test cli memory`
+· 每个变异跑 `cargo test -p radian-host memory` 与 `cargo test -p radian-exec --test cli memory`
 （都 `--no-fail-fast`），然后 `git checkout -- .`；`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -97,7 +97,7 @@ Base `5d80946` · 一次性 worktree `/tmp/memsvc-mut`（从 HEAD 建，做完�
 | M6 | 识别键不向上查找祖先目录 | `memory::identity::tests::a_subdirectory_finds_the_repository_above_it` | ✅ 抓住 |
 | M7 | `candidate_name` 不把 `.git` 当仓库名 | `memory::identity::tests::candidate_names_use_the_repository_directory_for_a_common_dir` | ✅ 抓住 |
 
-6/6 全抓（M3 在 `agent-cli/MUTATIONS.md`）。M4/M5 同时被单元测试与 CLI 测试抓住，说明
+6/6 全抓（M3 在 `radian-exec/MUTATIONS.md`）。M4/M5 同时被单元测试与 CLI 测试抓住，说明
 「服务层规则」与「命令接线」两条路径都有覆盖。
 
 **评审补充（合并时，2026-10-13）**：原实现在没有 `commondir` 时取 gitdir 的祖父目录，真实 submodule（`<super>/.git/modules/<name>`，git 不为它写 `commondir`）因此被解析成上层仓库的 `.git`，两者静默共享一个项目。改为 git 自己的规则：没有 `commondir` 时 gitdir 即 common dir。变异"恢复祖父回退"由 `a_submodule_is_its_own_project_not_the_superprojects` 与 `a_missing_commondir_means_the_gitdir_is_the_common_dir` 抓住。
@@ -134,7 +134,7 @@ Base `4bf767d` · 一次性 worktree `/tmp/memtui-mut` · 独立 `CARGO_TARGET_D
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
-| M4 | `confirm` 恒为 `None`（`confirmed=false` 仍执行写操作） | `memory::commands::tests::an_unconfirmed_forget_writes_nothing`；`agent_cli::cli::memory_forget_needs_confirmation_off_a_terminal`、`memory_split_and_merge_move_records_between_projects`；`radian_tui::tests::command::{a_confirmed_forget_waits_for_y_and_n_keeps_the_record, a_pending_confirmation_keeps_keys_out_of_the_input_box}`、`command::tests::memory_writes_become_a_confirmation` | ✅ |
+| M4 | `confirm` 恒为 `None`（`confirmed=false` 仍执行写操作） | `memory::commands::tests::an_unconfirmed_forget_writes_nothing`；`radian_exec::cli::memory_forget_needs_confirmation_off_a_terminal`、`memory_split_and_merge_move_records_between_projects`；`radian_tui::tests::command::{a_confirmed_forget_waits_for_y_and_n_keeps_the_record, a_pending_confirmation_keeps_keys_out_of_the_input_box}`、`command::tests::memory_writes_become_a_confirmation` | ✅ |
 
 ## sessions：导出脱敏
 
@@ -174,7 +174,7 @@ Base `0a3c197` · 一次性检出 `/tmp/adaptr-mut`（detached，独立 target�
 
 Base `8028d9e` · 一次性 worktree `/tmp/config-mut`（从 HEAD 建，做完删掉）· **独立
 `CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p radian-host`、
-`cargo test -p radian-tui --lib --test config`、以及 `cargo test -p agent-cli --test cli` 的
+`cargo test -p radian-tui --lib --test config`、以及 `cargo test -p radian-exec --test cli` 的
 `config` / `a_plaintext_secret` / `a_lower_schema` 过滤（都 `--no-fail-fast`），然后
 `git checkout -- .`；`git status --short` 为空。
 
@@ -294,8 +294,8 @@ Base `deb583f` · 在本任务工作树内逐条施加后从副本还原（`--no
 ## ADR 0026 第 0 片（b）交叉引用
 
 变异 M23（静默忽略 `model.api_key`）、M24（漏掉 `x-opencode-session`）、M25（非通用描述符接受
-`--base-url`）改的是本 crate 的代码，但抓住它们的测试在 `agent-cli`；明细见
-`crates/agent-cli/MUTATIONS.md` 的 M22–M25。
+`--base-url`）改的是本 crate 的代码，但抓住它们的测试在 `radian-exec`；明细见
+`crates/radian-exec/MUTATIONS.md` 的 M22–M25。
 
 ## ui-r2：`/theme` 写回与启动偏好（2026-10-14）
 
@@ -324,8 +324,8 @@ Base `442f55a` · 变异只在一次性 worktree 里做（`git worktree add --de
 
 变异 L3（查 key 仍用通用描述符的槽位）、L4（同名时 auth.json 压过配置）、L5（验证请求的
 报错带出 key）、L6（`/logout` 清空整个 auth.json）改的是本 crate 的 `provider.rs`/`login.rs`/
-`auth.rs`，抓住它们的测试分别在 `agent-cli`（具名 provider 验收）、`radian-host`（`login::tests`）
-与 `radian-tui`（logout pty）；明细见 `crates/agent-cli/MUTATIONS.md` 的 L1–L7。
+`auth.rs`，抓住它们的测试分别在 `radian-exec`（具名 provider 验收）、`radian-host`（`login::tests`）
+与 `radian-tui`（logout pty）；明细见 `crates/radian-exec/MUTATIONS.md` 的 L1–L7。
 ## ADR 0026 D9：启动解析与恢复（2026-10-13）
 
 Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
@@ -366,7 +366,7 @@ Base `b46f506` · 一次性 worktree `/tmp/radian-pi-mut-b1`，跑完删除。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
-| B1a | 去掉档位预算夹取（`Enabled` 原样发出） | `agent-cli::a_level_budget_clamps_to_max_tokens` | ✅ |
+| B1a | 去掉档位预算夹取（`Enabled` 原样发出） | `radian-exec::a_level_budget_clamps_to_max_tokens` | ✅ |
 
 ## skills 片 1+2：发现、提示节、`skill` 工具（ADR 0025）
 
@@ -687,8 +687,8 @@ Each mutation was made in place, restored from a copy in `/tmp` and compared wit
 
 SR-S1 is the hole this task closed. Under it nothing else failed: the rest of `radian-host`
 (276 lib tests and 15 other integration files, 87 tests), `radian-tui`'s
-`tests/model_switch.rs` (16 tests) and the whole `radian-tui`/`agent-cli` suites stayed green.
-(`-p radian-tui -p agent-cli` needs `cargo build -p agent-extensions --bin mcp-fixture` first;
+`tests/model_switch.rs` (16 tests) and the whole `radian-tui`/`radian-exec` suites stayed green.
+(`-p radian-tui -p radian-exec` needs `cargo build -p agent-extensions --bin mcp-fixture` first;
 without it 11 tests fail on "mcp-fixture is not built", which is unrelated to this decision —
 they were re-run green after the fixture was built.) SR-S2 was already caught by
 `reasoning_replay.rs`; the two new tests pin the same decision on the switch path, where
@@ -742,13 +742,13 @@ afterwards (`md5` compared, `git status --short` empty), `cargo test -p radian-h
 
 Base `6f2a08b` · in-place in this worktree, each mutation applied with `python3` from a copy and
 restored from it afterwards (`md5` compared, `git status --short` empty), `cargo test -p
-radian-host --lib --no-fail-fast memory::` (AC-1 additionally: `cargo test -p agent-cli --test
+radian-host --lib --no-fail-fast memory::` (AC-1 additionally: `cargo test -p radian-exec --test
 cli -- memory` after `cargo build -p radian-tui --bin radian`, and `cargo test -p radian-tui
 --test pty -- pty_a_memory_add`).
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| AC-1 | `project_for_write` never registers: a git workspace with an unknown key gets the `Unlinked` error (the pre-revision behaviour) | ✅ caught | `memory::service::tests::{a_write_registers_a_git_workspace_and_a_read_never_does, a_write_outside_a_repository_is_refused_and_creates_nothing, a_write_still_creates_when_a_candidate_previous_project_exists}`, `memory::tools::tests::{a_save_in_a_git_workspace_registers_the_project_and_notices_once, a_save_outside_a_project_workspace_is_refused_without_suggesting_global}`, and end to end `agent_cli::cli::{memory_add_registers_a_git_workspace_and_prints_one_notice, memory_save_in_a_git_workspace_creates_the_project_and_exec_shows_the_notice, memory_unlinked_workspace_refuses_project_writes_and_lists_global}`, `radian_tui::pty::pty_a_memory_add_shows_the_created_project_notice` |
+| AC-1 | `project_for_write` never registers: a git workspace with an unknown key gets the `Unlinked` error (the pre-revision behaviour) | ✅ caught | `memory::service::tests::{a_write_registers_a_git_workspace_and_a_read_never_does, a_write_outside_a_repository_is_refused_and_creates_nothing, a_write_still_creates_when_a_candidate_previous_project_exists}`, `memory::tools::tests::{a_save_in_a_git_workspace_registers_the_project_and_notices_once, a_save_outside_a_project_workspace_is_refused_without_suggesting_global}`, and end to end `radian_exec::cli::{memory_add_registers_a_git_workspace_and_prints_one_notice, memory_save_in_a_git_workspace_creates_the_project_and_exec_shows_the_notice, memory_unlinked_workspace_refuses_project_writes_and_lists_global}`, `radian_tui::pty::pty_a_memory_add_shows_the_created_project_notice` |
 | AC-2 | `MemoryService::state` registers a git workspace itself, so every **read** creates a project | ✅ caught | `memory::tools::tests::a_read_never_registers_a_project`, `memory::service::tests::{a_write_registers_a_git_workspace_and_a_read_never_does, a_write_still_creates_when_a_candidate_previous_project_exists}`, `memory::tools::tests::a_save_in_a_git_workspace_registers_the_project_and_notices_once` |
 | AC-3 | `project_for_write` drops the git check (registers any unregistered directory, `/tmp` included) | ✅ caught | `memory::service::tests::a_write_outside_a_repository_is_refused_and_creates_nothing`, `memory::tools::tests::a_save_outside_a_project_workspace_is_refused_without_suggesting_global` |
 | AC-4 | the `memory_unlinked` tool error says "Save to the global scope instead" again | ✅ caught | `memory::tools::tests::the_unlinked_tool_error_never_suggests_global` |
@@ -794,7 +794,7 @@ set), `cargo test -p radian-host --locked` and the named tests of the other crat
 Base `b63ac20`（本 worktree，dogfood/memory-r2）· 变异直接做在本 worktree，每个变异前把文件
 复制到 `/tmp/r2-mut*/`，跑完后从副本还原并 `diff -q` 确认一致；`git status --short` 在跑完后只剩
 本片的正常改动。每个变异用 `--no-fail-fast`；动到宿主代码的那几条先
-`cargo build -p radian-tui --bin radian`（agent-cli 的测试会拒绝过期的二进制）。
+`cargo build -p radian-tui --bin radian`（radian-exec 的测试会拒绝过期的二进制）。
 
 **第一次跑法有错**（把 `--no-fail-fast` 放在 `--` 之后当成了过滤器，M1 因此看起来"被抓住"），
 下表是改正后重跑的结果：每条都给出真正失败的测试名与 panic 行。
@@ -802,12 +802,12 @@ Base `b63ac20`（本 worktree，dogfood/memory-r2）· 变异直接做在本 wor
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | M1 | 固定段的查询文本改回**最后一条**用户消息，改在 `MemoryHooks::before_model_call` 的 `.fixed(...)` 里 | `radian_host/tests/memory_injection.rs::the_hook_orders_the_block_by_the_first_user_message` | ✅ caught |
-| M1b | 同一变异，改在追加接缝的查询回退（`addition_for_turn` 里的 `first_user_text(transcript)`） | `agent_cli::cli::{a_resumed_session_ranks_the_block_by_its_first_user_message, a_forked_child_ranks_the_block_by_the_parents_first_user_message}` | ✅ caught |
+| M1b | 同一变异，改在追加接缝的查询回退（`addition_for_turn` 里的 `first_user_text(transcript)`） | `radian_exec::cli::{a_resumed_session_ranks_the_block_by_its_first_user_message, a_forked_child_ranks_the_block_by_the_parents_first_user_message}` | ✅ caught |
 | M2 | 驱动器用 `InputSource::User` 注入追加消息 | `radian_runtime::tests/driver.rs::a_host_addition_lands_after_the_user_message_and_before_the_first_call` | ✅ caught |
 | M3 | 追加消息改到 `drain_steering` **之后**注入（晚一步到） | 同上（transcript 顺序：追加消息不再紧跟用户消息） | ✅ caught |
 | M4 | 追加候选忽略去重账本（`exclude` 为空） | `radian_host/tests/memory_injection.rs::a_later_turn_appends_its_new_hits_as_one_system_message` | ✅ caught |
 | M5 | 固定段每次调用重算（去掉 `fixed` 的缓存短路） | 宿主：`memory_injection.rs::{the_block_reaches_the_system_prompt_and_the_event_is_written_once, a_later_turn_appends_its_new_hits_as_one_system_message, an_addition_budget_drops_whole_records_and_additions_can_be_off}`；CLI：`the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once` | ✅ caught |
-| M6 | `<session>` 每次请求重算（去掉 key 比较） | `agent_cli::cli::the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once`（write 之后 `git:` 行从 `(clean)` 变成未提交） | ✅ caught |
+| M6 | `<session>` 每次请求重算（去掉 key 比较） | `radian_exec::cli::the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once`（write 之后 `git:` 行从 `(clean)` 变成未提交） | ✅ caught |
 | M7 | `/model` 后 `<session>` 不重算（重算分支改成 `let _ = key;`） | `radian_host::prompt::tests::the_session_layer_changes_only_when_the_model_route_does` | ✅ caught |
 
 8/8 caught。M1 与 M1b 是同一个行为的两条代码路径，**必须分开记**：正常一轮里追加接缝先算固定段
@@ -978,7 +978,7 @@ logic's shape, even though they do not touch the production closure's bytes.
 ## ADR 0042: 渲染侧移出 host（`mermaid_check`、`mermaid_layout`、`diagrams` skill 删除，2026-10-16）
 
 本 ADR 的 code 改动没有新的 host 变异可跑：`radian-host/src/mermaid.rs`、`mermaid_layout.rs`
-与它们的测试，以及内建 `diagrams` skill、`mermaid_check` 工具（挂载、dispatch、agent-cli 表、
+与它们的测试，以及内建 `diagrams` skill、`mermaid_check` 工具（挂载、dispatch、radian-exec 表、
 permission allow 名单）全部删除；`radian-tui` 改为直接依赖 vendored 的
 `third_party/grok-mermaid`。因此本文件里这些旧的节不再有对应代码或测试，保留为历史：
 
@@ -1118,7 +1118,7 @@ restored file with `diff -q`; afterwards `git diff` shows only the intended file
 变异把 `git_commit` 的 `ToolSpec` 重新挂回 `HostTools::open_session` 的 `specs`
 （`cp` 到 `/tmp/s0a-tools.rs.bak`，改后 `cp` 还原并 `cmp` 一致；变异版先
 `cargo build -p radian-tui --bin radian` 再跑测试）。命令：
-`cargo test -p agent-cli --locked --test cli a_headless_exec_mounts_no_orchestration_tools`。
+`cargo test -p radian-exec --locked --test cli a_headless_exec_mounts_no_orchestration_tools`。
 
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
@@ -1129,7 +1129,7 @@ restored file with `diff -q`; afterwards `git diff` shows only the intended file
 `src/subagent.rs` 与 `src/session.rs` 的六条变异；每条 `cp` 到 `.radian/scratch/mut/`，改后
 `cp` 还原并 `cmp` 一致。改到会影响运行中子进程的变异版前，先
 `cargo build -p radian-tui --bin radian`（`common::radian_bin()` 会拒绝过期二进制），再跑
-`timeout 300 cargo test -p agent-cli --locked --test subagent --no-fail-fast <test>`。
+`timeout 300 cargo test -p radian-exec --locked --test subagent --no-fail-fast <test>`。
 
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
@@ -1151,8 +1151,8 @@ restored file with `diff -q`; afterwards `git diff` shows only the intended file
 
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
-| PJ-1 | `project::apply_profile` 接受 `full`（`out.tier = Some(Preset::FullAccess)`） | ✅ 1 failed（`cannot widen` 警告缺失） | `agent-cli::cli::a_project_config_cannot_widen_the_tier`；单元 `project::tests::full_in_a_project_config_is_refused_with_a_warning` |
-| PJ-2 | `project::narrow` 取更宽者（`rank(a) >= rank(b)`） | ✅ 1 failed（记住的 `full` 没有被项目的 `workspace` 收窄） | `agent-cli::cli::a_remembered_tier_is_narrowed_by_the_project`；单元 `project::tests::the_narrower_tier_wins` |
+| PJ-1 | `project::apply_profile` 接受 `full`（`out.tier = Some(Preset::FullAccess)`） | ✅ 1 failed（`cannot widen` 警告缺失） | `radian-exec::cli::a_project_config_cannot_widen_the_tier`；单元 `project::tests::full_in_a_project_config_is_refused_with_a_warning` |
+| PJ-2 | `project::narrow` 取更宽者（`rank(a) >= rank(b)`） | ✅ 1 failed（记住的 `full` 没有被项目的 `workspace` 收窄） | `radian-exec::cli::a_remembered_tier_is_narrowed_by_the_project`；单元 `project::tests::the_narrower_tier_wins` |
 | TS-1 | `trust::apply` 的 `TrustHereSandbox` 不写 `access::remember_for` | ✅ 1 failed（`access/access.json` 不存在） | `radian-tui::pty::pty_trust_sandbox_choice_writes_the_access_record` |
 
 3/3 抓住。
@@ -1178,16 +1178,16 @@ Command: `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast me
 
 Worktree `.radian-worktrees/subagent-gaps`, branch `dogfood/subagent-gaps`. Each mutation was
 applied in place in `crates/radian-host/src/subagent.rs`, restored from a `cp` and confirmed
-byte-identical with `cmp`. SG-1 changes the child the tool spawns, so the `agent-cli` run was
+byte-identical with `cmp`. SG-1 changes the child the tool spawns, so the `radian-exec` run was
 made after `cargo build -p radian-tui --bin radian` (the harness refuses a stale binary).
 
 Commands: `timeout 300 cargo test -p radian-host --locked --no-fail-fast --test subagent_headers`
-(SG-1, radian-host); `timeout 300 cargo test -p agent-cli --locked --no-fail-fast --test subagent
+(SG-1, radian-host); `timeout 300 cargo test -p radian-exec --locked --no-fail-fast --test subagent
 the_parents_header` (SG-1, end to end).
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| SG-1 | the child `env` carrying the parent's `--header` values is never set (`if false`) | ✅ 2 failed | `agent-cli::subagent::the_parents_header_reaches_the_child_and_nothing_else_writes_it` (`the child must send the parent's header`: `left: None`); `radian_host::subagent_headers::the_header_value_reaches_the_child_through_the_environment_not_its_argv` (`EOF while parsing` an empty variable) |
+| SG-1 | the child `env` carrying the parent's `--header` values is never set (`if false`) | ✅ 2 failed | `radian-exec::subagent::the_parents_header_reaches_the_child_and_nothing_else_writes_it` (`the child must send the parent's header`: `left: None`); `radian_host::subagent_headers::the_header_value_reaches_the_child_through_the_environment_not_its_argv` (`EOF while parsing` an empty variable) |
 | SG-2 | `current_route` returns the startup route (the config slot is ignored) | ✅ 1 failed | `radian_host::subagent_route::the_child_runs_the_parents_live_model_route` (the recorded argv names `--model old`; the parent's own request still named `new`, so the switch itself is proven) |
 | SG-3 | `SessionKillGuard::drop` does nothing (plain `kill_on_drop`) | ✅ 1 failed | `radian_host::subagent_drop::dropping_the_call_leaves_no_grandchild_alive` (the logged grandchild pid was still alive after the 10 s bound) |
 
@@ -1201,13 +1201,13 @@ restored from a `cp` under `/tmp/radian-fix1/mut/` and confirmed byte-identical 
 run was made after `cargo build -p radian-tui --bin radian` and `cargo build -p agent-extensions
 --bin mcp-fixture` (the harness refuses a stale binary).
 
-Commands: `timeout 300 cargo test -p agent-cli --locked --no-fail-fast --test subagent <name>`.
+Commands: `timeout 300 cargo test -p radian-exec --locked --no-fail-fast --test subagent <name>`.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| FH-1 | `take_child_headers_from_env` reads the variable but does not `remove_var` it | ✅ 1 failed (the child's `shell` command wrote `["X-Test=child-env-secret-9"]` into the dump file) | `agent-cli::subagent::the_childs_own_environment_no_longer_carries_the_parents_header` |
+| FH-1 | `take_child_headers_from_env` reads the variable but does not `remove_var` it | ✅ 1 failed (the child's `shell` command wrote `["X-Test=child-env-secret-9"]` into the dump file) | `radian-exec::subagent::the_childs_own_environment_no_longer_carries_the_parents_header` |
 | FH-2 | the MCP spawn's `env_remove("RADIAN_CHILD_HEADERS")` is dropped | ⚠️ not caught alone (with FH-1 fixed the variable is already out of the child's environment, so `inherit_env` copies nothing) | none — the belt and braces is observable only together with FH-1 |
-| FH-1+FH-2 | both removals gone | ✅ 1 failed (the MCP server's env dump held `["X-Test=mcp-env-secret-5"]`) | `agent-cli::subagent::an_mcp_server_the_child_starts_does_not_get_the_parents_header` |
+| FH-1+FH-2 | both removals gone | ✅ 1 failed (the MCP server's env dump held `["X-Test=mcp-env-secret-5"]`) | `radian-exec::subagent::an_mcp_server_the_child_starts_does_not_get_the_parents_header` |
 
 ## Fix round 1 B: the two-step stop — SIGTERM, the grace, then the session SIGKILL (2026-10-17)
 
@@ -1223,13 +1223,13 @@ from a `cp` under `/tmp/radian-fix1/mut/` and confirmed byte-identical with `cmp
 made after `cargo build -p radian-tui --bin radian` (the harness refuses a stale binary).
 
 Commands: `timeout 400 cargo test -p radian-host --locked --no-fail-fast --test subagent_stop`;
-`timeout 400 cargo test -p agent-cli --locked --no-fail-fast --test subagent a_cancelled`.
+`timeout 400 cargo test -p radian-exec --locked --no-fail-fast --test subagent a_cancelled`.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| TS-1 | the cancel path sends SIGKILL straight away (the graceful step is skipped) | ✅ 3 failed | `radian_host::subagent_stop::cancelling_the_call_stops_what_the_child_started` (the escaped grandchild was still alive after 10 s); `agent-cli::subagent::a_cancelled_parent_turn_stops_the_command_the_childs_shell_started` and `..._stops_the_childs_background_job` (both timed out waiting for the pid to go) |
+| TS-1 | the cancel path sends SIGKILL straight away (the graceful step is skipped) | ✅ 3 failed | `radian_host::subagent_stop::cancelling_the_call_stops_what_the_child_started` (the escaped grandchild was still alive after 10 s); `radian-exec::subagent::a_cancelled_parent_turn_stops_the_command_the_childs_shell_started` and `..._stops_the_childs_background_job` (both timed out waiting for the pid to go) |
 | TS-2 | the drop guard sends SIGKILL straight away | ✅ 1 failed | `radian_host::subagent_stop::dropping_the_call_stops_what_the_child_started` (the escaped grandchild was still alive). `radian_host::subagent_drop::dropping_the_call_leaves_no_grandchild_alive` still passes: it pins the fallback. |
-| TS-3 | `radian exec` installs no SIGTERM listener (the kernel's default action kills the child at once; this mutation lives in `crates/agent-cli/src/events.rs`, see that crate's MUTATIONS.md) | ✅ 2 failed | both `agent-cli` tests above (the command and the job outlived the cancelled turn). The two `subagent_stop` tests still pass: their stub handles SIGTERM itself. |
+| TS-3 | `radian exec` installs no SIGTERM listener (the kernel's default action kills the child at once; this mutation lives in `crates/radian-exec/src/events.rs`, see that crate's MUTATIONS.md) | ✅ 2 failed | both `radian-exec` tests above (the command and the job outlived the cancelled turn). The two `subagent_stop` tests still pass: their stub handles SIGTERM itself. |
 ## ADR 0026: protocol from the models.dev `npm`, hard-coded per-protocol base URLs, the bundled snapshot, Responses with an API key (2026-10-17)
 
 Each mutation was applied in place under `src/`, the catching test binary was run alone with
@@ -1277,10 +1277,10 @@ because `common::radian_bin()` refuses a stale one.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | MP-1 | the known-provider check is gone (every `a/b` warns) | ✅ 1 failed (`left: Some("…--provider some-org --model foo?")`, `right: None`) | `startup::tests::the_model_hint_fires_only_for_a_known_provider_with_no_provider_flag` |
-| MP-2 | the `--provider` guard is gone (an explicit `--provider` still warns) | ✅ 1 failed (`left: Some("…--provider anthropic --model claude-x?")`, `right: None`) | the same unit test; and `agent-cli::exec::the_model_provider_hint_fires_once_without_a_provider_flag` (`err.contains("did you mean")` where none is allowed) |
+| MP-2 | the `--provider` guard is gone (an explicit `--provider` still warns) | ✅ 1 failed (`left: Some("…--provider anthropic --model claude-x?")`, `right: None`) | the same unit test; and `radian-exec::exec::the_model_provider_hint_fires_once_without_a_provider_flag` (`err.contains("did you mean")` where none is allowed) |
 
 Commands: `timeout 570 cargo test -p radian-host --lib --locked --no-fail-fast the_model_hint`
-(both); `timeout 570 cargo test -p agent-cli --test exec --locked --no-fail-fast
+(both); `timeout 570 cargo test -p radian-exec --test exec --locked --no-fail-fast
 the_model_provider_hint` (MP-2). MP-1 is caught only by the unit test: the CLI test's cases use
 `opencode-go/x` and `anthropic/claude-x`, both real descriptors, so warning on every slash would
 not change its answer.
@@ -1334,9 +1334,9 @@ binary) and rebuilt again after the restore (the restore-build log matches the p
 
 | # | Mutation | Result | Test(s) that caught it |
 |---|---|---|---|
-| U1 | the `<runtime>` flag back to the tier (`unix_sockets_restricted: workspace_mode` in `session/open.rs`) | ✅ 1 failed (`bwrap does not restrict Unix sockets, so the sentence must be gone`, the false sentence is back on Linux) | `agent-cli cli::the_workspace_system_prompt_unix_socket_sentence_follows_the_backend` |
+| U1 | the `<runtime>` flag back to the tier (`unix_sockets_restricted: workspace_mode` in `session/open.rs`) | ✅ 1 failed (`bwrap does not restrict Unix sockets, so the sentence must be gone`, the false sentence is back on Linux) | `radian-exec cli::the_workspace_system_prompt_unix_socket_sentence_follows_the_backend` |
 
-Commands: `timeout 570 cargo test -p agent-cli --locked --test cli --no-fail-fast
+Commands: `timeout 570 cargo test -p radian-exec --locked --test cli --no-fail-fast
 the_workspace_system_prompt_unix_socket_sentence_follows_the_backend` (after
 `cargo build -p radian-tui --bin radian --locked`, both times). The prompt unit test
 (`radian-host --lib prompt::the_runtime_unix_socket_sentence_follows_the_backend`) does not touch
@@ -1354,11 +1354,11 @@ log matches the pre-mutation one; the over-budget and headless set tests pass on
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| MT-1 | `injection::exceeds_budget`恒为 `true`（总是挂载） | ✅ 1 failed (`a memory within the budget mounts no search`) | `agent-cli::cli::memory_search_mounts_only_past_the_injection_budget`（预算内那半） |
-| MT-2 | `injection::exceeds_budget`恒为 `false`（永不挂载） | ✅ 1 failed (`a memory past the budget mounts the search`) | `agent-cli::cli::memory_search_mounts_only_past_the_injection_budget`（超预算那半） |
+| MT-1 | `injection::exceeds_budget`恒为 `true`（总是挂载） | ✅ 1 failed (`a memory within the budget mounts no search`) | `radian-exec::cli::memory_search_mounts_only_past_the_injection_budget`（预算内那半） |
+| MT-2 | `injection::exceeds_budget`恒为 `false`（永不挂载） | ✅ 1 failed (`a memory past the budget mounts the search`) | `radian-exec::cli::memory_search_mounts_only_past_the_injection_budget`（超预算那半） |
 | MT-3 | `memory_rules()` 去掉 `memory_search` 的 `allow` | ✅ 1 failed（`memory_search` 不再是 `Allow`） | `radian-permissions::profile::memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks` |
 | MT-4 | `default.md` 删掉 Remembering 一节 | ✅ 1 failed（`contains("/memory add")`） | `radian-host::prompt::the_builtin_default_role_carries_its_rules` |
-| MT-5 | `memory_save` 的 spec 加回 `specs()` | ✅ 1 failed (`only \`memory_search\` mounts, never \`memory_save\``) | `agent-cli::cli::memory_search_mounts_only_past_the_injection_budget`（超预算那半的缺席断言） |
+| MT-5 | `memory_save` 的 spec 加回 `specs()` | ✅ 1 failed (`only \`memory_search\` mounts, never \`memory_save\``) | `radian-exec::cli::memory_search_mounts_only_past_the_injection_budget`（超预算那半的缺席断言） |
 
 5/5 抓住。注：MT-5 的空内存钉住集合（headless `skill`+`subagent`、TUI 15 个）看不到它——
 预算内整个 memory provider 不挂载，`specs()` 根本不被咨询；缺席断言放在超预算的那半里，

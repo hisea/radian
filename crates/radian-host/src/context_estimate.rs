@@ -1,10 +1,10 @@
 //! `/context`: per-category estimate of the next request (ADR 0015 C1/C2).
 //!
 //! The estimator rule is ADR 0015 C2 (ASCII bytes rounded up ÷ `bytes_per_token`,
-//! one token per non-ASCII char), the same rule `agent_core::budget` uses. This
+//! one token per non-ASCII char), the same rule `radian_core::budget` uses. This
 //! module reimplements only the counting (it cannot reuse `budget`'s private
 //! `add_str`/`add_json`), and pins the total against
-//! `agent_core::budget::estimate_tokens_with` in tests, so the two cannot drift.
+//! `radian_core::budget::estimate_tokens_with` in tests, so the two cannot drift.
 //!
 //! The sum of the categories equals the total: sizes are summed first (one
 //! `div_ceil`), then the remainder of the division is distributed to the
@@ -16,7 +16,7 @@
 //! numbers (`categories` + `free` + `buffer` = `window`) and the per-item
 //! detail (context files, skills, MCP/built-in tools, memory records).
 
-use agent_core::{ContentPart, Message, ModelRequest, ToolSpec};
+use radian_core::{ContentPart, Message, ModelRequest, ToolSpec};
 
 /// One estimated category, in display order.
 #[derive(Debug, Clone, PartialEq)]
@@ -650,7 +650,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
 
 /// The request this breakdown was computed from, for the total-equality test.
 pub fn total_of(request: &ModelRequest, bytes_per_token: u32, count_reasoning: bool) -> u64 {
-    agent_core::budget::estimate_tokens_with(request, bytes_per_token, count_reasoning)
+    radian_core::budget::estimate_tokens_with(request, bytes_per_token, count_reasoning)
 }
 
 /// Rounds tokens for display, the same rule the plain-text notices use so the
@@ -756,7 +756,7 @@ pub fn notice_lines(report: &ContextReport) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{MessageMeta, ToolConcurrency};
+    use radian_core::{MessageMeta, ToolConcurrency};
     use serde_json::json;
 
     fn spec(name: &str) -> ToolSpec {
@@ -795,7 +795,7 @@ mod tests {
                     meta: MessageMeta::default(),
                 },
                 Message::Tool {
-                    result: agent_core::ToolResult::success(
+                    result: radian_core::ToolResult::success(
                         "c1",
                         vec![ContentPart::text("output")],
                     ),

@@ -1,11 +1,11 @@
 # radian-permissions
 
 The permission layer of ADR 0012: `ApprovalPolicy` + `ToolRuleSet`, implemented as one
-`agent_core::Hooks`. It decides **allow / ask / deny** for a tool call; it does not enforce
+`radian_core::Hooks`. It decides **allow / ask / deny** for a tool call; it does not enforce
 anything. `SandboxMode` (the execution boundary) is a separate layer and is never widened
 here — approval cannot turn a sandbox refusal into a run.
 
-`agent-cli` and `radian-tui` both wire this layer in as their `Hooks` implementation: their
+`radian-exec` and `radian-tui` both wire this layer in as their `Hooks` implementation: their
 `--profile` / `--approval` / `--allow-shell-command` flags build one of its `Profile`s and
 write every decision to the session journal. The `radian-runtime` driver is not itself a host.
 
@@ -260,6 +260,6 @@ transcript record, so it never appears in `journal_records`/`replay`.
 - Only the modelled tool argument shapes (`command`, `path`, else the name) are matched; a
   tool that carries its resource elsewhere would fall to `Name` (and thus typically to `ask`).
 - The `Mcp` matcher is `name.contains("__")`, not a registry lookup.
-- The layer is wired into `agent-cli` and `radian-tui` (see the top of this file), but those
+- The layer is wired into `radian-exec` and `radian-tui` (see the top of this file), but those
   hosts only ever produce `InputSource::User` turns; the non-human paths are covered by the
   unit tests in `tests/hooks.rs`, not end to end.

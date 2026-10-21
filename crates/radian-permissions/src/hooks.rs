@@ -1,11 +1,11 @@
-//! The permission layer as an `agent_core::Hooks` implementation.
+//! The permission layer as an `radian_core::Hooks` implementation.
 
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use agent_core::{HookContext, HookError, Hooks, InputSource, ToolCall, ToolDecision};
+use radian_core::{HookContext, HookError, Hooks, InputSource, ToolCall, ToolDecision};
 use serde_json::Value;
 
 use crate::approval::{ApprovalOutcome, ApprovalRequest, Approver};

@@ -2,7 +2,7 @@
 
 `crates/radian-sandbox` 把两个 spike 变成产品代码：macOS 的 `sandbox-exec` + SBPL，和 Linux 的
 `bubblewrap`。它只提供一件事——**受约束地启动一个子进程**；审批（`ApprovalPolicy`）与规则集
-（`ToolRuleSet`）不在本 crate，也**没有**接进 `agent-cli`。
+（`ToolRuleSet`）不在本 crate，也**没有**接进 `radian-exec`。
 
 **`full` 的安全声明：** `full` 信任你的环境，不弹任何内建审批，也不防陌生仓库里的提示注入——恶意的 skill、配置与上下文文件里的指令在 `full` 下畅通无阻。想要边界就用 `workspace`、容器或专用 OS 用户。
 
@@ -206,7 +206,7 @@ Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就�
 
 - `GitAccess::ReadOnly`（**默认**）：发现到的 git 元数据整块只读——就是今天的行为。任务 agent 保持
   它，逃逸矩阵的 `git_readonly` 组也钉住它。
-- `GitAccess::WritableExceptExec`：`.git` 可写，只把**能执行代码的入口**留成只读。`agent-cli` 与
+- `GitAccess::WritableExceptExec`：`.git` 可写，只把**能执行代码的入口**留成只读。`radian-exec` 与
   `radian-tui` 在 `WorkspaceWrite` 档位为通用会话传这个值（各自 `profile.rs` 一条单测钉住接线）。
 
 默认取更窄的 `ReadOnly`：调用方必须点名 `WritableExceptExec` 才会放宽，忘了接线的宿主退回安全一侧。
@@ -394,9 +394,9 @@ auto-maintenance**（git 2.55 会跑；macOS 的 2.53 不跑），与本切片�
 `git config maintenance.auto false` + `gc.auto 0`。变异（去掉这两行）在 VM 上 20 次跑出 **5 次失败**；
 带上修复 20 次 **0 失败**。**未改动任何产品规则**。
 
-**5. `agent-cli` 档位接线（Linux 首跑）**：先 `cargo build -p agent-extensions --bin mcp-fixture`
-（`cargo test -p agent-cli` 单独跑不会自动构建它，测试里有明确的报错提示），再
-`cargo test -p agent-cli` **49/49 通过**，连跑 3 次稳定。含
+**5. `radian-exec` 档位接线（Linux 首跑）**：先 `cargo build -p agent-extensions --bin mcp-fixture`
+（`cargo test -p radian-exec` 单独跑不会自动构建它，测试里有明确的报错提示），再
+`cargo test -p radian-exec` **49/49 通过**，连跑 3 次稳定。含
 `a_failed_sandbox_probe_refuses_instead_of_degrading`（探针失败即拒绝，模型一次都没跑）、
 `the_startup_text_does_not_claim_credential_isolation`、无沙箱不注册 `shell`。
 
@@ -454,7 +454,7 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 复用旧的 `target/`。只写 `/tmp` 下自建目录，未碰 `~/.ssh` 或任何凭据，未改系统文件。
 
 **1. 全工作区测试**：`cargo test --workspace --locked --no-fail-fast` → **777 passed, 0
-failed**（103 个测试二进制）。重点：`agent-cli/tests/cli.rs` **88**、`agent-extensions/tests/mcp.rs`
+failed**（103 个测试二进制）。重点：`radian-exec/tests/cli.rs` **88**、`agent-extensions/tests/mcp.rs`
 **27**、`radian-coding/tests/shell.rs` **13**、`radian-sandbox` 10 + `escape_linux` 1、`radian-session/tests/privacy.rs`
 **6**、`radian-tui/tests/pty.rs` **35**。
 
@@ -534,7 +534,7 @@ x86_64 与其它发行版。
 
 - `cargo test -p radian-sandbox --no-fail-fast`：单元 8/8、`workspace_write_is_compatible…` 1/1、
   `linux_escape_matrix` 通过（含 `radian_home` 组）。跑完 `pgrep bwrap`、`mcp_echo` 无孤儿。
-- `agent-cli` 的主目录端到端测试 4/4：`radian_home_places_sessions_under_the_radian_root`、
+- `radian-exec` 的主目录端到端测试 4/4：`radian_home_places_sessions_under_the_radian_root`、
   `radian_session_dir_overrides_radian_home`、`workspace_shell_cannot_read_the_sessions_directory`、
   `workspace_shell_cannot_read_a_moved_sessions_directory`（`bwrap` 实际遮住会话目录，含 `--session-dir` 移走的）。
 - `radian-host` 全部通过。
@@ -554,7 +554,7 @@ Rust **1.88.0**（`/tmp/radian-rust`）。源码为分支 `pi/linux3`（base `bc
   负载 flake `radian-session::a_torn_tail_is_truncated_before_appending`（单独跑 5/5 通过）。
 - `radian-memory`：全部通过（9 个测试二进制）；`tests/multiprocess.rs` 与 `tests/purge_race.rs`
   各连跑 **20/20 通过**（`flock` 与 inode 复查在 Linux 上一致）。
-- `agent-core --test compaction` 16/16；`radian-host` 36 + 11；两家 provider 的 `overflow`
+- `radian-core --test compaction` 16/16；`radian-host` 36 + 11；两家 provider 的 `overflow`
   单元测试各 7/7；两家契约各 13/14 通过。
 - `radian-sandbox`：单元 8/8、`workspace_write_is_compatible…` 1/1、`linux_escape_matrix` 1/1
   （含 `radian_home` 组）；跑完 `pgrep -a bwrap`、`pgrep -af mcp-fixture` 无孤儿。
@@ -562,7 +562,7 @@ Rust **1.88.0**（`/tmp/radian-rust`）。源码为分支 `pi/linux3`（base `bc
   跑前 `~/.radian` 不存在、`~/.cache` 3527 条；跑后 `~/.radian` 仍不存在、`~/.cache` 的
   `find -printf '%p %T@ %s'` **逐行 diff 为 0**，即测试没有写进 VM 真实的 `~/.radian`/`~/.cache`。
 - `agent-extensions` 的两个进度测试直接跑测试二进制各 **20/20 通过**。
-- `cargo test -p agent-core --locked --features journal-selfcheck`、其 clippy、
+- `cargo test -p radian-core --locked --features journal-selfcheck`、其 clippy、
   `cargo +1.88 check --workspace --all-targets`、两个 fixture 检查脚本：全部通过。
 
 ### 失败与修法（两条，已在分支上提交）

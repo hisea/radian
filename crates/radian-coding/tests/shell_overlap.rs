@@ -17,9 +17,9 @@ mod common;
 
 use std::path::Path;
 
-use agent_core::{NoopSink, ToolCall, ToolContext, ToolOutput, ToolProvider, ToolSession};
 use common::TempDir;
 use radian_coding::CodingTools;
+use radian_core::{NoopSink, ToolCall, ToolContext, ToolOutput, ToolProvider, ToolSession};
 use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
 use serde_json::json;
 
@@ -65,7 +65,7 @@ async fn call(tools: &CodingTools, command: String) -> Result<ToolOutput, String
     };
     let sink = NoopSink;
     let cx = ToolContext {
-        cancellation: agent_core::CancellationToken::new(),
+        cancellation: radian_core::CancellationToken::new(),
         events: &sink,
         index: 0,
     };
@@ -80,7 +80,7 @@ fn text_of(output: &ToolOutput) -> String {
         .content
         .iter()
         .filter_map(|part| match part {
-            agent_core::ContentPart::Text { text, .. } => Some(text.as_str()),
+            radian_core::ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect()

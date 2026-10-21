@@ -5,10 +5,10 @@ mod common;
 
 use std::sync::Arc;
 
-use agent_core::{
+use common::{MemTools, ScriptedModel, TempDir, call, calls, created, text};
+use radian_core::{
     Agent, JournalRecord, Message, NoopSink, RunStatus, TranscriptJournal, TurnOptions,
 };
-use common::{MemTools, ScriptedModel, TempDir, call, calls, created, text};
 use radian_session::{EventData, Session, SessionJournal};
 use serde_json::json;
 
@@ -140,7 +140,7 @@ async fn repair_write_back_appends_normally_and_keeps_seq_continuous() {
     assert_eq!(session.history().unwrap(), repaired);
 }
 
-/// §15-10: our journal is the mounted one; `agent-core`'s implicit recording selfcheck
+/// §15-10: our journal is the mounted one; `radian-core`'s implicit recording selfcheck
 /// only mounts when no journal is given, so it never double-writes or conflicts.
 #[tokio::test]
 async fn an_explicit_journal_is_the_only_one_mounted() {
@@ -244,11 +244,11 @@ async fn the_fold_agrees_with_an_independent_line_scan() {
             }
         }
         let mut expected = history.clone();
-        expected.extend(agent_core::repair(&history, &session.journal_records()));
+        expected.extend(radian_core::repair(&history, &session.journal_records()));
         assert_eq!(session.history().unwrap(), expected, "{name}");
 
         // The core accepts the folded history for a new session (it answers every call).
-        let agent = Arc::new(Agent::new(ScriptedModel::new([]), agent_core::NoTools));
+        let agent = Arc::new(Agent::new(ScriptedModel::new([]), radian_core::NoTools));
         agent
             .open_session_with_history(expected)
             .await

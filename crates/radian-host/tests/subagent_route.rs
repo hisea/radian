@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use agent_core::{InputSource, Message, NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
+use radian_core::{InputSource, Message, NoopSink, TurnOptions};
 use radian_host::{
     ApprovalRouting, AuthStore, HostBindings, ModelRoute, SessionId, SessionProjection,
     SessionSetup, TurnState, build_model, open_session,
@@ -36,8 +36,9 @@ fn scratch() -> PathBuf {
 fn isolated_home() -> PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir =
-            std::env::temp_dir().join(format!("radian-subagent-route-home-{}", std::process::id()));
+        // /tmp, not $TMPDIR: on macOS the latter can push <home>/run/<pid>.sock past SUN_LEN (104).
+        let dir = PathBuf::from("/tmp")
+            .join(format!("radian-subagent-route-home-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();

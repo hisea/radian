@@ -149,7 +149,7 @@ Base `f552250` · one-shot worktree `/tmp/small-mut` · `--no-fail-fast`；变�
 
 Base `4bf767d` · 一次性 worktree `/tmp/memtui-mut`（从 HEAD 建，做完删掉）· **独立
 `CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p radian-tui --lib`、`cargo test -p radian-tui
---test command`、`cargo test -p radian-host memory`、`cargo test -p agent-cli --test cli memory_`
+--test command`、`cargo test -p radian-host memory`、`cargo test -p radian-exec --test cli memory_`
 （都 `--no-fail-fast`），然后 `git checkout -- .`；`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -579,12 +579,12 @@ Base `d76df67` · 就地变异，每个变异 `git checkout -- crates/radian-tui
 ## Slice: `/login` / `/logout`(ADR 0026 D3/D10)
 
 Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git checkout -- .` 还原后跑对应
-测试,`git status --short` 为空。编号 L1–L7(与 agent-cli 的 MUTATIONS.md 同一张表)。
+测试,`git status --short` 为空。编号 L1–L7(与 radian-exec 的 MUTATIONS.md 同一张表)。
 
 | # | 变异 | 抓住它的测试 |
 |---|---|---|
 | L1 | 向导把 key 明文渲染(`wizard.key.clone()` 代替掩码) | `pty.rs::pty_login_custom_walk_saves_without_showing_the_key`(等 15 个掩码列出现的状态门 + 屏幕无明文;**诚实补充**:第一版测试只用 `pump()` 后的单次断言,逐字符 diff 渲染让明文连不成子串,变异"通过"是假通过;加状态门后才真正抓住) |
-/`logout` 的确认与删除由 L6 覆盖(见 agent-cli 表)。
+/`logout` 的确认与删除由 L6 覆盖(见 radian-exec 表)。
 ## ADR 0026 D9：`!` 自动批准键与 `/auto`（2026-10-13，键是 `!`，`Y` 保持 `y`）
 
 Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·

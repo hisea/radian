@@ -272,7 +272,7 @@ pub(super) struct TerminalReady {
     pub(super) guard: radian_tui::terminal::TtyGuard,
     pub(super) terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
     pub(super) memory_service: Option<radian_host::memory::MemoryService>,
-    pub(super) history: Vec<agent_core::Message>,
+    pub(super) history: Vec<radian_core::Message>,
     /// The queue-change forwarder for this session, aborted when the session ends.
     pub(super) queue_wake: tokio::task::JoinHandle<()>,
 }
@@ -378,7 +378,7 @@ pub(super) fn enter_terminal_and_history(
     let memory_service = session.memory().cloned();
     // The history of a resumed session is rendered before the first frame, so the transcript
     // shows it from the start. `open_session` already recovered exactly this transcript
-    // (`agent_core::recover` over the same journal records `Session::history` folds), so the
+    // (`radian_core::recover` over the same journal records `Session::history` folds), so the
     // host takes it instead of re-opening and re-folding the file (resume-perf B).
     let history = std::mem::take(&mut session.history);
 

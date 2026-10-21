@@ -14,8 +14,8 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agent_core::{NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
 use radian_coding::CodingTools;
+use radian_core::{NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
 use serde_json::json;
 
 /// This workspace's root: two levels above this crate's manifest dir.
@@ -68,7 +68,7 @@ async fn timed_grep(
     tools: &CodingTools,
     pattern: &str,
     path: &str,
-) -> (Duration, agent_core::ToolOutput) {
+) -> (Duration, radian_core::ToolOutput) {
     let session = tools.open_session().await.expect("open session");
     let start = Instant::now();
     let out = call(&session, pattern, path).await;
@@ -79,7 +79,7 @@ async fn timed_batch(
     tools: &CodingTools,
     patterns: [&str; 3],
     path: &str,
-) -> (Duration, [agent_core::ToolOutput; 3]) {
+) -> (Duration, [radian_core::ToolOutput; 3]) {
     let session = tools.open_session().await.expect("open session");
     let start = Instant::now();
     // One task polls all three, like Core's batch: a blocking scan serializes them.
@@ -95,7 +95,7 @@ async fn call(
     session: &radian_coding::CodingSession,
     pattern: &str,
     path: &str,
-) -> agent_core::ToolOutput {
+) -> radian_core::ToolOutput {
     let call = ToolCall {
         id: "bench".into(),
         name: "grep".into(),
@@ -103,7 +103,7 @@ async fn call(
     };
     let sink = NoopSink;
     let cx = ToolContext {
-        cancellation: agent_core::CancellationToken::new(),
+        cancellation: radian_core::CancellationToken::new(),
         events: &sink,
         index: 0,
     };
@@ -152,7 +152,7 @@ async fn read_call(
     session: &radian_coding::CodingSession,
     path: &str,
     offset: i64,
-) -> agent_core::ToolOutput {
+) -> radian_core::ToolOutput {
     let call = ToolCall {
         id: "bench".into(),
         name: "read".into(),
@@ -160,7 +160,7 @@ async fn read_call(
     };
     let sink = NoopSink;
     let cx = ToolContext {
-        cancellation: agent_core::CancellationToken::new(),
+        cancellation: radian_core::CancellationToken::new(),
         events: &sink,
         index: 0,
     };

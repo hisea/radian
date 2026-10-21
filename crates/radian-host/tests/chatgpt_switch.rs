@@ -9,10 +9,10 @@
 
 use std::sync::OnceLock;
 
-use agent_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink};
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, message_item, output_item_done,
 };
+use radian_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink};
 use radian_host::{AuthStore, OAuthEntry, Provider, RouteContext};
 use serde_json::Value;
 
@@ -128,7 +128,7 @@ async fn switching_to_chatgpt_mid_session_resolves_a_working_route() {
         )
         .await
         .expect("the switched route completes");
-    assert_eq!(response.stop_reason, agent_core::StopReason::EndTurn);
+    assert_eq!(response.stop_reason, radian_core::StopReason::EndTurn);
     assert_eq!(
         server.requests()[0].header("authorization"),
         Some(format!("Bearer {access}")).as_deref()

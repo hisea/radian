@@ -72,4 +72,4 @@ Meaning for the host: `outcome_unknown_after_crash` means **side effects may exi
 
 ## Verification
 
-`crates/agent-core/tests/journal.rs` and `tests/replace.rs` cover every row of the crash semantics table, the E2 no-marker paths, the E4 cancellation plus grace period, and the three pure functions in E8 plus `journal-selfcheck`.
+`crates/radian-core/tests/journal.rs` and `tests/replace.rs` cover every row of the crash semantics table, the E2 no-marker paths, the E4 cancellation plus grace period, and the three pure functions in E8 plus `journal-selfcheck`.

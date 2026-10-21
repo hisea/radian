@@ -3,7 +3,7 @@
 //! starts nothing, `tui.mouse = false` removes the whole feature, and the drag's auto-scroll
 //! is one tick of app state.
 
-use agent_core::Message;
+use radian_core::Message;
 use radian_host::{PendingRequest, PendingView};
 use radian_permissions::ApprovalRequest;
 use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input, UpdateResult};
@@ -523,7 +523,7 @@ fn a_marker_selection_copies_no_marker_characters_with_cjk() {
 
 #[test]
 fn a_selection_over_a_tool_head_copies_its_text() {
-    use agent_core::{ContentPart, Message, ToolCall, ToolResult};
+    use radian_core::{ContentPart, Message, ToolCall, ToolResult};
     let mut app = app();
     app.session.entries.clear();
     app.push_message(&Message::Assistant {

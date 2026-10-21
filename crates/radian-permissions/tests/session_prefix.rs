@@ -7,8 +7,8 @@ mod common;
 
 use std::sync::Arc;
 
-use agent_core::{Hooks, InputSource, ToolCall, ToolDecision};
 use common::{ScriptedApprover, TempDir, call, ctx};
+use radian_core::{Hooks, InputSource, ToolCall, ToolDecision};
 use radian_permissions::*;
 use radian_sandbox::Sandbox;
 use serde_json::json;
@@ -41,7 +41,7 @@ fn asking_profile(dir: &TempDir) -> Profile {
 async fn decide_shell(
     hooks: &PermissionHooks,
     command: &str,
-) -> Result<ToolDecision, agent_core::HookError> {
+) -> Result<ToolDecision, radian_core::HookError> {
     Hooks::before_tool_call(hooks, &ctx(), &call("shell", json!({ "command": command }))).await
 }
 

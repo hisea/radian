@@ -4,8 +4,8 @@
 //! once the plan's usage window (5 hours on Plus) is spent. That is not the provider being
 //! busy: the window resets minutes-to-hours later, so retrying the same request cannot help and
 //! the three retries of ADR 0017 only delay the same failure. The adapter reports it
-//! as a [`ModelError::Protocol`](agent_core::ModelError::Protocol) error instead — the core
-//! retries only a *transient* error (`agent_core::ModelError::is_transient`), so the turn fails
+//! as a [`ModelError::Protocol`](radian_core::ModelError::Protocol) error instead — the core
+//! retries only a *transient* error (`radian_core::ModelError::is_transient`), so the turn fails
 //! at once with a message that names the plan, its window, when the window resets, and `/model`
 //! as the way to another provider, rather than quoting the raw JSON.
 //!

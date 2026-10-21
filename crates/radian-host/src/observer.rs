@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use agent_core::Message;
+use radian_core::Message;
 use radian_session::{EventData, JournalTail, ReadError, SessionEvent, TailUpdate, TurnOutcome};
 
 use crate::projection::{LastToolCall, ProjectionRead, SessionProjection, TurnState};

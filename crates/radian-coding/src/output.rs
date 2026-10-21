@@ -17,7 +17,7 @@ use std::path::Path;
 #[cfg(not(unix))]
 use std::path::PathBuf;
 
-use agent_core::{ContentPart, ToolFailure, ToolOutput};
+use radian_core::{ContentPart, ToolFailure, ToolOutput};
 use serde::Deserialize;
 use serde_json::json;
 

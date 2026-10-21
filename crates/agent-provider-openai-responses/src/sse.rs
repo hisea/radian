@@ -5,7 +5,7 @@
 //! including a `\r\n` split across chunks. Identical in shape to the Chat Completions adapter's
 //! reader; the Responses stream is the same `data: {json}` framing.
 
-use agent_core::ModelError;
+use radian_core::ModelError;
 
 /// One line may not be longer than this. A server that never ends a line cannot grow memory.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;

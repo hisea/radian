@@ -1,4 +1,4 @@
-//! MCP stdio servers as `agent-core` tools.
+//! MCP stdio servers as `radian-core` tools.
 //!
 //! Each `AgentSession` gets its own server processes, started by [`McpToolProvider`] and
 //! kept for the whole conversation. Tools are exposed under stable aliases

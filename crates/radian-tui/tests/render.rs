@@ -1,8 +1,8 @@
 //! Rendering tests on `TestBackend`: reasoning and assistant text are distinguishable,
 //! an interrupted prefix is marked, and tool calls are shown.
 
-use agent_core::{AgentEvent, ContentPart, Message, ToolCall, ToolResult};
 use radian_coding::QuestionKind;
+use radian_core::{AgentEvent, ContentPart, Message, ToolCall, ToolResult};
 use radian_host::{PendingRequest, PendingView};
 use radian_tui::app::{App, Entry, EntryKind};
 use radian_tui::blocks::ReasoningMode;
@@ -242,7 +242,7 @@ fn the_note_clears_when_the_tools_finish() {
 }
 
 /// The note must name a tool that is **still running**. `ToolFinished` is emitted in completion
-/// order, "which may differ from the transcript order" (agent-core's own event contract), so the
+/// order, "which may differ from the transcript order" (radian-core's own event contract), so the
 /// call the note names can settle while another call of the same batch is still running. A note
 /// naming a settled tool is the same defect as the stuck "tool shell running".
 #[test]
@@ -289,7 +289,7 @@ fn the_note_names_a_tool_that_is_still_running() {
 /// A tool note may not outlive its batch: the next model request starts only after every call of
 /// the batch settled, so a `ToolStarted` whose `ToolFinished` never came must be forgotten there.
 /// The core does produce that: when a journal append fails, `run_group` discards the results of
-/// the calls already running (`agent-core/src/turn.rs`, the `journal_failed` path), so no
+/// the calls already running (`radian-core/src/turn.rs`, the `journal_failed` path), so no
 /// `ToolFinished` is emitted for them.
 #[test]
 fn the_tool_note_does_not_survive_the_next_model_request() {
@@ -1095,7 +1095,7 @@ fn the_default_input_style_is_lines() {
 /// starts at column 1 in the `frame` role (it used to be indented to the body column).
 #[test]
 fn the_compaction_line_starts_at_column_one_in_the_frame_role() {
-    let history = agent_core::compaction::compacted_history("the earlier work", &[], &[])
+    let history = radian_core::compaction::compacted_history("the earlier work", &[], &[])
         .expect("a valid history");
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
@@ -1971,7 +1971,7 @@ fn the_block_layout_snapshot() {
     });
     app.push_notice("profile: workspace · sandbox macos-seatbelt");
     let history =
-        agent_core::compaction::compacted_history("the earlier work, summarized", &[], &[])
+        radian_core::compaction::compacted_history("the earlier work, summarized", &[], &[])
             .expect("a valid history");
     app.push_message(&history[0]);
 
@@ -2103,7 +2103,7 @@ fn the_ask_and_memory_cards_have_their_own_heads() {
 /// the same line without them (the journaled message does not carry them).
 #[test]
 fn a_compaction_summary_is_one_line_that_expands() {
-    use agent_core::compaction::{RetainedUserMessage, compacted_history};
+    use radian_core::compaction::{RetainedUserMessage, compacted_history};
     use radian_tui::tools::ToolFold;
     let history = compacted_history(
         "the earlier work, summarized",
@@ -2175,7 +2175,7 @@ fn a_compaction_summary_is_one_line_that_expands() {
 /// fold is a layout cache key, override included).
 #[test]
 fn the_summary_fold_changes_the_line_count() {
-    use agent_core::compaction::compacted_history;
+    use radian_core::compaction::compacted_history;
     use radian_tui::tools::ToolFold;
     let history = compacted_history("one\ntwo\nthree\nfour", &[], &[]).expect("valid");
     let mut app = App::new("m", "s");

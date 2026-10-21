@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use agent_core::Message;
+use radian_core::Message;
 
 /// A session's stable identifier: the session file's name and `SessionCreated.session_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

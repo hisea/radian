@@ -275,9 +275,9 @@ mod tests {
     }
 
     /// A `BudgetReport` with `projected_tokens` out of a 1000-token budget.
-    fn budget(projected_tokens: u64) -> agent_core::BudgetReport {
-        agent_core::BudgetReport {
-            source: agent_core::UsageSource::Estimated,
+    fn budget(projected_tokens: u64) -> radian_core::BudgetReport {
+        radian_core::BudgetReport {
+            source: radian_core::UsageSource::Estimated,
             projected_tokens,
             input_budget_tokens: 1000,
             request_bytes: 0,

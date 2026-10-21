@@ -1,19 +1,19 @@
 //! ADR 0024 Q3: the question and the answer are durable without a new record — the question
 //! is the call's `ToolExecutionStarted.arguments` and the answer its `ToolExecutionSettled`
-//! result (ADR 0002 E1). This runs a real turn through `agent-core` with the recording journal.
+//! result (ADR 0002 E1). This runs a real turn through `radian-core` with the recording journal.
 
 mod common;
 
 use std::sync::{Arc, Mutex};
 
-use agent_core::testing::RecordingJournal;
-use agent_core::{
-    Agent, ContentPart, JournalRecord, Message, Model, ModelContext, ModelError, ModelRequest,
-    ModelResponse, NoopSink, StopReason, ToolCall,
-};
 use common::TempDir;
 use futures_util::future::BoxFuture;
 use radian_coding::{PromptError, Prompter, QuestionAnswer, QuestionReply, QuestionRequest};
+use radian_core::testing::RecordingJournal;
+use radian_core::{
+    Agent, ContentPart, JournalRecord, Message, Model, ModelContext, ModelError, ModelRequest,
+    ModelResponse, NoopSink, StopReason, ToolCall,
+};
 use serde_json::json;
 
 /// Asks one question on the first model call, then answers the user.

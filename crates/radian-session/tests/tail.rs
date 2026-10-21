@@ -5,8 +5,8 @@ mod common;
 use std::io::Write;
 use std::path::Path;
 
-use agent_core::{Message, TranscriptJournal};
 use common::{TempDir, created};
+use radian_core::{Message, TranscriptJournal};
 use radian_session::{JournalTail, ReadError, Session, SessionJournal};
 
 fn envelope(seq: u64, event: &str, data: serde_json::Value) -> String {
@@ -451,7 +451,7 @@ async fn the_tail_is_read_only_and_needs_no_writer_lock() {
     let path = dir.file("s.jsonl");
     let journal = SessionJournal::create(&path, "tail-sid", created()).unwrap();
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 0,
             message: Message::user("hello"),
         })

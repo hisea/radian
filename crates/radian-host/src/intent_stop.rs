@@ -14,7 +14,7 @@
 //! session ids, pane ids and absolute paths (lengths of the long ones stay far above
 //! the limit either way).
 
-use agent_core::{Message, OpaqueJson};
+use radian_core::{Message, OpaqueJson};
 
 /// How long the last assistant message may be, in characters, for the validator to
 /// consider it. About 200 (the spec's "约 200"): every true stall on this machine ends
@@ -113,7 +113,7 @@ pub fn matches_rule(message: &Message) -> bool {
     let text: String = content
         .iter()
         .filter_map(|part| match part {
-            agent_core::ContentPart::Text { text, .. } => Some(text.as_str()),
+            radian_core::ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect();
@@ -244,11 +244,11 @@ mod tests {
     #[test]
     fn a_tool_call_disqualifies() {
         let message = Message::Assistant {
-            content: vec![agent_core::ContentPart::text(
+            content: vec![radian_core::ContentPart::text(
                 "Now the docs-only ADR updates.",
             )],
             reasoning: Vec::new(),
-            tool_calls: vec![agent_core::ToolCall {
+            tool_calls: vec![radian_core::ToolCall {
                 id: "c1".into(),
                 name: "shell".into(),
                 arguments: serde_json::json!({}),

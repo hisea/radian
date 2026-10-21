@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use agent_core::Message;
+use radian_core::Message;
 use radian_host::{JournalObserver, SessionObserver};
 use radian_session::EventData;
 use ratatui::Frame;
@@ -64,7 +64,7 @@ pub enum AttachKey {
 /// (`queued`); any other code — `outcome_unknown_after_crash`, or a real settled result whose
 /// `Message::Tool` is not committed yet — means the call had started (`running`). A real
 /// result in the suffix settles within the next commit, so it is transient.
-fn open_call_state(result: &agent_core::ToolResult) -> &'static str {
+fn open_call_state(result: &radian_core::ToolResult) -> &'static str {
     if result.error_code.as_deref() == Some("not_started_after_crash") {
         "queued"
     } else {

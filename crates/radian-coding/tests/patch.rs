@@ -971,7 +971,7 @@ async fn ambiguous_crlf_reports_content_lines_without_cr() {
 /// the "legacy form" while the description treats it as the main usage.
 #[tokio::test]
 async fn the_multi_edit_rule_lives_in_the_schema_only_and_nothing_is_legacy() {
-    use agent_core::{ToolProvider, ToolSession};
+    use radian_core::{ToolProvider, ToolSession};
     let dir = TempDir::new("patch-desc");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();

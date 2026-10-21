@@ -1,7 +1,7 @@
 //! The pure `App::update` (ADR 0023 U3): every effect's trigger, and what each result `Input`
 //! does to the state. No terminal, no runtime, no files.
 
-use agent_core::CompactionOutcome;
+use radian_core::CompactionOutcome;
 use radian_tui::app::{App, Effect, Input, MemoryResult, TurnState};
 use radian_tui::command::{ExportRequest, SessionOutcome};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -307,7 +307,7 @@ fn an_input_that_changes_nothing_is_not_dirty() {
 fn a_refused_command_is_shown_as_a_notice() {
     let mut app = App::new("m", "s");
     let refused = radian_host::CommandRefused::undeclared(
-        &radian_host::SessionCommand::SendFollowup(agent_core::Message::user("hi")),
+        &radian_host::SessionCommand::SendFollowup(radian_core::Message::user("hi")),
     );
     let result = app.update(Input::CommandRefused(refused));
     assert!(result.dirty, "a notice is a visible change");

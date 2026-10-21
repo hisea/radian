@@ -18,7 +18,7 @@ radian login | logout | memory | config import-pi | trust | theme | footer | doc
 
 - The default serves only "a human opens a terminal". Line mode needs explicit `exec` (or `-p`/subcommand).
 - No `agent` binary exists. Docs, scripts, tests, and AGENTS.md use `radian exec …`. The `rad` alias stays.
-- No change to `agent-core` exists. Only host and `radian-host` change. Core interfaces stay unchanged.
+- No change to `radian-core` exists. Only host and `radian-host` change. Core interfaces stay unchanged.
 
 ### A2 Where each function lives
 
@@ -41,7 +41,7 @@ radian login | logout | memory | config import-pi | trust | theme | footer | doc
 
 ### A4 Tests
 
-Tests still drive the **real binary**: `agent-cli` end-to-end tests drive `radian exec`. TUI pty tests already drive `radian`. Old `agent` behavior cases stay covered (especially default line mode, streaming output, per-step approval, exit-code-2 cases). No test-only binary exists for compatibility.
+Tests still drive the **real binary**: `radian-exec` end-to-end tests drive `radian exec`. TUI pty tests already drive `radian`. Old `agent` behavior cases stay covered (especially default line mode, streaming output, per-step approval, exit-code-2 cases). No test-only binary exists for compatibility.
 
 ## Constraints and Costs
 
@@ -51,4 +51,4 @@ Tests still drive the **real binary**: `agent-cli` end-to-end tests drive `radia
 
 ## Verification
 
-`agent-cli` end-to-end tests cover `radian exec` modes, exit codes, the stdout/stderr contract, and broken pipe. `radian-tui` pty tests cover no-argument TUI entry, `exec --line` behavior, and management commands. `cargo test --workspace` runs.
+`radian-exec` end-to-end tests cover `radian exec` modes, exit codes, the stdout/stderr contract, and broken pipe. `radian-tui` pty tests cover no-argument TUI entry, `exec --line` behavior, and management commands. `cargo test --workspace` runs.

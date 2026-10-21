@@ -6,6 +6,8 @@
 [package]
 name = "grok-mermaid"
 version = "0.0.0"
+# Vendored upstream file: never publish this copy to a registry.
+publish = false
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.99.1"

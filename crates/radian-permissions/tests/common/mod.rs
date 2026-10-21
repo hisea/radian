@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use agent_core::{CancellationToken, HookContext, ToolCall};
 use futures_util::future::BoxFuture;
+use radian_core::{CancellationToken, HookContext, ToolCall};
 use radian_permissions::{ApprovalError, ApprovalOutcome, ApprovalRequest, Approver};
 use serde_json::Value;
 use tokio::sync::{Notify, Semaphore};

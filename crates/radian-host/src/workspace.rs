@@ -1,4 +1,4 @@
-//! Resolving and validating the `--workspace` argument, shared by `agent-cli` and
+//! Resolving and validating the `--workspace` argument, shared by `radian-exec` and
 //! `radian-tui` so the two hosts cannot disagree about what counts as a usable workspace.
 //!
 //! The point of doing this **before** the sandbox probe and before any session file exists

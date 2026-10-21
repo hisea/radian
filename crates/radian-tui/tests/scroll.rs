@@ -1,7 +1,7 @@
 //! Scroll-follow logic: new content follows while the view is at the bottom, and never
 //! drags the user back after they scroll up.
 
-use agent_core::AgentEvent;
+use radian_core::AgentEvent;
 use radian_tui::app::App;
 use radian_tui::projection::StreamKind;
 use radian_tui::render;
@@ -30,7 +30,7 @@ fn fill(app: &mut App, n: usize) {
     for i in 0..n {
         app.apply_event(&AgentEvent::TranscriptAppended {
             index: i,
-            message: agent_core::Message::user(format!("line {i}")),
+            message: radian_core::Message::user(format!("line {i}")),
         });
     }
 }
@@ -73,7 +73,7 @@ fn scrolling_up_pauses_following_and_new_content_does_not_drag_back() {
     for i in 0..5 {
         app.apply_event(&AgentEvent::TranscriptAppended {
             index: 100 + i,
-            message: agent_core::Message::user(format!("new {i}")),
+            message: radian_core::Message::user(format!("new {i}")),
         });
     }
     render(&mut app);

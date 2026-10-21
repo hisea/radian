@@ -73,7 +73,7 @@ pub struct ApprovalError(pub String);
 /// `HookContext.cancellation`, so a wait that never ends is interrupted, not hung.
 ///
 /// `decide` returns a boxed future so the trait is dyn-compatible and a host can inject an
-/// `Arc<dyn Approver>` (the same shape as `agent_core::TranscriptJournal`).
+/// `Arc<dyn Approver>` (the same shape as `radian_core::TranscriptJournal`).
 pub trait Approver: Send + Sync {
     fn decide(
         &self,

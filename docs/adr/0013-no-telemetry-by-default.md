@@ -50,5 +50,5 @@ New files use the mode at creation (`OpenOptionsExt::mode` and `DirBuilderExt::m
 
 - Network surfaces stay pinned by code review and tests: the models.dev catalog, `/login` verification, provider model list refresh, and opencode-go usage are the only added network paths. No telemetry, update-check, or crash-report module exists.
 - Redaction tests: `a_key_is_never_sent_over_plain_http_to_a_remote_host`, `the_key_is_hidden_from_debug_output`, `urls_never_leak_credentials_through_debug_or_config_errors`, `a_custom_header_value_echoed_by_the_server_is_masked`, `a_stream_error_that_echoes_the_key_is_masked`, `pty_the_panic_log_redacts_every_auth_key_not_only_the_startup_one`, `search_redacts_the_key_from_a_snippet`, `a_runtime_error_redacts_every_auth_key_not_only_the_route_key`.
-- Permission tests: `radian-session/tests/privacy.rs`, `agent-cli/tests/cli.rs` (new 0700 and 0600, wide-directory warn without change), `radian-tui/tests/pty.rs` (panic log 0600).
+- Permission tests: `radian-session/tests/privacy.rs`, `radian-exec/tests/cli.rs` (new 0700 and 0600, wide-directory warn without change), `radian-tui/tests/pty.rs` (panic log 0600).
 - Cleanup tests: `radian-host` `diagnostics` unit tests cover retention, the total cap, foreign files untouched, and write failure is not a panic.

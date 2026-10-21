@@ -37,7 +37,7 @@ FILES=(
   "crates/radian-coding/src/read.rs:radian-coding"
   "crates/radian-host/src/context.rs:radian-host"
   "crates/radian-tui/src/startup.rs:radian-tui"
-  "crates/agent-core/src/turn.rs:agent-core"
+  "crates/radian-core/src/turn.rs:radian-core"
 )
 
 restore() {

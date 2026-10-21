@@ -1,7 +1,7 @@
 //! Diff bodies (ADR 0028): the synthesized line-number gutter, the sign,
 //! the syntax highlight, the structure rows and the copy rule, on `TestBackend`.
 
-use agent_core::{ContentPart, Message, ToolCall, ToolResult};
+use radian_core::{ContentPart, Message, ToolCall, ToolResult};
 use radian_tui::app::{App, EntryKind};
 use radian_tui::render;
 use radian_tui::select::{Selection, locate, locate_hit, logical_text};

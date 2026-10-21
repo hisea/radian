@@ -355,7 +355,7 @@ const EXPANDED: DisplayModes = DisplayModes {
 /// auto-expand on a hit; this slice only keeps the content findable.)
 #[test]
 fn a_folded_tool_body_is_still_found() {
-    use agent_core::{ContentPart, Message, ToolCall, ToolResult};
+    use radian_core::{ContentPart, Message, ToolCall, ToolResult};
     use radian_tui::tools::ToolFold;
     let mut app = App::new("m", "s");
     app.tool_display.fold = ToolFold::Collapsed;
@@ -405,7 +405,7 @@ fn a_folded_tool_body_is_still_found() {
 /// the match's display line (the folded geometry, not the search's expanded one).
 #[test]
 fn a_hit_in_a_folded_tool_body_expands_only_that_entry() {
-    use agent_core::{ContentPart, Message, ToolCall, ToolResult};
+    use radian_core::{ContentPart, Message, ToolCall, ToolResult};
     use radian_tui::tools::ToolFold;
     let mut app = App::new("m", "s");
     app.tool_display.fold = ToolFold::Collapsed;
@@ -497,8 +497,8 @@ fn a_hit_in_a_folded_tool_body_expands_only_that_entry() {
 /// summary does the same.
 #[test]
 fn a_hit_in_folded_thinking_and_a_summary_expands_them() {
-    use agent_core::compaction::compacted_history;
-    use agent_core::{ContentPart, Message};
+    use radian_core::compaction::compacted_history;
+    use radian_core::{ContentPart, Message};
     let mut app = App::new("m", "s");
     app.reasoning_mode = radian_tui::blocks::ReasoningMode::Collapsed;
     app.push_message(&Message::Assistant {

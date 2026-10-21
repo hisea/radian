@@ -263,7 +263,7 @@ mod tests {
             revision: 1,
             tokens_before: 100,
             keep_target: 50,
-            trigger: agent_core::CompactionTrigger::Budget,
+            trigger: radian_core::CompactionTrigger::Budget,
         });
         assert_eq!(app.spinner_status(), Some("Compacting"));
 
@@ -282,7 +282,7 @@ mod tests {
             revision: 2,
             tokens_before: 100,
             keep_target: 50,
-            trigger: agent_core::CompactionTrigger::Manual,
+            trigger: radian_core::CompactionTrigger::Manual,
         });
         app.apply_event(&AgentEvent::CompactionFailed {
             reason: "boom".to_string(),
@@ -292,7 +292,7 @@ mod tests {
             revision: 3,
             tokens_before: 100,
             keep_target: 50,
-            trigger: agent_core::CompactionTrigger::Manual,
+            trigger: radian_core::CompactionTrigger::Manual,
         });
         app.apply_event(&AgentEvent::CompactionSkipped {
             reason: "already fits".to_string(),
@@ -326,7 +326,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        let message = agent_core::compaction::compacted_history(
+        let message = radian_core::compaction::compacted_history(
             "[context compacted without a summary: 7 messages dropped, 0 tool results truncated]",
             &[],
             &[],

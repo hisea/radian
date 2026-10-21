@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use agent_core::ModelUsage;
+use radian_core::ModelUsage;
 use radian_runtime::ModelRoute;
 use radian_session::{EventData, Session, UsageFee};
 
@@ -180,7 +180,7 @@ fn session_snapshot(session: &Session) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::PriceTier;
-    use agent_core::ModelUsage;
+    use radian_core::ModelUsage;
 
     /// The catalog prices from the research's §3.2 example (`opencode-go` /
     /// `deepseek-v4.1-flash`, micro-dollars per million tokens).

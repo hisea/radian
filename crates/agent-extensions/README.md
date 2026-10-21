@@ -1,7 +1,7 @@
 # agent-extensions
 
-MCP stdio servers exposed as `agent-core` tools. `McpToolProvider` implements
-`agent_core::ToolProvider`, so an `AgentSession` gets one set of server processes of its own;
+MCP stdio servers exposed as `radian-core` tools. `McpToolProvider` implements
+`radian_core::ToolProvider`, so an `AgentSession` gets one set of server processes of its own;
 `McpSession` implements `ToolSession` and lives for the whole conversation, so server-side
 state (a browser, a database handle, a counter) survives turns.
 

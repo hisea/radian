@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use agent_core::{InputSource, Message, NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
+use radian_core::{InputSource, Message, NoopSink, TurnOptions};
 use radian_host::{
     ApprovalRouting, AuthStore, HostBindings, ModelRoute, SessionId, SessionProjection,
     SessionSetup, TurnState, build_model, open_session,
@@ -51,7 +51,8 @@ fn scratch(label: &str) -> PathBuf {
 fn isolated_home() -> PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
+        // /tmp, not $TMPDIR: on macOS the latter can push <home>/run/<pid>.sock past SUN_LEN (104).
+        let dir = PathBuf::from("/tmp").join(format!(
             "radian-subagent-explore-home-{}",
             std::process::id()
         ));

@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agent_core::{
+use radian_core::{
     CancellationToken, ContentPart, ToolConcurrency, ToolContext, ToolFailure, ToolOutput, ToolSpec,
 };
 use radian_sandbox::{DenialCategory, Sandbox, SandboxCommand, SandboxMode, classify_denial};
@@ -1555,7 +1555,7 @@ mod tests {
         // Re-measured 2026-10-20 (fix1 STE rewrite): `shell` is about 2.70 KB at most
         // (the writable carve-out wording), `job` 1621 B — so the caps sit a little
         // above those sizes.
-        let size = |spec: &agent_core::ToolSpec| {
+        let size = |spec: &radian_core::ToolSpec| {
             serde_json::to_string(&serde_json::json!({
                 "name": spec.name,
                 "description": spec.description,

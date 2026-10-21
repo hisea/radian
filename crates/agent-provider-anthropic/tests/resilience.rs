@@ -8,15 +8,15 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use agent_core::{
-    AgentEvent, CancellationToken, ContentPart, EventSink, Message, Model, ModelContext,
-    ModelError, ModelRequest, ModelResponse, NoopSink,
-};
 use agent_provider_anthropic::testing::{
     MockServer, Reply, block_stop, message_delta, message_start, message_stop, text_delta,
     text_start,
 };
 use agent_provider_anthropic::{Anthropic, AnthropicConfig, ApiKey};
+use radian_core::{
+    AgentEvent, CancellationToken, ContentPart, EventSink, Message, Model, ModelContext,
+    ModelError, ModelRequest, ModelResponse, NoopSink,
+};
 use serde_json::{Value, json};
 
 const SECRET: &str = "sk-ant-resilience-secret";

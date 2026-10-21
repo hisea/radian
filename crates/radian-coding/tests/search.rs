@@ -3,9 +3,9 @@
 
 mod common;
 
-use agent_core::{ToolConcurrency, ToolProvider, ToolSession};
 use common::{TempDir, assert_outside, call, sentinel_outside, structured, text, tools};
 use radian_coding::{CodingTools, Limits};
+use radian_core::{ToolConcurrency, ToolProvider, ToolSession};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -353,7 +353,7 @@ async fn grep_caps_the_context_argument() {
 }
 
 /// The schema the model validates against must not refuse a large `context` before the tool
-/// can cut it (agent-core validates arguments against the spec before the call).
+/// can cut it (radian-core validates arguments against the spec before the call).
 #[tokio::test]
 async fn grep_schema_does_not_cap_context_below_the_cut() {
     let dir = TempDir::new("grep-schema");

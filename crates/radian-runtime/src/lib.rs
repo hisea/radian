@@ -1,4 +1,4 @@
-//! The runtime layer above `agent-core` and `radian-session`: the durable inbox and (in a
+//! The runtime layer above `radian-core` and `radian-session`: the durable inbox and (in a
 //! later slice) the per-session driver.
 //!
 //! - [`Inbox`] holds the four semantic input operations and, when built with

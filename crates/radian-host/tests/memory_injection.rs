@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use agent_core::{CancellationToken, HookContext, Hooks, Message, ModelRequest};
+use radian_core::{CancellationToken, HookContext, Hooks, Message, ModelRequest};
 use radian_host::memory::{
     InjectionConfig, MemoryHooks, MemoryInjection, MemoryService, ScopeSelection, WriteScope,
 };
@@ -232,7 +232,10 @@ async fn a_later_turn_appends_its_new_hits_as_one_system_message() {
         "the same low-trust note: {text}"
     );
     assert!(text.starts_with("<memory>"), "{text}");
-    assert_eq!(message.meta().source, Some(agent_core::InputSource::System));
+    assert_eq!(
+        message.meta().source,
+        Some(radian_core::InputSource::System)
+    );
     let origin = message.meta().origin.clone().expect("an origin");
     assert!(origin.get().contains("memory_addition"), "{}", origin.get());
     assert_eq!(origin.get().split(later.id.0.as_str()).count() - 1, 1);
@@ -251,12 +254,12 @@ async fn a_later_turn_appends_its_new_hits_as_one_system_message() {
     // its ids leave the ledger with it and the same turn text appends it again (decision 3).
     let after_compaction = vec![
         Message::User {
-            content: vec![agent_core::ContentPart::text("This is a summary.")],
-            meta: agent_core::MessageMeta {
+            content: vec![radian_core::ContentPart::text("This is a summary.")],
+            meta: radian_core::MessageMeta {
                 id: None,
-                source: Some(agent_core::InputSource::System),
+                source: Some(radian_core::InputSource::System),
                 origin: Some(
-                    agent_core::OpaqueJson::parse(r#"{"kind":"compaction_summary"}"#).unwrap(),
+                    radian_core::OpaqueJson::parse(r#"{"kind":"compaction_summary"}"#).unwrap(),
                 ),
             },
         },

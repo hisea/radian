@@ -10,8 +10,8 @@ mod common;
 
 use std::path::Path;
 
-use agent_core::{JournalRecord, Message, ModelUsage, ToolResult, TranscriptJournal};
 use common::{TempDir, created};
+use radian_core::{JournalRecord, Message, ModelUsage, ToolResult, TranscriptJournal};
 use radian_session::{RuntimeEvent, Session, SessionJournal, TurnOutcome};
 use serde_json::json;
 

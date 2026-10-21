@@ -6,8 +6,8 @@ mod common;
 
 use std::path::Path;
 
-use agent_core::TranscriptJournal;
 use common::{TempDir, fixture};
+use radian_core::TranscriptJournal;
 use radian_session::{Index, Session, SessionJournal};
 use serde_json::Value;
 
@@ -303,9 +303,9 @@ async fn a_torn_tail_is_not_indexed_and_is_picked_up_after_truncate_and_append()
     let journal = SessionJournal::resume(&path, sid).unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().len(), committed);
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 2,
-            message: agent_core::Message::assistant("after the tear"),
+            message: radian_core::Message::assistant("after the tear"),
         })
         .await
         .unwrap();

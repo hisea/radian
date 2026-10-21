@@ -2,7 +2,7 @@ use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use agent_core::ToolFailure;
+use radian_core::ToolFailure;
 
 use crate::docs;
 use crate::read_roots::{ReadRoots, normalise_absolute, user_home};

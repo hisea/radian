@@ -24,7 +24,7 @@
 1. 第一条规则只做「同一路径被后来的 `read` 取代的旧结果换成占位 `[superseded by a later read of <path>]`」，保留工具调用参数。它确定性、不调模型、不丢任何模型还没见过的内容。
 2. 门槛与保护窗口照 omp 的三个数起步，用 dogfood 调。
 3. 更广的「清所有旧工具输出」（shell/grep）放第二步，等第一步的数据。
-4. 实现可复用确定性兜底里的 `truncate_kept_tool_results`（`crates/agent-core/src/compaction.rs`）；提交走 ADR 0019 的 transcript 替换，`journal-selfcheck` 必须过。
+4. 实现可复用确定性兜底里的 `truncate_kept_tool_results`（`crates/radian-core/src/compaction.rs`）；提交走 ADR 0019 的 transcript 替换，`journal-selfcheck` 必须过。
 
 ## 验收
 

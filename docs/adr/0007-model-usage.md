@@ -86,4 +86,4 @@ Old records (field is `None`): infer the protocol from the session provider at t
 
 ## Verification
 
-HTTP/SSE tests in both provider adapters cover the three usage shapes, non-invented `total`, the `include_usage` request-body matrix, the 400 hint plus redaction, and the `input_includes_cache` mark. `agent-core` covers serialization round trips, journal order, event fields, and `replay`/`recover` ignoring usage. `journal-selfcheck` replay recognizes only `Message` records.
+HTTP/SSE tests in both provider adapters cover the three usage shapes, non-invented `total`, the `include_usage` request-body matrix, the 400 hint plus redaction, and the `input_includes_cache` mark. `radian-core` covers serialization round trips, journal order, event fields, and `replay`/`recover` ignoring usage. `journal-selfcheck` replay recognizes only `Message` records.

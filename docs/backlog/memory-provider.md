@@ -10,7 +10,7 @@
 
 ## 待决方向（lead 整理，待定）
 
-- **`MemoryBackend` trait**（宿主级，不进 agent-core；名字避开"provider"，那是模型路由）：`fixed(query, budget) -> Vec<Item>`、`addition(turn_text, exclude, budget) -> Vec<Item>`、可选 `capture(evidence) -> Vec<Candidate>`、可选 `search`、`status`。返回结构化记录，不返回提示词文本；渲染、低可信说明、分段、预算裁剪、`MemoryInjected` 账本全部留在宿主。接缝就是今天的 `MemoryInjection`（`MemoryHooks::before_model_call` 与 driver 的 `TurnAdditions` 闭包都只调它）。backend 出错按不变量 2 吞掉，不能做成 `Hooks`（Hooks 出错结束回合，ADR 0017）。
+- **`MemoryBackend` trait**（宿主级，不进 radian-core；名字避开"provider"，那是模型路由）：`fixed(query, budget) -> Vec<Item>`、`addition(turn_text, exclude, budget) -> Vec<Item>`、可选 `capture(evidence) -> Vec<Candidate>`、可选 `search`、`status`。返回结构化记录，不返回提示词文本；渲染、低可信说明、分段、预算裁剪、`MemoryInjected` 账本全部留在宿主。接缝就是今天的 `MemoryInjection`（`MemoryHooks::before_model_call` 与 driver 的 `TurnAdditions` 闭包都只调它）。backend 出错按不变量 2 吞掉，不能做成 `Hooks`（Hooks 出错结束回合，ADR 0017）。
 - **内置 `JsonlBackend`** = 今天的 `MemoryService` + `injection::plan`，纯重构。
 - **`CommandBackend`**：每次调用一个一次性子进程，stdin JSON（`{"v":1,"op":"fixed|addition|capture|search|status",…,"budget_tokens":N}`）→ stdout JSON（`{"items":[…]}`）；超时（inject 2 s、capture 30 s）、stdout 上限 64 KiB、非零退出一律空结果 + 一次 warn；跑在宿主侧沙箱外；只允许用户级配置（项目级 `.radian/config.toml` 本来只读 `permissions.profile`）；它收到用户每轮原话，是一条出网路径，要进 ADR 0013 的清单。和外部命令 hook 共用同一个子进程 runner，等那份 ADR 一起设计。
 - **capture 的形态**：照 Codex/omp-local，离线从**已提交**的 journal 提炼（ADR 0021 D9 / 0019），不是轮末多打一次模型。入口 `radian memory consolidate`，可选的启动后台触发默认关；选材按空闲时长、最大年龄、每次数量上限，当前进程打开的会话排除；领取/重试状态放 `sessions/index.db`；写入经 `MemoryService::create`，`source` 新增 `Extracted`，`Unverified`；候选过一遍 `heuristic-secret` 检测；用 `MemoryInjected` 的 id 剔掉"注入过又被复述"的内容。不做 Codex 的阶段 2 整合：JSONL 记录自带 key 与 revision，重复靠 `KeyConflict` 挡。

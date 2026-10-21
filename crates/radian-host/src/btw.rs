@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use agent_core::{
+use radian_core::{
     AgentEvent, CancellationToken, ContentPart, EventSink, Message, Model, ModelContext,
     ModelRequest,
 };
@@ -43,7 +43,7 @@ pub enum SideOutcome {
         text: String,
         /// The model returned tool calls; none was executed.
         tool_calls_dropped: bool,
-        usage: Option<agent_core::ModelUsage>,
+        usage: Option<radian_core::ModelUsage>,
         /// The call's fee at the route in force, if a price was known.
         fee_micros: Option<u64>,
     },
@@ -150,8 +150,8 @@ mod tests {
     /// or blocks until cancelled.
     struct Script {
         texts: Vec<String>,
-        tool_calls: Vec<agent_core::ToolCall>,
-        usage: Option<agent_core::ModelUsage>,
+        tool_calls: Vec<radian_core::ToolCall>,
+        usage: Option<radian_core::ModelUsage>,
         block: bool,
         calls: std::sync::atomic::AtomicUsize,
     }
@@ -161,11 +161,11 @@ mod tests {
             &self,
             _request: ModelRequest,
             cx: ModelContext<'_>,
-        ) -> Result<agent_core::ModelResponse, agent_core::ModelError> {
+        ) -> Result<radian_core::ModelResponse, radian_core::ModelError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.block {
                 cx.cancellation.cancelled().await;
-                return Err(agent_core::ModelError::Transport(
+                return Err(radian_core::ModelError::Transport(
                     "the request was cancelled".into(),
                 ));
             }
@@ -173,12 +173,12 @@ mod tests {
                 cx.events
                     .emit(AgentEvent::ModelTextDelta { text: text.clone() });
             }
-            Ok(agent_core::ModelResponse {
-                content: vec![agent_core::ContentPart::text(self.texts.concat())],
+            Ok(radian_core::ModelResponse {
+                content: vec![radian_core::ContentPart::text(self.texts.concat())],
                 reasoning: Vec::new(),
                 tool_calls: self.tool_calls.clone(),
                 provider_payload: None,
-                stop_reason: agent_core::StopReason::EndTurn,
+                stop_reason: radian_core::StopReason::EndTurn,
                 usage: self.usage.clone(),
                 limits: None,
             })
@@ -224,7 +224,7 @@ mod tests {
         let model = Script {
             texts: vec!["hel".into(), "lo".into()],
             tool_calls: Vec::new(),
-            usage: Some(agent_core::ModelUsage {
+            usage: Some(radian_core::ModelUsage {
                 input: Some(10),
                 output: Some(3),
                 ..Default::default()
@@ -260,8 +260,8 @@ mod tests {
                 &self,
                 _request: ModelRequest,
                 _cx: ModelContext<'_>,
-            ) -> Result<agent_core::ModelResponse, agent_core::ModelError> {
-                Err(agent_core::ModelError::Transport("boom".into()))
+            ) -> Result<radian_core::ModelResponse, radian_core::ModelError> {
+                Err(radian_core::ModelError::Transport("boom".into()))
             }
         }
         let sink = Collect::new();
@@ -279,7 +279,7 @@ mod tests {
     async fn tool_calls_in_the_answer_are_dropped_never_executed() {
         let model = Script {
             texts: vec!["done".into()],
-            tool_calls: vec![agent_core::ToolCall {
+            tool_calls: vec![radian_core::ToolCall {
                 id: "c1".into(),
                 name: "shell".into(),
                 arguments: serde_json::json!({"command": "rm -rf /"}),

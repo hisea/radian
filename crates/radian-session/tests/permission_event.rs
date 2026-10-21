@@ -3,8 +3,8 @@
 
 mod common;
 
-use agent_core::{JournalRecord, Message, TranscriptJournal, recover, replay};
 use common::{TempDir, created};
+use radian_core::{JournalRecord, Message, TranscriptJournal, recover, replay};
 use radian_session::{
     ApprovalPolicyValue, EventData, PermissionApprover, PermissionDecision, RuntimeEvent, Session,
     SessionJournal,

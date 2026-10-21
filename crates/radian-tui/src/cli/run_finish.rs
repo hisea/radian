@@ -15,7 +15,7 @@ pub(super) fn build_startup_screen(
     cli: &Cli,
     app: &mut App,
     session: &radian_host::LocalSession,
-    history: &[agent_core::Message],
+    history: &[radian_core::Message],
     dir: &Path,
     session_id: &str,
     resume: &Option<String>,

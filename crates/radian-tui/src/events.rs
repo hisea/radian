@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use agent_core::{AgentEvent, EventSink, RunStatus};
+use radian_core::{AgentEvent, EventSink, RunStatus};
 use ratatui::crossterm::event::{
     Event, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -345,12 +345,12 @@ mod tests {
     fn a_fact_event_writes_the_projection_and_wakes_the_ui() {
         let (sink, projection, rx) = sink();
         sink.emit(AgentEvent::ModelResponseReceived {
-            stop_reason: agent_core::StopReason::EndTurn,
+            stop_reason: radian_core::StopReason::EndTurn,
             tool_calls: 0,
-            usage: Some(agent_core::ModelUsage {
+            usage: Some(radian_core::ModelUsage {
                 input: Some(5),
                 output: Some(2),
-                ..agent_core::ModelUsage::default()
+                ..radian_core::ModelUsage::default()
             }),
             limits: None,
         });
@@ -390,11 +390,11 @@ mod tests {
         sink.emit(AgentEvent::CompactionUsage {
             revision: 1,
             model: "current".into(),
-            usage: agent_core::ModelUsage {
+            usage: radian_core::ModelUsage {
                 input: Some(50_000),
                 output: Some(1_000),
                 input_includes_cache: Some(false),
-                ..agent_core::ModelUsage::default()
+                ..radian_core::ModelUsage::default()
             },
         });
         {
@@ -410,12 +410,12 @@ mod tests {
         }
         // ... and a later conversation response adds to the same totals.
         sink.emit(AgentEvent::ModelResponseReceived {
-            stop_reason: agent_core::StopReason::EndTurn,
+            stop_reason: radian_core::StopReason::EndTurn,
             tool_calls: 0,
-            usage: Some(agent_core::ModelUsage {
+            usage: Some(radian_core::ModelUsage {
                 input: Some(10_000),
                 input_includes_cache: Some(false),
-                ..agent_core::ModelUsage::default()
+                ..radian_core::ModelUsage::default()
             }),
             limits: None,
         });
@@ -441,7 +441,7 @@ mod tests {
 
         sink.emit(AgentEvent::TranscriptAppended {
             index: 0,
-            message: agent_core::Message::assistant("a"),
+            message: radian_core::Message::assistant("a"),
         });
         let events: Vec<UiEvent> = rx.try_iter().collect();
         assert_eq!(events.len(), 1, "the commit is a fact");

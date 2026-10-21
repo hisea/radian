@@ -6,7 +6,7 @@
 
 - 一条 **`Wire`**：语义化的响应（纯文本、分片文本、工具调用、分片参数、finish reason、usage 三形态、错误、挂起……），不含任何一家的字节。
 - 一个 **`ContractHarness<M>`** trait：由每个 adapter 实现，负责把 `Wire` 翻译成自己的线格式（OpenAI 的 SSE chunk、以后 Anthropic 的事件流），并持有自己的 mock 与凭据。
-- 一组**检查函数**：`check_plain_text` … `check_secret_not_leaked`，全部泛型于 `M: Model`，直接驱动 `Model::complete`（不经过 turn loop——契约管 adapter，管 loop 是 `agent-core` 自己测试的事）。
+- 一组**检查函数**：`check_plain_text` … `check_secret_not_leaked`，全部泛型于 `M: Model`，直接驱动 `Model::complete`（不经过 turn loop——契约管 adapter，管 loop 是 `radian-core` 自己测试的事）。
 
 现有 OpenAI 兼容适配器的接入见 `agent-provider-openai-compatible/tests/contract.rs`：约 100 行 harness + 12 个 `#[tokio::test]`，每个委托给契约 crate 的一条检查。**契约里没有 OpenAI 的字节**；`tests/http.rs` 里那些 SSE 分片、header、超时、错误体细节继续留在 adapter 自己的测试里。
 
@@ -44,7 +44,7 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 
 实测暴露的 `completion_tokens_details` 缺口修好后，契约的 usage 期望值里出现了嵌套的 `details`。因为 `OpaqueJson` 的相等是**字节级**的，而适配器把 provider 的 chunk 解析成 `serde_json::Value` 时会丢掉原始键序（`Value` 的 map 是 `BTreeMap`，ADR 0007 的 J3 已把这一点记为可接受），原先的写法只能把期望值**按某个适配器的解析器恰好产出的顺序**写出来——那等于把一个实现细节编进了"与 adapter 无关"的契约里。
 
-评审时改成：契约用 `assert_usage_eq` 比较，**`details` 按 JSON 内容比，其余字段仍逐字段比**。`OpaqueJson` 的字节级相等仍在 `agent-core` 侧的往返测试里起作用（那里的字节确实应当保真）；契约关心的是子对象的内容与嵌套结构。两家 adapter 的契约套件在改动后仍各自全绿。
+评审时改成：契约用 `assert_usage_eq` 比较，**`details` 按 JSON 内容比，其余字段仍逐字段比**。`OpaqueJson` 的字节级相等仍在 `radian-core` 侧的往返测试里起作用（那里的字节确实应当保真）；契约关心的是子对象的内容与嵌套结构。两家 adapter 的契约套件在改动后仍各自全绿。
 
 ## 变异保证
 
@@ -147,4 +147,4 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 **重试（ADR 0017，2026-10-15）**：矩阵里标为 provider 的错误（408 / 429 / 5xx）
 现在是 `Unavailable`，与断流、空闲超时、连接失败同属 `is_transient()`；取消仍是
 `Transport` 但**不** transient。重试发生在 core 的一次模型调用内部，策略由宿主的
-`[model] retries` 给出，见 `crates/agent-core/tests/retry.rs`。
+`[model] retries` 给出，见 `crates/radian-core/tests/retry.rs`。

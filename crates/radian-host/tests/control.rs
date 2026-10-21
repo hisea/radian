@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use agent_core::{NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
+use radian_core::{NoopSink, TurnOptions};
 use radian_host::{
     ApprovalRouting, ControlServer, HostBindings, LocalSession, SessionId, SessionProjection,
     SessionSetup, TurnState, build_model, open_session,

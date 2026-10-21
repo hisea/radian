@@ -9,48 +9,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "agent-cli"
-version = "0.1.0"
-dependencies = [
- "agent-core",
- "agent-extensions",
- "agent-provider-anthropic",
- "agent-provider-openai-compatible",
- "clap",
- "futures-util",
- "libc",
- "radian-coding",
- "radian-host",
- "radian-memory",
- "radian-permissions",
- "radian-runtime",
- "radian-sandbox",
- "radian-session",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "agent-core"
-version = "0.1.0"
-dependencies = [
- "agent-core",
- "futures-util",
- "jsonschema",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "agent-extensions"
 version = "0.1.0"
 dependencies = [
- "agent-core",
  "libc",
+ "radian-core",
  "rmcp",
  "serde_json",
  "sha2",
@@ -62,9 +25,9 @@ dependencies = [
 name = "agent-provider-anthropic"
 version = "0.1.0"
 dependencies = [
- "agent-core",
  "agent-provider-anthropic",
  "agent-provider-contract",
+ "radian-core",
  "reqwest",
  "serde_json",
  "thiserror 2.0.21",
@@ -75,7 +38,7 @@ dependencies = [
 name = "agent-provider-contract"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "serde_json",
  "tokio",
 ]
@@ -84,9 +47,9 @@ dependencies = [
 name = "agent-provider-openai-compatible"
 version = "0.1.0"
 dependencies = [
- "agent-core",
  "agent-provider-contract",
  "agent-provider-openai-compatible",
+ "radian-core",
  "reqwest",
  "serde_json",
  "thiserror 2.0.21",
@@ -97,9 +60,9 @@ dependencies = [
 name = "agent-provider-openai-responses"
 version = "0.1.0"
 dependencies = [
- "agent-core",
  "agent-provider-contract",
  "agent-provider-openai-responses",
+ "radian-core",
  "reqwest",
  "serde_json",
  "thiserror 2.0.21",
@@ -2286,12 +2249,12 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 name = "radian-coding"
 version = "0.1.0"
 dependencies = [
- "agent-core",
  "futures-util",
  "globset",
  "ignore",
  "libc",
  "radian-coding",
+ "radian-core",
  "radian-sandbox",
  "regex",
  "serde",
@@ -2302,10 +2265,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "radian-core"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "jsonschema",
+ "radian-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "radian-exec"
+version = "0.1.0"
+dependencies = [
+ "agent-extensions",
+ "agent-provider-anthropic",
+ "agent-provider-openai-compatible",
+ "clap",
+ "futures-util",
+ "libc",
+ "radian-coding",
+ "radian-core",
+ "radian-host",
+ "radian-memory",
+ "radian-permissions",
+ "radian-runtime",
+ "radian-sandbox",
+ "radian-session",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "radian-host"
 version = "0.1.0"
 dependencies = [
- "agent-core",
  "agent-extensions",
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
@@ -2316,6 +2315,7 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "radian-coding",
+ "radian-core",
  "radian-host",
  "radian-memory",
  "radian-permissions",
@@ -2349,8 +2349,8 @@ dependencies = [
 name = "radian-permissions"
 version = "0.1.0"
 dependencies = [
- "agent-core",
  "futures-util",
+ "radian-core",
  "radian-sandbox",
  "radian-session",
  "serde",
@@ -2363,9 +2363,9 @@ dependencies = [
 name = "radian-runtime"
 version = "0.1.0"
 dependencies = [
- "agent-core",
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
+ "radian-core",
  "radian-runtime",
  "radian-session",
  "serde_json",
@@ -2387,11 +2387,11 @@ dependencies = [
 name = "radian-session"
 version = "0.1.0"
 dependencies = [
- "agent-core",
  "chrono",
  "fs2",
  "futures-util",
  "libc",
+ "radian-core",
  "radian-session",
  "rusqlite",
  "serde",
@@ -2404,8 +2404,6 @@ dependencies = [
 name = "radian-tui"
 version = "0.1.0"
 dependencies = [
- "agent-cli",
- "agent-core",
  "agent-extensions",
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
@@ -2416,6 +2414,8 @@ dependencies = [
  "portable-pty",
  "pulldown-cmark",
  "radian-coding",
+ "radian-core",
+ "radian-exec",
  "radian-host",
  "radian-memory",
  "radian-permissions",

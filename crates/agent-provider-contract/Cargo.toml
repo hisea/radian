@@ -4,9 +4,13 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 description = "Adapter-neutral provider contract suite: every Model implementation must pass these checks"
+# Test-only harness: the provider crates use it in dev-dependencies, so it is
+# never a runtime dependency of anything shippable.
+publish = false
 
 [dependencies]
-agent-core = { path = "../agent-core" }
+radian-core = { version = "0.1.0", path = "../radian-core" }
 serde_json.workspace = true
 tokio.workspace = true

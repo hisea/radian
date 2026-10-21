@@ -6,11 +6,11 @@ mod common;
 
 use std::sync::Arc;
 
-use agent_core::{
+use common::{Recorder, ScriptedModel, TempDir, created};
+use radian_core::{
     Agent, AgentConfig, CompactionOutcome, ContentPart, ContextBudget, InputSource, JournalRecord,
     Message, ModelResponse, NoTools, StopReason, TranscriptJournal, TurnOptions,
 };
-use common::{Recorder, ScriptedModel, TempDir, created};
 use radian_runtime::{Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
 
@@ -23,7 +23,7 @@ fn summary_response(summary: &str) -> ModelResponse {
         provider_payload: None,
         stop_reason: StopReason::EndTurn,
         // A real summarizer reports usage, so `CompactionUsageRecorded` is written.
-        usage: Some(agent_core::ModelUsage {
+        usage: Some(radian_core::ModelUsage {
             input: Some(50),
             ..Default::default()
         }),
@@ -72,7 +72,7 @@ async fn open_driver(
         agent,
         journal,
         inbox,
-        live as Arc<dyn agent_core::EventSink>,
+        live as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await

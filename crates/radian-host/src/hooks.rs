@@ -1,5 +1,5 @@
 //! User-level external command hooks (ADR 0045 slice A): the Claude/Codex subset as an
-//! [`agent_core::Hooks`] implementation.
+//! [`radian_core::Hooks`] implementation.
 //!
 //! Three events, all shell commands from the user's own `config.toml` (`[hooks]`):
 //!
@@ -40,11 +40,11 @@
 //! one (enforced or not, with the same environment rules as `shell`); with no sandbox in
 //! the slot they run as plain `/bin/sh -c` with the host environment.
 
-use agent_core::{
+use radian_coding::Jobs;
+use radian_core::{
     ContentPart, HookContext, HookError, Hooks, InputSource, Message, RunOutcome, RunStatus,
     ToolCall, ToolDecision, ToolResult,
 };
-use radian_coding::Jobs;
 use radian_runtime::Inbox;
 use radian_sandbox::SandboxSlot;
 use serde::Deserialize;
@@ -980,7 +980,7 @@ impl Hooks for CommandHooks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{CancelReason, CancellationToken};
+    use radian_core::{CancelReason, CancellationToken};
     use std::sync::Mutex;
 
     use crate::wake_gate::{MAX_WAKES_PER_WINDOW, WAKE_WINDOW};
