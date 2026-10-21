@@ -98,6 +98,79 @@ fn fork_is_refused_while_a_turn_runs() {
     );
 }
 
+/// `/new` ends the session when idle: no effect (leaving the loop is the execution), and
+/// the flags the loop reads to end this session and open the next.
+#[test]
+fn new_starts_a_new_session_when_idle() {
+    let mut app = App::new("m", "s");
+    let effects = submit(&mut app, "/new");
+    assert!(effects.is_empty(), "leaving needs no effect: {effects:?}");
+    assert!(app.new_session, "the loop must open a new session");
+    assert!(app.quit, "the loop must leave this session");
+    assert!(notices(&app).is_empty(), "{:?}", notices(&app));
+}
+
+/// `/new` while a turn runs is refused with a notice and the session is unchanged.
+#[test]
+fn new_is_refused_while_a_turn_runs() {
+    let mut app = App::new("m", "s");
+    app.session.projection.set_turn(TurnState::Running);
+    let effects = submit(&mut app, "/new");
+    assert!(
+        effects.is_empty(),
+        "no new session while running: {effects:?}"
+    );
+    assert!(!app.new_session && !app.quit, "the session is unchanged");
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|note| note.contains("finish the current turn before starting a new session")),
+        "{:?}",
+        notices(&app)
+    );
+}
+
+/// `/new` while a background job runs is refused with a notice pointing to `/jobs kill`,
+/// and the session is unchanged.
+#[test]
+fn new_is_refused_while_a_background_job_runs() {
+    let mut app = App::new("m", "s");
+    app.update(Input::Runtime(
+        radian_session::RuntimeEvent::BackgroundJobStarted {
+            job_id: "job-1".to_owned(),
+            command: "sleep 60".to_owned(),
+            output: "available through job".to_owned(),
+        },
+    ));
+    let effects = submit(&mut app, "/new");
+    assert!(effects.is_empty(), "no new session with a job: {effects:?}");
+    assert!(!app.new_session && !app.quit, "the session is unchanged");
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|note| note.contains("`/jobs kill`")),
+        "{:?}",
+        notices(&app)
+    );
+}
+
+/// `/new` after the session ended is refused (like `/fork`), and the session is unchanged.
+#[test]
+fn new_is_refused_after_the_session_ended() {
+    let mut app = App::new("m", "s");
+    app.session.session_ended = Some("the driver failed".to_owned());
+    let effects = submit(&mut app, "/new");
+    assert!(effects.is_empty(), "no new session when ended: {effects:?}");
+    assert!(!app.new_session && !app.quit, "the session is unchanged");
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|note| note.contains("needs a live session")),
+        "{:?}",
+        notices(&app)
+    );
+}
+
 /// The result inputs: each one changes the state the way the loop's result used to.
 #[test]
 fn the_result_inputs_change_the_state() {
