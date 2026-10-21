@@ -27,4 +27,5 @@ says which ADRs it touches.
    files, publishes the draft, re-checks every asset over an anonymous
    download, and pushes the formula to `hisea/homebrew-tap`. Store the
    notary profile once with `xcrun notarytool store-credentials RADIAN
-   --apple-id <addr> --team-id <id> --password <app-pw>`.
+   --apple-id <addr> --team-id <id>` (without `--password`: notarytool then
+   asks for it, keeping it out of shell history).
