@@ -67,7 +67,7 @@ Use this section when the owner asks you to hand work to pi in herdr. pi is a se
 - The files to read first, the background, and the steps.
 - The limits: do not change the public API of `agent-core` without saying why, no new dependencies without a reason, minimum Rust 1.99.1, follow the style around it.
 - The acceptance commands from the Verify section, and how many times to repeat flaky-prone tests.
-- The write-as-you-go rule: pi writes each finished piece to disk and commits it before it starts the next piece. It keeps a short progress note in the worktree (what is done, what is verified, what is next) and updates it after each step. A context compaction loses work that lives only in the conversation; it does not lose a file or a commit.
+- The write-as-you-go rule: pi writes each finished piece to disk and keeps a short progress note in the worktree (what is done, what is verified, what is next), updated after each step. A context compaction loses work that lives only in the conversation; it does not lose a file. pi commits at whole pieces of work (code with its tests in one commit, the ADR change and the backlog deletion in one docs-only commit), not after every small step.
 - The test rule: each new test must fail when the feature is broken. pi runs the test against the broken code, and does a mutation check for each behavior it adds. The report names the test that caught each mutation.
 - The report: files changed, the design in a few lines, the command results, what pi is unsure about, and the commit id. pi must say when it is unsure, and must not guess.
 - The notice: when pi finishes or is blocked, it runs `herdr agent prompt <your pane> "<one line>"`. Use your own pane id from `$HERDR_PANE_ID`. The line has the status, the commit id, whether all the commands passed, and what you must decide.
@@ -86,7 +86,7 @@ Use this section when the owner asks you to hand work to pi in herdr. pi is a se
 - Do a mutation check of pi's new tests in that worktree: break the code, see that a test fails, restore the code. A test that stays green is a hole. Tell pi about it.
 - Read the diff. Read each comment that claims a guarantee, such as "race-free", and check the claim. Look for a test that is named for one thing and checks another.
 - Send the problems back in a new brief on the same branch, as a new commit. Do not amend.
-- After the review passes, squash the branch to two commits before the gate: one code commit, and one docs-only commit with the ADR change and the backlog deletion (one commit when no ADR changes). Check that the squashed tree equals the reviewed tip. The gate merges each item with one merge commit and takes as many verified items as it can.
+- The gate merges each reviewed branch as it is, with one merge commit per item, and takes as many verified items as it can. Do not rewrite a branch before the gate.
 
 ### Shell hygiene
 
