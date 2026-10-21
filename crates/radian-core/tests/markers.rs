@@ -6,9 +6,9 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common::*;
 use radian_core::testing::{FailingJournal, RecordingJournal, SequenceLog, SlowJournal};
 use radian_core::*;
-use common::*;
 use serde_json::json;
 
 /// Opens a session whose every transcript change is journaled to `journal`.

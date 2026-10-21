@@ -2,9 +2,9 @@
 
 mod common;
 
+use common::*;
 use radian_core::testing::{FailingJournal, RecordingJournal};
 use radian_core::*;
-use common::*;
 use serde_json::json;
 use std::sync::Arc;
 

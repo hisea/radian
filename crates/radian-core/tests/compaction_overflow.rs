@@ -6,6 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
+use common::{Recorder, Reply, ScriptedModel, overflow, text};
 use radian_core::testing::RecordingJournal;
 use radian_core::{
     Agent, AgentConfig, AgentEvent, CancellationToken, CompactionError, CompactionFailure,
@@ -13,7 +14,6 @@ use radian_core::{
     ModelError, ModelResponse, ModelUsage, NoTools, RunError, RunStatus, StopReason, TurnOptions,
     compaction,
 };
-use common::{Recorder, Reply, ScriptedModel, overflow, text};
 
 fn summary_reply(summary: &str, input: u64) -> Reply {
     Reply::Respond(ModelResponse {

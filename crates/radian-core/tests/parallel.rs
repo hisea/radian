@@ -2,8 +2,8 @@ mod common;
 
 use std::time::Duration;
 
-use radian_core::*;
 use common::*;
+use radian_core::*;
 use serde_json::json;
 use tokio::time::Instant;
 

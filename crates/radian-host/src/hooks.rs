@@ -40,11 +40,11 @@
 //! one (enforced or not, with the same environment rules as `shell`); with no sandbox in
 //! the slot they run as plain `/bin/sh -c` with the host environment.
 
+use radian_coding::Jobs;
 use radian_core::{
     ContentPart, HookContext, HookError, Hooks, InputSource, Message, RunOutcome, RunStatus,
     ToolCall, ToolDecision, ToolResult,
 };
-use radian_coding::Jobs;
 use radian_runtime::Inbox;
 use radian_sandbox::SandboxSlot;
 use serde::Deserialize;

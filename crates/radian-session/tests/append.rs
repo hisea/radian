@@ -37,8 +37,8 @@ use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use radian_core::{JournalRecord, Message, TranscriptJournal};
 use common::{TempDir, created};
+use radian_core::{JournalRecord, Message, TranscriptJournal};
 use radian_session::{Session, SessionJournal, WriteError, lock_retry_attempts};
 
 fn session_id() -> &'static str {

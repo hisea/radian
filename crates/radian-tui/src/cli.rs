@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
-use radian_core::{AgentEvent, ContextBudget, EventSink, TurnOptions};
 use clap::Parser;
+use radian_core::{AgentEvent, ContextBudget, EventSink, TurnOptions};
 use radian_host::memory::MemoryService;
 use radian_host::{
     DEFAULT_MAX_TOKENS, ModelArgs, Provider, SessionFacade, Thinking, build_model,
@@ -441,20 +441,18 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
                 provider,
             }))
         }
-        RadianCommand::Logout { provider } => {
-            run_radian_exec(radian_exec::Cli::for_command(radian_exec::Command::Logout {
-                provider,
-            }))
-        }
-        RadianCommand::Memory { workspace, command } => run_radian_exec(radian_exec::Cli::for_memory(
-            workspace.map(|path| path.to_string_lossy().into_owned()),
-            command,
+        RadianCommand::Logout { provider } => run_radian_exec(radian_exec::Cli::for_command(
+            radian_exec::Command::Logout { provider },
         )),
-        RadianCommand::Config { command } => {
-            run_radian_exec(radian_exec::Cli::for_command(radian_exec::Command::Config {
+        RadianCommand::Memory { workspace, command } => {
+            run_radian_exec(radian_exec::Cli::for_memory(
+                workspace.map(|path| path.to_string_lossy().into_owned()),
                 command,
-            }))
+            ))
         }
+        RadianCommand::Config { command } => run_radian_exec(radian_exec::Cli::for_command(
+            radian_exec::Command::Config { command },
+        )),
         RadianCommand::Theme { command } => run_theme(command),
         RadianCommand::Footer { command } => run_footer(command),
         RadianCommand::Docs { topic } => run_docs(topic.as_deref()),

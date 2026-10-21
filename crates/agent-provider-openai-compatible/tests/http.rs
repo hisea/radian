@@ -3,11 +3,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use radian_core::*;
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use agent_provider_openai_compatible::{
     ApiKey, ConfigError, OpenAiCompatible, OpenAiCompatibleConfig,
 };
+use radian_core::*;
 use serde_json::{Value, json};
 
 // ---------- helpers ----------

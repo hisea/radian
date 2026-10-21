@@ -5,9 +5,9 @@ mod common;
 
 use std::sync::Arc;
 
+use common::*;
 use radian_core::testing::{FailingJournal, RecordingJournal};
 use radian_core::*;
-use common::*;
 
 // ---------- serialization (AC-A5-6) ----------
 

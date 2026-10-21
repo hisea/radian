@@ -3,8 +3,8 @@ mod common;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use radian_core::*;
 use common::*;
+use radian_core::*;
 
 #[tokio::test]
 async fn failed_close_can_be_retried() {

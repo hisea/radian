@@ -9,13 +9,13 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use radian_core::{Agent, AgentEvent, EventSink, InputSource, NoTools, RunStatus, TurnOptions};
 use agent_provider_anthropic::testing::{
     MockServer, Reply, block_stop, message_delta, message_start, message_stop, text_delta,
     text_start,
 };
 use agent_provider_anthropic::{Anthropic, AnthropicConfig, ApiKey};
 use common::{Recorder, TempDir, created};
+use radian_core::{Agent, AgentEvent, EventSink, InputSource, NoTools, RunStatus, TurnOptions};
 use radian_runtime::{Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
 
@@ -59,14 +59,14 @@ async fn run_inputs(
     let journal = Arc::new(SessionJournal::create(path, "sid", created()).unwrap());
     let inbox = Inbox::durable(16, Arc::clone(&journal));
     let recorder = Arc::new(Recorder::default());
-    let agent = Arc::new(
-        Agent::new(model(server), NoTools).with_config(radian_core::AgentConfig {
+    let agent = Arc::new(Agent::new(model(server), NoTools).with_config(
+        radian_core::AgentConfig {
             // These tests pin the one-failure-per-turn behaviour (ADR 0017 §2); its
             // retry is exercised in radian-core's retry tests.
             retries: 0,
             ..Default::default()
-        }),
-    );
+        },
+    ));
     let mut driver = Driver::open(
         &agent,
         journal,

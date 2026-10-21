@@ -5,8 +5,8 @@ mod common;
 use std::io::Write;
 use std::path::Path;
 
-use radian_core::{Message, TranscriptJournal};
 use common::{TempDir, created};
+use radian_core::{Message, TranscriptJournal};
 use radian_session::{JournalTail, ReadError, Session, SessionJournal};
 
 fn envelope(seq: u64, event: &str, data: serde_json::Value) -> String {

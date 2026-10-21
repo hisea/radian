@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common::*;
 use radian_core::testing::{FailingJournal, RecordingJournal, SequenceLog, SlowJournal};
 use radian_core::*;
-use common::*;
 use serde_json::json;
 
 /// Opens a journaled session.

@@ -8,8 +8,8 @@
 //! and fed back as an [`Input`]. Refreshes are event-driven (a job settle, a tool-list
 //! change), never polled, so an open panel is idle-zero-redraw like an idle screen.
 
-use radian_core::ToolSpec;
 use radian_coding::{JobState, JobSummary};
+use radian_core::ToolSpec;
 use serde_json::Value;
 
 use crate::command::InspectorPage;

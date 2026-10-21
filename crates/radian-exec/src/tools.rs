@@ -4,9 +4,9 @@
 
 #[cfg(test)]
 mod tests {
-    use radian_core::{CancellationToken, ToolProvider, ToolSession};
     use agent_extensions::McpToolProvider;
     use radian_coding::CodingTools;
+    use radian_core::{CancellationToken, ToolProvider, ToolSession};
     use radian_host::HostTools as CliTools;
 
     fn scratch(name: &str) -> std::path::PathBuf {

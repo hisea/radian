@@ -9,10 +9,10 @@
 
 use std::sync::OnceLock;
 
-use radian_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink};
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, message_item, output_item_done,
 };
+use radian_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink};
 use radian_host::{AuthStore, OAuthEntry, Provider, RouteContext};
 use serde_json::Value;
 

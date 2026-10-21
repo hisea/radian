@@ -10,7 +10,6 @@
 
 use std::sync::Mutex;
 
-use radian_core::*;
 use agent_provider_contract::{FnCall, Reason, Wire};
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, completed_pausing, created, function_call_added,
@@ -18,6 +17,7 @@ use agent_provider_openai_responses::testing::{
     output_item_done, refusal_item, text_delta,
 };
 use agent_provider_openai_responses::{OpenAiResponses, OpenAiResponsesConfig};
+use radian_core::*;
 use serde_json::{Map, Value, json};
 
 const SECRET: &str = "sk-contract-secret-token";

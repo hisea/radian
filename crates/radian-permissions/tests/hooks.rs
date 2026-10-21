@@ -6,8 +6,8 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use radian_core::{HookContext, Hooks, InputSource, ToolCall, ToolDecision};
 use common::{Gate, ScriptedApprover, TempDir, call, ctx};
+use radian_core::{HookContext, Hooks, InputSource, ToolCall, ToolDecision};
 use radian_permissions::*;
 use serde_json::json;
 

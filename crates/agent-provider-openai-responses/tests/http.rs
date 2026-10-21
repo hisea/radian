@@ -4,16 +4,16 @@
 
 use std::time::Duration;
 
-use radian_core::{
-    CancellationToken, ContentPart, Message, MessageMeta, Model, ModelContext, ModelError,
-    ModelRequest, ModelResponse, NoopSink, OpaqueJson, StopReason, ToolConcurrency, ToolSpec,
-};
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, function_call_added, function_call_arguments_delta,
     function_call_arguments_done, message_item, output_item_done, reasoning_item,
     reasoning_summary_delta, text_delta,
 };
 use agent_provider_openai_responses::{OpenAiResponses, OpenAiResponsesConfig, build_client};
+use radian_core::{
+    CancellationToken, ContentPart, Message, MessageMeta, Model, ModelContext, ModelError,
+    ModelRequest, ModelResponse, NoopSink, OpaqueJson, StopReason, ToolConcurrency, ToolSpec,
+};
 use serde_json::{Value, json};
 
 const SECRET: &str = "sk-contract-secret-token";

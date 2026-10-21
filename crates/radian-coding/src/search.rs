@@ -38,9 +38,9 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use radian_core::ToolFailure;
 use globset::{GlobBuilder, GlobMatcher};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use radian_core::ToolFailure;
 
 use crate::fail;
 use crate::safe_fs::{self, EntryKind, OpenMode};

@@ -14,8 +14,8 @@ mod common;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use radian_core::{Agent, InputSource, ModelResponse, TurnOptions};
 use common::{MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, text};
+use radian_core::{Agent, InputSource, ModelResponse, TurnOptions};
 use radian_runtime::{Driver, Inbox};
 use radian_session::SessionJournal;
 use serde_json::json;

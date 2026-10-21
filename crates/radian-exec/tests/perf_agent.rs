@@ -30,8 +30,10 @@ impl TempDir {
     fn new(label: &str) -> Self {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir =
-            std::env::temp_dir().join(format!("radian-exec-perf-{}-{label}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "radian-exec-perf-{}-{label}-{n}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }

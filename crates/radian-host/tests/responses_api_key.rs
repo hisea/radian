@@ -6,12 +6,12 @@
 //!
 //! Everything runs against a local mock; no test touches `chatgpt.com` or `opencode.ai`.
 
-use radian_core::{
-    CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink, StopReason,
-};
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, function_call_added, function_call_arguments_done, message_item,
     output_item_done, text_delta, usage,
+};
+use radian_core::{
+    CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink, StopReason,
 };
 use radian_host::{ModelArgs, Provider, Thinking, build_model};
 use serde_json::Value;

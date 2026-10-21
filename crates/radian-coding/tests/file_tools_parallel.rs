@@ -23,8 +23,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use radian_core::{NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
 use common::{TempDir, text, tools};
+use radian_core::{NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
 use serde_json::json;
 
 /// The hook is process-global: the hook tests run one at a time.

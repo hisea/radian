@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use radian_core::{InputSource, Message, NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
+use radian_core::{InputSource, Message, NoopSink, TurnOptions};
 use radian_host::{
     ApprovalRouting, AuthStore, HostBindings, ModelRoute, SessionId, SessionProjection,
     SessionSetup, TurnState, build_model, open_session,

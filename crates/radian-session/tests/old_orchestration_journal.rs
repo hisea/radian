@@ -8,8 +8,8 @@
 
 mod common;
 
-use radian_core::Message;
 use common::TempDir;
+use radian_core::Message;
 use radian_session::{Session, SessionJournal};
 
 /// The pre-change lead journal: `SessionCreated`, a turn, one `TaskSpawned` and one

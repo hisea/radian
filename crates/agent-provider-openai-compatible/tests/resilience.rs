@@ -7,12 +7,12 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
+use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use radian_core::{
     AgentEvent, CancellationToken, ContentPart, EventSink, Message, Model, ModelContext,
     ModelError, ModelRequest, ModelResponse, NoopSink,
 };
-use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
-use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use serde_json::{Value, json};
 
 const SECRET: &str = "sk-openai-resilience-secret";

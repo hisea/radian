@@ -6,8 +6,8 @@ mod common;
 
 use std::path::Path;
 
-use radian_core::TranscriptJournal;
 use common::{TempDir, fixture};
+use radian_core::TranscriptJournal;
 use radian_session::{Index, Session, SessionJournal};
 use serde_json::Value;
 

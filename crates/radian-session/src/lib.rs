@@ -32,9 +32,6 @@ mod tail;
 pub mod trace;
 mod writer;
 
-/// Re-exported so a reader of [`UncommittedReplacement::end`] need not depend on `radian-core`
-/// directly for the enum.
-pub use radian_core::ReplacementEnd;
 pub use error::ReadError;
 pub use export::{
     ExportError, ExportOptions, export_json, export_json_to, export_markdown, export_markdown_to,
@@ -57,6 +54,9 @@ pub use index::{
     Audit, Index, IndexError, IndexedEvent, RebuildWarning, Reconcile, SearchHit, SessionSummary,
     read_line_at,
 };
+/// Re-exported so a reader of [`UncommittedReplacement::end`] need not depend on `radian-core`
+/// directly for the enum.
+pub use radian_core::ReplacementEnd;
 pub use reader::{EventData, Session, SessionEvent, UncommittedReplacement};
 pub use runtime::{
     ApprovalPolicyValue, InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision,

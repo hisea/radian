@@ -5,8 +5,8 @@ mod common;
 
 use std::sync::Arc;
 
-use radian_core::*;
 use common::*;
+use radian_core::*;
 use serde_json::{Value, json};
 
 fn text_with_usage(s: &str, input: u64) -> Reply {

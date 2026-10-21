@@ -3,8 +3,8 @@ mod common;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use radian_core::*;
 use common::*;
+use radian_core::*;
 use serde_json::{Value, json};
 
 /// Decides per call id.

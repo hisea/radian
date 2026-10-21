@@ -5,8 +5,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use radian_core::{Agent, AgentConfig, ModelUsage};
 use agent_extensions::McpToolProvider;
+use radian_core::{Agent, AgentConfig, ModelUsage};
 use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{Driver, Inbox, ModelRoute};
 use radian_sandbox::{Sandbox, SandboxSlot};

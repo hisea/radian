@@ -6,9 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use radian_core::{JournalError, JournalRecord, Message, ModelUsage, ToolResult, TranscriptJournal};
 use fs2::FileExt;
 use futures_util::future::BoxFuture;
+use radian_core::{
+    JournalError, JournalRecord, Message, ModelUsage, ToolResult, TranscriptJournal,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;

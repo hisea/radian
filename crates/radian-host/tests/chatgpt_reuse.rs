@@ -7,9 +7,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use radian_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink};
 use agent_provider_openai_responses::testing::{completed, message_item, output_item_done};
 use agent_provider_openai_responses::{OpenAiResponsesConfig, build_client};
+use radian_core::{CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink};
 use radian_host::oauth_chatgpt::Endpoints;
 use radian_host::{AuthStore, ChatGptModel, OAuthEntry};
 use serde_json::Value;

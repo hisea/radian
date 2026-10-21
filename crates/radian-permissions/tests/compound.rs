@@ -5,8 +5,8 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use radian_core::{Hooks, InputSource, ToolDecision};
 use common::{ScriptedApprover, TempDir, call, ctx};
+use radian_core::{Hooks, InputSource, ToolDecision};
 use radian_permissions::*;
 use serde_json::json;
 

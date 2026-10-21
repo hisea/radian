@@ -14,8 +14,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use radian_core::{Agent, InputSource, Message, TurnOptions};
 use common::{MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, text};
+use radian_core::{Agent, InputSource, Message, TurnOptions};
 use radian_runtime::{Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
 use serde_json::json;

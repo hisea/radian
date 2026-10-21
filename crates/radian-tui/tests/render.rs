@@ -1,8 +1,8 @@
 //! Rendering tests on `TestBackend`: reasoning and assistant text are distinguishable,
 //! an interrupted prefix is marked, and tool calls are shown.
 
-use radian_core::{AgentEvent, ContentPart, Message, ToolCall, ToolResult};
 use radian_coding::QuestionKind;
+use radian_core::{AgentEvent, ContentPart, Message, ToolCall, ToolResult};
 use radian_host::{PendingRequest, PendingView};
 use radian_tui::app::{App, Entry, EntryKind};
 use radian_tui::blocks::ReasoningMode;

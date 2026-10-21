@@ -232,7 +232,10 @@ async fn a_later_turn_appends_its_new_hits_as_one_system_message() {
         "the same low-trust note: {text}"
     );
     assert!(text.starts_with("<memory>"), "{text}");
-    assert_eq!(message.meta().source, Some(radian_core::InputSource::System));
+    assert_eq!(
+        message.meta().source,
+        Some(radian_core::InputSource::System)
+    );
     let origin = message.meta().origin.clone().expect("an origin");
     assert!(origin.get().contains("memory_addition"), "{}", origin.get());
     assert_eq!(origin.get().split(later.id.0.as_str()).count() - 1, 1);

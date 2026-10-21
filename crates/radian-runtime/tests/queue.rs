@@ -6,8 +6,8 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use radian_core::{InputSource, Message, MessageId, MessageMeta, OpaqueJson};
 use common::{TempDir, created};
+use radian_core::{InputSource, Message, MessageId, MessageMeta, OpaqueJson};
 use radian_runtime::{CancelCause, Inbox, InboxError, Lane};
 use radian_session::{EventData, Session, SessionJournal};
 

@@ -14,8 +14,8 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use radian_core::{NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
 use radian_coding::CodingTools;
+use radian_core::{NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
 use serde_json::json;
 
 /// This workspace's root: two levels above this crate's manifest dir.

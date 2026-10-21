@@ -6,14 +6,14 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
+use common::TempDir;
+use futures_util::future::BoxFuture;
+use radian_coding::{PromptError, Prompter, QuestionAnswer, QuestionReply, QuestionRequest};
 use radian_core::testing::RecordingJournal;
 use radian_core::{
     Agent, ContentPart, JournalRecord, Message, Model, ModelContext, ModelError, ModelRequest,
     ModelResponse, NoopSink, StopReason, ToolCall,
 };
-use common::TempDir;
-use futures_util::future::BoxFuture;
-use radian_coding::{PromptError, Prompter, QuestionAnswer, QuestionReply, QuestionRequest};
 use serde_json::json;
 
 /// Asks one question on the first model call, then answers the user.

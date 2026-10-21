@@ -2,8 +2,8 @@ mod common;
 
 use std::sync::Arc;
 
-use radian_core::*;
 use common::*;
+use radian_core::*;
 use serde_json::json;
 
 #[tokio::test]

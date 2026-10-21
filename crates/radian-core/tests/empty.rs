@@ -9,9 +9,9 @@ mod common;
 
 use std::sync::Arc;
 
+use common::*;
 use radian_core::testing::RecordingJournal;
 use radian_core::*;
-use common::*;
 use serde_json::json;
 
 /// A final answer with no content at all.

@@ -9,8 +9,8 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use radian_core::*;
 use common::*;
+use radian_core::*;
 
 fn agent_with_retries(
     model: Arc<ScriptedModel>,

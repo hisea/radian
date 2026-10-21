@@ -5,11 +5,11 @@ mod common;
 
 use std::sync::Arc;
 
+use common::{TempDir, call, tools};
+use radian_coding::CodingTools;
 use radian_core::{
     Agent, Model, ModelContext, ModelError, ModelRequest, ModelResponse, ToolProvider, ToolSession,
 };
-use common::{TempDir, call, tools};
-use radian_coding::CodingTools;
 
 /// Never called: opening a session only needs the trait to be implemented.
 struct NeverModel;

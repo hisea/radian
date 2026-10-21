@@ -5,10 +5,10 @@ mod common;
 
 use std::sync::Arc;
 
+use common::{MemTools, ScriptedModel, TempDir, call, calls, created, text};
 use radian_core::{
     Agent, JournalRecord, Message, NoopSink, RunStatus, TranscriptJournal, TurnOptions,
 };
-use common::{MemTools, ScriptedModel, TempDir, call, calls, created, text};
 use radian_session::{EventData, Session, SessionJournal};
 use serde_json::json;
 
