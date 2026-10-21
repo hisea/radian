@@ -397,10 +397,12 @@ impl SubagentSession {
         // `explore` mounts exactly the three read-only tools, and MCP specs are never
         // filtered by `--tools`: passing the parent's config would hand the child tools
         // that can write. A `general` child keeps it — it runs the parent's own set.
-        // An `explore` child also ignores the config file's `[mcp]` (this flag): it
-        // starts no MCP server at all. A `general` child reads the same config file and
-        // the same `--mcp-config` path and merges them the same way, so it ends up with
-        // the parent's own server set — neither lost nor started twice per process.
+        // An `explore` child also ignores the implicit MCP sources (this flag): neither the
+        // config file's `[mcp]` nor the workspace's `.mcp.json` (which a trusted parent
+        // would otherwise load through the inherited `--trust`). A `general` child reads
+        // the same config file and the same `--mcp-config` path and merges them the same
+        // way, so it ends up with the parent's own server set — neither lost nor started
+        // twice per process.
         if kind != Kind::Explore
             && let Some(mcp) = &self.parts.mcp_config
         {

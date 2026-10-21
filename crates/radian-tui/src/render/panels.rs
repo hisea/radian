@@ -142,9 +142,11 @@ pub(super) fn login_height(
 }
 
 /// The startup project-trust panel (ADR 0031 T3, ADR 0035): the shared panel with
-/// the workspace line, the choices through [`crate::select_list`], and the hardcoded key
-/// hints. The cursor's default is `TrustHereSandbox` (decision 2026-10-20: for a
-/// project with no trusted decision the sandbox choice comes first and is pre-selected).
+/// the workspace line, the project `.mcp.json` preview (slice B2: one line per server, env
+/// key names only, never values), the choices through [`crate::select_list`], and the
+/// hardcoded key hints. The cursor's default is `TrustHereSandbox` (decision
+/// 2026-10-20: for a project with no trusted decision the sandbox choice comes first and
+/// is pre-selected).
 pub fn trust_panel(
     wizard: &TrustWizard,
     width: usize,
@@ -164,6 +166,11 @@ pub fn trust_panel(
         format!("project resources found in {}", wizard.workspace.display()),
         theme.text,
     )));
+    if let Some(preview) = &wizard.mcp {
+        for line in radian_host::preview_lines(preview) {
+            panel = panel.row(Line::from(Span::styled(line, theme.hint)));
+        }
+    }
     for line in list.lines {
         panel = panel.row(line);
     }

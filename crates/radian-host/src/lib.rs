@@ -143,7 +143,7 @@ pub use job_notify::{JobNotifier, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_messa
 pub use mcp::{
     CREDENTIAL_VARS, LoadScope, McpLoad, ProjectPreview, ProjectPreviewEntry, load_mcp_config,
     load_mcp_from_toml, load_project, load_project_file, merge_mcp, merge_project_mcp,
-    preview_project, project_path,
+    preview_lines, preview_project, project_path,
 };
 pub use model::{
     COMPACTION_THINKING_CURRENT, ChatGptModel, DEFAULT_MAX_MODEL_CALLS, DEFAULT_MAX_TOKENS,

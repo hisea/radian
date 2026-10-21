@@ -2745,7 +2745,7 @@ fn the_login_wizard_uses_the_text_hierarchy() {
 #[test]
 fn the_trust_panel_snapshot_at_80_120_and_ascii() {
     let mut app = App::new("m", "s");
-    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"), None);
 
     let terminal = render(&mut app, 80, 24);
     let text = screen(&terminal);

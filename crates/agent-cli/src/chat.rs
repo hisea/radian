@@ -183,7 +183,9 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     }
     let mut trust_choice = None;
     if trust_setup.needs_ask {
-        if let Some(choice) = trust_prompt(&lines, &workspace_path).await {
+        // Slice B2: the question lists the project servers that trust would load.
+        let preview = radian_host::preview_project(&workspace_path);
+        if let Some(choice) = trust_prompt(&lines, &workspace_path, preview.as_ref()).await {
             trust_setup.resolved =
                 radian_host::trust::resolved_for(choice, &workspace_path).map_err(SetupError)?;
             trust_setup.needs_ask = false;
@@ -197,6 +199,28 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         eprintln!("{}", radian_host::trust::untrusted_notice(&workspace_path));
     }
     eprintln!("{}", radian_host::trust::status_line(&trust_setup));
+
+    // Slice B2: the project `.mcp.json` joins the user's sources now that trust is resolved
+    // — trusted (or `--trust`) loads it, untrusted starts no process. The user's own
+    // precedence stands (the command line over `[mcp]`, both over the project file), and
+    // the `[mcp] …` lines print here, before any session file exists.
+    let (project, mut project_lines) = radian_host::load_project(
+        &workspace_path,
+        trust_setup.resolved.decision.as_bool(),
+        cli.no_config_mcp,
+    );
+    // The question just listed these servers: only the non-interactive default restates it.
+    if trust_choice.is_some() {
+        project_lines.retain(|line| !line.contains("not loaded (untrusted)"));
+    }
+    for line in &project_lines {
+        eprintln!("[mcp] {line}");
+    }
+    let merged = radian_host::merge_project_mcp(project, setup.mcp_user, setup.mcp_file);
+    for warning in &merged.warnings {
+        eprintln!("[mcp] {warning}");
+    }
+    let servers = merged.servers;
 
     // ADR 0043 decision 1a: the child `radian exec` this session may start. The model, the
     // provider and the (generic-provider) endpoint are the parent's resolved ones; the key is
@@ -247,7 +271,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
             config_slot: setup.config_slot,
             budget_for: Some(setup.budget_for),
             price_for: setup.price_for,
-            servers: setup.servers,
+            servers,
             mcp_config_path: setup.mcp_config.clone(),
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,

@@ -246,6 +246,58 @@ pub struct ProjectPreview {
     pub error: Option<String>,
 }
 
+/// Renders a [`ProjectPreview`] as trust-question lines, shared by the `radian exec`
+/// prompt and the TUI modal: one line per server (the name, the `command` + `args` as
+/// written, the `env` key names only — never values), remote entries marked skipped, and
+/// the read/parse error when the file cannot be used.
+pub fn preview_lines(preview: &ProjectPreview) -> Vec<String> {
+    if let Some(error) = &preview.error {
+        return vec![format!("project .mcp.json: {error}")];
+    }
+    if preview.entries.is_empty() {
+        return vec!["project .mcp.json: no servers to load".to_owned()];
+    }
+    let runnable = preview
+        .entries
+        .iter()
+        .filter(|entry| entry.skipped.is_none())
+        .count();
+    let mut lines = vec![format!(
+        "project .mcp.json: {} server{} to load once trusted:",
+        runnable,
+        if runnable == 1 { "" } else { "s" },
+    )];
+    for entry in &preview.entries {
+        lines.push(preview_entry_line(entry));
+    }
+    lines
+}
+
+/// One trust-question line for a project entry. Values never appear: the command and
+/// args are as written (before `${VAR}` expansion) and only env key names are named.
+fn preview_entry_line(entry: &ProjectPreviewEntry) -> String {
+    if let Some(detail) = &entry.skipped {
+        return format!("mcp: {} skipped ({detail})", entry.name);
+    }
+    let mut command = entry
+        .command
+        .clone()
+        .unwrap_or_else(|| "(no command)".to_owned());
+    for arg in &entry.args {
+        command.push(' ');
+        command.push_str(arg);
+    }
+    if entry.env_keys.is_empty() {
+        format!("mcp: {} `{command}`", entry.name)
+    } else {
+        format!(
+            "mcp: {} `{command}` env: {}",
+            entry.name,
+            entry.env_keys.join(", ")
+        )
+    }
+}
+
 /// Reads the raw entries of `<workspace>/.mcp.json` for the trust question. The loader runs
 /// first purely as the structural check, so the preview lists exactly what a trusted load
 /// would start (plus the skipped remote entries, which the loader drops with a warning).
@@ -1261,6 +1313,32 @@ mod tests {
             .expect("the remote entry");
         let skipped = web.skipped.as_deref().expect("remote entries are marked");
         assert!(skipped.contains("stdio"), "{skipped}");
+        // The shared question lines: the header counts the runnable server, entries show
+        // commands as written with env key names only, skips are marked, values never leak.
+        let lines = preview_lines(&preview);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("1 server to load once trusted")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(
+                |line| line.contains("mcp: fs `npx -y ${RADIAN_MCP_B2_PREVIEW}`")
+                    && line.contains("env: PLAIN, SECRET")
+            ),
+            "as written, keys only: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("mcp: web skipped") && line.contains("stdio")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("sekret-value")),
+            "values never leak: {lines:?}"
+        );
         // A broken file previews as an error, not entries.
         write(&dir, ".mcp.json", "{not json");
         let preview = preview_project(&dir).expect("the file exists");
