@@ -13865,3 +13865,83 @@ async fn pty_retry_after_a_model_error_resends_the_same_text() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+/// `/loop --times 5` re-sends the same prompt every turn: the second request carries the
+/// same user text, the footer counts `loop 1/5` while the hanging second turn runs, Esc
+/// pauses the loop, and `/help` lists `/loop`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_loop_resends_until_times_and_footer_shows_it() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        text_reply("LOOP-REPLY-ONE"),
+        Reply::SseThenHang { pieces: Vec::new() },
+    ])
+    .await;
+    let dir = TempDir::new("loop");
+    // The shipped default footer (the `deck` preset carries the `loop` item): the suite's
+    // `classic` default has no `loop` row, so `spawn_bare` writes no config file. Fifty
+    // rows fit the whole `/help` list, so the `/loop` line cannot scroll off.
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "loop",
+        ],
+        &[],
+        50,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"/loop --times 5 loop-prompt-xyzzy\r");
+    assert!(
+        pty.wait_for_screen("LOOP-REPLY-ONE", wait_positive()),
+        "the first turn did not answer:\n{}",
+        pty.screen()
+    );
+    // The second turn hangs on purpose: the footer stably shows the iteration count.
+    assert!(
+        pty.wait_for_screen("loop 1/5", wait_positive()),
+        "the footer did not count the loop iteration:\n{}",
+        pty.screen()
+    );
+    // Both turns reached the model with the same prompt.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server.requests().len() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(server.requests().len(), 2, "two turns ran");
+    assert_eq!(
+        last_user_text(&server, 0),
+        last_user_text(&server, 1),
+        "both requests carry the loop prompt"
+    );
+    assert!(
+        last_user_text(&server, 0).contains("loop-prompt-xyzzy"),
+        "the text is the typed prompt"
+    );
+    // Esc pauses the hanging loop turn (the mode stays on, the prompt is dropped).
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_for_screen("loop paused", wait_positive()),
+        "Esc did not pause the loop:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/help\r");
+    assert!(
+        pty.wait_for_screen("/loop", wait_positive()),
+        "/help does not list /loop:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+}
