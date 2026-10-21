@@ -75,6 +75,74 @@ pub struct Breakdown {
     pub details: Details,
 }
 
+/// The structured `/context` report (backlog `tui-context-grid`): the next
+/// request's estimated categories in display order, the stacking numbers
+/// (`categories` + `free` + `buffer` = `window`), the provider-reported input
+/// (ADR 0015 C1, never mixed into the estimate), the message and compaction
+/// counts, and the per-item detail. The host computes every number once; the
+/// TUI renders the grid and the narrow-terminal plain text from this one value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextReport {
+    /// The routed `(provider, model)` for the legend header. `None` when no
+    /// route is in force.
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub categories: Vec<Category>,
+    /// The total estimate `T` (the sum of the categories).
+    pub total_tokens: u64,
+    /// `C`: the context window size (ADR 0018). `None` when unknown.
+    pub window: Option<u64>,
+    /// `B`: the auto-compaction threshold (ADR 0018). `None` when unconfigured.
+    pub threshold: Option<u64>,
+    /// `threshold - used` (saturating): the free space before auto-compaction.
+    pub free_tokens: Option<u64>,
+    /// `window - threshold` (saturating): the reserved compaction buffer.
+    pub buffer_tokens: Option<u64>,
+    /// The last provider-reported input in the current revision (`None` without
+    /// one, never 0, ADR 0007).
+    pub reported: Option<u64>,
+    pub message_count: usize,
+    pub compactions: usize,
+    pub details: Details,
+}
+
+impl ContextReport {
+    /// Packs one estimate with its session facts. No numbers are recomputed.
+    pub fn new(
+        breakdown: Breakdown,
+        provider: Option<String>,
+        model: Option<String>,
+        reported: Option<u64>,
+        message_count: usize,
+        compactions: usize,
+    ) -> Self {
+        Self {
+            provider,
+            model,
+            categories: breakdown.categories,
+            total_tokens: breakdown.total_tokens,
+            window: breakdown.window,
+            threshold: breakdown.threshold,
+            free_tokens: breakdown.free_tokens,
+            buffer_tokens: breakdown.buffer_tokens,
+            reported,
+            message_count,
+            compactions,
+            details: breakdown.details,
+        }
+    }
+
+    /// Tokens of the named display category, or 0 when it is absent (reasoning
+    /// when `count_reasoning` is off).
+    pub fn category_tokens(&self, name: &str) -> u64 {
+        self.categories
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.tokens)
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Size {
     ascii: u64,
@@ -178,6 +246,41 @@ fn is_mcp_tool(name: &str, mcp_server_ids: &[String]) -> bool {
     match name.split_once("__") {
         Some((prefix, _)) => mcp_server_ids.iter().any(|id| id == prefix),
         None => false,
+    }
+}
+
+/// Splits the whole tool-array size into built-in and MCP content, attributing
+/// the array framing (`[` `]` and the `,` separators) to the built-in side when
+/// it has a tool, else to the MCP side, else (no tools at all) to the empty
+/// `[]` on the built-in side. The two sizes sum back to `whole` byte for byte.
+fn split_tools(whole: Size, tools: &[ToolSpec], mcp_server_ids: &[String]) -> (Size, Size) {
+    let mut builtin_content = Size::default();
+    let mut mcp_content = Size::default();
+    let mut builtin_count = 0usize;
+    let mut mcp_count = 0usize;
+    for spec in tools {
+        let mut size = Size::default();
+        size.add_json(spec);
+        if is_mcp_tool(&spec.name, mcp_server_ids) {
+            mcp_content = mcp_content.plus(size);
+            mcp_count += 1;
+        } else {
+            builtin_content = builtin_content.plus(size);
+            builtin_count += 1;
+        }
+    }
+    let framing = Size {
+        ascii: whole
+            .ascii
+            .saturating_sub(builtin_content.ascii + mcp_content.ascii),
+        non_ascii_chars: whole
+            .non_ascii_chars
+            .saturating_sub(builtin_content.non_ascii_chars + mcp_content.non_ascii_chars),
+    };
+    if builtin_count > 0 || mcp_count == 0 {
+        (builtin_content.plus(framing), mcp_content)
+    } else {
+        (builtin_content, mcp_content.plus(framing))
     }
 }
 
@@ -356,13 +459,30 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     settings_size.add_json(&request.settings);
     let base_size = base_size.plus(settings_size);
 
-    // Order: base, context files, memory, tools, user, assistant, [reasoning],
-    // tool results.
+    // Display order (the `/context` grid legend, spec `tui-context-grid`): system
+    // prompt, context files, memory, tool definitions (built-in), skills, MCP
+    // tools, user, assistant, [reasoning], tool results. The skills section is a
+    // substring of the base, so the system prompt is the base minus skills; the
+    // tool array is split into built-in and MCP specs, its framing (`[` `]` `,`)
+    // riding with the built-in side (or the MCP side when there is no built-in
+    // tool, or the empty `[]` on `tool definitions` when there are no tools at
+    // all). Either split sums back to its whole byte for byte, so the category
+    // tokens still sum to the total exactly.
+    let skills_size = size_of_str(input.skills_section);
+    let system_size = Size {
+        ascii: base_size.ascii.saturating_sub(skills_size.ascii),
+        non_ascii_chars: base_size
+            .non_ascii_chars
+            .saturating_sub(skills_size.non_ascii_chars),
+    };
+    let (builtin_size, mcp_size) = split_tools(tools_size, &request.tools, input.mcp_server_ids);
     let mut parts: Vec<(&'static str, Size)> = vec![
-        ("base system prompt", base_size),
+        ("system prompt", system_size),
         ("context files", context_size),
-        ("memory injection", memory_size),
-        ("tool definitions", tools_size),
+        ("memory", memory_size),
+        ("tool definitions", builtin_size),
+        ("skills", skills_size),
+        ("MCP tools", mcp_size),
         ("user messages", user_size),
         ("assistant text", assistant_size),
     ];
@@ -479,7 +599,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
         .unwrap_or(0);
     let memory_tokens = categories
         .iter()
-        .find(|c| c.name == "memory injection")
+        .find(|c| c.name == "memory")
         .map(|c| c.tokens)
         .unwrap_or(0);
     let (builtin_tools_count, builtin_tools_tokens, mcp_tools_count, mcp_tools_tokens) = {
@@ -533,7 +653,10 @@ pub fn total_of(request: &ModelRequest, bytes_per_token: u32, count_reasoning: b
     agent_core::budget::estimate_tokens_with(request, bytes_per_token, count_reasoning)
 }
 
-fn format_tokens(n: u64) -> String {
+/// Rounds tokens for display, the same rule the plain-text notices use so the
+/// grid and the fallback cannot disagree: below 1000 raw, below 10000 one
+/// decimal K, else whole K.
+pub fn format_tokens(n: u64) -> String {
     if n < 1000 {
         format!("{n}")
     } else if n < 10_000 {
@@ -543,19 +666,16 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
-/// Renders the `/context` notice lines: one per category with tokens and
-/// share, the free space and the compaction buffer, the total `T / B`
-/// (window), the reported line (ADR 0015 C1), the message count, the
-/// compaction count, and the per-item detail.
-pub fn notice_lines(
-    breakdown: &Breakdown,
-    reported: Option<u64>,
-    message_count: usize,
-    compactions: usize,
-) -> Vec<String> {
+/// Renders the `/context` notice lines from one structured report: one per
+/// category with tokens and share, the free space and the compaction buffer,
+/// the total `T / B` (window), the reported line (ADR 0015 C1), the message
+/// count, the compaction count, and the per-item detail. The narrow-terminal
+/// fallback of the grid view; the numbers come from the report, so the text
+/// and the grid cannot disagree.
+pub fn notice_lines(report: &ContextReport) -> Vec<String> {
     let mut out = Vec::new();
     out.push("context (estimated):".to_owned());
-    for category in &breakdown.categories {
+    for category in &report.categories {
         out.push(format!(
             "  {}: {} ({:.1}%)",
             category.name,
@@ -563,50 +683,47 @@ pub fn notice_lines(
             category.share
         ));
     }
-    if let Some(free) = breakdown.free_tokens {
+    if let Some(free) = report.free_tokens {
         out.push(format!(
             "  free until auto-compact: {}",
             format_tokens(free)
         ));
     }
-    if let Some(buffer) = breakdown.buffer_tokens {
+    if let Some(buffer) = report.buffer_tokens {
         out.push(format!(
             "  compaction buffer (reserved): {}",
             format_tokens(buffer)
         ));
     }
-    match (breakdown.threshold, breakdown.window) {
+    match (report.threshold, report.window) {
         (Some(threshold), Some(window)) => out.push(format!(
             "  total: {} / {} (window {})",
-            format_tokens(breakdown.total_tokens),
+            format_tokens(report.total_tokens),
             format_tokens(threshold),
             format_tokens(window)
         )),
         (Some(threshold), None) => out.push(format!(
             "  total: {} / {}",
-            format_tokens(breakdown.total_tokens),
+            format_tokens(report.total_tokens),
             format_tokens(threshold)
         )),
         (None, Some(window)) => out.push(format!(
             "  total: {} (window {})",
-            format_tokens(breakdown.total_tokens),
+            format_tokens(report.total_tokens),
             format_tokens(window)
         )),
-        (None, None) => out.push(format!(
-            "  total: {}",
-            format_tokens(breakdown.total_tokens)
-        )),
+        (None, None) => out.push(format!("  total: {}", format_tokens(report.total_tokens))),
     }
-    match reported {
+    match report.reported {
         Some(input) => out.push(format!(
             "reported: {} (last provider input)",
             format_tokens(input)
         )),
         None => out.push("reported: none yet".to_owned()),
     }
-    out.push(format!("messages: {message_count}"));
-    out.push(format!("compactions this session: {compactions}"));
-    let details = &breakdown.details;
+    out.push(format!("messages: {}", report.message_count));
+    out.push(format!("compactions this session: {}", report.compactions));
+    let details = &report.details;
     if !details.context_files.is_empty() {
         out.push("context files:".to_owned());
         for file in &details.context_files {
@@ -708,6 +825,17 @@ mod tests {
             window: Some(100_000),
             threshold: Some(90_000),
         }
+    }
+
+    fn report_of(breakdown: &Breakdown, reported: Option<u64>) -> ContextReport {
+        ContextReport::new(
+            breakdown.clone(),
+            Some("opencode".to_owned()),
+            Some("muse-spark-1.3-contributor".to_owned()),
+            reported,
+            3,
+            1,
+        )
     }
 
     #[test]
@@ -817,7 +945,7 @@ mod tests {
             block: system.context_files.clone(),
         }];
         let breakdown = estimate(&input(&req, &system, &blocks));
-        let lines = notice_lines(&breakdown, Some(12_000), 3, 1);
+        let lines = notice_lines(&report_of(&breakdown, Some(12_000)));
         assert!(lines.iter().any(|l| l.contains("estimated")), "{lines:?}");
         assert!(
             lines
@@ -825,11 +953,104 @@ mod tests {
                 .any(|l| l.contains("reported") && l.contains("12")),
             "{lines:?}"
         );
-        let unreported = notice_lines(&breakdown, None, 0, 0);
+        let unreported = notice_lines(&report_of(&breakdown, None));
         assert!(
             unreported.iter().any(|l| l.contains("none yet")),
             "{unreported:?}"
         );
+    }
+
+    /// The spec split sums back exactly: `system prompt` + `skills` is the base,
+    /// `tool definitions` + `MCP tools` is the tool array, and the category sum
+    /// still equals the estimator total.
+    #[test]
+    fn the_skill_and_mcp_splits_sum_back_to_their_wholes() {
+        let skills_section = "\n\n## Skills (ADR 0025)\n- a\n".to_owned();
+        let base = format!("<runtime>rt</runtime>\n{skills_section}<role>role</role>\n");
+        let system = SystemSplit {
+            base,
+            context_files:
+                "<project_instructions path=\"AGENTS.md\">\nbody\n</project_instructions>\n"
+                    .to_owned(),
+            memory: "\n\n## Memory (ADR 0021)\n- [global] (fact): note\n".to_owned(),
+        };
+        let prompt = format!("{}{}{}", system.base, system.context_files, system.memory);
+        let req = ModelRequest {
+            system_prompt: Some(prompt),
+            messages: vec![Message::user("hello")],
+            tools: vec![spec("read"), spec("srv__search")],
+            settings: serde_json::Value::Null,
+        };
+        let blocks = [ContextBlock {
+            path: "AGENTS.md".to_owned(),
+            block: system.context_files.clone(),
+        }];
+        let mcp_ids = ["srv".to_owned()];
+        let split = estimate(&EstimateInput {
+            request: &req,
+            system: &system,
+            skills_section: &skills_section,
+            skills_count: 3,
+            context_blocks: &blocks,
+            mcp_server_ids: &mcp_ids,
+            memory_records: 1,
+            bytes_per_token: 4,
+            count_reasoning: false,
+            window: Some(100_000),
+            threshold: Some(90_000),
+        });
+        let tokens = |name: &str| {
+            split
+                .categories
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| c.tokens)
+                .unwrap_or(0)
+        };
+        assert!(tokens("system prompt") > 0, "{split:?}");
+        assert!(tokens("skills") > 0, "{split:?}");
+        assert!(tokens("tool definitions") > 0, "{split:?}");
+        assert!(tokens("MCP tools") > 0, "{split:?}");
+        // Same request, unsplit view: one base category, one tool category.
+        let whole = estimate(&EstimateInput {
+            request: &req,
+            system: &system,
+            skills_section: "",
+            skills_count: 0,
+            context_blocks: &blocks,
+            mcp_server_ids: &[],
+            memory_records: 1,
+            bytes_per_token: 4,
+            count_reasoning: false,
+            window: Some(100_000),
+            threshold: Some(90_000),
+        });
+        assert_eq!(split.total_tokens, whole.total_tokens);
+        assert_eq!(split.total_tokens, total_of(&req, 4, false));
+        let whole_base = whole
+            .categories
+            .iter()
+            .find(|c| c.name == "system prompt")
+            .map(|c| c.tokens)
+            .unwrap_or(0);
+        // One ceil for the total: naming the skills section moves at most one
+        // token between the two views.
+        assert!(
+            tokens("system prompt") + tokens("skills") <= whole_base + 1
+                && whole_base <= tokens("system prompt") + tokens("skills") + 1,
+            "{split:?} vs {whole:?}"
+        );
+        // The report packs the estimate without recomputing.
+        let memory_tokens = tokens("memory");
+        let files_tokens = tokens("context files");
+        let mcp_tokens = tokens("MCP tools");
+        let report = ContextReport::new(split, None, None, None, 1, 0);
+        assert_eq!(report.total_tokens, whole.total_tokens);
+        assert_eq!(report.category_tokens("reasoning"), 0);
+        assert_eq!(report.details.memory_tokens, memory_tokens);
+        assert_eq!(report.details.context_files_tokens, files_tokens);
+        assert_eq!(report.category_tokens("MCP tools"), mcp_tokens);
+        assert!(mcp_tokens > 0);
     }
 
     /// Owner addendum 2026-10-20: categories + free + buffer sum to the window.
@@ -873,8 +1094,32 @@ mod tests {
         assert_eq!(breakdown.details.mcp_tools_count, 1);
         assert_eq!(breakdown.details.builtin_tools_count, 1);
         assert_eq!(breakdown.details.memory_records, 1);
-        let lines = notice_lines(&breakdown, None, 3, 0);
+        assert!(breakdown.details.memory_tokens > 0, "{breakdown:?}");
+        // The skills section and the MCP split are their own display categories
+        // now (spec `tui-context-grid`): the order is fixed, reasoning stays
+        // conditional, and the tools framing rides on one side so the split
+        // sums back exactly.
+        let names: Vec<&str> = breakdown.categories.iter().map(|c| c.name).collect();
+        assert_eq!(
+            names,
+            [
+                "system prompt",
+                "context files",
+                "memory",
+                "tool definitions",
+                "skills",
+                "MCP tools",
+                "user messages",
+                "assistant text",
+                "tool results"
+            ],
+            "{breakdown:?}"
+        );
+        let lines = notice_lines(&report_of(&breakdown, None));
         let text = lines.join("\n");
+        assert!(text.contains("system prompt:"), "{text}");
+        assert!(text.contains("skills"), "{text}");
+        assert!(text.contains("MCP tools"), "{text}");
         assert!(text.contains("AGENTS.md"), "{text}");
         assert!(text.contains("skills: 3 listed"), "{text}");
         assert!(text.contains("1 MCP in 1 servers"), "{text}");

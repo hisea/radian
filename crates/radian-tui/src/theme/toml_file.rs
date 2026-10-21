@@ -383,6 +383,29 @@ fancy_role = "#010203"
         assert_eq!(light.name, ThemeName::File);
     }
 
+    /// The `/context` grid roles (spec `tui-context-grid`): missing roles fall
+    /// back to the built-in defaults, and a file that names them wins.
+    #[test]
+    fn the_context_roles_fall_back_and_override() {
+        let (theme, warnings) = loaded("[roles]\ntext = \"#010203\"\n");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            theme.ctx_system.fg,
+            Theme::dark().tool_result.fg,
+            "system = muted"
+        );
+        assert_eq!(theme.ctx_tools.fg, Theme::dark().hint.fg, "tools = dim");
+        assert_eq!(theme.ctx_free.fg, Theme::dark().frame.fg, "free = frame");
+        assert_eq!(theme.ctx_user.fg, Theme::dark().model.fg, "user = accent");
+        let (theme, warnings) =
+            loaded("[roles]\nctx_system = \"#112233\"\nctx_buffer = \"#445566\"\n");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(theme.ctx_system.fg, Some(Color::Rgb(0x11, 0x22, 0x33)));
+        assert_eq!(theme.ctx_buffer.fg, Some(Color::Rgb(0x44, 0x55, 0x66)));
+        // The neighbors the file did not name still fall back.
+        assert_eq!(theme.ctx_files.fg, Theme::dark().ctx_files.fg);
+    }
+
     /// A broken file falls back as a whole to `dark` (decision 4).
     #[test]
     fn a_broken_file_falls_back_as_a_whole() {

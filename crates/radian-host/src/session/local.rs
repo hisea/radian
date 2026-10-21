@@ -223,12 +223,15 @@ impl LocalSession {
         Ok(crate::btw::SideCancel::new(cancel))
     }
 
-    /// The `/context` report (backlog `tui-context-command`): the next request's
-    /// shape split into estimated categories, read from the journal's committed
-    /// view plus the stored system layers. Read-only: it never touches the
-    /// inbox or the driver, so it works mid-turn.
-    fn context_report_inner(&self) -> Vec<String> {
-        use crate::context_estimate::{ContextBlock, EstimateInput, SystemSplit, estimate};
+    /// The `/context` report (backlog `tui-context-command`, grid spec
+    /// `tui-context-grid`): the next request's shape split into estimated
+    /// categories, read from the journal's committed view plus the stored system
+    /// layers. Read-only: it never touches the inbox or the driver, so it works
+    /// mid-turn.
+    fn context_report_inner(&self) -> Result<crate::context_estimate::ContextReport, String> {
+        use crate::context_estimate::{
+            ContextBlock, ContextReport, EstimateInput, SystemSplit, estimate,
+        };
         use crate::memory::first_user_text;
 
         // The committed view: history, compactions, and the last reported input
@@ -237,13 +240,13 @@ impl LocalSession {
         let (history, compactions, reported) = match read_committed(&self.journal_path) {
             Ok(view) => view,
             Err(error) => {
-                return vec![format!("context: cannot read the session file: {error}")];
+                return Err(format!("context: cannot read the session file: {error}"));
             }
         };
         let request = match self.next_request_shape() {
             Ok(request) => request,
             Err(error) => {
-                return vec![format!("context: cannot read the session file: {error}")];
+                return Err(format!("context: cannot read the session file: {error}"));
             }
         };
         // The fixed block's text and record count, for the estimate's split and
@@ -294,7 +297,15 @@ impl LocalSession {
             window: self.window_context,
             threshold,
         });
-        crate::context_estimate::notice_lines(&breakdown, reported, history.len(), compactions)
+        let (provider, model) = self.model_route().unzip();
+        Ok(ContextReport::new(
+            breakdown,
+            provider,
+            model,
+            reported,
+            history.len(),
+            compactions,
+        ))
     }
 }
 
@@ -706,7 +717,7 @@ impl SessionFacade for LocalSession {
         jobs.tail(id, max).map(|(state, _, tail)| (state, tail))
     }
 
-    fn context_report(&self) -> Vec<String> {
+    fn context_report(&self) -> Result<crate::context_estimate::ContextReport, String> {
         self.context_report_inner()
     }
 

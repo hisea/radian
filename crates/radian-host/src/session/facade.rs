@@ -121,13 +121,15 @@ pub trait SessionFacade: Send + Sync {
     /// `None` for an unknown id. The ring is in-memory, so this is not I/O.
     fn job_tail(&self, id: &str, max: usize) -> Option<(radian_coding::JobState, String)>;
 
-    /// The `/context` notice lines (backlog `tui-context-command`): per-category
-    /// estimated tokens and share of the next request, the total `T / B`, the
-    /// last provider-reported input (`none yet` without one), the message count
-    /// and the compactions this session. Read-only; it never touches the inbox
-    /// or the driver, so it works mid-turn. The history is the journal's
-    /// committed view (live deltas excluded).
-    fn context_report(&self) -> Vec<String>;
+    /// The `/context` report (backlog `tui-context-command`, grid spec
+    /// `tui-context-grid`): the next request's estimated categories in display
+    /// order, the stacking numbers, the last provider-reported input (ADR 0015
+    /// C1), the message count and the compactions this session. Read-only; it
+    /// never touches the inbox or the driver, so it works mid-turn. The history
+    /// is the journal's committed view (live deltas excluded). The TUI renders
+    /// both the grid and the plain-text fallback from this one value, so the
+    /// numbers are computed once.
+    fn context_report(&self) -> Result<crate::context_estimate::ContextReport, String>;
 
     /// The next formal request's shape (backlog `tui-btw-side-question`): the
     /// system prompt the hook chain would build, the committed history, the

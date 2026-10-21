@@ -190,6 +190,21 @@ pub(crate) fn fg_source(role: Role) -> Option<&'static str> {
         Role::StatusOk => Some("success"),
         Role::StatusWarn => Some("warning"),
         Role::StatusError => Some("error"),
+        // The `/context` grid's category roles have no pi source (spec
+        // `tui-context-grid`): a theme file sets them by their Radian names, and
+        // anything else falls back to the built-in palette.
+        Role::CtxSystem
+        | Role::CtxFiles
+        | Role::CtxMemory
+        | Role::CtxTools
+        | Role::CtxSkills
+        | Role::CtxMcp
+        | Role::CtxUser
+        | Role::CtxAssistant
+        | Role::CtxReasoning
+        | Role::CtxResults
+        | Role::CtxFree
+        | Role::CtxBuffer => None,
     }
 }
 

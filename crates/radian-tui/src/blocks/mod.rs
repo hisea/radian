@@ -21,6 +21,7 @@ use crate::app::{Entry, EntryKind};
 use crate::tools::{self, DisplayModes};
 
 mod ask;
+mod context_grid;
 mod layout;
 pub(crate) mod markdown;
 mod thinking;
@@ -28,6 +29,7 @@ mod tool_card;
 
 pub(crate) use ask::AskGlyphs;
 use ask::{ask_block, ask_pending_line, is_ask_entry};
+pub use context_grid::{ContextView, context_entry, context_lines, context_texts};
 pub(crate) use layout::parse_blocks_for;
 pub use layout::{blocks_for, body_text_lines, layout, layout_with, line_count, line_count_cached};
 #[cfg(test)]
@@ -377,6 +379,26 @@ pub struct MdPiece {
     pub offset: Option<usize>,
 }
 
+/// A `/context` grid category's own color (spec `tui-context-grid`): system
+/// prompt, context files, memory, built-in tool definitions, skills, MCP
+/// tools, user messages, assistant text, reasoning, tool results, free space
+/// and the compaction buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CtxTone {
+    System,
+    Files,
+    Memory,
+    Tools,
+    Skills,
+    Mcp,
+    User,
+    Assistant,
+    Reasoning,
+    Results,
+    Free,
+    Buffer,
+}
+
 /// A Markdown piece's render role (ADR 0028 R2, ADR 0029 decision 3: pi's `md*` roles).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MdStyle {
@@ -428,6 +450,10 @@ pub enum MdStyle {
     StatusRunning,
     /// A quote's `│ ` bar (`mdQuoteBorder`).
     QuoteBar,
+    /// One `/context` grid cell or legend glyph (spec `tui-context-grid`): the
+    /// estimated category's own theme role. Not Markdown; the same per-piece
+    /// mechanism as the tool head's name and status glyphs.
+    Ctx(CtxTone),
     /// A list bullet or number (`mdListBullet`).
     Bullet,
     /// A thematic break (`mdHr`).

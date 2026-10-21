@@ -304,9 +304,9 @@ impl App {
             } => self.begin_bash(command, exclude_from_context),
             // `/skills`: the host lists the discovered skills as notices.
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
-            // `/context`: the loop reads the estimate from the facade; the answer
-            // comes back as `Input::SessionDone`.
-            command::Outcome::Context => UpdateResult::effect(Effect::Context),
+            // `/context [all]`: the loop reads the estimate from the facade; the
+            // answer comes back as `Input::ContextReady`.
+            command::Outcome::Context { all } => UpdateResult::effect(Effect::Context { all }),
             // `/btw [question]`: ask from the current context, or reopen the last
             // side answer. Pure: the loop sends the request and streams it back.
             command::Outcome::Btw(question) => self.run_btw(question),

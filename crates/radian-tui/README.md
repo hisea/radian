@@ -352,8 +352,9 @@ token arrows became `↑`/`↓`, its success `✓`, its truncation `…`). The
 brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under `ascii`; `㎭` (U+33AD) is gone
 (East-Asian-Wide, off-baseline fallback). The spinner's default
 is `pulse` (`⏺`, one cell); the covered optional kind is `quadrant` (`▖▘▝▗`). The arc
-(`◜◝◞◟`), the braille (`⠋⠙⠸⠴`), `pulse` itself, and the fold pair `◼`/`◻` (ADR 0035's
-2026-10-16 note: the owner chose them knowing four of the six reference fonts lack them) are the
+(`◜◝◞◟`), the braille (`⠋⠙⠸⠴`), `pulse` itself, the fold pair `◼`/`◻` (ADR 0035's
+2026-10-16 note: the owner chose them knowing four of the six reference fonts lack them), and
+the context grid's buffer `▨` (spec `tui-context-grid`: three of the six lack it) are the
 **documented exceptions** to this
 rule (ADR 0027/10: the owner picked them after seeing them), so a font without them
 draws a fallback glyph; `tui.spinner = "quadrant"` switches to the covered set.
@@ -395,6 +396,7 @@ Documented exceptions (allowed to fall back; the test keeps them in a separate s
 | `⏺` | U+23FA | spinner default (`pulse`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `◼` | U+25FC | thinking / tool head, folded (ADR 0035's 2026-10-16 note) | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
 | `◻` | U+25FB | thinking / tool head, expanded | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| `▨` | U+25A8 | context grid compaction buffer (spec `tui-context-grid`) | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ |
 | `◜` `◝` `◞` `◟` | U+25DC…DF | spinner `arc` | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ |
 | `⠋` `⠙` `⠹` `⠸` `⠼` `⠴` `⠦` `⠧` `⠇` `⠏` | U+280B… | spinner `braille` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
 
