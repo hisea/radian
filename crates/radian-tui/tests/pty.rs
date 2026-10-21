@@ -2033,6 +2033,145 @@ async fn pty_resume_renders_the_stored_history() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// `--resume` with a goal in the journal parks it as paused (ADR 0047) and the startup
+/// block shows `goal paused: <objective>; /goal resume to continue`. Seeded like
+/// `pty_resume_renders_the_stored_history`: only the journal differs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_with_paused_goal_shows_the_resume_hint() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("resume-goal");
+    let path = dir.path().join("goal.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "goal",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    let budget = radian_session::GoalState::default_budget();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::GoalSet {
+            objective: "RESUME-GOAL-42".into(),
+            max_turns: budget.max_turns,
+            max_duration_secs: budget.max_duration_secs,
+            max_tokens: budget.max_tokens,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("new reply")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "goal",
+        ],
+        24,
+        100,
+    );
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen(
+            "goal paused: RESUME-GOAL-42; /goal resume to continue",
+            wait_positive()
+        ),
+        "the paused-goal hint is missing from the startup block:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `/new` from a session with a (paused) goal starts clean: the new startup block has no
+/// `goal paused` line and `/goal` reports no goal. The old goal stays in the old journal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_from_a_goal_session_starts_without_a_goal() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-goal");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let path = sessions.join("old.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "old",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    let budget = radian_session::GoalState::default_budget();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::GoalSet {
+            objective: "OLD-GOAL-7".into(),
+            max_turns: budget.max_turns,
+            max_duration_secs: budget.max_duration_secs,
+            max_tokens: budget.max_tokens,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("SECOND-TWO")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--resume",
+            "old",
+        ],
+        24,
+        100,
+    );
+    // The old session resumes with the paused goal and stays idle (a paused goal never
+    // auto-continues), so `/new` is accepted.
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("goal paused: OLD-GOAL-7", wait_positive()),
+        "the old session has no paused-goal hint:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen("--resume old", wait_positive()),
+        "the /new notice must name the old session:\n{}",
+        pty.screen()
+    );
+    // The new session is live: one turn gets the mock reply, with no goal continuation.
+    pty.send(b"hello second\r");
+    assert!(
+        pty.wait_for_screen("SECOND-TWO", wait_positive()),
+        "the new session did not answer:\n{}",
+        pty.screen()
+    );
+    // Its startup block carries no goal hint ...
+    pty.expand_startup();
+    assert!(
+        pty.screen_absent("goal paused"),
+        "the new session must not show a paused-goal hint:\n{}",
+        pty.screen()
+    );
+    // ... and `/goal` reports no goal (a carried-over goal would name its objective).
+    pty.send(b"/goal\r");
+    assert!(
+        pty.wait_for_screen("no goal; /goal <objective> sets one", wait_positive()),
+        "the new session must have no goal:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// The approval dialog end to end: the tool runs only after the human answers, the prompt
 /// shows the **resolved** path, and the decision is written to the session file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
