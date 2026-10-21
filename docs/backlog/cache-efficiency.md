@@ -2,7 +2,7 @@
 
 - 状态：idea（条件：接入 Anthropic 路由、或 OpenAI 系路由的命中率掉下来时再做）
 - 涉及 ADR：0018、0026
-- 来源：`docs/research/2026-10-18-area-deep-dive/README.md` 第 3、4、9 条
+- 来源：`research/2026-10-18-area-deep-dive/README.md` 第 3、4、9 条
 
 ## 背景
 

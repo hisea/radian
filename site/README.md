@@ -10,7 +10,7 @@ Figure 1 is a frame rendered by the TUI prototype script, pasted into `index.htm
 
 ```sh
 for t in light dark; do
-  bash docs/research/2026-10-16-render-prototype/render-screen.sh --width 120 --panel off --theme $t > /tmp/screen-$t.ansi
+  bash research/2026-10-16-render-prototype/render-screen.sh --width 120 --panel off --theme $t > /tmp/screen-$t.ansi
 done
 python3 -I site/tools/ansi2html.py /tmp/screen-light.ansi 116,89,180   # paste into <pre class="frame-light">
 python3 -I site/tools/ansi2html.py /tmp/screen-dark.ansi 167,152,215   # paste into <pre class="frame-dark">
@@ -22,5 +22,5 @@ The two numbers are the theme's accent RGB; the script maps it to the page's `va
 
 - `brew install radian` is a placeholder (marked "soon"); fix the formula name or remove the row.
 - The frame's model name, costs and quota are invented by the prototype script.
-- The two speed numbers come from `docs/perf-baseline.md` (Apple M4, before ADR 0040); re-measure.
+- The two speed numbers come from `benchmarks/perf-baseline.md` (Apple M4, before ADR 0040); re-measure.
 - Deployment (host, `CNAME`) is not decided.

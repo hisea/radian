@@ -12,7 +12,7 @@
 //! omp recognizes the same body by `error.code ?? error.type`
 //! (`@oh-my-pi/pi-ai/src/error/flags.ts:487`: `code === "usage_limit_reached"`;
 //! `src/providers/openai-codex/response-handler.ts:72`); the ChatGPT backend's own body carries
-//! the field as `type` (see `docs/providers/openai-responses-wire-notes.md` §7).
+//! the field as `type` (see `crates/agent-provider-openai-responses/WIRE.md` §7).
 
 use serde_json::Value;
 

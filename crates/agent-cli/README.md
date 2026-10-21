@@ -282,7 +282,7 @@ radian config import-pi --from ~/.pi/agent --write              # save it (refus
   suggested variable and the report says so without ever showing the value; a `!command` value
   is listed and **never executed**.
 - Radian does **not** promise compatibility with Pi's file format. See
-  [`docs/pi-migration.md`](../../docs/pi-migration.md) for the mapping table.
+  [`docs/user/pi-migration.md`](../../docs/user/pi-migration.md) for the mapping table.
 
 ## Exit codes
 

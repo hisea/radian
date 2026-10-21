@@ -264,7 +264,7 @@ async fn a_tool_call_round_trips_through_the_core() {
 
 #[tokio::test]
 async fn reasoning_content_streams_as_reasoning_not_text() {
-    // AC-R1-8: the dogfooded shape (`docs/findings/2026-10-12-opencode-zen-dogfooding.md`
+    // AC-R1-8: the dogfooded shape (`research/2026-10-12-opencode-zen-dogfooding.md`
     // gap 2) - a `delta` carries `content: ""` and `reasoning_content` at the same time.
     let server = MockServer::start(vec![Reply::sse(&[
         chunk(

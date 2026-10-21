@@ -2,7 +2,7 @@
 //!
 //! Only a complete response is returned, as the core requires: a stream that ends without a
 //! terminal event is an error, never a partial answer. The event names and item shapes are
-//! recorded in `docs/providers/openai-responses-wire-notes.md`.
+//! recorded in `crates/agent-provider-openai-responses/WIRE.md`.
 
 use std::collections::HashSet;
 

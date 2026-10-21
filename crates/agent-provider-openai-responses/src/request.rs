@@ -1,7 +1,7 @@
 //! `ModelRequest` -> Responses request body. Pure, so it is tested without a server.
 //!
 //! Field names and shapes are recorded with their source in
-//! `docs/providers/openai-responses-wire-notes.md`; the wire is the standard Responses
+//! `crates/agent-provider-openai-responses/WIRE.md`; the wire is the standard Responses
 //! `input` item list (also used by the Codex endpoint).
 
 use agent_core::{ContentPart, Message, ModelError, ModelRequest, ToolCall, ToolResult};

@@ -5,8 +5,8 @@
 //!   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=$SYSROOT/lib/rustlib/aarch64-apple-darwin/bin/rust-lld \
 //!   cargo build -p radian-sandbox --bin sandbox-escape --features testing \
 //!   --target aarch64-unknown-linux-musl
-//! scp target/aarch64-unknown-linux-musl/debug/sandbox-escape <user>@<vm>:/tmp/
-//! ssh <user>@<vm> '/tmp/sandbox-escape --out /tmp/radian-sandbox-evidence'
+//! scp target/aarch64-unknown-linux-musl/debug/sandbox-escape <user>@<linux-host>:/tmp/
+//! ssh <user>@<linux-host> '/tmp/sandbox-escape --out /tmp/radian-sandbox-evidence'
 //! ```
 
 use std::process::ExitCode;

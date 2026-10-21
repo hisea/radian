@@ -1,6 +1,6 @@
 # Linux compatibility findings — independent re-run, 2026-10-12
 # VM: Arch Linux ARM aarch64, kernel 7.2.6-1-aarch64-ARCH, bwrap 0.12.0, git 2.55.0,
-#     Rust 1.88.0 (rustup minimal, installed under /tmp; see docs/sandbox.md).
+#     Rust 1.88.0 (rustup minimal, installed under /tmp; see crates/radian-sandbox/LIMITS.md).
 # Produced by crates/radian-sandbox/tests/compat_linux.rs (3/3 runs passed).
 
 sandbox: workspace-write, default sensitive-read denies

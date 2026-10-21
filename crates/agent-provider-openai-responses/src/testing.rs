@@ -3,7 +3,7 @@
 //! It speaks just enough HTTP/1.1 to stream a chunked response with headers, hang, or cut the
 //! connection, and it records every request it receives. Replies are used in order, one per
 //! request. The event builders below produce the standard Responses event shapes recorded in
-//! `docs/providers/openai-responses-wire-notes.md`.
+//! `crates/agent-provider-openai-responses/WIRE.md`.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

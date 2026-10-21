@@ -8,7 +8,7 @@
 
 - `cobol-modernization`（把 `/app/src/program.cbl` 用 Python 重写成 `/app/program.py`）：15 分钟、40 次模型调用，写了 20 多个 COBOL 探测程序去摸 GnuCOBOL 对怪异输入的边界行为，**一次 `patch`/`write` 都没有**，到 900 s 超时没写出 `program.py`，得 0 分。输出 15.2 万 token，大部分是推理；后半段单次调用 60–80 s。
 - 任务本身就有参照物：编译原 COBOL 跑一遍，和 Python 输出逐字节比对即可。
-- 与研究报告记下的"只查不改"同一类（`docs/research/2026-10-18-area-deep-dive/README.md` 第 15 条 no-edit 看门狗）。
+- 与研究报告记下的"只查不改"同一类（`research/2026-10-18-area-deep-dive/README.md` 第 15 条 no-edit 看门狗）。
 
 ## 待决方向
 

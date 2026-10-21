@@ -54,7 +54,7 @@
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
 | `acp-server.md` | idea（暂定不做） | 新 ADR；0032、0009、0024、0011、0010、0043 | ACP 服务端：先做外部适配器验证需求；审批→`request_permission`、inbox→`session/prompt`、live→`session/update`；在 exec jsonl 与控制口客户端之后 |
 
-只占索引行（暂无文件；来源都是总报告 `docs/research/2026-10-18-area-deep-dive/README.md`）：
+只占索引行（暂无文件；来源都是总报告 `research/2026-10-18-area-deep-dive/README.md`）：
 
 | (无文件) | 状态 | ADR | 一句话 |
 |---|---|---|---|

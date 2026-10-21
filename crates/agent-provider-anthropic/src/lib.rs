@@ -3,7 +3,7 @@
 //!
 //! The wire format follows Anthropic's official developer documentation; every event, field
 //! and `stop_reason` value the adapter relies on is recorded with its URL and access date in
-//! `docs/providers/anthropic-wire-notes.md`. The adapter does **not** implement subscription
+//! `crates/agent-provider-anthropic/WIRE.md`. The adapter does **not** implement subscription
 //! OAuth (Anthropic's policy forbids routing consumer subscriptions through third-party
 //! tools). Extended thinking is implemented behind an explicit config; server-side tool
 //! blocks remain unimplemented.

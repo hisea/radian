@@ -2,7 +2,7 @@
 
 - 状态：idea
 - 涉及 ADR：0012、0043
-- 来源：`docs/research/2026-10-18-area-deep-dive/README.md` 第三轮安全小节（注：没有独立的 `13-security.md` 文件，内容在总报告 README 里）
+- 来源：`research/2026-10-18-area-deep-dive/README.md` 第三轮安全小节（注：没有独立的 `13-security.md` 文件，内容在总报告 README 里）
 
 ## 背景
 

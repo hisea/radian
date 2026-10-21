@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "fake API keys used by tests and fixtures"
+regexes = ['''^sk-live-abcdef[0-9]+$''']

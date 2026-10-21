@@ -3,7 +3,7 @@
 //! matters, and directly through `complete` where the response's usage must be visible.
 //!
 //! All event shapes come from the official documentation (see
-//! `docs/providers/anthropic-wire-notes.md`); this file adds nothing to the wire format.
+//! `crates/agent-provider-anthropic/WIRE.md`); this file adds nothing to the wire format.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -2,7 +2,7 @@
 
 - 状态：idea
 - 涉及 ADR：无
-- 来源：`docs/research/2026-10-18-area-deep-dive/README.md` 第 1 条；分报告 6 §7（注：没有独立的 `6-evals-observability.md` 文件，设计在总报告 README 引用的分报告里）
+- 来源：`research/2026-10-18-area-deep-dive/README.md` 第 1 条；分报告 6 §7（注：没有独立的 `6-evals-observability.md` 文件，设计在总报告 README 引用的分报告里）
 
 ## 背景
 

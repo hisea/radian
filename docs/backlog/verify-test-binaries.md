@@ -2,7 +2,7 @@
 
 - 状态：idea
 - 涉及 ADR：新 ADR（journal-selfcheck 的作用范围会变）
-- 来源：`docs/research/2026-10-15-build-timings.md` §3、§5；总报告第三轮"先不做"末条；`4-architecture.md` §6 ⑤
+- 来源：`research/2026-10-15-build-timings.md` §3、§5；总报告第三轮"先不做"末条；`4-architecture.md` §6 ⑤
 
 ## 背景
 

@@ -3,7 +3,7 @@
 - 状态：decided＼�；已落地（pi/import-claude，ADR 0046）：用户级 commands/skills 引用/`CLAUDE.md`/用户 hooks、项目级 commands/skills 复制；MCP 与项目 hooks 等两个 slice B（见末节）。本文件保留，不删除。
 - 顺序：生态兼容四件事的第 4/4＼�按 `context-at-imports` → `mcp-servers-json` → `command-hooks-claude-subset` → `import-claude` 做；ACP 暂定不做）
 - 涉及 ADR：新 ADR（外部 agent 配置导入）；0029（§5 "一次性翻译，不是运行时兼容层"的同一原则）、0008（只存 secret 引用；不写回）、0025（commands 转 skill、`extra_paths`）、0031（导入不等于信任）
-- 来源：`docs/research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` §6 ④；总报告 README 第 31 条
+- 来源：`research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` §6 ④；总报告 README 第 31 条
 - 依赖：`mcp-servers-json.md`（目标 MCP 结构）、`command-hooks-claude-subset.md`（目标 hook 子集）、`project-skills.md`（`$ARGUMENTS`）先落地，否则对应类别只能在报告里列为"未导入"
 
 ## 背景

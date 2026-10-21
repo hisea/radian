@@ -90,7 +90,7 @@ projection handle, now reached through `app.session.projection`.
   cannot starve the frame (`pty_a_flooding_producer_still_draws_and_answers_keys`).
 - **Idle is zero redraw**: the loop blocks in `recv`, and no display in this build changes with
   time, so nothing is drawn until an event arrives (`pty_an_idle_screen_is_not_redrawn`; the
-  Step 0 baseline was ~19 frames/s, `docs/perf-baseline.md` §7b).
+  Step 0 baseline was ~19 frames/s, `benchmarks/perf-baseline.md` §7b).
 
 ### The layer stack (ADR 0023 U4)
 
@@ -1220,7 +1220,7 @@ continue it: `... the session file <path> exists; after fixing the problem, cont
 - Frame timing under load (the spike measured p95 ≪ 16 ms; this skeleton was not benchmarked).
 - `Shift-Enter` on terminals without the enhanced keyboard protocol.
 - Windows and Linux ptys; only macOS was exercised.
-- Large transcripts: virtualized since 2026-10-13 (dogfooding D9; `tests/virtual.rs`, frame times in `docs/perf-baseline.md` §4). Not done: the first frame after resuming a large session still measures every entry once (ADR 0023 Step 0 measured it: 50k messages → **2.2–4.7 s** to the first frame; a width change also re-wraps the whole transcript, ~70 ms at 50k). Those Step 0 numbers come from `TestBackend` and a real pty (`crates/radian-tui/tests/perf_render.rs`): they measure our render cost and the bytes arriving at a pty, **not** the draw latency of a real terminal emulator.
+- Large transcripts: virtualized since 2026-10-13 (dogfooding D9; `tests/virtual.rs`, frame times in `benchmarks/perf-baseline.md` §4). Not done: the first frame after resuming a large session still measures every entry once (ADR 0023 Step 0 measured it: 50k messages → **2.2–4.7 s** to the first frame; a width change also re-wraps the whole transcript, ~70 ms at 50k). Those Step 0 numbers come from `TestBackend` and a real pty (`crates/radian-tui/tests/perf_render.rs`): they measure our render cost and the bytes arriving at a pty, **not** the draw latency of a real terminal emulator.
 
 ## Sessions
 
@@ -1477,7 +1477,7 @@ then throwing it away, so it must not run on every cold build. `build.rs` only c
 against the vendored grammars (a digest in `assets/syntaxes.packdump.digest`) and copies it to
 `$OUT_DIR`; the binary embeds that dump and only deserializes it. A grammar edit fails the build
 until `RADIAN_REGENERATE_SYNTAXES=1 cargo build -p radian-tui` regenerates both files, which are
-then committed. `docs/perf-baseline.md` has the before/after numbers. The **language table
+then committed. `benchmarks/perf-baseline.md` has the before/after numbers. The **language table
 above is what limits highlighting**; a grammar the set ships but the table does not name
 renders as plain text.
 
