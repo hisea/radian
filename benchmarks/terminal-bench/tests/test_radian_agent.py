@@ -80,7 +80,7 @@ class FakeEnvironment:
 
 
 def scrub_host_key():
-    """Hide the owner's real key from the test process environment."""
+    """Hide the real key from the test process environment."""
     return mock.patch.dict(
         os.environ,
         {k: v for k, v in os.environ.items() if k != CREDENTIAL_ENV_NAME},

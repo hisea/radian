@@ -1,13 +1,13 @@
 # 剩余时间感知：radian 知道这一轮的期限，并告诉模型
 
-- 状态：idea（定是否做成产品功能）
+- 状态：idea（是否做成产品功能）
 - 涉及 ADR：0017（回合结束）、0036（`<runtime>` 层或运行中提示）、0032（`radian exec` 的 flag）
 - 来源：Terminal-Bench smoke（2026-10-20）
 
 ## 背景（已核实）
 
 - `compile-compcert` 在 40 分钟上限前 3 分钟才开始主构建；`cobol-modernization` 到 900 s 都没写交付物。两次都是被外部强制停掉，radian 没有自己结束这一轮，journal 不完整。
-- `radian exec` 已有 `--turn-timeout-secs`。Terminal-Bench 适配器在传了 `--ak timeout_sec` 时用它减 60 s 作为 `--turn-timeout-secs`�此替代）：Harbor 0.24.0 不把任务自己的 agent 超时传给 agent，只在外面用 `asyncio.wait_for` 到点杀掉，所以不传 `timeout_sec` 时仍会被外部强制停掉。
+- `radian exec` 已有 `--turn-timeout-secs`。Terminal-Bench 适配器在传了 `--ak timeout_sec` 时用它减 60 s 作为 `--turn-timeout-secs`（采用此替代方案）：Harbor 0.24.0 不把任务自己的 agent 超时传给 agent，只在外面用 `asyncio.wait_for` 到点杀掉，所以不传 `timeout_sec` 时仍会被外部强制停掉。
 
 ## 待决方向
 

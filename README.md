@@ -36,7 +36,7 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
 `mcp-fixture` (a hand-written MCP server for its tests) and `radian-sandbox`'s `sandbox-escape`
 (requires `--features testing`).
 
-## Status (2026-10-13)
+## Status
 
 - **The `~/.radian/` layout** is implemented: `config/` and `cache/` are readable
   by the sandbox; `sessions/` and `memory/` are denied. `RADIAN_HOME` overrides the
@@ -230,7 +230,7 @@ declaration can only **narrow**, never widen.
 
 - **A failed probe refuses to run.** If the backend is missing or its probe fails, the host
   exits with an error instead of falling back to an unsandboxed run. There is no degrade path
- . Try `RADIAN_SANDBOX_PROBE_FAIL=1` to exercise it; it can only
+  (decision 2). Try `RADIAN_SANDBOX_PROBE_FAIL=1` to exercise it; it can only
   cause a refusal.
 - **Without `--workspace`** no write or execute tool exists at all: the built-in tools are only
   mounted with a workspace, and `shell` additionally needs a sandbox.

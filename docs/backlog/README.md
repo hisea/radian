@@ -1,6 +1,6 @@
 # 待办（backlog）
 
-状态：accepted＼�
+状态：accepted
 
 ## 规则
 
@@ -17,7 +17,7 @@
 
 - 状态：idea | decided | in-progress（分支名）
 - 涉及 ADR：0008、0026
-- 来源：决定 / 研究报告路径与章节
+- 来源：研究报告路径与章节
 
 ## 背景
 

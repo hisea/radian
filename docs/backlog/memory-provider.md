@@ -2,13 +2,13 @@
 
 - 状态：idea
 - 涉及 ADR：0021、0013、0031
-- 来源：的决定（A：模型不写记忆）；`research/2026-10-18-area-deep-dive/9-long-tasks-memory.md` §6.5
+- 来源：`research/2026-10-18-area-deep-dive/9-long-tasks-memory.md` §6.5
 
 ## 背景
 
 模型侧的写工具已经删除，`memory_search` 改为超出注入预算才挂载（pi/memory-tools，ADR 0021 D5/D7）。读靠注入，写靠用户命令。剩下的是两件还没定的事：记忆从哪来可以替换，以及没有人手写时记忆怎么长。
 
-## 待决方向（lead 整理，owner 未定）
+## 待决方向（lead 整理，待定）
 
 - **`MemoryBackend` trait**（宿主级，不进 agent-core；名字避开"provider"，那是模型路由）：`fixed(query, budget) -> Vec<Item>`、`addition(turn_text, exclude, budget) -> Vec<Item>`、可选 `capture(evidence) -> Vec<Candidate>`、可选 `search`、`status`。返回结构化记录，不返回提示词文本；渲染、低可信说明、分段、预算裁剪、`MemoryInjected` 账本全部留在宿主。接缝就是今天的 `MemoryInjection`（`MemoryHooks::before_model_call` 与 driver 的 `TurnAdditions` 闭包都只调它）。backend 出错按不变量 2 吞掉，不能做成 `Hooks`（Hooks 出错结束回合，ADR 0017）。
 - **内置 `JsonlBackend`** = 今天的 `MemoryService` + `injection::plan`，纯重构。

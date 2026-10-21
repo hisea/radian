@@ -1,6 +1,6 @@
 # 可配置压缩阈值 + 压缩后确定性补水
 
-- 状态：idea＼�满足下面的「做的条件」就做，且先于 `context-pruning.md`）
+- 状态：idea（满足下面的「做的条件」就做，且先于 `context-pruning.md`）
 - 涉及 ADR：0018（`B` 公式补一个可选上限；摘要结构加确定性的文件清单与补水消息）、0008（配置 schema）
 - 来源：`research/2026-10-18-area-deep-dive/3-context.md` §6.9 与 §6.5(a)(c)
 

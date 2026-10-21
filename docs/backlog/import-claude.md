@@ -1,7 +1,7 @@
 # `radian import claude`：一次性翻译 Claude Code 的私有格式
 
-- 状态：decided＼�；已落地（pi/import-claude，ADR 0046）：用户级 commands/skills 引用/`CLAUDE.md`/用户 hooks、项目级 commands/skills 复制；MCP 与项目 hooks 等两个 slice B（见末节）。本文件保留，不删除。
-- 顺序：生态兼容四件事的第 4/4＼�按 `context-at-imports` → `mcp-servers-json` → `command-hooks-claude-subset` → `import-claude` 做；ACP 暂定不做）
+- 状态：decided；已落地（pi/import-claude，ADR 0046）：用户级 commands/skills 引用/`CLAUDE.md`/用户 hooks、项目级 commands/skills 复制；MCP 与项目 hooks 等两个 slice B（见末节）。本文件保留，不删除。
+- 顺序：生态兼容四件事的第 4/4（按 `context-at-imports` → `mcp-servers-json` → `command-hooks-claude-subset` → `import-claude` 做；ACP 暂定不做）
 - 涉及 ADR：新 ADR（外部 agent 配置导入）；0029（§5 "一次性翻译，不是运行时兼容层"的同一原则）、0008（只存 secret 引用；不写回）、0025（commands 转 skill、`extra_paths`）、0031（导入不等于信任）
 - 来源：`research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` §6 ④；总报告 README 第 31 条
 - 依赖：`mcp-servers-json.md`（目标 MCP 结构）、`command-hooks-claude-subset.md`（目标 hook 子集）、`project-skills.md`（`$ARGUMENTS`）先落地，否则对应类别只能在报告里列为"未导入"
@@ -13,7 +13,7 @@
 
 ## 决定（已定）
 
-命令是 `radian config import-claude`，与 `import-pi` 对称，不新开顶层子命令。只做能保真的几类，照 `import-pi` 的骨架。**来源在哪一级，产物就落在哪一级**＼�：用户级来源写用户级文件，项目级来源写项目级文件。
+命令是 `radian config import-claude`，与 `import-pi` 对称，不新开顶层子命令。只做能保真的几类，照 `import-pi` 的骨架。**来源在哪一级，产物就落在哪一级**：用户级来源写用户级文件，项目级来源写项目级文件。
 
 用户级（`~/.claude/`）：
 
@@ -50,5 +50,5 @@
 ## 落地记（pi/import-claude；本文件保留）
 
 - 落地：`radian config import-claude --claude-home <dir> [--project <dir>] [--write]`（ADR 0046）。干跑打印配置草稿 + skill/`AGENTS.md` 节、报告走 stderr；`--write` 写盘；写前项目级提示信任门。测试 `crates/radian-host/tests/claude_migrate.rs` 8 项，四个变异点名测试。
-- fix1＼�永不覆盖，只合并）：`--force` 整个去掉；配置经 `edit_preserving` 格式保留合并（只追加缺失的 `extra_paths` 与 hook 条目，冲突逐键报告）；`AGENTS.md`/`SKILL.md` 已存在就跳过并逐行报告，其余照写；只读配置整个写入报错且什么都不写。
+- fix1（永不覆盖，只合并）：`--force` 整个去掉；配置经 `edit_preserving` 格式保留合并（只追加缺失的 `extra_paths` 与 hook 条目，冲突逐键报告）；`AGENTS.md`/`SKILL.md` 已存在就跳过并逐行报告，其余照写；只读配置整个写入报错且什么都不写。
 - 未落地（等两个 slice B）：用户 `.claude.json` 的 `mcpServers`（等 `[mcp]` 节）与项目 `.claude/settings.json` 的 `hooks`（等项目级 `.radian/hooks.json` 加载）只报告为未导入；项目 `.mcp.json` 永不翻译（运行时切片落地后直接读）。本文件保留到两片都落地再删。

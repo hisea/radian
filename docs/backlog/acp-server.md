@@ -1,6 +1,6 @@
 # ACP 服务端 `radian acp`
 
-- 状态：idea＼�暂定，不排期；生态兼容的另外四件先做）
+- 状态：idea（暂定，不排期；生态兼容的另外四件先做）
 - 涉及 ADR：新 ADR；0032（一个二进制、保留的子命令）、0009（全屏 TUI 之外的宿主面）、0024（审批与提问映射到 `request_permission`）、0011（`session/prompt` 走 inbox）、0010（`session/update` 只发 live 事件）、0043（控制口）
 - 来源：`research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` §5.6、§6 ⑥；总报告 README 第 32 条（入口顺序：先 `exec --output jsonl`，再控制口客户端，最后 `radian acp`）
 - 依赖：`exec-jsonl-output.md` 先落地；控制口客户端（总报告第 32 条，尚无 backlog 文件）
@@ -10,7 +10,7 @@
 - ACP（Agent Client Protocol，agentclientprotocol.com）列了 43 个 agent、13 个编辑器客户端。opencode 原生实现了服务端；Claude Code、Codex、pi 各通过一个适配器（`claude-agent-acp`、`codex-acp`、`pi-acp`）接入。Radian 不在列表里：编辑器用户是 Radian 现在完全触达不到的人群。
 - `radian serve` 与 `radian mcp` 两个子命令已按 ADR 0032 预留、尚未实现（`cli.rs` 的 `reserved`）；ADR 0043 保留了控制口但没有 server 模式。
 
-## 方向（研究报告建议，owner 未定）
+## 方向（研究报告建议，待定）
 
 2026-10-20 对协议页核实的事实：客户端把 agent 当子进程起；`session/new` 带 `cwd` 与一组 `mcpServers`，agent 必须连上客户端给的 stdio MCP server；一个连接可开多个 session；回合内只能 `session/cancel`，不能再发 prompt；审批是 agent 调客户端的 `session/request_permission`，选项 `allow_once`/`allow_always`/`reject_once`/`reject_always`，取消时客户端用 `cancelled` 答掉挂起的审批；客户端可选暴露 `fs/read_text_file`、`fs/write_text_file`、`terminal/*`；`loadSession` 可选，要用 `session/update` 回放历史。
 
@@ -25,7 +25,7 @@
 - 外部适配器还是内建子命令；若内建，用预留的 `serve` 还是新名 `acp`（ADR 0032 要改）。
 - 多会话：ACP 客户端会在一个进程里开多个 session，而 ADR 0043 是单会话 radian；是每个 session 起一个 radian 进程（适配器方案天然如此），还是宿主内多会话。
 - 沙箱与信任门在编辑器里怎么问：ADR 0031 的启动期 modal 没有 TUI 可用，要经 `request_permission` 还是按非交互处理（缺省不信任）。
-- 收益大小取决于用户群，定优先级；报告估计 1.5–2.5 周。
+- 收益大小取决于用户群，优先级待定；报告估计 1.5–2.5 周。
 
 ## 验收
 

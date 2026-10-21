@@ -1,28 +1,28 @@
 # orca：替代 herdr 的派发与闸门（v0）
 
-- 状态：idea＼�设计定为 v0，记录在案，**不开工**；先仓库外原型，不进二进制）。
-  2026-10-20 两轮外部审核的 P0 已全部采纳进设计稿；第一轮三处分歧 owner 保留原决定；第二轮 owner 保留一处：单机 v0 用 linked worktree 共享 clone，不做独立 clone。
+- 状态：idea（设计定为 v0，记录在案，**不开工**；先仓库外原型，不进二进制）。
+  两轮外部审核的 P0 已全部采纳进设计稿；第一轮三处分歧保留原设计，第二轮保留一处：单机 v0 用 linked worktree 共享 clone，不做独立 clone。
 - 涉及 ADR：0032（保留子命令；落地时要加 `orca`/`work`）、0043（远期 `radian orca`；`subagent` 是子进程
   的先例；缺省 `full`，无人值守必须显式 `--profile workspace`）、0044（`--output jsonl` 的 `Result` 与退
   出码是 worker 回传契约；`completed` 不等于任务完成；`cost` 为会话累计）、0038（`workspace` 沙箱内 git 可写 refs/index/objects、只有 config/hooks 只读；linked worktree 共享
   common dir；单机 v0 仍用 worktree，靠包装器检测并安全失败）、0020（push 凭据的禁读清单，同一 OS 用户下是否遮住待验证）、0024（`human` 闸门是结构化交互的宿主外映射）、0013
   （`orca serve` 只在 loopback/ssh 转发）、0037（stall 超时按无输出计）、0022（返工 `--resume`，不 fork）
 - 设计全文：`research/2026-10-20-orca-v0-design.md`（修订版）
-- 外部审核：`research/2026-10-20-orca-v0-review-and-competitor-analysis.md`（第一轮）；第二轮复审由 owner 转达，结论记在设计稿"修订记录"
+- 外部审核：`research/2026-10-20-orca-v0-review-and-competitor-analysis.md`（第一轮）；第二轮复审结论记在设计稿"修订记录"
 - 对手调查：`research/2026-10-20-orca-competitors.md`
 
-## 决定＼�
+## 决定
 
 - Claude 是 lead：分析需求、拆 item、经 orca 的 MCP 工具写入 backlog、看判定、提交 rework brief；
-  **批准（pass/fail）是 owner 权限，不在 MCP 工具里**，v0 这是流程保证不是安全边界（同一 OS 用户）；
-  merge 归 owner。
+  **批准（pass/fail）不在 MCP 工具里**，v0 这是流程保证不是安全边界（同一 OS 用户）；
+  merge 由人执行。
 - orca 是确定性程序，不是模型：文件 backlog 状态变更的**唯一写者**（`todo/doing/review/done/failed`
   目录为粗状态，frontmatter `phase` 为细状态），`state.lock` 短事务 + `state_version`，`runner.lock` 只放一个调度循环，不依赖 git 分支，不长驻
   （`orca run` 推进到没有立即可做的事就退；human、CI、退避等待不堵它）。
 - 三个身份：`item_id`；`session_id = item_id`（**一个 work item 一个 session**，返工 `--resume` 回原
   host，不可恢复进 `failed`，人重新 add）；`attempt_id` 每次执行一个，旧 attempt 的结果被拒。
 - worker 是一次性 `radian exec -p --profile workspace --yes --output jsonl`，工作区可写、无交互入口，工
-  作区是 `.radian-worktrees/<item>` 的 linked worktree，单机 v0 共享一个 clone＼�跨 item 改 ref 的
+  作区是 `.radian-worktrees/<item>` 的 linked worktree，单机 v0 共享一个 clone（跨 item 改 ref 的
   风险由包装器在 push 前检测：head 是 base 后代、branch 与 HEAD 一致、无 dirty，不成立即 failed 不 push，
   远端 ref 为真相）；host 侧的
   `radian work` 包装器在模型退出后核 commit/dirty/sha，**只在 `completed` 且产物有效时** push（git 置空
@@ -30,7 +30,7 @@
 - 交付核验由 orca 机器做（base/head sha、dirty、远端 ref、有效改动），不信 `Result.outcome`。
 - 远端身份靠 host-local attempt record（token、pid + 启动时间）对账；包装器确认退出即 `terminated`，只有
   联系不上才 `reconciling`，不自动重派；失败分四类，只有基础设施与模型失败自动退避重试；预算
-  `max_attempts/max_cost/max_wall_time` 到顶进 `todo.paused_budget`，owner `reset-budget` 才继续，不与交付审批共用 phase。
+  `max_attempts/max_cost/max_wall_time` 到顶进 `todo.paused_budget`，`reset-budget` 后才继续，不与交付审批共用 phase。
 - `done` 只等于已合并；gate 全过只到 `awaiting_human`。verdict 绑 sha，审批绑 sha + `verdict_set_digest`，
   分支动了或同 sha 重审都作废；pass 之后 Integration Gate 对 main 的合并候选验证，合并时 main 必须仍是那个 base。
 - 闸门是可配置阶段序列：`commands` / `mutation` / `review` / `ci` / `human`，brief 只能加严；命令来源可
