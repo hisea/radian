@@ -288,15 +288,17 @@ impl App {
     /// Replaces the read handle with the host's projection, so the renderer reads the same
     /// facts the facade owns.
     /// The inputs to the herdr state function (ADR 0034 H2): the turn state, the pending
-    /// queue's length, whether the startup trust prompt is waiting, and whether degraded
-    /// wake notices wait while idle.
-    pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool, bool) {
+    /// queue's length, whether the startup trust prompt is waiting, whether degraded
+    /// wake notices wait while idle, and this session's running background-job count (the
+    /// footer's `jobs` item reads the same start/settle pair, so there is no second source).
+    pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool, bool, usize) {
         let trust = matches!(self.top_modal(), Some(Modal::Trust(_)));
         (
             self.session.projection.read().turn(),
             self.pending,
             trust,
             self.session.wake_waiting,
+            self.session.running_jobs.len(),
         )
     }
 

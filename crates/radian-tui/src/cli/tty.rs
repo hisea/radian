@@ -304,15 +304,32 @@ pub(super) fn spinner_frame_at(
     Some(frame)
 }
 
-/// How long the loop may wait for an event: the hang-up check's own tick, and — only while a
-/// spinner is visible — that spinner's frame interval, so the breath is sampled at the step it
-/// turns at and nothing else wakes the loop early (ADR 0023 U2).
+/// How long the loop may wait for an event: the hang-up check's own tick; only while a
+/// spinner is visible, that spinner's frame interval, so the breath is sampled at the step it
+/// turns at; only while background jobs run and the footer shows the `jobs` item, the sooner
+/// of the hang-up tick and the wait until the displayed age text changes — every second
+/// under a minute, the next minute boundary after (ADR 0023 U2). Nothing else wakes the loop
+/// early; the loop redraws only when the age text changed.
 pub(super) fn wait_for_an_event(app: &App) -> Duration {
     if app.spinner_visible() {
         TTY_CHECK_TICK.min(app.spinner_interval())
+    } else if let Some(jobs) = crate::footer::tick_in(app, app.now) {
+        TTY_CHECK_TICK.min(jobs)
     } else {
         TTY_CHECK_TICK
     }
+}
+
+/// The `jobs` age tick (ADR 0023 U2): redraws the idle loop when the displayed age text
+/// changes, and never otherwise. The loop stamps the clock before calling (its own stamp,
+/// like `spinner_tick`'s), so this reads `app.now` and stays wall-clock-free for tests.
+pub(super) fn jobs_tick(app: &App, last: &mut Option<String>) -> Option<String> {
+    let text = crate::footer::age_text(app, app.now)?;
+    if *last == Some(text.clone()) {
+        return None;
+    }
+    *last = Some(text.clone());
+    Some(text)
 }
 
 /// Whether the tty is already hung up, as `poll(2)` sees it right now. A draw failure carries
@@ -575,6 +592,99 @@ mod tests {
         idle.theme = radian_tui::theme::Theme::dark();
         assert_eq!(frames(&mut idle), 0, "no spinner visible, no frame");
         assert_eq!(wait_for_an_event(&idle), TTY_CHECK_TICK);
+    }
+
+    /// ADR 0023 U2's time-driven `jobs` age: with an injected clock (`App::now`/`set_now`)
+    /// the loop redraws when the displayed age text changes (1 s, near the minute boundary,
+    /// the new minute) and never on an unchanged tick; the wait never passes the hang-up
+    /// tick, shortening below it only for the next change. With no job — or a footer without
+    /// the item — the wait is the plain `TTY_CHECK_TICK` and no redraw. The loop only ever
+    /// waits and redraws on the text the `jobs` item itself shows.
+    #[test]
+    fn the_idle_loop_ticks_the_jobs_age_and_nothing_else() {
+        fn footer_with(ids: &[&str]) -> radian_host::config::TuiFooterConfig {
+            radian_host::config::TuiFooterConfig {
+                rows: vec![radian_host::config::TuiFooterRowConfig {
+                    left: ids
+                        .iter()
+                        .map(|id| radian_host::config::TuiFooterItemConfig {
+                            id: id.to_string(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+        fn start_job(app: &mut App, id: &str, started: std::time::Instant) {
+            app.session.running_jobs.push(crate::app::RunningJob {
+                id: id.to_owned(),
+                started,
+            });
+        }
+        let mut app = App::new("mock", "s");
+        app.apply_footer(&footer_with(&["jobs"]));
+        // No job: the plain tick, no redraw.
+        assert_eq!(wait_for_an_event(&app), TTY_CHECK_TICK);
+        let mut last = None;
+        assert_eq!(jobs_tick(&app, &mut last), None);
+
+        let base = std::time::Instant::now();
+        start_job(&mut app, "job-1", base);
+        // The oldest job is 1 s old: the wait stays within the hang-up tick and the
+        // redraw shows the new age.
+        app.set_now(base + Duration::from_secs(1));
+        assert_eq!(
+            wait_for_an_event(&app),
+            TTY_CHECK_TICK,
+            "the jobs wait never passes the hang-up tick"
+        );
+        assert_eq!(jobs_tick(&app, &mut last), Some("1s".to_owned()));
+        assert_eq!(
+            jobs_tick(&app, &mut last),
+            None,
+            "the same age redraws nothing"
+        );
+        // Near the minute boundary the wait shortens below the hang-up tick.
+        app.set_now(base + Duration::from_millis(59_950));
+        assert_eq!(
+            wait_for_an_event(&app),
+            Duration::from_millis(50),
+            "the loop wakes for the age-text change"
+        );
+        assert_eq!(jobs_tick(&app, &mut last), Some("59s".to_owned()));
+        assert_eq!(
+            jobs_tick(&app, &mut last),
+            None,
+            "the same age redraws nothing"
+        );
+        // Past one minute the wait is capped again, and the redraw shows the new minute.
+        app.set_now(base + Duration::from_secs(61));
+        assert_eq!(wait_for_an_event(&app), TTY_CHECK_TICK);
+        assert_eq!(jobs_tick(&app, &mut last), Some("1m".to_owned()));
+        assert_eq!(
+            jobs_tick(&app, &mut last),
+            None,
+            "the same age redraws nothing"
+        );
+        // The job settled: back to the plain tick, and the last text is forgotten so a new
+        // job redraws at once.
+        app.session.running_jobs.clear();
+        assert_eq!(wait_for_an_event(&app), TTY_CHECK_TICK);
+        assert_eq!(jobs_tick(&app, &mut last), None);
+        start_job(&mut app, "job-2", base);
+        app.set_now(base + Duration::from_secs(2));
+        assert_eq!(jobs_tick(&app, &mut last), Some("2s".to_owned()));
+
+        // A footer without the item: no timer at all, even with a job running.
+        let mut bare = App::new("mock", "s");
+        bare.apply_footer(&footer_with(&["session"]));
+        start_job(&mut bare, "job-1", base);
+        bare.set_now(base + Duration::from_secs(30));
+        assert_eq!(wait_for_an_event(&bare), TTY_CHECK_TICK);
+        let mut last = None;
+        assert_eq!(jobs_tick(&bare, &mut last), None);
     }
 
     /// ADR 0023 U5: a fact-only update (usage, budget, tier, MCP) wakes the UI with a `Dirty`

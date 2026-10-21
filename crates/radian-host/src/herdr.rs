@@ -118,12 +118,27 @@ pub enum Blocked {
 }
 
 /// The pure state function (ADR H2): trust and pending `blocked` wins over `working`; a
-/// used-up wake budget blocks only while idle — a started turn reads `working` again, so
+/// running turn reads `working`; background jobs keep an idle session `working` too — even
+/// past a used-up wake budget, whose degraded notices wait for a turn that may never come
+/// (ADR 0037 decision 5), so herdr does not read idle while jobs still run; a used-up wake
+/// budget blocks only while idle and jobless — a started turn reads `working` again, so
 /// the report is back to normal on the next turn start.
-pub fn state(turn: TurnState, pending: usize, trust_modal: bool, wake_waiting: bool) -> State {
+///
+/// `jobs` is this session's running background-job count (never the ids, commands or
+/// durations, ADR H7). It only matters while no turn runs: a running turn is plain
+/// `working` with no label.
+pub fn state(
+    turn: TurnState,
+    pending: usize,
+    trust_modal: bool,
+    wake_waiting: bool,
+    jobs: usize,
+) -> State {
     if trust_modal || pending > 0 {
         State::Blocked
-    } else if turn == TurnState::Running {
+    } else if turn == TurnState::Running || jobs > 0 {
+        // A running turn, or background jobs keeping an idle session working — even past a
+        // used-up wake budget, whose degraded notices wait for a turn that may never come.
         State::Working
     } else if wake_waiting {
         State::Blocked
@@ -273,12 +288,32 @@ pub struct Metadata {
     pub state_labels: BTreeMap<String, String>,
     /// `display_agent`: sent once, at startup.
     pub display_agent: Option<String>,
+    /// `clear_state_labels`: herdr keeps labels until cleared. Send `true` when leaving a
+    /// labeled state with no replacement label, so a later turn is not misread with the old
+    /// label. Only ever `true` on the wire; `false` is left out like any default.
+    pub clear_state_labels: bool,
 }
 
 impl Metadata {
     /// Whether this carries nothing to report.
     pub fn is_empty(&self) -> bool {
-        self.tokens.is_empty() && self.state_labels.is_empty() && self.display_agent.is_none()
+        self.tokens.is_empty()
+            && self.state_labels.is_empty()
+            && self.display_agent.is_none()
+            && !self.clear_state_labels
+    }
+}
+
+/// The value under `working` for `state_labels`: `Some("jobs")` while background jobs keep
+/// an idle session working, so herdr shows `working · jobs`. It refines the reported [`State`],
+/// never the raw inputs: a running turn is plain `working` with no label, and a blocked
+/// session carries the [`blocked_label`] instead — the count, commands and durations never
+/// leave the process (ADR H7).
+pub fn working_label(state: State, turn: TurnState, jobs: usize) -> Option<String> {
+    if state == State::Working && turn != TurnState::Running && jobs > 0 {
+        Some("jobs".to_owned())
+    } else {
+        None
     }
 }
 
@@ -345,6 +380,9 @@ pub fn metadata_line(env: &HerdrEnv, metadata: &Metadata, seq: u64, id: &str) ->
             "tokens".into(),
             serde_json::to_value(&metadata.tokens).expect("tokens serialize"),
         );
+    }
+    if metadata.clear_state_labels {
+        object.insert("clear_state_labels".into(), serde_json::Value::Bool(true));
     }
     line(&serde_json::json!({
         "id": id,
@@ -680,11 +718,17 @@ mod tests {
 
     #[test]
     fn blocked_wins_over_working() {
-        assert_eq!(state(TurnState::Running, 1, false, false), State::Blocked);
-        assert_eq!(state(TurnState::Running, 0, true, false), State::Blocked);
-        assert_eq!(state(TurnState::Running, 0, false, false), State::Working);
-        assert_eq!(state(TurnState::Idle, 0, false, false), State::Idle);
-        assert_eq!(state(TurnState::Cancelled, 0, false, false), State::Idle);
+        assert_eq!(
+            state(TurnState::Running, 1, false, false, 0),
+            State::Blocked
+        );
+        assert_eq!(state(TurnState::Running, 0, true, false, 0), State::Blocked);
+        assert_eq!(
+            state(TurnState::Running, 0, false, false, 0),
+            State::Working
+        );
+        assert_eq!(state(TurnState::Idle, 0, false, false, 0), State::Idle);
+        assert_eq!(state(TurnState::Cancelled, 0, false, false, 0), State::Idle);
         assert_eq!(
             blocked_message(Some(&Blocked::Approval("shell".into())), false),
             "approval: shell"
@@ -701,14 +745,57 @@ mod tests {
     /// working again (the TUI clears the flag on `TurnStarted`).
     #[test]
     fn a_used_up_wake_budget_blocks_only_while_idle() {
-        assert_eq!(state(TurnState::Idle, 0, false, true), State::Blocked);
-        assert_eq!(state(TurnState::Cancelled, 0, false, true), State::Blocked);
+        assert_eq!(state(TurnState::Idle, 0, false, true, 0), State::Blocked);
         assert_eq!(
-            state(TurnState::Running, 0, false, true),
+            state(TurnState::Cancelled, 0, false, true, 0),
+            State::Blocked
+        );
+        assert_eq!(
+            state(TurnState::Running, 0, false, true, 0),
             State::Working,
             "a started turn is back to normal"
         );
-        assert_eq!(state(TurnState::Idle, 0, false, false), State::Idle);
+        assert_eq!(state(TurnState::Idle, 0, false, false, 0), State::Idle);
+    }
+
+    /// Jobs keep an idle session `working` with the `jobs` label — even past a used-up wake
+    /// budget, whose degraded notices wait for a turn that may never come. With no jobs the
+    /// answers are what they always were.
+    #[test]
+    fn idle_with_jobs_reports_working_with_the_jobs_label() {
+        assert_eq!(state(TurnState::Idle, 0, false, false, 1), State::Working);
+        assert_eq!(
+            working_label(State::Working, TurnState::Idle, 1),
+            Some("jobs".to_owned())
+        );
+        assert_eq!(state(TurnState::Idle, 0, false, true, 2), State::Working);
+        assert_eq!(
+            working_label(State::Working, TurnState::Idle, 2),
+            Some("jobs".to_owned())
+        );
+        assert_eq!(
+            state(TurnState::Cancelled, 0, false, false, 1),
+            State::Working
+        );
+        // No jobs: what it always was.
+        assert_eq!(state(TurnState::Idle, 0, false, false, 0), State::Idle);
+        assert_eq!(working_label(State::Idle, TurnState::Idle, 0), None);
+        assert_eq!(state(TurnState::Idle, 0, false, true, 0), State::Blocked);
+    }
+
+    /// A running turn is plain `working` with no label, and a blocked session carries the
+    /// blocking category instead — the job count never leaks into either.
+    #[test]
+    fn a_running_or_blocked_session_never_carries_the_jobs_label() {
+        assert_eq!(
+            state(TurnState::Running, 0, false, false, 2),
+            State::Working
+        );
+        assert_eq!(working_label(State::Working, TurnState::Running, 2), None);
+        assert_eq!(state(TurnState::Idle, 1, false, false, 1), State::Blocked);
+        assert_eq!(working_label(State::Blocked, TurnState::Idle, 1), None);
+        assert_eq!(state(TurnState::Idle, 0, true, false, 1), State::Blocked);
+        assert_eq!(working_label(State::Blocked, TurnState::Idle, 1), None);
     }
 
     #[test]
@@ -961,6 +1048,7 @@ mod tests {
             tokens,
             state_labels: labels,
             display_agent: Some("radian".to_owned()),
+            clear_state_labels: false,
         };
         let text = metadata_line(&env(), &metadata, 12, "r");
         assert!(text.ends_with('\n'));
@@ -993,6 +1081,27 @@ mod tests {
         }
         assert!(!metadata.is_empty());
         assert!(Metadata::default().is_empty(), "nothing to report");
+    }
+
+    /// Leaving a labeled state with no replacement label clears herdr's labels (herdr keeps
+    /// them until cleared): `clear_state_labels: true` with nothing else is still a report.
+    #[test]
+    fn clearing_the_labels_is_a_report_of_its_own() {
+        let metadata = Metadata {
+            clear_state_labels: true,
+            ..Metadata::default()
+        };
+        assert!(!metadata.is_empty());
+        let value: serde_json::Value =
+            serde_json::from_str(metadata_line(&env(), &metadata, 12, "r").trim()).unwrap();
+        assert_eq!(value["method"], "pane.report_metadata");
+        assert_eq!(value["params"]["clear_state_labels"], true);
+        assert!(value["params"].get("state_labels").is_none());
+        // `false` is left out like any default.
+        let value: serde_json::Value =
+            serde_json::from_str(metadata_line(&env(), &Metadata::default(), 12, "r").trim())
+                .unwrap();
+        assert!(value["params"].get("clear_state_labels").is_none());
     }
 
     #[test]

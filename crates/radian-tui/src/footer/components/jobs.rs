@@ -6,7 +6,7 @@
 //! so its row takes no space. The age is the loop's clock minus the start the TUI saw, and it
 //! ticks with the existing footer refresh (a contributor tick redraws) — no new timer.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::app::App;
 use crate::footer::Item;
@@ -54,6 +54,43 @@ impl Component for Jobs {
                 )
                 .value("age", format_age(age)),
         )
+    }
+}
+
+/// The displayed age text now: the oldest running job's age, or `None` when no job runs
+/// or the footer does not show the `jobs` item. The count changes only on start/settle
+/// events, which redraw on their own; the age is what the idle loop ticks.
+pub(crate) fn age_text(app: &App, now: Instant) -> Option<String> {
+    if !app.footer.shows_jobs() {
+        return None;
+    }
+    let oldest = app
+        .session
+        .running_jobs
+        .iter()
+        .min_by_key(|job| job.started)?;
+    Some(format_age(now.saturating_duration_since(oldest.started)))
+}
+
+/// How long the idle loop may wait before the displayed age text changes (ADR 0023 U2):
+/// every second while the oldest running job is under a minute old, the next minute
+/// boundary after that. `None` when no redraw will ever be needed — no timer at all then.
+pub(crate) fn tick_in(app: &App, now: Instant) -> Option<Duration> {
+    if !app.footer.shows_jobs() {
+        return None;
+    }
+    let oldest = app
+        .session
+        .running_jobs
+        .iter()
+        .min_by_key(|job| job.started)?;
+    let age = now.saturating_duration_since(oldest.started);
+    let secs = age.as_secs();
+    if secs < 60 {
+        Some(Duration::from_secs(secs + 1).saturating_sub(age))
+    } else {
+        let next_minute = (secs / 60 + 1) * 60;
+        Some(Duration::from_secs(next_minute).saturating_sub(age))
     }
 }
 
