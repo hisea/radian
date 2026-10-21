@@ -179,7 +179,7 @@ fn spawn_direct_keeping_slave(
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
-    cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+    cmd.env("RADIAN_CATALOG_URL", fast_catalog_url());
     cmd.env("RADIAN_KEYBOARD_ENHANCEMENT", "0");
     let keep_slave = slave.try_clone().unwrap();
     cmd.stdin(std::process::Stdio::from(slave.try_clone().unwrap()));
@@ -200,6 +200,37 @@ fn spawn_direct_keeping_slave(
 }
 
 const BIN: &str = env!("CARGO_BIN_EXE_radian");
+
+/// A catalog URL that fails at once on every OS (ADR 0018's `RADIAN_CATALOG_URL` seam).
+///
+/// A connect to a closed loopback port is refused on macOS but times out on this Linux
+/// box (5 s measured), so the old `http://127.0.0.1:1/api.json` held the catalog fetch for
+/// the whole `FETCH_TIMEOUT`. This binds `127.0.0.1:0` once per test process and answers
+/// HTTP 503 to every connection, so the fetch fails fast anywhere. The production code
+/// path is unchanged (no `--offline-catalog`).
+fn fast_catalog_url() -> String {
+    use std::sync::OnceLock;
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind the catalog sink");
+        let addr = listener.local_addr().expect("the sink's address");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                use std::io::{Read, Write};
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        format!("http://{addr}/api.json")
+    })
+    .clone()
+}
 
 /// The positive deadline: how long a wait for something to **appear**, to **change**, or for the
 /// app to **exit** may take before the test fails. Every positive wait in this file uses it (via
@@ -419,8 +450,8 @@ impl Pty {
         }
         cmd.env("TERM", "xterm-256color");
         // Tests must not read the user's catalog cache or reach the real models.dev. A fresh
-        // `HOME` isolates the cache; the catalog URL points at a closed local port, so a
-        // lookup fails fast and the window is unknown. A test that wants the catalog
+        // `HOME` isolates the cache; the catalog URL is the fast-failing sink
+        // (`fast_catalog_url`), so a lookup fails fast and the window is unknown. A test that wants the catalog
         // overrides both through `envs`.
         let home = TempDir::new("home");
         cmd.env("HOME", home.path().as_os_str());
@@ -455,7 +486,7 @@ impl Pty {
         }
         // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
         // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
-        cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+        cmd.env("RADIAN_CATALOG_URL", fast_catalog_url());
         // A pty has nobody to answer the kitty keyboard-enhancement query, and crossterm
         // waits up to 2 s for it; the harness opts out (a test that wants the sequences sets
         // the variable back to `1` through `envs`).
@@ -1507,6 +1538,98 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
     );
     assert!(!pty.screen().contains("project trust"), "{}", pty.screen());
     pty.quit();
+}
+
+/// Slice B2: the startup trust modal lists the project `.mcp.json` servers — names, the
+/// `command` + `args` as written, the `env` key names only (never values) — and marks
+/// remote entries skipped. The workspace holds only the `.mcp.json` (no skill), proving
+/// the file alone triggers the modal. The test untrusts (no server ever starts) and
+/// journals, like the skill-modal test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_trust_modal_lists_the_project_mcp_servers() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("TRUST-MCP-OK")]).await;
+    let dir = TempDir::new("trust-mcp-session");
+    let home = TempDir::new("trust-mcp-home");
+    let ws = TempDir::new("trust-mcp-ws");
+    std::fs::write(
+        ws.path().join(".mcp.json"),
+        r#"{"mcpServers":{
+            "fs": {"command": "npx", "args": ["-y", "${MCP_B2_PTY_BIN}"],
+                "env": {"FIXTURE_LOG": "/tmp/b2.log", "SEKRET": "sekret-value"}},
+            "web": {"type": "http", "url": "https://example.com/mcp"}}}"#,
+    )
+    .unwrap();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust-mcp",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("project trust", wait_positive()),
+        "the trust modal is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen(
+            "project .mcp.json: 1 server to load once trusted",
+            wait_positive()
+        ),
+        "the preview header is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("mcp: fs `npx -y ${MCP_B2_PTY_BIN}`", wait_positive()),
+        "the command as written is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("FIXTURE_LOG, SEKRET", wait_positive()),
+        "the env key names are missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("mcp: web skipped", wait_positive()),
+        "the skipped remote entry is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("sekret-value"),
+        "values never leak into the modal:\n{}",
+        pty.screen()
+    );
+    // Down four rows from the sandbox default to "do not trust this directory", Enter.
+    for _ in 0..4 {
+        pty.send(b"\x1b[B"); // Down
+    }
+    pty.send(b"\r");
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: not loaded", wait_positive()),
+        "the trust state was not shown:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let canonical = std::fs::canonicalize(ws.path()).unwrap();
+    let trust = std::fs::read_to_string(home.path().join("trust/trust.json")).unwrap();
+    assert!(
+        trust.contains(&canonical.to_string_lossy().to_string()) && trust.contains("false"),
+        "{trust}"
+    );
 }
 
 /// decision 2026-10-20: a project with no trusted decision shows

@@ -274,9 +274,8 @@ fn specs() -> Vec<ToolSpec> {
         description: format!(
             "{LOW_TRUST_NOTE} Read durable memory. To search, pass `query`. To read records \
              in full, pass `ids`. A search matches every word. The tool matches words \
-             case-insensitively. A search returns at most `limit` records. Default: \
-             {DEFAULT_SEARCH_LIMIT}. Maximum: {MAX_SEARCH_LIMIT}. Scope orders the results \
-             first. Project scope comes before global scope. Trust orders them next. User \
+             case-insensitively. A search returns at most `limit` records. Scope orders the \
+             results first. Project scope comes before global scope. Trust orders them next. User \
              trust and confirmed trust come before agent-unverified trust. Match score comes \
              after trust. Newest comes after match score. The id comes last. Results carry \
              their scope, source, and verification."
@@ -302,7 +301,8 @@ fn specs() -> Vec<ToolSpec> {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_SEARCH_LIMIT,
-                    "description": "Maximum records to return."
+                    "description": format!("Maximum records to return. Default: \
+                                          {DEFAULT_SEARCH_LIMIT}. Maximum: {MAX_SEARCH_LIMIT}.")
                 }
             },
             "additionalProperties": false

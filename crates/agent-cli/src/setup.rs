@@ -4,7 +4,6 @@
 //! Split from `lib.rs` by pure move (ADR 0043 decision 5): no behaviour change.
 
 use agent_core::ContextBudget;
-use agent_extensions::McpServerConfig;
 use std::path::PathBuf;
 
 use radian_host::{
@@ -27,7 +26,11 @@ pub(crate) struct Setup {
     pub(crate) price_for: Option<radian_host::cost::RoutePrice>,
     /// The provider actually chosen, for the session's config snapshot.
     pub(crate) provider: Provider,
-    pub(crate) servers: Vec<McpServerConfig>,
+    /// The user's `[mcp]` section (empty for `--no-config-mcp`), merged with the project
+    /// file and `--mcp-config` in `chat` once trust is resolved.
+    pub(crate) mcp_user: radian_host::McpLoad,
+    /// The `--mcp-config` file (empty when the flag is absent).
+    pub(crate) mcp_file: radian_host::McpLoad,
     pub(crate) mcp_config: Option<String>,
     pub(crate) system_prompt: Option<String>,
     pub(crate) max_model_calls: u32,
@@ -497,22 +500,20 @@ pub(crate) async fn setup(
             }) as radian_host::cost::RoutePrice,
         )
     };
-    let file_loaded = match &cli.mcp_config {
+    let mcp_file = match &cli.mcp_config {
         Some(path) => load_mcp_config(path).map_err(SetupError)?,
         None => radian_host::McpLoad::default(),
     };
-    // ADR 0008 §8: the user's `[mcp]` section and `--mcp-config` merge, the command
-    // line winning a collision. The `explore` subagent child passes `--no-config-mcp`
-    // (with no `--mcp-config` either), so it starts no MCP server at all.
-    let merged = if cli.no_config_mcp {
-        file_loaded
+    // ADR 0008 §8: the user's `[mcp]` section and `--mcp-config` load here; they merge with
+    // the project `.mcp.json` in `chat`, after trust is resolved (the project file needs
+    // the workspace and the trust decision). The `explore` subagent child passes
+    // `--no-config-mcp` (with no `--mcp-config` either), so its config section stays
+    // empty — and `chat` additionally skips the project file for it.
+    let mcp_user = if cli.no_config_mcp {
+        radian_host::McpLoad::default()
     } else {
-        radian_host::merge_mcp(config.mcp.clone(), file_loaded)
+        config.mcp.clone()
     };
-    for warning in &merged.warnings {
-        eprintln!("[mcp] {warning}");
-    }
-    let servers = merged.servers;
     // The key and every header value are secrets: no error this program prints may contain
     // any of them, and they are never written to the session file. "The key" is **every**
     // login in `auth.json`, not only this route's (ADR 0013 T4, ): a provider
@@ -563,7 +564,8 @@ pub(crate) async fn setup(
         budget_for,
         price_for,
         provider,
-        servers,
+        mcp_user,
+        mcp_file,
         mcp_config: cli.mcp_config.clone(),
         system_prompt,
         max_model_calls: cli.max_model_calls,
