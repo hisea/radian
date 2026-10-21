@@ -133,6 +133,7 @@ async fn open_inner(label: &str, scratch: &Path, resume: bool) -> Arc<LocalSessi
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
             hooks: Default::default(),
+            project_hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume,
             config_snapshot: json!({"provider": "openai-compatible", "model": "mock"}),
