@@ -38,6 +38,7 @@
 | `tui-btw-side-question.md` | decided（第一档） | 0010、0018、0023、0007、0017 | `/btw <q>` 一次额外请求，与正式请求同前缀、不执行工具、只在覆盖层、不落 transcript/journal；一次一个 |
 | `tui-new-session.md` | decided（第一档） | 0022、0023、0043、0026、0037 | `/new` 空闲时原地开新会话，沿用当前生效的模型/档位；有 job 时拒绝；不加 `/clear` 别名 |
 | `tui-context-command.md` | decided（第一档） | 0015、0036、0021、0018 | `/context` 按类别打印下一次请求的估算，reported 与 estimated 分开标 |
+| `tui-context-grid.md` | decided（依赖 tui-context-command） | 0035、0029、0015、0018 | `/context` 网格视图�原型 B）：10×20 格 `◼`/`◻`/`▨`，右侧图例，类别色是主题角色，下面明细 |
 | `tui-loop-continuation.md` | decided | 0011、0005、0037、0027、0023、0017 | 续跑引擎第一、二步：`/loop [--every] [--times] [--for] [prompt]` 轮末重投，`User` 来源 + meta，缺省上限 20 次/1 h，不计唤醒闸门 |
 | `goal-mode.md` | decided（依赖 tui-loop-continuation） | 新 ADR；0018、0036、0011、0005、0043、0037、0034、0006、0022 | `/goal` 持久目标 + `goal {progress\|done\|wait}` 工具 + 预算；目标块确定性注入不进摘要；resume 后 paused；`exec -p --goal` 待决 |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
