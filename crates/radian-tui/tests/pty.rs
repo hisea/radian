@@ -245,8 +245,8 @@ fn fast_catalog_url() -> String {
 const WAIT_POSITIVE: Duration = Duration::from_secs(60);
 
 /// [`WAIT_POSITIVE`], raised for one run with `RADIAN_TEST_WAIT_SECS` (a slower machine, or a
-/// soak run, without an edit; `RADIAN_PTY_PARALLEL` is the sibling knob). An unparsable value is
-/// ignored, so a typo cannot silently shorten a deadline.
+/// soak run, without an edit). An unparsable value is ignored, so a typo cannot
+/// silently shorten a deadline.
 fn wait_positive() -> Duration {
     std::env::var("RADIAN_TEST_WAIT_SECS")
         .ok()
@@ -276,48 +276,6 @@ macro_rules! skip_inside_sandbox {
             return;
         }
     };
-}
-
-/// The pty tests spawn real processes and mock servers. Running all of them at once makes
-/// them flake on a busy machine, and running them one at a time made this binary about 140 s
-/// of the workspace test run (2026-10-15). A small counting gate allows a few at once:
-/// `RADIAN_PTY_PARALLEL` (default 3, minimum 1) sets how many.
-static PTY_SLOTS: Mutex<usize> = Mutex::new(0);
-static PTY_FREED: std::sync::Condvar = std::sync::Condvar::new();
-
-fn pty_parallelism() -> usize {
-    std::env::var("RADIAN_PTY_PARALLEL")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(3)
-        .max(1)
-}
-
-/// One running pty test; the slot is given back on drop (a panicking test included).
-struct PtySlot;
-
-impl Drop for PtySlot {
-    fn drop(&mut self) {
-        let mut busy = PTY_SLOTS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *busy -= 1;
-        PTY_FREED.notify_one();
-    }
-}
-
-fn pty_guard() -> PtySlot {
-    let limit = pty_parallelism();
-    let mut busy = PTY_SLOTS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    while *busy >= limit {
-        busy = PTY_FREED
-            .wait(busy)
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-    }
-    *busy += 1;
-    PtySlot
 }
 
 struct Pty {
@@ -745,10 +703,7 @@ fn mcp_config(dir: &Path, log: &Path) -> PathBuf {
 
 /// One turn: send `hello`, wait for the mock reply, then quit with Ctrl-C.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the four pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_end_to_end_conversation_and_clean_exit() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("ASSISTANT-REPLY-OK")]).await;
     let dir = TempDir::new("e2e");
     let mut pty = Pty::spawn(
@@ -815,9 +770,7 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
 /// ADR 0043: a fresh TUI session mounts only the built-in tools. No `git_commit` and
 /// none of the deleted task/lead/named tools are advertised to the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_mounts_only_the_builtin_tools() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("TASKS-REPLY-OK")]).await;
     let dir = TempDir::new("tasks");
     let mut pty = Pty::spawn(
@@ -919,9 +872,7 @@ async fn pty_mounts_only_the_builtin_tools() {
 /// ADR 0026 slice 0b acceptance: with `model.provider` and `model.model` in the config and a
 /// matching `auth.json` entry, `radian` starts with **no arguments** from the project directory.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_launches_with_no_arguments_from_the_config_and_auth_json() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("NO-ARGS-REPLY-OK")]).await;
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
@@ -957,9 +908,7 @@ async fn pty_launches_with_no_arguments_from_the_config_and_auth_json() {
 /// ADR 0036: the host reads `AGENTS.md` at session start, the startup line names it, and
 /// the model's system prompt carries its content and the untrusted note.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_context_file_reaches_the_model_and_the_startup_line() {
-    let _serial = pty_guard();
     let dir = TempDir::new("context-session");
     let home = TempDir::new("context-home");
     // The workspace is a **sibling** of the session directory (ADR 0020: the sandbox hides the
@@ -1027,9 +976,7 @@ async fn pty_the_context_file_reaches_the_model_and_the_startup_line() {
 
 /// the user but never reaches the prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_skill_commands_expand_list_notice_and_escape() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![
         text_reply("SKILL-REPLY-OK"),
         text_reply("ESCAPE-REPLY-OK"),
@@ -1178,9 +1125,7 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
 /// ADR 0025 slice 4: `[skills] extra_paths` in the config add skill roots. This drives the whole
 /// path — config reader, `~`/relative resolution (an absolute path here), discovery, the prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_skills_extra_paths_are_read_from_the_config() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![
         text_reply("EXTRA-SKILL-REPLY-OK"),
         text_reply("EXTRA-COMMAND-REPLY-OK"),
@@ -1262,9 +1207,7 @@ async fn pty_skills_extra_paths_are_read_from_the_config() {
 /// so this test moves down to "do not trust this directory", writes `trust.json` with
 /// Enter, and journals `ProjectTrustChanged`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_trust_modal_asks_and_enter_untrusts() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("TRUST-REPLY-OK")]).await;
     let dir = TempDir::new("trust-session");
     let home = TempDir::new("trust-home");
@@ -1355,9 +1298,7 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
 /// and pre-selected, so Enter trusts the directory **and** remembers `workspace` for it
 /// in `access.json`, the same record `/access` writes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_trust_sandbox_choice_writes_the_access_record() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("TRUST-SANDBOX-OK")]).await;
     let dir = TempDir::new("trust-sandbox-session");
     let home = TempDir::new("trust-sandbox-home");
@@ -1425,9 +1366,7 @@ async fn pty_trust_sandbox_choice_writes_the_access_record() {
 /// ADR 0031 T3: `--trust` overrides for this process only and never writes `trust.json`; a
 /// saved decision (and a bare `.radian/`) means no question.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_trust_override_and_saved_decision_skip_the_modal() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![]).await;
     let dir = TempDir::new("trust-session-2");
     let home = TempDir::new("trust-home-2");
@@ -1546,9 +1485,7 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
 /// the file alone triggers the modal. The test untrusts (no server ever starts) and
 /// journals, like the skill-modal test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_trust_modal_lists_the_project_mcp_servers() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("TRUST-MCP-OK")]).await;
     let dir = TempDir::new("trust-mcp-session");
     let home = TempDir::new("trust-mcp-home");
@@ -1636,9 +1573,7 @@ async fn pty_trust_modal_lists_the_project_mcp_servers() {
 /// `untrusted project · /trust to trust it` under the wordmark (no modal when there
 /// are no project resources); a trusted project shows no hint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_startup_shows_the_trust_hint_until_trusted() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("HINT-OK")]).await;
     let dir = TempDir::new("trust-hint-session");
     let home = TempDir::new("trust-hint-home");
@@ -1712,7 +1647,6 @@ fn diagnostics_dir(home: &Path) -> PathBuf {
 /// goes to the diagnostics directory, not next to the session (ADR 0013 T4).
 #[test]
 fn pty_panic_path_restores_the_terminal() {
-    let _serial = pty_guard();
     let dir = TempDir::new("panic");
     // A directory that does not exist yet, so the app creates it owner-only.
     let sessions = dir.path().join("sessions");
@@ -1795,7 +1729,6 @@ fn pty_panic_path_restores_the_terminal() {
 /// continues and a panic still exits 101 (ADR 0013 T4).
 #[test]
 fn pty_an_unwritable_diagnostics_directory_is_only_a_notice() {
-    let _serial = pty_guard();
     let dir = TempDir::new("panic-unwritable");
     let home = dir.path();
     // Make the resolved diagnostics path a regular file: creating or writing under it fails.
@@ -1864,7 +1797,6 @@ fn group_alive(pgid: i32) -> bool {
 /// own process group, so "no orphan" is asserted on the group as well as the pid.
 #[test]
 fn pty_panic_path_does_not_orphan_a_child() {
-    let _serial = pty_guard();
     let dir = TempDir::new("panic-child");
     let mut pty = Pty::spawn(
         &[
@@ -1908,9 +1840,7 @@ fn pty_panic_path_does_not_orphan_a_child() {
 /// (ADR 0037 decision 6, `Jobs::drop` -> `kill_all`, killpg only). The job writes its pid
 /// before the app panics.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_panic_path_does_not_orphan_a_background_job() {
-    let _serial = pty_guard();
     let dir = TempDir::new("panic-job");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -1961,10 +1891,7 @@ async fn pty_panic_path_does_not_orphan_a_background_job() {
 /// `--resume` renders the stored history before the first frame. The session file is written
 /// with the same storage API the app uses, so the test also pins the on-disk convention.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_resume_renders_the_stored_history() {
-    let _serial = pty_guard();
     let dir = TempDir::new("resume");
     let path = dir.path().join("resume-me.jsonl");
     let journal = radian_session::SessionJournal::create(
@@ -2037,10 +1964,7 @@ async fn pty_resume_renders_the_stored_history() {
 /// block shows `goal paused: <objective>; /goal resume to continue`. Seeded like
 /// `pty_resume_renders_the_stored_history`: only the journal differs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_resume_with_paused_goal_shows_the_resume_hint() {
-    let _serial = pty_guard();
     let dir = TempDir::new("resume-goal");
     let path = dir.path().join("goal.jsonl");
     let journal = radian_session::SessionJournal::create(
@@ -2092,10 +2016,7 @@ async fn pty_resume_with_paused_goal_shows_the_resume_hint() {
 /// `/new` from a session with a (paused) goal starts clean: the new startup block has no
 /// `goal paused` line and `/goal` reports no goal. The old goal stays in the old journal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_new_from_a_goal_session_starts_without_a_goal() {
-    let _serial = pty_guard();
     let dir = TempDir::new("new-goal");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -2175,10 +2096,7 @@ async fn pty_new_from_a_goal_session_starts_without_a_goal() {
 /// The approval dialog end to end: the tool runs only after the human answers, the prompt
 /// shows the **resolved** path, and the decision is written to the session file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_approval_allow_once_runs_the_tool() {
-    let _serial = pty_guard();
     let dir = TempDir::new("approve");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -2260,10 +2178,7 @@ async fn pty_approval_allow_once_runs_the_tool() {
 
 /// Denying feeds a denial result back to the model and never runs the tool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_approval_deny_is_fed_back_to_the_model() {
-    let _serial = pty_guard();
     let dir = TempDir::new("approve-deny");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -2323,10 +2238,7 @@ async fn pty_approval_deny_is_fed_back_to_the_model() {
 
 /// "Always this session" applies to the next matching call without a second prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_approval_always_skips_the_next_prompt() {
-    let _serial = pty_guard();
     let dir = TempDir::new("approve-session");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -2382,9 +2294,7 @@ async fn pty_approval_always_skips_the_next_prompt() {
 /// The exact report: a tool is running (the input is empty), Esc must cancel the
 /// turn. The command runs long, so the turn is still running when Esc arrives.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_escape_cancels_a_running_tool_turn() {
-    let _serial = pty_guard();
     let dir = TempDir::new("escape-tool");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -2436,9 +2346,7 @@ async fn pty_escape_cancels_a_running_tool_turn() {
 /// README says so). The dogfood build (2b55c50) did not; this pins the behaviour. The reply
 /// never finishes, so the turn stays running until the cancel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_escape_cancels_a_running_turn() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
     let dir = TempDir::new("escape-cancel");
     let mut pty = Pty::spawn(
@@ -2483,10 +2391,7 @@ async fn pty_escape_cancels_a_running_turn() {
 /// Ctrl-C while the prompt is up cancels the turn: the prompt goes away, the tool never runs,
 /// and the app is still usable (a second Ctrl-C quits).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_ctrl_c_while_waiting_for_approval_cancels_the_turn() {
-    let _serial = pty_guard();
     let dir = TempDir::new("approve-cancel");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -2548,10 +2453,7 @@ async fn pty_ctrl_c_while_waiting_for_approval_cancels_the_turn() {
 /// ADR 0018: over the input budget `B` the request is **still sent** and the turn completes;
 /// the status bar shows the projection over `B` and labels a local estimate honestly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_an_over_budget_request_is_still_sent() {
-    let _serial = pty_guard();
     let dir = TempDir::new("budget-over");
     let server = MockServer::start(vec![text_reply("OVER-BUDGET-REPLY")]).await;
     let mut pty = Pty::spawn(
@@ -2602,10 +2504,7 @@ async fn pty_an_over_budget_request_is_still_sent() {
 /// Without `--context-window` the budget is off, and the status bar says so instead of
 /// showing a guessed number (ADR 0015 C1's `Disabled` row).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_without_a_window_the_status_bar_says_the_budget_is_off() {
-    let _serial = pty_guard();
     let dir = TempDir::new("budget-off");
     // The assertion is about the pre-ADR one-line status bar (ADR 0027 C2 moved the context
     // text into the itemized footer), so this runs the `classic` preset.
@@ -2648,11 +2547,8 @@ async fn pty_without_a_window_the_status_bar_says_the_budget_is_off() {
 /// A failed sandbox probe is a refusal, never an unsandboxed run (ADR 0012 P5). The
 /// seam is `RADIAN_SANDBOX_PROBE_FAIL=1`, which can only cause a refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
     skip_inside_sandbox!("pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed");
-    let _serial = pty_guard();
     let dir = TempDir::new("probe-fail");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -2720,9 +2616,7 @@ async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
 /// compiled out there rather than failing on the missing binary.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_an_outer_sandbox_is_inherited_instead_of_refused() {
-    let _serial = pty_guard();
     let dir = TempDir::new("inherited");
     let ws = dir.path().join("ws");
     let outside = dir.path().join("outside");
@@ -2882,10 +2776,7 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// workspace`: since slice 1 of `sandbox-auto-allow-shell` the sandboxed shell runs
 /// with no prompt, so the turn goes straight to the marker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
-    let _serial = pty_guard();
     let dir = TempDir::new("shell");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -2950,10 +2841,7 @@ async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
 /// end by the `pty_approval_*` tests; the unit tests in `workspace_sandbox.rs` pin the
 /// unsandboxed compound ask.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_sandboxed_compound_shell_command_runs_without_asking() {
-    let _serial = pty_guard();
     let dir = TempDir::new("shell-compound");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -3055,7 +2943,6 @@ async fn pty_a_sandboxed_compound_shell_command_runs_without_asking() {
 /// user quits with the ordinary keys, which restore the terminal.
 #[test]
 fn pty_a_driver_panic_ends_the_session_and_refuses_fork() {
-    let _serial = pty_guard();
     let dir = TempDir::new("driver-panic");
     let mut pty = Pty::spawn(
         &[
@@ -3108,10 +2995,7 @@ fn pty_a_driver_panic_ends_the_session_and_refuses_fork() {
 
 /// A bracketed paste arrives whole and multi-line in the input box.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the four pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_multiline_paste_reaches_the_input_box() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("after-paste")]).await;
     let dir = TempDir::new("paste");
     let mut pty = Pty::spawn(
@@ -3152,9 +3036,7 @@ async fn pty_multiline_paste_reaches_the_input_box() {
 /// apart, because `read_input` waited the full `INPUT_POLL` before draining crossterm's
 /// buffer).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_committed_ime_string_reaches_the_input_in_one_frame() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("never")]).await;
     let dir = TempDir::new("ime");
     let mut pty = Pty::spawn(
@@ -3194,10 +3076,7 @@ async fn pty_a_committed_ime_string_reaches_the_input_in_one_frame() {
 /// The second request must not carry the first response's reasoning (ADR 0014 R4), verified
 /// on the real UI path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the four pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_reasoning_is_not_sent_back_to_the_provider() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![
         Reply::sse(&[
             chunk(json!({"reasoning_content": "SECRET-REASONING-TEXT"}), None),
@@ -3251,10 +3130,7 @@ async fn pty_reasoning_is_not_sent_back_to_the_provider() {
 /// The TUI's `--header` is the same parser `radian-exec` uses: `{session_id}` expands to this
 /// process's session id, so a routing header can name the conversation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_header_value_expands_the_session_id() {
-    let _serial = pty_guard();
     let dir = TempDir::new("header-new");
     let server = MockServer::start(vec![text_reply("HEADER-OK")]).await;
     let mut pty = Pty::spawn(
@@ -3295,10 +3171,7 @@ async fn pty_a_header_value_expands_the_session_id() {
 
 /// A resumed session expands `{session_id}` to the id being resumed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_resumed_session_header_uses_the_resumed_id() {
-    let _serial = pty_guard();
     let dir = TempDir::new("header-resume");
     let server = MockServer::start(vec![text_reply("FIRST"), text_reply("SECOND")]).await;
 
@@ -3369,10 +3242,7 @@ async fn pty_a_resumed_session_header_uses_the_resumed_id() {
 /// `authorization` is refused (the key has one source), and the refusal never echoes the
 /// value. The app refuses before entering the alternate screen, so it exits with an error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_an_authorization_header_is_refused_without_echoing_its_value() {
-    let _serial = pty_guard();
     let dir = TempDir::new("header-auth");
     let server = MockServer::start(vec![text_reply("never")]).await;
     let mut pty = Pty::spawn(
@@ -3409,10 +3279,7 @@ async fn pty_an_authorization_header_is_refused_without_echoing_its_value() {
 /// A `--header` with no `=` is a usage error whose message does not echo the argument: the
 /// whole argument may be a pasted credential.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_malformed_header_error_does_not_echo_its_value() {
-    let _serial = pty_guard();
     let dir = TempDir::new("header-bad");
     let server = MockServer::start(vec![text_reply("never")]).await;
     let mut pty = Pty::spawn(
@@ -3448,10 +3315,7 @@ async fn pty_a_malformed_header_error_does_not_echo_its_value() {
 /// their tools goes through the approval prompt, returns its result, and the status bar shows
 /// the servers and tools that connected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them() {
-    let _serial = pty_guard();
     let dir = TempDir::new("mcp");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -3533,9 +3397,7 @@ async fn pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them() {
 /// ADR 0027: `tui.brand` is the one source for the footer's `brand` item and the
 /// startup banner's one-line fallback. At a width below the wordmark the fallback shows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_brand_config_is_the_banner_fallback() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("never")]).await;
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
@@ -3555,11 +3417,8 @@ async fn pty_the_brand_config_is_the_banner_fallback() {
 /// ADR 0012 option B keeps MCP servers running outside the sandbox under `workspace-write`,
 /// so the startup notice is the only thing that tells the user. A test holds it in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
     skip_inside_sandbox!("pty_the_workspace_write_notice_names_the_mcp_sandbox_gap");
-    let _serial = pty_guard();
     let dir = TempDir::new("notice");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -3621,10 +3480,8 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
 /// backend is still the one probed and named. Mutation: reading an environment variable in
 /// `confined_by_outer_sandbox` (the summary would read `inherited`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
     skip_inside_sandbox!("pty_the_startup_summary_names_the_real_sandbox_backend");
-    let _serial = pty_guard();
     let dir = TempDir::new("summary-sandbox");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -3693,10 +3550,8 @@ async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
 /// ADR 0043 decision 2: with no flags the session starts `full` and the startup summary says
 /// `no sandbox`. Putting the default back to `workspace` is the mutation this catches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_default_tier_is_full_with_no_sandbox() {
     skip_inside_sandbox!("pty_the_default_tier_is_full_with_no_sandbox");
-    let _serial = pty_guard();
     let dir = TempDir::new("default-full");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -3748,10 +3603,8 @@ async fn pty_the_default_tier_is_full_with_no_sandbox() {
 /// narrow. `--trust` skips the startup modal (a project config is a project resource), and the
 /// summary then shows `workspace`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_project_config_narrows_the_tier() {
     skip_inside_sandbox!("pty_a_project_config_narrows_the_tier");
-    let _serial = pty_guard();
     let dir = TempDir::new("project-workspace");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -3805,9 +3658,7 @@ async fn pty_a_project_config_narrows_the_tier() {
 /// (which would ask) runs without a prompt, through the sandbox, and the decision is still
 /// written to the audit record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
-    let _serial = pty_guard();
     let dir = TempDir::new("yes");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -3885,9 +3736,7 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
 /// `--max-model-calls` reaches the turn: with a limit of 1, the reply after the tool call is
 /// never requested.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_max_model_calls_limits_the_turn() {
-    let _serial = pty_guard();
     let dir = TempDir::new("max-calls");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -3944,9 +3793,7 @@ async fn pty_max_model_calls_limits_the_turn() {
 /// An `@` reference attaches the file: the request the model receives carries a
 /// `<file path="…">` block with the contents, and the transcript folds it to one line.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_an_at_reference_attaches_the_file_and_folds_it() {
-    let _serial = pty_guard();
     let dir = TempDir::new("mention");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -4020,9 +3867,7 @@ async fn pty_an_at_reference_attaches_the_file_and_folds_it() {
 /// A binary attachment is not sent at all: the request never reaches the model, a notice
 /// names the file, and the input box still holds the message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_binary_attachment_is_not_sent_and_the_input_is_kept() {
-    let _serial = pty_guard();
     let dir = TempDir::new("mention-binary");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -4073,9 +3918,7 @@ async fn pty_a_binary_attachment_is_not_sent_and_the_input_is_kept() {
 
 /// `Tab` completes an `@` reference in the input box; `Enter` then attaches the file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_tab_completes_an_at_reference_and_enter_attaches_it() {
-    let _serial = pty_guard();
     let dir = TempDir::new("tab-mention");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -4153,7 +3996,6 @@ fn assert_session_dir_empty(dir: &Path) {
 /// session file (dogfooding D1/D2).
 #[test]
 fn pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
-    let _serial = pty_guard();
     let dir = TempDir::new("missing-workspace");
     let session_dir = dir.path().join("sessions");
     std::fs::create_dir_all(&session_dir).unwrap();
@@ -4201,7 +4043,6 @@ fn pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
 /// why, does not blame the backend, and creates no session file.
 #[test]
 fn pty_a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
-    let _serial = pty_guard();
     let dir = TempDir::new("nested-session");
     let session_dir = dir.path().join("sessions");
     let ws = session_dir.join("ws");
@@ -4253,7 +4094,6 @@ fn pty_a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
 /// `--session-id` with corrected parameters then creates the session (dogfooding D2).
 #[test]
 fn pty_a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
-    let _serial = pty_guard();
     let dir = TempDir::new("probe-no-session");
     let session_dir = dir.path().join("sessions");
     std::fs::create_dir_all(&session_dir).unwrap();
@@ -4320,7 +4160,6 @@ fn pty_a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
 /// Acceptance 3: a missing or malformed MCP config file fails before the session exists.
 #[test]
 fn pty_a_bad_mcp_config_creates_no_session() {
-    let _serial = pty_guard();
     let dir = TempDir::new("bad-mcp");
     let session_dir = dir.path().join("sessions");
     std::fs::create_dir_all(&session_dir).unwrap();
@@ -4367,10 +4206,7 @@ fn pty_a_bad_mcp_config_creates_no_session() {
 /// Acceptance 5: a clean exit prints one reason line on the normal screen, after the
 /// alternate screen is gone, and the line ends with a newline (dogfooding D4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_clean_exit_prints_one_reason_line() {
-    let _serial = pty_guard();
     let dir = TempDir::new("exit-reason");
     let server = MockServer::start(vec![text_reply("unused")]).await;
     let mut pty = Pty::spawn(
@@ -4419,7 +4255,6 @@ async fn pty_clean_exit_prints_one_reason_line() {
 /// redacts header values and the key even when the panic text mentions them (dogfooding D4).
 #[test]
 fn pty_a_panic_writes_a_redacted_panic_log() {
-    let _serial = pty_guard();
     let dir = TempDir::new("panic-log");
     let sessions = dir.path().join("sessions");
     let home = dir.path().to_str().unwrap();
@@ -4519,7 +4354,6 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
 /// runtime text (here a synthesized panic) must not reach the log or the terminal.
 #[test]
 fn pty_the_panic_log_redacts_every_auth_key_not_only_the_startup_one() {
-    let _serial = pty_guard();
     let dir = TempDir::new("panic-all-keys");
     let sessions = dir.path().join("sessions");
     let home = dir.path().to_str().unwrap();
@@ -4599,7 +4433,6 @@ fn app_pid(pty: &Pty) -> String {
 #[test]
 fn pty_sigterm_and_sighup_restore_the_terminal_and_say_why() {
     for (signal, name, code) in [("TERM", "SIGTERM", 143), ("HUP", "SIGHUP", 129)] {
-        let _serial = pty_guard();
         let dir = TempDir::new("signal");
         let id = format!("signal-{}", name.to_lowercase());
         let mut pty = Pty::spawn(
@@ -4666,9 +4499,7 @@ fn anth_text_reply(text: &str) -> anth::Reply {
 /// `--provider anthropic` in the TUI talks the Messages API and shows the reply; the session
 /// snapshot names anthropic.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_anthropic_provider_sends_a_messages_request_and_renders_the_reply() {
-    let _serial = pty_guard();
     let server = anth::MockServer::start(vec![anth_text_reply("ANTHROPIC-TUI-REPLY")]).await;
     let dir = TempDir::new("anthropic");
     let mut pty = Pty::spawn_with_env(
@@ -4728,7 +4559,6 @@ async fn pty_anthropic_provider_sends_a_messages_request_and_renders_the_reply()
 /// terminal is entered, and does not touch the file.
 #[test]
 fn pty_session_id_already_exists_points_at_resume() {
-    let _serial = pty_guard();
     let dir = TempDir::new("dup-id");
     // First run: create the session, then leave via the panic hook (quick, no server needed).
     let mut first = Pty::spawn(
@@ -4790,7 +4620,6 @@ fn pty_session_id_already_exists_points_at_resume() {
 /// provider the TUI refuses them before the terminal, and creates no session file.
 #[test]
 fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
-    let _serial = pty_guard();
     // `--thinking` left this check in ADR 0026 D11 (it rides both wire protocols now); only
     // `--max-tokens` remains Anthropic-only.
     {
@@ -4831,9 +4660,7 @@ fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
 /// ADR 0017: a model error ends the turn, not the session. The TUI shows the error as a
 /// transcript notice, returns to the input box, and the next line runs a new turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_model_error_is_shown_and_the_session_continues() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![
         // Non-transient, so one failure ends the turn (ADR 0017 retries only
         // connection failures, dropped streams, idle timeouts and 408/429/5xx/529).
@@ -4887,9 +4714,7 @@ async fn pty_a_model_error_is_shown_and_the_session_continues() {
 /// ADR 0018's fallback: a recognizable context-overflow error is shown, followed by the
 /// one-line hint, and the session stays usable (the error ends the turn, ADR 0017).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_context_overflow_is_shown_with_a_hint() {
-    let _serial = pty_guard();
     let body = r#"{"error":{"message":"This model's maximum context length is 16385 tokens. However, your messages resulted in 20000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
     let server = MockServer::start(vec![Reply::status(400, body), text_reply("SECOND-OK")]).await;
     let dir = TempDir::new("overflow");
@@ -4937,10 +4762,7 @@ async fn pty_a_context_overflow_is_shown_with_a_hint() {
 /// ADR 0018: the startup notice names the window and where it came from. An explicit
 /// `--context-window` needs no catalog, so this is deterministic without a mock catalog.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_startup_notice_names_the_window_source() {
-    let _serial = pty_guard();
     let dir = TempDir::new("catalog-window");
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let mut pty = Pty::spawn(
@@ -4975,9 +4797,7 @@ async fn pty_the_startup_notice_names_the_window_source() {
 /// and no number is invented. The reader maps the key's zero to `None` before either host sees
 /// it, so only a reader that refused `0` would fail here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_zero_context_window_in_the_config_leaves_the_budget_off() {
-    let _serial = pty_guard();
     let dir = TempDir::new("zero-window");
     let home = TempDir::new("zero-window-home");
     let server = MockServer::start(vec![text_reply("never")]).await;
@@ -5025,7 +4845,6 @@ async fn pty_a_zero_context_window_in_the_config_leaves_the_budget_off() {
 /// a loopback endpoint, so nothing else can refuse this run).
 #[test]
 fn pty_a_zero_context_window_flag_is_a_usage_error() {
-    let _serial = pty_guard();
     let dir = TempDir::new("zero-window-flag");
     let session_dir = dir.path().join("sessions");
     std::fs::create_dir_all(&session_dir).unwrap();
@@ -5065,9 +4884,7 @@ fn pty_a_zero_context_window_flag_is_a_usage_error() {
 /// ADR 0021 D2/D6: the TUI shows the memory project state and the injection budget at
 /// startup. The `HOME` is private to the pty, so this never reads the real `~/.radian`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
-    let _serial = pty_guard();
     let dir = TempDir::new("memory-notice");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -5117,9 +4934,7 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
 /// itself, and the TUI shows the one notice line naming it. It must reach the transcript (a
 /// `Notice` entry), not stderr, which the fullscreen UI draws over.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_memory_add_shows_the_created_project_notice() {
-    let _serial = pty_guard();
     let dir = TempDir::new("memory-auto-create");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(ws.join(".git")).unwrap();
@@ -5181,9 +4996,7 @@ async fn pty_a_memory_add_shows_the_created_project_notice() {
 /// ADR 0021 D7: `/memory` commands run in the TUI without a model request, and the record
 /// they create is injected into the next request's system prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_memory_commands_run_without_a_model_request() {
-    let _serial = pty_guard();
     let dir = TempDir::new("memory-commands");
     let server = MockServer::start(vec![text_reply("REPLY-AFTER-MEMORY")]).await;
     let mut pty = Pty::spawn(
@@ -5250,9 +5063,7 @@ async fn pty_memory_commands_run_without_a_model_request() {
 /// A `/memory` read command runs while a turn is stuck on a hanging model call and does not
 /// interrupt it (ADR 0021 D6: memory takes effect at the next request, not mid-turn).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
-    let _serial = pty_guard();
     let dir = TempDir::new("memory-running");
     let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
     let mut pty = Pty::spawn(
@@ -5322,9 +5133,7 @@ async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
 
 /// ADR 0018: `/compact` runs without a model request and shows its result as a notice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_compact_shows_its_result_without_a_model_request() {
-    let _serial = pty_guard();
     let dir = TempDir::new("compact");
     let server = MockServer::start(vec![text_reply("never")]).await;
     let mut pty = Pty::spawn(
@@ -5364,9 +5173,7 @@ async fn pty_compact_shows_its_result_without_a_model_request() {
 /// line separate (ADR 0015 C1), without sending a model request. Read-only, so
 /// it works on an idle session with no usage yet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_context_prints_estimated_categories_without_a_model_request() {
-    let _serial = pty_guard();
     let dir = TempDir::new("context");
     let server = MockServer::start(vec![text_reply("never")]).await;
     let mut pty = Pty::spawn(
@@ -5440,9 +5247,7 @@ fn last_user_text(server: &MockServer, n: usize) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_editing_in_the_middle_sends_the_edited_text() {
-    let _serial = pty_guard();
     let dir = TempDir::new("composer-edit");
     let server = MockServer::start(vec![text_reply("EDITED-OK")]).await;
     let mut pty = Pty::spawn(
@@ -5480,9 +5285,7 @@ async fn pty_editing_in_the_middle_sends_the_edited_text() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_multiline_history_and_paste_edit_at_the_cursor() {
-    let _serial = pty_guard();
     let dir = TempDir::new("composer-multiline");
     let server = MockServer::start(vec![text_reply("MULTI-OK"), text_reply("PASTE-OK")]).await;
     let mut pty = Pty::spawn(
@@ -5535,9 +5338,7 @@ async fn pty_multiline_history_and_paste_edit_at_the_cursor() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
-    let _serial = pty_guard();
     let dir = TempDir::new("composer-draft");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -5691,9 +5492,7 @@ async fn seed_session(dir: &Path, id: &str, workspace: &str, user: &str) {
 /// The picker lists this workspace's sessions, filters, resumes the chosen one, and the next
 /// model request carries that session's history.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_pick_lists_filters_and_resumes_the_chosen_session() {
-    let _serial = pty_guard();
     let dir = TempDir::new("pick");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -5784,9 +5583,7 @@ async fn pty_pick_lists_filters_and_resumes_the_chosen_session() {
 
 /// `n` starts a new session; `Esc` quits with code 0 and creates no session file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_pick_starts_new_and_escape_leaves_no_session() {
-    let _serial = pty_guard();
     let dir = TempDir::new("pick-new");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -5874,9 +5671,7 @@ async fn pty_pick_starts_new_and_escape_leaves_no_session() {
 
 /// `--pick` with no sessions goes straight to a new session with a notice (no empty list).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_pick_without_sessions_starts_a_new_one() {
-    let _serial = pty_guard();
     let dir = TempDir::new("pick-none");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -5915,9 +5710,7 @@ async fn pty_pick_without_sessions_starts_a_new_one() {
 /// `/sessions` lists the current workspace's sessions with a copyable `--resume`; `/export`
 /// writes the current session and refuses to overwrite without `--force`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_sessions_and_export_commands() {
-    let _serial = pty_guard();
     let dir = TempDir::new("sess-cmd");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -5976,8 +5769,15 @@ async fn pty_sessions_and_export_commands() {
     // Without `--force` it refuses; with `--force` it overwrites.
     pty.send(b"/export\r");
     assert!(
-        // The notice wraps, so match a fragment that stays on one line.
-        pty.wait_for_screen("ready exists", wait_positive()),
+        // The notice wraps mid-word at a column that moves with the temp dir's
+        // length (it holds the pid), and the continuation row is indented, so no
+        // single-line fragment is stable: compare with all whitespace removed.
+        pty.wait_until(wait_positive(), |screen| {
+            screen
+                .split_whitespace()
+                .collect::<String>()
+                .contains("alreadyexists")
+        }),
         "the overwrite refusal is missing:\n{}",
         pty.screen()
     );
@@ -5997,9 +5797,7 @@ async fn pty_sessions_and_export_commands() {
 /// finishes normally (ADR 0023 U4). The reply is paced so the turn is still running when the
 /// picker is opened.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_sessions_opens_and_closes_during_a_running_turn() {
-    let _serial = pty_guard();
     let dir = TempDir::new("sessions-during-turn");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -6074,9 +5872,7 @@ async fn pty_sessions_opens_and_closes_during_a_running_turn() {
 /// A rebound `send` key sends, and `Enter` (rebound to newline in the same file) does not:
 /// the request text carries the newline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_rebound_send_key_sends_and_enter_does_not() {
-    let _serial = pty_guard();
     let dir = TempDir::new("config-send");
     let config = dir.path().join("config.toml");
     std::fs::write(
@@ -6130,9 +5926,7 @@ async fn pty_a_rebound_send_key_sends_and_enter_does_not() {
 /// corrupts the first transcript row — a resumed history is exactly that row. Both the byte
 /// order and the rendered row are pinned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
-    let _serial = pty_guard();
     let dir = TempDir::new("config-screen");
     let config = dir.path().join("config.toml");
     std::fs::write(&config, "schema_version = 1\n").unwrap();
@@ -6195,9 +5989,7 @@ async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
 
 /// One key bound to two actions refuses startup, naming the conflict.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_keymap_conflict_refuses_to_start() {
-    let _serial = pty_guard();
     let dir = TempDir::new("config-conflict");
     let config = dir.path().join("config.toml");
     std::fs::write(
@@ -6237,9 +6029,7 @@ async fn pty_a_keymap_conflict_refuses_to_start() {
 /// `/fork` (ADR 0022): when idle it creates a child with the parent's history; while a turn
 /// is running it is refused; the child resumes normally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_fork_creates_a_resumable_child_when_idle() {
-    let _serial = pty_guard();
     let dir = TempDir::new("fork-pty");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -6340,9 +6130,7 @@ async fn pty_fork_creates_a_resumable_child_when_idle() {
 /// of copying an empty history. The classic footer shows the turn state, so the test can wait
 /// for `idle` (the `RunFinished`) while the commit is still pending.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_fork_waits_for_the_turn_to_be_committed() {
-    let _serial = pty_guard();
     let dir = TempDir::new("fork-commit-wait");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -6414,9 +6202,7 @@ async fn pty_a_fork_waits_for_the_turn_to_be_committed() {
 /// ADR 0022 §1: when the commit takes longer than `FORK_COMMIT_WAIT`, the `/fork` gives up with
 /// a notice and creates no child session (never an empty one).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_fork_gives_up_when_the_turn_is_still_being_written() {
-    let _serial = pty_guard();
     let dir = TempDir::new("fork-commit-timeout");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -6484,9 +6270,7 @@ async fn pty_a_fork_gives_up_when_the_turn_is_still_being_written() {
 
 /// `/fork` while a turn is running is refused with a notice and creates nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_fork_refuses_while_a_turn_runs() {
-    let _serial = pty_guard();
     let dir = TempDir::new("fork-pty-running");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -6554,9 +6338,7 @@ async fn pty_fork_refuses_while_a_turn_runs() {
 /// the notice names the old session and its resume command; `/sessions` lists both; both
 /// journals replay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_new_starts_a_fresh_session_carrying_route_tier_and_auto() {
-    let _serial = pty_guard();
     let dir = TempDir::new("new-pty");
     let sessions = dir.path().join("sessions");
     let ws = dir.path().join("ws");
@@ -6762,9 +6544,7 @@ async fn pty_new_starts_a_fresh_session_carrying_route_tier_and_auto() {
 /// and must fail this test. The suite default footer (`classic`) has no thinking item, so
 /// this runs the `pi` preset, whose identity row pairs the model with `reasoning`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_new_carries_thinking_into_the_new_sessions_startup_footer() {
-    let _serial = pty_guard();
     let dir = TempDir::new("new-thinking-carry");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -6827,9 +6607,7 @@ async fn pty_new_carries_thinking_into_the_new_sessions_startup_footer() {
 
 /// `/new` while a turn runs is refused with a notice and the session is unchanged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_new_refuses_while_a_turn_runs() {
-    let _serial = pty_guard();
     let dir = TempDir::new("new-pty-running");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -6899,9 +6677,7 @@ async fn pty_new_refuses_while_a_turn_runs() {
 /// `/new` while a background job runs is refused with a notice pointing to `/jobs kill`;
 /// after the kill it works and the old session is unchanged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_new_refuses_while_a_background_job_runs() {
-    let _serial = pty_guard();
     let dir = TempDir::new("new-pty-job");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -6982,9 +6758,7 @@ async fn pty_new_refuses_while_a_background_job_runs() {
 /// `/new` drops the old session's write lock while the process lives: a second process
 /// can `--resume` the old session while the first one runs the new session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_new_releases_the_old_sessions_lock() {
-    let _serial = pty_guard();
     let dir = TempDir::new("new-pty-lock");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -7085,9 +6859,7 @@ fn assert_journal_replays(sessions: &std::path::Path, id: &str) {
 
 /// Phase 5: `Ctrl-F` searches the transcript and jumps to an earlier match.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_find_jumps_to_an_earlier_match() {
-    let _serial = pty_guard();
     let dir = TempDir::new("find-pty");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -7176,9 +6948,7 @@ async fn pty_find_jumps_to_an_earlier_match() {
 /// disables the `POLLHUP` check would slip through.)
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_closed_master_ends_the_app_cleanly() {
-    let _serial = pty_guard();
     let dir = TempDir::new("master-gone");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -7288,9 +7058,7 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
 /// must still exit within the bound; the deadline is a failure bound, not synchronization.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_full_terminal_cannot_hang_the_exit_line() {
-    let _serial = pty_guard();
     let dir = TempDir::new("exit-line-hang");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -7383,9 +7151,7 @@ async fn pty_a_full_terminal_cannot_hang_the_exit_line() {
 /// convention 128+SIGHUP.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_hung_main_loop_still_exits_on_a_signal() {
-    let _serial = pty_guard();
     let dir = TempDir::new("hung-loop");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -7456,7 +7222,6 @@ async fn pty_a_hung_main_loop_still_exits_on_a_signal() {
 /// group id and the app it started is in the same group; an empty group means no orphan.
 #[test]
 fn a_panicking_pty_test_leaves_no_app_process() {
-    let _serial = pty_guard();
     let dir = TempDir::new("panicking-test");
     let group_file = dir.path().join("group");
     let group_file_clone = group_file.clone();
@@ -7547,7 +7312,6 @@ fn settled_frame_count(pty: &mut Pty) -> usize {
 /// §7); now the frame count over an idle window must not move.
 #[test]
 fn pty_an_idle_screen_is_not_redrawn() {
-    let _serial = pty_guard();
     let dir = TempDir::new("idle-redraw");
     let mut pty = Pty::spawn(
         &[
@@ -7591,9 +7355,7 @@ fn pty_an_idle_screen_is_not_redrawn() {
 /// signal: a spinner that redraws without turning shows 1 glyph, while even every second
 /// frame lands on a new one — so the turn itself is checkable, not just the frame count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_visible_spinner_redraws_on_its_interval() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
@@ -7663,9 +7425,7 @@ fn arc_glyphs(raw: &[u8]) -> Vec<&'static str> {
 /// interval itself is pinned by `the_breath_redraws_once_per_step…` in `cli/tty.rs`, which
 /// walks the loop's own tick with an injected clock; this test pins the visible breathing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_pulse_breathes_through_rgb_colours() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
@@ -7794,7 +7554,6 @@ fn dot_colours(raw: &[u8]) -> Vec<(u8, u8, u8)> {
 /// 3 s watchdog, which is what would fire if the loop still had to poll for the flag.
 #[test]
 fn pty_a_signal_while_idle_leaves_immediately() {
-    let _serial = pty_guard();
     let dir = TempDir::new("signal-immediate");
     let mut pty = Pty::spawn(
         &[
@@ -7843,7 +7602,6 @@ fn pty_a_signal_while_idle_leaves_immediately() {
 /// key is still handled.
 #[test]
 fn pty_a_flooding_producer_still_draws_and_answers_keys() {
-    let _serial = pty_guard();
     let dir = TempDir::new("flood-facts");
     let mut pty = Pty::spawn(
         &[
@@ -7940,9 +7698,7 @@ fn assert_mouse_released(pty: &Pty, label: &str) {
 /// alternate-scroll behavior turned the wheel into `Up`, which replaced the draft with the
 /// previous history entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_wheel_scrolls_the_transcript_not_the_input_history() {
-    let _serial = pty_guard();
     let dir = TempDir::new("mouse-scroll");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -8039,9 +7795,7 @@ async fn pty_wheel_scrolls_the_transcript_not_the_input_history() {
 /// A `Moved` report is not input: it is dropped before the channel (so it cannot cause a
 /// frame). The app also never enables any-motion reporting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_mouse_move_is_dropped() {
-    let _serial = pty_guard();
     let dir = TempDir::new("mouse-move");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -8093,9 +7847,7 @@ async fn pty_a_mouse_move_is_dropped() {
 /// `tui.mouse = false` sends no mouse sequence at all, so the terminal keeps its native
 /// selection/copy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_mouse_off_sends_no_reporting_sequence() {
-    let _serial = pty_guard();
     let dir = TempDir::new("mouse-off");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -8141,7 +7893,6 @@ async fn pty_mouse_off_sends_no_reporting_sequence() {
 fn pty_every_exit_path_releases_the_mouse() {
     // The ordinary quit (the `Drop` of the guard).
     {
-        let _serial = pty_guard();
         let dir = TempDir::new("mouse-quit");
         let mut pty = Pty::spawn(
             &[
@@ -8168,7 +7919,6 @@ fn pty_every_exit_path_releases_the_mouse() {
     }
     // The panic hook restores the terminal (and releases the mouse).
     {
-        let _serial = pty_guard();
         let dir = TempDir::new("mouse-panic");
         let mut pty = Pty::spawn(
             &[
@@ -8193,7 +7943,6 @@ fn pty_every_exit_path_releases_the_mouse() {
     }
     // A signal leaves through the ordinary clean-exit path.
     {
-        let _serial = pty_guard();
         let dir = TempDir::new("mouse-signal");
         let mut pty = Pty::spawn(
             &[
@@ -8233,9 +7982,7 @@ fn pty_every_exit_path_releases_the_mouse() {
 /// With an overlay open, the wheel scrolls the overlay, not the transcript: the picker's
 /// selected row moves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_wheel_scrolls_an_open_overlay() {
-    let _serial = pty_guard();
     let dir = TempDir::new("mouse-overlay");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -8313,9 +8060,7 @@ async fn pty_the_wheel_scrolls_an_open_overlay() {
 /// the chosen session's id expands `{session_id}` in a header, and the same terminal then runs
 /// the session. This pins both the single terminal setup and the header ordering.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_pick_resumes_the_selected_id_and_enters_once() {
-    let _serial = pty_guard();
     let dir = TempDir::new("pick-overlay");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -8416,9 +8161,7 @@ async fn pty_pick_resumes_the_selected_id_and_enters_once() {
 /// asserted before the session's first frame. Waiting for `(Ctrl-P to expand)`, which only the
 /// session phase draws, is what makes the stray text observable.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
-    let _serial = pty_guard();
     let dir = TempDir::new("pick-stderr");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -8502,9 +8245,7 @@ async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
 /// rule for the memory *notice*, applied to the warning. On the `--pick` path the startup
 /// ones would otherwise land on the alternate screen.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_memory_warning_is_a_transcript_notice_not_stderr() {
-    let _serial = pty_guard();
     let dir = TempDir::new("memory-warning");
     let home = TempDir::new("memory-warning-home");
     // A user skill whose frontmatter declares `allowed-tools`: discovery warns once through the
@@ -8549,9 +8290,7 @@ async fn pty_a_memory_warning_is_a_transcript_notice_not_stderr() {
 /// no longer parks the loop).
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_signal_watchdog_releases_the_mouse() {
-    let _serial = pty_guard();
     let dir = TempDir::new("mouse-watchdog");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -8606,9 +8345,7 @@ async fn pty_the_signal_watchdog_releases_the_mouse() {
 /// created, because the session id is not even resolved yet.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_signal_during_pick_exits_128_plus_signal() {
-    let _serial = pty_guard();
     let dir = TempDir::new("pick-signal");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -8690,10 +8427,8 @@ async fn pty_a_signal_during_pick_exits_128_plus_signal() {
 /// description after the watchdog exits.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_watchdog_restores_the_stdout_flags() {
     use std::os::fd::AsRawFd;
-    let _serial = pty_guard();
     let dir = TempDir::new("mouse-flags");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -8782,10 +8517,7 @@ fn ask_reply(done: &str) -> Vec<Reply> {
 /// ADR 0024 Q5/Q7 end to end: the TUI registers `ask_user`, shows the form, and the turn
 /// continues after three answers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
-    let _serial = pty_guard();
     // The workspace is a **sibling** of the session directory: the sandbox denies read on the
     // sessions directory, so a workspace inside it could not be both hidden and usable (the
     // linux3 finding).
@@ -8875,9 +8607,7 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
 /// ADR 0024 Q7/R3 end to end: `alt-h` collapses the panel to one line and shows it
 /// again without losing the answers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_ask_user_alt_h_hides_and_shows() {
-    let _serial = pty_guard();
     let dir = TempDir::new("ask-hide");
     let sessions = dir.path().join("sessions");
     let ws = dir.path().join("ws");
@@ -8936,9 +8666,7 @@ async fn pty_ask_user_alt_h_hides_and_shows() {
 
 /// ADR 0024 Q7 + `esc` twice declines, and the turn continues.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_ask_user_esc_declines() {
-    let _serial = pty_guard();
     let dir = TempDir::new("ask-decline");
     let sessions = dir.path().join("sessions");
     let ws = dir.path().join("ws");
@@ -8991,9 +8719,7 @@ async fn pty_ask_user_esc_declines() {
 /// ADR 0024 Q7/R3 + the `Other` row keeps its text while Up/Down
 /// move between the options, and the answer carries it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_ask_user_other_keeps_its_text() {
-    let _serial = pty_guard();
     let dir = TempDir::new("ask-other");
     let sessions = dir.path().join("sessions");
     let ws = dir.path().join("ws");
@@ -9068,10 +8794,7 @@ async fn pty_ask_user_other_keeps_its_text() {
 /// ADR 0024 Q4: Ctrl-C while a question is up cancels the turn, the form goes with the waiter
 /// (ADR 0023 U7), and **no** answer is sent: the model is never asked again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_ctrl_c_during_a_question_cancels_without_an_answer() {
-    let _serial = pty_guard();
     let dir = TempDir::new("ask-cancel");
     let sessions = dir.path().join("sessions");
     let ws = dir.path().join("ws");
@@ -9142,10 +8865,7 @@ async fn pty_ctrl_c_during_a_question_cancels_without_an_answer() {
 /// ADR 0023 U7 end to end: two tool calls that need approval are asked one after the other, in
 /// order, and the status bar counts the queue. The second never replaces the first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_two_approvals_are_shown_in_order() {
-    let _serial = pty_guard();
     let dir = TempDir::new("two-approvals");
     let sessions = dir.path().join("sessions");
     let ws = dir.path().join("ws");
@@ -9228,9 +8948,7 @@ async fn pty_two_approvals_are_shown_in_order() {
 /// A long command's approval still shows `[y] allow once` (the keys are the box's own last
 /// row), and answering `y` runs the whole command (approval-fit).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_long_command_keeps_the_approval_keys_visible() {
-    let _serial = pty_guard();
     let dir = TempDir::new("approval-fit");
     let sessions = dir.path().join("sessions");
     let ws = dir.path().join("ws");
@@ -9308,9 +9026,7 @@ async fn pty_a_long_command_keeps_the_approval_keys_visible() {
 /// `/model` switches the wire: after the switch the requests go to the **new** mock server
 /// with the new protocol (ADR 0026 D5, D6 — here opencode-go → anthropic).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_model_switch_sends_the_next_turn_to_the_new_provider() {
-    let _serial = pty_guard();
     let dir = TempDir::new("model-switch");
     let sessions = dir.path().join("sessions");
     let ws = dir.path().join("ws");
@@ -9447,9 +9163,7 @@ fn write_chatgpt_oauth_entry(radian_home: &Path) {
 /// the same as `anthropic`/`openai`/`opencode-go` already are - so this also pins that the
 /// new descriptor did not accidentally gain a login gate the others do not have).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_model_lists_chatgpt_once_it_is_logged_in() {
-    let _serial = pty_guard();
     let dir = TempDir::new("model-chatgpt");
     let sessions = dir.path().join("sessions");
     let radian_home = dir.path().join("radian-home");
@@ -9490,9 +9204,7 @@ async fn pty_model_lists_chatgpt_once_it_is_logged_in() {
 /// a `chatgpt` login. The login is an `oauth` entry, which `resolve_key` (api keys only) does
 /// not see; the switch's credential check must also accept `has_login` ("no credential for `chatgpt`: run /login chatgpt" right after logging in).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_model_switches_to_chatgpt_with_an_oauth_login() {
-    let _serial = pty_guard();
     let dir = TempDir::new("model-chatgpt-switch");
     let sessions = dir.path().join("sessions");
     let radian_home = dir.path().join("radian-home");
@@ -9535,9 +9247,7 @@ async fn pty_model_switches_to_chatgpt_with_an_oauth_login() {
 
 /// D8: a resume uses the last switched model from the journal, with no flags.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_resume_replays_the_switched_model() {
-    let _serial = pty_guard();
     let dir = TempDir::new("model-resume");
     let sessions = dir.path().join("sessions");
     let ws = dir.path().join("ws");
@@ -9630,9 +9340,7 @@ async fn pty_a_resume_replays_the_switched_model() {
 /// low/high/max), names the clamp, and the next request carries the wire value as
 /// `reasoning_effort`. `medium` matches no candidate, so Enter submits the typed level.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_thinking_clamps_up_and_sends_reasoning_effort() {
-    let _serial = pty_guard();
     let dir = TempDir::new("thinking-clamp");
     let sessions = dir.path().join("sessions");
     let ws = dir.path().join("ws");
@@ -9696,9 +9404,7 @@ async fn pty_thinking_clamps_up_and_sends_reasoning_effort() {
 /// runs **after** it, so the journal's last model change is the one resolved (status bar and
 /// request alike). The config's model (an OpenAI mock) must not be used.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_picked_resume_uses_the_journals_model() {
-    let _serial = pty_guard();
     let dir = TempDir::new("pick-model");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -9796,10 +9502,7 @@ async fn pty_a_picked_resume_uses_the_journals_model() {
 /// ADR 0024 Q5: `--approval never` only affects approvals. The user is still there, so the
 /// TUI still registers `ask_user`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_approval_never_still_registers_ask_user() {
-    let _serial = pty_guard();
     let dir = TempDir::new("ask-never");
     let sessions = dir.path().join("sessions");
     let ws = dir.path().join("ws");
@@ -9839,10 +9542,7 @@ async fn pty_approval_never_still_registers_ask_user() {
 /// ADR 0024 Q5: `radian-tui` registers `ask_user` even with **no** `--workspace` (so no coding
 /// tools). The startup line must reflect the actual registration, not the host's intent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_ask_user_is_registered_without_a_workspace() {
-    let _serial = pty_guard();
     let dir = TempDir::new("ask-no-ws");
     let server = MockServer::start(vec![text_reply("NO-WS-DONE")]).await;
     let mut pty = Pty::spawn(
@@ -9894,9 +9594,7 @@ async fn pty_ask_user_is_registered_without_a_workspace() {
 /// The slash command tree completes every level: typing `/mem` lists the
 /// commands, Tab completes the name, the next level's list appears, and Tab completes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_slash_completion_walks_the_command_tree() {
-    let _serial = pty_guard();
     let dir = TempDir::new("slash-completion");
     let mut pty = Pty::spawn(
         &[
@@ -9953,9 +9651,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
 /// Without `--workspace` the current directory is the coding root, so the first request carries
 /// the file tools (before this, a session without `--workspace` had none).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_without_a_workspace_the_current_directory_is_the_coding_root() {
-    let _serial = pty_guard();
     let dir = TempDir::new("default-workspace");
     let server = MockServer::start(vec![text_reply("OK")]).await;
     let mut pty = Pty::spawn(
@@ -10005,10 +9701,8 @@ async fn pty_without_a_workspace_the_current_directory_is_the_coding_root() {
 /// says so on the startup line.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_session_started_from_home_uses_home_tmp() {
     use std::os::unix::fs::PermissionsExt;
-    let _serial = pty_guard();
     let home = TempDir::new("home-workspace");
     let sessions = TempDir::new("home-workspace-sessions");
     let (mut child, mut master) = spawn_direct_in(
@@ -10055,7 +9749,6 @@ async fn pty_a_session_started_from_home_uses_home_tmp() {
 #[cfg(unix)]
 #[test]
 fn pty_a_session_started_from_the_filesystem_root_is_refused() {
-    let _serial = pty_guard();
     let home = TempDir::new("root-workspace-home");
     let sessions = TempDir::new("root-workspace-sessions");
     let (mut child, mut master) = spawn_direct_in(
@@ -10114,9 +9807,7 @@ fn pty_a_session_started_from_the_filesystem_root_is_refused() {
 /// this workspace's sessions, offers no "new" entry, resumes the chosen one, and Esc leaves
 /// without creating a file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_resume_without_a_value_picks_a_session() {
-    let _serial = pty_guard();
     let dir = TempDir::new("resume-pick");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -10222,9 +9913,7 @@ async fn pty_resume_without_a_value_picks_a_session() {
 /// The exit line is a command the user can paste: the program name, the id,
 /// and the flags that must be repeated — and never a key or a header value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_exit_line_is_a_copyable_resume_command() {
-    let _serial = pty_guard();
     let dir = TempDir::new("resume-command");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -10277,9 +9966,7 @@ async fn pty_the_exit_line_is_a_copyable_resume_command() {
 /// line renders with the fixture's `userMessageText` RGB (via `userMessageText → var fg`).
 /// `COLORTERM=truecolor` makes the app emit RGB, which the vt100 model reports per cell.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_theme_file_colors_the_user_line() {
-    let _serial = pty_guard();
     let home = TempDir::new("theme-home");
     // `RADIAN_HOME` root with the theme file and a config selecting it by name.
     let themes = home.path().join("themes");
@@ -10414,9 +10101,7 @@ fn auth_json_mode(path: &std::path::Path) -> u32 {
 /// never appear in any byte the app put on screen** — typed or after the fact — and the
 /// pre-existing `auth.json` entry must survive (only `corp` is added, the file still 0600).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_login_custom_walk_saves_without_showing_the_key() {
-    let _serial = pty_guard();
     const KEY: &str = "sk-PTY-SECRET-42";
     let verify = login_verify_server("200 OK");
     let dir = TempDir::new("login");
@@ -10540,9 +10225,7 @@ async fn pty_login_custom_walk_saves_without_showing_the_key() {
 /// stores the key anyway (D3). The same run covers `/logout`: the confirmation, the removal,
 /// and the untouched sibling entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_login_failed_verification_can_save_and_logout_removes_only_one() {
-    let _serial = pty_guard();
     const KEY: &str = "sk-SECOND-SECRET-7";
     // No server on this port: the verification cannot connect (D3's failure path).
     let dead = "http://127.0.0.1:9/v1";
@@ -10633,9 +10316,7 @@ async fn pty_login_failed_verification_can_save_and_logout_removes_only_one() {
 
 /// `/logout` with `n` keeps the credential.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_logout_with_n_keeps_the_entry() {
-    let _serial = pty_guard();
     let dir = TempDir::new("logout-keep");
 
     let server = MockServer::start(vec![text_reply("never")]).await;
@@ -10687,9 +10368,7 @@ async fn pty_logout_with_n_keeps_the_entry() {
 /// the session, so the next ask never prompts; the status bar says `AUTO`, and both the
 /// audit record of the switch and the durable `ConfigChanged` land in the journal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_auto_key_approves_once_and_enables_auto() {
-    let _serial = pty_guard();
     let dir = TempDir::new("auto-key");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -10774,9 +10453,7 @@ async fn pty_auto_key_approves_once_and_enables_auto() {
 
 /// A journaled in-session switch restores auto on resume under `workspace` (D9).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_resume_restores_auto_on_workspace() {
-    let _serial = pty_guard();
     let dir = TempDir::new("auto-resume");
     let path = dir.path().join("auto-resume.jsonl");
     let journal = radian_session::SessionJournal::create(
@@ -10844,9 +10521,7 @@ async fn pty_resume_restores_auto_on_workspace() {
 /// `full` never restores auto (D9): the startup says how to get it back, and the status bar
 /// does not show AUTO.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_resume_does_not_restore_auto_on_full_and_hints() {
-    let _serial = pty_guard();
     let dir = TempDir::new("auto-resume-full");
     let path = dir.path().join("auto-full.jsonl");
     let journal = radian_session::SessionJournal::create(
@@ -10900,9 +10575,7 @@ async fn pty_resume_does_not_restore_auto_on_full_and_hints() {
 
 /// Config `[permissions] approval = "auto"` is ignored under `full`, with a warning (D9).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_config_auto_is_ignored_under_full_with_a_warning() {
-    let _serial = pty_guard();
     let dir = TempDir::new("auto-config-full");
     let config = dir.path().join("config.toml");
     std::fs::write(
@@ -10945,9 +10618,7 @@ async fn pty_config_auto_is_ignored_under_full_with_a_warning() {
 
 /// The same config value holds under `workspace`: auto is on from the first frame.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_config_auto_enables_auto_on_workspace() {
-    let _serial = pty_guard();
     let dir = TempDir::new("auto-config-ws");
     let config = dir.path().join("config.toml");
     std::fs::write(
@@ -11019,9 +10690,7 @@ fn sgr(code: u8, col: u16, row: u16, press: bool) -> Vec<u8> {
 /// selection's logical text reaches the clipboard as OSC 52 (`ESC]52;c;<base64>BEL`), and the
 /// status bar says what actually happened ("via OSC 52"), never that the clipboard holds it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_mouse_drag_copies_the_selection_via_osc52() {
-    let _serial = pty_guard();
     let dir = TempDir::new("select-copy");
     let path = dir.path().join("select-me.jsonl");
     let journal = radian_session::SessionJournal::create(
@@ -11098,7 +10767,6 @@ async fn pty_a_mouse_drag_copies_the_selection_via_osc52() {
 /// events, no wake-ups and no frames (ADR 0023 U2's zero-redraw, pointer edition).
 #[test]
 fn pty_pointer_motion_alone_draws_no_frame() {
-    let _serial = pty_guard();
     let dir = TempDir::new("motion-idle");
     let mut pty = Pty::spawn(
         &[
@@ -11141,7 +10809,6 @@ fn pty_pointer_motion_alone_draws_no_frame() {
 /// slice added). The ordinary path: the guard's drop.
 #[test]
 fn pty_quit_closes_button_motion_reporting() {
-    let _serial = pty_guard();
     let dir = TempDir::new("select-exit");
     let mut pty = Pty::spawn(
         &[
@@ -11326,9 +10993,7 @@ fn herdr_env(envs: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
 /// One mock turn: the fake socket must see idle (startup), working (TurnStarted), idle
 /// (RunFinished) and a release on exit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_herdr_reports_the_turn_states_and_releases() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("HERDR-REPLY-OK")]).await;
     let dir = TempDir::new("herdr-turn");
     let sock = HerdrSocket::start("turn");
@@ -11399,9 +11064,7 @@ async fn pty_herdr_reports_the_turn_states_and_releases() {
 /// once, then only the key that changed, with no cost, token totals, paths or command text
 /// anywhere in it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_herdr_reports_metadata_changes() {
-    let _serial = pty_guard();
     let dir = TempDir::new("herdr-meta");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -11516,9 +11179,7 @@ async fn pty_herdr_reports_metadata_changes() {
 /// ADR 0034: a structured question labels `blocked` as `question` - the
 /// category, never the question's body.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_herdr_labels_a_question_as_question() {
-    let _serial = pty_guard();
     let dir = TempDir::new("herdr-question");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -11585,9 +11246,7 @@ async fn pty_herdr_labels_a_question_as_question() {
 /// `pane.report_agent_session`, after the state report that holds the pane (herdr refuses a
 /// `resume_argv` from a reporter that does not hold the pane yet).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_herdr_reports_the_session_identity() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("HERDR-IDENTITY-OK")]).await;
     let dir = TempDir::new("herdr-identity");
     let sock = HerdrSocket::start("identity");
@@ -11647,9 +11306,7 @@ async fn pty_herdr_reports_the_session_identity() {
 /// first token (`herdr agent prompt --wait` gives it 5 s). The mock never sends one, so a report
 /// that waited for a token would never arrive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_herdr_reports_working_within_a_second_of_the_input() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
     let dir = TempDir::new("herdr-gate");
     let sock = HerdrSocket::start("gate");
@@ -11698,9 +11355,7 @@ async fn pty_herdr_reports_working_within_a_second_of_the_input() {
 
 /// An approval is `blocked` with the tool name only; the command text is never sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_herdr_reports_blocked_without_the_command_text() {
-    let _serial = pty_guard();
     let dir = TempDir::new("herdr-approval");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -11788,9 +11443,7 @@ async fn pty_herdr_reports_blocked_without_the_command_text() {
 /// queued state is still `working`). The test accepts the full five, the four without
 /// the transient `idle`, and the coalesced three.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_herdr_reports_working_while_a_job_runs() {
-    let _serial = pty_guard();
     let dir = TempDir::new("herdr-jobs");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -11993,9 +11646,7 @@ async fn pty_herdr_reports_working_while_a_job_runs() {
 
 /// Without `HERDR_ENV=1` nothing is sent at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_herdr_is_silent_without_the_env() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("HERDR-SILENT-OK")]).await;
     let dir = TempDir::new("herdr-off");
     let sock = HerdrSocket::start("off");
@@ -12039,9 +11690,7 @@ async fn pty_herdr_is_silent_without_the_env() {
 
 /// `RADIAN_HERDR=0` turns it off for one run even inside a herdr pane.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_herdr_is_silent_when_disabled() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("HERDR-DISABLED-OK")]).await;
     let dir = TempDir::new("herdr-disabled");
     let sock = HerdrSocket::start("disabled");
@@ -12088,9 +11737,7 @@ async fn pty_herdr_is_silent_when_disabled() {
 /// Idle and empty, Ctrl-C asks twice: the first press only shows the hint and never exits;
 /// the second inside the window exits 0 with the copyable resume line.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_ctrl_c_twice_quits_and_one_press_only_hints() {
-    let _serial = pty_guard();
     let dir = TempDir::new("ctrl-c-quit");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -12151,9 +11798,7 @@ async fn pty_ctrl_c_twice_quits_and_one_press_only_hints() {
 /// Idle with text, one Ctrl-C clears the input (it does not quit) and the cleared line is
 /// back through `Up`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_ctrl_c_clears_a_draft_before_quitting() {
-    let _serial = pty_guard();
     let dir = TempDir::new("ctrl-c-clear");
     let server = MockServer::start(vec![]).await;
     let mut pty = Pty::spawn(
@@ -12209,9 +11854,7 @@ async fn pty_ctrl_c_clears_a_draft_before_quitting() {
 /// `/theme light` end to end: the notice names the saved file, the config's other bytes
 /// survive, and only `tui.theme` changed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_slash_theme_switches_and_writes_the_config() {
-    let _serial = pty_guard();
     let dir = TempDir::new("theme-switch");
     let config = dir.path().join("config.toml");
     let sessions = dir.path().join("sessions");
@@ -12284,9 +11927,7 @@ async fn pty_slash_theme_switches_and_writes_the_config() {
 /// (small-fixes 1): a key `/login` saves **mid-session** joins this session's
 /// redaction list, so an export of the same session hides it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_login_key_is_redacted_from_an_export_in_the_same_session() {
-    let _serial = pty_guard();
     // Deliberately not `sk-`-prefixed and not after `Bearer`: the export's heuristic
     // redaction would catch such a token on its own, and this test is about the *known*
     // secret list (the mid-session `/login`), not the heuristic.
@@ -12378,9 +12019,7 @@ async fn pty_a_login_key_is_redacted_from_an_export_in_the_same_session() {
 /// the second. The pty harness otherwise starts tests on `preset = classic`, so this test
 /// passes the `pi` preset explicitly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_pi_footer_is_two_rows() {
-    let _serial = pty_guard();
     let dir = TempDir::new("footer-pi");
     let server = MockServer::start(vec![text_reply("never")]).await;
     let mut pty = Pty::spawn_with_config(
@@ -12419,9 +12058,7 @@ async fn pty_the_pi_footer_is_two_rows() {
 /// The **shipped default** with no config file: the two-row `pi` footer (ADR 0027 C2).
 /// `spawn_bare` writes no `[tui.footer]`, so this is exactly what a user gets.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
-    let _serial = pty_guard();
     let dir = TempDir::new("footer-default");
     // A short workspace so the cwd item fits at a normal width (a long path is legitimately
     // dropped by the narrow-terminal rule, which the second test covers).
@@ -12493,9 +12130,7 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
 /// tokens were `-` and `cost` was hidden until the next response, because the projection starts
 /// empty and only the live sink wrote to it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
-    let _serial = pty_guard();
     let dir = TempDir::new("cost-resume");
     let home = TempDir::new("cost-resume-home");
     // A catalog cache with a price for the model the session ran on. `resolve_offline` reads
@@ -12613,9 +12248,7 @@ async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
 /// The shipped default on a narrow terminal follows the drop order: the `right` group
 /// (reasoning) goes before the `left` group's end, and the model (highest priority) stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_the_default_footer_drops_the_right_group_on_a_narrow_terminal() {
-    let _serial = pty_guard();
     let dir = TempDir::new("footer-narrow");
     let ws = short_workspace("footer-narrow");
     let server = MockServer::start(vec![text_reply("never")]).await;
@@ -12691,9 +12324,7 @@ fn longest_run(screen: &str, ch: char) -> usize {
 /// at the old width until a key or wheel arrived ("scroll once and it fixes itself"). The app
 /// now polls `TIOCGWINSZ` on its idle tick.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_bare_resize_re_lays_out() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("never")]).await;
     // The rule is the width witness, so this test asks for `tui.input_style = "lines"`: the
     // default `bar` band has no rule to measure (its width at 80 and 120 columns is pinned by
@@ -12745,7 +12376,6 @@ async fn pty_a_bare_resize_re_lays_out() {
 /// `CSI < 1 u` (crossterm 0.29.0 `event.rs:495-527`).
 #[test]
 fn pty_keyboard_enhancement_is_pushed_and_popped_on_exit() {
-    let _serial = pty_guard();
     let dir = TempDir::new("keyboard-enhance");
     let mut pty = Pty::spawn_with_env(
         &[
@@ -12789,9 +12419,7 @@ fn pty_keyboard_enhancement_is_pushed_and_popped_on_exit() {
 /// ADR 0033 acceptance: `!cmd` runs in the sandbox, shows a `$ cmd` block, and its `Ran \`cmd\``
 /// message reaches the next request's user messages.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_bang_runs_and_enters_the_context() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("AFTER-BANG")]).await;
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
@@ -12847,9 +12475,7 @@ async fn pty_bang_runs_and_enters_the_context() {
 
 /// ADR 0033 acceptance: `!!cmd` runs and shows, but its output never enters the request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_bangbang_stays_out_of_the_context() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("AFTER-BANGBANG")]).await;
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
@@ -12896,9 +12522,7 @@ async fn pty_bangbang_stays_out_of_the_context() {
 /// ADR 0033 + ADR 0012: a `!` command really is confined — a write outside the workspace
 /// fails under `--profile workspace`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_bang_is_confined_to_the_workspace() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("never")]).await;
     let escape = format!("/tmp/radian-bang-escape-{}", std::process::id());
     let _ = std::fs::remove_file(&escape);
@@ -12936,9 +12560,7 @@ async fn pty_bang_is_confined_to_the_workspace() {
 /// ADR 0033: every `!`/`!!` run is audited in the journal (`UserBash`), even when it does not
 /// enter the context.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_bang_is_audited_in_the_journal() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("never")]).await;
     let dir = TempDir::new("bang-audit");
     let config = format!(
@@ -12989,9 +12611,7 @@ async fn pty_bang_is_audited_in_the_journal() {
 
 /// ADR 0033: only one `!` at a time (a second is refused) and Esc cancels the running one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_bang_is_single_and_escapable() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("never")]).await;
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
@@ -13030,9 +12650,7 @@ async fn pty_bang_is_single_and_escapable() {
 /// group. A turn must be running for Ctrl-C to mean "cancel" (otherwise it arms quit), so this
 /// starts one with a reply that never finishes and then cancels both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_ctrl_c_stops_a_running_bang() {
-    let _serial = pty_guard();
     // A reply that never finishes: the turn stays running while the bash does.
     let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
     let config = format!(
@@ -13103,9 +12721,7 @@ fn the_bang_command_runs_through_the_sandboxed_executor() {
 /// ADR 0038 slice 2: switching to `full` (no sandbox) opens a confirmation; Esc cancels and
 /// leaves the tier unchanged. The model has no tool for this, so it is a user-only command.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_access_full_requires_confirmation_and_esc_cancels() {
-    let _serial = pty_guard();
     let dir = TempDir::new("access-confirm");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -13173,9 +12789,7 @@ async fn pty_access_full_requires_confirmation_and_esc_cancels() {
 /// startup line and the footer mark it `(project)`. A file **in the workspace** cannot cause
 /// it — only the user's `~/.radian/access/access.json` can.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
-    let _serial = pty_guard();
     let dir = TempDir::new("access-remembered");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -13265,9 +12879,7 @@ async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
 /// ADR 0038 decision 2: a journaled access change restores the tier on resume, the same way
 /// `/model` restores the route.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_resume_restores_the_access_tier() {
-    let _serial = pty_guard();
     let dir = TempDir::new("access-resume");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -13414,9 +13026,7 @@ fn picker_hint(screen: &str) -> Option<String> {
 /// Mutation: drop the follow (read the file once, never poll the tail again) → the new message
 /// and `working…` never arrive and the disappearance is never seen → FAILED.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_attach_follow_shows_new_committed_events() {
-    let _serial = pty_guard();
     use radian_core::TranscriptJournal;
     let dir = TempDir::new("attach-follow");
     let journal = attach_session(dir.path(), "attach-me", 0).await;
@@ -13500,9 +13110,7 @@ async fn pty_attach_follow_shows_new_committed_events() {
 /// Mutation: drop the validation and build the path from the raw id → the decoy is opened, its
 /// `ATTACH-OLD-USER` shows, and the refusal line is missing → FAILED.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_attach_refuses_a_path_like_id_without_reading_it() {
-    let _serial = pty_guard();
     let scratch = TempDir::new("attach-bad-id");
     // `<scratch>/decoy.jsonl`, which is where `attach ../decoy` would resolve to.
     let _decoy = attach_session(scratch.path(), "decoy", 0).await;
@@ -13555,9 +13163,7 @@ async fn pty_attach_refuses_a_path_like_id_without_reading_it() {
 /// Mutation: route any of these keys anywhere (a command, a write, a control-port connection)
 /// → the byte, run/ or directory assertion FAILED.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_attach_swallows_every_other_key() {
-    let _serial = pty_guard();
     let dir = TempDir::new("attach-keys");
     let home = TempDir::new("attach-keys-home");
     // Held for the whole test: the writer lock stays taken, so a reader that tried to lock
@@ -13654,9 +13260,7 @@ async fn pty_attach_swallows_every_other_key() {
 /// Mutation: open the picker with its "new session" row (leave `without_new` off the built
 /// picker) → the `n new` hint is drawn and `n` leaves instead of filtering → FAILED.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_attach_without_an_id_picks_a_session_and_stays_read_only() {
-    let _serial = pty_guard();
     let scratch = TempDir::new("attach-pick");
     let sessions = scratch.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -13821,9 +13425,7 @@ async fn pty_attach_without_an_id_picks_a_session_and_stays_read_only() {
 /// `Esc` at the picker, before any choice, leaves with exit 0 and creates nothing: no session
 /// file appears or changes (the picker is not the `--pick` screen, which may start a session).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_attach_without_an_id_escapes_the_picker_without_writing() {
-    let _serial = pty_guard();
     let scratch = TempDir::new("attach-pick-esc");
     let sessions = scratch.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -13875,9 +13477,7 @@ async fn pty_attach_without_an_id_escapes_the_picker_without_writing() {
 /// Mutation: drop `follow` when the choice is made (attach without the flag) → the appended
 /// line never arrives → FAILED.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_attach_without_an_id_follows_the_chosen_session() {
-    let _serial = pty_guard();
     use radian_core::TranscriptJournal;
     let scratch = TempDir::new("attach-pick-follow");
     let sessions = scratch.path().join("sessions");
@@ -13953,9 +13553,7 @@ async fn pty_attach_without_an_id_follows_the_chosen_session() {
 /// With no sessions, `attach` says so in one line and exits 0 **without entering the alternate
 /// screen**; nothing at all is created, not even the session directory.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_attach_without_an_id_and_no_sessions_says_so_without_a_screen() {
-    let _serial = pty_guard();
     let scratch = TempDir::new("attach-pick-none");
     // Never created: `attach` must not create it either.
     let sessions = scratch.path().join("sessions");
@@ -14003,7 +13601,6 @@ async fn pty_attach_without_an_id_and_no_sessions_says_so_without_a_screen() {
 /// burst and throw it away, so the first key after a resize was silently dropped.
 #[test]
 fn pty_a_resize_does_not_eat_a_typed_key() {
-    let _serial = pty_guard();
     let dir = TempDir::new("resize-keeps-keys");
     let mut pty = Pty::spawn(
         &[
@@ -14042,9 +13639,7 @@ fn pty_a_resize_does_not_eat_a_typed_key() {
 /// dead and how to resume it, keeps the text, and reaches no model. The footer says `ended`,
 /// never `idle` (nothing can start).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_submit_after_the_driver_ended_says_the_session_is_dead() {
-    let _serial = pty_guard();
     let dir = TempDir::new("ended-submit");
     let server = MockServer::start(vec![text_reply("never")]).await;
     let mut pty = Pty::spawn(
@@ -14117,9 +13712,7 @@ async fn pty_a_submit_after_the_driver_ended_says_the_session_is_dead() {
 /// text stays) and reaches no model; picking one with `/model` writes the two keys to the
 /// freshly created config file, and the next message reaches the mock model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_first_launch_starts_with_no_model_and_writes_back_the_first_pick() {
-    let _serial = pty_guard();
     let dir = TempDir::new("first-launch");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -14200,9 +13793,7 @@ async fn pty_first_launch_starts_with_no_model_and_writes_back_the_first_pick() 
 /// ADR 0008 §2 + ADR 0026 D5: a session that started with a configured model never writes
 /// the config on `/model` — the switch only advances the journal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_a_model_switch_never_writes_when_a_model_was_configured() {
-    let _serial = pty_guard();
     let dir = TempDir::new("model-no-write");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -14272,7 +13863,6 @@ async fn pty_a_model_switch_never_writes_when_a_model_was_configured() {
 /// `/panel` returns to the last page. Esc closes to the composer.
 #[test]
 fn pty_inspector_four_commands_open_their_pages() {
-    let _serial = pty_guard();
     let dir = TempDir::new("inspector-pages");
     let mut pty = Pty::spawn(
         &[
@@ -14387,9 +13977,7 @@ fn pty_inspector_four_commands_open_their_pages() {
 /// The inspector opens while a turn runs and does not disturb it: the running state stays
 /// visible under the panel, and the turn still settles.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_inspector_opens_during_a_running_turn() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
@@ -14438,7 +14026,6 @@ async fn pty_inspector_opens_during_a_running_turn() {
 /// panel layer): with no events, the frame count over an idle window must not move.
 #[test]
 fn pty_an_open_panel_is_not_redrawn() {
-    let _serial = pty_guard();
     let dir = TempDir::new("inspector-idle");
     let mut pty = Pty::spawn(
         &[
@@ -14503,9 +14090,7 @@ fn slow_text_reply(text: &str, pause: Duration) -> Reply {
 /// opens its own turn in order when it ends (ADR 0011 L4 FIFO). The footer's `queued` item
 /// shows the waiting count (2, then 1) and hides when drained.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_queue_during_a_running_turn_runs_queued_turns_in_order() {
-    let _serial = pty_guard();
     let pause = Duration::from_secs(2);
     let server = MockServer::start(vec![
         slow_text_reply("FIRST-REPLY-OK", pause),
@@ -14606,9 +14191,7 @@ async fn pty_queue_during_a_running_turn_runs_queued_turns_in_order() {
 
 /// `/queue <text>` while idle opens a turn at once, carrying the queued text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_queue_while_idle_starts_a_turn_at_once() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("IDLE-QUEUE-REPLY-OK")]).await;
     let dir = TempDir::new("queue-idle");
     let mut pty = Pty::spawn_bare(
@@ -14652,9 +14235,7 @@ async fn pty_queue_while_idle_starts_a_turn_at_once() {
 /// `/copy code` copies only its last fenced block: the loop's honest `copied N chars`
 /// notice names what was copied.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_copy_copies_the_last_message_and_its_code_block() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![
         text_reply("COPY-OK"),
         text_reply("```rust\nlet x = 1;\n```"),
@@ -14718,9 +14299,7 @@ fn bel_count(pty: &Pty) -> usize {
 /// `tui.bell = "attention"`: an approval prompt rings exactly once — no second ring for the
 /// same prompt, and no ring for anything before it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_bell_attention_rings_once_for_an_approval() {
-    let _serial = pty_guard();
     let dir = TempDir::new("bell-approval");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -14791,9 +14370,7 @@ async fn pty_bell_attention_rings_once_for_an_approval() {
 
 /// `tui.bell = "off"`: the same approval prompt stays silent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_bell_off_stays_silent() {
-    let _serial = pty_guard();
     let dir = TempDir::new("bell-off");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -14859,9 +14436,7 @@ async fn pty_bell_off_stays_silent() {
 /// first, so its settle lands in a later frame than the turn end: the two rings can never
 /// merge into one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_bell_all_rings_for_a_background_job_settle() {
-    let _serial = pty_guard();
     let dir = TempDir::new("bell-job");
     let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
@@ -14926,9 +14501,7 @@ async fn pty_bell_all_rings_for_a_background_job_settle() {
 /// message matches the first one's, and the transcript gains a second user message without
 /// rewriting anything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_retry_after_a_model_error_resends_the_same_text() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![
         Reply::status(
             400,
@@ -14999,9 +14572,7 @@ async fn pty_retry_after_a_model_error_resends_the_same_text() {
 /// same user text, the footer counts `loop 1/5` while the hanging second turn runs, Esc
 /// pauses the loop, and `/help` lists `/loop`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_loop_resends_until_times_and_footer_shows_it() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![
         text_reply("LOOP-REPLY-ONE"),
         Reply::SseThenHang { pieces: Vec::new() },
@@ -15080,10 +14651,7 @@ async fn pty_loop_resends_until_times_and_footer_shows_it() {
 /// as the formal body plus one trailing message, and the session file never
 /// holds the side question or its answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// The test body blocks on the pty on purpose; the lock serializes the pty tests.
-#[allow(clippy::await_holding_lock)]
 async fn pty_btw_side_question_streams_without_touching_the_transcript() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![
         text_reply("FORMAL-ANSWER-OK"),
         text_reply("SIDE-ANSWER-OK"),
@@ -15167,9 +14735,7 @@ async fn pty_btw_side_question_streams_without_touching_the_transcript() {
 /// Bundled manual end to end: the prompt index names `radian://docs/`, the mock model reads
 /// one page through `read`, and the tool result carries the page text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)]
 async fn pty_docs_page_reads_end_to_end() {
-    let _serial = pty_guard();
     let server = MockServer::start(vec![
         tool_reply("call_1", "read", r#"{"path":"radian://docs/providers.md"}"#),
         text_reply("DOCS-DONE"),

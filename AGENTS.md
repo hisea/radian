@@ -15,16 +15,22 @@ Run these before you say a change is done. All of them must pass. The `journal-s
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --locked
-cargo test -p radian-core --locked --features journal-selfcheck
+cargo nextest run --workspace --locked --no-fail-fast
+cargo nextest run -p radian-core --locked --features journal-selfcheck --no-fail-fast
 cargo clippy -p radian-core --all-targets --features journal-selfcheck -- -D warnings
 bash docs/schema/check-fixtures.sh
 bash docs/schema/check-config-fixtures.sh
 ```
 
-Run tests with `--no-fail-fast`. Cargo stops at the first failing test binary by
-default, which makes a mutation look like it was caught by one test when it was
-caught by seven, and hides failures in the binaries that never ran.
+Run the suite with `--no-fail-fast`: nextest runs every test binary's tests as
+separate processes in parallel (`.config/nextest.toml` caps the pty suite's
+concurrency and kills a hung test by timeout), so one failure must not hide the
+rest. Plain `cargo test` keeps working for a contributor without nextest: no test
+depends on nextest to pass, only the pty concurrency cap lives in the nextest
+config. The pty binary under plain `cargo test` runs at libtest's default thread
+count; on a loaded machine that can flake, so
+`cargo test -p radian-tui --test pty -- --test-threads=3` approximates the old
+in-process gate (see `crates/radian-tui/README.md`).
 
 A change to a provider adapter must also keep **both** contract suites green:
 

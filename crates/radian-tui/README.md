@@ -682,6 +682,12 @@ The transcript owns its scrolling:
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 | — | background jobs (ADR 0037): `shell` `background:true` returns at once, `job` (`op: "wait"`) returns the increment and the settle, `job` (`op: "kill"`) stops one, `/jobs` lists and `/jobs kill all` stops them, a settle arrives as a System message, and a crash reports an orphan | `tests/jobs.rs` (coding), `tests/job_notify.rs` (host), `tests/pty.rs` |
 
+The pty suite runs under nextest (`cargo nextest run -p radian-tui --test pty`),
+which runs up to 6 pty tests at once (`.config/nextest.toml`) and kills a hung
+test by timeout, counted as a failure. Plain `cargo test` still passes without
+nextest but has no concurrency cap; on a loaded machine it can flake, so run
+`cargo test -p radian-tui --test pty -- --test-threads=3` there.
+
 ## Must be hand-tested in a real terminal
 
 pty automation uses a `vt100` screen model, which answers queries instantly and does not
