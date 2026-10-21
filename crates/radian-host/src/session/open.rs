@@ -418,7 +418,7 @@ pub async fn open_session(
     ));
     let agent_config = AgentConfig {
         system_prompt,
-        context_budget: context_budget.clone(),
+        context_budget,
         auto_compact,
         compaction_settings,
         retries,

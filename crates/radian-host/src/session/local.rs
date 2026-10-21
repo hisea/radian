@@ -142,8 +142,10 @@ impl LocalSession {
             .map(|injection| (injection.text, injection.records.len()))
             .unwrap_or_default();
         let (memory_text, memory_records) = fixed;
-        let system_prompt =
-            format!("{}{}{}", self.system_base, self.context_section, memory_text);
+        let system_prompt = format!(
+            "{}{}{}",
+            self.system_base, self.context_section, memory_text
+        );
         let request = agent_core::ModelRequest {
             system_prompt: Some(system_prompt),
             messages: history.clone(),
@@ -163,14 +165,14 @@ impl LocalSession {
                 block: block.clone(),
             })
             .collect();
-        let mcp_server_ids: Vec<String> =
-            self.mcp_servers.iter().map(|server| server.id.clone()).collect();
+        let mcp_server_ids: Vec<String> = self
+            .mcp_servers
+            .iter()
+            .map(|server| server.id.clone())
+            .collect();
         let (bytes_per_token, count_reasoning) = match self.context_budget {
             Some(budget) => (budget.bytes_per_token, budget.count_reasoning),
-            None => (
-                agent_core::DEFAULT_BYTES_PER_TOKEN,
-                false,
-            ),
+            None => (agent_core::DEFAULT_BYTES_PER_TOKEN, false),
         };
         let threshold = self
             .projection
@@ -699,8 +701,7 @@ impl SessionFacade for LocalSession {
 /// provider-reported input in the current revision (`None` without one — never
 /// 0, ADR 0007). A parse failure is an error the caller renders as a notice.
 fn read_committed(path: &Path) -> Result<(Vec<Message>, usize, Option<u64>), String> {
-    let session =
-        radian_session::Session::open(path).map_err(|error| error.to_string())?;
+    let session = radian_session::Session::open(path).map_err(|error| error.to_string())?;
     let history = session.history().map_err(|error| error.to_string())?;
     let mut compactions = 0usize;
     let mut reported: Option<u64> = None;

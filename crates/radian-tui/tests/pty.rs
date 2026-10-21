@@ -5061,7 +5061,8 @@ async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
 /// ADR 0018: `/compact` runs without a model request and shows its result as a notice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
-async fn pty_compact_shows_its_result_without_a_model_request() {    let _serial = pty_guard();
+async fn pty_compact_shows_its_result_without_a_model_request() {
+    let _serial = pty_guard();
     let dir = TempDir::new("compact");
     let server = MockServer::start(vec![text_reply("never")]).await;
     let mut pty = Pty::spawn(

@@ -338,7 +338,10 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     if framing.ascii > 0 || framing.non_ascii_chars > 0 {
         if tool_results_size.ascii > 0
             || tool_results_size.non_ascii_chars > 0
-            || request.messages.iter().any(|m| matches!(m, Message::Tool { .. }))
+            || request
+                .messages
+                .iter()
+                .any(|m| matches!(m, Message::Tool { .. }))
         {
             tool_results_size = tool_results_size.plus(framing);
         } else if assistant_size.ascii > 0 || assistant_size.non_ascii_chars > 0 {
@@ -388,7 +391,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
             break;
         }
         // Only categories with a fractional part can take from the remainder.
-        if parts[i].1.ascii % bpt > 0 {
+        if !parts[i].1.ascii.is_multiple_of(bpt) {
             tokens[i] += 1;
             remainder -= 1;
         }
@@ -454,7 +457,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
             if rem == 0 {
                 break;
             }
-            if sizes[i].ascii % bpt > 0 {
+            if !sizes[i].ascii.is_multiple_of(bpt) {
                 toks[i] += 1;
                 rem -= 1;
             }
@@ -561,10 +564,16 @@ pub fn notice_lines(
         ));
     }
     if let Some(free) = breakdown.free_tokens {
-        out.push(format!("  free until auto-compact: {}", format_tokens(free)));
+        out.push(format!(
+            "  free until auto-compact: {}",
+            format_tokens(free)
+        ));
     }
     if let Some(buffer) = breakdown.buffer_tokens {
-        out.push(format!("  compaction buffer (reserved): {}", format_tokens(buffer)));
+        out.push(format!(
+            "  compaction buffer (reserved): {}",
+            format_tokens(buffer)
+        ));
     }
     match (breakdown.threshold, breakdown.window) {
         (Some(threshold), Some(window)) => out.push(format!(
@@ -583,10 +592,16 @@ pub fn notice_lines(
             format_tokens(breakdown.total_tokens),
             format_tokens(window)
         )),
-        (None, None) => out.push(format!("  total: {}", format_tokens(breakdown.total_tokens))),
+        (None, None) => out.push(format!(
+            "  total: {}",
+            format_tokens(breakdown.total_tokens)
+        )),
     }
     match reported {
-        Some(input) => out.push(format!("reported: {} (last provider input)", format_tokens(input))),
+        Some(input) => out.push(format!(
+            "reported: {} (last provider input)",
+            format_tokens(input)
+        )),
         None => out.push("reported: none yet".to_owned()),
     }
     out.push(format!("messages: {message_count}"));
@@ -663,7 +678,10 @@ mod tests {
                     meta: MessageMeta::default(),
                 },
                 Message::Tool {
-                    result: agent_core::ToolResult::success("c1", vec![ContentPart::text("output")]),
+                    result: agent_core::ToolResult::success(
+                        "c1",
+                        vec![ContentPart::text("output")],
+                    ),
                     meta: MessageMeta::default(),
                 },
             ],
@@ -802,7 +820,9 @@ mod tests {
         let lines = notice_lines(&breakdown, Some(12_000), 3, 1);
         assert!(lines.iter().any(|l| l.contains("estimated")), "{lines:?}");
         assert!(
-            lines.iter().any(|l| l.contains("reported") && l.contains("12")),
+            lines
+                .iter()
+                .any(|l| l.contains("reported") && l.contains("12")),
             "{lines:?}"
         );
         let unreported = notice_lines(&breakdown, None, 0, 0);

@@ -1202,7 +1202,8 @@ mod tests {
 
     /// A missing import stays literal (a warning, not a failure) and is listed.
     #[test]
-    fn a_missing_import_stays_literal_with_a_warning() {        let dir = TempDir::new("missing");
+    fn a_missing_import_stays_literal_with_a_warning() {
+        let dir = TempDir::new("missing");
         dir.mkdir("repo/.git");
         dir.write("repo/CLAUDE.md", "TOP\n@docs/nope.md");
         let files = load(&dir.path().join("repo"), None);
