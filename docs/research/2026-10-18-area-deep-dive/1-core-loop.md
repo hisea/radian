@@ -133,7 +133,7 @@ Radian 的循环在**持久化和恢复**上比五家都严格。每步宿主开
 - **为什么**：现在测不出 P8（边流边派发）的收益（测量文档"What cannot be measured"）。有了这些字段，用现有脚本就能算"最后一个调用就绪到 message_stop 之间的时间"乘以调用数，也能跟踪各 provider 的 TTFT。Codex 有同类计时（`turn_timing.rs`）。
 - **成本**：低。adapter 打时间戳，记录加可选字段。
 - **ADR**：ADR 0006（JSONL 格式，加可选字段不升版本，按其规则核对）、ADR 0007（usage）、ADR 0010（这些是 durable 事实，不是 live delta）、ADR 0013（只写本地文件，不上报）。
-- **验证**：契约测试断言两个 adapter 都填了这些字段，或者按 `docs/provider-contract.md` 声明"不支持"；`check-fixtures.sh` 通过。
+- **验证**：契约测试断言两个 adapter 都填了这些字段，或者按 `crates/agent-provider-contract/README.md` 声明"不支持"；`check-fixtures.sh` 通过。
 
 ### P7 长工具期间保温 prompt cache（收益：长等待后的成本和 TTFT，成本中）
 - **做什么**：工具运行超过 cache TTL 的 90%（至少留 10 s 余量）时，用上一次请求的前缀发一次 `max_tokens=1` 的保温请求，用量写进 journal。照搬 pi 的阈值规则：预计省钱不足就不发。

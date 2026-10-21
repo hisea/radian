@@ -89,7 +89,7 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 
 ## Anthropic adapter 已接入
 
-`crates/agent-provider-anthropic`（API key 认证，无 OAuth）的 14 个契约测试全部委托给同一套检查，现已全绿（含 `contract_11_context_overflow` 与 `contract_7c_input_cache_semantics`）。线格式依据（官方 URL + 访问日期）、`stop_reason` 取值集合与 usage 字段全集见 `docs/providers/anthropic-wire-notes.md`。
+`crates/agent-provider-anthropic`（API key 认证，无 OAuth）的 14 个契约测试全部委托给同一套检查，现已全绿（含 `contract_11_context_overflow` 与 `contract_7c_input_cache_semantics`）。线格式依据（官方 URL + 访问日期）、`stop_reason` 取值集合与 usage 字段全集见 `crates/agent-provider-anthropic/WIRE.md`。
 
 ## 接第三家时预计会暴露的地方（2026-10-12 评估，非结论）
 

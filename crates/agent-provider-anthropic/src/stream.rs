@@ -3,7 +3,7 @@
 //! Only a complete response is returned, as the core requires: a stream that ends without a
 //! `message_stop` (and a `message_delta` carrying `stop_reason`) is an error, never a partial
 //! answer. Event shapes and the `stop_reason` set come from the official documentation, with
-//! URLs and access dates in `docs/providers/anthropic-wire-notes.md`.
+//! URLs and access dates in `crates/agent-provider-anthropic/WIRE.md`.
 
 use std::collections::HashSet;
 
@@ -354,7 +354,7 @@ fn index_of(event: &Value) -> usize {
 }
 
 /// Anthropic `stop_reason` -> neutral `StopReason`. The two lossy neutralizations and their
-/// reasons are recorded in `docs/providers/anthropic-wire-notes.md` §5.
+/// reasons are recorded in `crates/agent-provider-anthropic/WIRE.md` §5.
 fn map_stop_reason(raw: &str) -> StopReason {
     match raw {
         "end_turn" => StopReason::EndTurn,

@@ -6,7 +6,7 @@
 //! revision 2 it is also the protocol of a **built-in descriptor's** `@ai-sdk/openai` model
 //! (e.g. `opencode-go`'s `muse-spark-1.3-contributor`), where the caller passes a plain
 //! `Authorization: Bearer <key>` and none of the Codex-only headers (decision 4; the field-by-
-//! field comparison is `docs/providers/openai-responses-wire-notes.md` §8). The adapter knows
+//! field comparison is `crates/agent-provider-openai-responses/WIRE.md` §8). The adapter knows
 //! nothing about OAuth: the caller supplies the whole header set (`Authorization`,
 //! `chatgpt-account-id`, `OpenAI-Beta`, `originator`) as configuration, so the login/token
 //! machinery stays in the host (ADR 0026).
@@ -16,7 +16,7 @@
 //! assistant message's `provider_payload` and replayed verbatim on the next request (ADR 0014
 //! R10/revision 1); a payload written by another provider (e.g. Anthropic thinking blocks) is
 //! ignored rather than misinterpreted. Every wire field the adapter relies on is recorded with
-//! its source line in `docs/providers/openai-responses-wire-notes.md`.
+//! its source line in `crates/agent-provider-openai-responses/WIRE.md`.
 //!
 //! Rate-limit headers (`x-codex-primary-*`, `x-codex-secondary-*`) are kept raw on
 //! [`agent_core::ModelResponse::limits`] without being parsed (ADR 0026;

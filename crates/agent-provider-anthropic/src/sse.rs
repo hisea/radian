@@ -4,7 +4,7 @@
 //! a multi-byte character split across two network chunks is fine. Line ends may be `\n`,
 //! `\r\n` or `\r`, including a `\r\n` split across chunks. Anthropic names its events with
 //! the SSE `event:` field, but the event `type` is also in the `data` JSON, so ignoring the
-//! name field is safe (see `docs/providers/anthropic-wire-notes.md` §4).
+//! name field is safe (see `crates/agent-provider-anthropic/WIRE.md` §4).
 
 use agent_core::ModelError;
 

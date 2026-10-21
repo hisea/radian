@@ -1,6 +1,6 @@
 //! The provider network-failure matrix (Phase 7) for the OpenAI-compatible adapter: what it
 //! does **today**, recorded rather than changed. The summary table lives in
-//! `docs/provider-contract.md`.
+//! `crates/agent-provider-contract/README.md`.
 //!
 //! Timing tests assert the *result*, never a duration; the only clock is a hang watchdog.
 

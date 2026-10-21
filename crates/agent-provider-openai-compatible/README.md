@@ -134,4 +134,4 @@ compiled only under the feature (ADR 0013: no test server ships in the product).
 G4 (`meta` is provider-invisible) · 0007 (usage: `include_usage`, the three SSE shapes, and
 "never compute `total`") · 0010 (deltas are live projections) · 0013 (T1/T4: no telemetry, and an
 endpoint named in an error is redacted) · 0014 (reasoning content). The contract itself and its
-escape hatches are documented in `docs/provider-contract.md`.
+escape hatches are documented in `crates/agent-provider-contract/README.md`.

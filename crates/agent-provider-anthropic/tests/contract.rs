@@ -7,7 +7,7 @@
 //! Anthropic has no `content_filter` stop reason (it uses `refusal`, which the suite checks
 //! separately), so the harness **explicitly declares** `Reason::ContentFiltered` unsupported
 //! rather than inventing a value Anthropic never sends. See
-//! `docs/providers/anthropic-wire-notes.md` §4.4/§5.
+//! `crates/agent-provider-anthropic/WIRE.md` §4.4/§5.
 
 use std::sync::Mutex;
 

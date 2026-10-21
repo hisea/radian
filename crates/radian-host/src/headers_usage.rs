@@ -9,7 +9,7 @@
 //!
 //! Only the header names the providers' docs name are parsed (listed on
 //! [`ANTHROPIC_HEADERS`] / [`OPENAI_HEADERS`]); anything else stays raw on `limits` and is
-//! ignored here, never invented ([`docs/provider-contract.md`](../../../docs/provider-contract.md):
+//! ignored here, never invented ([`crates/agent-provider-contract/README.md`](../../agent-provider-contract/README.md):
 //! a provider that lacks a concept is declared absent, never fabricated). A window whose
 //! remaining fails to parse still shows while it has a reset, and vice versa (ADR 0027
 //! revision 5: one bad field drops only its own part).
@@ -43,7 +43,7 @@ pub struct HeadersUsage {
 }
 
 /// The `anthropic` descriptor's `Headers` source. Names from the provider's rate-limit docs
-/// (`docs/providers/anthropic-wire-notes.md` §9): `anthropic-ratelimit-requests-*` and
+/// (`crates/agent-provider-anthropic/WIRE.md` §9): `anthropic-ratelimit-requests-*` and
 /// `anthropic-ratelimit-tokens-*`, each a limit, a remaining count and a reset.
 pub const ANTHROPIC_HEADERS: HeadersUsage = HeadersUsage {
     title: "Anthropic usage",
@@ -62,7 +62,7 @@ pub const ANTHROPIC_HEADERS: HeadersUsage = HeadersUsage {
 };
 
 /// The `openai` descriptor's `Headers` source. Names from the provider's rate-limit docs
-/// (`docs/providers/openai-compatible-wire-notes.md`): `x-ratelimit-remaining-*` counts with
+/// (`crates/agent-provider-openai-compatible/WIRE.md`): `x-ratelimit-remaining-*` counts with
 /// `x-ratelimit-reset-*` windows.
 pub const OPENAI_HEADERS: HeadersUsage = HeadersUsage {
     title: "OpenAI usage",

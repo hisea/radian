@@ -23,7 +23,7 @@ Radian 的 provider 层正确性好（三个 adapter 都过契约套件，用量
 |---|---|---|---|---|---|---|
 | 支持的协议 | Chat Completions、Anthropic Messages、Responses（SSE） | 很多 api（Messages、Completions、Responses、Codex Responses、Bedrock、Google 等）（`pi-mono/packages/ai/src/api/`） | 只有 Responses，HTTP SSE 和 WebSocket 两种（`codex/codex-rs/core/src/client.rs:11-21`） | 只有 Anthropic Messages（及其云厂商托管，文档） | 用 pi-ai 的协议集（本机只有 coding-agent 包，**未核实**细节） | 很多协议（`opencode/packages/ai/src/protocols/`） |
 | Anthropic 缓存断点 | 3 个：最后一个工具、system 末尾、最后一条消息的最后一个可缓存块（`crates/agent-provider-anthropic/src/request.rs:21-25,71-107`） | system 和最后一个工具，最后一条 user 消息的最后一块（`pi-mono/packages/ai/src/api/anthropic-messages.ts:1228-1252,1529-1552,1659`） | 不适用 | 自动管理；会话中途追加的系统上下文块也单独打标记（[prompt-caching](https://code.claude.com/docs/en/prompt-caching)） | 不明 | 最后一个工具，第一段和最后一段 system，对话末尾，最多 4 个（`opencode/packages/ai/src/cache-policy.ts:5-11,17-21`） |
-| Anthropic TTL | 只有 5 分钟，不发 `ttl`（`docs/providers/anthropic-wire-notes.md:67`） | `short`/`long`，`long` 发 `ttl:"1h"`（`anthropic-messages.ts:79-92`） | 不适用 | 主对话在订阅额度内用 1h，其余 5m；`promptCacheTtl` 和 `subagentPromptCacheTtl` 可以按桶设置（文档） | 不明 | 可以配 `ttlSeconds`（`cache-policy.ts:68-69`） |
+| Anthropic TTL | 只有 5 分钟，不发 `ttl`（`crates/agent-provider-anthropic/WIRE.md:67`） | `short`/`long`，`long` 发 `ttl:"1h"`（`anthropic-messages.ts:79-92`） | 不适用 | 主对话在订阅额度内用 1h，其余 5m；`promptCacheTtl` 和 `subagentPromptCacheTtl` 可以按桶设置（文档） | 不明 | 可以配 `ttlSeconds`（`cache-policy.ts:68-69`） |
 | OpenAI `prompt_cache_key` | **不发**；chatgpt 路由发了 `session_id` 头（`crates/radian-host/src/provider.rs:574-586`） | 发会话 id，截到 64 字符（`pi-mono/packages/ai/src/api/openai-responses.ts:355-364`） | 每个请求都发；子 agent 用 `{source}:{parent_thread_id}`（`client.rs:646-668,1060`） | 不适用 | 不明 | 发会话亲和 id（`opencode/packages/core/src/session/model-request.ts:278-295`；`ai/src/protocols/shared.ts:57-71`） |
 | Responses 增量 | 无；`store:false`，每轮全量（`crates/agent-provider-openai-responses/src/request.rs:48-53`） | Codex 默认 `transport:"auto"`，WebSocket 上用 `previous_response_id` 只发增量（`openai-codex-responses.ts:295,1467-1476,1519`；`coding-agent/src/core/settings-defaults.ts:5`） | WebSocket 默认开（OpenAI provider `supports_websockets: true`），比较上一请求后只发新增条目，还有 `generate=false` 预热（`model-provider-info/src/lib.rs:561`；`client.rs:1500-1531,2137-2160`） | 不适用 | 不明 | OpenAI Responses 走 WebSocket channel transport（`ai/src/protocols/openai-responses.ts:21,310-315`） |
 | 请求压缩 | 无 | 未核实 | ChatGPT 后端用 zstd，默认开（`client.rs:1733-1742`；`features/src/lib.rs:1446-1450`） | 未核实 | 未核实 | 未核实 |
@@ -90,7 +90,7 @@ Radian 的 provider 层正确性好（三个 adapter 都过契约套件，用量
    - chatgpt 路由有 `session_id` 头。按 Codex 的注释，ChatGPT 可能靠这个头做亲和（**推断**）。
    - API key 的 `openai` 描述符用 `no_headers`（`provider.rs:562-564,1085-1118`），既没有键也没有亲和头。
 3. **Anthropic 只用 3 个断点，单轮新增超过 20 个块时整段 miss**。
-   - 官方规则：读缓存时从每个断点往前最多回看 20 个块。Radian 的 wire notes 记下了这条，但判断「本 adapter 不受影响」（`docs/providers/anthropic-wire-notes.md:69`）。
+   - 官方规则：读缓存时从每个断点往前最多回看 20 个块。Radian 的 wire notes 记下了这条，但判断「本 adapter 不受影响」（`crates/agent-provider-anthropic/WIRE.md:69`）。
    - 在 agent 循环里，一次回复里有 N 个并行工具调用，下一请求就多出约 2N 个块（N 个 `tool_use` 加 N 个 `tool_result`）。N ≥ 10 时，最后一个断点回看不到上一轮的断点，对话部分只剩 tools 和 system 能命中（**推断**，依据是文档规则）。
    - Radian 的 `subagent` 支持并行，不少工具是 `Shared` 并发，这种情况会出现。第 4 个断点空着没用（`request.rs:21-25`）。
 4. **压缩摘要请求不共享前缀**（`agent-core/src/compaction.rs:356-385`）。

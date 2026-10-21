@@ -33,7 +33,7 @@ cargo test -p agent-provider-openai-compatible --features testing --test contrac
 cargo test -p agent-provider-anthropic --features testing --test contract
 ```
 
-See `docs/provider-contract.md`, including what the contract still assumes about a
+See `crates/agent-provider-contract/README.md`, including what the contract still assumes about a
 provider and the two escape hatches: a harness declares what its provider has no concept
 of, and the contract then asserts the absence. Never invent a wire value a provider does
 not send to make the contract pass.

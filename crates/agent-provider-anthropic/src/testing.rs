@@ -3,7 +3,7 @@
 //! It speaks just enough HTTP/1.1 to stream a chunked response, hang, or cut the connection,
 //! and it records every request it receives. Replies are used in order, one per request.
 //! The event builders below produce the official event shapes recorded in
-//! `docs/providers/anthropic-wire-notes.md` §4.
+//! `crates/agent-provider-anthropic/WIRE.md` §4.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

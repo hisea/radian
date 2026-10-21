@@ -71,7 +71,7 @@
 即：`input` 是**裸的 `input_tokens`**，没有任何加/减。Anthropic 的 `input_tokens` 不含 `cache_read_input_tokens` / `cache_creation_input_tokens`（两者是并列字段）——所以 `ModelUsage.input` = **未命中缓存的那部分输入**。
 
 fixture/测试证据：`stream.rs:803-823`（`message_start` 给 `input_tokens: 472`、`cache_read_input_tokens: 3`，`message_delta` 给 `output_tokens: 89`、`cache_creation_input_tokens: 7` → `input Some(472)`、`cache_read Some(3)`、`cache_write Some(7)`、`total None`）；`stream.rs:826-838`（逐字段取最后一次非空值）；`stream.rs:867-879`（`total` 恒 `None`，ADR 0007 J2）；`crates/agent-provider-anthropic/tests/http.rs:852-864`（`output_tokens_details` 原样保留，`thinking_tokens: 5`）。
-映射说明也写在 `docs/providers/anthropic-wire-notes.md:89`（字段表）与 `:167`（映射一览）。
+映射说明也写在 `crates/agent-provider-anthropic/WIRE.md:89`（字段表）与 `:167`（映射一览）。
 
 **OpenAI 兼容**（`crates/agent-provider-openai-compatible/src/stream.rs:241-289`）：
 
@@ -102,7 +102,7 @@ fixture/测试证据：
 
 **实践影响**（今天）：
 - opencode-go 走 OpenAI 兼容协议那条路（`/zen/go/v1`，deepseek/gpt/grok/qwen…）→ **费用高估（F1）**，预算基线正确。
-- Anthropic 协议那条路（`api.anthropic.com` 与 opencode-go 的 `/zen/go`）→ 费用公式正确，预算基线**低估**（如果真有缓存命中）。之所以今天还不是问题：本 adapter**没有实现** `cache_control`，radian 永远不会主动创建缓存断点（`docs/providers/anthropic-wire-notes.md:179`），所以 `cache_read`/`cache_write` 在实践中是 0/缺失。反过来，opencode-go 的 OpenAI 兼容路径**会**有缓存命中：那个端点要求每个会话一个稳定的 `x-opencode-session`，用途之一就是 prompt 缓存（`docs/findings/2026-10-12-opencode-zen-dogfooding.md:22`；该文档 `:72` 注明"缓存效果未验证"，但字段 `prompt_tokens_details.cached_tokens` 已在真实响应里出现过）。
+- Anthropic 协议那条路（`api.anthropic.com` 与 opencode-go 的 `/zen/go`）→ 费用公式正确，预算基线**低估**（如果真有缓存命中）。之所以今天还不是问题：本 adapter**没有实现** `cache_control`，radian 永远不会主动创建缓存断点（`crates/agent-provider-anthropic/WIRE.md:179`），所以 `cache_read`/`cache_write` 在实践中是 0/缺失。反过来，opencode-go 的 OpenAI 兼容路径**会**有缓存命中：那个端点要求每个会话一个稳定的 `x-opencode-session`，用途之一就是 prompt 缓存（`docs/findings/2026-10-12-opencode-zen-dogfooding.md:22`；该文档 `:72` 注明"缓存效果未验证"，但字段 `prompt_tokens_details.cached_tokens` 已在真实响应里出现过）。
 
 ---
 
@@ -218,7 +218,7 @@ completion_tokens: 2000
 - **建议**（需要 定一条，因为牵动 `ModelUsage` 的契约）：
   - **(a) 不改编排器（推荐）**：在**费用侧**扣掉重复部分，并在 `ModelUsage` 上显式标记语义，而不是在 footer 里猜——例如给 `ModelUsage` 加一个可选字段（`input_includes_cache_read: Option<bool>`，或更中性的 `uncached_input: Option<u64>`），由各 adapter 填；`cost_micros` 用 `input − cache_read`（饱和减）作为输入单价的那一项。理由：ADR 0007 J1/J3 的精神是"provider 报什么就记什么"，`input` 同时被预算侧当作"整次请求大小"（`budget.rs:4`），改掉 `input` 的含义会连带改变预算基线的行为。
   - **(b) 在 adapter 里归一**：`input = prompt_tokens − cached_tokens`（`stream.rs:275`）。这样 `input` 在两家统一为"未命中缓存"，费用公式不动；代价是 journal 里的 `input` 不再是 provider 的原始数（导出/审计看到的是我们的加工值），且预算基线会变成"未命中部分"（对 Anthropic 形状本来如此，对 OpenAI 形状是**行为改变**，需要一起评估）。
-  - 无论选哪条，都要把"`ModelUsage.input` 的确切含义"写进 `crates/agent-core/src/model.rs:54-72` 的注释与 `docs/provider-contract.md`（这是 F6）。
+  - 无论选哪条，都要把"`ModelUsage.input` 的确切含义"写进 `crates/agent-core/src/model.rs:54-72` 的注释与 `crates/agent-provider-contract/README.md`（这是 F6）。
 - **测试思路**：在 `crates/agent-provider-openai-compatible/src/stream.rs` 的既有测试里加一条，把 OpenAI 形状的 usage JSON 经 `assemble(&[chunk(...)], false)` 走完整链路（已有 helper），断言归一化后的 `input`（或新字段）表示**未命中**输入；再在 `crates/radian-tui/tests/footer.rs` 加一条对应的成本断言：价 `input 3_000_000 / cache_read 300_000`（`test` 里已有的 `ModelPrice` 构造方式，`:571-576`）、usage `input 1_000_000 / cache_read 900_000`、`output 0`，期望 `$0.30 + $0.27 = $0.57`（而不是今天的 `$3.00 + $0.27 = $3.27`）。这一条同时钉住"缓存部分只按缓存价算一次"。
 
 ### F2（中高）压缩调用的 token/费用不计入
@@ -253,7 +253,7 @@ completion_tokens: 2000
 
 - **现象**：同一类型在两家、甚至同一 adapter 的两种别名下含义不同（§2.2），而文档与类型注释都没写；预算侧与费用侧的假设互相矛盾（`budget.rs:4` vs `timing.rs:87-90`）。
 - **根因**：ADR 0007 J1 只规定了字段名与"没报就是 `None`"，没有规定**字段的包含关系**；`crates/agent-core/src/model.rs:54-72` 的注释逐字照抄了"provider-reported"，没有说清 `input`/`output` 里含什么。
-- **建议**：把语义钉进 `crates/agent-core/src/model.rs:54-72` 的字段注释（`input` 是否含 `cache_read`、`output` 是否含 reasoning）与 `docs/provider-contract.md`（那里已经在管 `UsageField`），并在 adapter 的契约测试里断言。
+- **建议**：把语义钉进 `crates/agent-core/src/model.rs:54-72` 的字段注释（`input` 是否含 `cache_read`、`output` 是否含 reasoning）与 `crates/agent-provider-contract/README.md`（那里已经在管 `UsageField`），并在 adapter 的契约测试里断言。
 - **测试思路**：契约测试（`crates/agent-provider-*/tests/contract.rs` 的 `UsageField` 风格）加一条关于"`input` 与 `cache_read` 的包含关系"的声明，两家都必须显式声明并被测试钉住。
 
 ### F7（低）全零计数会显示 `$0.00`
@@ -273,7 +273,7 @@ completion_tokens: 2000
 
 ## 8. 已核对且正确（未发现问题的部分）
 
-1. **Anthropic 的映射**：`input ← input_tokens`、`output ← output_tokens`、`cache_read ← cache_read_input_tokens`、`cache_write ← cache_creation_input_tokens`、`details ← output_tokens_details`（原样）、`total` 恒 `None`（Anthropic 确实不提供 `total_tokens`，ADR 0007 J2）。代码 `stream.rs:61-99`；测试 `stream.rs:803-879`、`tests/http.rs:852-864`；文档 `docs/providers/anthropic-wire-notes.md:89`、`:167`。
+1. **Anthropic 的映射**：`input ← input_tokens`、`output ← output_tokens`、`cache_read ← cache_read_input_tokens`、`cache_write ← cache_creation_input_tokens`、`details ← output_tokens_details`（原样）、`total` 恒 `None`（Anthropic 确实不提供 `total_tokens`，ADR 0007 J2）。代码 `stream.rs:61-99`；测试 `stream.rs:803-879`、`tests/http.rs:852-864`；文档 `crates/agent-provider-anthropic/WIRE.md:89`、`:167`。
 2. **OpenAI 兼容的别名与 details**：`prompt_tokens`/`input_tokens`、`completion_tokens`/`output_tokens`、`cache_read_input_tokens`/`cached_tokens`、`cache_creation_input_tokens`/`cache_write` 的别名回退；每个 `*_details` 子对象按 wire 名完整保留（dogfood 修掉的那个 reasoning token 丢失问题确实修好了）。代码 `stream.rs:241-289`；测试 `stream.rs:563-690`（含真实形状的 `:633-668`）。
 3. **`total` 绝不由 `input + output` 伪造**（`stream.rs:277`、`stream.rs:670-690`；`journal`/`ModelUsage` 的注释 `model.rs:59-61`）。
 4. **费用公式的形状**：四项各自单价、先乘后除、饱和加法（`timing.rs:71-92`）；无价或无计数就隐藏而不是显示 `$0.00`（`timing.rs:78`、`footer.rs:900-912`，测试 `footer.rs:558-578`、`timing.rs` 的 `the_cost_uses_the_catalog_price`）。
