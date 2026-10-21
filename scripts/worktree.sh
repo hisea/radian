@@ -170,12 +170,12 @@ if [ "$FORCE" -eq 0 ]; then
     assert_still "$FROM"
 fi
 
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "${TMPDIR}"' EXIT INT TERM
-git worktree list --porcelain | grep '^worktree ' | sort > "$TMPDIR/before"
+SCRATCH="$(mktemp -d)"
+trap 'rm -rf "${SCRATCH}"' EXIT INT TERM
+git worktree list --porcelain | grep '^worktree ' | sort > "$SCRATCH/before"
 git worktree add "$@"
-git worktree list --porcelain | grep '^worktree ' | sort > "$TMPDIR/after"
-NEW="$(comm -13 "$TMPDIR/before" "$TMPDIR/after" | sed 's/^worktree //')"
+git worktree list --porcelain | grep '^worktree ' | sort > "$SCRATCH/after"
+NEW="$(comm -13 "$SCRATCH/before" "$SCRATCH/after" | sed 's/^worktree //')"
 if [ -z "$NEW" ] || [ "$(printf '%s\n' "$NEW" | wc -l)" -ne 1 ]; then
     echo "$PROG: cannot tell which worktree was added; clone target/ by hand." >&2
     exit 1
