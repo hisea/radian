@@ -1104,9 +1104,7 @@ mod tests {
         fn job_tail(&self, _id: &str, _max: usize) -> Option<(radian_coding::JobState, String)> {
             todo!()
         }
-        fn context_report(
-            &self,
-        ) -> Result<radian_host::context_estimate::ContextReport, String> {
+        fn context_report(&self) -> Result<radian_host::context_estimate::ContextReport, String> {
             todo!()
         }
         fn next_request_shape(&self) -> Result<agent_core::ModelRequest, String> {
@@ -1134,10 +1132,7 @@ mod tests {
     /// while the mode is on and fails the armed assertion.
     #[test]
     fn the_loop_syncs_its_armed_state_into_the_session_hooks() {
-        let dir = std::env::temp_dir().join(format!(
-            "radian-loop-sync-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("radian-loop-sync-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ws = dir.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
@@ -1146,20 +1141,18 @@ mod tests {
             .build()
             .unwrap();
         let inbox = Arc::new(radian_runtime::Inbox::new(64));
-        let hooks = Arc::new(
-            radian_host::CommandHooks::new(
-                &Default::default(),
-                &Default::default(),
-                &ws,
-                "sid",
-                radian_sandbox::SandboxSlot::empty(),
-                &inbox,
-                rt.handle(),
-                Arc::new(|_: &str| {}),
-                Arc::new(|_: &str| {}),
-                Arc::new(|_: &str| {}),
-            ),
-        );
+        let hooks = Arc::new(radian_host::CommandHooks::new(
+            &Default::default(),
+            &Default::default(),
+            &ws,
+            "sid",
+            radian_sandbox::SandboxSlot::empty(),
+            &inbox,
+            rt.handle(),
+            Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
+        ));
         let journal = Arc::new(
             radian_session::SessionJournal::create(
                 dir.join("s.jsonl"),
