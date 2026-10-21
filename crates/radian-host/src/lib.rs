@@ -140,7 +140,11 @@ pub use home::{
 };
 pub use hooks::{CommandHooks, HooksWarning, REASON_CHAR_LIMIT};
 pub use job_notify::{JobNotifier, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message};
-pub use mcp::{McpLoad, load_mcp_config, load_mcp_from_toml, merge_mcp};
+pub use mcp::{
+    CREDENTIAL_VARS, LoadScope, McpLoad, ProjectPreview, ProjectPreviewEntry, load_mcp_config,
+    load_mcp_from_toml, load_project, load_project_file, merge_mcp, merge_project_mcp,
+    preview_project, project_path,
+};
 pub use model::{
     COMPACTION_THINKING_CURRENT, ChatGptModel, DEFAULT_MAX_MODEL_CALLS, DEFAULT_MAX_TOKENS,
     HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext, SwitchableModel, Thinking,
