@@ -145,19 +145,21 @@ fn opening_rest(sentence: &str) -> Option<&str> {
             return Some(rest);
         }
     }
-    // The English phrase markers, with a word boundary.
+    // The English phrase markers, with a word boundary (a hyphenated token is one
+    // token, not a marker opening: "Now-or-never" holds).
     for marker in ["Let me", "I will", "Time to", "I'll", "Now", "Next", "Then"] {
         if let Some(rest) = sentence.strip_prefix(marker)
             && rest
                 .chars()
                 .next()
-                .is_none_or(|next| !next.is_ascii_alphanumeric())
+                .is_none_or(|next| !next.is_ascii_alphanumeric() && next != '-')
         {
             return Some(rest);
         }
     }
     // A gerund: the first word ends in "ing" — except "Nothing", which only looks
-    // like one ("Nothing further unless p1 wants changes.").
+    // like one ("Nothing further unless p1 wants changes."). A word boundary follows:
+    // a hyphenated token ("THINKING-OK") is one token, not a gerund opening.
     let word: String = sentence
         .chars()
         .take_while(|ch| ch.is_ascii_alphabetic())
@@ -165,6 +167,10 @@ fn opening_rest(sentence: &str) -> Option<&str> {
     if word.len() > "ing".len()
         && word.to_ascii_lowercase().ends_with("ing")
         && !word.eq_ignore_ascii_case("nothing")
+        && sentence[word.len()..]
+            .chars()
+            .next()
+            .is_none_or(|next| !next.is_ascii_alphanumeric() && next != '-')
     {
         return Some(&sentence[word.len()..]);
     }
@@ -270,6 +276,9 @@ mod tests {
     /// The named false-positive kinds hold each for its own reason.
     #[test]
     fn each_named_false_positive_kind_holds() {
+        // A hyphenated token is one token, not a gerund or marker opening.
+        assert!(!matches_rule(&Message::assistant("THINKING-OK")));
+        assert!(!matches_rule(&Message::assistant("Now-or-never")));
         // "Nothing" is not a gerund.
         assert!(!matches_rule(&Message::assistant(
             "Nothing further unless p1 wants changes."
