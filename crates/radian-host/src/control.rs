@@ -329,10 +329,7 @@ impl ControlServer {
             }
             other => failure(
                 id,
-                format!(
-                    "unknown verb `{other}`: the control port has no approval or answer verb \
-                     (ADR 0043)"
-                ),
+                format!("unknown verb `{other}`: the control port has no approval or answer verb"),
             ),
         }
     }
@@ -436,6 +433,7 @@ fn runtime_event_json(event: &RuntimeEvent) -> Value {
             source,
             wake,
             degraded,
+            pending_wake,
         } => json!({
             "message": message,
             "message_id": message_id,
@@ -443,6 +441,7 @@ fn runtime_event_json(event: &RuntimeEvent) -> Value {
             "source": source,
             "wake": wake,
             "degraded": degraded,
+            "pending_wake": pending_wake,
         }),
         RuntimeEvent::InputClaimed {
             message_ids,
@@ -719,7 +718,7 @@ fn parse_source(request: &Value) -> Result<InputSource, String> {
             "scheduler" => Ok(InputSource::Scheduler),
             "subagent" => Ok(InputSource::Subagent),
             "mcp" => Ok(InputSource::Mcp),
-            "user" => Err("the control port never accepts the `User` source (ADR 0043)".into()),
+            "user" => Err("the control port never accepts the `User` source".into()),
             "permission_decision" => {
                 Err("the control port never accepts the `PermissionDecision` source".into())
             }

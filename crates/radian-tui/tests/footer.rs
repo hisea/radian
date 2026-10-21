@@ -2437,3 +2437,26 @@ fn a_response_without_headers_leaves_the_usage_row_absent() {
         row(&terminal, 11)
     );
 }
+
+/// `radian footer export` prints the preset file exactly, so the presets are user-facing
+/// text: none of the four names an ADR.
+/// Mutation: put `(ADR 0027)` back into one preset comment → this fails.
+#[test]
+fn exported_presets_name_no_adr() {
+    for preset in ["deck", "full", "pi", "classic"] {
+        let toml = radian_tui::footer::export_preset(preset).expect("a built-in preset");
+        assert!(!toml.contains("ADR"), "{preset} names an ADR:\n{toml}");
+    }
+}
+
+/// The user-facing docs never name an ADR: the root `README.md`, `docs/sandbox.md` and
+/// `docs/pi-migration.md` (crate READMEs and developer docs keep theirs).
+/// Mutation: put `(ADR 0008)` back into one doc → this fails.
+#[test]
+fn user_docs_name_no_adr() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for doc in ["README.md", "docs/sandbox.md", "docs/pi-migration.md"] {
+        let text = std::fs::read_to_string(root.join(doc)).expect("a user-facing doc exists");
+        assert!(!text.contains("ADR"), "{doc} names an ADR");
+    }
+}

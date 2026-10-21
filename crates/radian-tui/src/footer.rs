@@ -20,6 +20,7 @@ mod draw;
 mod presets;
 mod rows;
 
+pub(crate) use components::{age_text, tick_in};
 use draw::render_row;
 pub(crate) use draw::{
     auto_marker, context_fraction, contrib_role, contribution, contribution_text, inline_styles,
@@ -321,6 +322,22 @@ impl Footer {
     /// The configured glyph set (the renderer reads it for other chrome too).
     pub fn glyphs(&self) -> Glyphs {
         self.glyphs
+    }
+
+    /// Whether the `jobs` item is part of the footer: the idle loop only ticks the age while
+    /// it shows (ADR 0023 U2). An empty row list is the pre-config default, which draws the
+    /// preset's rows (`lines` falls back the same way).
+    pub(crate) fn shows_jobs(&self) -> bool {
+        fn has_jobs(rows: &[Row]) -> bool {
+            rows.iter()
+                .flat_map(|row| row.left.iter().chain(row.right.iter()))
+                .any(|item: &Item| item.id == "jobs" && !item.disabled)
+        }
+        if self.rows.is_empty() {
+            let mut warnings = Vec::new();
+            return has_jobs(&preset_footer_rows(self.preset, &mut warnings));
+        }
+        has_jobs(&self.rows)
     }
 
     /// The footer's lines at `width`. The `classic` preset is the renderer's (it draws the

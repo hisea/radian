@@ -99,8 +99,10 @@ impl App {
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
     pub(super) fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
         // The loop tracks its own echo pair first (which turns are loop-attributed); the
-        // arms below read the same event for their own facts.
+        // goal tracks its own beside it (which turns are goal-attributed); the arms below
+        // read the same event for their own facts.
         super::loop_mode::track_loop_runtime_event(&mut self.session.loop_state, event, self.now);
+        super::goal_mode::track_goal_runtime_event(&mut self.session.goal_mode, event, self.now);
         if let RuntimeEvent::InboxEnqueued {
             lane, message_id, ..
         } = event
@@ -129,10 +131,15 @@ impl App {
                 None => UpdateResult::none(),
             };
             // The `/loop` turn-end decision (the one place step 3 extends): a finished loop
-            // turn re-sends, waits for `--every`, or stops with a notice.
+            // turn re-sends, waits for `--every`, or stops with a notice. The `/goal`
+            // decision runs beside it: a finished goal turn banks and re-sends, waits for
+            // a `wait`, or stops with a notice. Mutual exclusion keeps only one armed.
             let loop_result = self.loop_turn_finished(*outcome);
             result.dirty |= loop_result.dirty;
             result.effects.extend(loop_result.effects);
+            let goal_result = self.goal_turn_finished(*outcome);
+            result.dirty |= goal_result.dirty;
+            result.effects.extend(goal_result.effects);
             // A completed or failed turn rings the bell in every mode but `off`: the user
             // may be looking at another window. A cancel needs no ring — the user pressed
             // the key themselves.
@@ -147,9 +154,11 @@ impl App {
             }
         }
         // A new turn started: the previous turn's failure (if any) is no longer retryable —
-        // `/retry` is only for the turn that just failed.
+        // `/retry` is only for the turn that just failed. Back to normal too: a new turn
+        // ends the goal-budget block (like the wake-budget one) for herdr.
         if let RuntimeEvent::TurnStarted { .. } = event {
             self.session.last_turn_failed = false;
+            self.session.goal_mode.blocked = false;
         }
         if let RuntimeEvent::ConfigChanged { change, .. } = event {
             // The driver applied the queued change: the status bar's `next:` promise is done.
@@ -296,6 +305,10 @@ impl App {
                 self.session
                     .timer
                     .response_finished(self.now, usage.as_ref().and_then(|usage| usage.output));
+                // ADR 0047: a live response's usage accrues to the goal's open stretch.
+                if let Some(usage) = usage {
+                    self.note_goal_usage(usage);
+                }
                 // ADR 0027 slice ④: a `Headers` provider publishes its rate-limit
                 // snapshot here, into the same store the `usage` component draws. Pure and
                 // in-memory (no I/O, no clock read beyond the snapshot's own); a response
@@ -956,5 +969,26 @@ mod tests {
             "wake budget used up: 1 job notices are waiting — send any message to continue",
         );
         assert_eq!(app.session.entries.len(), 2);
+    }
+
+    /// The herdr state inputs carry this session's running background-job count: the
+    /// start/settle pair the footer's `jobs` item reads feeds it, so there is no second
+    /// source for the jobs item's `working · jobs`.
+    #[test]
+    fn the_herdr_inputs_carry_the_running_job_count() {
+        let mut app = App::new("m", "s");
+        assert_eq!(app.herdr_state_inputs().4, 0);
+        let _ = app.update(Input::Runtime(RuntimeEvent::BackgroundJobStarted {
+            job_id: "job-1".to_owned(),
+            command: "sleep 3".to_owned(),
+            output: "available through job".to_owned(),
+        }));
+        assert_eq!(app.herdr_state_inputs().4, 1);
+        let _ = app.update(Input::Runtime(RuntimeEvent::BackgroundJobSettled {
+            job_id: "job-1".to_owned(),
+            state: "exited 0".to_owned(),
+            duration_ms: 3_000,
+        }));
+        assert_eq!(app.herdr_state_inputs().4, 0);
     }
 }

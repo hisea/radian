@@ -354,6 +354,7 @@ fn a_genuinely_half_written_line_is_treated_as_a_torn_tail() {
                 source: InputSource::User,
                 wake: true,
                 degraded: false,
+                pending_wake: false,
             })
             .await
             .unwrap();

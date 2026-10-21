@@ -892,8 +892,8 @@ async fn pty_mounts_only_the_builtin_tools() {
     assert_eq!(
         got,
         [
-            "ask_user", "glob", "grep", "job", "patch", "read", "shell", "skill", "subagent",
-            "write"
+            "ask_user", "glob", "goal", "grep", "job", "patch", "read", "shell", "skill",
+            "subagent", "write"
         ],
         "the exact tool set of a fresh TUI session: {names:?}"
     );
@@ -2027,6 +2027,145 @@ async fn pty_resume_renders_the_stored_history() {
     assert!(
         pty.wait_for_screen("new reply", wait_positive()),
         "the resumed session did not run a turn:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `--resume` with a goal in the journal parks it as paused (ADR 0047) and the startup
+/// block shows `goal paused: <objective>; /goal resume to continue`. Seeded like
+/// `pty_resume_renders_the_stored_history`: only the journal differs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_with_paused_goal_shows_the_resume_hint() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("resume-goal");
+    let path = dir.path().join("goal.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "goal",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    let budget = radian_session::GoalState::default_budget();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::GoalSet {
+            objective: "RESUME-GOAL-42".into(),
+            max_turns: budget.max_turns,
+            max_duration_secs: budget.max_duration_secs,
+            max_tokens: budget.max_tokens,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("new reply")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "goal",
+        ],
+        24,
+        100,
+    );
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen(
+            "goal paused: RESUME-GOAL-42; /goal resume to continue",
+            wait_positive()
+        ),
+        "the paused-goal hint is missing from the startup block:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `/new` from a session with a (paused) goal starts clean: the new startup block has no
+/// `goal paused` line and `/goal` reports no goal. The old goal stays in the old journal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_from_a_goal_session_starts_without_a_goal() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-goal");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let path = sessions.join("old.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "old",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    let budget = radian_session::GoalState::default_budget();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::GoalSet {
+            objective: "OLD-GOAL-7".into(),
+            max_turns: budget.max_turns,
+            max_duration_secs: budget.max_duration_secs,
+            max_tokens: budget.max_tokens,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("SECOND-TWO")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--resume",
+            "old",
+        ],
+        24,
+        100,
+    );
+    // The old session resumes with the paused goal and stays idle (a paused goal never
+    // auto-continues), so `/new` is accepted.
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("goal paused: OLD-GOAL-7", wait_positive()),
+        "the old session has no paused-goal hint:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen("--resume old", wait_positive()),
+        "the /new notice must name the old session:\n{}",
+        pty.screen()
+    );
+    // The new session is live: one turn gets the mock reply, with no goal continuation.
+    pty.send(b"hello second\r");
+    assert!(
+        pty.wait_for_screen("SECOND-TWO", wait_positive()),
+        "the new session did not answer:\n{}",
+        pty.screen()
+    );
+    // Its startup block carries no goal hint ...
+    pty.expand_startup();
+    assert!(
+        pty.screen_absent("goal paused"),
+        "the new session must not show a paused-goal hint:\n{}",
+        pty.screen()
+    );
+    // ... and `/goal` reports no goal (a carried-over goal would name its objective).
+    pty.send(b"/goal\r");
+    assert!(
+        pty.wait_for_screen("no goal; /goal <objective> sets one", wait_positive()),
+        "the new session must have no goal:\n{}",
         pty.screen()
     );
     pty.quit();
@@ -10998,6 +11137,23 @@ impl HerdrSocket {
         }
     }
 
+    /// Waits for a `pane.report_metadata` whose `state_labels[key]` is `value`.
+    fn wait_for_label(&self, key: &str, value: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.snapshot().iter().any(|got| {
+                got["method"] == "pane.report_metadata"
+                    && got["params"]["state_labels"][key] == value
+            }) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Waits for any request of `method`.
     fn wait_for_method(&self, method: &str, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
@@ -11507,6 +11663,164 @@ async fn pty_herdr_reports_blocked_without_the_command_text() {
         "the command text must never be sent: {all}"
     );
     pty.quit();
+}
+
+/// The jobs item (decided ): a background job keeps an idle session
+/// `working` with the `jobs` label; the followup turn its settle wakes is plain `working`,
+/// then `idle` again. The command text never leaves the process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_working_while_a_job_runs() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("herdr-jobs");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            r#"{"command":"sleep 3","background":true}"#,
+        ),
+        text_reply("TURN1-OK"),
+        text_reply("JOB-DONE-OK"),
+    ])
+    .await;
+    let sock = HerdrSocket::start("jobs");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "herdr-jobs",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "auto",
+        ],
+        &env_refs,
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("idle", wait_positive()),
+        "the startup idle report"
+    );
+    pty.send(b"run it in the background\r");
+    assert!(
+        pty.wait_for_screen("TURN1-OK", wait_positive()),
+        "the first turn did not answer:\n{}",
+        pty.screen()
+    );
+    // The turn ended while the job still sleeps: idle-with-jobs is `working` with the label.
+    assert!(
+        sock.wait_for_label("working", "jobs", wait_positive()),
+        "working with the jobs label after the turn ended: {:?}",
+        sock.snapshot()
+    );
+    // The job settles: its notice wakes a followup turn (plain `working`), then `idle`.
+    assert!(
+        pty.wait_for_screen("JOB-DONE-OK", wait_positive()),
+        "the settle never cycled through a turn:\n{}",
+        pty.screen()
+    );
+    let deadline = Instant::now() + wait_positive();
+    let states = loop {
+        let states: Vec<String> = sock
+            .of_method("pane.report_agent")
+            .iter()
+            .map(|value| {
+                value["params"]["state"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        if states == ["idle", "working", "idle", "working", "idle"] {
+            break states;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the full turn cycle: {states:?}; all: {:?}",
+            sock.snapshot()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(states, ["idle", "working", "idle", "working", "idle"]);
+    assert_eq!(
+        sock.of_method("pane.report_metadata")
+            .iter()
+            .filter(|value| value["params"]["state_labels"]["working"] == "jobs")
+            .count(),
+        1,
+        "the jobs label is sent once, never while a turn runs: {:?}",
+        sock.snapshot()
+    );
+    assert!(
+        !serde_json::to_string(&sock.snapshot())
+            .unwrap()
+            .contains("sleep 3"),
+        "the command text must never be sent"
+    );
+    // Leaving idle-with-jobs clears herdr's labels (it keeps them until cleared): one
+    // metadata with `clear_state_labels`, after the jobs label and before the followup
+    // turn's working — otherwise later turns show `working · jobs`.
+    let log = sock.snapshot();
+    let jobs_at = log
+        .iter()
+        .position(|value| {
+            value["method"] == "pane.report_metadata"
+                && value["params"]["state_labels"]["working"] == "jobs"
+        })
+        .expect("the jobs label");
+    let clears: Vec<usize> = log
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| {
+            value["method"] == "pane.report_metadata"
+                && value["params"]["clear_state_labels"].as_bool() == Some(true)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        clears.len(),
+        1,
+        "leaving idle-with-jobs clears once: {log:?}"
+    );
+    let followup_at = {
+        let mut workings = 0;
+        log.iter()
+            .position(|value| {
+                if value["method"] == "pane.report_agent" && value["params"]["state"] == "working" {
+                    workings += 1;
+                    workings == 2
+                } else {
+                    false
+                }
+            })
+            .expect("the followup turn's working")
+    };
+    assert!(
+        jobs_at < clears[0] && clears[0] < followup_at,
+        "label, then clear, then the followup turn's working: {log:?}"
+    );
+    pty.quit();
+    assert!(
+        sock.wait_for_release(wait_positive()),
+        "a normal exit releases: {:?}",
+        sock.snapshot()
+    );
 }
 
 /// Without `HERDR_ENV=1` nothing is sent at all.

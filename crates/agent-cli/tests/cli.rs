@@ -3855,6 +3855,10 @@ async fn without_a_window_the_budget_is_off_and_says_so() {
 
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("[budget] window unknown"), "{stderr}");
+    assert!(
+        !stderr.contains("ADR"),
+        "the budget line names no ADR: {stderr}"
+    );
     // No budget is invented: `B` is unknown, not a guess (ADR 0018).
     assert!(stderr.contains("B ?"), "{stderr}");
     assert!(stderr.contains("no budget"), "{stderr}");
@@ -8968,7 +8972,7 @@ async fn config_import_claude_drafts_and_writes() {
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("trust-gate resources"), "{stderr}");
+    assert!(stderr.contains("need your trust first"), "{stderr}");
     let text = std::fs::read_to_string(&config_path).unwrap();
     radian_host::parse_config(&config_path, &text).expect("the written file reads back");
     assert!(text.contains("# keep me"), "{text}");
@@ -9541,15 +9545,16 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
         );
     }
     // The exact set: a headless session with no `--workspace` and an empty memory mounts the
-    // built-in `skill` (its `theme-import` skill is compiled in) and `subagent` (ADR 0043
-    // decision 1a — a parent mounts it even with no workspace; only `explore` needs one), and
-    // nothing else. `memory_search` mounts only past the injection budget (ADR 0021 D7), so an
-    // empty memory does not list it; `memory_save`/`memory_revise` do not exist.
+    // built-in `skill` (its `theme-import` skill is compiled in), `subagent` (ADR 0043
+    // decision 1a — a parent mounts it even with no workspace; only `explore` needs one) and
+    // `goal` (ADR 0047 — host-level like `ask_user`, answering `no_active_goal` without one),
+    // and nothing else. `memory_search` mounts only past the injection budget (ADR 0021 D7),
+    // so an empty memory does not list it; `memory_save`/`memory_revise` do not exist.
     let mut got = names.clone();
     got.sort();
     assert_eq!(
         got,
-        ["skill", "subagent"],
+        ["goal", "skill", "subagent"],
         "the exact tool set of a fresh headless session: {names:?}"
     );
 }

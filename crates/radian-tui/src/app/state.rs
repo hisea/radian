@@ -360,6 +360,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::SwitchCompacted { .. }
         | Input::SessionDone(_)
         | Input::ContextReady { .. }
+        | Input::GoalDone { .. }
         | Input::WakeBudgetNotice(_)
         | Input::TrustResolved(_)
         | Input::AccessApplied { .. }

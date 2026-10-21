@@ -103,6 +103,12 @@ pub enum Input {
     },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
+    /// A `/goal` journal append finished (the result of [`Effect::GoalAppend`]): what to
+    /// apply on success, and whether the append held. A failure changes nothing.
+    GoalDone {
+        apply: goal_mode::GoalApply,
+        result: Result<(), String>,
+    },
     /// A `/context [all]` estimate arrived (grid spec `tui-context-grid`): the
     /// structured report (boxed: the grid's numbers would otherwise bloat every
     /// `Input`) and whether every context file lists. `update` pushes one grid

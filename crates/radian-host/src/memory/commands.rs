@@ -26,7 +26,7 @@ use super::service::{
 /// The exit code for a usage or refusal error, matching the CLI's `USAGE_ERROR` and clap.
 pub const USAGE_ERROR: i32 = 2;
 
-/// `radian memory <command>` / `/memory <command>` (ADR 0021 D7): the user commands for
+/// `radian memory <command>` / `/memory <command>`: the user commands for
 /// durable
 /// memory. Every one is `Source::User`, and none of them needs a model, a key or a session
 /// file. `forget`, `purge`, `split` and `merge` need confirmation.

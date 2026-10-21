@@ -52,11 +52,13 @@ mod composer;
 mod config;
 mod find;
 mod footer;
+pub(crate) mod goal_mode;
 mod history;
 mod input;
 mod inspector;
 mod layers;
 pub(crate) mod loop_mode;
+pub(crate) use goal_mode::GoalMode;
 mod mouse;
 mod overlay;
 mod send;
@@ -259,6 +261,15 @@ pub enum Effect {
         exit_code: Option<i32>,
         cancelled: bool,
     },
+    /// Journal one `/goal` change first (ADR 0047): the loop appends `event` to the session
+    /// journal and answers with [`Input::GoalDone`], which applies `apply`. A failed append
+    /// applies nothing. Turn-end stops use the same effect for their audit record, but they
+    /// mutate at once (the decision gates the send) and the completion only reports a lost
+    /// write.
+    GoalAppend {
+        event: radian_session::RuntimeEvent,
+        apply: goal_mode::GoalApply,
+    },
     /// Cancel the running `!`/`!!` command (Esc, ADR 0033).
     CancelBash,
 }
@@ -318,6 +329,16 @@ impl PartialEq for Effect {
             (FetchCompletions(a), FetchCompletions(b)) => a == b,
             (OpenPicker { query: a }, OpenPicker { query: b }) => a == b,
             (Session(a), Session(b)) => a == b,
+            (
+                GoalAppend {
+                    event: ae,
+                    apply: aa,
+                },
+                GoalAppend {
+                    event: be,
+                    apply: bb,
+                },
+            ) => ae == be && aa == bb,
             (
                 LoginVerify {
                     name: an,
@@ -520,8 +541,9 @@ pub struct SessionView {
     running_tools: Vec<(String, String)>,
     /// This session's running background jobs, in start order (ADR 0027 slice ③
     /// item 5): the footer's `jobs` item reads them. A `BackgroundJobStarted` runtime event
-    /// appends with the loop's clock, its settle removes; the age ticks with the existing
-    /// footer refresh (a contributor tick redraws), so no new timer exists for it.
+    /// appends with the loop's clock, its settle removes; while any runs and the footer shows
+    /// the `jobs` item, the idle loop waits the sooner of the hang-up tick and the next
+    /// age-text change (ADR 0023 U2), so the age ticks with no other timer.
     pub(crate) running_jobs: Vec<RunningJob>,
     /// The `next_turn` inputs this process sent that the runtime has not admitted yet: one
     /// entry per `InboxEnqueued` without a matching `InputAdmitted`, by message id. The
@@ -537,6 +559,10 @@ pub struct SessionView {
     /// quitting the TUI ends it. The turn-end decision lives in `loop_mode` so step 3
     /// (`goal-mode.md`) can add its input in the same place.
     pub(crate) loop_state: loop_mode::LoopState,
+    /// The `/goal` continuation (step 3, ADR 0047): the durable goal's live half. The
+    /// durable state is shared with the `goal` tool and the prompt hook; the stretches,
+    /// deadlines and send guards here are process-local like the loop's.
+    pub(crate) goal_mode: GoalMode,
     /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
     /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
     /// reason is readable; the user quits with the ordinary keys.

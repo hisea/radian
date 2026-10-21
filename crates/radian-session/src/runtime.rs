@@ -135,6 +135,11 @@ pub enum RuntimeEvent {
         /// an ordinary line is byte-identical to before; an old journal has no such field
         /// and reads as `false` (ADR 0006 §5.5).
         degraded: bool,
+        /// Whether this `next_step` entry opens the next turn when it is still queued at
+        /// the turn boundary (ADR 0011). Written only when `true`, so an
+        /// ordinary line is byte-identical to before; an old journal has no such field
+        /// and reads as `false` (ADR 0006 §5.5).
+        pending_wake: bool,
     },
     /// The driver claimed these inputs for a turn (ADR 0006 §5.5).
     InputClaimed {
@@ -248,6 +253,44 @@ pub enum RuntimeEvent {
         state: String,
         duration_ms: u64,
     },
+    /// The persistent goal was set or replaced (`/goal <objective>`, ADR 0047). Audit only:
+    /// `critical = false`. The durable goal state a resume restores is folded from this and
+    /// the events below; the limits ride along so one record rebuilds the whole goal.
+    /// `max_duration_secs` is the `--for`-style wall-clock cap in seconds.
+    GoalSet {
+        objective: String,
+        max_turns: Option<u64>,
+        max_duration_secs: Option<u64>,
+        max_tokens: Option<u64>,
+    },
+    /// The goal's budget limits were changed (`/goal budget …`, ADR 0047). Audit only:
+    /// `critical = false`. Carries the full resulting triple, so the fold needs no memory.
+    GoalBudgetSet {
+        max_turns: Option<u64>,
+        max_duration_secs: Option<u64>,
+        max_tokens: Option<u64>,
+    },
+    /// The model recorded progress (`goal { op: "progress" }`, ADR 0047). Audit only:
+    /// `critical = false`. The note replaces the "latest progress" the prompt block shows.
+    GoalProgress { note: String },
+    /// The model reported the goal done (`goal { op: "done" }`, ADR 0047). Audit only:
+    /// `critical = false`. Terminal: the continuation stops.
+    GoalDone { note: Option<String> },
+    /// The goal was paused (`/goal pause`, a cancel, or a model error, ADR 0047). Audit
+    /// only: `critical = false`.
+    GoalPaused {},
+    /// The goal was resumed (`/goal resume`, ADR 0047). Audit only: `critical = false`.
+    GoalResumed {},
+    /// The goal was dropped (`/goal drop`, ADR 0047). Audit only: `critical = false`.
+    /// Terminal: the fold forgets the goal.
+    GoalDropped {},
+    /// The model deferred the next continuation (`goal { op: "wait" }`, ADR 0047). Audit
+    /// only: `critical = false`. The delay itself is process-local (the TUI's deadline).
+    GoalWait { secs: u64 },
+    /// A budget cap stopped the goal (ADR 0047). Audit only: `critical = false`. `kind` is
+    /// one of `turns`, `duration` or `tokens`. Terminal, like the ADR 0037 wake-gate stop:
+    /// the TUI notifies, herdr reports `blocked`, and the journal names it.
+    GoalBudgetExhausted { kind: String },
 }
 
 impl RuntimeEvent {
@@ -270,14 +313,23 @@ impl RuntimeEvent {
             RuntimeEvent::UserBash { .. } => "UserBash",
             RuntimeEvent::BackgroundJobStarted { .. } => "BackgroundJobStarted",
             RuntimeEvent::BackgroundJobSettled { .. } => "BackgroundJobSettled",
+            RuntimeEvent::GoalSet { .. } => "GoalSet",
+            RuntimeEvent::GoalBudgetSet { .. } => "GoalBudgetSet",
+            RuntimeEvent::GoalProgress { .. } => "GoalProgress",
+            RuntimeEvent::GoalDone { .. } => "GoalDone",
+            RuntimeEvent::GoalPaused {} => "GoalPaused",
+            RuntimeEvent::GoalResumed {} => "GoalResumed",
+            RuntimeEvent::GoalDropped {} => "GoalDropped",
+            RuntimeEvent::GoalWait { .. } => "GoalWait",
+            RuntimeEvent::GoalBudgetExhausted { .. } => "GoalBudgetExhausted",
         }
     }
 
     /// The `critical` flag (ADR 0006 §4). State/rebuild events are `true`; audit events are
     /// `false` (`TurnFailed`, `ContextBudgetReached`, `PermissionResolved`,
     /// `ApprovalPolicyChanged`, `MemoryInjected`, `SessionForked`, `ProjectTrustChanged`,
-    /// `UserBash`, `BackgroundJobStarted`, `BackgroundJobSettled`). A reader may skip a
-    /// `false` event without breaking reconstruction.
+    /// `UserBash`, `BackgroundJobStarted`, `BackgroundJobSettled`, and every `Goal*`
+    /// event). A reader may skip a `false` event without breaking reconstruction.
     pub fn critical(&self) -> bool {
         match self {
             RuntimeEvent::InboxEnqueued { .. }
@@ -295,7 +347,16 @@ impl RuntimeEvent {
             | RuntimeEvent::ProjectTrustChanged { .. }
             | RuntimeEvent::UserBash { .. }
             | RuntimeEvent::BackgroundJobStarted { .. }
-            | RuntimeEvent::BackgroundJobSettled { .. } => false,
+            | RuntimeEvent::BackgroundJobSettled { .. }
+            | RuntimeEvent::GoalSet { .. }
+            | RuntimeEvent::GoalBudgetSet { .. }
+            | RuntimeEvent::GoalProgress { .. }
+            | RuntimeEvent::GoalDone { .. }
+            | RuntimeEvent::GoalPaused {}
+            | RuntimeEvent::GoalResumed {}
+            | RuntimeEvent::GoalDropped {}
+            | RuntimeEvent::GoalWait { .. }
+            | RuntimeEvent::GoalBudgetExhausted { .. } => false,
         }
     }
 
@@ -343,6 +404,10 @@ pub(crate) struct InboxEnqueuedData<'a> {
     /// it to `false` (ADR 0006 §5.5).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub degraded: bool,
+    /// Whether this `next_step` entry opens the next turn when it is still queued at the
+    /// turn boundary (ADR 0011). Written only when `true`, like `degraded`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pending_wake: bool,
 }
 
 #[derive(Serialize)]
@@ -453,6 +518,51 @@ pub(crate) struct BackgroundJobSettledData<'a> {
     pub duration_ms: u64,
 }
 
+#[derive(Serialize)]
+pub(crate) struct GoalSetData<'a> {
+    pub objective: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_duration_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct GoalBudgetSetData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_duration_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct GoalProgressData<'a> {
+    pub note: &'a str,
+}
+
+#[derive(Serialize)]
+pub(crate) struct GoalDoneData<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct GoalMarker {}
+
+#[derive(Serialize)]
+pub(crate) struct GoalWaitData {
+    pub secs: u64,
+}
+
+#[derive(Serialize)]
+pub(crate) struct GoalBudgetExhaustedData<'a> {
+    pub kind: &'a str,
+}
+
 /// The `data` view of one runtime event. A manual enum (like the transcript writer's
 /// `Render`) keeps the field order of the ADR and avoids an externally tagged wrapper.
 pub(crate) enum RuntimeData<'a> {
@@ -472,6 +582,15 @@ pub(crate) enum RuntimeData<'a> {
     UserBash(UserBashData<'a>),
     BackgroundJobStarted(BackgroundJobStartedData<'a>),
     BackgroundJobSettled(BackgroundJobSettledData<'a>),
+    GoalSet(GoalSetData<'a>),
+    GoalBudgetSet(GoalBudgetSetData),
+    GoalProgress(GoalProgressData<'a>),
+    GoalDone(GoalDoneData<'a>),
+    GoalPaused,
+    GoalResumed,
+    GoalDropped,
+    GoalWait(GoalWaitData),
+    GoalBudgetExhausted(GoalBudgetExhaustedData<'a>),
 }
 
 impl Serialize for RuntimeData<'_> {
@@ -493,6 +612,17 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::UserBash(d) => d.serialize(serializer),
             RuntimeData::BackgroundJobStarted(d) => d.serialize(serializer),
             RuntimeData::BackgroundJobSettled(d) => d.serialize(serializer),
+            RuntimeData::GoalSet(d) => d.serialize(serializer),
+            RuntimeData::GoalBudgetSet(d) => d.serialize(serializer),
+            RuntimeData::GoalProgress(d) => d.serialize(serializer),
+            RuntimeData::GoalDone(d) => d.serialize(serializer),
+            // Paused, resumed and dropped carry no fields: the event name is the record,
+            // and `data` stays `{}` (the envelope requires an object).
+            RuntimeData::GoalPaused => GoalMarker {}.serialize(serializer),
+            RuntimeData::GoalResumed => GoalMarker {}.serialize(serializer),
+            RuntimeData::GoalDropped => GoalMarker {}.serialize(serializer),
+            RuntimeData::GoalWait(d) => d.serialize(serializer),
+            RuntimeData::GoalBudgetExhausted(d) => d.serialize(serializer),
         }
     }
 }
@@ -506,6 +636,7 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             source,
             wake,
             degraded,
+            pending_wake,
         } => RuntimeData::InboxEnqueued(InboxEnqueuedData {
             message,
             message_id,
@@ -513,6 +644,7 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             source: *source,
             wake: *wake,
             degraded: *degraded,
+            pending_wake: *pending_wake,
         }),
         RuntimeEvent::InputClaimed {
             message_ids,
@@ -631,5 +763,36 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             state,
             duration_ms: *duration_ms,
         }),
+        RuntimeEvent::GoalSet {
+            objective,
+            max_turns,
+            max_duration_secs,
+            max_tokens,
+        } => RuntimeData::GoalSet(GoalSetData {
+            objective,
+            max_turns: *max_turns,
+            max_duration_secs: *max_duration_secs,
+            max_tokens: *max_tokens,
+        }),
+        RuntimeEvent::GoalBudgetSet {
+            max_turns,
+            max_duration_secs,
+            max_tokens,
+        } => RuntimeData::GoalBudgetSet(GoalBudgetSetData {
+            max_turns: *max_turns,
+            max_duration_secs: *max_duration_secs,
+            max_tokens: *max_tokens,
+        }),
+        RuntimeEvent::GoalProgress { note } => RuntimeData::GoalProgress(GoalProgressData { note }),
+        RuntimeEvent::GoalDone { note } => RuntimeData::GoalDone(GoalDoneData {
+            note: note.as_deref(),
+        }),
+        RuntimeEvent::GoalPaused {} => RuntimeData::GoalPaused,
+        RuntimeEvent::GoalResumed {} => RuntimeData::GoalResumed,
+        RuntimeEvent::GoalDropped {} => RuntimeData::GoalDropped,
+        RuntimeEvent::GoalWait { secs } => RuntimeData::GoalWait(GoalWaitData { secs: *secs }),
+        RuntimeEvent::GoalBudgetExhausted { kind } => {
+            RuntimeData::GoalBudgetExhausted(GoalBudgetExhaustedData { kind })
+        }
     }
 }

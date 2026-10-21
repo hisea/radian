@@ -61,6 +61,10 @@ impl App {
             // optional prompt. The loop's own inline prompt goes through `@` expansion
             // like `/queue`.
             command::Outcome::Loop(command) => self.loop_command(command),
+            // `/goal` (ADR 0047): the objective is literal text (no `@` expansion — the
+            // stored objective is re-sent verbatim every turn). Changes journal through
+            // the loop; `Show` only reads.
+            command::Outcome::Goal(command) => self.goal_command(command),
             command::Outcome::Memory(command) => UpdateResult::effect(Effect::RunMemoryCommand {
                 command,
                 confirmed: false,

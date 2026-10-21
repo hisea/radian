@@ -378,6 +378,76 @@ async fn a_child_failure_leaves_the_parent_untouched() {
     assert!(leftovers.is_empty(), "no temp file left: {leftovers:?}");
 }
 
+/// ADR 0047: an active goal (objective, budget, latest progress) rides into the child as
+/// paused; the counters restart — the child is a new session with its own budget.
+#[tokio::test]
+async fn an_active_goal_rides_into_the_child_as_paused() {
+    let dir = TempDir::new("fork-goal");
+    let (parent, child) = ids("goal");
+    let (parent_path, _) = two_turn_parent(&dir, &parent).await;
+    let journal = SessionJournal::resume(&parent_path, &parent).unwrap();
+    journal
+        .append_runtime_event(RuntimeEvent::GoalSet {
+            objective: "ship it".into(),
+            max_turns: Some(2),
+            max_duration_secs: None,
+            max_tokens: Some(1000),
+        })
+        .await
+        .unwrap();
+    journal
+        .append_runtime_event(RuntimeEvent::GoalProgress {
+            note: "half there".into(),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let child_path = dir.file("c.jsonl");
+    fork(request(&parent_path, &parent, None, &child_path, &child))
+        .await
+        .unwrap();
+    let opened = Session::open(&child_path).unwrap();
+    assert_eq!(opened.history().unwrap().len(), 4, "history intact");
+    let goal = radian_session::fold(opened.events()).expect("the child carries the goal");
+    assert_eq!(goal.objective, "ship it");
+    assert_eq!(goal.status, radian_session::GoalStatus::Paused);
+    assert_eq!(goal.progress.as_deref(), Some("half there"));
+    assert_eq!(goal.budget.max_turns, Some(2));
+    assert_eq!(goal.budget.max_tokens, Some(1000));
+    assert_eq!(goal.turns_used, 0, "the child's budget is its own");
+}
+
+/// ADR 0047: a finished goal stays behind — the child folds to no goal.
+#[tokio::test]
+async fn a_done_goal_stays_behind() {
+    let dir = TempDir::new("fork-goal-done");
+    let (parent, child) = ids("goaldone");
+    let (parent_path, _) = two_turn_parent(&dir, &parent).await;
+    let journal = SessionJournal::resume(&parent_path, &parent).unwrap();
+    journal
+        .append_runtime_event(RuntimeEvent::GoalSet {
+            objective: "ship it".into(),
+            max_turns: None,
+            max_duration_secs: None,
+            max_tokens: None,
+        })
+        .await
+        .unwrap();
+    journal
+        .append_runtime_event(RuntimeEvent::GoalDone { note: None })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let child_path = dir.file("c.jsonl");
+    fork(request(&parent_path, &parent, None, &child_path, &child))
+        .await
+        .unwrap();
+    let opened = Session::open(&child_path).unwrap();
+    assert!(radian_session::fold(opened.events()).is_none());
+}
+
 #[tokio::test]
 async fn fork_with_journal_uses_the_open_writer() {
     let dir = TempDir::new("fork-inproc");

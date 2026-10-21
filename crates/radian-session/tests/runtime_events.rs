@@ -30,6 +30,7 @@ fn all_events() -> Vec<RuntimeEvent> {
             source: InputSource::User,
             wake: true,
             degraded: false,
+            pending_wake: false,
         },
         RuntimeEvent::InputClaimed {
             message_ids: vec![message_id.clone()],
@@ -146,6 +147,7 @@ async fn runtime_events_round_trip_through_typed_reader_variants() {
             source,
             wake,
             degraded,
+            pending_wake,
         } => {
             assert_eq!(message.text(), "hello");
             assert_eq!(message_id.0, "inbox-1");
@@ -153,6 +155,7 @@ async fn runtime_events_round_trip_through_typed_reader_variants() {
             assert_eq!(*source, InputSource::User);
             assert!(*wake, "a `next_turn` entry wakes");
             assert!(!*degraded, "a normal entry is not a degrade");
+            assert!(!*pending_wake, "a normal entry carries no pending wake");
         }
         other => panic!("expected InboxEnqueued, got {other:?}"),
     }

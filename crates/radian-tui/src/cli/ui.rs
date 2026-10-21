@@ -222,6 +222,9 @@ pub(super) fn ui_loop(
     // The last spinner frame drawn (ADR 0027): the idle tick redraws only when the
     // frame changes, so the pulse (500 ms) does not draw on every 250 ms wake.
     let mut last_spinner: Option<radian_tui::spinner::Frame> = None;
+    // The last `jobs` age text drawn (ADR 0023 U2): the idle tick redraws only when the text
+    // changes, so a running job does not draw on every wake.
+    let mut last_jobs: Option<String> = None;
     // An effect batch the draw-fairness cap did not finish: declared outside the loop so the
     // rest survives to the next turn (never dropped, order kept).
     let mut effects: Vec<Effect> = Vec::new();
@@ -255,14 +258,23 @@ pub(super) fn ui_loop(
                 .pending_fork
                 .map(|deadline| deadline.saturating_duration_since(now));
             // A `/loop --every` wait ends at the next iteration's due time (the turn-end
-            // decision still re-checks; the deadline only wakes an idle loop).
+            // decision still re-checks; the deadline only wakes an idle loop). A goal
+            // `wait` arms the same wake through `goal_deadline`.
             let loop_remaining = app
                 .loop_deadline()
                 .map(|deadline| deadline.saturating_duration_since(now));
-            let wait_remaining = [quit_remaining, fork_remaining, loop_remaining]
-                .into_iter()
-                .flatten()
-                .min();
+            let goal_remaining = app
+                .goal_deadline()
+                .map(|deadline| deadline.saturating_duration_since(now));
+            let wait_remaining = [
+                quit_remaining,
+                fork_remaining,
+                loop_remaining,
+                goal_remaining,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let first = if app.is_selecting() || wait_remaining.is_some() {
                 // The nearer of the deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
                 let timeout = match (app.is_selecting(), wait_remaining) {
@@ -297,9 +309,14 @@ pub(super) fn ui_loop(
                         }
                         // A `/loop --every` wait ended while idle: send the next iteration
                         // (a running turn ignores the deadline; its end decides instead).
-                        if app
+                        // The same wake fires an armed goal `wait` (`goal_deadline_fired`
+                        // runs beside the loop's in the one `LoopDeadline` arm).
+                        if (app
                             .loop_deadline()
                             .is_some_and(|d| std::time::Instant::now() >= d)
+                            || app
+                                .goal_deadline()
+                                .is_some_and(|d| std::time::Instant::now() >= d))
                             && app.update(AppInput::LoopDeadline).dirty
                             && !draw_frame(terminal, app)?
                         {
@@ -338,7 +355,11 @@ pub(super) fn ui_loop(
                 // A bounded wait, not a blocking one: guard 2's hang-up check runs every tick even
                 // while the app is idle. A timeout with the tty alive loops without drawing. The
                 // spinner shortens it to its own frame interval while one is visible (ADR 0027
-                // revision 13), which is what makes the breath turn at its step.
+                // revision 13), which is what makes the breath turn at its step; running
+                // background jobs shown in the footer shorten it toward the next age-text
+                // change, never past the hang-up tick (ADR 0023 U2), so the `jobs` age ticks
+                // while idle.
+                app.set_now(std::time::Instant::now());
                 match rx.recv_timeout(wait_for_an_event(app)) {
                     Ok(event) => Some(event),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -346,9 +367,14 @@ pub(super) fn ui_loop(
                             app.quit = true;
                             break;
                         }
+                        app.set_now(std::time::Instant::now());
                         if spinner_tick(app, &mut last_spinner).is_some()
                             && !draw_frame(terminal, app)?
                         {
+                            app.quit = true;
+                            break;
+                        }
+                        if jobs_tick(app, &mut last_jobs).is_some() && !draw_frame(terminal, app)? {
                             app.quit = true;
                             break;
                         }

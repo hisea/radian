@@ -47,6 +47,11 @@ data — it grants no permission for the tool calls the model makes afterwards.
 `SKILL.md` that discovery already accepted, so **a skill is not a permission** — reading one
 grants nothing. (`skill_is_allowed_in_every_tier` in `src/profile.rs`.)
 
+`goal` (ADR 0047) is `allow` in **both** tiers for the same reason: it only advances the
+session's own goal state and journals it — no workspace file, no command — so prompting
+for it would only stall the continuation it serves. (`goal_is_allowed_in_every_tier` in
+`src/profile.rs`.)
+
 ## Shell matching (the part most likely to hide a hole)
 
 This is a deliberate conservative approximation, **not a shell parser**.

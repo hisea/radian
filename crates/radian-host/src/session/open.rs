@@ -358,6 +358,17 @@ pub async fn open_session(
     let mut tools = HostTools::new(coding, memory_tools, mcp.clone())
         .with_tool_allow(tools_allow)
         .with_spec_sink(std::sync::Arc::clone(&spec_sink));
+    // ADR 0047: the persistent goal. Folded once from the journal at open (a resume parks
+    // an active goal as paused); the `goal` tool, the prompt hook and the TUI share the
+    // result, and every change is journaled first so the fold always rebuilds it.
+    let goal_share: crate::goal::SharedGoal =
+        Arc::new(Mutex::new(parsed.as_ref().and_then(|parsed| {
+            radian_session::fold_for_resume(parsed.events())
+        })));
+    tools = tools.with_goal(crate::goal::GoalTools::new(
+        Arc::clone(&goal_share),
+        Arc::clone(&journal),
+    ));
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
         tools = tools.with_ask(ask);
@@ -385,8 +396,8 @@ pub async fn open_session(
     }
     // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> carries
     // the tier/sandbox facts; 1 <role> is the role
-    // prompt (or `--system`); 2 is the context files; 3 is appended by the skills/memory hooks;
-    // 0b <session> is appended last by its own hook, so the static prefix stays cacheable.
+    // prompt (or `--system`); 2 is the context files; 3 is appended by the skills/memory/goal
+    // hooks; 0b <session> is appended last by its own hook, so the static prefix stays cacheable.
     let model_name = config_snapshot
         .get("model")
         .and_then(|value| value.as_str())
@@ -416,6 +427,7 @@ pub async fn open_session(
         &context.section,
         role_override,
     ));
+    let goal_hooks = Arc::new(crate::goal::GoalHooks::new(Arc::clone(&goal_share)));
     // The exact base the hook chain writes (layers 0a, 1 and 2): the side-question
     // shape rebuilds the prompt from it, so the bytes match the formal request.
     let role_base = crate::prompt::assemble(&runtime_layer, &role_layer, &context.section);
@@ -445,6 +457,7 @@ pub async fn open_session(
                 Arc::clone(&command_hooks),
                 Arc::clone(&memory_hooks),
                 Arc::clone(&skills_hooks),
+                Arc::clone(&goal_hooks),
                 Arc::clone(&facts_hooks),
             )),
     );
@@ -527,6 +540,15 @@ pub async fn open_session(
             Arc::clone(&runtime_events),
             wake_warning,
         );
+        // ADR 0011: a stranded notice that opens the next turn counts one
+        // wake. The inbox fires the callback without holding its lock, and the `Weak`
+        // keeps the inbox from owning the session's notifier (which owns the inbox).
+        let weak = Arc::downgrade(&notifier);
+        inbox.set_pending_wake_callback(Some(Arc::new(move |_| {
+            if let Some(notifier) = weak.upgrade() {
+                notifier.note_promoted_wake();
+            }
+        })));
         notifier.spawn(&runtime);
         notifier
     });
@@ -660,6 +682,7 @@ pub async fn open_session(
         queue,
         memory,
         skills: shared_skills,
+        goal: goal_share,
         job_notifier,
         jobs,
         tool_specs,
