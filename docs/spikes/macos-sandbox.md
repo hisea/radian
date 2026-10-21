@@ -73,7 +73,7 @@ $ ps -axo pid,comm | grep -E 'mcp-fixture|sleep 600|sandbox-exec' | grep -v grep
 
 - **default-deny + 选择性 allow**，不用 `(allow default)` 再打补丁。写权限只开工作区子树；更深的 `deny subpath` 可以在工作区内 carve-out（.git 只读就是这么做的，实测有效）。
 - 网络关闭 = 不写任何 network allow；打开 = 加一行 `(allow network*)`（对照用例证明两种状态都真实生效）。
-- subpath 匹配按**解析后路径**：`$TMPDIR` 是 `<scratch>/...` 的符号链接，profile 里必须写 realpath（`<scratch>/...`），否则规则不命中。符号链接逃逸被拦截也说明匹配发生在解析后的目标路径上。
+- subpath 匹配按**解析后路径**：`$TMPDIR` 是 `<tmpdir>/…` 的符号链接，profile 里必须写 realpath（`/private<tmpdir>/…`），否则规则不命中。符号链接逃逸被拦截也说明匹配发生在解析后的目标路径上。
 
 ## 必须放行的路径/操作（实测矩阵，`data/allow-matrix.json`）
 
