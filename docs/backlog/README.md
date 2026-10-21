@@ -55,7 +55,6 @@
 | `prompt-deliver-first.md` | idea | 0036 | 提示词：先交付能跑的版本再迭代、用参照物差分；cobol smoke 是现成复现 |
 | `runtime-resource-limits.md` | idea | 0036 | `<runtime>` 写实际可用 CPU/内存（cgroup），避免 `make -j16` 跑在 2 核容器 |
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
-| `read-from-end.md` | idea | 0039、0043 | `read` 能从文件末尾读（负 `offset` 或 `tail`），消掉模型为看文件尾部而走的 `tail`/`grep -c` shell 调用 |
 | `job-notice-lost-on-write-failure.md` | idea（bug） | 0037、0001、0011、0034 | job 完成通知的 `followup` 写入失败时唤醒静默丢失，会话一直空闲（ab3 磁盘满时复现） |
 | `acp-server.md` | idea（暂定不做） | 新 ADR；0032、0009、0024、0011、0010、0043 | ACP 服务端：先做外部适配器验证需求；审批→`request_permission`、inbox→`session/prompt`、live→`session/update`；在 exec jsonl 与控制口客户端之后 |
 
