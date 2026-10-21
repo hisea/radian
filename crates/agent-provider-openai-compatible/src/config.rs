@@ -53,7 +53,7 @@ pub struct OpenAiCompatibleConfig {
     /// `None` sends no key, which is byte-identical to the adapter before the feature.
     pub reasoning_effort: Option<String>,
     /// The assistant-message field the model requires its reasoning to be replayed in
-    /// (ADR 0014 Q1). `None` sends no reasoning at all, byte-identical to the
+    /// (ADR 0014 R4). `None` sends no reasoning at all, byte-identical to the
     /// adapter before the feature; `Some(field)` writes the reasoning of every assistant
     /// message under that key (an empty string when the message had none, Q3).
     pub reasoning_replay: Option<String>,

@@ -1,4 +1,4 @@
-# `radian-memory` mutation record (ADR 0021 M1)
+# `radian-memory` mutation record (ADR 0021)
 
 Base: `75e31a5` · one-shot worktree `/tmp/memstore-mut` (created from HEAD, deleted after) ·
 each mutation run with `cargo test -p radian-memory --no-fail-fast`, then `git checkout -- .`;

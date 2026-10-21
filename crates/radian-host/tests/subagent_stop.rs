@@ -1,4 +1,4 @@
-//! ADR 0043 decision 1a (fix round 1 B): the `subagent` parent stops the child in **two steps** —
+//! ADR 0043 decision 2 (fix round 1 B): the `subagent` parent stops the child in **two steps** —
 //! SIGTERM first, so the child runs the same cleanup a Ctrl-C does, then `kill_session` as the
 //! SIGKILL fallback — on both the cancel path and the drop path.
 //!

@@ -1,4 +1,4 @@
-//! Where a host writes local diagnostics (ADR 0013 decision 4; the path is ADR 0020).
+//! Where a host writes local diagnostics (ADR 0013 T4; the path is ADR 0020).
 //!
 //! Diagnostics live under the cache — `~/.radian/cache/diagnostics/` — not in the session
 //! directory: a cache may be cleaned by the system, while the session journal is the
@@ -8,7 +8,7 @@
 //! before each write.
 //!
 //! Nothing here ever touches the session directory, and a failed write or cleanup is a
-//! diagnostic in itself — it is reported and the run continues (ADR 0013 decision 4).
+//! diagnostic in itself — it is reported and the run continues (ADR 0013 T4).
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -76,7 +76,7 @@ pub fn is_diagnostic_file(name: &str) -> bool {
 }
 
 /// What one cleanup did. Failures are named, not returned as an error: cleanup must not stop
-/// the run (ADR 0013 decision 4).
+/// the run (ADR 0013 T4).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CleanReport {
     pub removed: u64,

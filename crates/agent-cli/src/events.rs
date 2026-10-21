@@ -21,7 +21,7 @@ pub(crate) enum Next {
     Leave,
     /// A second Ctrl-C during a wind-down.
     Forced,
-    /// SIGTERM: the process was asked to stop (ADR 0043 decision 1a, fix round 1 B). Leave
+    /// SIGTERM: the process was asked to stop (ADR 0043 decision 2, fix round 1 B). Leave
     /// through the ordinary path — cancel what runs, then the caller closes the session.
     Terminated,
     /// The driver stopped on its own (an error).
@@ -30,7 +30,7 @@ pub(crate) enum Next {
 
 /// SIGINT: what a terminal's Ctrl-C sends.
 pub(crate) const SIGINT: i32 = 2;
-/// SIGTERM: the signal a parent that wants this process to stop sends. ADR 0043 decision 1a's
+/// SIGTERM: the signal a parent that wants this process to stop sends. ADR 0043 decision 2's
 /// `subagent` parent sends it before it falls back to SIGKILL, so `radian exec` must handle it:
 /// without a handler the kernel's default action kills the process at once, and the session-end
 /// cleanup (which kills every shell command and background job this session started) never runs.
@@ -198,7 +198,7 @@ pub(crate) async fn wait_for_turn(
     }
 }
 
-/// The signal-driven stop (`SIGTERM`, ADR 0043 decision 1a fix round 1 B): cancel what is
+/// The signal-driven stop (`SIGTERM`, ADR 0043 decision 2 fix round 1 B): cancel what is
 /// running, close the inbox at once — the process was asked to stop, so a queued input is not
 /// run — and join the driver. The driver finishes the cancelled turn and closes the session,
 /// which kills the whole session of every background job (ADR 0037 decision 6) and shuts the
@@ -228,7 +228,7 @@ pub(crate) enum TurnEnd {
     Done,
     /// A second Ctrl-C arrived while the first cancellation was still settling.
     Forced,
-    /// SIGTERM: the process was asked to stop (ADR 0043 decision 1a, fix round 1 B).
+    /// SIGTERM: the process was asked to stop (ADR 0043 decision 2, fix round 1 B).
     Terminated,
     /// The driver stopped before the turn finished (an error).
     DriverEnded,
@@ -242,7 +242,7 @@ pub(crate) enum TurnEnd {
 /// of a wind-down now and then, and the CLI left with code 0 instead of 130. One task loops on
 /// `ctrl_c()` and forwards into a channel, so no signal can fall between two calls. SIGTERM has
 /// its own listener because `radian exec` must handle it at all: its default action would kill
-/// the process before any session-end cleanup (ADR 0043 decision 1a fix round 1 B).
+/// the process before any session-end cleanup (ADR 0043 decision 2 fix round 1 B).
 pub(crate) fn spawn_signals() -> mpsc::UnboundedReceiver<i32> {
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn({

@@ -103,7 +103,7 @@ pub(crate) fn search_sessions(cli: &Cli, query: &str) -> Result<(), OutputError>
     let secrets = export_secrets(cli);
     for hit in hits {
         // The snippet is session content and can carry a model-echoed key or header value;
-        // redact the known secrets exactly like `--export` (ADR 0013 decision 3).
+        // redact the known secrets exactly like `--export` (ADR 0013 T3).
         let snippet = redact(&hit.snippet, &secrets);
         radian_host::write_line(&format!(
             "{}\t{}\t{}",

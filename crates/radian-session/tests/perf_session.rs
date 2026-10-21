@@ -65,7 +65,7 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
-/// One `append` (write + flush + fsync). The per-record cost ADR 0006 §15.2 measured; the
+/// One `append` (write + flush + fsync). The per-record cost ADR 0006 §10 measured; the
 /// distribution matters because the core awaits each one.
 #[tokio::test]
 #[ignore = "measurement, not an assertion; run with --ignored --nocapture"]

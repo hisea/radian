@@ -1,6 +1,6 @@
 //! macOS compatibility round: what do ordinary commands need under `workspace-write` with
 //! the default sensitive-read denies? Findings feed the allowlist; anything incompatible is
-//! recorded, never fixed by widening a rule (ADR 0012 decision 3).
+//! recorded, never fixed by widening a rule (ADR 0012 P4).
 //!
 //! ADR 0038 decision 4: the `workspace` tier a general session runs in asks for
 //! `WritableExceptExec`, so this round now builds that policy — `git commit` and `git add`

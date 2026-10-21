@@ -1,9 +1,9 @@
-//! Project context files (ADR 0036 C2): `AGENTS.md` / `CLAUDE.md` discovery, the byte limits,
+//! Project context files (ADR 0036): `AGENTS.md` / `CLAUDE.md` discovery, the byte limits,
 //! and the `<project_instructions>` section the model sees.
 //!
-//! Read **once** at session start, by the host process, outside the sandbox (ADR 0036 C3). The
+//! Read **once** at session start, by the host process, outside the sandbox (ADR 0036). The
 //! content never enters the journal; only the loaded paths and sizes go into the
-//! `SessionCreated.config_snapshot` (ADR 0006 §7a). A file that cannot be read is a warning, not
+//! `SessionCreated.config_snapshot` (ADR 0006 §6). A file that cannot be read is a warning, not
 //! a failure: the session opens without it.
 //!
 //! The 64 KiB/128 KiB limits count the file's expanded bytes (after `@path` imports)
@@ -24,9 +24,9 @@ pub const CANDIDATES: [&str; 5] = [
     "CLAUDE.MD",
 ];
 
-/// One file's byte limit (ADR 0036 C2).
+/// One file's byte limit (ADR 0036).
 pub const MAX_FILE_BYTES: usize = 64 * 1024;
-/// The limit over all files together (ADR 0036 C2).
+/// The limit over all files together (ADR 0036).
 pub const MAX_TOTAL_BYTES: usize = 128 * 1024;
 
 /// One context file that was read.
@@ -83,7 +83,7 @@ impl ContextFiles {
     }
 
     /// The startup line: `AGENTS.md (12.3 KB), ~/.radian/AGENTS.md (1.1 KB)`, or `none`
-    /// (ADR 0036 C2). An expanded import reads `CLAUDE.md (2.1 KB, +docs/a.md 3.4 KB)`;
+    /// (ADR 0036). An expanded import reads `CLAUDE.md (2.1 KB, +docs/a.md 3.4 KB)`;
     /// an import that stayed literal reads `, not read: ../x.md`. `workspace`/`home`
     /// only shape the display path.
     pub fn line(&self, workspace: &Path, home: Option<&Path>) -> String {
@@ -119,7 +119,7 @@ impl ContextFiles {
     }
 
     /// The `config_snapshot.context` value: the loaded paths and sizes, plus each file's
-    /// imports when it imported something (ADR 0036 C2). A file with no imports has no
+    /// imports when it imported something (ADR 0036). A file with no imports has no
     /// `imports` key, so its entry is byte-identical to the shape before imports existed.
     /// `not_read` is a startup warning, not prompt content, so it is never recorded.
     pub fn snapshot(&self) -> serde_json::Value {
@@ -177,14 +177,14 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
             dir = current.parent().map(Path::to_path_buf);
         }
     } else {
-        // Outside a repository: only the workspace directory itself (ADR 0036 C2).
+        // Outside a repository: only the workspace directory itself (ADR 0036).
         dirs.push(workspace.to_path_buf());
     }
     dirs.reverse();
     candidates.extend(dirs);
     // The import boundary, canonicalized once: the repository root for workspace files
     // (or the workspace itself outside a repository), the radian home for the global file
-    // (ADR 0036 C2). An import that canonicalizes outside its boundary stays literal.
+    // (ADR 0036). An import that canonicalizes outside its boundary stays literal.
     // `None` is "nothing may be read" (the boundary itself could not be resolved).
     let home_boundary = radian_home.map(|home| std::fs::canonicalize(home).ok());
     let home_boundary = home_boundary.flatten();
@@ -223,7 +223,7 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
             }
         };
         // `@path` imports expand before any budget applies: the per-file cap below and
-        // the total budget after it both count expanded bytes (ADR 0036 C2).
+        // the total budget after it both count expanded bytes (ADR 0036).
         let raw_text = String::from_utf8_lossy(&bytes).into_owned();
         let importer_dir = path
             .parent()
@@ -235,7 +235,7 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
         result.warnings.extend(import_warnings);
         // The per-file limit applies to the file **after** its imports are expanded; the
         // total budget is applied after every file is read, so the outermost whole file is
-        // dropped before the innermost is truncated (ADR 0036 D3.2).
+        // dropped before the innermost is truncated (ADR 0036).
         let truncated = expanded.len() > MAX_FILE_BYTES;
         let loaded = expanded.len().min(MAX_FILE_BYTES);
         let content = String::from_utf8_lossy(&expanded.as_bytes()[..loaded]).into_owned();
@@ -263,7 +263,7 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
     // The total budget: drop the outermost whole files (global, repository root) until the
     // rest fits. Every file is already capped at `MAX_FILE_BYTES`, so a single file can never
     // exceed the total and the file nearest the workspace is never the one dropped
-    // (ADR 0036 D3.2).
+    // (ADR 0036).
     let mut total: usize = raw.iter().map(|(file, _)| file.bytes).sum();
     while total > MAX_TOTAL_BYTES && raw.len() > 1 {
         let (file, _) = raw.remove(0);
@@ -287,7 +287,7 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
 }
 
 /// How many levels of `@path` imports expand: the top file is depth 0 and an import at
-/// depth 4 keeps its `@` literal (the 5th level stays literal, ADR 0036 C2).
+/// depth 4 keeps its `@` literal (the 5th level stays literal, ADR 0036).
 const MAX_IMPORT_DEPTH: usize = 4;
 
 /// Expands one file's `@path` imports: `@` only at line start or after whitespace, the path
@@ -547,7 +547,7 @@ pub(crate) fn repo_root(workspace: &Path) -> Option<PathBuf> {
     None
 }
 
-/// One file's `<project_instructions>` block (ADR 0036 C2). [`build_section`]
+/// One file's `<project_instructions>` block (ADR 0036). [`build_section`]
 /// concatenates these with no extra separators, so the blocks add up to the
 /// section byte for byte.
 fn file_block(path_display: &str, content: &str) -> String {
@@ -558,7 +558,7 @@ fn file_block(path_display: &str, content: &str) -> String {
     )
 }
 
-/// The section: one `<project_instructions path="…">` block per file (ADR 0036 C2). Empty when there is no file. The content's literal closing tags and the
+/// The section: one `<project_instructions path="…">` block per file (ADR 0036). Empty when there is no file. The content's literal closing tags and the
 /// path's attribute characters are escaped, so a file cannot close the frame early and pretend
 /// to be a higher-priority layer ([`crate::escape`]).
 fn build_section(files: &[(LoadedFile, String)]) -> String {
@@ -573,7 +573,7 @@ fn build_section(files: &[(LoadedFile, String)]) -> String {
 }
 
 /// A display path: relative to the workspace when under it, `~/…` when under the home, else
-/// the absolute path (ADR 0036 C2's `context: AGENTS.md (12.3 KB), …`). Imports are stored
+/// the absolute path (ADR 0036's `context: AGENTS.md (12.3 KB), …`). Imports are stored
 /// canonicalized (symlinks resolved, so `/var` reads as `/private/var` on macOS) while the
 /// workspace is not, so the canonical forms are compared as a fallback.
 fn display_path(path: &Path, workspace: &Path, home: Option<&Path>) -> String {
@@ -665,7 +665,7 @@ mod tests {
         assert!(files.files[0].path.ends_with("AGENTS.md"));
     }
 
-    /// The same real file is read once (ADR 0036 C2): a workspace `AGENTS.md` that is a
+    /// The same real file is read once (ADR 0036): a workspace `AGENTS.md` that is a
     /// symlink to the repository root's `AGENTS.md` contributes one section, not two.
     #[test]
     fn a_symlinked_context_file_is_read_once() {
@@ -684,7 +684,7 @@ mod tests {
         );
     }
 
-    /// Discovery stops at the repository root: a file above it is never read (ADR 0036 C2).
+    /// Discovery stops at the repository root: a file above it is never read (ADR 0036).
     #[test]
     fn discovery_stops_at_the_repository_root() {
         let dir = TempDir::new("root");
@@ -788,7 +788,7 @@ mod tests {
         assert!(files.section.contains("[truncated:"), "{}", files.section);
 
         // Three files at 64 KiB each: the **outermost** (the repository root) is dropped
-        // whole and the file nearest the workspace is kept (ADR 0036 D3.2).
+        // whole and the file nearest the workspace is kept (ADR 0036).
         let dir = TempDir::new("total");
         dir.mkdir("repo/.git");
         let chunk = "y".repeat(MAX_FILE_BYTES);
@@ -839,7 +839,7 @@ mod tests {
     }
 
     /// A directory named like a candidate is skipped (not a file), and a file that cannot be
-    /// read is a warning, never a failure (ADR 0036 C2).
+    /// read is a warning, never a failure (ADR 0036).
     #[test]
     fn an_unreadable_file_is_a_warning() {
         use std::os::unix::fs::PermissionsExt;
@@ -873,7 +873,7 @@ mod tests {
     }
 
     /// A literal closing tag in the content (any case) is escaped, so the frame has exactly
-    /// one real closing tag and it is at the end (ADR 0036 C2 supplement).
+    /// one real closing tag and it is at the end (ADR 0036 supplement).
     #[test]
     fn a_content_closing_tag_is_escaped() {
         let dir = TempDir::new("content-escape");
@@ -909,7 +909,7 @@ mod tests {
         );
     }
 
-    /// A path with `"` and `>` cannot end the `path` attribute (ADR 0036 C2 supplement).
+    /// A path with `"` and `>` cannot end the `path` attribute (ADR 0036 supplement).
     #[test]
     fn a_path_with_quotes_cannot_end_the_attribute() {
         let dir = TempDir::new("path-escape");
@@ -945,7 +945,7 @@ mod tests {
         assert_eq!(empty.line(&dir.path().join("repo"), None), "none");
     }
 
-    /// `@docs/a.md` is expanded; the startup line lists the import (ADR 0036 C2).
+    /// `@docs/a.md` is expanded; the startup line lists the import (ADR 0036).
     #[test]
     fn an_at_import_is_expanded() {
         let dir = TempDir::new("import");
@@ -971,7 +971,7 @@ mod tests {
 
     /// The snapshot lists each file's imports (the real path, the bytes that file
     /// contributed) and omits the key when a file imported nothing, so an entry without
-    /// imports is byte-identical to the shape before imports existed (ADR 0036 C2).
+    /// imports is byte-identical to the shape before imports existed (ADR 0036).
     /// Dropping the field makes this fail.
     #[test]
     fn the_snapshot_lists_a_files_imports() {
@@ -1009,7 +1009,7 @@ mod tests {
         );
     }
 
-    /// `` `@README` `` and fenced `@x` stay literal and are never read (ADR 0036 C2).
+    /// `` `@README` `` and fenced `@x` stay literal and are never read (ADR 0036).
     /// Removing the fenced-block skip makes this fail.
     #[test]
     fn code_spans_are_not_expanded() {
@@ -1163,7 +1163,7 @@ mod tests {
     }
 
     /// After expansion pushes the total over 128 KiB, the outermost whole file is dropped
-    /// (ADR 0036 D3.2 still applies to expanded bytes).
+    /// (ADR 0036 still applies to expanded bytes).
     #[test]
     fn the_total_budget_drops_the_outermost_after_expansion() {
         let dir = TempDir::new("total-import");
@@ -1228,7 +1228,7 @@ mod tests {
         assert!(line.contains("not read: docs/nope.md"), "{line}");
     }
 
-    /// The global file's imports resolve inside the radian home only (ADR 0036 C2):
+    /// The global file's imports resolve inside the radian home only (ADR 0036):
     /// `@extra.md` expands, `@../repo/secret.md` stays literal and is listed.
     #[test]
     fn a_global_import_resolves_inside_the_home_only() {

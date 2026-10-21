@@ -372,7 +372,7 @@ struct State {
 /// The memory injection the system-prompt hook and the per-turn addition seam share.
 ///
 /// One instance per session: it owns the fixed block's lifetime, exactly like the skills
-/// section (ADR 0025) and the context files (ADR 0036 C2).
+/// section (ADR 0025) and the context files (ADR 0036).
 pub struct MemoryInjection {
     /// `None` when this process has no memory root (`RADIAN_HOME`/`HOME`): the injection is
     /// then a no-op, which is how "closing memory changes nothing" (invariant 1) is expressed

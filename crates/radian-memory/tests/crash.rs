@@ -1,4 +1,4 @@
-//! ADR 0021 M1 #4 (crash): a torn tail is not committed, a malformed line names its line, and
+//! ADR 0021 #4 (crash): a torn tail is not committed, a malformed line names its line, and
 //! the unknown-event policy matches ADR 0006 §7.
 
 mod common;

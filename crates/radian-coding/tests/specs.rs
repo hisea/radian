@@ -188,7 +188,7 @@ async fn ask_user_spec() -> agent_core::ToolSpec {
         .clone()
 }
 
-/// ADR 0024 decision 2 (`ask-user-pass`): the description itself states when to ask —
+/// ADR 0024 Q2 (`ask-user-pass`): the description itself states when to ask —
 /// only a decision that belongs to the user, or a real ambiguity looking cannot
 /// resolve — and tells the model to mark its recommendation.
 #[tokio::test]

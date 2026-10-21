@@ -25,7 +25,7 @@ pub fn encode_child_headers(headers: &[String]) -> String {
 /// its own session, exactly as a config file's headers do. A malformed value is refused without
 /// echoing it (a bug in the parent, or a stray variable).
 ///
-/// Taking the value out of the environment is the point (ADR 0043 decision 1a, fix round 1 A):
+/// Taking the value out of the environment is the point (ADR 0043 decision 2, fix round 1 A):
 /// they are secrets, and a variable left behind would be inherited by everything this child
 /// starts. The child reads it here and keeps only the parsed headers, which its own startup adds
 /// to the redaction list.

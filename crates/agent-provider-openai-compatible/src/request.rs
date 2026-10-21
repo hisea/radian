@@ -138,7 +138,7 @@ fn assistant(
         Value::String(text)
     };
     message.insert("content".into(), content);
-    // ADR 0014 Q1/Q3: when the model requires it, the reasoning is replayed under
+    // ADR 0014 R4: when the model requires it, the reasoning is replayed under
     // the field the model named. Every assistant message carries the key, an empty string when
     // the message has no reasoning, so a history mixing reasoning and non-reasoning replies is
     // still accepted (DeepSeek's "all subsequent requests" rule).
@@ -178,7 +178,7 @@ fn tool_result(result: &ToolResult) -> Value {
     json!({"role": "tool", "tool_call_id": result.call_id, "content": text})
 }
 
-/// The reasoning the model wants back (ADR 0014 Q1): the text parts only, joined
+/// The reasoning the model wants back (ADR 0014 R4): the text parts only, joined
 /// by newlines, matching pi. Non-text parts are dropped rather than placeheld — a signature or
 /// structured reason belongs to `provider_payload`, not this channel (ADR 0014 R3/R10).
 fn reasoning_text(parts: &[ContentPart]) -> String {
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn reasoning_is_replayed_only_when_the_model_asks_for_it() {
-        // ADR 0014 Q1/Q3: with a replay field, an assistant message's reasoning is
+        // ADR 0014 R4: with a replay field, an assistant message's reasoning is
         // written under that key, and a message with none carries an empty string.
         let mut cfg = config();
         cfg.reasoning_replay = Some("reasoning_content".into());

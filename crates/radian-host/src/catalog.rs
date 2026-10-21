@@ -9,7 +9,7 @@
 //! (`chatgpt`) — the numbers the route's own descriptor table cites
 //! ([`crate::DescriptorModel::limit`], read from `@oh-my-pi/pi-catalog`'s `openai-codex` block).
 //! The catalog is fetched over a read-only GET with no key, no header and no user data, cached
-//! owner-only under the same cache root as the diagnostics (ADR 0013 decision 4), and refreshed
+//! owner-only under the same cache root as the diagnostics (ADR 0013 T4), and refreshed
 //! at most once every [`CACHE_TTL`].
 //!
 //! The fetch is deliberately allowed to fail: a missing or stale catalog falls back to the
@@ -266,7 +266,7 @@ const REPLAYABLE_INTERLEAVED: [&str; 3] = ["reasoning_content", "reasoning", "re
 
 /// The `interleaved` catalog value as a replay field name: `{"field": "reasoning_content"}`
 /// and the other plain-text names are replayed; `reasoning_details`, a bare `true`, and a
-/// missing entry are not (ADR 0014 Q2).
+/// missing entry are not (ADR 0014 R5).
 fn parse_interleaved(value: &Value) -> Option<String> {
     let field = value.get("field").and_then(Value::as_str)?;
     REPLAYABLE_INTERLEAVED
@@ -391,7 +391,7 @@ struct CatalogModel {
     limit: ModelLimit,
     price: Option<ModelPrice>,
     /// The `interleaved` field the model requires its reasoning replayed under, when the
-    /// catalog names a plain-text field (ADR 0014 Q2). `None` for a missing entry,
+    /// catalog names a plain-text field (ADR 0014 R5). `None` for a missing entry,
     /// a bare `true`, or a structured field Radian does not replay (`reasoning_details`).
     reasoning_replay: Option<String>,
     /// The model entry's own `provider.npm` (ADR 0026), when it carries
@@ -504,7 +504,7 @@ impl Catalog {
             .and_then(|entry| entry.price.clone())
     }
 
-    /// The reasoning-replay field the catalog declares for a model (ADR 0014 Q2),
+    /// The reasoning-replay field the catalog declares for a model (ADR 0014 R5),
     /// or `None` when the entry is missing or names a field Radian does not replay.
     pub fn reasoning_replay(&self, provider: &str, model: &str) -> Option<String> {
         self.providers
@@ -1007,7 +1007,7 @@ fn read_cache(path: &Path) -> Option<(Catalog, Duration)> {
 }
 
 /// The catalog's reasoning-replay field for `(provider, model)`, read from the local cache
-/// (ADR 0014 Q2). `None` when the cache is missing, the entry is absent, or the
+/// (ADR 0014 R5). `None` when the cache is missing, the entry is absent, or the
 /// entry declares a field Radian does not replay. Offline, like the budget resolver: a switch
 /// never fetches.
 pub fn catalog_reasoning_replay(provider: &str, model: &str) -> Option<String> {
@@ -1376,7 +1376,7 @@ mod tests {
         assert_eq!(price.rates_for(None).input, 1_000_000, "no prompt: base");
     }
 
-    /// ADR 0014 Q2: the catalog's `interleaved` value decides reasoning replay. A
+    /// ADR 0014 R5: the catalog's `interleaved` value decides reasoning replay. A
     /// plain-text field name opens it; `reasoning_details` (a structured array), a bare `true`,
     /// and a missing entry do not.
     #[test]

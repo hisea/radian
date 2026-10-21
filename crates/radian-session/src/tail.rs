@@ -229,7 +229,7 @@ fn read_new_lines(
                     message: format!("line exceeds the {MAX_LINE_BYTES}-byte cap"),
                 });
             }
-            // No LF means no commit: a torn tail (ADR 0006 §3.2). Do not parse or advance.
+            // No LF means no commit: a torn tail (ADR 0006 §2.2). Do not parse or advance.
             break;
         }
         let raw = std::str::from_utf8(&line[..line.len() - 1]).map_err(|e| ReadError::Corrupt {

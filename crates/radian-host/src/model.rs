@@ -148,7 +148,7 @@ pub struct ModelArgs {
     /// `reasoning_effort`. `None` sends no key.
     pub reasoning_effort: Option<String>,
     /// `openai-compatible` only: the assistant-message field the model requires its reasoning
-    /// replayed under (ADR 0014 Q1). `None` sends no reasoning.
+    /// replayed under (ADR 0014 R4). `None` sends no reasoning.
     pub reasoning_replay: Option<String>,
     /// Whether a [`Provider::ChatGpt`] route authenticates by the `chatgpt` descriptor's OAuth
     /// (ADR 0026) or by a plain `Authorization: Bearer` from `auth.json` (ADR 0026
@@ -463,7 +463,7 @@ pub fn compaction_settings_for_route(
     }
 }
 
-/// The reasoning-replay field for a route (ADR 0014 Q2): the `[providers.<id>]`
+/// The reasoning-replay field for a route (ADR 0014 R5): the `[providers.<id>]`
 /// override when the provider is named, else the catalog's `interleaved` field. `None` means
 /// the model does not require replay, or declares a field Radian does not replay (e.g.
 /// `reasoning_details`).
@@ -479,7 +479,7 @@ pub fn resolve_reasoning_replay(provider: &crate::ProviderRef, model: &str) -> O
     crate::catalog::catalog_reasoning_replay(provider.id(), model)
 }
 
-/// Whether a route replays reasoning, resolved by provider **name** (ADR 0014 Q2):
+/// Whether a route replays reasoning, resolved by provider **name** (ADR 0014 R5):
 /// the `[providers.<name>]` override, else the catalog's `interleaved` field. This is what the
 /// per-route budget resolver uses, so the estimate counts the reasoning the request really
 /// carries. A name reachable only through `auth.json`'s `env` has no declaration here and no

@@ -127,7 +127,7 @@ pub enum LineRole {
     /// A structural row (ADR 0029's `frame`): the diff's `@@` headers and file
     /// headers, which are information about the diff, not content in it.
     Frame,
-    /// The `ask_user` block's prompt and title (ADR 0024 R1): the emphasis role.
+    /// The `ask_user` block's prompt and title (ADR 0024 Q7): the emphasis role.
     Accent,
     /// A weak line (an option description, a note).
     Muted,
@@ -339,7 +339,7 @@ impl ToolRender {
     }
 }
 
-/// The compile-time registry (ADR 0028 decision 5). The match is on the **exact**
+/// The compile-time registry (ADR 0028 R4). The match is on the **exact**
 /// model-facing built-in name: an MCP tool is aliased `server__tool` (verified in
 /// `agent-extensions`' `alias.rs`), so a server-provided `read` arrives as `fs__read` — its
 /// arguments and output are not the built-in's, and it must take [`generic`] like every other
@@ -432,7 +432,7 @@ pub struct DisplayModes {
     /// The footer's glyph set (ADR 0027 C2): the tool card's frame characters follow it
     /// (ADR 0028, `ascii` draws `+ - |`), and so do the Markdown elements that have
     /// an ascii fallback (ADR 0035) and the `ask_user` block's box and marks
-    /// (ADR 0024 R1). In the layout cache key: the drawn glyphs differ.
+    /// (ADR 0024 Q7). In the layout cache key: the drawn glyphs differ.
     pub glyphs: crate::footer::Glyphs,
 }
 

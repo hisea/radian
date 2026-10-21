@@ -954,7 +954,7 @@ async fn pty_launches_with_no_arguments_from_the_config_and_auth_json() {
 /// ADR 0025 slice 3 acceptance: `/skill:<name> [args]` puts the skill's body in one user
 /// message, `/skills` lists the discovered skills, `/skill:nope` is a notice and not a message,
 /// and `//skill:x` is an ordinary message. A `disable-model-invocation: true` skill is listed for
-/// ADR 0036 C2: the host reads `AGENTS.md` at session start, the startup line names it, and
+/// ADR 0036: the host reads `AGENTS.md` at session start, the startup line names it, and
 /// the model's system prompt carries its content and the untrusted note.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -1709,7 +1709,7 @@ fn diagnostics_dir(home: &Path) -> PathBuf {
 }
 
 /// The panic hook restores the terminal before the panic message is printed, and the panic log
-/// goes to the diagnostics directory, not next to the session (ADR 0013 decision 4).
+/// goes to the diagnostics directory, not next to the session (ADR 0013 T4).
 #[test]
 fn pty_panic_path_restores_the_terminal() {
     let _serial = pty_guard();
@@ -1792,7 +1792,7 @@ fn pty_panic_path_restores_the_terminal() {
 }
 
 /// A diagnostics write that cannot happen is one line on stderr, never a fault: the run
-/// continues and a panic still exits 101 (ADR 0013 decision 4).
+/// continues and a panic still exits 101 (ADR 0013 T4).
 #[test]
 fn pty_an_unwritable_diagnostics_directory_is_only_a_notice() {
     let _serial = pty_guard();
@@ -2645,7 +2645,7 @@ async fn pty_without_a_window_the_status_bar_says_the_budget_is_off() {
     pty.quit();
 }
 
-/// A failed sandbox probe is a refusal, never an unsandboxed run (ADR 0012 decision 2). The
+/// A failed sandbox probe is a refusal, never an unsandboxed run (ADR 0012 P5). The
 /// seam is `RADIAN_SANDBOX_PROBE_FAIL=1`, which can only cause a refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
@@ -4460,7 +4460,7 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
         "the panic reason is on the normal screen: {after}"
     );
 
-    // The log lives in the diagnostics directory (ADR 0013 decision 4), named for the session
+    // The log lives in the diagnostics directory (ADR 0013 T4), named for the session
     // and the time, not next to the session.
     let diagnostics = diagnostics_dir(dir.path());
     let log_path = std::fs::read_dir(&diagnostics)
@@ -8833,7 +8833,7 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
     );
 }
 
-/// ADR 0024 R2/R3 end to end: `alt-h` collapses the panel to one line and shows it
+/// ADR 0024 Q7/R3 end to end: `alt-h` collapses the panel to one line and shows it
 /// again without losing the answers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -8895,7 +8895,7 @@ async fn pty_ask_user_alt_h_hides_and_shows() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// ADR 0024 R3 + `esc` twice declines, and the turn continues.
+/// ADR 0024 Q7 + `esc` twice declines, and the turn continues.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_ask_user_esc_declines() {
@@ -8949,7 +8949,7 @@ async fn pty_ask_user_esc_declines() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// ADR 0024 R2/R3 + the `Other` row keeps its text while Up/Down
+/// ADR 0024 Q7/R3 + the `Other` row keeps its text while Up/Down
 /// move between the options, and the answer carries it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -13274,7 +13274,7 @@ fn dir_entries(dir: &Path) -> Vec<String> {
 }
 
 /// `run/` under the app's `RADIAN_HOME`: where a control-port socket would appear. attach must
-/// never create one (it reads the journal directly, ADR 0043 D15).
+/// never create one (it reads the journal directly, ADR 0043 decision 7).
 fn run_entries(home: &Path) -> Vec<String> {
     dir_entries(&home.join("run"))
 }

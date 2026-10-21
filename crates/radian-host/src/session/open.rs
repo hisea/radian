@@ -101,7 +101,7 @@ pub async fn open_session(
     let queue: Arc<SessionQueue> = shared_queue.unwrap_or_else(|| Arc::new(PendingQueue::new()));
     let origin = session_id.as_str().to_string();
 
-    // ADR 0036 C2: read the project context files once, here. They are workspace input, so
+    // ADR 0036: read the project context files once, here. They are workspace input, so
     // they never enter the journal; only the loaded paths and sizes go into the snapshot. The
     // section is appended after the host's base prompt (layer 1) and before the skills/memory
     // hooks (layer 3).
@@ -380,7 +380,7 @@ pub async fn open_session(
     if !shared_skills.is_empty() {
         tools = tools.with_skills(SkillTools::new(Arc::clone(&shared_skills)));
     }
-    // ADR 0043 decision 1a: `subagent` exists in a parent session only. The depth-1 rule is
+    // ADR 0043 decision 2: `subagent` exists in a parent session only. The depth-1 rule is
     // here, at the one place a session is established: a session whose own `parent` relation is
     // `"subagent"` never mounts the tool, so a child cannot start a grandchild.
     let is_subagent_child = parent

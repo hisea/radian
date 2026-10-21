@@ -1,4 +1,4 @@
-# schema_version 高于 v1：只读或拒绝，绝不写入（ADR 0008 §5.2）。
+# schema_version 高于 v1：只读或拒绝，绝不写入（ADR 0008 §4）。
 schema_version = 99
 
 [model]

@@ -1,4 +1,4 @@
-//! ADR 0021 M1 #11 (Markdown): export → edit → import; a revision mismatch is a conflict and
+//! ADR 0021 #11 (Markdown): export → edit → import; a revision mismatch is a conflict and
 //! writes nothing; a malformed block is refused with its position; a new id becomes an
 //! `Import` record.
 

@@ -66,7 +66,7 @@ pub fn provider_in_model_hint(
 /// Where session files live: an explicit `--session-dir` wins, then `RADIAN_SESSION_DIR`, then
 /// the user's data directory (ADR 0020: `~/.radian/sessions`, or `$RADIAN_HOME/sessions`).
 ///
-/// Sessions are durable records, not a cache (ADR 0013 decision 4). The default directory is
+/// Sessions are durable records, not a cache (ADR 0013 T4). The default directory is
 /// created owner-only on first use and the sandbox denies read on it (ADR 0020 decision 3).
 pub fn session_dir(flag: Option<&Path>) -> Result<PathBuf, String> {
     session_dir_with(
@@ -320,10 +320,10 @@ pub struct LeadSetup {
     /// Rebuilds the profile and sandbox for a run-time tier switch (ADR 0038 slice 2). `None`
     /// for a host with no `/access` command (the CLI): a switch is then refused.
     pub access_builder: Option<AccessBuilder>,
-    /// The `SessionCreated.parent` a derived session records (ADR 0043 decision 1a's subagent
+    /// The `SessionCreated.parent` a derived session records (ADR 0043 decision 2's subagent
     /// child). `None` for an ordinary host-opened session.
     pub parent: Option<radian_session::ForkParent>,
-    /// `subagent` (ADR 0043 decision 1a): the host's launch parameters for a child `radian
+    /// `subagent` (ADR 0043 decision 2): the host's launch parameters for a child `radian
     /// exec`. `None` leaves the tool unmounted.
     pub subagent: Option<SubagentParts>,
     /// Only these built-in tools are mounted (`None` mounts every one the host has). The

@@ -289,7 +289,7 @@ pub struct Cli {
     #[arg(long)]
     no_trust: bool,
 
-    /// Hidden: the parent session of a derived session (ADR 0043 decision 1a's subagent child).
+    /// Hidden: the parent session of a derived session (ADR 0043 decision 2's subagent child).
     /// Written to `SessionCreated.parent` with `relation = "subagent"`; a session with this
     /// parent never mounts `subagent` itself (depth 1).
     #[arg(long, value_name = "SESSION_ID", hide = true)]
@@ -343,7 +343,7 @@ where
 /// Runs the parsed CLI to completion and returns the exit code: the runtime is built here and
 /// torn down with a bound, exactly as the headless command always did.
 pub fn run_blocking(cli: Cli) -> i32 {
-    // ADR 0043 decision 1a (fix round 1 A): a subagent child receives its parent's `--header`
+    // ADR 0043 decision 2 (fix round 1 A): a subagent child receives its parent's `--header`
     // values in `RADIAN_CHILD_HEADERS`. They are read — and the variable is removed from this
     // process's environment — **here**, before the runtime below is built: `remove_var` may only
     // run while the process has one thread, and the multi-thread runtime is what starts the

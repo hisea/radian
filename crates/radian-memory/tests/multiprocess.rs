@@ -1,4 +1,4 @@
-//! ADR 0021 M1 #3 (multi-writer): two real processes write the same scope; the single-writer
+//! ADR 0021 #3 (multi-writer): two real processes write the same scope; the single-writer
 //! lock serializes them, so a concurrent create of one key yields exactly one `KeyConflict`
 //! and a concurrent revise yields exactly one `RevisionConflict`, with no lost updates.
 //!

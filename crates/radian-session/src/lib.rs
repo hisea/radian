@@ -7,7 +7,7 @@
 //!   LF-terminated lines, and an fsync at the ADR 0040 sync points (a group of records becomes
 //!   durable together, at a boundary or before an external side effect, not on every append).
 //!   One file allows exactly one writer (kernel `flock`), and opening an existing file for
-//!   append first truncates any torn tail (ADR 0006 §3.2).
+//!   append first truncates any torn tail (ADR 0006 §2.2).
 //! - [`Session`] is the streaming reader implementing the unknown-content policy of the ADR
 //!   (§7): unknown optional fields are ignored, unknown non-critical events are skipped and
 //!   reported, unknown critical events refuse the whole file, higher `schema_version` files
@@ -63,14 +63,14 @@ pub use runtime::{
     RuntimeEvent, TurnOutcome, TurnReason,
 };
 pub use tail::{JournalTail, TailUpdate};
-/// ADR 0043 D14: whether a live session process holds the file's writer lock (the reader-side
+/// ADR 0043 decision 7: whether a live session process holds the file's writer lock (the reader-side
 /// probe `radian attach` uses).
 pub use writer::{
     ForkParent, SessionCreatedData, SessionJournal, WriteError, now_utc, session_is_live,
 };
 
 /// Fault-injection seams, compiled only with the `testing` feature. Off by default so a
-/// production build cannot arm them (ADR 0019 §7's failed-abort-write path).
+/// production build cannot arm them (ADR 0019's failed-abort-write path).
 #[cfg(feature = "testing")]
 pub use writer::{fail_next_aborted_write, fail_next_write, lock_retry_attempts};
 

@@ -1,4 +1,4 @@
-//! ADR 0006 §15-3/6: torn tails and crash recovery, plus the single-writer guarantee.
+//! ADR 0006-3/6: torn tails and crash recovery, plus the single-writer guarantee.
 //!
 //! The crash test spawns this same test binary (the `#[test]` functions whose names start
 //! with `child_` are no-ops unless the parent sets an env var), has the child write a

@@ -1,4 +1,4 @@
-//! The format-preserving edit both config write-backs share (ADR 0008 §5.4).
+//! The format-preserving edit both config write-backs share (ADR 0008 §4).
 //!
 //! `/theme` and the first-launch model choice both change a few keys through `toml_edit` so
 //! every other byte — comments, blank lines, key order, unknown fields — is preserved. The
@@ -16,7 +16,7 @@ use super::{Config, SUPPORTED_SCHEMA_VERSION, parse};
 /// Why a preserving edit did not happen. Every variant leaves the file untouched.
 #[derive(Debug, thiserror::Error)]
 pub enum PreserveError {
-    /// The file was read read-only (a `schema_version` newer than this build, ADR 0008 §5.2).
+    /// The file was read read-only (a `schema_version` newer than this build, ADR 0008 §4).
     #[error(
         "{path}: the configuration file is newer than the supported v{supported}; \
          applies to this session only and the file is not written"

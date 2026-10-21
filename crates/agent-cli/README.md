@@ -54,7 +54,7 @@ creates or modifies a session file (`.jsonl`).
 - **`--export <id>`**: the session as Markdown on stdout by default;
   `--format json` gives the raw event document. `--out FILE` writes it to a file instead
   (refused if the file exists, unless `--force`).
-  - **Redaction cannot be turned off** (ADR 0013 decision 3): this process's key (from
+  - **Redaction cannot be turned off** (ADR 0013 T3): this process's key (from
     `--api-key-env`) and every `--header` value are redacted, on top of the always-on
     `sk-`/`Bearer`/`Authorization` patterns. Opting in to extra content never weakens it.
   - **Reasoning and raw provider payloads are omitted by default** (ADR 0014, ADR 0013);
@@ -252,7 +252,7 @@ is set), `model.api_key` (a `{ from = "env", name = "…" }` reference, equivale
 wired yet; the startup names every ignored key (never a value).
 
 A secret **value** is refused: a bare string on `api_key`/`token`/… and a secret-looking string
-anywhere (the ADR 0008 §4.2 heuristic) both fail startup, and the message names the key path
+anywhere (the ADR 0008 §3.2 heuristic) both fail startup, and the message names the key path
 without echoing the value. `schema_version` is required; a newer one is read read-only with a
 warning, an older one is refused. See the root `README.md` for the example file.
 
@@ -275,7 +275,7 @@ radian config import-pi --from ~/.pi/agent --write              # save it (refus
 - `--write` writes to the file `--config`/`RADIAN_CONFIG` names, else
   `~/.radian/config/config.toml`, atomically and owner-only (`0600`, directory `0700`), after
   validating the draft with the same reader the host uses. **An existing file is refused**
-  (exit 1) — this version has no faithful write-back (ADR 0008 §5.4).
+  (exit 1) — this version has no faithful write-back (ADR 0008 §4).
 - **Credentials are never migrated.** `auth.json` is never read (not even `stat`ed), so an
   unreadable credential file cannot fail the run. A `$NAME`/`${NAME}` value becomes
   `{ from = "env", name = "NAME" }`; a **literal** value is not copied — the draft references a
@@ -335,4 +335,4 @@ radian config import-pi --from ~/.pi/agent --write              # save it (refus
 
 The startup lines state the profile, the backend and what it actually enforces. They never
 claim credential isolation: the macOS backend leaves `mach-lookup` open, so the IPC boundary
-is not tightened (ADR 0012 decision 4). MCP server processes are not sandboxed by this build.
+is not tightened (ADR 0012 P4). MCP server processes are not sandboxed by this build.

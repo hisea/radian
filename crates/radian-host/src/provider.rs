@@ -320,7 +320,7 @@ pub struct NamedProvider {
     pub reasoning_replay: Option<ReasoningReplayOverride>,
 }
 
-/// A `[providers.<id>]` override for the catalog's reasoning replay (ADR 0014 Q2):
+/// A `[providers.<id>]` override for the catalog's reasoning replay (ADR 0014 R5):
 /// `reasoning_replay = "<field>"` or `reasoning_replay = false`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReasoningReplayOverride {
@@ -345,7 +345,7 @@ pub enum NamedSource {
 pub struct ProviderDecl {
     pub kind: String,
     pub base_url: String,
-    /// `reasoning_replay` (ADR 0014 Q2): a field name, or `false` to switch replay
+    /// `reasoning_replay` (ADR 0014 R5): a field name, or `false` to switch replay
     /// off. `None` lets the catalog decide.
     pub reasoning_replay: Option<ReasoningReplayOverride>,
 }

@@ -342,7 +342,7 @@ fn read_only() -> Vec<Rule> {
 /// Fixed `allow` in every tier (ADR 0024 Q6 and ADR 0025 S3): `ask_user` writes nothing and
 /// runs nothing, and `skill` only reads a `SKILL.md` that discovery already accepted — a skill
 /// **is not a permission**, so reading one never prompts and grants nothing. Both still go
-/// through the ordinary hook path. `subagent` (ADR 0043 decision 1a) is here for a different
+/// through the ordinary hook path. `subagent` (ADR 0043 decision 2) is here for a different
 /// reason: the tool itself writes no file and runs no workspace command; it starts a child
 /// session whose own tier and approval decide everything it may do. A parent prompt would only
 /// add a second gate that a headless parent cannot answer. `goal` (ADR 0047) is here for the
@@ -504,7 +504,7 @@ mod tests {
         }
     }
 
-    /// ADR 0043 decision 1a: `subagent` writes nothing and runs no workspace command itself;
+    /// ADR 0043 decision 2: `subagent` writes nothing and runs no workspace command itself;
     /// the child's own tier and approval govern what it does. Every tier allows it, so a
     /// headless parent that cannot answer an `ask` can still use it. Removing the rule would
     /// make it fall through to the default `ask` and be denied without a terminal.

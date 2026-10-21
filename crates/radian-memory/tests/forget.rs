@@ -1,4 +1,4 @@
-//! ADR 0021 M1 #5/#7 (Forget and Purge): a forgotten record disappears from every view, does
+//! ADR 0021 #5/#7 (Forget and Purge): a forgotten record disappears from every view, does
 //! not come back on replay, and Purge physically removes its content atomically.
 
 mod common;

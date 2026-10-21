@@ -1,4 +1,4 @@
-//! Redaction (ADR 0013 decisions 3/T4, ADR 0026): the values
+//! Redaction (ADR 0013 T3/T4, ADR 0026): the values
 //! that must never appear in anything this program prints or writes — every key in
 //! `auth.json`, every `--header` value, and every value registered since startup.
 //!
@@ -7,7 +7,7 @@
 use super::Cli;
 
 /// The values that must never appear in an export: the keys in `auth.json` and every
-/// `--header` value. Redaction itself is not optional (ADR 0013 decision 3). An export does
+/// `--header` value. Redaction itself is not optional (ADR 0013 T3). An export does
 /// not know which provider wrote the session, so every usable key in the store is redacted —
 /// and, through [`redaction_secrets`], every value registered since startup (a `chatgpt` token
 /// refreshed mid-session, ADR 0026).

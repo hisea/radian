@@ -12,7 +12,7 @@ or the shape of the config file (ADR 0008).
 
 `SessionJournal` is the `TranscriptJournal` implementation. `create(path, session_id, created)`
 takes the exclusive lock, truncates any torn tail and writes `SessionCreated` at seq 0;
-`resume(path, session_id)` opens an existing file, truncates the torn tail (ADR 0006 §3.2),
+`resume(path, session_id)` opens an existing file, truncates the torn tail (ADR 0006 §2.2),
 verifies `schema_version`/`session_id` **from the file**, and continues `seq` after the last
 complete line. `append_runtime_event(RuntimeEvent)` writes a runtime-owned event through the
 same lock, `seq` counter and sync-point decision (ADR 0040); `next_seq()`, `session_id()`,
@@ -84,7 +84,7 @@ payloads are not indexed), with `LIKE` metacharacters escaped.
 
 `export_json` / `export_markdown` (and the `*_to` file variants) render a session with
 non-optional redaction. `ExportOptions` has two per-export opt-ins, both off by default:
-`include_provider_payload` (ADR 0013 decision 3) and `include_reasoning` (ADR 0014).
+`include_provider_payload` (ADR 0013 T3) and `include_reasoning` (ADR 0014).
 `with_secret` adds an always-redacted string; there is deliberately **no** switch that turns
 redaction off. `redact_value` / `redact_text` are public because a host that prints its own
 diagnostics must redact the same way.
@@ -153,19 +153,19 @@ Mutation records: `MUTATIONS.md` (writer/reader/crash/fuzz/privacy) and `MUTATIO
   The group-commit tests (`tests/group_commit.rs`, `radian-runtime/tests/group_commit.rs`)
   instead pin *when* the fsync happens — the per-step count and the crash-at-every-record
   traversal fail if a sync point stops syncing. The measured cost it buys is ~4 ms per fsync
-  on this machine (ADR 0006 §15.2; the per-step numbers are in `benchmarks/perf-baseline.md`).
+  on this machine (ADR 0006 §10; the per-step numbers are in `benchmarks/perf-baseline.md`).
 - **Space cost, accepted:** `ToolExecutionSettled` carries the full result and the following
   `MessageAppended` carries the same result message again, so a large tool output is stored
-  **twice** (ADR 0006 §15.1). v1 does not change this.
+  **twice** (ADR 0006). v1 does not change this.
 - **A session's memory grows with its length.** `Session::open` retains every event; only the
   index path (`scan_stream`) streams without retaining.
 - **Line length:** a fixed internal cap (64 MiB, `MAX_LINE_BYTES` in `reader.rs`) refuses an
-  oversized line instead of growing the buffer. ADR 0006 §16 still lists the suggested 16/64 MiB
+  oversized line instead of growing the buffer. ADR 0006 §2.1 still lists the suggested 16/64 MiB
   values as **not performance-tested**.
 - **Not in v1:** cross-process locking beyond `flock` is not designed here; `ts` clock skew is
-  not normalised (order is `seq` only); GB-scale files are not measured (ADR 0006 §16).
+  not normalised (order is `seq` only); GB-scale files are not measured (ADR 0006 §2.1).
 - **`Session::skipped` and `Session::recovered_replacements` are different things** and are
-  deliberately kept apart: `skipped` is the ADR 0006 §7b list of unknown events and the index
+  deliberately kept apart: `skipped` is the ADR 0006 §6 list of unknown events and the index
   derives `skipped_count` from it, so a short replacement is never smuggled in there.
 - **A short replacement that later happens to be completed** by a normal append is
   indistinguishable from a complete replacement and is not reported; `replay` only requires

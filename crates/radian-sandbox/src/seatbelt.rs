@@ -150,7 +150,7 @@ impl SandboxBackend for Seatbelt {
 
 /// The SBPL profile for a policy. `(deny default)` with selective allows; the workspace is
 /// the only writable subtree, and deeper `deny` rules carve read-only and no-read holes out
-/// of it. `mach-lookup` is deliberately wide (ADR 0012 decision 4): the IPC boundary
+/// of it. `mach-lookup` is deliberately wide (ADR 0012 P4): the IPC boundary
 /// is **not** tightened, and no text may claim credential isolation because of this profile.
 pub(crate) fn profile_text(policy: &SandboxPolicy) -> String {
     let mut profile = String::new();

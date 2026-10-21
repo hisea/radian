@@ -38,7 +38,7 @@ radian-sandbox = { path = "../radian-sandbox" }
 unicode-width = "0.2.2"
 # Reused for the owner-only file/directory creation (ADR 0013) in `diagnostics`.
 radian-session = { path = "../radian-session" }
-# The journal timestamps are RFC3339 strings; the stall check (ADR 0030 R5) parses them. The
+# The journal timestamps are RFC3339 strings; the stall check (ADR 0006 §2) parses them. The
 # same `chrono` the session writer already uses to format them, so no new crate enters the tree.
 chrono = "0.4"
 # The model catalog fetches over HTTP (ADR 0018); the same client the adapters use, so no new
@@ -58,7 +58,7 @@ futures-util.workspace = true
 # `net`/`io-util`: the ChatGPT OAuth login's one-shot loopback callback listener (ADR 0026
 # slice ①) is production code, not a test fixture, so these two features are on
 # unconditionally (the mock-server crates only need them under `testing`).
-# `process`: ADR 0043 decision 1a's `subagent` tool starts a child `radian exec`.
+# `process`: ADR 0043 decision 2's `subagent` tool starts a child `radian exec`.
 # `time`: the footer command runner bounds each run (`tokio::time::timeout`) and spaces out
 # its `ETXTBSY` spawn retries (`tokio::time::sleep`).
 tokio = { workspace = true, features = ["net", "io-util", "process", "time"] }

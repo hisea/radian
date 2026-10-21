@@ -1,4 +1,4 @@
-# v1 加上未知字段：读取方解释时忽略，但写回必须保真（ADR 0008 §5.3/§5.4）。
+# v1 加上未知字段：读取方解释时忽略，但写回必须保真（ADR 0008 §4）。
 schema_version = 1
 
 future_top_level = { feature = true }

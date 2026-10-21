@@ -174,7 +174,7 @@ fn only_a_nonzero_counter_is_billable() {
 }
 
 /// The mark round-trips through the v1 JSON, and a record without it still reads: the journal
-/// needs no schema bump (ADR 0007; ADR 0006 §7a's "unknown optional field" rule in
+/// needs no schema bump (ADR 0007; ADR 0006 §6's "unknown optional field" rule in
 /// reverse — an old reader ignores the new key, a new reader reads an old file).
 #[test]
 fn the_cache_semantics_mark_round_trips_and_is_optional() {

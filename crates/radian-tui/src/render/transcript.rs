@@ -332,7 +332,7 @@ fn role_style(role: crate::tools::LineRole, style: Style, theme: &Theme) -> Styl
         crate::tools::LineRole::DiffContext => theme.diff_context,
         crate::tools::LineRole::DiffHunk => theme.diff_hunk,
         crate::tools::LineRole::Frame => theme.frame,
-        // The `ask_user` block (ADR 0024 R1): the prompt is the emphasis, a
+        // The `ask_user` block (ADR 0024 Q7): the prompt is the emphasis, a
         // description/note is weak, the box is structural.
         crate::tools::LineRole::Accent => theme.notice_label,
         crate::tools::LineRole::Muted => theme.notice_body,

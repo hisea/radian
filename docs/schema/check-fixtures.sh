@@ -244,7 +244,7 @@ EXPECT = {
         outcome="accept",
         events=1,
         skips=[],
-        # (文件路径, [(导入路径, 字节数)]) —— ADR 0036 C2：快照列出每份文件的导入。
+        # (文件路径, [(导入路径, 字节数)]) —— ADR 0036：快照列出每份文件的导入。
         context_imports=[
             (
                 "/work/example/CLAUDE.md",
@@ -448,7 +448,7 @@ def check_fixture(name, exp):
                     raise Corruption(f"{name}: line {i}: SessionCreated.parent 不是对象")
                 if not isinstance(parent.get("session_id"), str) or not parent["session_id"]:
                     raise Corruption(f"{name}: line {i}: parent.session_id 必须是非空字符串")
-                # ADR 0030 O2: `relation` is optional; an old `parent` without one reads as
+                # ADR 0006 §4: `relation` is optional; an old `parent` without one reads as
                 # "fork". When present it must be a non-empty string.
                 if "relation" in parent and (
                     not isinstance(parent["relation"], str) or not parent["relation"]
@@ -590,7 +590,7 @@ def check_fixture(name, exp):
         if forked.get("child_session_id") != sid or forked.get("parent_seq") != seq:
             raise Corruption(f"{name}: SessionForked {forked!r} != 期望")
     if "context_imports" in exp:
-        # ADR 0036 C2：`config_snapshot.context.files[]` 的导入是可选的加法字段——
+        # ADR 0036：`config_snapshot.context.files[]` 的导入是可选的加法字段——
         # 有导入的文件带 `imports: [{path, bytes}]`，没有的文件没有该键。
         created = next(e["data"] for e in events if e["event"] == "SessionCreated")
         files = created["config_snapshot"]["context"]["files"]

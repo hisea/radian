@@ -46,7 +46,7 @@ pub struct ForkParent {
 }
 
 /// The `relation` of a `parent` line written before ADR 0043 added the field: an old line read
-/// by a new reader is a fork (ADR 0006 §7a).
+/// by a new reader is a fork (ADR 0006 §6).
 fn default_relation() -> String {
     "fork".to_owned()
 }
@@ -61,7 +61,7 @@ impl ForkParent {
         }
     }
 
-    /// A one-shot subagent child's parent (ADR 0043 decision 1a): the parent session and the
+    /// A one-shot subagent child's parent (ADR 0043 decision 2): the parent session and the
     /// seq it was spawned at (`0` when the spawning call does not know a boundary).
     pub fn subagent(session_id: impl Into<String>, seq: u64) -> Self {
         Self {
@@ -71,7 +71,7 @@ impl ForkParent {
         }
     }
 
-    /// The relation. A `parent` without one reads back as `"fork"` (ADR 0006 §7a).
+    /// The relation. A `parent` without one reads back as `"fork"` (ADR 0006 §6).
     pub fn relation(&self) -> &str {
         &self.relation
     }
@@ -307,7 +307,7 @@ impl SessionJournal {
     }
 
     /// Opens an existing session file for appending: takes the exclusive lock, truncates
-    /// the torn tail (ADR 0006 §3.2), verifies `schema_version`/`session_id` from the
+    /// the torn tail (ADR 0006 §2.2), verifies `schema_version`/`session_id` from the
     /// file itself, and continues `seq` after the last complete line. This is the entry a
     /// host uses for repair write-back (ADR 0002 E9) and for resuming after a crash.
     pub fn resume(path: impl AsRef<Path>, session_id: &str) -> Result<Self, WriteError> {
@@ -651,7 +651,7 @@ impl ResumeLock {
             }
             .into());
         }
-        // ADR 0019 §6/§7: validate before touching the file. `Session::open` ignores a torn
+        // ADR 0019: validate before touching the file. `Session::open` ignores a torn
         // tail and folds the committed prefix, so a corrupt file is refused with its bytes
         // exactly as they were — the torn tail is not truncated first. An already-aborted
         // segment is closed, so a second `resume` does not repeat the abort.
@@ -661,7 +661,7 @@ impl ResumeLock {
             .rev()
             .find(|segment| segment.end == agent_core::ReplacementEnd::EndOfFile)
             .map(|segment| segment.revision);
-        // Only now that the file is known sound is the torn tail (ADR 0006 §3.2) removed:
+        // Only now that the file is known sound is the torn tail (ADR 0006 §2.2) removed:
         // everything past the committed prefix of the parse we made under this lock.
         let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
         if size > parsed.committed_bytes() {
@@ -701,7 +701,7 @@ fn raw_data<D: Serialize>(data: &D) -> serde_json::Result<Box<RawValue>> {
 }
 
 /// Picks the next `seq`, renders the envelope and writes it — all while the caller holds the
-/// writer lock (ADR 0006 §15.3). Every line is `write`+`flush`ed; only a sync point
+/// writer lock (ADR 0006 §10). Every line is `write`+`flush`ed; only a sync point
 /// (`must_sync`, ADR 0040 decision 2) is `fsync`ed, and only then does the group of records
 /// written since the last fsync become durable. The counter advances after a successful write:
 /// `write`+`flush` for a non-sync record, `write`+`flush`+`fsync` for a sync record. A failed
@@ -851,7 +851,7 @@ pub fn fail_next_write(session_id: &str, event: &'static str) {
         .push((session_id.to_owned(), event));
 }
 
-/// Test-only fault seam (ADR 0019 §7): the next `TranscriptReplacementAborted` write in the
+/// Test-only fault seam (ADR 0019): the next `TranscriptReplacementAborted` write in the
 /// session `session_id` fails.
 #[cfg(feature = "testing")]
 pub fn fail_next_aborted_write(session_id: &str) {
@@ -1197,7 +1197,7 @@ pub fn now_utc() -> String {
 }
 
 /// Whether a live writer holds the session file's exclusive lock — i.e. a session process is
-/// running (ADR 0043 D14: `radian attach` uses this to tell a live session's open tool calls
+/// running (ADR 0043 decision 7: `radian attach` uses this to tell a live session's open tool calls
 /// from a crash's synthesised results).
 ///
 /// Read-only and non-blocking: the file is opened for reading and a **shared** lock is tried.
@@ -1266,7 +1266,7 @@ fn scan_lines(file: &mut File, path: &Path) -> Result<Option<u64>, WriteError> {
                 let raw = &line[..line.len() - 1];
                 // Every LF-terminated line must parse, including an empty one. A line that
                 // fails to parse is corruption, and the append path must refuse it too
-                // (ADR 0006 §3.2-3). Skipping an empty line here let `resume` append after
+                // (ADR 0006 §2.2-3). Skipping an empty line here let `resume` append after
                 // corruption and produce a file the reader then refuses forever.
                 lineno += 1;
                 let envelope: ScanEnvelope =
@@ -1452,7 +1452,7 @@ mod tests {
         }
     }
 
-    /// The liveness probe (ADR 0043 D14): a `SessionJournal` holds the writer's exclusive lock
+    /// The liveness probe (ADR 0043 decision 7): a `SessionJournal` holds the writer's exclusive lock
     /// for its lifetime, so the probe reports live while it exists and not-live after it is
     /// dropped. The probe takes only a **shared** lock and releases it at once, so it never
     /// blocks the writer and repeated probes agree.

@@ -4,8 +4,8 @@
 //! never modified.
 //!
 //! Every column except `sessions.path` and `sessions.indexed_at` is derived by the same
-//! [`scan_stream`] the reader uses (ADR 0006 §10.1), so the LF-commit / torn-tail rule
-//! (ADR 0006 §3.2) is shared by construction: a torn tail is neither indexed nor counted.
+//! [`scan_stream`] the reader uses (ADR 0006 §8), so the LF-commit / torn-tail rule
+//! (ADR 0006 §2.2) is shared by construction: a torn tail is neither indexed nor counted.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -72,7 +72,7 @@ pub struct SessionSummary {
     pub last_ts: Option<String>,
     pub event_count: u64,
     pub skipped_count: u64,
-    /// The committed prefix length of the file (ADR 0006 §3.2).
+    /// The committed prefix length of the file (ADR 0006 §2.2).
     pub file_bytes: u64,
 }
 

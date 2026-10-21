@@ -1,4 +1,4 @@
-//! Escaping for prompt frames (ADR 0036 C2 supplement).
+//! Escaping for prompt frames (ADR 0036 supplement).
 //!
 //! A file from the workspace is untrusted input. When it is placed inside a tag
 //! (`<project_instructions path="…">…</project_instructions>`, a skill's `<skill …>…</skill>`),

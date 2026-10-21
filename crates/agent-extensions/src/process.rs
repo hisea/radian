@@ -87,7 +87,7 @@ impl ServerProcess {
             }
         }
         command.envs(config.env.iter().map(|(k, v)| (k, v)));
-        // ADR 0043 decision 1a (fix round 1 A): a subagent child gets its parent's `--header`
+        // ADR 0043 decision 2 (fix round 1 A): a subagent child gets its parent's `--header`
         // values in `RADIAN_CHILD_HEADERS` and removes the variable from its own environment at
         // startup, so this is belt and braces — a server must not see that secret even if a
         // config names the variable in `inherit_env`. The name is `radian_host::headers::

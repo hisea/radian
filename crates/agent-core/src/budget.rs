@@ -54,7 +54,7 @@ impl ContextBudget {
         self
     }
 
-    /// Count the assistant `reasoning` field in the estimate (ADR 0014 Q4): the host
+    /// Count the assistant `reasoning` field in the estimate (ADR 0014 R6): the host
     /// sets this when the route's `reasoning_replay` is on, because the field is then really
     /// sent and really occupies input tokens.
     pub fn with_reasoning(mut self, count: bool) -> Self {
@@ -144,7 +144,7 @@ impl RequestSize {
 /// Before this, a host that put a large `origin` on a message (ADR 0018's verbatim
 /// user messages) inflated the estimate for content the provider never saw.
 ///
-/// **Revision (ADR 0014 Q4)**: an assistant message's `reasoning` is likewise
+/// **Revision (ADR 0014 R6)**: an assistant message's `reasoning` is likewise
 /// subtracted unless the caller passes `count_reasoning` — the provider only receives it when
 /// the model requires replay. `request_size` is the default (do not count); the host uses
 /// [`request_size_with`] with the route's setting.
@@ -152,7 +152,7 @@ pub fn request_size(request: &ModelRequest) -> RequestSize {
     request_size_with(request, false)
 }
 
-/// [`request_size`] with the reasoning-count switch (ADR 0014 Q4).
+/// [`request_size`] with the reasoning-count switch (ADR 0014 R6).
 pub fn request_size_with(request: &ModelRequest, count_reasoning: bool) -> RequestSize {
     let mut size = RequestSize::default();
     if let Some(system) = &request.system_prompt {
@@ -170,7 +170,7 @@ pub fn request_size_with(request: &ModelRequest, count_reasoning: bool) -> Reque
                 size.remove_str(inner);
             }
         }
-        // ADR 0014 Q4: the provider only sees `reasoning` when the model requires it
+        // ADR 0014 R6: the provider only sees `reasoning` when the model requires it
         // replayed, so subtract the field unless the caller says the model does.
         if !count_reasoning
             && let crate::message::Message::Assistant { reasoning, .. } = message
@@ -194,7 +194,7 @@ pub fn estimate_tokens(request: &ModelRequest, bytes_per_token: u32) -> u64 {
     request_size(request).tokens(bytes_per_token)
 }
 
-/// [`estimate_tokens`] with the reasoning-count switch (ADR 0014 Q4).
+/// [`estimate_tokens`] with the reasoning-count switch (ADR 0014 R6).
 pub fn estimate_tokens_with(
     request: &ModelRequest,
     bytes_per_token: u32,

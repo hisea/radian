@@ -35,7 +35,7 @@ Base `f552250` · one-shot worktree `/tmp/small-mut` · `--no-fail-fast`；变�
 
 M7 同时被单元测试和两个宿主的用法错误测试抓住；三者都断言退出码/错误，而不是只看 stdout。
 
-## ADR 0013 决定 4：诊断目录（2026-10-13）
+## ADR 0013 T4：诊断目录（2026-10-13）
 
 Base: `f6fda6f` · 一次性检出 `/tmp/diag-mut`（从 HEAD 建，做完删掉）· 独立 `CARGO_TARGET_DIR` ·
 每个变异用 `--no-fail-fast` 跑，然后 `git checkout -- .`；`git status --short` 为空。
@@ -82,7 +82,7 @@ M7 里的单元测试 `window_tokens_is_min_of_input_and_context_and_zero_is_unk
 `the_input_budget_is_min_of_input_and_context_minus_the_reservation`；目录 `output` 只做警告、
 不参与 `R`。
 
-## ADR 0021 M1 第二片：项目身份与 `MemoryService`（2026-10-13）
+## ADR 0021 第二片：项目身份与 `MemoryService`（2026-10-13）
 
 Base `5d80946` · 一次性 worktree `/tmp/memsvc-mut`（从 HEAD 建，做完删掉）· **独立 `CARGO_TARGET_DIR`**
 · 每个变异跑 `cargo test -p radian-host memory` 与 `cargo test -p agent-cli --test cli memory`
@@ -102,7 +102,7 @@ Base `5d80946` · 一次性 worktree `/tmp/memsvc-mut`（从 HEAD 建，做完�
 
 **评审补充（合并时，2026-10-13）**：原实现在没有 `commondir` 时取 gitdir 的祖父目录，真实 submodule（`<super>/.git/modules/<name>`，git 不为它写 `commondir`）因此被解析成上层仓库的 `.git`，两者静默共享一个项目。改为 git 自己的规则：没有 `commondir` 时 gitdir 即 common dir。变异"恢复祖父回退"由 `a_submodule_is_its_own_project_not_the_superprojects` 与 `a_missing_commondir_means_the_gitdir_is_the_common_dir` 抓住。
 
-## ADR 0021 M1 第三片：agent 工具与注入（2026-10-13）
+## ADR 0021 第三片：agent 工具与注入（2026-10-13）
 
 Base `2d01d9b` · 一次性 worktree `/tmp/memsvcb-mut`（从 HEAD 建，做完删掉）· **独立
 `CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p radian-host --no-fail-fast`（M9 跑
@@ -127,7 +127,7 @@ Base `2d01d9b` · 一次性 worktree `/tmp/memsvcb-mut`（从 HEAD 建，做完�
 
 **评审补充（合并时，2026-10-13）**：注入块原样拼接记录内容，agent 写的记录可用换行伪造"user or confirmed"段标题，把自己抬进可信段。改为把内容写成一行（换行转义为 `\n`，反斜杠为 `\\`）。变异"恢复原样拼接"由 `memory::injection::tests::agent_content_cannot_forge_the_trusted_heading` 抓住。
 
-## ADR 0021 M1 第四片：共享命令的确认（2026-10-13）
+## ADR 0021 第四片：共享命令的确认（2026-10-13）
 
 Base `4bf767d` · 一次性 worktree `/tmp/memtui-mut` · 独立 `CARGO_TARGET_DIR` ·
 `git checkout --` 还原。
@@ -594,7 +594,7 @@ Base `658b882` · 一次性 worktree `/tmp/radian-pl-mut`（detached，跑完删
 2/2 抓住。SP-S2 在 macOS 上运行时 pty 用例抓不住（这台机器只会走 `macos-seatbelt` 分支），
 所以词组按平台分别断言在 `describe` 的单测里（同一测试也覆盖未知后端按真名显示）。
 
-## context-escape（上下文文件闭合标签/属性转义，ADR 0036 C2 补充，2026-10-15）
+## context-escape（上下文文件闭合标签/属性转义，ADR 0036 补充，2026-10-15）
 
 Base `65ea1ed` · 一次性 worktree `/tmp/radian-ce-mut`，还原后 `git status --short` 为空。
 
@@ -864,7 +864,7 @@ SG-M3 证明它们确实区分「关掉命令」与「没关」。
 失败，SG-F1-M1 的守卫那条就是证明。
 
 **如实记录（测试的触发条件）**：`git status` 只在**大小相同**的 stat-dirty 文件上才哈希内容、从而跑 clean filter；内容大小不同时 git 直接按 stat 判为改动，不跑 filter。所以 M1 的页脚行为测试用「与 index blob 同大小」的改动（`one\n` → `two\n`）。第一次写测试时用了不同大小（`one\ntwo\n`），SG-F1-M1 的行为测试假绿（只有守卫抓住）；改成同大小后行为测试也抓住。（M2、M3 删除前也是同大小改动；两行随 `git_diff` 工具一并删除。）
-## ADR 0030 切片 7 part a 复核修订 1：`tools` 卸载与 `skills` 允许名单（2026-10-16）
+## ADR 0043 复核修订 1：`tools` 卸载与 `skills` 允许名单（2026-10-16）
 
 工作树 `.radian-worktrees/orch-s7a`（分支 `oc/orch-s7a`，基 `5625f6f`）。每条变异就地改，跑单个测试，
 再从 `.radian/scratch/mut/` 的副本 `cp` 还原并 `cmp` 确认；跑完 `git status --short` 只剩源码改动。跑法
@@ -917,7 +917,7 @@ either one alone changes no output on any sample: the first round of this check 
 route is stopped by the label text of the box in its way. L4 is the observable form of the same
 requirement: the route then starts inside the box, the layout refuses it, and the back-edge
 snapshot sees the vendor's drawing instead of the layout's.
-## ADR 0030 片 8：进程控制口（Unix socket、JSON lines，2026-10-16）
+## ADR 0043 decision 1：进程控制口（Unix socket、JSON lines，2026-10-16）
 
 Base `a3eb856`（分支 `oc/orch-s8`）· 就地改 `src/control.rs`，每次从 `/tmp/control.rs.bak`
 `cp` 还原并用 `cmp` 确认逐字节相同；每个变异跑
@@ -967,7 +967,7 @@ pre-mutation file in `.radian/scratch/mutations/` and confirmed byte-identical w
 | M1 | `originator` must be `radian`, never Codex's own value | `oauth_chatgpt::ORIGINATOR` changed to `"codex_cli_rs"` | ✅ FAILED | `provider::tests::the_chatgpt_descriptor_is_registered_with_responses_models_and_static_headers_only` (the descriptor's static headers) |
 | M2 | every request carries `chatgpt-account-id` | `ChatGptModel::complete` drops the `.with_header("chatgpt-account-id", …)` call | ✅ FAILED | `chatgpt_headers::headers_carry_originator_radian_and_the_account_id_from_the_token` (mock-recorded header is `None`) |
 | M3 | the usage contributor only polls while routed to `chatgpt` | `chatgpt_usage_active` changed to always return `true` | ✅ FAILED | `cli::chatgpt_usage_gate_tests::the_gate_is_active_only_for_chatgpt` |
-| M4 | a task's own route (ADR 0030 O11), not the lead's, decides its model | the end-to-end test's model factory changed to ignore `agent_model` and always build the lead's default (chatgpt) model | ✅ FAILED | `chatgpt_lead_task::a_chatgpt_lead_default_and_a_deepseek_task_route_requests_to_the_right_mock` (the routed task's outcome becomes `Failed`, since the chatgpt mock's one scripted reply is already consumed by the default-route task) |
+| M4 | a task's own route (ADR 0043), not the lead's, decides its model | the end-to-end test's model factory changed to ignore `agent_model` and always build the lead's default (chatgpt) model | ✅ FAILED | `chatgpt_lead_task::a_chatgpt_lead_default_and_a_deepseek_task_route_requests_to_the_right_mock` (the routed task's outcome becomes `Failed`, since the chatgpt mock's one scripted reply is already consumed by the default-route task) |
 
 4/4 caught — exactly the task brief's list. M4 mutates the *test's own* model-factory
 closure rather than `radian-tui/src/cli.rs`'s real `task_model`: that closure is private to
@@ -987,7 +987,7 @@ permission allow 名单）全部删除；`radian-tui` 改为直接依赖 vendore
 
 新渲染器的四个变异记在 `crates/radian-tui/MUTATIONS.md` 的「ADR 0042」一节；上游文件的保真度
 （决定 2）由 `third_party/grok-mermaid/tests/pristine.rs` 自己查。
-## ADR 0030 片 9：项目编排配置、信任门、快照、沙箱 verify（2026-10-16）
+## ADR 0043：项目编排配置、信任门、快照、沙箱 verify（2026-10-16）
 
 Base `11a25d9` · worktree 内就地改 `src/orchestration.rs` / `src/task.rs`，每个变异从内存里的
 原始字节还原并用 `==` 断言逐字节相同（脚本 `.radian/scratch/mutate-s9.py`，跑完 `git status`
@@ -1005,7 +1005,7 @@ Base `11a25d9` · worktree 内就地改 `src/orchestration.rs` / `src/task.rs`�
 5/5 抓住。MUT9-1 同时钉住「未信任时 verify 与 policy 都不读」这一条门的两个面（同一个
 `if !trusted` 早退）。MUT9-3 与 MUT9-4 都用同一条快照测试，但变异点不同：一个从 task 的
 worktree 读，一个在 spawn 时重读 lead 的文件。合并 origin/main（切片 7b 的 named agent）后
-补了 MUT9-6：named agent 的定义也读 lead 工作区的快照（ADR 0030 O7 rev 2 item 4），同一条
+补了 MUT9-6：named agent 的定义也读 lead 工作区的快照（ADR 0043），同一条
 测试就地变异 `src/named.rs` 验证，改完从 `.radian/scratch/named.rs.bak` 的副本 `cp` 还原并用
 `cmp` 断言逐字节相同。
 
@@ -1174,7 +1174,7 @@ stale one).
 Command: `timeout 300 cargo test -p radian-host --lib --locked --no-fail-fast memory_search_with_ids_returns_the_full_records`
 (GV-2). (GV-1's `strip_renamed_tool_aliases` is deleted with `remove-git-diff`; the row is dropped.)
 
-## ADR 0043 decision 1a gaps: `--header` forwarding, the live route, the drop guard (2026-10-17)
+## ADR 0043 decision 2 gaps: `--header` forwarding, the live route, the drop guard (2026-10-17)
 
 Worktree `.radian-worktrees/subagent-gaps`, branch `dogfood/subagent-gaps`. Each mutation was
 applied in place in `crates/radian-host/src/subagent.rs`, restored from a `cp` and confirmed

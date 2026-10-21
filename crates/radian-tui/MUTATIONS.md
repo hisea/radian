@@ -145,7 +145,7 @@ Base `f552250` · one-shot worktree `/tmp/small-mut` · `--no-fail-fast`；变�
 
 「`c` 继续只放宽一次请求」的旧变异 M4 随 `BudgetRelax` 与继续提示一起删除（ADR 0018）。
 
-## ADR 0021 M1 第四片：slash 命令框架（2026-10-13）
+## ADR 0021 第四片：slash 命令框架（2026-10-13）
 
 Base `4bf767d` · 一次性 worktree `/tmp/memtui-mut`（从 HEAD 建，做完删掉）· **独立
 `CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p radian-tui --lib`、`cargo test -p radian-tui
@@ -2001,7 +2001,7 @@ built-in); it fails the same `631c8dd` footer the same way.
 **Coverage (decision 1).** The old `item_placeholders` table listed 20 built-in ids — `brand`,
 `host`, `model`, `reasoning`, `tier`, `cwd`, `git_branch`, `worktree`, `status`, `session`,
 `context`, `context_bar`, `tokens`, `speed`, `elapsed`, `cost`, `pending`, `tasks`, `mcp`,
-`scroll` — and the registry has exactly those 20, one file each (`tasks` is the ADR 0030 addition;
+`scroll` — and the registry has exactly those 20, one file each (`tasks` is the ADR 0043 removal;
 the ADR C2 list omits it). `every_registry_id_has_a_component_file` pins the `components/<id>.rs`
 file per registry id, so a new built-in cannot be registered without its file.
 `git_branch`/`worktree`/`status` are ordinary registered components that read the contribution
@@ -2328,7 +2328,7 @@ passed). UH-T1 is the slice's "no特判" acceptance: a `Headers` provider must n
 | MC-3 | `app/transcript.rs` 的 `BudgetExceeded` notice 删掉（`if false`） | `app::transcript::tests::a_budget_exceeded_turn_shows_the_notice_naming_the_flag`（"a notice" 找不到） | ✅ 1 failed |
 
 
-## `attach` 把活会话的未决工具调用显示为 queued/running（ADR 0043 D14）
+## `attach` 把活会话的未决工具调用显示为 queued/running（ADR 0043 decision 7）
 
 journal 的 fold 会为每个没有已提交结果的调用合成一个崩溃结果（ADR 0002）；活会话（有 writer
 持有文件锁，`radian_session::session_is_live`）里那正是运行时已请求未开始（`queued`）或已开始

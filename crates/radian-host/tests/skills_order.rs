@@ -109,7 +109,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         None,
     ));
 
-    // The volatile `<session>` facts (ADR 0036 D1): appended last.
+    // The volatile `<session>` facts (ADR 0036): appended last.
     let facts = Arc::new(radian_host::prompt::SessionFactsHooks::new(
         &ws, "m-1", None,
     ));
@@ -162,7 +162,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     );
     assert!(prompt.contains("tabs over spaces"), "{prompt}");
     assert!(prompt.contains("Say hello."), "{prompt}");
-    // The `<session>` layer is last, after skills (ADR 0036 D1: the static prefix stays
+    // The `<session>` layer is last, after skills (ADR 0036: the static prefix stays
     // cacheable).
     let session_at = prompt
         .find("<session>")

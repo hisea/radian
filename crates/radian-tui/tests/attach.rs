@@ -696,7 +696,7 @@ fn assert_empty_dir(dir: &Path, what: &str) {
 
 // ---------- a subagent child's journal ----------
 
-/// ADR 0043 decision 1a: the session a `subagent` call starts is an ordinary journal file with
+/// ADR 0043 decision 2: the session a `subagent` call starts is an ordinary journal file with
 /// `SessionCreated.parent { relation = "subagent" }`, so `radian attach <child id>` shows it —
 /// there is no live session to hold and no socket involved, only the committed facts. This
 /// drives the real full-screen `attach` under a pty and looks for the child's assistant text.

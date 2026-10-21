@@ -288,7 +288,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             );
         }
         Some(Modal::Question(form)) => {
-            // ADR 0024 R2: the shared panel primitive draws the box, the tab row,
+            // ADR 0024 Q7: the shared panel primitive draws the box, the tab row,
             // the current question and the key hints (the bottom border). The panel is
             // height-aware; a long option list scrolls to the cursor.
             // The same budget the height was measured with, so the window and the frame agree

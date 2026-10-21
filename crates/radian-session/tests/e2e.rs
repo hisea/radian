@@ -1,4 +1,4 @@
-//! ADR 0006 §15-8/9/10/11: the end-to-end proof, repair write-back, selfcheck
+//! ADR 0006-8/9/10/11: the end-to-end proof, repair write-back, selfcheck
 //! non-interference, and the sensitive-information rule.
 
 mod common;

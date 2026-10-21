@@ -1,6 +1,6 @@
 # radian-memory
 
-The ADR 0021 M1 memory storage layer. It is **host-free**: the caller passes the root
+The ADR 0021 memory storage layer. It is **host-free**: the caller passes the root
 directory (the host passes `~/.radian/memory/`); the crate never reads `HOME`, and Core does
 not know it exists.
 
@@ -13,7 +13,7 @@ not know it exists.
 ```
 
 The directory is `0700` and the files `0600`. Each log is append-only JSONL, the only source
-of truth. The mechanics mirror `radian-session` (ADR 0006 §3.2/§7) without depending on it:
+of truth. The mechanics mirror `radian-session` (ADR 0006 §2.2/§7) without depending on it:
 one writer at a time (`flock`, **blocking** so writers serialize — the memory store is shared
 by many sessions, unlike a per-session journal), `write`+`flush`+`fsync` per append, a torn
 tail (bytes after the last LF) is ignored and truncated before the next append, a malformed

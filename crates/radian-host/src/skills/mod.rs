@@ -687,7 +687,7 @@ pub fn expand(skill: &Skill, args: &str) -> Result<String, String> {
         None => (body.to_owned(), Some(args.to_owned())),
     };
     // The body and the path are project/user input: escape a literal `</skill>` and the
-    // attribute characters, so a skill file cannot close its own frame (ADR 0036 C2's rule
+    // attribute characters, so a skill file cannot close its own frame (ADR 0036's rule
     // applied to the other model-visible frame).
     let block = format!(
         "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
@@ -1751,7 +1751,7 @@ mod tests {
         assert!(bare.ends_with("</skill>"), "{bare}");
     }
 
-    /// A skill body containing a literal `</skill>` cannot close its own frame (ADR 0036 C2's
+    /// A skill body containing a literal `</skill>` cannot close its own frame (ADR 0036's
     /// rule applied to the skill frame).
     #[test]
     fn a_skill_body_cannot_close_its_frame() {

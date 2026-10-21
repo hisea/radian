@@ -34,7 +34,7 @@ use crate::config::{ConfigQueue, ConfigSlot, ModelRoute};
 /// Computes `B` for a (provider, model) from the warm local catalog (ADR 0026 D7). The host
 /// supplies it; it must not touch the network. It returns the whole [`ContextBudget`], not just
 /// the token count, so the host can also say whether the route replays reasoning and the
-/// estimate must count it (ADR 0014 Q4).
+/// estimate must count it (ADR 0014 R6).
 pub type BudgetFor = Arc<dyn Fn(&str, &str) -> Option<ContextBudget> + Send + Sync>;
 
 /// A host seam that adds context to a **user** turn before its first model call (ADR 0021

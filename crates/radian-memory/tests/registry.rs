@@ -1,4 +1,4 @@
-//! ADR 0021 M1 #1 (registry): an identity key resolves to one stable `ProjectId`; relink
+//! ADR 0021 #1 (registry): an identity key resolves to one stable `ProjectId`; relink
 //! attaches a key to an existing project; different keys stay independent.
 
 mod common;

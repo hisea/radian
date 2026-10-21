@@ -45,7 +45,7 @@ use ratatui::widgets::Paragraph;
 use crate::app::{App, Entry, EntryKind};
 use crate::projection::TurnState;
 
-/// The line a running session shows (ADR 0043 D14). `…` is one character, not three dots.
+/// The line a running session shows (ADR 0043 decision 7). `…` is one character, not three dots.
 pub const WORKING_LINE: &str = "working…";
 
 /// What one key did.
@@ -132,7 +132,7 @@ impl AttachView {
         self.observer.history()
     }
 
-    /// Whether a turn is open: the last `TurnStarted` with no `TurnFinished` (ADR 0043 D14).
+    /// Whether a turn is open: the last `TurnStarted` with no `TurnFinished` (ADR 0043 decision 7).
     /// A durable fact only — the observer folds the two runtime events into the projection.
     pub fn running(&self) -> bool {
         self.observer.projection().turn() == TurnState::Running

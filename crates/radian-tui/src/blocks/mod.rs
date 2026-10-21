@@ -429,7 +429,7 @@ pub enum MdStyle {
     LinkUrl,
     /// A quote's text (`mdQuote`).
     Quote,
-    /// The `ask_user` block's own roles (ADR 0024 R1): the emphasis, a weak line,
+    /// The `ask_user` block's own roles (ADR 0024 Q7): the emphasis, a weak line,
     /// and a structural line. Not Markdown; the same per-piece mechanism.
     Accent,
     Muted,

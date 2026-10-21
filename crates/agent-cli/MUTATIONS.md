@@ -201,7 +201,7 @@ M10 的变异只在报错字符串上；测试还断言已有 `.jsonl` 字节不
 | M1 | 宿主不把实际会话目录加进 `deny_read` | ✅ 抓住 (rc=101) | `workspace_shell_cannot_read_the_sessions_directory` 与 `workspace_shell_cannot_read_a_moved_sessions_directory`（两条都失败） |
 | M5 | `session_dir` 仍用旧的数据目录（`~/.local/share/radian/sessions`） | ✅ 抓住 (rc=101) | `radian_home_places_sessions_under_the_radian_root` |
 
-## ADR 0021 M1 第二片：`agent memory` 的确认（2026-10-13）
+## ADR 0021 第二片：`agent memory` 的确认（2026-10-13）
 
 Base `5d80946` · 一次性 worktree `/tmp/memsvc-mut` · 独立 `CARGO_TARGET_DIR` ·
 `cargo test -p agent-cli --test cli memory --no-fail-fast`，变异后 `git checkout --` 还原。
@@ -346,7 +346,7 @@ Base `bf6ccf8` · 一次性 worktree `/tmp/e2-mut`（从 HEAD 建，跑完删）
 二进制，这是它该做的）；另外 MCP 相关测试需要先编 `mcp-fixture`，否则它们会以环境错误
 失败、把"被抓住"的假象混进来——所以最后是按目标测试逐个过滤确认的。
 
-## ADR 0030 片 6b2：`radian exec` 挂 lead tools（2026-10-16）
+## ADR 0043：`radian exec` 挂 lead tools（2026-10-16）
 
 Base `2f41f69` · 直接改源码、跑单个测试、从 `.radian/scratch/mut/` 副本 `cp` 还原，
 `git status --short` 跑完为空。测试前先 `cargo build -p radian-tui`（陈旧检测会拒绝旧二进制）。
