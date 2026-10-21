@@ -24,3 +24,7 @@ The two numbers are the theme's accent RGB; the script maps it to the page's `va
 - The frame's model name, costs and quota are invented by the prototype script.
 - The two speed numbers come from `benchmarks/perf-baseline.md` (Apple M4, before ADR 0040); re-measure.
 - Deployment (host, `CNAME`) is not decided.
+
+## README images
+
+`.github/readme/` holds the README banner and terminal figure, light and dark, rendered from this page by headless Chrome: `python3 -I site/tools/readme-images.py`. The terminal figure stops after the diff, because the rows below it hold invented model and cost data.
