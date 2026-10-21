@@ -23,6 +23,12 @@ Type `/model <provider>/<model>` to switch the model at the next turn boundary.
 Type `/thinking <level>` to set the thinking level.
 Type `/usage` to show current provider usage.
 Type `/context` to show the next request size estimate by category.
+Type `/btw <question>` to ask a side question from the current context.
+Nothing goes into the transcript.
+No tool runs.
+Press Esc to cancel a running question or close the answer.
+Type `/btw` alone to reopen the last answer.
+One side question runs at a time.
 Type `/auto on` to approve tool questions for this session.
 Type `/auto off` to ask again.
 Type `/yolo` as a short form of `/auto on`.
