@@ -28,6 +28,37 @@ use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use serde_json::json;
 
 const BIN: &str = env!("CARGO_BIN_EXE_radian");
+
+/// A catalog URL that fails at once on every OS (ADR 0018's `RADIAN_CATALOG_URL` seam).
+///
+/// A connect to a closed loopback port is refused on macOS but times out on this Linux
+/// box (5 s measured), so the old `http://127.0.0.1:1/api.json` held the catalog fetch for
+/// the whole `FETCH_TIMEOUT`. This binds `127.0.0.1:0` once per test process and answers
+/// HTTP 503 to every connection, so the fetch fails fast anywhere. The production code
+/// path is unchanged (no `--offline-catalog`).
+fn fast_catalog_url() -> String {
+    use std::sync::OnceLock;
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind the catalog sink");
+        let addr = listener.local_addr().expect("the sink's address");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                use std::io::{Read, Write};
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        format!("http://{addr}/api.json")
+    })
+    .clone()
+}
 const POLL: Duration = Duration::from_millis(1);
 
 struct TempDir(PathBuf);
@@ -114,8 +145,8 @@ impl Pty {
         cmd.env("HOME", home.path());
         // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
         // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
-        // No real models.dev from a test (ADR 0018): a closed local port fails fast.
-        cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+        // The catalog URL is the fast-failing sink (`fast_catalog_url`); no real network.
+        cmd.env("RADIAN_CATALOG_URL", fast_catalog_url());
         let child = cmd.spawn().unwrap();
 
         let mut master = File::from(master);
