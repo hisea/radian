@@ -22,39 +22,39 @@ pub const HELP: &str = "\
                        (default 30 turns or 2h); /goal shows it, /goal pause|resume|drop
                        controls it, /goal budget <N turns|<dur>|<N> tokens> caps it
 /copy [code]          copy the last assistant message (or its last code block)
-/compact [note]       summarize the history now and keep the recent part (ADR 0018)
+/compact [note]       summarize the history now and keep the recent part
 /sessions [query]     list this workspace's recent sessions, or search their text
-/fork                 fork this session at its last turn boundary (ADR 0022)
+/fork                 fork this session at its last turn boundary
 /new                  start a new session here; the old session stays resumable
 /theme <name>         switch the color theme and write it back to the config file
 /model <provider>/<model>
-                      switch the model at the next turn boundary (ADR 0026 D5)
-/thinking <level>     set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)
-/usage                show the current provider's usage, one line per window (ADR 0027)
-/context              show the next request's estimated size by category (ADR 0015)
+                      switch the model at the next turn boundary
+/thinking <level>     set the thinking level (off…max); unsupported levels clamp to what the model supports
+/usage                show the current provider's usage, one line per window
+/context              show the next request's estimated size by category
 /btw [question]       ask about the current context without touching the transcript;
                       `/btw` alone reopens the last side answer
-/auto on|off          auto-approve tool asks for this session (ADR 0026 D9)
+/auto on|off          auto-approve tool asks for this session
 /yolo                 alias of /auto
 /access [workspace|full]
-                      show or switch the permission tier (ADR 0038); the switch takes effect
+                      show or switch the permission tier; the switch takes effect
                       at the next tool call, and `full` asks for confirmation
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
                       forget, purge, confirm, export, import, project, relink, split, merge
-/skill:<name> [args]  run a skill: read its body into the message (ADR 0025)
+/skill:<name> [args]  run a skill: read its body into the message
 /skills               list the discovered skills
-/jobs                 open the inspector's jobs page (list) or stop one/all (ADR 0037)
+/jobs                 open the inspector's jobs page (list) or stop one/all
 /tools                open the inspector's tools page
 /mcp                  open the inspector's mcp page
 /hooks                open the inspector's hooks page
 /panel                open the inspector on the last page
-/login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
+/login [provider]     store an API key in credentials/auth.json; custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
 //…                   send a message that starts with `/`
-!<command>            run a shell command in the sandbox (ADR 0033); `!!` keeps its output
+!<command>            run a shell command in the sandbox; `!!` keeps its output
                       out of the model's context";
 
 /// A memory command waiting for the user's confirmation. Only the destructive commands
@@ -314,7 +314,7 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "compact",
-            description: "summarize the history now and keep the recent part (ADR 0018)",
+            description: "summarize the history now and keep the recent part",
             levels: &[free_level],
         },
         Command {
@@ -324,7 +324,7 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "fork",
-            description: "fork this session at its last turn boundary (ADR 0022)",
+            description: "fork this session at its last turn boundary",
             levels: &[],
         },
         Command {
@@ -339,22 +339,22 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "model",
-            description: "switch the model at the next turn boundary (ADR 0026 D5)",
+            description: "switch the model at the next turn boundary",
             levels: &[model_route_level],
         },
         Command {
             name: "thinking",
-            description: "set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)",
+            description: "set the thinking level (off…max); unsupported levels clamp to what the model supports",
             levels: &[thinking_level_level],
         },
         Command {
             name: "usage",
-            description: "show the current provider's usage, one line per window (ADR 0027)",
+            description: "show the current provider's usage, one line per window",
             levels: &[],
         },
         Command {
             name: "context",
-            description: "show the next request's estimated size by category (ADR 0015)",
+            description: "show the next request's estimated size by category",
             levels: &[],
         },
         Command {
@@ -364,7 +364,7 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "auto",
-            description: "auto-approve tool asks for this session (ADR 0026 D9)",
+            description: "auto-approve tool asks for this session",
             levels: &[auto_level],
         },
         Command {
@@ -374,7 +374,7 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "access",
-            description: "show or switch the permission tier (ADR 0038)",
+            description: "show or switch the permission tier",
             levels: &[access_level],
         },
         Command {
@@ -399,7 +399,7 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "login",
-            description: "store an API key in credentials/auth.json (ADR 0026 D3); custom \
+            description: "store an API key in credentials/auth.json; custom \
                           names a new endpoint",
             levels: &[login_level],
         },
@@ -1660,6 +1660,42 @@ mod tests {
                 }
                 other => panic!("expected usage for {empty:?}, got {other:?}"),
             }
+        }
+    }
+
+    /// User-facing slash text never names an ADR: the `/help` table, every slash
+    /// command's description, the `/memory --help` text and the `/login` provider
+    /// choices.
+    /// Mutation: put `(ADR 0018)` back into one description → this fails.
+    #[test]
+    fn slash_help_and_descriptions_name_no_adr() {
+        assert!(!HELP.contains("ADR"), "/help names an ADR:\n{HELP}");
+        for command in tree() {
+            assert!(
+                !command.description.contains("ADR"),
+                "/{} names an ADR: {}",
+                command.name,
+                command.description
+            );
+        }
+        // `/memory --help` is clap's rendered error text, shown as-is.
+        let error = radian_host::memory::commands::parse_args(&["--help".to_owned()]).unwrap_err();
+        assert!(
+            !error.to_string().contains("ADR"),
+            "/memory --help names an ADR: {error}"
+        );
+        // The `/login` picker and `radian login`'s numbered list share this text.
+        for (_, description) in radian_host::login_choices() {
+            assert!(
+                !description.contains("ADR"),
+                "a login choice names an ADR: {description}"
+            );
+        }
+        for (_, description) in crate::login::LoginWizard::choices() {
+            assert!(
+                !description.contains("ADR"),
+                "a login choice names an ADR: {description}"
+            );
         }
     }
 

@@ -11,7 +11,7 @@
 下后端是透明的（不探测、不包裹），但 shell 工具仍自己按 `allow_env` 清环境——**full 是
 "文件系统/网络不设限"，不是"把宿主环境交给模型控制的 shell"**；**full 不放开环境变量白名单**
 ＼�。② 进程组清理：shell 工具用 `setsid` 让子进程自成会话与进程组
-（没有控制终端），超时/取消/leader 退出都杀整组（ADR 0016 取代了原先的 `process_group(0)`）。
+（没有控制终端），超时/取消/leader 退出都杀整组。
 ③ 输出截断也是 shell 工具自己的策略：每流独立预算、保留头尾（尾部更大，因为失败命令的错误在
 末尾）、边读边丢，沙箱不参与。
 
@@ -32,7 +32,7 @@ structured 里是 `sandbox_denied`）。分类在沙箱层按 errno 文本与策
 路径匹配优先于裸 errno（`EPERM` 既可能是 seccomp 的 socket 拒绝，也可能是 seatbelt
 的读拒绝）；`inherited` 后端不做分类（外层说了算，见上）。
 
-**ADR 0016（2026-10-13）：** `workspace` 档位改为**开网**（出站与本机回环 connect/bind/listen），
+**2026-10-13：** `workspace` 档位改为**开网**（出站与本机回环 connect/bind/listen），
 并放开 **pty**（`/dev/ptmx` 与 `/dev/ttys[0-9]+` 的写与 `file-ioctl`，后者**只**对这两类路径）。shell 工具用 `setsid` 让受约束命令没有控制终端，配合内核的
 controlling-terminal 检查堵住 `TIOCSTI`（矩阵新增 `tiocsti_outside_terminal`）。
 
@@ -41,14 +41,14 @@ controlling-terminal 检查堵住 `TIOCSTI`（矩阵新增 `tiocsti_outside_term
 `Sandbox::new(mode, workspace)` 与 `Sandbox::from_policy` 对 `WorkspaceWrite` **先探测
 后端**（跑一个真子进程，证明 deny 与 workspace allow 都生效），探测失败就返回 `SandboxError`。
 **没有任何路径**把受约束档位变成无沙箱运行；`FullAccess` 只有调用方点名才会用到，且不探测。
-（ADR 0012，决定第 2 条。）测试：`an_unavailable_backend_is_an_error_and_never_a_downgrade`、
+＼�失败必须明确报错，绝不降级。）测试：`an_unavailable_backend_is_an_error_and_never_a_downgrade`、
 `a_failed_probe_is_an_error_not_a_downgrade`、`full_access_is_transparent_and_unprobed`。
 
 探测为什么必须是"跑探针"而不是"二进制存在"：`sandbox-exec` 已弃用，SBPL 操作名是私有接口并会随
 macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在一个临时 workspace 里同时验证
 "工作区外写被拒"和"工作区内写成功"，两者缺一即失败。
 
-## 嵌套：已在沙箱内的 radian 沿用外层（ADR 0016，2026-10-16 实测）
+## 嵌套：已在沙箱内的 radian 沿用外层（2026-10-16 实测）
 
 radian 的 `workspace` 沙箱里再起一层 `sandbox-exec` 被内核拒绝，所以嵌套场景下探测必然失败。实测
 （macOS 27，`sandbox-exec`；p1 与 w8:p7 各自独立复现）：
@@ -83,7 +83,7 @@ radian 看不到。检测只问内核：任何环境变量、配置键、参数�
 `confined_by_outer_sandbox()` 在非 macOS 返回 `false`，Linux 保持今天的行为（探测失败即拒绝）；
 Linux VM 验证恢复时一并做。
 
-## 运行中切换档位（ADR 0038 切片 ②，2026-10-15）
+## 运行中切换档位（2026-10-15）
 
 档位不再固定：`/access workspace|full` 可以在会话里切换，从**下一次工具调用**起生效。
 
@@ -93,14 +93,14 @@ Linux VM 验证恢复时一并做。
 - 切到 `full` 必须由人确认（`full` 等于没有沙箱）。切换由宿主重建 profile 与 sandbox；**新档位的
   沙箱探测失败即拒绝切换，绝不降级**（与启动路径同一条硬规则）。
 - 每次切换写一条 `ConfigChanged {access}`，resume 时恢复会话当时的档位。
-- 按项目记住的档位在 `~/.radian/access/access.json`（ADR 0021 的项目身份作键），**沙箱禁读**，
+- 按项目记住的档位在 `~/.radian/access/access.json`（以项目身份作键），**沙箱禁读**，
   与 `trust/`、`sessions/`、`memory/`、`credentials/` 同类。仓库里的任何文件都不能设置它。
 
 ## 后端与策略
 
 - `SandboxMode::{WorkspaceWrite, FullAccess}` 是产品概念；SBPL / bwrap 的参数只是实现。
 - `SandboxPolicy`：canonical workspace、`network`、`read_only`（git 元数据自动发现：`.git` 目录、
-  worktree 指针文件及其共享 common dir）、`git_access`（ADR 0038：这些 git 元数据是整块只读，
+  worktree 指针文件及其共享 common dir）、`git_access`（这些 git 元数据是整块只读，
   还是只留执行入口只读；见下）、`deny_read`（默认 `~/.ssh`、`~/.aws`、`~/.gnupg`、
   `~/.netrc`、浏览器配置等）、`allow_env` 白名单。
 
@@ -135,14 +135,14 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
 **未改变**的语义：正常子目录里的 `.git` 照旧被发现并只读；worktree 指针文件及其共享 common dir
 的规则不变；工作区根自身即使是缓存目录也照样遍历（用户点名的目录不跳过）。
 
-- **ADR 0020（2026-10-13）**：宿主在 enforced 档位把**实际的会话目录**（`--session-dir`
+- **2026-10-13**：宿主在 enforced 档位把**实际的会话目录**（`--session-dir`
   可能已改位）与 `~/.radian/memory` 加进 `deny_read`，并在建沙箱前把它们创建为 0700（Linux 的
   bwrap 只能遮住**已存在**的路径）；`~/.radian/config` 与 `~/.radian/cache` 保持可读。
 - **macOS**：`(deny default)` + 选择性 allow；只写工作区；更深的 `deny` 覆盖敏感读，并按
   `git_access` 覆盖 git 元数据（`ReadOnly` 整块拒写；`WritableExceptExec` 只拒执行入口，见下；
   哪个**真正生效**由后端回答，面向模型的文案见"切片④"）；默认不加 `(allow network*)`；`/dev/null` 放行；`TMPDIR` 指向工作区内 `.radian-sandbox/tmp`。
 - **Linux**：`--unshare-all`（网络关闭）或部分隔离（开启）；宿主根 `--ro-bind / /` + 工作区
-  `--bind`；git 元数据 `--ro-bind` 覆盖（ADR 0038 切片①**未改 Linux**：无论 `git_access` 取何值
+  `--bind`；git 元数据 `--ro-bind` 覆盖（**未改 Linux**：无论 `git_access` 取何值
   都整块只读）；敏感目录 `--tmpfs`（目录）或 `/dev/null`（文件）；
   `--clearenv` + 白名单；`HOME`/`TMPDIR` 在工作区内 `.radian-sandbox/{home,tmp}`。
 
@@ -174,8 +174,8 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
 | normal_use | 工作区内写回读；工作区外只读 | ✅ | ✅ |
 | git_readonly | `ReadOnly`（默认，任务 agent 与未点名放宽的宿主）：写 `.git/hooks`、`.git/config`、`.git/info`、`git config core.hooksPath`、`git add`、worktree 指针、共享 gitdir、经符号链接写共享 `.git` 全部被拒；`git status`/`git log` 可用 | 8 拒 + 2 可 | 8 拒 + 2 可 |
 | sensitive_read | 假 `~/.ssh/id_ed25519` 打开失败（只断言 exit，不读内容）；普通文件可读 | ✅ | ✅ |
-| radian_home | ADR 0020/0026/0025/0031：`~/.radian/sessions/<file>`、`~/.radian/memory/<file>`、`~/.radian/credentials/auth.json` 与 `~/.radian/trust/trust.json` 读失败；`config/<file>`、`cache/<file>` 与 `skills/<dir>/SKILL.md` 可读；`--session-dir` 指向的目录也读失败 | 5 拒 + 3 可 | 4 拒 + 2 可（`skills_readable`/`trust_unreadable` 待 VM 恢复后补跑） |
-| deny_inside_workspace | ADR 0020：会话目录在工作区**里面**（如 `--session-dir ./sessions`）允许构建；该子目录读失败，工作区其余部分可读可写 | 1 拒 + 2 可 | 1 拒 + 2 可 |
+| radian_home | `~/.radian/sessions/<file>`、`~/.radian/memory/<file>`、`~/.radian/credentials/auth.json` 与 `~/.radian/trust/trust.json` 读失败；`config/<file>`、`cache/<file>` 与 `skills/<dir>/SKILL.md` 可读；`--session-dir` 指向的目录也读失败 | 5 拒 + 3 可 | 4 拒 + 2 可（`skills_readable`/`trust_unreadable` 待 VM 恢复后补跑） |
+| deny_inside_workspace | 会话目录在工作区**里面**（如 `--session-dir ./sessions`）允许构建；该子目录读失败，工作区其余部分可读可写 | 1 拒 + 2 可 | 1 拒 + 2 可 |
 | mcp_stdio | 最小 stdio MCP（initialize / tools/list / tools/call echo）可用 | ✅ | ✅ |
 | signals | 给自己的子进程、孙进程发信号可以；给沙箱外同用户进程发信号被拒 | 2 可 + 1 拒 | 2 可 + 1 拒 |
 
@@ -195,17 +195,17 @@ Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就�
 （根是只读的），因此只 mask 已存在的 deny 路径；SBPL 可以给未来才会创建的路径写规则。默认 deny
 列表里不存在的项在 Linux 上暂不 mask。
 
-## ADR 0038 切片①：`workspace` 档位下 `.git` 可写、只留执行入口只读（macOS）
+## `workspace` 档位下 `.git` 可写、只留执行入口只读（macOS）
 
 **背景**：通用（general）与项目主管（lead）会话在 `workspace` 档位下要能直接用原生 git 提交
 （commit、branch、checkout、stash、rebase、merge），否则"在 main 上和一个通用 agent 协作"这条最
-常见的用法走不通（ADR 0038 背景）。**理由不变**：仍要堵住模型在 `.git` 里埋可执行的东西（hook、
-`core.hooksPath`、filter、fsmonitor），等用户在沙箱外跑 git 时被执行（ADR 0012）。
+常见的用法走不通。**理由不变**：仍要堵住模型在 `.git` 里埋可执行的东西（hook、
+`core.hooksPath`、filter、fsmonitor），等用户在沙箱外跑 git 时被执行。
 
 **选择放在一个显式策略参数上**：`SandboxPolicy::git_access`。
 
 - `GitAccess::ReadOnly`（**默认**）：发现到的 git 元数据整块只读——就是今天的行为。任务 agent 保持
-  它（ADR 0038 的 `.git` 规则），逃逸矩阵的 `git_readonly` 组也钉住它。
+  它，逃逸矩阵的 `git_readonly` 组也钉住它。
 - `GitAccess::WritableExceptExec`：`.git` 可写，只把**能执行代码的入口**留成只读。`agent-cli` 与
   `radian-tui` 在 `WorkspaceWrite` 档位为通用会话传这个值（各自 `profile.rs` 一条单测钉住接线）。
 
@@ -215,9 +215,8 @@ Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就�
 gitdir 与共享 common dir，三者经同一函数处理——在整块可写之下追加；发现到的是**文件**（worktree 的
 `.git` 指针）时则整块拒写）：
 
-**linked worktree：git 目录可能在工作区之外**（ADR 0043 决定 1：工作区本身就是 worktree、host 仓库
-在别处，于是 per-worktree gitdir 与 common dir 都在 workspace 的 `subpath` allow 之外，ADR 0038 决定 4
-的原文在这里原本落不了地）。`WritableExceptExec` 因此对**每个发现到的 git 目录**先发一条
+**linked worktree：git 目录可能在工作区之外**（工作区本身就是 worktree、host 仓库
+在别处，于是 per-worktree gitdir 与 common dir 都在 workspace 的 `subpath` allow 之外，原规则在这里原本落不了地）。`WritableExceptExec` 因此对**每个发现到的 git 目录**先发一条
 `(allow file-write* (subpath <dir>))`，**再**发下面这批 deny：所有 allow 都在所有 deny 之前，因为
 per-worktree gitdir 就嵌在 common dir 之下——若某条 allow 跟在 deny 之后，common dir 的
 `worktrees/<name>/{gitdir,config.worktree}` deny 会被嵌套目录的 allow 反压。allow 只覆盖发现到的
@@ -240,7 +239,7 @@ per-worktree gitdir 就嵌在 common dir 之下——若某条 allow 跟在 deny
 目录：它没有自己的执行入口，但**写它就会让模型把 git 指向自己控制的 gitdir**（那里的 hook 会在沙箱外、
 用户下次跑 git 时执行），所以它保留**整块** deny，和 `ReadOnly` 完全一样；共享 common dir 里的
 `worktrees/<name>/{gitdir,commondir,config.worktree}` 同理按名字拒写（`gitdir` 被改指向、`commondir`
-被改指向、per-worktree `config` 里放 `core.hooksPath`）。`<git>/info/` **有意不拒**（ADR 0038 的只读
+被改指向、per-worktree `config` 里放 `core.hooksPath`）。`<git>/info/` **有意不拒**（只读
 清单只列了 `config`、`config.worktree`、`hooks/` 与子模块同类），对象库、refs、index、`logs/` 都照常可写。
 
 **行为测试**：`crates/radian-sandbox/tests/git_writable.rs`（macOS-only；每条命令都带 `FullAccess`
@@ -254,7 +253,7 @@ per-worktree gitdir 就嵌在 common dir 之下——若某条 allow 跟在 deny
 `seatbelt::tests::writable_except_exec_carves_out_only_the_exec_entries` 与
 `a_worktree_pointer_file_keeps_the_full_deny` 钉住。
 
-**工作区之外的 linked worktree**（ADR 0043 切片 ⓪B）：同文件另有一个 scratch——workspace **就是**
+**工作区之外的 linked worktree**：同文件另有一个 scratch——workspace **就是**
 一个 linked worktree，host 仓库（及其 common dir）在它之外——
 `linked_worktree_outside_the_workspace_allows_native_git`（`git merge --ff-only`、原生 `git commit`、
 `git branch` 成功；同一脚本在 `ReadOnly` 下拒绝）与
@@ -262,13 +261,13 @@ per-worktree gitdir 就嵌在 common dir 之下——若某条 allow 跟在 deny
 `worktrees/<name>/{gitdir,config.worktree}`、worktree 的 `.git` 指针文件，以及 **host 仓库工作树里的
 文件**全被拒）。
 
-**未验证 / Linux**：ADR 0038 切片①**只在 macOS 上实施**。Linux（bwrap）无论 `git_access` 取何值都
+**未验证 / Linux**：本节的改动**只在 macOS 上实施**。Linux（bwrap）无论 `git_access` 取何值都
 保持今天的整块 `--ro-bind` 只读（`bwrap.rs` 里带注释）；任何"Linux 也只留执行入口只读"的说法都要等
-VM 恢复、`sandbox-escape` 矩阵在 VM 上重跑之后才算数。**linked worktree（ADR 0043 切片 ⓪B）在 Linux 上
+VM 恢复、`sandbox-escape` 矩阵在 VM 上重跑之后才算数。**linked worktree在 Linux 上
 也照旧只读**：per-worktree gitdir 与 common dir 即使在工作区之外也保持 `--ro-bind`，沙箱里原生
 `git commit`（含 worktree 里的）仍按设计失败。当前状态：**Linux pending，未改、未验证**。
 
-## ADR 0038 切片④：面向模型的文案按会话说真话（macOS）
+## 面向模型的文案按会话说真话（macOS）
 
 切片①之后，macOS 的通用/lead 会话能写 `.git`，但 `shell` 的工具描述与启动行仍写着"`.git` 只读、
 `git commit` 按设计失败"。切片④让这段文案按**实际生效**的 git 权限说：
@@ -277,15 +276,15 @@ VM 恢复、`sandbox-escape` 矩阵在 VM 上重跑之后才算数。**linked wo
   说 `git commit`、`git branch`、`git stash` 可在沙箱里直接用（原生 git），并说明 `.git/config`、
   `.git/config.worktree`、`.git/hooks/` 仍只读；否则保持今天的只读文案。
 - **启动时的事实句**（`radian-host/src/describe.rs::workspace_sandbox_facts`）同样分两种写法；
-  它同时进入启动块与 `<runtime>` 层（ADR 0036）。
-- **`shell` 的工具描述与 `<runtime>` 的工具行**按后端实际是否放开 `.git` 写权限来写（ADR 0038）；没有 `git_commit` 工具，提交用原生 git。
+  它同时进入启动块与 `<runtime>` 层。
+- **`shell` 的工具描述与 `<runtime>` 的工具行**按后端实际是否放开 `.git` 写权限来写；没有 `git_commit` 工具，提交用原生 git。
 
 **判据不是 policy 里的 `git_access`，而是后端实际是否实施**：`Sandbox::git_writable_except_exec`
 （由 `SandboxBackend::git_writable_except_exec` 回答）给出**生效**的答案。`macos-seatbelt` 返回
 policy 的值（它实现了切片①的 carve-out）；Linux（bwrap）沿用安全的默认 `false`，因为切片①未改
 Linux、整块 `--ro-bind` 只读，文案也随之保持只读。忘了接线的宿主退回只读文案，不会谎报可写。
 
-**工具列表每个会话只算一次**（ADR 0036）：`/access` 换档后，本会话的 `shell` 描述
+**工具列表每个会话只算一次**：`/access` 换档后，本会话的 `shell` 描述
 与启动行**不变**，`/access` 的提示据此说明；下一次会话（含 resume）才显示新档位的文案。切片④的
 测试：`radian-coding` 的 `the_shell_description_follows_the_effective_git_access` 与 `radian-host`
 的 `the_startup_line_reports_the_sandboxes_effective_git_access`（各用一个固定答案的假后端，两种
@@ -301,10 +300,10 @@ Linux、整块 `--ro-bind` 只读，文案也随之保持只读。忘了接线�
 | `ssh -V` | ✅ | 只打印版本，不读 `~/.ssh` |
 | `cargo --version` | ✅ | |
 | **`cargo build`（无依赖项目，`--offline`）** | ✅ | spike 未验证项：可在沙箱内 build；`target/` 在工作区内，`~/.cargo`/`~/.rustup` 可读，`TMPDIR` 指向工作区 |
-| `git commit` / `git add` | ✅ | **ADR 0038 决定 4**：`workspace` 档位下通用会话的 `.git` 可写（只留执行入口只读），原生 git 在沙箱里可直接提交 |
-| `git config set core.hooksPath`（写 `.git/config`） | ❌ | **设计使然**：执行入口只读。模型仍不能改 `.git/config` 或装 hook（ADR 0038/0012） |
+| `git commit` / `git add` | ✅ | `workspace` 档位下通用会话的 `.git` 可写（只留执行入口只读），原生 git 在沙箱里可直接提交 |
+| `git config set core.hooksPath`（写 `.git/config`） | ❌ | **设计使然**：执行入口只读。模型仍不能改 `.git/config` 或装 hook |
 
-**本轮的兼容性断言仍不放宽规则**：`git commit` 能跑，是 ADR 0038 决定 4 有意放开 `.git` 的**非执行**
+**本轮的兼容性断言仍不放宽规则**：`git commit` 能跑，是有意放开 `.git` 的**非执行**
 部分，不是为兼容性让步；执行入口（`config`、`hooks/` 等）依旧拒写，兼容性轮次用
 `git config set core.hooksPath` 这条把口子钉住。除此之外唯一新增的放行仍是 `/dev/null`（git 需要）
 与 `TMPDIR` 指向工作区内（两平台一致），都属于"工作区可写"的既有语义。
@@ -318,7 +317,7 @@ Linux、整块 `--ro-bind` 只读，文案也随之保持只读。忘了接线�
 
 （20 次采样，warmup 2 次。Linux 数字经 ssh 在 VM 上测得；macOS 数字本机测得。）
 
-## 表述约束（硬要求，ADR 0012 决定第 4 条）
+## 表述约束（硬要求，决定第 4 条）
 
 macOS 后端**全开 `mach-lookup`**，`mach-lookup` 最小化排到 Phase 7。因此 **IPC 边界尚未收紧**，
 任何面向用户的文案、文档或 UI **不得**把"敏感目录禁读"表述成完整的凭据隔离保证。允许的说法只有：
@@ -328,7 +327,7 @@ macOS 后端**全开 `mach-lookup`**，`mach-lookup` 最小化排到 Phase 7。�
 另注：环境变量过滤属于**启动层**（本 crate 的 `command`），不是沙箱机制本身；`sandbox-exec` 与
 bwrap 都不过滤环境。
 
-**Unix socket（ADR 0016，2026-10-14；Linux 片 0，2026-10-20）**：`(allow network*)` 同时放行了连接本机**任何同用户
+**Unix socket（2026-10-14；Linux 片 0，2026-10-20）**：`(allow network*)` 同时放行了连接本机**任何同用户
 的 Unix socket**（herdr、ssh-agent、`docker.sock` 等），本修订之前的版本存在这个口子。现在开网时
 seatbelt 追加 `(deny network-outbound (remote unix-socket))`，只放行固定的 mDNSResponder（DNS 需要）
 和用户级配置 `[sandbox] allow_unix_sockets` 里写明的路径（canonicalize；失败只警告并跳过）。
@@ -404,7 +403,7 @@ auto-maintenance**（git 2.55 会跑；macOS 的 2.53 不跑），与本切片�
 **启动开销**（VM 本机重测，20 次）：裸 `true` 中位 0.93 ms，沙箱内 8.73 ms，**~7.8 ms**（与旧值
 ~8.0 ms 一致）。
 
-**2026-10-13 ADR 0020 追加**：矩阵新增 `radian_home` 组 5 条（sessions/memory 拒，config/cache
+**2026-10-13 追加**：矩阵新增 `radian_home` 组 5 条（sessions/memory 拒，config/cache
 可，`--session-dir` 移动目录拒）。同一 VM 上重跑 **39/39 PASS**（macOS 本机同样 39/39）。
 
 **2026-10-13 补（workspace 在禁读目录内）**：矩阵新增 `deny_inside_workspace` 组 3 条（会话
@@ -412,17 +411,17 @@ auto-maintenance**（git 2.55 会跑；macOS 的 2.53 不跑），与本切片�
 `Sandbox::from_policy` 在构建时拒绝，`crates/radian-sandbox/tests/backend.rs` 的单测覆盖。
 macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新。
 
-**2026-10-13 补（ADR 0026 D4，凭据禁读）**：矩阵新增 `radian_home.credentials_unreadable` 1 条
+**2026-10-13 补（凭据禁读）**：矩阵新增 `radian_home.credentials_unreadable` 1 条
 （`~/.radian/credentials/auth.json` 读失败；对照 FullAccess 可读）。macOS 本机重跑 **43/43 PASS**，
 `escape-macos.{txt,json}` 已更新。**Linux 未跑**（VM 暂停中）：`escape-linux.{txt,json}` 按现有格式补上
 该条，其 `note` 标为 `not run`；VM 恢复后需重跑核对。
 
-**2026-10-14 补（ADR 0025 裁决 1，skills 可读）**：矩阵新增 `radian_home.skills_readable` 1 条
+**2026-10-14 补（skills 可读）**：矩阵新增 `radian_home.skills_readable` 1 条
 （`~/.radian/skills/greet/SKILL.md` 可读；`sessions`/`memory`/`credentials` 仍拒读）。macOS 本机重跑
 **44/44 PASS**，`escape-macos.{txt,json}` 已更新（diff 里的临时目录编号变化来自重跑本身）。
 **Linux 未跑**（VM 暂停中）：`escape-linux.{txt,json}` 待 VM 恢复后重跑补齐 `skills_readable`。
 
-**2026-10-14 补（ADR 0031 T2/裁决 4，trust 禁读）**：矩阵新增 `radian_home.trust_unreadable` 1 条
+**2026-10-14 补（trust 禁读）**：矩阵新增 `radian_home.trust_unreadable` 1 条
 （`~/.radian/trust/trust.json` 读失败；对照 FullAccess 可读），并确认 `config_readable`/`skills_readable`/
 `sessions_unreadable`/`credentials_unreadable` 不变。macOS 本机重跑 **45/45 PASS**，`escape-macos.{txt,json}`
 已更新（diff 里的临时目录编号变化来自重跑本身）。**Linux 未跑**（VM 暂停中）：待 VM 恢复后重跑补齐
@@ -441,12 +440,12 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 ## 评审补充（合并时由评审者追加，2026-10-12）
 
 1. **复现步骤里的文件名错了，已改。** 二进制叫 `sandbox-escape`（`Cargo.toml` 的 `[[bin]] name`），`scp … /tmp/` 后它在 `/tmp/sandbox-escape`，而原文下一行运行的是 `/tmp/radian-sandbox-escape`——照原文复现会直接失败。评审者按原文执行时撞上，已改成 `/tmp/sandbox-escape`。
-2. **"真实 `cargo build` 能跑"的覆盖范围比测试本身更宽，但要说准。** 仓库里的兼容性测试验的是一个**零依赖**的 hello-world（`--offline`）。评审者另外在本机（macOS）沙箱里做了一次**带依赖的真实构建**：一个依赖 `serde_json` 的项目（共 11 个包，依赖从本机 cargo 缓存读取、`--offline`、网络关闭、`Cargo.lock` 在沙箱外预先生成），`cargo build` **成功**，用时约 8 秒。该探针依赖本机缓存状态，因此没有提交成测试。**未验证**：需要联网拉依赖的构建（这次探针是显式关网跑的；ADR 0016 之后 `workspace` 默认**开网**，关网时这类构建按设计会失败）、带 build script 写工作区外路径的 crate、其他构建系统。
+2. **"真实 `cargo build` 能跑"的覆盖范围比测试本身更宽，但要说准。** 仓库里的兼容性测试验的是一个**零依赖**的 hello-world（`--offline`）。评审者另外在本机（macOS）沙箱里做了一次**带依赖的真实构建**：一个依赖 `serde_json` 的项目（共 11 个包，依赖从本机 cargo 缓存读取、`--offline`、网络关闭、`Cargo.lock` 在沙箱外预先生成），`cargo build` **成功**，用时约 8 秒。该探针依赖本机缓存状态，因此没有提交成测试。**未验证**：需要联网拉依赖的构建（这次探针是显式关网跑的；`workspace` 默认**开网**，关网时这类构建按设计会失败）、带 build script 写工作区外路径的 crate、其他构建系统。
 3. **Linux 结果本轮评审未能独立重跑。**（**后续已补**：2026-10-12 评审者在 VM 上独立重跑，26/26，零差异；见文末“Linux 独立复核”节。） 驱动可以按文档交叉编译（得到静态链接的 aarch64 ELF），但评审时 VM 已不可达（`ssh: … No route to host`）。所以 Linux 的 26/26 目前**以本文作者提交的证据为准**（`tests/data/escape-linux.{txt,json}`），评审者核对了证据文件格式与"每条失败都带关沙箱对照"的列，但没有在 VM 上再跑一次。上一轮 Linux spike 的 26 条中的同类用例评审者是独立复现过的（见 `docs/spikes/linux-sandbox.md`）。
 4. **本切片在 owner 的 Mac 上装了 rustup target `aarch64-unknown-linux-musl`**（用于交叉编译 VM 上跑的驱动）。这是一次开发环境改动，不影响仓库，但值得知道。
-5. **`git add`/`git commit` 在旧版 `workspace-write` 下失败曾是设计结果**（`.git` 整块只读）。ADR 0038 之后，通用会话在该档位下 `.git` 可写、可直接提交（`config`/`hooks` 等执行入口仍只读）；当前没有 task agent 的整体只读规则。
+5. **`git add`/`git commit` 在旧版 `workspace-write` 下失败曾是设计结果**（`.git` 整块只读）。现在，通用会话在该档位下 `.git` 可写、可直接提交（`config`/`hooks` 等执行入口仍只读）；当前没有 task agent 的整体只读规则。
 
-## Linux 复验（ADR 0016 之后，2026-10-13）
+## Linux 复验（2026-10-13，开网之后）
 
 **环境**：`ssh <user>@<host>`（第一条命令 `uname -s` = Linux）。Arch Linux ARM aarch64，
 内核 7.2.6-1-aarch64-ARCH，bwrap 0.12.0，git 2.55.0，Rust 1.88.0（`/tmp/radian-rust`，
@@ -478,8 +477,7 @@ failed**，矩阵前后 `ps` 无 `bwrap`/`mcp_echo.py`/`sandbox-exec` 孤儿。�
 `index.db` `600`；`radian-session/tests/privacy.rs` 另证 `-wal`/`-shm` `600`。
 
 **6. TUI pty 测试与真实 `~/.cache`**：`cargo test -p radian-tui --test pty` → **35/35**。但
-**发现一处测试污染**：pty 测试的 harness 继承运行者的真实 `HOME`，而 ADR 0013 决定 4 之后
-panic log 落在缓存目录，于是 4 个 panic log 写进了 VM 真实的
+**发现一处测试污染**：pty 测试的 harness 继承运行者的真实 `HOME`，而 panic log 落在缓存目录，于是 4 个 panic log 写进了 VM 真实的
 `~/.cache/radian/diagnostics/`（`retry-…`、`driver-panic-…`、`18de05ec…`、`dup-…`）。修复：
 两个 pty harness（`tests/pty.rs`、`tests/perf_startup.rs`）给每个子进程一个临时
 `HOME`/`XDG_CACHE_HOME`（显式传 HOME 的测试仍然覆盖）。修复后重跑 35/35，真实
@@ -523,27 +521,27 @@ deps/pty-… --exact pty_end_to_end_conversation_and_clean_exit → ok (EXIT=0) 
 x86_64 与其它发行版。
 
 **评审补充（合并时，2026-10-13）**：第 6 条的 pty harness 修复与 main 上已有的修复重叠（目录缓存
-那一片已给 `tests/pty.rs` 私有 `HOME`）；合并取 main 的版本。ADR 0020 之后诊断与缓存都在
+那一片已给 `tests/pty.rs` 私有 `HOME`）；合并取 main 的版本。现在诊断与缓存都在
 `$HOME/.radian/` 下，`XDG_CACHE_HOME` 不再起作用，所以 `tests/perf_startup.rs` 去掉了它，改为
 与 `tests/pty.rs` 一样把 `RADIAN_CATALOG_URL` 指向关闭的本地端口。本节的逃逸矩阵是 34 例
-（ADR 0020 之前）；ADR 0020 新增的 5 例在 Linux 上的复核见下一节。第 7 条的两个进度测试由评审者
+（之前是 34 例）；`radian_home` 新增的 5 例在 Linux 上的复核见下一节。第 7 条的两个进度测试由评审者
 另行修正（见 `crates/agent-extensions/tests/mcp.rs` 的注释）。第 8 条用预编译测试二进制代替
 沙箱内 `cargo test`，评审者接受：测的是同一段 bind/openpty 代码。
 
-## ADR 0020 与进度测试的 Linux 复核（评审者本人，2026-10-13）
+## 主目录布局与进度测试的 Linux 复核（评审者本人，2026-10-13）
 
 同一 VM，源码为 main 247750b 加进度测试修正（ea9cbd3），`git archive` 同步到 `/tmp/radian-linux/src`。
 
 - `cargo test -p radian-sandbox --no-fail-fast`：单元 8/8、`workspace_write_is_compatible…` 1/1、
-  `linux_escape_matrix` 通过（含 ADR 0020 的 `radian_home` 组）。跑完 `pgrep bwrap`、`mcp_echo` 无孤儿。
-- `agent-cli` 的 ADR 0020 端到端测试 4/4：`radian_home_places_sessions_under_the_radian_root`、
+  `linux_escape_matrix` 通过（含 `radian_home` 组）。跑完 `pgrep bwrap`、`mcp_echo` 无孤儿。
+- `agent-cli` 的主目录端到端测试 4/4：`radian_home_places_sessions_under_the_radian_root`、
   `radian_session_dir_overrides_radian_home`、`workspace_shell_cannot_read_the_sessions_directory`、
   `workspace_shell_cannot_read_a_moved_sessions_directory`（`bwrap` 实际遮住会话目录，含 `--session-dir` 移走的）。
 - `radian-host` 全部通过。
 - 进度测试直接跑测试二进制：`settled_progress_arrives_in_order` **0/40 失败**，
   `progress_does_not_reset_the_call_deadline` **0/30 失败**（修正前分别是 15/40、1/30）。
 
-## Linux 复验（ADR 0018/0020/0021 M1 之后，2026-10-13）
+## Linux 复验（2026-10-13，含自动压缩与记忆功能之后）
 
 环境：Arch Linux aarch64（kernel 7.2.6）、8 核、`/tmp` 3.9G tmpfs、`bubblewrap 0.12.0`、
 Rust **1.88.0**（`/tmp/radian-rust`）。源码为分支 `pi/linux3`（base `bc194f2`）`git archive`
@@ -559,7 +557,7 @@ Rust **1.88.0**（`/tmp/radian-rust`）。源码为分支 `pi/linux3`（base `bc
 - `agent-core --test compaction` 16/16；`radian-host` 36 + 11；两家 provider 的 `overflow`
   单元测试各 7/7；两家契约各 13/14 通过。
 - `radian-sandbox`：单元 8/8、`workspace_write_is_compatible…` 1/1、`linux_escape_matrix` 1/1
-  （含 ADR 0020 的 `radian_home` 组）；跑完 `pgrep -a bwrap`、`pgrep -af mcp-fixture` 无孤儿。
+  （含 `radian_home` 组）；跑完 `pgrep -a bwrap`、`pgrep -af mcp-fixture` 无孤儿。
 - `radian-tui` 的 pty 测试：直接跑测试二进制 **37/37 ×3 通过**（21–30s/轮，见下两条修法）。
   跑前 `~/.radian` 不存在、`~/.cache` 3527 条；跑后 `~/.radian` 仍不存在、`~/.cache` 的
   `find -printf '%p %T@ %s'` **逐行 diff 为 0**，即测试没有写进 VM 真实的 `~/.radian`/`~/.cache`。
@@ -577,8 +575,7 @@ Rust **1.88.0**（`/tmp/radian-rust`）。源码为分支 `pi/linux3`（base `bc
    一次重绘；行为断言（越过 `B` 仍发请求）不变，测试 <1s 通过。
 2. **`pty_shell_approval_shows_the_command_and_the_truncation_marker` 在 Linux 上确定性失败**。
    屏幕显示 `bwrap: Can't chdir to /tmp/…/ws: No such file or directory`，shell `exit code: 1`。
-   根因：测试把工作区（`<tmp>/ws`）放在会话目录（`<tmp>`）里面，而 ADR 0020 把会话目录加进
-   沙箱的 `deny_read`；`bwrap` 先 `--bind` 工作区、**后**对会话目录 `--tmpfs` 遮蔽，于是工作区
+   根因：测试把工作区（`<tmp>/ws`）放在会话目录（`<tmp>`）里面，而会话目录在沙箱的 `deny_read` 里；`bwrap` 先 `--bind` 工作区、**后**对会话目录 `--tmpfs` 遮蔽，于是工作区
    被遮住，`--chdir` 失败。手工复现：
    `bwrap … --bind W W --tmpfs P --chdir W …`（W 在 P 内）失败；把 `--tmpfs P` 放在 `--bind W W`
    之前则成功。修法：给这个测试一个**与会话目录平级**的 sessions 目录（`<tmp>/sessions`）。
