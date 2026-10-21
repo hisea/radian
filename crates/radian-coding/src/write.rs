@@ -70,7 +70,18 @@ pub(crate) async fn run(
     // is re-opened by path, so a parent swapped for a link mid-call is refused, not followed.
     let opened = root.open_write(&args.path, true)?;
     let readable = opened.readable;
-    let mut file = opened.file;
+    let mut file = match opened.source {
+        crate::workspace::OpenedSource::File(file) => file,
+        crate::workspace::OpenedSource::Embedded(_) => {
+            return Err(crate::fail(
+                crate::CODE_OUTSIDE,
+                format!(
+                    "`{}` is in the bundled manual (`radian://docs/`), which is read-only",
+                    args.path
+                ),
+            ));
+        }
+    };
     // ADR 0028: the result carries the old file's line count so the TUI
     // can show `+M −N`. It is counted on the fd that is about to be truncated (never a second
     // open of the path), streamed in chunks so a large old file is not held in memory, and

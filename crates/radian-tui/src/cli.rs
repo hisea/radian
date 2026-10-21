@@ -352,6 +352,15 @@ enum RadianCommand {
         command: FooterCommand,
     },
 
+    /// Read the bundled user manual. No arguments prints the topic index; a topic prints
+    /// that page. The pages are compiled into the binary, the same text `read` sees.
+    Docs {
+        /// The manual topic: a page stem like `commands`, or `commands.md`. Omitted prints
+        /// one line per topic with its description.
+        #[arg(value_name = "TOPIC")]
+        topic: Option<String>,
+    },
+
     /// View another session read-only: its committed transcript, rendered
     /// with the same blocks a `--resume` uses. No input reaches the session, no socket is
     /// opened, and nothing is written.
@@ -448,6 +457,7 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
         }
         RadianCommand::Theme { command } => run_theme(command),
         RadianCommand::Footer { command } => run_footer(command),
+        RadianCommand::Docs { topic } => run_docs(topic.as_deref()),
         RadianCommand::Attach {
             session_id,
             follow,
@@ -458,6 +468,44 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
         // implements these names; a usage-class refusal (2), never a silent no-op.
         RadianCommand::Serve => reserved("serve"),
         RadianCommand::Mcp => reserved("mcp"),
+    }
+}
+
+/// Runs `radian docs [topic]`: the bundled manual from the same embedded table `read`
+/// sees, so the two never drift. No arguments prints one line per topic (`topic: description`);
+/// a topic prints that page verbatim. Read-only, no network, no model, no credentials.
+/// An unknown topic exits 2 and lists the pages on stderr.
+fn run_docs(topic: Option<&str>) -> ExitCode {
+    match topic {
+        None => {
+            for (name, text) in radian_coding::docs::DOCS {
+                let topic = radian_coding::docs::topic(name);
+                let description = radian_coding::docs::description(text);
+                if description.is_empty() {
+                    println!("{topic}");
+                } else {
+                    println!("{topic}: {description}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Some(topic) => match radian_coding::docs::lookup_topic(topic) {
+            Some((_, text)) => {
+                print!("{text}");
+                ExitCode::SUCCESS
+            }
+            None => {
+                eprintln!(
+                    "radian: unknown docs topic `{topic}; available topics: {}",
+                    radian_coding::docs::DOCS
+                        .iter()
+                        .map(|(name, _)| radian_coding::docs::topic(name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                ExitCode::from(2)
+            }
+        },
     }
 }
 

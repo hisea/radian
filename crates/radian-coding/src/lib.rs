@@ -9,7 +9,7 @@
 //! not enforce.
 //!
 //! - paths are workspace-relative; absolute paths and `..` escapes are refused;
-//! - `read`, `grep` and `glob` additionally read two **read-only** roots outside the
+//! - `read` additionally reads the bundled manual (`radian://docs/`); `read`, `grep` and `glob` additionally read two **read-only** roots outside the
 //!   workspace (ADR 0039): the cargo registry sources, `$CARGO_HOME/registry/src`,
 //!   and every toolchain's `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`. A model names one as an
 //!   absolute path or with `~`; it is opened from that root's fd with the same per-component
@@ -57,6 +57,7 @@
 
 mod args;
 mod ask;
+pub mod docs;
 mod foreground;
 mod glob;
 mod grep;

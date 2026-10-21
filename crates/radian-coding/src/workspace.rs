@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use agent_core::ToolFailure;
 
+use crate::docs;
 use crate::read_roots::{ReadRoots, normalise_absolute, user_home};
 use crate::safe_fs::{self, EntryKind, OpenMode, RootDir, SafeFsError, Stat};
 use crate::{CODE_OUTSIDE, fail};
@@ -35,11 +36,19 @@ pub struct WorkspaceRoot {
 }
 
 /// An open workspace file with the facts the tools check before using it.
+///
+/// A file is either a real descriptor or an embedded docs page (`radian://docs/`).
+/// The embedded pages are read-only memory; `write`/`patch` never open them.
+pub(crate) enum OpenedSource {
+    File(File),
+    Embedded(&'static [u8]),
+}
+
 pub(crate) struct OpenedFile {
-    pub file: File,
+    pub source: OpenedSource,
     pub stat: Stat,
     /// Whether the fd was opened read-write and can be read back. Only `write`'s count needs it:
-    /// its fallback open is write-only (review fix 1).
+    /// its fallback open is write-only (review fix 1). Embedded pages are always readable.
     pub readable: bool,
 }
 
@@ -66,6 +75,9 @@ enum Resolved {
         relative: PathBuf,
         prefix: PathBuf,
     },
+    /// A bundled docs page (`radian://docs/`). `None` is the root (a listing);
+    /// `Some` is one page by file name.
+    Embedded { page: Option<String> },
 }
 
 impl WorkspaceRoot {
@@ -115,7 +127,11 @@ impl WorkspaceRoot {
 
     /// Rejects absolute paths and Windows prefixes before any filesystem access, then joins
     /// the workspace-relative path onto the root. Lexical only: the fd walk does the rest.
+    /// The bundled manual (`radian://`) is read-only and never a workspace path.
     fn joined(&self, user: &str) -> Result<PathBuf, ToolFailure> {
+        if docs::is_virtual(user) {
+            return Err(docs_write_failure(user));
+        }
         let relative = Path::new(user);
         if relative.is_absolute() {
             return Err(fail(
@@ -150,7 +166,8 @@ impl WorkspaceRoot {
 
     /// Opens `user` for reading through the fd walk and reports what it is. A relative path
     /// is workspace-relative; an absolute or `~` path is resolved against the read-only roots
-    /// (ADR 0039) and refused when it is under none of them. Any symlink component
+    /// (ADR 0039) and refused when it is under none of them. `radian://docs/`
+    /// names the bundled manual and is read from memory. Any symlink component
     /// is refused; the caller checks `stat.kind`.
     pub(crate) fn open_read(&self, user: &str) -> Result<OpenedFile, ToolFailure> {
         match self.resolve_read(user)? {
@@ -158,17 +175,20 @@ impl WorkspaceRoot {
             Resolved::Root {
                 index, relative, ..
             } => self.open_root_file(user, index, &relative),
+            Resolved::Embedded { page } => self.open_embedded_file(user, page),
         }
     }
 
     /// Opens the directory `user` names (`.` is the root) through the fd walk. Same resolution
-    /// as [`WorkspaceRoot::open_read`].
+    /// as [`WorkspaceRoot::open_read`]. The bundled docs root has no fd; `read` lists it
+    /// without calling this, so this refuses it with the docs list.
     pub(crate) fn open_dir(&self, user: &str) -> Result<File, ToolFailure> {
         match self.resolve_read(user)? {
             Resolved::Workspace(relative) => self.open_workspace_dir(user, &relative),
             Resolved::Root {
                 index, relative, ..
             } => self.open_root_dir(user, index, &relative),
+            Resolved::Embedded { page } => Err(docs_dir_failure(user, page)),
         }
     }
 
@@ -176,6 +196,7 @@ impl WorkspaceRoot {
     /// for a read-only root, the prefix to render result paths with. The ignore matchers for
     /// the directories above the base are loaded here too (outermost first), from the same
     /// root fd the walk descends from, so no path is re-opened (ADR 0039 decision 2).
+    /// The bundled manual has no directory to walk; search tools refuse it and point to `read`.
     pub(crate) fn read_base(&self, user: &str) -> Result<ReadBase, ToolFailure> {
         match self.resolve_read(user)? {
             Resolved::Workspace(relative) => {
@@ -203,11 +224,13 @@ impl WorkspaceRoot {
                     ancestors,
                 })
             }
+            Resolved::Embedded { .. } => Err(docs_search_failure(user)),
         }
     }
 
     /// The path `user` resolves to relative to its root, and the read-only root's prefix when
     /// it is not a workspace path. For a search tool's file fallback and for rendering paths.
+    /// The bundled manual has no relative path; search tools refuse it and point to `read`.
     pub(crate) fn read_relative(
         &self,
         user: &str,
@@ -217,14 +240,34 @@ impl WorkspaceRoot {
             Resolved::Root {
                 relative, prefix, ..
             } => Ok((relative, Some(prefix))),
+            Resolved::Embedded { .. } => Err(docs_search_failure(user)),
         }
     }
 
-    /// Resolves a read tool's `path` to the workspace or one of the read-only roots (ADR 0039
-    /// revision 1). A relative path is workspace-relative and keeps the existing checks; an
-    /// absolute path, or one written with `~`, is refused unless it falls under a read-only
-    /// root, and the refusal names the readable roots.
+    /// Resolves a read tool's `path` to the bundled manual, the workspace or one of the
+    /// read-only roots (ADR 0039). `radian://docs/` is checked before the
+    /// absolute/`~` check. A relative path is workspace-relative and keeps the existing
+    /// checks; an absolute path, or one written with `~`, is refused unless it falls under
+    /// a read-only root, and the refusal names the readable roots.
     fn resolve_read(&self, user: &str) -> Result<Resolved, ToolFailure> {
+        if docs::is_root(user) {
+            return Ok(Resolved::Embedded { page: None });
+        }
+        if let Some(name) = docs::page_name(user) {
+            return Ok(Resolved::Embedded {
+                page: Some(name.to_owned()),
+            });
+        }
+        if docs::is_virtual(user) {
+            return Err(fail(
+                CODE_OUTSIDE,
+                format!(
+                    "`{user}` is not a bundled manual path; use `read` on `radian://docs/` ({}), \
+                     or a workspace-relative path",
+                    docs::names().join(", ")
+                ),
+            ));
+        }
         if is_absolute_or_home(user) {
             let candidate = expand_home(user)
                 .and_then(|path| normalise_absolute(&path))
@@ -256,6 +299,28 @@ impl WorkspaceRoot {
         self.dir
             .dir(relative)
             .map_err(|error| self.map_error(user, error))
+    }
+
+    /// Opens a bundled manual page from memory. `None` is the root, which has no file;
+    /// `read` lists it without calling this. An unknown page names the available pages.
+    fn open_embedded_file(
+        &self,
+        user: &str,
+        page: Option<String>,
+    ) -> Result<OpenedFile, ToolFailure> {
+        let name = page.unwrap_or_default();
+        match docs::find(&name) {
+            Some(text) => Ok(OpenedFile {
+                source: OpenedSource::Embedded(text.as_bytes()),
+                stat: Stat {
+                    kind: EntryKind::File,
+                    size: text.len() as u64,
+                    nlink: 1,
+                },
+                readable: true,
+            }),
+            None => Err(docs_missing_failure(user)),
+        }
     }
 
     /// Opens a path under a read-only root through that root's fd.
@@ -484,7 +549,7 @@ impl WorkspaceRoot {
 
 /// Where a read tool's path came from, for the message that refuses an absolute/`~` path under
 /// no readable root (ADR 0039). It keeps naming the path kind, as the
-/// workspace-only refusal did, and lists the two readable roots.
+/// workspace-only refusal did, and lists the readable roots including the bundled manual.
 fn outside_read_failure(user: &str) -> ToolFailure {
     let kind = if user.starts_with('~') {
         "a `~` path"
@@ -494,8 +559,60 @@ fn outside_read_failure(user: &str) -> ToolFailure {
     fail(
         CODE_OUTSIDE,
         format!(
-            "`{user}` is {kind} outside the workspace; the file tools also read, read-only, {}",
-            crate::read_roots::READ_ROOTS_DESCRIPTION
+            "`{user}` is {kind} outside the workspace; the file tools also read, read-only, {}; \
+             the bundled manual lives at `radian://docs/` ({}), read with `read`",
+            crate::read_roots::READ_ROOTS_DESCRIPTION,
+            docs::names().join(", ")
+        ),
+    )
+}
+
+/// The bundled manual root has no directory fd; `read` lists it directly.
+/// `open_dir` refuses it here so the error names the pages.
+fn docs_dir_failure(user: &str, page: Option<String>) -> ToolFailure {
+    match page {
+        None => fail(
+            "is_a_directory",
+            format!(
+                "`{user}` is the bundled manual root ({}); read one page with `read`",
+                docs::names().join(", ")
+            ),
+        ),
+        Some(_) => docs_missing_failure(user),
+    }
+}
+
+/// A search tool (`grep`/`glob`) cannot walk the bundled manual; it has no directory fd.
+/// The refusal points to `read` and the prompt index.
+fn docs_search_failure(user: &str) -> ToolFailure {
+    fail(
+        CODE_OUTSIDE,
+        format!(
+            "`{user}` is a bundled manual page; `grep` and `glob` do not search it, \
+             use `read radian://docs/<page>.md` (pages: {})",
+            docs::names().join(", ")
+        ),
+    )
+}
+
+/// The bundled manual is read-only; `write`/`patch` refuse any virtual path.
+fn docs_write_failure(user: &str) -> ToolFailure {
+    fail(
+        CODE_OUTSIDE,
+        format!(
+            "`{user}` is in the bundled manual (`radian://docs/`), which is read-only; \
+             `write` and `patch` only write workspace-relative paths"
+        ),
+    )
+}
+
+/// An unknown manual page; the error lists the pages that `read` can open.
+fn docs_missing_failure(user: &str) -> ToolFailure {
+    fail(
+        "not_found",
+        format!(
+            "`{user}` is not a bundled manual page; available pages: {}",
+            docs::names().join(", ")
         ),
     )
 }
@@ -525,7 +642,7 @@ fn opened_file(user: &str, file: File, readable: bool) -> Result<OpenedFile, Too
     safe_fs::run_after_open_hook();
     let stat = safe_fs::fstat(&file).map_err(|e| io_failure(user, e))?;
     Ok(OpenedFile {
-        file,
+        source: OpenedSource::File(file),
         stat,
         readable,
     })

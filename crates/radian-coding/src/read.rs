@@ -27,7 +27,7 @@ pub(crate) fn schema() -> serde_json::Value {
                 "type": "string",
                 "description": "File or directory to read. Use a workspace-relative path. For \
                                 cargo registry or Rust toolchain sources, use an absolute path or \
-                                a `~` path."
+                                a `~` path. Manual: `radian://docs/<page>.md`."
             },
             "max_bytes": {
                 "type": "integer",
@@ -130,6 +130,66 @@ fn missing_file(root: &WorkspaceRoot, user: &str, failure: ToolFailure) -> ToolF
     )
 }
 
+/// Lists the bundled manual root from memory, in the same shape as a directory `read`:
+/// `kind`, size and name rows sorted by name, `limit` as the entry cap, with the same
+/// truncation note. `offset` and `max_bytes` are file arguments and are ignored, said once.
+fn run_docs_dir(
+    limits: &Limits,
+    user_path: &str,
+    limit: Option<usize>,
+    offset_given: bool,
+    max_bytes_given: bool,
+) -> Result<ToolOutput, ToolFailure> {
+    let cap = match limit {
+        Some(n) if n > limits.max_list_entries => {
+            return Err(fail(
+                "read_limit_exceeded",
+                format!(
+                    "`limit` {n} exceeds the {} entry cap for a directory",
+                    limits.max_list_entries
+                ),
+            ));
+        }
+        Some(n) => n,
+        None => limits.default_list_entries,
+    };
+    let mut rows: Vec<(String, u64)> = crate::docs::DOCS
+        .iter()
+        .map(|(name, text)| (name.to_string(), text.len() as u64))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let total = rows.len();
+    let truncated = total > cap;
+    rows.truncate(cap);
+    let mut text = String::new();
+    for (name, size) in &rows {
+        text.push_str(&format!("file\t{size}\t{name}\n"));
+    }
+    if truncated {
+        text.push_str(&format!(
+            "[truncated: showing {cap} of {total} entries; narrow it with `glob` or `grep`]\n"
+        ));
+    }
+    if offset_given || max_bytes_given {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(
+            "[offset and max_bytes are file arguments and were ignored for this \
+             directory; `limit` caps entries]\n",
+        );
+    }
+    Ok(ToolOutput {
+        content: vec![ContentPart::text(text)],
+        structured: Some(serde_json::json!({
+            "path": user_path,
+            "entries": rows.len(),
+            "total_entries": total,
+            "truncated": truncated,
+        })),
+    })
+}
+
 pub(crate) async fn run(
     root: &WorkspaceRoot,
     limits: &Limits,
@@ -206,8 +266,10 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
     // `limit` as the entry cap. `offset` and `max_bytes` are file arguments; for a
     // directory they are ignored, said once in the result. The directory is opened
     // through the root's directory fd and listed through that fd (ADR 0039 decision 2).
-    // `open_dir` is tried first because `open_read` cannot open the root itself (an
-    // empty relative path is not a file name); a file falls through to the read below.
+    // The bundled manual root (`radian://docs/`) has no fd and is listed from memory.
+    if crate::docs::is_root(&path) {
+        return run_docs_dir(limits, &path, limit, offset_given, max_bytes_given);
+    }
     if let Ok(dir) = root.open_dir(&path) {
         return crate::list::run_dir(limits, &path, &dir, limit, offset_given, max_bytes_given);
     }
@@ -239,22 +301,43 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
     };
     let total = opened.stat.size;
 
-    let mut reader = BufReader::new(opened.file);
-    // A negative `offset` counts from the end: resolve it to an absolute line first.
+    match opened.source {
+        crate::workspace::OpenedSource::File(file) => {
+            let mut reader = BufReader::new(file);
+            finish_read(&mut reader, &path, total, budget, offset, limit)
+        }
+        crate::workspace::OpenedSource::Embedded(bytes) => {
+            let mut reader = std::io::Cursor::new(bytes);
+            finish_read(&mut reader, &path, total, budget, offset, limit)
+        }
+    }
+}
+
+/// The tail of a bounded read once the budget and total are known: negative-offset
+/// resolution, the bounded stream, and the tool output. Generic over any readable
+/// and seekable source, so real files and embedded manual pages share the logic.
+fn finish_read<R: BufRead + Seek>(
+    reader: &mut R,
+    path: &str,
+    total: u64,
+    budget: usize,
+    offset: i64,
+    limit: Option<usize>,
+) -> Result<ToolOutput, ToolFailure> {
     // The count scans newlines with `fill_buf`/`consume` only, so it never holds the
     // file in memory; the bounded `read_stream` below still does the actual read.
     let offset = if offset < 0 {
-        let total_lines = count_lines(&mut reader).map_err(|e| io_failure(&path, e))?;
+        let total_lines = count_lines(&mut *reader).map_err(|e| io_failure(path, e))?;
         reader
             .seek(SeekFrom::Start(0))
-            .map_err(|e| io_failure(&path, e))?;
+            .map_err(|e| io_failure(path, e))?;
         resolve_from_end(total_lines, offset)
     } else {
         offset
     };
-    let outcome = read_stream(&mut reader, &path, total, budget, offset, limit)?;
+    let outcome = read_stream(&mut *reader, path, total, budget, offset, limit)?;
 
-    let structured = outcome.structured(&path, total);
+    let structured = outcome.structured(path, total);
     Ok(ToolOutput {
         content: vec![ContentPart::text(outcome.content)],
         structured: Some(structured),
