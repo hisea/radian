@@ -141,6 +141,14 @@ pub(crate) struct JobCell {
     /// `true` for a retained foreground result (ADR 0037 decision 3a): a settled entry the
     /// model reads like any job, evicted with the foreground bounds, never counted as running.
     retained: bool,
+    /// How long the job ran, captured once at settle. `None` while running (and for 3a
+    /// retained entries, which never carry the hint): the backlog's "elapsed is already in
+    /// the result" is not true of `OutputResult`, so the cell keeps it (ADR 0010: this is
+    /// live state, not a new durable record).
+    duration: Option<Duration>,
+    /// Whether the one-step-foreground hint was already printed (ADR 0037 decision 4): one
+    /// line per task, on the first read that sees the job ended.
+    hint_shown: bool,
     /// Set by a `job` kill before the session is signalled, so the supervisor can
     /// label the settle. `None` means the leader exited on its own.
     termination: Option<Termination>,
@@ -335,6 +343,8 @@ impl Jobs {
             started: Instant::now(),
             state: JobState::Running,
             retained: false,
+            duration: None,
+            hint_shown: false,
             termination: None,
             ring: Ring::default(),
             read_offset: 0,
@@ -451,14 +461,38 @@ impl Jobs {
     fn take_increment(cell: &mut JobCell, waited_out: bool, wait_cancelled: bool) -> OutputResult {
         let (dropped, increment) = cell.ring.since(cell.read_offset);
         cell.read_offset = cell.ring.total;
+        let hint_secs = Self::foreground_hint_secs(cell);
         OutputResult {
             state: cell.state.clone(),
+            hint_secs,
             dropped,
             increment,
             waited_out,
             wait_cancelled,
             output: OUTPUT_HINT.to_owned(),
         }
+    }
+
+    /// The one-step-foreground hint's seconds (ADR 0037 decision 4): the settle-recorded
+    /// run time, in whole seconds, only for an explicit-background job that ended by
+    /// itself (`Exited` or `Signaled`) within the foreground default timeout, only once per
+    /// task. A stopped job (`Killed`, or `TimedOut` if one ever settles that way) gets no
+    /// line: nothing about a stopped command says a foreground call would have returned
+    /// it. A retained 3a foreground entry never gets it, and neither does a job that ran
+    /// past the default (background was the right call for those).
+    fn foreground_hint_secs(cell: &mut JobCell) -> Option<u64> {
+        if cell.state.is_running() || cell.retained || cell.hint_shown {
+            return None;
+        }
+        if !matches!(cell.state, JobState::Exited(_) | JobState::Signaled(_)) {
+            return None;
+        }
+        let duration = cell.duration?;
+        if duration > Limits::DEFAULT_SHELL_TIMEOUT {
+            return None;
+        }
+        cell.hint_shown = true;
+        Some(duration.as_secs())
     }
 
     /// How many background jobs are running right now, and how many settles this
@@ -584,6 +618,8 @@ impl Jobs {
             started: Instant::now(),
             state,
             retained: true,
+            duration: None,
+            hint_shown: false,
             termination: None,
             ring,
             read_offset: 0,
@@ -673,6 +709,9 @@ pub struct StartInfo {
 /// What a `job` read or wait returns.
 pub(crate) struct OutputResult {
     pub state: JobState,
+    /// Whole seconds of the settle-recorded run time, when the one-step-foreground hint
+    /// (ADR 0037 decision 4) goes into this result. `None` means no hint line.
+    pub hint_secs: Option<u64>,
     /// Bytes the ring had to drop before the caller's cursor.
     pub dropped: u64,
     pub increment: Vec<u8>,
@@ -834,7 +873,11 @@ fn settle(inner: &JobsInner, cell: &Arc<Mutex<JobCell>>, id: String, status: Opt
         // this settle and its broadcast is already sent) or none of them (the job still
         // counts as running). Lock order is registry-then-cell, the same as `list`.
         let mut registry = inner.state.lock().unwrap_or_else(|e| e.into_inner());
-        lock(cell).state = state.clone();
+        let mut cell = lock(cell);
+        cell.state = state.clone();
+        // The run time is fixed here, at settle: a later read must report how long the job
+        // ran, not how long ago it started (ADR 0037 decision 4).
+        cell.duration = Some(Duration::from_millis(duration_ms));
         registry.settled_total += 1;
         let _ = inner.events.send(JobEvent::Settled {
             id,
@@ -1114,6 +1157,15 @@ fn render_output(id: &str, result: &OutputResult, timeout: Duration) -> ToolOutp
     if result.wait_cancelled {
         text.push_str("[the turn was cancelled; the job keeps running]\n");
     }
+    // The one-step-foreground hint (ADR 0037 decision 4): just before `[status: ...]`.
+    if let Some(secs) = result.hint_secs {
+        text.push_str(&format!(
+            "[this job ended after {secs} s; a foreground shell call (default {} s, max {} s) \
+             returns such a command in one step]\n",
+            Limits::DEFAULT_SHELL_TIMEOUT.as_secs(),
+            Limits::MAX_SHELL_TIMEOUT.as_secs()
+        ));
+    }
     text.push_str(&format!("[status: {}]\n", result.state.label()));
 
     ToolOutput {
@@ -1223,6 +1275,152 @@ mod tests {
         assert_eq!(first_line(&"x".repeat(200)).chars().count(), 120);
     }
 
+    /// A settled background cell with a settle-recorded run time the test controls. The
+    /// run time comes from `settle`, never from `started.elapsed()` at read time, so a
+    /// A run past 300 s is pinned here without sleeping 300 s: only `duration` matters
+    /// for the hint, and the `started` instant is scenery.
+    fn ended_cell(
+        retained: bool,
+        duration: Option<Duration>,
+        started: Instant,
+    ) -> Arc<Mutex<JobCell>> {
+        let (settled, _) = tokio::sync::watch::channel(true);
+        Arc::new(Mutex::new(JobCell {
+            command: "test".into(),
+            started,
+            state: JobState::Exited(0),
+            retained,
+            duration,
+            hint_shown: false,
+            termination: None,
+            ring: Ring::default(),
+            read_offset: 0,
+            output: PathBuf::from("test.out"),
+            sid: 0,
+            waiters: 0,
+            reaped: Arc::new(Mutex::new(true)),
+            settled,
+        }))
+    }
+
+    /// Renders one incremental read of `cell`, like `job` with `op: read` and no range.
+    fn rendered(cell: &Arc<Mutex<JobCell>>) -> String {
+        let result = Jobs::take_increment(&mut lock(cell), false, false);
+        let output = render_output("job-0-0", &result, Duration::ZERO);
+        output
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                radian_core::ContentPart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The full hint line, with N filled in (ADR 0037 decision 4).
+    fn hint_line(secs: u64) -> String {
+        format!(
+            "[this job ended after {secs} s; a foreground shell call (default 300 s, max 600 s) \
+             returns such a command in one step]"
+        )
+    }
+
+    /// An ended fast background job's first read carries the one-step hint just before the
+    /// status row (ADR 0037 decision 4).
+    #[test]
+    fn an_ended_fast_background_job_gets_the_hint_before_its_status() {
+        let cell = ended_cell(false, Some(Duration::from_secs(70)), Instant::now());
+        let text = rendered(&cell);
+        let hint = hint_line(70);
+        assert!(text.contains(&hint), "{text}");
+        assert!(
+            text.find(&hint).unwrap() < text.find("[status: exited 0]").unwrap(),
+            "the hint goes just before the status: {text}"
+        );
+    }
+
+    /// A job that ran past the foreground default gets no hint: background was the right
+    /// call. The run time is the settle-recorded `duration`, so no 300 s sleep is needed.
+    #[test]
+    fn a_slow_background_job_gets_no_hint() {
+        let cell = ended_cell(false, Some(Duration::from_secs(301)), Instant::now());
+        let text = rendered(&cell);
+        assert!(!text.contains("this job ended after"), "{text}");
+        assert!(text.contains("[status: exited 0]"), "{text}");
+    }
+
+    /// The threshold is inclusive: a job that ran exactly the foreground default still
+    /// gets the line.
+    #[test]
+    fn a_job_at_exactly_the_foreground_default_still_gets_the_hint() {
+        let cell = ended_cell(false, Some(Duration::from_secs(300)), Instant::now());
+        let text = rendered(&cell);
+        assert!(text.contains(&hint_line(300)), "{text}");
+    }
+
+    /// A 3a retained foreground entry never gets the line, however fast it was.
+    #[test]
+    fn a_retained_foreground_entry_gets_no_hint() {
+        let cell = ended_cell(true, Some(Duration::from_secs(7)), Instant::now());
+        let text = rendered(&cell);
+        assert!(!text.contains("this job ended after"), "{text}");
+        assert!(text.contains("[status: exited 0]"), "{text}");
+    }
+
+    /// One line per task: the second read of the same ended job has no hint.
+    #[test]
+    fn the_hint_is_shown_only_once_per_task() {
+        let cell = ended_cell(false, Some(Duration::from_secs(70)), Instant::now());
+        assert!(rendered(&cell).contains(&hint_line(70)));
+        let again = rendered(&cell);
+        assert!(!again.contains("this job ended after"), "{again}");
+    }
+
+    /// A running job never gets the line: there is no end yet.
+    #[test]
+    fn a_running_job_gets_no_hint() {
+        let text = rendered(&test_cell());
+        assert!(text.contains("[status: running]"), "{text}");
+        assert!(!text.contains("this job ended after"), "{text}");
+    }
+
+    /// A background job stopped with `job kill` (or a session-end cleanup) settles as
+    /// `killed`, which is not "ended by itself": no hint, however fast it was.
+    #[test]
+    fn a_killed_job_gets_no_hint() {
+        let cell = ended_cell(false, Some(Duration::from_secs(20)), Instant::now());
+        lock(&cell).state = JobState::Killed;
+        let text = rendered(&cell);
+        assert!(!text.contains("this job ended after"), "{text}");
+        assert!(text.contains("[status: killed]"), "{text}");
+    }
+
+    /// `TimedOut` is likewise excluded, so the rule stays "ended by itself" even if a
+    /// background job ever settles that way.
+    #[test]
+    fn a_timed_out_job_gets_no_hint() {
+        let cell = ended_cell(false, Some(Duration::from_secs(20)), Instant::now());
+        lock(&cell).state = JobState::TimedOut;
+        let text = rendered(&cell);
+        assert!(!text.contains("this job ended after"), "{text}");
+        assert!(text.contains("[status: timed out]"), "{text}");
+    }
+
+    /// The line reports the settle-recorded run time, not `started.elapsed()` at read time:
+    /// this cell started 400 s ago but ran 70 s, so the line says 70 s. An implementation
+    /// that reads the clock at read time would say ~400 s — or nothing at all, past the
+    /// threshold.
+    #[test]
+    fn the_hint_reports_the_settle_time_not_the_read_time() {
+        let cell = ended_cell(
+            false,
+            Some(Duration::from_secs(70)),
+            Instant::now() - Duration::from_secs(400),
+        );
+        let text = rendered(&cell);
+        assert!(text.contains(&hint_line(70)), "{text}");
+    }
+
     /// A job cell as `start` builds it, for the settle test below.
     fn test_cell() -> Arc<Mutex<JobCell>> {
         let (settled, _) = tokio::sync::watch::channel(false);
@@ -1231,6 +1429,8 @@ mod tests {
             started: Instant::now(),
             state: JobState::Running,
             retained: false,
+            duration: None,
+            hint_shown: false,
             termination: None,
             ring: Ring::default(),
             read_offset: 0,
