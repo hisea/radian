@@ -52,6 +52,18 @@ fn flag_value(argv: &[String], flag: &str) -> Option<String> {
 }
 
 async fn run_child(arguments: Value, coding_root: Option<PathBuf>, trust: bool) -> Vec<String> {
+    // One test binary, one stub writer and spawner at a time. The stub is written
+    // to disk just before the child `exec`s it, and this binary's tests run on
+    // parallel threads: another thread's `fork` (for its own child) can inherit
+    // the still-open write descriptor, and the `exec` of the stub in that window
+    // fails with `ETXTBSY` ("Text file busy", os error 26) on Linux — the same
+    // race `command_footer` retries in product. The product's own subagent spawn
+    // starts the installed `radian` binary, which nobody writes at run time, so
+    // no product path needs this; serializing the fixture's write-then-spawn is
+    // enough. The three tests stay fast: each stub exits at once.
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = SERIAL.lock().await;
+
     let label = if arguments.get("agent").and_then(Value::as_str) == Some("explore") {
         "explore"
     } else {

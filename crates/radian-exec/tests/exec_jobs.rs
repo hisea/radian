@@ -216,6 +216,14 @@ async fn p_chains_two_jobs_through_two_woken_turns() {
 /// settle lands (absorbed into the ending turn, or waking a new one), every wake notice
 /// runs its turn. Twenty iterations with staggered sleeps cover the interleavings; the
 /// journal invariant holds for each one.
+///
+/// A settle that lands while the turn still runs takes the busy lane
+/// (`inject_pending_wake`: `wake: false`, `pending_wake: true`). Absorbed at a step
+/// boundary it opens no turn; still queued at the turn boundary it opens the next turn
+/// itself and counts as one wake (ADR 0011 L5, ADR 0037 decision 5). So the count
+/// resolves each later turn's opening claim back to its enqueue instead of filtering
+/// on `"wake": true` alone: `"wake": true` misses a stranded notice (two turns, zero
+/// wakes) and counting every `pending_wake` enqueue would charge an absorbed one.
 /// Mutation: drop the handled-settles check → iterations whose settle lands between the
 /// registry and the inbox exit before the woken turn runs, and the invariant fails.
 #[tokio::test]
@@ -256,20 +264,84 @@ async fn p_waits_for_a_job_settling_as_the_turn_ends() {
 
         assert_eq!(code, 0, "iteration {i}: {err}");
         assert!(out.contains("first"), "iteration {i}: {out}");
-        let journal = std::fs::read_to_string(env.sessions.join(format!("{sid}.jsonl"))).unwrap();
-        let turns_started = journal.matches("\"event\":\"TurnStarted\"").count();
-        let sys_wakes = journal
-            .lines()
-            .filter(|line| {
-                line.contains("\"event\":\"InboxEnqueued\"")
-                    && line.contains("\"source\":\"system\"")
-                    && line.contains("\"wake\":true")
-            })
+        let journal_text =
+            std::fs::read_to_string(env.sessions.join(format!("{sid}.jsonl"))).unwrap();
+        // Every later turn must open on a System wake: an idle `followup`
+        // (`wake: true`) or a notice stranded past the turn end (`pending_wake:
+        // true`, `wake: false`), which opens its turn itself and counts as one
+        // wake (ADR 0011 L5, ADR 0037 decision 5). The opener is the first
+        // `InputClaimed` for each later turn, resolved back to its enqueue; an
+        // absorbed notice is claimed mid-turn and never counts.
+        let mut enqueued: std::collections::HashMap<String, (String, bool, bool)> =
+            std::collections::HashMap::new();
+        let mut first_claim: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut turn_order: Vec<String> = Vec::new();
+        for line in journal_text.lines() {
+            let record: Value = serde_json::from_str(line).unwrap();
+            match record.get("event").and_then(Value::as_str) {
+                Some("InboxEnqueued") => {
+                    let data = &record["data"];
+                    enqueued.insert(
+                        data["message_id"].as_str().unwrap().to_owned(),
+                        (
+                            data["source"].as_str().unwrap().to_owned(),
+                            data["wake"].as_bool().unwrap(),
+                            data.get("pending_wake")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        ),
+                    );
+                }
+                Some("InputClaimed") => {
+                    let data = &record["data"];
+                    first_claim
+                        .entry(data["turn_id"].as_str().unwrap().to_owned())
+                        .or_insert_with(|| {
+                            data["message_ids"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|id| id.as_str().unwrap().to_owned())
+                                .collect()
+                        });
+                }
+                Some("TurnStarted") => {
+                    turn_order.push(record["data"]["turn_id"].as_str().unwrap().to_owned());
+                }
+                _ => {}
+            }
+        }
+        let sys_wakes = enqueued
+            .values()
+            .filter(|(source, wake, _)| source == "system" && *wake)
             .count();
-        woken_total += sys_wakes;
+        let mut stranded = 0;
+        for turn_id in turn_order.iter().skip(1) {
+            let opener = first_claim
+                .get(turn_id)
+                .unwrap_or_else(|| panic!("iteration {i}: turn {turn_id} has no claimed input"));
+            assert!(
+                !opener.is_empty(),
+                "iteration {i}: turn {turn_id} claimed no input"
+            );
+            for id in opener {
+                let (source, wake, pending_wake) = enqueued.get(id).unwrap_or_else(|| {
+                    panic!("iteration {i}: claimed input {id} was never enqueued")
+                });
+                assert!(
+                    source == "system" && (*wake || *pending_wake),
+                    "iteration {i}: turn {turn_id} opened on a non-wake input {id} ({source})"
+                );
+                if *pending_wake && !*wake {
+                    stranded += 1;
+                }
+            }
+        }
+        woken_total += sys_wakes + stranded;
         assert_eq!(
-            turns_started,
-            1 + sys_wakes,
+            turn_order.len(),
+            1 + sys_wakes + stranded,
             "iteration {i}: every wake notice ran its turn"
         );
     }
