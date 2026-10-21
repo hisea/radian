@@ -33,6 +33,7 @@
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
 | `turn-end-continuation.md` | A item 4 open；B 已落地 | 0036、0037、0008、0045、0011、0021、0034、0005、0017 | 轮末「只说不做」（`Now X.` 后无工具调用）：A 部分落地（删掉无效的结束回合规则、工作区外可见加任务文本例外、通知以 omp 形状收尾并修少换行、显式转后台返回文本按 opencode 形状、取消自动转后台即后台只走显式 `background: true` 且前台缺省 300 s），只剩查 lead 记忆漏进 worker（第 4 项）；B `Stop` 路径内建续跑已落地（保守规则粗筛 + 一条 System 续跑交模型判断，每回合一次、连续两次后 herdr `blocked`，计入唤醒闸门，stdin 加 `last_assistant_message`）；研究笔记 `research/2026-10-21-intent-stop.md` |
+| `job-wait-hint.md` | decided | 0037 | `job` 的 `wait`/`read` 返回时，显式后台任务 300 s 内结束的加一行「前台一次就能拿到」；不改 shell 说明（ab7：22 次后台全在 72 s 内结束，14 次紧跟 `wait`） |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
