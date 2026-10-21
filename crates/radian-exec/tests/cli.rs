@@ -1976,6 +1976,13 @@ async fn first_sigint_cancels_the_turn_and_the_session_survives() {
 
 #[tokio::test]
 async fn second_sigint_exits_130() {
+    // Load note: the two signals are separated only by a pipe round-trip (the marker
+    // wait below), so this test is the load detector for the signal path. A listener
+    // that re-subscribes after every signal loses the second Ctrl-C when the
+    // forwarding task is preempted in the gap — the turn still ends Cancelled and the
+    // loop idles forever — about one hung iteration in seven with six busy loops and
+    // this test pinned to the same four cores. Validate signal-handling changes with
+    // that pinning and `--stress-count 300`: the fixed listener trips zero.
     let dir = scratch("130");
     let log = dir.join("fixture.log");
     let config = mcp_config(&dir, &log);

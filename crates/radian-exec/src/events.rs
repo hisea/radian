@@ -236,27 +236,60 @@ pub(crate) enum TurnEnd {
 
 /// The signal listeners: one task for SIGINT, one for SIGTERM, both forwarding into one channel.
 ///
-/// `tokio::signal::ctrl_c()` does **not** buffer: every call creates a fresh watch receiver, so a
-/// signal that arrives while no `ctrl_c()` future is registered is lost. Awaiting a fresh
-/// `ctrl_c()` on each loop iteration (as this CLI first did) therefore dropped the second Ctrl-C
-/// of a wind-down now and then, and the CLI left with code 0 instead of 130. One task loops on
-/// `ctrl_c()` and forwards into a channel, so no signal can fall between two calls. SIGTERM has
-/// its own listener because `radian exec` must handle it at all: its default action would kill
-/// the process before any session-end cleanup (ADR 0043 decision 2 fix round 1 B).
+/// The SIGINT listener is a single persistent subscription, not a fresh `ctrl_c()` per
+/// iteration. Every `ctrl_c()` call subscribes a new watch receiver, so a SIGINT recorded
+/// after the previous future completed but before the next subscribe is never delivered
+/// (the watch version already moved on). Under load the forwarding task can be preempted
+/// exactly there — right after it forwards the first Ctrl-C and just before the test
+/// answers the wind-down marker with the second one — and the loop then waits out a
+/// wind-down that already ended instead of forcing the exit. The same receiver re-armed
+/// by `recv` cannot miss: a signal recorded after the last `recv` completed is a version
+/// the next `recv` is still waiting for, and the wind-down marker round-trips through the
+/// loop, so the second Ctrl-C can never coalesce with the first into one broadcast.
+/// SIGTERM already listened this way (a persistent `signal` plus `recv`); SIGINT matches
+/// it. Non-unix keeps the portable `ctrl_c()` loop: no persistent subscription exists
+/// there, and the forced-exit race was measured on unix schedulers.
 pub(crate) fn spawn_signals() -> mpsc::UnboundedReceiver<i32> {
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn({
         let tx = tx.clone();
         async move {
-            loop {
-                if tokio::signal::ctrl_c().await.is_err() {
-                    // The handler could not be installed (it can be retried); do not drop the
-                    // channel, or the loop would spin on a closed receiver.
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{SignalKind, signal};
+                loop {
+                    let mut interrupt = match signal(SignalKind::interrupt()) {
+                        Ok(signal) => signal,
+                        Err(_) => {
+                            // The handler could not be installed (it can be retried); do
+                            // not drop the channel, or the loop would spin on a closed
+                            // receiver.
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                    };
+                    // `recv` re-arms the same receiver, so no signal recorded after the
+                    // previous one can fall into a re-subscription gap. It never resolves
+                    // to `None`; the loop ends when the receiver is gone.
+                    while interrupt.recv().await.is_some() {
+                        if tx.send(SIGINT).is_err() {
+                            return;
+                        }
+                    }
                 }
-                if tx.send(SIGINT).is_err() {
-                    break;
+            }
+            #[cfg(not(unix))]
+            {
+                loop {
+                    if tokio::signal::ctrl_c().await.is_err() {
+                        // The handler could not be installed (it can be retried); do not drop the
+                        // channel, or the loop would spin on a closed receiver.
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    if tx.send(SIGINT).is_err() {
+                        break;
+                    }
                 }
             }
         }
