@@ -191,10 +191,29 @@ pub(crate) struct JournalSummary {
 /// Folds one journal file into its [`JournalSummary`]. Unparseable lines are skipped: a torn
 /// tail must not stop the `Result` record.
 pub(crate) fn summarize_journal(path: &Path) -> JournalSummary {
-    let mut summary = JournalSummary::default();
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return summary;
+    let Ok(bytes) = std::fs::read(path) else {
+        return JournalSummary::default();
     };
+    fold_bytes(&bytes)
+}
+
+/// Folds only the bytes this process wrote: the journal suffix after `prefix_len`, the
+/// `set_tee` return that separates resumed history from this run. The prefix is whole
+/// lines (install and every write take the same lock), so the suffix starts on a line
+/// boundary; a short slice still folds by skipping what does not parse, exactly like the
+/// full fold.
+pub(crate) fn summarize_journal_from(path: &Path, prefix_len: u64) -> JournalSummary {
+    let Ok(bytes) = std::fs::read(path) else {
+        return JournalSummary::default();
+    };
+    let start = (prefix_len as usize).min(bytes.len());
+    fold_bytes(&bytes[start..])
+}
+
+/// Folds journal bytes into a [`JournalSummary`]. Unparseable lines are skipped.
+fn fold_bytes(bytes: &[u8]) -> JournalSummary {
+    let mut summary = JournalSummary::default();
+    let text = String::from_utf8_lossy(bytes);
     for line in text.lines() {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -265,14 +284,18 @@ fn assistant_text(content: &[serde_json::Value]) -> String {
 }
 
 /// Builds the closing `Result` line. `cost_estimated` comes from the live projection (a
-/// restored call was re-priced with today's catalog); everything else is folded from the
-/// journal, so it covers resumed history too. The wake-budget ending adds
-/// `unhandled_job_notices`; every other ending omits it, so their field set is the
-/// fixture's field set.
+/// restored call was re-priced with today's catalog); everything else session-wide is folded
+/// from the journal, so it covers resumed history too. The `run_*` triple folds only the
+/// suffix after the tee prefix: this process's own lines. Its `estimated` is always false:
+/// the resume re-pricing writes no journal record (it only folds in memory before the tee
+/// is installed), so the suffix never holds a re-priced old record — its fees are
+/// contemporary. The wake-budget ending adds `unhandled_job_notices`; every other ending
+/// omits it, so their field set is the fixture's field set.
 pub(crate) fn result_line(
     session_id: &str,
     end: &ExecEnd,
     summary: &JournalSummary,
+    run_summary: &JournalSummary,
     cost_estimated: bool,
 ) -> Vec<u8> {
     let (outcome, exit_code, reason) = end.result_fields();
@@ -287,11 +310,29 @@ pub(crate) fn result_line(
             usage.insert(name.to_owned(), count.into());
         }
     }
+    let mut run_usage = serde_json::Map::new();
+    for (name, value) in [
+        ("input", run_summary.input),
+        ("output", run_summary.output),
+        ("cache_read", run_summary.cache_read),
+        ("cache_write", run_summary.cache_write),
+    ] {
+        if let Some(count) = value {
+            run_usage.insert(name.to_owned(), count.into());
+        }
+    }
     let cost = summary.fee_micros.map(|micros| {
         serde_json::json!({
             "micros": micros,
             "incomplete": summary.fee_incomplete,
             "estimated": cost_estimated,
+        })
+    });
+    let run_cost = run_summary.fee_micros.map(|micros| {
+        serde_json::json!({
+            "micros": micros,
+            "incomplete": run_summary.fee_incomplete,
+            "estimated": false,
         })
     });
     let mut result = serde_json::json!({
@@ -303,6 +344,9 @@ pub(crate) fn result_line(
         "turns": summary.turns,
         "usage": usage,
         "cost": cost,
+        "run_turns": run_summary.turns,
+        "run_usage": run_usage,
+        "run_cost": run_cost,
         "text": summary.last_text,
     });
     if let Some(unhandled) = end.unhandled_job_notices() {
@@ -510,6 +554,7 @@ mod tests {
     }
 
     /// The `Result` line carries every field the ADR promises, with the folded totals.
+    /// Mutation: copy the session totals into `run_*` → the run half differs here and this fails.
     #[test]
     fn the_result_line_carries_the_run_and_the_session_totals() {
         let summary = JournalSummary {
@@ -522,10 +567,21 @@ mod tests {
             fee_incomplete: false,
             last_text: "done".to_owned(),
         };
+        let run_summary = JournalSummary {
+            turns: 1,
+            input: Some(5),
+            output: Some(2),
+            cache_read: None,
+            cache_write: None,
+            fee_micros: Some(7),
+            fee_incomplete: true,
+            last_text: "ignored".to_owned(),
+        };
         let line = result_line(
             "sid",
             &ExecEnd::Status(Some(RunStatus::BudgetExceeded)),
             &summary,
+            &run_summary,
             true,
         );
         let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
@@ -540,9 +596,54 @@ mod tests {
                 "turns": 2,
                 "usage": {"input": 15, "output": 6},
                 "cost": {"micros": 37, "incomplete": false, "estimated": true},
+                "run_turns": 1,
+                "run_usage": {"input": 5, "output": 2},
+                "run_cost": {"micros": 7, "incomplete": true, "estimated": false},
                 "text": "done",
             })
         );
+    }
+
+    /// The suffix fold counts only the bytes after the tee prefix. Mutation: ignore
+    /// `prefix_len` and fold the whole file → the run half equals the session half and
+    /// this fails; an off-by-one-line boundary (one history line too many or one run
+    /// line too few) also fails here.
+    #[test]
+    fn the_run_fold_counts_only_the_suffix_after_the_prefix() {
+        let dir = std::env::temp_dir().join(format!("radian-jsonl-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.jsonl");
+        let events = [
+            serde_json::json!({"schema_version":1,"session_id":"s","seq":0,"ts":"2026-10-20T00:00:00Z","event":"SessionCreated","critical":true,"data":{}}),
+            serde_json::json!({"schema_version":1,"session_id":"s","seq":1,"ts":"2026-10-20T00:00:01Z","event":"ModelUsageRecorded","critical":false,"data":{"usage":{"input":10,"output":4},"fee":{"micros":30}}}),
+            serde_json::json!({"schema_version":1,"session_id":"s","seq":2,"ts":"2026-10-20T00:00:02Z","event":"TurnFinished","critical":true,"data":{"turn_id":"t1","outcome":"completed"}}),
+            serde_json::json!({"schema_version":1,"session_id":"s","seq":3,"ts":"2026-10-20T00:00:03Z","event":"ModelUsageRecorded","critical":false,"data":{"usage":{"input":5,"output":2},"fee":{"micros":7}}}),
+            serde_json::json!({"schema_version":1,"session_id":"s","seq":4,"ts":"2026-10-20T00:00:04Z","event":"TurnFinished","critical":true,"data":{"turn_id":"t2","outcome":"completed"}}),
+        ];
+        let mut file = String::new();
+        let mut prefix_len = 0u64;
+        for (i, event) in events.iter().enumerate() {
+            let mut line = serde_json::to_string(event).unwrap();
+            line.push('\n');
+            if i < 3 {
+                prefix_len += line.len() as u64;
+            }
+            file.push_str(&line);
+        }
+        std::fs::write(&path, &file).unwrap();
+
+        let session = summarize_journal(&path);
+        assert_eq!(session.turns, 2);
+        assert_eq!(session.input, Some(15));
+
+        let run = summarize_journal_from(&path, prefix_len);
+        assert_eq!(run.turns, 1, "only the second turn ran after the tee");
+        assert_eq!(run.input, Some(5));
+        assert_eq!(run.output, Some(2));
+        assert_eq!(run.fee_micros, Some(7));
+        assert!(!run.fee_incomplete);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The wake-budget ending exits 3 with a budget outcome, its own stop reason, and
@@ -569,7 +670,7 @@ mod tests {
             last_text: "stuck".to_owned(),
             ..JournalSummary::default()
         };
-        let line = result_line("sid", &end, &summary, false);
+        let line = result_line("sid", &end, &summary, &JournalSummary::default(), false);
         let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
         assert_eq!(
             value,
@@ -582,6 +683,9 @@ mod tests {
                 "turns": 4,
                 "usage": {},
                 "cost": serde_json::Value::Null,
+                "run_turns": 0,
+                "run_usage": {},
+                "run_cost": serde_json::Value::Null,
                 "text": "stuck",
                 "unhandled_job_notices": 2,
             })
@@ -593,7 +697,7 @@ mod tests {
             unhandled_stop: 1,
         };
         assert_eq!(end.unhandled_stop_notices(), Some(1));
-        let line = result_line("sid", &end, &summary, false);
+        let line = result_line("sid", &end, &summary, &JournalSummary::default(), false);
         let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
         assert_eq!(
             value.get("unhandled_job_notices"),
