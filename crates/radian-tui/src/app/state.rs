@@ -334,6 +334,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::MouseUp { .. } => true,
         Input::QuitDeadline
         | Input::ForkDeadline
+        | Input::LoopDeadline
         | Input::Resize { .. }
         | Input::Stream(_)
         | Input::Event(_)

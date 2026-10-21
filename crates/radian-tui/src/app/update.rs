@@ -35,6 +35,9 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            // A `/loop --every` wait ended while idle: the turn-end decision re-checks
+            // everything (a running turn ignores the deadline; its end decides).
+            Input::LoopDeadline => self.loop_deadline_fired(),
             Input::Action(action) => {
                 // A completion menu is a selectable list: while it is up,
                 // Up/Down (and Ctrl-N) move the highlight and wrap, Enter and Tab accept the
@@ -246,6 +249,13 @@ impl App {
             }
             Input::SkillExpanded { result, steer } => self.skill_expanded(result, steer),
             Input::CommandRefused(refused) => {
+                // A refused `send` around now may be the loop's own followup (the inbox
+                // rejects when full): drop the in-flight mark so the turn-end decision
+                // re-evaluates instead of wedging. A refusal the loop did not cause can at
+                // worst cost one extra iteration, still capped.
+                if refused.command == "send" {
+                    self.session.loop_state.awaiting_echo = false;
+                }
                 self.push_notice(format!(
                     "the session refused `{}`: {}",
                     refused.command, refused.reason

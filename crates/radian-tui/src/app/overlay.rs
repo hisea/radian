@@ -177,14 +177,18 @@ impl Default for AccessWizard {
 /// comes first and is pre-selected, so Enter trusts with the sandbox). This keeps the
 /// owner rule below the access wizard: opening the sandbox's absence is never the
 /// pre-selected answer.
+///
+/// Slice B2: `mcp` carries the project `.mcp.json` preview the modal lists (one line per
+/// server, env key names only, never values), or `None` when there is no project file.
 pub struct TrustWizard {
     pub workspace: PathBuf,
     pub cursor: usize,
     pub choices: Vec<radian_host::trust::Choice>,
+    pub mcp: Option<radian_host::ProjectPreview>,
 }
 
 impl TrustWizard {
-    pub fn new(workspace: PathBuf) -> Self {
+    pub fn new(workspace: PathBuf, mcp: Option<radian_host::ProjectPreview>) -> Self {
         let choices: Vec<radian_host::trust::Choice> = radian_host::trust::Choice::ALL
             .into_iter()
             // "Trust parent" needs a parent to name.
@@ -200,6 +204,7 @@ impl TrustWizard {
             workspace,
             cursor,
             choices,
+            mcp,
         }
     }
 

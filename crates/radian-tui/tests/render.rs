@@ -2745,7 +2745,7 @@ fn the_login_wizard_uses_the_text_hierarchy() {
 #[test]
 fn the_trust_panel_snapshot_at_80_120_and_ascii() {
     let mut app = App::new("m", "s");
-    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"), None);
 
     let terminal = render(&mut app, 80, 24);
     let text = screen(&terminal);
@@ -2783,6 +2783,48 @@ fn the_trust_panel_snapshot_at_80_120_and_ascii() {
         "{text}"
     );
     assert!(!text.contains('╭'), "{text}");
+}
+
+/// Slice B2: the trust modal lists the project `.mcp.json` servers — names, commands as
+/// written, env key names only (never values) — and marks remote entries skipped. The
+/// mutation (the modal drops the preview rows) fails this test.
+#[test]
+fn the_trust_panel_lists_the_project_mcp_preview() {
+    let mut app = App::new("m", "s");
+    app.push_trust_modal(
+        std::path::PathBuf::from("/work/example"),
+        Some(radian_host::ProjectPreview {
+            entries: vec![
+                radian_host::ProjectPreviewEntry {
+                    name: "fs".to_owned(),
+                    command: Some("npx ${MCP_B2_BIN}".to_owned()),
+                    args: vec!["-y".to_owned()],
+                    env_keys: vec!["FIXTURE_LOG".to_owned()],
+                    skipped: None,
+                },
+                radian_host::ProjectPreviewEntry {
+                    name: "web".to_owned(),
+                    command: None,
+                    args: Vec::new(),
+                    env_keys: Vec::new(),
+                    skipped: Some("type `http`".to_owned()),
+                },
+            ],
+            error: None,
+        }),
+    );
+    let terminal = render(&mut app, 100, 30);
+    let text = screen(&terminal);
+    assert!(
+        text.contains("project .mcp.json: 1 server to load once trusted"),
+        "{text}"
+    );
+    assert!(
+        text.contains("mcp: fs `npx ${MCP_B2_BIN} -y` env: FIXTURE_LOG"),
+        "commands as written, key names only: {text}"
+    );
+    assert!(text.contains("mcp: web skipped (type `http`)"), "{text}");
+    assert!(!text.contains("sekret"), "values never leak: {text}");
 }
 
 /// The session picker (ADR 0035/2): the shared panel with the filter row, the

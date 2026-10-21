@@ -61,8 +61,13 @@ impl App {
 
     /// Pushes the startup trust modal (ADR 0031 T3). Called once, after the terminal is
     /// entered, when the workspace has project resources and no saved decision.
-    pub fn push_trust_modal(&mut self, workspace: PathBuf) {
-        self.push_modal(Modal::Trust(Box::new(TrustWizard::new(workspace))));
+    /// `mcp` is the project `.mcp.json` preview the modal lists (slice B2).
+    pub fn push_trust_modal(
+        &mut self,
+        workspace: PathBuf,
+        mcp: Option<radian_host::ProjectPreview>,
+    ) {
+        self.push_modal(Modal::Trust(Box::new(TrustWizard::new(workspace, mcp))));
     }
 
     /// Removes the topmost overlay matching `pick`. Returns it, or `None` when absent.

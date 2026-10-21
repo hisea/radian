@@ -7,6 +7,8 @@ use agent_core::{ToolConcurrency, ToolProvider, ToolSession};
 use common::{TempDir, assert_outside, call, sentinel_outside, structured, text, tools};
 use radian_coding::{CodingTools, Limits};
 use serde_json::json;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// The tools with non-default limits, for the cap tests.
 fn tools_with(root: &std::path::Path, limits: Limits) -> CodingTools {
@@ -1047,4 +1049,408 @@ async fn grep_byte_cap_stays_bounded_when_full_body_is_many_times_the_cap() {
     );
     assert_eq!(structured(&out)["matches"], json!(80));
     assert_eq!(structured(&out)["files"], json!(8));
+}
+
+// ---------- several whitespace-separated bases in one `path` ----------
+
+/// Two existing directories in one `path`: both are searched, the first line names both,
+/// and `max_matches` counts the whole call, not each base.
+#[tokio::test]
+async fn grep_searches_several_paths_and_shares_the_match_cap() {
+    let dir = TempDir::new("grep-multi");
+    let root = dir.file("ws");
+    dir.write("ws/a/one.txt", "needle a1\nneedle a2\n");
+    dir.write("ws/b/two.txt", "needle b1\nneedle b2\n");
+    let tools = tools(&root);
+
+    let out = call(&tools, "grep", json!({"pattern": "needle", "path": "a b"}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    assert!(
+        body.starts_with("[searched 2 paths: a, b]\n"),
+        "the first line names both bases: {body}"
+    );
+    for line in [
+        "a/one.txt:1:needle a1",
+        "a/one.txt:2:needle a2",
+        "b/two.txt:1:needle b1",
+        "b/two.txt:2:needle b2",
+    ] {
+        assert!(body.contains(line), "both bases are searched: {body}");
+    }
+
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "path": "a b", "max_matches": 3}),
+    )
+    .await
+    .unwrap();
+    let body = text(&out);
+    assert!(body.starts_with("[searched 2 paths: a, b]\n"), "{body}");
+    assert_eq!(
+        body.lines().filter(|line| line.contains(".txt:")).count(),
+        3,
+        "the cap counts the whole call, not each base: {body}"
+    );
+    assert_eq!(structured(&out)["matches"], json!(3));
+    assert!(
+        body.contains("[truncated: showing the first 3 matches]"),
+        "{body}"
+    );
+}
+
+/// Overlapping bases (`crates` and `crates/a`): each match is reported once.
+#[tokio::test]
+async fn grep_overlapping_bases_report_each_match_once() {
+    let dir = TempDir::new("grep-multi-overlap");
+    let root = dir.file("ws");
+    dir.write("ws/crates/a/f.txt", "needle\n");
+    dir.write("ws/crates/top.txt", "needle\n");
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "path": "crates crates/a"}),
+    )
+    .await
+    .unwrap();
+    let body = text(&out);
+    assert!(
+        body.starts_with("[searched 2 paths: crates, crates/a]\n"),
+        "{body}"
+    );
+    assert_eq!(
+        body.lines()
+            .filter(|line| line.contains("crates/a/f.txt:1:"))
+            .count(),
+        1,
+        "the shared file is reported once: {body}"
+    );
+    assert!(body.contains("crates/top.txt:1:needle"), "{body}");
+}
+
+/// A directory whose name holds a space exists, so the whole `path` is one base: it is
+/// searched as-is, with no header and no split.
+#[tokio::test]
+async fn grep_a_directory_name_with_a_space_is_one_path() {
+    let dir = TempDir::new("grep-multi-space");
+    let root = dir.file("ws");
+    dir.write("ws/my dir/f.txt", "needle\n");
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "path": "my dir"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text(&out), "my dir/f.txt:1:needle\n");
+}
+
+/// A split segment that names nothing: the error names it and says `path` takes one
+/// path per call. Without whitespace the error is the plain missing-path error.
+#[tokio::test]
+async fn grep_names_the_missing_segment_and_hints_one_path_per_call() {
+    let dir = TempDir::new("grep-multi-missing");
+    let root = dir.file("ws");
+    dir.write("ws/real/f.txt", "needle\n");
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "path": "real nope"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "not_found", "{failure:?}");
+    assert!(
+        failure.message.contains("nope"),
+        "the error names the missing segment: {failure:?}"
+    );
+    assert!(
+        failure
+            .message
+            .contains("`path` takes one directory or file")
+            && failure
+                .message
+                .contains("call the tool once per path in the same reply"),
+        "the error hints one path per call: {failure:?}"
+    );
+
+    let failure = call(&tools, "grep", json!({"pattern": "needle", "path": "nope"}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, "not_found", "{failure:?}");
+    assert!(
+        !failure.message.contains("takes one directory or file"),
+        "no hint without whitespace: {failure:?}"
+    );
+}
+
+/// A lone file and a directory in one `path`: both contribute their matches.
+#[tokio::test]
+async fn grep_mixes_a_file_and_a_directory_base() {
+    let dir = TempDir::new("grep-multi-file-dir");
+    let root = dir.file("ws");
+    dir.write("ws/a/one.txt", "needle a\n");
+    dir.write("ws/b/two.txt", "needle b\n");
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "path": "a/one.txt b"}),
+    )
+    .await
+    .unwrap();
+    let body = text(&out);
+    assert!(
+        body.starts_with("[searched 2 paths: a/one.txt, b]\n"),
+        "{body}"
+    );
+    assert!(body.contains("a/one.txt:1:needle a"), "{body}");
+    assert!(body.contains("b/two.txt:1:needle b"), "{body}");
+}
+
+/// Two existing directories in one `path`: both are listed, the first line names both,
+/// and `max_results` counts the whole call, not each base.
+#[tokio::test]
+async fn glob_searches_several_paths_and_shares_the_result_cap() {
+    let dir = TempDir::new("glob-multi");
+    let root = dir.file("ws");
+    dir.write("ws/a/f0.txt", "x");
+    dir.write("ws/a/f1.txt", "x");
+    dir.write("ws/b/g0.txt", "x");
+    dir.write("ws/b/g1.txt", "x");
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "glob",
+        json!({"pattern": "**/*.txt", "path": "a b"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        text(&out),
+        "[searched 2 paths: a, b]\na/f0.txt\na/f1.txt\nb/g0.txt\nb/g1.txt\n"
+    );
+
+    let out = call(
+        &tools,
+        "glob",
+        json!({"pattern": "**/*.txt", "path": "a b", "max_results": 3}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        text(&out),
+        "[searched 2 paths: a, b]\na/f0.txt\na/f1.txt\nb/g0.txt\n\
+         [truncated: showing 3 of 4 matches]\n"
+    );
+    assert_eq!(structured(&out)["total_matches"], json!(4));
+}
+
+/// Overlapping bases: each file is listed once.
+#[tokio::test]
+async fn glob_overlapping_bases_list_each_file_once() {
+    let dir = TempDir::new("glob-multi-overlap");
+    let root = dir.file("ws");
+    dir.write("ws/crates/a/f.rs", "x");
+    dir.write("ws/crates/top.rs", "x");
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "glob",
+        json!({"pattern": "**/*.rs", "path": "crates crates/a"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        text(&out),
+        "[searched 2 paths: crates, crates/a]\ncrates/a/f.rs\ncrates/top.rs\n"
+    );
+}
+
+/// A directory whose name holds a space exists, so the whole `path` is one base.
+#[tokio::test]
+async fn glob_a_directory_name_with_a_space_is_one_path() {
+    let dir = TempDir::new("glob-multi-space");
+    let root = dir.file("ws");
+    dir.write("ws/my dir/f.txt", "x");
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "glob",
+        json!({"pattern": "**/*.txt", "path": "my dir"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text(&out), "my dir/f.txt\n");
+}
+
+/// A split segment that names nothing: the error names it and says `path` takes one
+/// path per call. Without whitespace the error is the plain missing-path error.
+#[tokio::test]
+async fn glob_names_the_missing_segment_and_hints_one_path_per_call() {
+    let dir = TempDir::new("glob-multi-missing");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(root.join("real")).unwrap();
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "glob",
+        json!({"pattern": "**/*", "path": "real nope"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        failure.message.contains("nope"),
+        "the error names the missing segment: {failure:?}"
+    );
+    assert!(
+        failure
+            .message
+            .contains("`path` takes one directory or file")
+            && failure
+                .message
+                .contains("call the tool once per path in the same reply"),
+        "the error hints one path per call: {failure:?}"
+    );
+
+    let failure = call(&tools, "glob", json!({"pattern": "**/*", "path": "nope"}))
+        .await
+        .unwrap_err();
+    assert!(
+        !failure.message.contains("takes one directory or file"),
+        "no hint without whitespace: {failure:?}"
+    );
+}
+
+/// A lone file and a directory in one `path`: both contribute their matches.
+#[tokio::test]
+async fn glob_mixes_a_file_and_a_directory_base() {
+    let dir = TempDir::new("glob-multi-file-dir");
+    let root = dir.file("ws");
+    dir.write("ws/a/one.txt", "x");
+    dir.write("ws/b/two.txt", "x");
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "glob",
+        json!({"pattern": "**/*.txt", "path": "a/one.txt b"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        text(&out),
+        "[searched 2 paths: a/one.txt, b]\na/one.txt\nb/two.txt\n"
+    );
+}
+
+// ---------- mixed workspace and read-only-root bases ----------
+
+/// A private cargo registry tree for the mixed-base tests below. `CARGO_HOME`,
+/// `RUSTUP_HOME` and `HOME` are process-wide, so they are set **once**; every test in
+/// this binary that does not use these tools builds them with `ReadRoots::none()` and
+/// never reads the variables.
+struct MixedFixture {
+    registry: PathBuf,
+}
+
+static MIXED_FIXTURE: OnceLock<MixedFixture> = OnceLock::new();
+
+fn mixed_fixture() -> &'static MixedFixture {
+    MIXED_FIXTURE.get_or_init(|| {
+        let base =
+            std::env::temp_dir().join(format!("radian-search-multiroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let cargo_home = base.join("cargo");
+        let registry = cargo_home.join("registry/src");
+        let dep = registry.join("dep-1.0.0/src/lib.rs");
+        std::fs::create_dir_all(dep.parent().unwrap()).unwrap();
+        std::fs::write(&dep, "pub fn dep_needle() {}\n").unwrap();
+        let rustup_home = base.join("rustup");
+        std::fs::create_dir_all(&rustup_home).unwrap();
+        // SAFETY: this binary sets these three variables exactly once, before any tool
+        // reads them. The `OnceLock` serialises the write and every reader runs after it
+        // returns, so no thread observes a concurrent `setenv`/`getenv`. They are never
+        // changed again.
+        unsafe {
+            std::env::set_var("CARGO_HOME", &cargo_home);
+            std::env::set_var("RUSTUP_HOME", &rustup_home);
+            std::env::set_var("HOME", &base);
+        }
+        MixedFixture { registry }
+    })
+}
+
+/// One workspace-relative base and one absolute read-only-root base in one `path`: each
+/// hit renders the way a lone call would (relative for the workspace, absolute for the
+/// root).
+#[tokio::test]
+async fn grep_mixes_workspace_and_read_only_root_paths_with_their_own_prefixes() {
+    let fx = mixed_fixture();
+    let dir = TempDir::new("grep-multi-mixed");
+    let root = dir.file("ws");
+    dir.write("ws/local/keep.rs", "needle local\n");
+    let tools = CodingTools::new(&root).unwrap();
+    let registry = std::fs::canonicalize(&fx.registry).unwrap();
+    let path = format!("local {}", registry.display());
+
+    let out = call(&tools, "grep", json!({"pattern": "needle", "path": path}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    assert!(
+        body.starts_with("[searched 2 paths: local, "),
+        "the first line names both bases: {body}"
+    );
+    assert!(
+        body.contains("local/keep.rs:1:needle local"),
+        "the workspace hit stays relative: {body}"
+    );
+    assert!(
+        body.contains("dep-1.0.0/src/lib.rs:1:pub fn dep_needle() {}")
+            && body.contains(&*registry.to_string_lossy()),
+        "the registry hit stays absolute: {body}"
+    );
+}
+
+/// The same mix for `glob`: each match renders with its own base's prefix.
+#[tokio::test]
+async fn glob_mixes_workspace_and_read_only_root_paths_with_their_own_prefixes() {
+    let fx = mixed_fixture();
+    let dir = TempDir::new("glob-multi-mixed");
+    let root = dir.file("ws");
+    dir.write("ws/local/keep.rs", "x");
+    let tools = CodingTools::new(&root).unwrap();
+    let registry = std::fs::canonicalize(&fx.registry).unwrap();
+    let path = format!("local {}", registry.display());
+
+    let out = call(&tools, "glob", json!({"pattern": "**/*.rs", "path": path}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    assert!(
+        body.starts_with("[searched 2 paths: local, "),
+        "the first line names both bases: {body}"
+    );
+    assert!(
+        body.contains("local/keep.rs"),
+        "the workspace hit stays relative: {body}"
+    );
+    assert!(
+        body.contains("dep-1.0.0/src/lib.rs") && body.contains(&*registry.to_string_lossy()),
+        "the registry hit stays absolute: {body}"
+    );
 }

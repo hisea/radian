@@ -15,10 +15,14 @@ pub const HELP: &str = "\
 /help                 list the commands
 /queue <text>          queue a message for the next turn, even while one runs
 /retry                resend the last message after a model error
+/loop [--every <dur>] [--times N] [--for <dur>] [prompt]
+                       repeat the prompt every turn until --times/--for (default 20 turns or
+                       1h); a bare /loop toggles; --every waits between turns
 /copy [code]          copy the last assistant message (or its last code block)
 /compact [note]       summarize the history now and keep the recent part (ADR 0018)
 /sessions [query]     list this workspace's recent sessions, or search their text
 /fork                 fork this session at its last turn boundary (ADR 0022)
+/new                  start a new session here; the old session stays resumable
 /theme <name>         switch the color theme and write it back to the config file
 /model <provider>/<model>
                       switch the model at the next turn boundary (ADR 0026 D5)
@@ -115,6 +119,10 @@ pub enum Outcome {
     /// `/retry`: resend the last user message after a model-error turn. The app decides
     /// (idle and the last turn failed); the text goes as-is, with no `@` expansion.
     Retry,
+    /// `/loop` (continuation step 1-2): toggle the per-turn repeat, or arm/enable it with
+    /// limits and an optional prompt. Flags come before the prompt; running it is the loop's
+    /// job (an effect), like every other command.
+    Loop(LoopCommand),
     /// `/copy [code]`: copy the last committed assistant message — or its last fenced code
     /// block — through the configured clipboard backend.
     Copy { code_only: bool },
@@ -130,6 +138,10 @@ pub enum Outcome {
     Export(ExportRequest),
     /// `/fork`: the host forks the current (idle) session at its last turn boundary.
     Fork,
+    /// `/new`: leave the loop; the host ends this session and opens a fresh one in the
+    /// same workspace, then the loop runs again. No host work happens here (unlike
+    /// `/fork`), so there is no `SessionOutcome`: setting the flag IS the execution.
+    New,
     /// `/theme <name>` (ADR 0008 revision): switch the theme now and write `tui.theme` back
     /// to the config file. The loop loads the theme (I/O) and does the write-back.
     Theme(String),
@@ -279,6 +291,12 @@ pub fn tree() -> &'static [Command] {
             levels: &[],
         },
         Command {
+            name: "loop",
+            description: "repeat the prompt every turn until --times/--for (default 20 turns or \
+             1h); a bare /loop toggles",
+            levels: &[free_level],
+        },
+        Command {
             name: "copy",
             description: "copy the last assistant message (or its last code block)",
             levels: &[copy_level],
@@ -296,6 +314,11 @@ pub fn tree() -> &'static [Command] {
         Command {
             name: "fork",
             description: "fork this session at its last turn boundary (ADR 0022)",
+            levels: &[],
+        },
+        Command {
+            name: "new",
+            description: "start a new session here; the old session stays resumable",
             levels: &[],
         },
         Command {
@@ -1050,12 +1073,15 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/queue") => queue_text(&tokens[1..]),
         Some("/retry") if tokens.len() == 1 => Outcome::Retry,
         Some("/retry") => Outcome::Notices(vec!["usage: /retry (no arguments)".to_owned()]),
+        Some("/loop") => loop_request(&tokens[1..]),
         Some("/copy") => copy_request(&tokens[1..]),
         Some("/memory") => memory_command(&tokens[1..], memory_enabled),
         Some("/compact") => Outcome::Compact(compact_instructions(&tokens[1..])),
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
         Some("/fork") => Outcome::Fork,
+        Some("/new") if tokens.len() == 1 => Outcome::New,
+        Some("/new") => Outcome::Notices(vec!["usage: /new (no arguments)".to_owned()]),
         Some("/theme") => theme_name(&tokens[1..]),
         Some("/thinking") => match tokens[1..].first() {
             Some(level) => Outcome::Thinking(level.clone()),
@@ -1274,6 +1300,131 @@ fn queue_text(args: &[String]) -> Outcome {
     Outcome::Queue(joined.to_owned())
 }
 
+/// What `/loop` asked for: a bare toggle, or an enable with limits and an optional prompt.
+/// A bare `/loop` toggles (off when on; armed when off — the next message becomes the loop
+/// prompt). Flags come before the prompt; a `--` token after the prompt started is a usage
+/// error, never silent prompt text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopCommand {
+    /// A bare `/loop`: the app toggles the mode.
+    Toggle,
+    /// `/loop [--every <dur>] [--times N] [--for <dur>] [prompt]`.
+    Enable(LoopOptions),
+}
+
+/// The `/loop` limits and prompt. Durations are `std::time::Duration`; `None` is "not
+/// given" (the app resolves the default cap).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LoopOptions {
+    /// Wait at least this long between iteration starts (`--every <dur>`).
+    pub every: Option<std::time::Duration>,
+    /// Stop after this many loop turns (`--times N`).
+    pub times: Option<u64>,
+    /// Stop this long after the loop started (`--for <dur>`).
+    pub for_duration: Option<std::time::Duration>,
+    /// The loop prompt (`None` = armed: the next user message becomes it).
+    pub prompt: Option<String>,
+}
+
+/// The `/loop` usage line, shared by every refusal below.
+const LOOP_USAGE: &str = "usage: /loop [--every <dur>] [--times N] [--for <dur>] [prompt] \
+    (durations like 30s, 5m, 2h; flags come before the prompt; a bare number or duration \
+    needs its flag; a bare /loop toggles)";
+
+/// `/loop ...`: flags (`--every`, `--times`, `--for`) before the prompt, then the prompt
+/// words. A bare number or a bare duration is refused even as a prompt (omp's limit versus
+/// pi-loop's interval would be ambiguous); anything else unknown is the same usage notice.
+fn loop_request(args: &[String]) -> Outcome {
+    if args.is_empty() {
+        return Outcome::Loop(LoopCommand::Toggle);
+    }
+    let mut options = LoopOptions::default();
+    let mut prompt_at: Option<usize> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let token = &args[index];
+        if prompt_at.is_none() && token.starts_with("--") {
+            let flag = token.trim_start_matches('-');
+            match flag {
+                "every" | "times" | "for" => {
+                    let Some(value) = args.get(index + 1) else {
+                        return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+                    };
+                    match flag {
+                        "every" => {
+                            let Some(duration) = parse_loop_duration(value) else {
+                                return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+                            };
+                            options.every = Some(duration);
+                        }
+                        "times" => {
+                            let Ok(times) = value.parse::<u64>() else {
+                                return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+                            };
+                            if times == 0 {
+                                return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+                            }
+                            options.times = Some(times);
+                        }
+                        _ => {
+                            let Some(duration) = parse_loop_duration(value) else {
+                                return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+                            };
+                            options.for_duration = Some(duration);
+                        }
+                    }
+                    index += 2;
+                }
+                _ => return Outcome::Notices(vec![LOOP_USAGE.to_owned()]),
+            }
+        } else if token.starts_with("--") {
+            // A flag after the prompt started: refuse rather than loop the literal flag
+            // text ("flags come before the prompt" is the rule the usage line states).
+            return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+        } else {
+            if prompt_at.is_none() {
+                prompt_at = Some(index);
+            }
+            index += 1;
+        }
+    }
+    if let Some(start) = prompt_at {
+        let prompt = args[start..].join(" ");
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+        }
+        // One bare number or duration is not a prompt: it needs its flag.
+        if !prompt.contains(' ')
+            && (prompt.parse::<u64>().is_ok() || parse_loop_duration(prompt).is_some())
+        {
+            return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+        }
+        options.prompt = Some(prompt.to_owned());
+    }
+    Outcome::Loop(LoopCommand::Enable(options))
+}
+
+/// A loop duration: a positive integer with one unit (`30s`, `5m`, `2h`). Anything else —
+/// no unit, an unknown unit, zero, overflow — is `None`. The bare-number refusal above
+/// reuses it, so the two stay one definition.
+fn parse_loop_duration(text: &str) -> Option<std::time::Duration> {
+    let unit = text.chars().last()?;
+    if !matches!(unit, 's' | 'm' | 'h') {
+        return None;
+    }
+    let number: u64 = text[..text.len() - unit.len_utf8()].parse().ok()?;
+    if number == 0 {
+        return None;
+    }
+    let secs = match unit {
+        's' => number,
+        'm' => number.checked_mul(60)?,
+        _ => number.checked_mul(3600)?,
+    };
+    Some(std::time::Duration::from_secs(secs))
+}
+
 /// `/copy [code]`: no argument copies the whole message, `code` only its last fenced block.
 /// Anything else is a usage notice.
 fn copy_request(args: &[String]) -> Outcome {
@@ -1473,6 +1624,21 @@ mod tests {
         assert!(tree().iter().any(|command| command.name == "queue"));
     }
 
+    /// `/new` takes no argument; anything after it is a usage notice. It is a command,
+    /// and it is in `/help`.
+    #[test]
+    fn new_takes_no_arguments() {
+        assert!(matches!(parse("/new", false), Outcome::New));
+        match parse("/new now", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /new"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/new"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "new"));
+    }
+
     /// `/retry` takes no argument; anything after it is a usage notice. It is a command,
     /// and it is in `/help`.
     #[test]
@@ -1486,6 +1652,94 @@ mod tests {
         }
         assert!(HELP.contains("/retry"), "{HELP}");
         assert!(tree().iter().any(|command| command.name == "retry"));
+    }
+
+    /// `/loop`: a bare line toggles; flags (`--every`, `--times`, `--for`) come before the
+    /// prompt; a bare number or bare duration is refused even as a prompt; a flag after the
+    /// prompt started, an unknown flag, a missing value and a zero limit are usage notices.
+    /// It is a command, and it is in `/help`.
+    #[test]
+    fn loop_parses_toggle_flags_and_prompt() {
+        use std::time::Duration;
+
+        assert!(matches!(
+            parse("/loop", false),
+            Outcome::Loop(LoopCommand::Toggle)
+        ));
+
+        // Flags with a prompt.
+        match parse("/loop --every 5m --times 3 fix the build", false) {
+            Outcome::Loop(LoopCommand::Enable(options)) => {
+                assert_eq!(options.every, Some(Duration::from_secs(300)));
+                assert_eq!(options.times, Some(3));
+                assert_eq!(options.for_duration, None);
+                assert_eq!(options.prompt.as_deref(), Some("fix the build"));
+            }
+            other => panic!("expected the loop options, got {other:?}"),
+        }
+        // Flags without a prompt arm the loop; the next message becomes the prompt.
+        match parse("/loop --times 2", false) {
+            Outcome::Loop(LoopCommand::Enable(options)) => {
+                assert_eq!(options.times, Some(2));
+                assert_eq!(options.prompt, None);
+            }
+            other => panic!("expected an armed loop, got {other:?}"),
+        }
+        // A prompt with no flags.
+        match parse("/loop watch the tests", false) {
+            Outcome::Loop(LoopCommand::Enable(options)) => {
+                assert_eq!(options.prompt.as_deref(), Some("watch the tests"));
+                assert_eq!(options.every, None);
+            }
+            other => panic!("expected a prompt-only loop, got {other:?}"),
+        }
+        // A multi-word prompt may start with a number; a single bare number or bare
+        // duration is refused (it needs its flag).
+        match parse("/loop run 5 times", false) {
+            Outcome::Loop(LoopCommand::Enable(options)) => {
+                assert_eq!(options.prompt.as_deref(), Some("run 5 times"));
+            }
+            other => panic!("expected the prompt, got {other:?}"),
+        }
+        for line in [
+            "/loop 5",
+            "/loop 5m",
+            "/loop 0",
+            "/loop --times 0",
+            "/loop --every",
+        ] {
+            match parse(line, false) {
+                Outcome::Notices(notices) => {
+                    assert!(notices[0].contains("usage: /loop"), "{line}: {notices:?}")
+                }
+                other => panic!("{line}: expected a usage notice, got {other:?}"),
+            }
+        }
+        // A flag after the prompt started, an unknown flag and a bad duration are the
+        // same usage notice — never silent prompt text.
+        for line in [
+            "/loop fix it --times 2",
+            "/loop --forever 2 fix it",
+            "/loop --every 5x fix it",
+            "/loop --for two fix it",
+        ] {
+            match parse(line, false) {
+                Outcome::Notices(notices) => {
+                    assert!(notices[0].contains("usage: /loop"), "{line}: {notices:?}")
+                }
+                other => panic!("{line}: expected a usage notice, got {other:?}"),
+            }
+        }
+        // Durations take seconds, minutes and hours; zero is refused.
+        match parse("/loop --every 30s --for 2h go", false) {
+            Outcome::Loop(LoopCommand::Enable(options)) => {
+                assert_eq!(options.every, Some(Duration::from_secs(30)));
+                assert_eq!(options.for_duration, Some(Duration::from_secs(7200)));
+            }
+            other => panic!("expected durations, got {other:?}"),
+        }
+        assert!(HELP.contains("/loop"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "loop"));
     }
 
     /// `/copy` copies the whole message, `/copy code` only its last block; anything else is

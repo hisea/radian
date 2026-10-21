@@ -539,6 +539,45 @@ fn the_table_snapshot_keeps_the_header_and_the_cell_text() {
     }
 }
 
+/// ADR 0035 V1's one blank row between blocks, owned by the layout: with a full transcript
+/// (bottom-anchored, the owner's screenshot case) the transcript's last row never touches
+/// the input's top line, in both input styles.
+#[test]
+fn the_transcript_keeps_one_blank_row_above_the_input_in_both_styles() {
+    use radian_tui::render::InputStyle;
+    for style in [InputStyle::Lines, InputStyle::Box] {
+        let mut a = app();
+        // Enough transcript to fill the viewport, so the last row sits at the bottom of its
+        // area (bottom-anchored scroll).
+        for i in 0..40 {
+            a.push_message(&assistant(&format!("line {i}"), Vec::new()));
+        }
+        a.input_style = style;
+        let frame = rows(&render(&mut a, 80, 24));
+        // The input's top chrome: a full-width rule (`lines`) or the half frame's top
+        // (`box`). Scanning for it keeps the test on the layout, not on fixed heights.
+        // The status row is excluded (it is the last row).
+        let input_top = frame[..frame.len() - 1]
+            .iter()
+            .position(|row| {
+                (!row.is_empty() && row.chars().all(|cell| cell == '\u{2500}'))
+                    || row.starts_with('\u{256d}')
+            })
+            .expect("the input's top line");
+        assert!(
+            frame[input_top - 1].trim().is_empty(),
+            "{style:?}: the row above the input's top line must be blank:\n{}",
+            frame.join("\n")
+        );
+        assert!(
+            !frame[input_top - 2].trim().is_empty(),
+            "{style:?}: exactly one blank row, so the transcript's last row is just above \
+             the spacer:\n{}",
+            frame.join("\n")
+        );
+    }
+}
+
 /// A CJK command and output keep the marker column and the body rail (the screen model inserts a
 /// cell after each wide glyph, so compare with whitespace squeezed).
 #[test]
